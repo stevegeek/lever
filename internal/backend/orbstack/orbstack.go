@@ -100,7 +100,7 @@ func (o *OrbStack) ensureRootlessDocker(ctx context.Context) error {
 	if err := user(`command -v dockerd-rootless.sh >/dev/null 2>&1 || curl -fsSL https://get.docker.com/rootless | sh`); err != nil {
 		return fmt.Errorf("rootless install: %w", err)
 	}
-	if err := user(`export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user enable --now docker 2>/dev/null || (nohup dockerd-rootless.sh >/tmp/lever-dockerd.log 2>&1 &); sleep 3`); err != nil {
+	if err := user(`export XDG_RUNTIME_DIR=/run/user/$(id -u); export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock; systemctl --user enable --now docker 2>/dev/null || (nohup dockerd-rootless.sh >/tmp/lever-dockerd.log 2>&1 &); timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'`); err != nil {
 		return fmt.Errorf("start rootless dockerd: %w", err)
 	}
 	return nil

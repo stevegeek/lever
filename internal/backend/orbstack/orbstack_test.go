@@ -9,7 +9,13 @@ import (
 	"github.com/lever-to/lever/internal/exec"
 )
 
+// orbVersionScript scripts a successful `orb version` response for >= 2.1.1.
+func orbVersionScript(f *exec.FakeRunner) {
+	f.Script("orb version", exec.Result{Stdout: "Version: 2.2.1 (2020100)\n"})
+}
+
 func scriptedMachine(f *exec.FakeRunner) {
+	orbVersionScript(f)
 	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"}) // machine already exists
 	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
 	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
@@ -42,8 +48,9 @@ func TestEnsureUpIsIdempotentWhenMachineExists(t *testing.T) {
 
 func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 	f := exec.NewFakeRunner()
+	orbVersionScript(f)
 	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
-	f.Script("orb create --isolated", exec.Result{Stdout: "created\n"})
+	f.Script("orb create --isolated --mount", exec.Result{Stdout: "created\n"})
 	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
 	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
 	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
@@ -59,17 +66,18 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 	}
 	var sawCreate bool
 	for _, c := range f.Calls {
-		if c.Name == "orb" && strings.Join(c.Args, " ") == "create --isolated ubuntu lever-jail" {
+		if c.Name == "orb" && strings.Join(c.Args, " ") == "create --isolated --mount /Users/x/tree:/lever ubuntu lever-jail" {
 			sawCreate = true
 		}
 	}
 	if !sawCreate {
-		t.Fatalf("expected `orb create --isolated ubuntu lever-jail`; calls=%+v", f.Calls)
+		t.Fatalf("expected `orb create --isolated --mount /Users/x/tree:/lever ubuntu lever-jail`; calls=%+v", f.Calls)
 	}
 }
 
 func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	f := exec.NewFakeRunner()
+	orbVersionScript(f)
 	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
 	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
 	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "1000\n"}) // non-default uid
@@ -92,6 +100,16 @@ func TestProfileDeclaresSharedKernelAndFragile(t *testing.T) {
 	p := New(exec.NewFakeRunner(), "lever-jail").Profile()
 	if p.SeparateKernel || !p.VersionFragile {
 		t.Fatalf("orbstack profile wrong: %+v", p)
+	}
+}
+
+func TestProfileFSBoundedByIsHonest(t *testing.T) {
+	p := New(exec.NewFakeRunner(), "lever-jail").Profile()
+	if !strings.Contains(p.FSBoundedBy, "/lever") {
+		t.Fatalf("Profile.FSBoundedBy should mention /lever mount; got %q", p.FSBoundedBy)
+	}
+	if strings.Contains(p.FSBoundedBy, "NOT yet") {
+		t.Fatalf("Profile.FSBoundedBy still contains stale 'NOT yet' wording; got %q", p.FSBoundedBy)
 	}
 }
 
@@ -142,5 +160,124 @@ func TestTeardownIsNoopWhenAbsent(t *testing.T) {
 		if c.Name == "orb" && len(c.Args) > 0 && c.Args[0] == "delete" {
 			t.Fatalf("delete must NOT be called when machine absent: %+v", f.Calls)
 		}
+	}
+}
+
+// --- OrbStack version preflight tests ---
+
+func TestOrbVersionAtLeast(t *testing.T) {
+	cases := []struct {
+		name    string
+		stdout  string
+		wantOK  bool
+		wantErr bool
+		wantGot string
+	}{
+		{
+			name:    "2.2.1 >= 2.1.1 → ok",
+			stdout:  "Version: 2.2.1 (2020100)\n",
+			wantOK:  true,
+			wantGot: "2.2.1",
+		},
+		{
+			name:    "2.1.1 >= 2.1.1 → ok (exact match)",
+			stdout:  "Version: 2.1.1 (2000000)\n",
+			wantOK:  true,
+			wantGot: "2.1.1",
+		},
+		{
+			name:    "2.1.0 >= 2.1.1 → too old",
+			stdout:  "Version: 2.1.0 (1990000)\n",
+			wantOK:  false,
+			wantGot: "2.1.0",
+		},
+		{
+			name:    "2.0.9 >= 2.1.1 → too old (minor mismatch)",
+			stdout:  "Version: 2.0.9 (1900000)\n",
+			wantOK:  false,
+			wantGot: "2.0.9",
+		},
+		{
+			name:    "3.0.0 >= 2.1.1 → ok (major bump)",
+			stdout:  "Version: 3.0.0 (9999999)\n",
+			wantOK:  true,
+			wantGot: "3.0.0",
+		},
+		{
+			name:    "1.9.9 >= 2.1.1 → too old (major too low)",
+			stdout:  "Version: 1.9.9 (1000000)\n",
+			wantOK:  false,
+			wantGot: "1.9.9",
+		},
+		{
+			name:    "malformed output → error",
+			stdout:  "orb: command not found\n",
+			wantErr: true,
+		},
+		{
+			name:    "empty output → error",
+			stdout:  "",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := exec.NewFakeRunner()
+			f.Script("orb version", exec.Result{Stdout: tc.stdout})
+			ok, got, err := orbVersionAtLeast(context.Background(), f, 2, 1, 1)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (ok=%t got=%q)", ok, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("ok: want %t got %t", tc.wantOK, ok)
+			}
+			if got != tc.wantGot {
+				t.Errorf("got version string: want %q got %q", tc.wantGot, got)
+			}
+		})
+	}
+}
+
+func TestEnsureUpRejectsOldOrb(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb version", exec.Result{Stdout: "Version: 2.1.0 (1990000)\n"})
+	b := New(f, "lever-jail")
+
+	err := b.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-jail",
+		ProjectTree: "/Users/x/tree",
+	})
+	if err == nil {
+		t.Fatal("expected error for OrbStack 2.1.0, got nil")
+	}
+	if !strings.Contains(err.Error(), "OrbStack") || !strings.Contains(err.Error(), "2.1.1") {
+		t.Fatalf("error should mention OrbStack >= 2.1.1; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "2.1.0") {
+		t.Fatalf("error should show the found version; got: %v", err)
+	}
+}
+
+func TestEnsureUpRequiresProjectTree(t *testing.T) {
+	f := exec.NewFakeRunner()
+	// No `orb version` needed: ProjectTree guard fires before the preflight.
+	b := New(f, "lever-jail")
+
+	err := b.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-jail",
+		ProjectTree: "", // empty
+	})
+	if err == nil {
+		t.Fatal("expected error for empty ProjectTree, got nil")
+	}
+	if !strings.Contains(err.Error(), "ProjectTree") {
+		t.Fatalf("error should mention ProjectTree; got: %v", err)
 	}
 }

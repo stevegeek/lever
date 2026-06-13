@@ -6,6 +6,8 @@ package orbstack
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/lever-to/lever/internal/backend"
@@ -15,12 +17,19 @@ import (
 
 const (
 	distro = "ubuntu"
+	// mountDest is the path inside the isolated machine where the project tree
+	// is bind-mounted via `orb create --mount <host>:/lever`. Agents work
+	// exclusively within this directory; no host home is visible.
+	mountDest = "/lever"
 	// defaultRunUID is the fallback UID used for the rootless Docker socket path
 	// (/run/user/<uid>/docker.sock) before EnsureUp has resolved the real UID.
 	// OrbStack maps the host user to 501 by default, so DockerHost() is sensible
 	// even before EnsureUp, per the interface's "valid after EnsureUp" contract.
 	defaultRunUID = "501"
 )
+
+// orbVersionRe matches "Version: 2.2.1 (2020100)" lines from `orb version`.
+var orbVersionRe = regexp.MustCompile(`Version:\s*(\d+)\.(\d+)\.(\d+)`)
 
 type OrbStack struct {
 	r       exec.Runner
@@ -37,7 +46,7 @@ func (o *OrbStack) Profile() backend.Profile {
 	return backend.Profile{
 		Name:             "orbstack",
 		SeparateKernel:   false, // shares the OrbStack VM kernel
-		FSBoundedBy:      "isolated machine: no host files by default (project-tree mount NOT yet applied)",
+		FSBoundedBy:      "isolated machine: no host files + project tree mounted at /lever",
 		EgressEnforcedAt: "jail netns iptables/ip6tables",
 		VersionFragile:   true, // depends on OrbStack --isolated behaviours
 	}
@@ -53,7 +62,18 @@ func (o *OrbStack) DockerHost() string {
 func (o *OrbStack) HostToolAlias() string { return "host.orb.internal" }
 
 func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
-	if err := o.ensureMachine(ctx); err != nil {
+	if cfg.ProjectTree == "" {
+		return fmt.Errorf("EnsureUp: ProjectTree is required")
+	}
+	// Preflight: require OrbStack >= 2.1.1 for --mount support on isolated machines.
+	ok, got, err := orbVersionAtLeast(ctx, o.r, 2, 1, 1)
+	if err != nil {
+		return fmt.Errorf("EnsureUp: orb version check: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("lever requires OrbStack >= 2.1.1 for isolated-machine mounts; found %s", got)
+	}
+	if err := o.ensureMachine(ctx, cfg.ProjectTree); err != nil {
 		return err
 	}
 	if err := o.resolveRunUser(ctx); err != nil {
@@ -63,6 +83,40 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 		return err
 	}
 	return o.ApplyEgress(ctx, cfg.AllowedPorts)
+}
+
+// orbVersionAtLeast runs `orb version`, parses the semver, and returns whether
+// it is >= (major, minor, patch). got is the raw version string on success or
+// the raw output on parse failure.
+func orbVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch int) (ok bool, got string, err error) {
+	res, err := r.Run(ctx, nil, "orb", "version")
+	if err != nil {
+		return false, "", fmt.Errorf("orb version: %w", err)
+	}
+	m := orbVersionRe.FindStringSubmatch(res.Stdout)
+	if m == nil {
+		return false, strings.TrimSpace(res.Stdout), fmt.Errorf("orb version: could not parse version from %q", strings.TrimSpace(res.Stdout))
+	}
+	// m[1],m[2],m[3] are guaranteed digits by the regex.
+	vMaj, _ := strconv.Atoi(m[1])
+	vMin, _ := strconv.Atoi(m[2])
+	vPat, _ := strconv.Atoi(m[3])
+	got = fmt.Sprintf("%s.%s.%s", m[1], m[2], m[3])
+
+	switch {
+	case vMaj > major:
+		return true, got, nil
+	case vMaj < major:
+		return false, got, nil
+	// vMaj == major
+	case vMin > minor:
+		return true, got, nil
+	case vMin < minor:
+		return false, got, nil
+	// vMin == minor
+	default:
+		return vPat >= patch, got, nil
+	}
 }
 
 // resolveRunUser caches the in-machine run user and UID so the subid/linger
@@ -83,20 +137,24 @@ func (o *OrbStack) resolveRunUser(ctx context.Context) error {
 	return nil
 }
 
-func (o *OrbStack) ensureMachine(ctx context.Context) error {
+// ensureMachine creates the isolated OrbStack machine if it doesn't yet exist.
+// The project tree is mounted at /lever via `--mount <projectTree>:/lever`; this
+// is set at CREATE time only. Changing the tree on an existing machine requires
+// teardown+recreate — mounts cannot be modified on a running machine (acceptable
+// limitation; document it in operator notes).
+func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error {
 	res, err := o.r.Run(ctx, nil, "orb", "list")
 	if err != nil {
 		return fmt.Errorf("orb list: %w", err)
 	}
 	if machineListed(res.Stdout, o.machine) {
-		return nil // idempotent
+		// Idempotent: machine already exists; we cannot alter the mount after
+		// creation, so no action is taken here. To change the project tree,
+		// call Teardown() first, then EnsureUp() again.
+		return nil
 	}
-	// The isolated machine intentionally shares NO host files. Mounting the
-	// project tree (cfg.ProjectTree) IN is NOT yet implemented: it needs the
-	// verified OrbStack mount mechanism for isolated machines, tracked as the
-	// first task of the next slice. That is why Config.ProjectTree is currently
-	// unused here — the `--mount` is deliberately omitted until then.
-	if _, err := o.r.Run(ctx, nil, "orb", "create", "--isolated", distro, o.machine); err != nil {
+	mountArg := projectTree + ":" + mountDest
+	if _, err := o.r.Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.machine); err != nil {
 		return fmt.Errorf("orb create: %w", err)
 	}
 	return nil

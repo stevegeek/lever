@@ -15,13 +15,11 @@ import (
 
 const (
 	distro = "ubuntu"
-	// TODO(task9): resolve run-user dynamically (orb -m <machine> whoami) instead of hardcoding "leveruser"
-	runUser = "leveruser"
-	// runUserUID is the UID OrbStack maps for the host user; the rootless Docker
-	// socket lives at /run/user/<uid>/docker.sock. Hardcoded to match the PoC
-	// environment; Task 9 integration tests will force dynamic resolution.
-	runUserUID = 501
-	dockerSock = "unix:///run/user/501/docker.sock"
+	// defaultRunUID is the fallback UID used for the rootless Docker socket path
+	// (/run/user/<uid>/docker.sock) before EnsureUp has resolved the real UID.
+	// OrbStack maps the host user to 501 by default, so DockerHost() is sensible
+	// even before EnsureUp, per the interface's "valid after EnsureUp" contract.
+	defaultRunUID = "501"
 )
 
 type OrbStack struct {
@@ -29,6 +27,8 @@ type OrbStack struct {
 	machine string
 	aliasV4 string
 	aliasV6 string
+	runUser string // resolved via `orb -m <machine> whoami`
+	runUID  string // resolved via `orb -m <machine> id -u`
 }
 
 func New(r exec.Runner, machine string) *OrbStack { return &OrbStack{r: r, machine: machine} }
@@ -43,17 +43,44 @@ func (o *OrbStack) Profile() backend.Profile {
 	}
 }
 
-func (o *OrbStack) DockerHost() string    { return dockerSock }
+func (o *OrbStack) DockerHost() string {
+	uid := o.runUID
+	if uid == "" {
+		uid = defaultRunUID
+	}
+	return fmt.Sprintf("unix:///run/user/%s/docker.sock", uid)
+}
 func (o *OrbStack) HostToolAlias() string { return "host.orb.internal" }
 
 func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.ensureMachine(ctx); err != nil {
 		return err
 	}
+	if err := o.resolveRunUser(ctx); err != nil {
+		return err
+	}
 	if err := o.ensureRootlessDocker(ctx); err != nil {
 		return err
 	}
 	return o.ApplyEgress(ctx, cfg.AllowedPorts)
+}
+
+// resolveRunUser caches the in-machine run user and UID so the subid/linger
+// script and the rootless Docker socket path work for any OrbStack user, not a
+// hardcoded one. Called after ensureMachine (the machine must exist) and before
+// ensureRootlessDocker.
+func (o *OrbStack) resolveRunUser(ctx context.Context) error {
+	res, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "whoami")
+	if err != nil {
+		return fmt.Errorf("resolve run user: %w", err)
+	}
+	o.runUser = strings.TrimSpace(res.Stdout)
+	res, err = o.r.Run(ctx, nil, "orb", "-m", o.machine, "id", "-u")
+	if err != nil {
+		return fmt.Errorf("resolve run uid: %w", err)
+	}
+	o.runUID = strings.TrimSpace(res.Stdout)
+	return nil
 }
 
 func (o *OrbStack) ensureMachine(ctx context.Context) error {
@@ -93,9 +120,8 @@ func (o *OrbStack) ensureRootlessDocker(ctx context.Context) error {
 	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
-	// TODO(task9): resolve run-user dynamically (orb -m <machine> whoami) instead of hardcoding "leveruser"
 	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; loginctl enable-linger %s`,
-		runUser, runUser, runUser, runUser, runUser)); err != nil {
+		o.runUser, o.runUser, o.runUser, o.runUser, o.runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)
 	}
 	if err := user(`command -v dockerd-rootless.sh >/dev/null 2>&1 || curl -fsSL https://get.docker.com/rootless | sh`); err != nil {

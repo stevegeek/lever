@@ -11,6 +11,8 @@ import (
 
 func scriptedMachine(f *exec.FakeRunner) {
 	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"}) // machine already exists
+	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
 	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
 	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
 	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
@@ -42,6 +44,8 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
 	f.Script("orb create --isolated", exec.Result{Stdout: "created\n"})
+	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
 	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
 	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
 	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
@@ -61,6 +65,26 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 	}
 	if !sawCreate {
 		t.Fatalf("expected `orb create --isolated ubuntu lever-jail`; calls=%+v", f.Calls)
+	}
+}
+
+func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
+	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "1000\n"}) // non-default uid
+	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
+	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	b := New(f, "lever-jail")
+
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/Users/x/tree"}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if got := b.DockerHost(); !strings.Contains(got, "/run/user/1000/") {
+		t.Fatalf("DockerHost should reflect resolved uid 1000; got %q", got)
 	}
 }
 

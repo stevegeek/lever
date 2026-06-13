@@ -28,6 +28,16 @@ func TestBuildRulesDropsRestToAliasAfterAllows(t *testing.T) {
 	}
 }
 
+func TestBuildRulesDropsFC00AfterV6Allows(t *testing.T) {
+	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305})
+	v6 := familyArgs(rules, IPv6)
+	allowIdx := indexOfRule(v6, "--dport 3305 -j ACCEPT")
+	dropIdx := indexOfRule(v6, "-d fc00::/7 -j DROP")
+	if allowIdx < 0 || dropIdx < 0 || dropIdx < allowIdx {
+		t.Fatalf("fc00::/7 DROP must come AFTER the v6 alias allow (alias is a /128 inside fc00::/7); allow=%d drop=%d", allowIdx, dropIdx)
+	}
+}
+
 func TestBuildRulesDropsRFC1918AndIPv6(t *testing.T) {
 	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", nil)
 	v4 := familyArgs(rules, IPv4)

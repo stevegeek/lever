@@ -24,12 +24,15 @@ type Rule struct {
 }
 
 var (
-	rfc1918   = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	// private/special-use IPv4: RFC1918 + link-local/metadata (169.254/16) + CGNAT/Tailscale (100.64/10)
+	privateV4 = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"}
 	ipv6Local = []string{"fe80::/10", "fc00::/7"} // link-local + ULA (the host alias ULA is a /128 inside fc00::/7, so allow-before-drop ordering is essential)
 )
 
 // BuildRules returns ordered OUTPUT rules. aliasV4/aliasV6 are the resolved
 // host.orb.internal addresses; allowedPorts are host-loopback tool ports.
+// Assumes the OUTPUT chain default policy is ACCEPT: the public internet stays
+// open; only the host alias and the listed private/special-use ranges are dropped.
 func BuildRules(aliasV4, aliasV6 string, allowedPorts []int) []Rule {
 	ports := append([]int(nil), allowedPorts...)
 	sort.Ints(ports)
@@ -52,7 +55,7 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int) []Rule {
 		rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-j", "DROP")})
 	}
 	// 3) DROP private/LAN ranges explicitly (don't rely on OrbStack routing alone).
-	for _, c := range rfc1918 {
+	for _, c := range privateV4 {
 		rules = append(rules, Rule{IPv4, out("-d", c, "-j", "DROP")})
 	}
 	for _, c := range ipv6Local {

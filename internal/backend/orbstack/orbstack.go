@@ -37,7 +37,7 @@ func (o *OrbStack) Profile() backend.Profile {
 	return backend.Profile{
 		Name:             "orbstack",
 		SeparateKernel:   false, // shares the OrbStack VM kernel
-		FSBoundedBy:      "isolated machine: no host home + single --mount",
+		FSBoundedBy:      "isolated machine: no host files by default (project-tree mount NOT yet applied)",
 		EgressEnforcedAt: "jail netns iptables/ip6tables",
 		VersionFragile:   true, // depends on OrbStack --isolated behaviours
 	}
@@ -91,6 +91,11 @@ func (o *OrbStack) ensureMachine(ctx context.Context) error {
 	if machineListed(res.Stdout, o.machine) {
 		return nil // idempotent
 	}
+	// The isolated machine intentionally shares NO host files. Mounting the
+	// project tree (cfg.ProjectTree) IN is NOT yet implemented: it needs the
+	// verified OrbStack mount mechanism for isolated machines, tracked as the
+	// first task of the next slice. That is why Config.ProjectTree is currently
+	// unused here — the `--mount` is deliberately omitted until then.
 	if _, err := o.r.Run(ctx, nil, "orb", "create", "--isolated", distro, o.machine); err != nil {
 		return fmt.Errorf("orb create: %w", err)
 	}

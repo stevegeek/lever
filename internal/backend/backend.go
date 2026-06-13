@@ -33,8 +33,8 @@ type Config struct {
 // EnsureUp idempotent.
 type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
-	DockerHost() string                 // endpoint the broker drives (valid after EnsureUp)
-	HostToolAlias() string              // how an agent reaches allowlisted host tools ("" if none)
+	DockerHost() string    // endpoint the broker drives (valid after EnsureUp)
+	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
 	ApplyEgress(ctx context.Context, allowedPorts []int) error
 	Teardown(ctx context.Context) error
 	Profile() Profile

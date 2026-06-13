@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/lever-to/lever/internal/backend"
+	"github.com/lever-to/lever/internal/egress"
 	"github.com/lever-to/lever/internal/exec"
 )
 
@@ -106,13 +107,35 @@ func (o *OrbStack) ensureRootlessDocker(ctx context.Context) error {
 	return nil
 }
 
-// Teardown stops and removes the OrbStack machine. Idempotent: safe to call
-// even when the machine does not exist.
+// Teardown deletes the jail machine. Idempotent: a no-op if the machine is
+// already absent.
 func (o *OrbStack) Teardown(ctx context.Context) error {
-	_, err := o.r.Run(ctx, nil, "orb", "delete", o.machine)
-	return err
+	res, err := o.r.Run(ctx, nil, "orb", "list")
+	if err != nil {
+		return fmt.Errorf("orb list: %w", err)
+	}
+	if !machineListed(res.Stdout, o.machine) {
+		return nil // already gone
+	}
+	if _, err := o.r.Run(ctx, nil, "orb", "delete", o.machine); err != nil {
+		return fmt.Errorf("orb delete: %w", err)
+	}
+	return nil
 }
 
-// ApplyEgress is implemented fully in Task 7; this stub lets EnsureUp compile
-// and the Task 6 tests (which script the bash/iptables calls loosely) pass.
-func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int) error { return nil }
+func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int) error {
+	v4, v6, err := resolveHostAlias(ctx, o.r, o.machine)
+	if err != nil {
+		return err
+	}
+	o.aliasV4, o.aliasV6 = v4, v6
+	for _, rule := range egress.BuildRules(v4, v6, allowedPorts) {
+		args := append([]string{"-u", "root", "-m", o.machine, rule.Family.Binary()}, rule.Args...)
+		if _, err := o.r.Run(ctx, nil, "orb", args...); err != nil {
+			return fmt.Errorf("apply %s: %w", rule.Render(), err)
+		}
+	}
+	return nil
+}
+
+var _ backend.Backend = (*OrbStack)(nil)

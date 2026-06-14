@@ -21,6 +21,9 @@ type Inboxer interface {
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
 
+// compile-time proof the real client satisfies Inboxer.
+var _ Inboxer = (*scion.Client)(nil)
+
 type Bridge struct {
 	in   Inboxer
 	file string

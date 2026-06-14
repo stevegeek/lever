@@ -1,0 +1,11 @@
+# hello-grove: the smallest agent-manager application — a manager + one grove.
+name: hello-grove
+backend: orbstack
+tree: .
+manager:
+  image: scionlocal/lever-claude:latest
+  prompt_file: manager.md
+  allow_ports: []
+groves:
+  - name: worker
+    dir: groves/worker

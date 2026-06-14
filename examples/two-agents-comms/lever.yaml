@@ -1,0 +1,12 @@
+name: two-agents-comms
+backend: orbstack
+tree: .
+manager:
+  image: scionlocal/lever-claude:latest
+  prompt_file: manager.md
+  allow_ports: []
+groves:
+  - name: producer
+    dir: groves/producer
+  - name: consumer
+    dir: groves/consumer

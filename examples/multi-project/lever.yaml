@@ -1,0 +1,14 @@
+name: multi-project
+backend: orbstack
+tree: .
+manager:
+  image: scionlocal/lever-claude:latest
+  prompt_file: manager.md
+  allow_ports: []
+groves:
+  - name: svc-a
+    dir: groves/svc-a
+  - name: svc-b
+    dir: groves/svc-b
+  - name: svc-c
+    dir: groves/svc-c

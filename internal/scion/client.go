@@ -69,20 +69,23 @@ func projectFlag(project string) []string {
 	return []string{"-g", project}
 }
 
-// run executes a scion subcommand and returns trimmed combined stdout. cwd ""
-// uses the process cwd. Non-zero exit returns an error with the dev-auth banner
-// stripped for readability. (cwd is honored once exec.RunIn lands in Task 2; for
-// now Task 1 only uses cwd="" so a direct Run is fine.)
-func (c *Client) run(ctx context.Context, cwd string, args ...string) (string, error) {
-	res, err := c.r.Run(ctx, c.env(), c.bin, args...)
-	out := res.Stdout
-	if res.Stderr != "" {
-		out = out + res.Stderr
-	}
+// runIn executes a scion subcommand in the given working directory and returns
+// trimmed combined stdout. cwd "" uses the process cwd. Non-zero exit returns
+// an error with the dev-auth banner stripped for readability.
+func (c *Client) runIn(ctx context.Context, dir string, args ...string) (string, error) {
+	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
+	out := res.Stdout + res.Stderr
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", strings.Join(args, " "), clean(out))
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// run executes a scion subcommand and returns trimmed combined stdout. cwd ""
+// uses the process cwd. Non-zero exit returns an error with the dev-auth banner
+// stripped for readability.
+func (c *Client) run(ctx context.Context, cwd string, args ...string) (string, error) {
+	return c.runIn(ctx, cwd, args...)
 }
 
 var bannerRE = regexp.MustCompile(`(?i)WARNING:.*development auth.*`)

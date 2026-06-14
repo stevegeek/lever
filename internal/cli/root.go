@@ -37,6 +37,6 @@ func newRootWith(bf BackendFactory, cf ClientFactory) *cobra.Command {
 	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration"}
 	root.AddCommand(&cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(Version) }})
 	root.AddCommand(newUpCmd(bf), newDownCmd(bf), newDoctorCmd(bf))
-	root.AddCommand(newAgentCmd(cf))
+	root.AddCommand(newAgentCmd(cf), newMsgCmd(cf), newWatchCmd(cf))
 	return root
 }

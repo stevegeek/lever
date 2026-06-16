@@ -76,9 +76,22 @@ func (c *Client) runIn(ctx context.Context, dir string, args ...string) (string,
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	out := res.Stdout + res.Stderr
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", strings.Join(args, " "), clean(out))
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), clean(out))
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// redactArgs renders args for a user-visible error/log, masking secret values.
+// It detects the `hub secret set <KEY> <VALUE>` shape and replaces <VALUE> with
+// "***" (keeping <KEY> visible). All other commands render verbatim.
+func redactArgs(args []string) string {
+	if len(args) == 5 && args[0] == "hub" && args[1] == "secret" && args[2] == "set" {
+		redacted := make([]string, len(args))
+		copy(redacted, args)
+		redacted[4] = "***"
+		return strings.Join(redacted, " ")
+	}
+	return strings.Join(args, " ")
 }
 
 // run executes a scion subcommand and returns trimmed combined stdout. cwd ""

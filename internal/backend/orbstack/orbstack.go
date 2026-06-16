@@ -6,6 +6,8 @@ package orbstack
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -79,10 +81,55 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.resolveRunUser(ctx); err != nil {
 		return err
 	}
-	if err := o.ensureRootlessDocker(ctx); err != nil {
+	if err := o.ensureRuntimes(ctx); err != nil {
 		return err
 	}
+	if cfg.ScionSource != "" {
+		if err := o.ensureScion(ctx, cfg.ScionSource); err != nil {
+			return err
+		}
+	}
 	return o.ApplyEgress(ctx, cfg.AllowedPorts)
+}
+
+// ensureScion cross-compiles scion from a host source checkout for linux/arm64
+// and installs it into the jail at /usr/local/bin/scion. The build runs on the
+// HOST (Go's build cache makes re-runs incremental, so this is cheap to repeat).
+// The binary is piped into the jail via `bash -c "cat <bin> | orb … bash -c 'cat
+// > … .tmp && chmod && mv'"` because the Runner has no stdin channel. The install
+// is atomic: it writes a temp file then mv's it over the destination (mv is
+// atomic on the same filesystem), so a mid-stream failure can't leave a
+// truncated, executable /usr/local/bin/scion. `set -o pipefail` makes a
+// left-side failure (e.g. the host `cat`) propagate instead of being masked by a
+// successful right side. bash (not sh) is required because dash on Linux hosts —
+// where the linux-docker backend will run — does not support `set -o pipefail`.
+func (o *OrbStack) ensureScion(ctx context.Context, source string) error {
+	fi, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("scion source %q: %w", source, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("scion source %q is not a directory", source)
+	}
+	bin := filepath.Join(os.TempDir(), "lever-scion-"+o.machine)
+	if _, err := o.r.RunIn(ctx, source, map[string]string{"GOOS": "linux", "GOARCH": "arm64"},
+		"go", "build", "-o", bin, "./cmd/scion"); err != nil {
+		return fmt.Errorf("cross-compile scion: %w", err)
+	}
+	install := fmt.Sprintf(
+		`set -o pipefail; cat %s | orb -m %s -u root bash -c 'cat > /usr/local/bin/scion.tmp && chmod +x /usr/local/bin/scion.tmp && mv /usr/local/bin/scion.tmp /usr/local/bin/scion'`,
+		shellSingleQuote(bin), shellSingleQuote(o.machine))
+	if _, err := o.r.Run(ctx, nil, "bash", "-c", install); err != nil {
+		return fmt.Errorf("install scion into jail: %w", err)
+	}
+	return nil
+}
+
+// shellSingleQuote wraps s in single quotes safe for POSIX shells, escaping any
+// embedded single quote as the standard '\” sequence (close quote, escaped
+// quote, reopen quote).
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // orbVersionAtLeast runs `orb version`, parses the semver, and returns whether
@@ -122,7 +169,7 @@ func orbVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch i
 // resolveRunUser caches the in-machine run user and UID so the subid/linger
 // script and the rootless Docker socket path work for any OrbStack user, not a
 // hardcoded one. Called after ensureMachine (the machine must exist) and before
-// ensureRootlessDocker.
+// ensureRuntimes.
 func (o *OrbStack) resolveRunUser(ctx context.Context) error {
 	res, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "whoami")
 	if err != nil {
@@ -169,9 +216,10 @@ func machineListed(stdout, name string) bool {
 	return false
 }
 
-// ensureRootlessDocker installs prereqs + Docker rootless and starts the daemon.
+// ensureRuntimes installs prereqs + rootless Docker and rootless Podman.
 // Idempotent: the rootless install script and systemctl --start are safe to re-run.
-func (o *OrbStack) ensureRootlessDocker(ctx context.Context) error {
+// Podman is daemonless so no service startup is needed; scion auto-prefers it over Docker.
+func (o *OrbStack) ensureRuntimes(ctx context.Context) error {
 	root := func(script string) error {
 		_, err := o.r.Run(ctx, nil, "orb", "-u", "root", "-m", o.machine, "bash", "-lc", script)
 		return err
@@ -180,7 +228,7 @@ func (o *OrbStack) ensureRootlessDocker(ctx context.Context) error {
 		_, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "bash", "-lc", script)
 		return err
 	}
-	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables`); err != nil {
+	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
 	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; loginctl enable-linger %s`,
@@ -225,6 +273,21 @@ func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int) error {
 		}
 	}
 	return nil
+}
+
+// MountDest returns the path inside the jail where the project tree is bind-mounted.
+func (o *OrbStack) MountDest() string { return mountDest }
+
+// RunUser returns the in-machine run user resolved by EnsureUp (valid after EnsureUp).
+func (o *OrbStack) RunUser() string { return o.runUser }
+
+// RunUID returns the in-machine run user's UID resolved by EnsureUp.
+// Falls back to defaultRunUID if EnsureUp has not yet been called.
+func (o *OrbStack) RunUID() string {
+	if o.runUID == "" {
+		return defaultRunUID
+	}
+	return o.runUID
 }
 
 var _ backend.Backend = (*OrbStack)(nil)

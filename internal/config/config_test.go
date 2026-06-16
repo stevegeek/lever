@@ -47,6 +47,42 @@ groves:
 	}
 }
 
+func TestScionSourceResolved(t *testing.T) {
+	// relative path → resolved under the config dir and absolute
+	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: relative/scion\n")
+	app, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := filepath.Join(filepath.Dir(p), "relative", "scion")
+	if app.Scion.Source != want {
+		t.Fatalf("relative scion source: want %q got %q", want, app.Scion.Source)
+	}
+	if !filepath.IsAbs(app.Scion.Source) {
+		t.Fatalf("scion source not absolute: %q", app.Scion.Source)
+	}
+
+	// absolute path → stays as-is
+	p = writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: /abs/scion-src\n")
+	app, err = Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if app.Scion.Source != "/abs/scion-src" {
+		t.Fatalf("absolute scion source: want /abs/scion-src got %q", app.Scion.Source)
+	}
+
+	// empty → stays empty
+	p = writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
+	app, err = Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if app.Scion.Source != "" {
+		t.Fatalf("empty scion source: want \"\" got %q", app.Scion.Source)
+	}
+}
+
 func TestValidateRejectsUnknownBackend(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n")
 	if _, err := Load(p); err == nil {

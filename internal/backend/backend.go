@@ -27,6 +27,9 @@ type Config struct {
 	MachineName  string // jail identifier
 	ProjectTree  string // host path bind-mounted as the ONLY visible tree
 	AllowedPorts []int  // host-loopback tool ports to allow via the host alias
+	// ScionSource is the host path to a scion source checkout to cross-compile and
+	// install into the jail. Empty disables scion provisioning (back-compat).
+	ScionSource string
 }
 
 // Backend is the contract the rest of Lever drives. Implementations must make

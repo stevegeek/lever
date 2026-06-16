@@ -23,12 +23,17 @@ type Grove struct {
 	Dir  string `yaml:"dir"`
 }
 
+type ScionConfig struct {
+	Source string `yaml:"source"`
+}
+
 type App struct {
-	Name    string  `yaml:"name"`
-	Backend string  `yaml:"backend"`
-	Tree    string  `yaml:"tree"`
-	Manager Manager `yaml:"manager"`
-	Groves  []Grove `yaml:"groves"`
+	Name    string      `yaml:"name"`
+	Backend string      `yaml:"backend"`
+	Tree    string      `yaml:"tree"`
+	Manager Manager     `yaml:"manager"`
+	Scion   ScionConfig `yaml:"scion"`
+	Groves  []Grove     `yaml:"groves"`
 
 	dir string
 }
@@ -52,6 +57,20 @@ func Load(path string) (*App, error) {
 		if abs, err := filepath.Abs(app.Tree); err == nil {
 			app.Tree = abs
 		}
+	}
+	if app.Scion.Source != "" {
+		src := app.Scion.Source
+		if strings.HasPrefix(src, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				src = filepath.Join(home, src[2:])
+			}
+		} else if !filepath.IsAbs(src) {
+			src = filepath.Join(app.dir, src)
+		}
+		if abs, err := filepath.Abs(src); err == nil {
+			src = abs
+		}
+		app.Scion.Source = src
 	}
 	if err := app.Validate(); err != nil {
 		return nil, err
@@ -82,3 +101,12 @@ func (a *App) Validate() error {
 
 // GroveDir returns the absolute path of a grove dir (tree + relative dir).
 func (a *App) GroveDir(g Grove) string { return filepath.Join(a.Tree, g.Dir) }
+
+// ManagerPromptPath returns the absolute path to the manager's prompt file
+// (relative to the tree), or "" if none is configured.
+func (a *App) ManagerPromptPath() string {
+	if a.Manager.PromptFile == "" {
+		return ""
+	}
+	return filepath.Join(a.Tree, a.Manager.PromptFile)
+}

@@ -8,19 +8,21 @@ import "github.com/lever-to/lever/internal/config"
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
 // carry operands (a dir to register, the manager image, etc.).
 type Step struct {
-	Kind   string // jail-up | scion-server | hub-enable | credential | register-manager | register-grove | start-manager
+	Kind   string // jail-up | load-image | init-machine | config-registry | scion-server | credential | register-manager | register-grove | start-manager
 	Target string
 	Detail string
 }
 
 // Plan returns the ordered bring-up for an app. Order is load-bearing: the jail
-// must exist before scion runs in it; projects must be registered before the
-// manager (which orchestrates them) starts.
+// must exist and the image loaded before scion runs in it; projects must be
+// registered before the manager (which orchestrates them) starts.
 func Plan(a *config.App) []Step {
 	steps := []Step{
 		{Kind: "jail-up", Target: a.Tree},
+		{Kind: "load-image", Target: a.Manager.Image},
+		{Kind: "init-machine"},
+		{Kind: "config-registry", Detail: "scionlocal"},
 		{Kind: "scion-server"},
-		{Kind: "hub-enable"},
 	}
 	if a.Manager.CredentialFile != "" {
 		steps = append(steps, Step{Kind: "credential", Target: a.Manager.CredentialFile})

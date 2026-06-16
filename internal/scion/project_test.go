@@ -28,7 +28,7 @@ func TestHubLinkArgvAndDir(t *testing.T) {
 		t.Fatalf("HubLink: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	for _, want := range []string{"hub link", "--hub http://127.0.0.1:8080", "-y"} {
+	for _, want := range []string{"hub link", "--hub http://127.0.0.1:8080", "-y", "--non-interactive"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
 		}

@@ -284,6 +284,74 @@ func TestEnsureUpInstallsPodman(t *testing.T) {
 	}
 }
 
+func TestEnsureScionBuildsAndInstalls(t *testing.T) {
+	f := exec.NewFakeRunner()
+	scriptedMachine(f)
+	f.Script("go build", exec.Result{})
+	f.Script("sh -c", exec.Result{})
+	b := New(f, "lever-jail")
+
+	if err := b.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: "/some/scion-src",
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+
+	var sawBuild, sawInstall bool
+	for _, c := range f.Calls {
+		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
+			if c.Dir != "/some/scion-src" {
+				t.Errorf("build Dir: want /some/scion-src got %q", c.Dir)
+			}
+			if c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
+				t.Errorf("build env: want linux/arm64 got %+v", c.Env)
+			}
+			var sawCmd bool
+			for _, a := range c.Args {
+				if a == "./cmd/scion" {
+					sawCmd = true
+				}
+			}
+			if !sawCmd {
+				t.Errorf("build args should contain ./cmd/scion; got %+v", c.Args)
+			}
+			sawBuild = true
+		}
+		if c.Name == "sh" && len(c.Args) >= 2 && c.Args[0] == "-c" {
+			script := c.Args[1]
+			if strings.Contains(script, "orb -m lever-jail -u root") && strings.Contains(script, "/usr/local/bin/scion") {
+				sawInstall = true
+			}
+		}
+	}
+	if !sawBuild {
+		t.Fatalf("expected go build for ./cmd/scion in /some/scion-src; calls=%+v", f.Calls)
+	}
+	if !sawInstall {
+		t.Fatalf("expected sh -c scion install into jail; calls=%+v", f.Calls)
+	}
+}
+
+func TestEnsureScionSkippedWhenEmpty(t *testing.T) {
+	f := exec.NewFakeRunner()
+	scriptedMachine(f)
+	b := New(f, "lever-jail")
+
+	if err := b.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: "",
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
+			t.Fatalf("go build must NOT be called when ScionSource empty: %+v", c)
+		}
+		if c.Name == "sh" && len(c.Args) >= 2 && strings.Contains(c.Args[1], "/usr/local/bin/scion") {
+			t.Fatalf("scion install must NOT be called when ScionSource empty: %+v", c)
+		}
+	}
+}
+
 func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	f := exec.NewFakeRunner()
 	// No `orb version` needed: ProjectTree guard fires before the preflight.

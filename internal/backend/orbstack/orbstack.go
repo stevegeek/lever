@@ -6,6 +6,8 @@ package orbstack
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -82,7 +84,32 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.ensureRuntimes(ctx); err != nil {
 		return err
 	}
+	if cfg.ScionSource != "" {
+		if err := o.ensureScion(ctx, cfg.ScionSource); err != nil {
+			return err
+		}
+	}
 	return o.ApplyEgress(ctx, cfg.AllowedPorts)
+}
+
+// ensureScion cross-compiles scion from a host source checkout for linux/arm64
+// and installs it into the jail at /usr/local/bin/scion. The build runs on the
+// HOST (Go's build cache makes re-runs incremental, so this is cheap to repeat).
+// The binary is piped into the jail via `sh -c "cat <bin> | orb … bash -c 'cat > …'"`
+// because the Runner has no stdin channel.
+func (o *OrbStack) ensureScion(ctx context.Context, source string) error {
+	bin := filepath.Join(os.TempDir(), "lever-scion-linux")
+	if _, err := o.r.RunIn(ctx, source, map[string]string{"GOOS": "linux", "GOARCH": "arm64"},
+		"go", "build", "-o", bin, "./cmd/scion"); err != nil {
+		return fmt.Errorf("cross-compile scion: %w", err)
+	}
+	install := fmt.Sprintf(
+		`cat %s | orb -m %s -u root bash -c 'cat > /usr/local/bin/scion && chmod +x /usr/local/bin/scion'`,
+		bin, o.machine)
+	if _, err := o.r.Run(ctx, nil, "sh", "-c", install); err != nil {
+		return fmt.Errorf("install scion into jail: %w", err)
+	}
+	return nil
 }
 
 // orbVersionAtLeast runs `orb version`, parses the semver, and returns whether

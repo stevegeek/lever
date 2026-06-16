@@ -62,6 +62,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, bf BackendFactory) (ap
 		MachineName:  machine,
 		ProjectTree:  app.Tree,
 		AllowedPorts: app.Manager.AllowPorts,
+		ScionSource:  app.Scion.Source,
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.
 	if err := ob.EnsureUp(ctx, cfg); err != nil {

@@ -36,7 +36,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 	case "jail-up":
 		return d.JailUp(ctx, app)
 	case "load-image":
-		return d.LoadImage(ctx, app.Manager.Image)
+		return d.LoadImage(ctx, s.Target)
 	case "init-machine":
 		return d.Scion.InitMachine(ctx)
 	case "config-registry":
@@ -50,7 +50,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 		}
 		tok, err := read(s.Target)
 		if err != nil {
-			return err
+			return fmt.Errorf("reading credential %s: %w", s.Target, err)
 		}
 		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 	case "register-manager", "register-grove":

@@ -83,6 +83,44 @@ func TestScionSourceResolved(t *testing.T) {
 	}
 }
 
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCredentialFileResolved(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "lever.yaml")
+	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: .\nmanager:\n  credential_file: secrets/tok\n")
+	app, err := Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "secrets/tok"); app.Manager.CredentialFile != want {
+		t.Fatalf("CredentialFile = %q, want %q", app.Manager.CredentialFile, want)
+	}
+
+	home, _ := os.UserHomeDir()
+	cfg2 := filepath.Join(dir, "l2.yaml")
+	mustWriteFile(t, cfg2, "name: a\nbackend: orbstack\ntree: .\nmanager:\n  credential_file: ~/.scion/oauth-token\n")
+	app2, err := Load(cfg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app2.Manager.CredentialFile != filepath.Join(home, ".scion/oauth-token") {
+		t.Fatalf("CredentialFile ~ expand = %q", app2.Manager.CredentialFile)
+	}
+
+	cfg3 := filepath.Join(dir, "l3.yaml")
+	mustWriteFile(t, cfg3, "name: a\nbackend: orbstack\ntree: .\n")
+	app3, _ := Load(cfg3)
+	if app3.Manager.CredentialFile != "" {
+		t.Fatalf("empty CredentialFile = %q", app3.Manager.CredentialFile)
+	}
+}
+
 func TestValidateRejectsUnknownBackend(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n")
 	if _, err := Load(p); err == nil {

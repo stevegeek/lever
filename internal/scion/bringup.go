@@ -10,11 +10,15 @@ import (
 var hubReadyAttempts = 30
 var hubReadyInterval = 1 * time.Second
 
-// waitHubReady polls a lightweight hub call until it succeeds or attempts run out.
+// waitHubReady polls a lightweight, PROJECT-INDEPENDENT hub call until it
+// succeeds or attempts run out. `list --all` lists agents across all projects
+// and hits the hub without resolving a current project — unlike `list --global`,
+// which forces project resolution and fails with "no git origin remote found"
+// when run (as here) before any project is registered (verified live 2026-06-17).
 func (c *Client) waitHubReady(ctx context.Context) error {
 	var lastErr error
 	for i := 0; i < hubReadyAttempts; i++ {
-		if _, err := c.run(ctx, "", "list", "--global", "--format", "json"); err == nil {
+		if _, err := c.run(ctx, "", "list", "--all", "--format", "json"); err == nil {
 			return nil
 		} else {
 			lastErr = err

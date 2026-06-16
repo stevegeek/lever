@@ -278,6 +278,9 @@ func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int) error {
 // MountDest returns the path inside the jail where the project tree is bind-mounted.
 func (o *OrbStack) MountDest() string { return mountDest }
 
+// MachineName returns the jail machine name this backend targets.
+func (o *OrbStack) MachineName() string { return o.machine }
+
 // RunUser returns the in-machine run user resolved by EnsureUp (valid after EnsureUp).
 func (o *OrbStack) RunUser() string { return o.runUser }
 

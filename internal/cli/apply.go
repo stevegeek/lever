@@ -31,7 +31,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			deps, err := buildApplyDeps(cmd.Context(), app, bf)
+			deps, _, _, err := buildApplyDeps(cmd.Context(), app, bf)
 			if err != nil {
 				return err
 			}
@@ -51,12 +51,12 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 // run-user and UID before the JailRunner and scion.Client are constructed.
 // JailUp is therefore a no-op in the returned Deps — the jail is already
 // confirmed up and the user/uid are known.
-func buildApplyDeps(ctx context.Context, app *config.App, bf BackendFactory) (apply.Deps, error) {
+func buildApplyDeps(ctx context.Context, app *config.App, bf BackendFactory) (apply.Deps, *orbstack.OrbStack, *scion.Client, error) {
 	machine := "lever-" + app.Name
 	b := bf(machine)
 	ob, ok := b.(*orbstack.OrbStack)
 	if !ok {
-		return apply.Deps{}, fmt.Errorf("apply currently supports the orbstack backend only")
+		return apply.Deps{}, nil, nil, fmt.Errorf("apply currently supports the orbstack backend only")
 	}
 	cfg := backend.Config{
 		MachineName:  machine,
@@ -66,7 +66,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, bf BackendFactory) (ap
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.
 	if err := ob.EnsureUp(ctx, cfg); err != nil {
-		return apply.Deps{}, err
+		return apply.Deps{}, nil, nil, err
 	}
 	user, uid := ob.RunUser(), ob.RunUID()
 	jr := jail.New(exec.RealRunner{}, machine, user, uid)
@@ -79,5 +79,5 @@ func buildApplyDeps(ctx context.Context, app *config.App, bf BackendFactory) (ap
 		LoadImage: func(ctx context.Context, ref string) error { return jail.LoadImage(ctx, machine, user, uid, ref) },
 		Scion:     sc,
 		JailMount: ob.MountDest(),
-	}, nil
+	}, ob, sc, nil
 }

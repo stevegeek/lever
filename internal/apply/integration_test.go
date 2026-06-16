@@ -5,8 +5,8 @@ package apply_test
 // Live integration test for `lever apply`. This is the automated form of the
 // C6 hands-on validation: it brings up a real OrbStack jail, cross-compiles and
 // installs scion into it, loads the agent image, runs the full bring-up, starts
-// the manager agent with a prompt, and asserts the agent creates HELLO on the
-// host through the bind mount — then tears the jail down.
+// the manager agent with a prompt, and asserts the manager agent boots and
+// completes its task — then tears the jail down.
 //
 // It needs a real machine (OrbStack, a loaded agent image, a Claude credential),
 // so it is gated behind the `integration` build tag AND LEVER_IT=1, and skips
@@ -18,14 +18,23 @@ package apply_test
 //	LEVER_IT_CRED=$HOME/.scion/oauth-token \
 //	go test -tags integration -run TestApplyLiveHelloGrove -timeout 35m ./internal/apply/
 //
-// It proves the executor end-to-end. It does NOT exercise manager→worker
-// dispatch: the stock agent image carries no scion/lever tooling, so the manager
-// cannot orchestrate the worker grove. The prompt therefore has the manager do
-// the task directly; the worker grove is still registered (exercising the
-// register-grove + path-translation path).
+// It proves the executor end-to-end. The success signal is the manager agent
+// reaching activity "completed" via `scion list` in the jail — NOT the HELLO
+// file landing in the host tree. scion mounts a project-config working COPY
+// (~/.scion/project-configs/<slug>__<id>) as /workspace in the agent container,
+// not the live host tree; the agent's writes reach the host only via a `scion
+// sync`, which is timing-dependent and out of the executor's control. Asserting
+// the host-tree file would make this test flaky (observed across C6 runs). See
+// the "agent workspace is a copy+sync" investigation task.
+//
+// It does NOT exercise manager→worker dispatch: the stock agent image carries no
+// scion/lever tooling, so the manager cannot orchestrate the worker grove. The
+// prompt therefore has the manager do the task directly; the worker grove is
+// still registered (exercising the register-grove + path-translation path).
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,21 +108,63 @@ groves:
 		t.Fatalf("lever apply failed: %v\n%s", err, out)
 	}
 
-	// The manager agent runs asynchronously; poll the host tree for HELLO.
-	hello := filepath.Join(tree, "HELLO")
+	// The manager agent runs asynchronously inside the jail. Poll scion for its
+	// lifecycle state — the reliable, executor-controlled success signal. We want
+	// it to reach phase "running" and activity "completed" (task done).
+	runUser := strings.TrimSpace(orbOut(t, machine, "whoami"))
+	if runUser == "" {
+		t.Fatal("could not resolve jail run user")
+	}
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		if b, err := os.ReadFile(hello); err == nil {
-			if got := strings.TrimSpace(string(b)); got != wantHello {
-				t.Fatalf("HELLO contents = %q, want %q", got, wantHello)
-			}
-			return // success: agent booted with its prompt and wrote to the host via the mount
+		phase, activity := agentState(t, machine, runUser, name)
+		if phase == "error" {
+			t.Fatalf("manager agent entered phase=error")
+		}
+		if phase == "running" && activity == "completed" {
+			return // success: agent booted with its prompt and completed the task
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("HELLO not created within deadline (manager agent did not complete the task)")
+			t.Fatalf("manager agent did not reach running/completed within deadline (last phase=%q activity=%q)", phase, activity)
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// agentState returns the (phase, activity) of the named agent via `scion list`
+// run inside the jail. Missing agent or transient errors yield ("","").
+func agentState(t *testing.T, machine, runUser, name string) (string, string) {
+	t.Helper()
+	out := orbOut(t, machine, "-u", runUser, "env",
+		"XDG_RUNTIME_DIR=/run/user/501", "PATH=/usr/local/bin:/usr/bin:/bin",
+		"SCION_HUB_ENABLED=true", "SCION_HUB_ENDPOINT=http://127.0.0.1:8080",
+		"scion", "list", "--all", "--format", "json")
+	i := strings.IndexByte(out, '[')
+	if i < 0 {
+		return "", ""
+	}
+	var agents []struct {
+		Slug     string `json:"slug"`
+		Phase    string `json:"phase"`
+		Activity string `json:"activity"`
+	}
+	if err := json.Unmarshal([]byte(out[i:]), &agents); err != nil {
+		return "", ""
+	}
+	for _, a := range agents {
+		if a.Slug == name {
+			return a.Phase, a.Activity
+		}
+	}
+	return "", ""
+}
+
+// orbOut runs `orb -m <machine> <args...>` on the host and returns combined output.
+func orbOut(t *testing.T, machine string, args ...string) string {
+	t.Helper()
+	full := append([]string{"-m", machine}, args...)
+	out, _ := exec.Command("orb", full...).CombinedOutput()
+	return string(out)
 }
 
 func mustWrite(t *testing.T, path, content string) {

@@ -17,7 +17,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "scion-server", "hub-enable", "register-manager", "register-grove", "register-grove", "start-manager"}
+	want := []string{"jail-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -26,8 +26,13 @@ func TestPlanOrder(t *testing.T) {
 			t.Fatalf("step %d = %q want %q (all=%v)", i, kinds[i], want[i], kinds)
 		}
 	}
-	if steps[4].Target != "/t/groves/appa" {
-		t.Fatalf("register-grove target=%q", steps[4].Target)
+	// register-grove targets: first grove is at index 6, second at index 7
+	// (0:jail-up 1:load-image 2:init-machine 3:config-registry 4:scion-server 5:register-manager 6:register-grove 7:register-grove 8:start-manager)
+	if steps[6].Target != "/t/groves/appa" {
+		t.Fatalf("register-grove[0] target=%q", steps[6].Target)
+	}
+	if steps[7].Target != "/t/groves/appb" {
+		t.Fatalf("register-grove[1] target=%q", steps[7].Target)
 	}
 }
 
@@ -41,14 +46,14 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	// credential must appear AFTER hub-enable and BEFORE register-manager
-	credIdx, hubIdx, regIdx := -1, -1, -1
+	// credential must appear AFTER scion-server and BEFORE register-manager
+	credIdx, scionIdx, regIdx := -1, -1, -1
 	for i, k := range kinds {
 		switch k {
 		case "credential":
 			credIdx = i
-		case "hub-enable":
-			hubIdx = i
+		case "scion-server":
+			scionIdx = i
 		case "register-manager":
 			regIdx = i
 		}
@@ -56,8 +61,8 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 	if credIdx < 0 {
 		t.Fatalf("no credential step; kinds=%v", kinds)
 	}
-	if !(hubIdx < credIdx && credIdx < regIdx) {
-		t.Fatalf("credential must be between hub-enable and register-manager; hub=%d cred=%d reg=%d", hubIdx, credIdx, regIdx)
+	if !(scionIdx < credIdx && credIdx < regIdx) {
+		t.Fatalf("credential must be between scion-server and register-manager; scion=%d cred=%d reg=%d", scionIdx, credIdx, regIdx)
 	}
 	if steps[credIdx].Target != "/home/x/.scion/oauth-token" {
 		t.Fatalf("credential target=%q", steps[credIdx].Target)

@@ -95,21 +95,41 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 // ensureScion cross-compiles scion from a host source checkout for linux/arm64
 // and installs it into the jail at /usr/local/bin/scion. The build runs on the
 // HOST (Go's build cache makes re-runs incremental, so this is cheap to repeat).
-// The binary is piped into the jail via `sh -c "cat <bin> | orb … bash -c 'cat > …'"`
-// because the Runner has no stdin channel.
+// The binary is piped into the jail via `bash -c "cat <bin> | orb … bash -c 'cat
+// > … .tmp && chmod && mv'"` because the Runner has no stdin channel. The install
+// is atomic: it writes a temp file then mv's it over the destination (mv is
+// atomic on the same filesystem), so a mid-stream failure can't leave a
+// truncated, executable /usr/local/bin/scion. `set -o pipefail` makes a
+// left-side failure (e.g. the host `cat`) propagate instead of being masked by a
+// successful right side. bash (not sh) is required because dash on Linux hosts —
+// where the linux-docker backend will run — does not support `set -o pipefail`.
 func (o *OrbStack) ensureScion(ctx context.Context, source string) error {
-	bin := filepath.Join(os.TempDir(), "lever-scion-linux")
+	fi, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("scion source %q: %w", source, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("scion source %q is not a directory", source)
+	}
+	bin := filepath.Join(os.TempDir(), "lever-scion-"+o.machine)
 	if _, err := o.r.RunIn(ctx, source, map[string]string{"GOOS": "linux", "GOARCH": "arm64"},
 		"go", "build", "-o", bin, "./cmd/scion"); err != nil {
 		return fmt.Errorf("cross-compile scion: %w", err)
 	}
 	install := fmt.Sprintf(
-		`cat %s | orb -m %s -u root bash -c 'cat > /usr/local/bin/scion && chmod +x /usr/local/bin/scion'`,
-		bin, o.machine)
-	if _, err := o.r.Run(ctx, nil, "sh", "-c", install); err != nil {
+		`set -o pipefail; cat %s | orb -m %s -u root bash -c 'cat > /usr/local/bin/scion.tmp && chmod +x /usr/local/bin/scion.tmp && mv /usr/local/bin/scion.tmp /usr/local/bin/scion'`,
+		shellSingleQuote(bin), shellSingleQuote(o.machine))
+	if _, err := o.r.Run(ctx, nil, "bash", "-c", install); err != nil {
 		return fmt.Errorf("install scion into jail: %w", err)
 	}
 	return nil
+}
+
+// shellSingleQuote wraps s in single quotes safe for POSIX shells, escaping any
+// embedded single quote as the standard '\” sequence (close quote, escaped
+// quote, reopen quote).
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // orbVersionAtLeast runs `orb version`, parses the semver, and returns whether
@@ -149,7 +169,7 @@ func orbVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch i
 // resolveRunUser caches the in-machine run user and UID so the subid/linger
 // script and the rootless Docker socket path work for any OrbStack user, not a
 // hardcoded one. Called after ensureMachine (the machine must exist) and before
-// ensureRootlessDocker.
+// ensureRuntimes.
 func (o *OrbStack) resolveRunUser(ctx context.Context) error {
 	res, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "whoami")
 	if err != nil {

@@ -2,6 +2,7 @@ package orbstack
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -288,11 +289,12 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	f := exec.NewFakeRunner()
 	scriptedMachine(f)
 	f.Script("go build", exec.Result{})
-	f.Script("sh -c", exec.Result{})
+	f.Script("bash -c", exec.Result{})
+	src := t.TempDir() // must exist for the stat check
 	b := New(f, "lever-jail")
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: "/some/scion-src",
+		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: src,
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
@@ -300,35 +302,46 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	var sawBuild, sawInstall bool
 	for _, c := range f.Calls {
 		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			if c.Dir != "/some/scion-src" {
-				t.Errorf("build Dir: want /some/scion-src got %q", c.Dir)
+			if c.Dir != src {
+				t.Errorf("build Dir: want %q got %q", src, c.Dir)
 			}
 			if c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
 				t.Errorf("build env: want linux/arm64 got %+v", c.Env)
 			}
 			var sawCmd bool
-			for _, a := range c.Args {
+			var binArg string
+			for i, a := range c.Args {
 				if a == "./cmd/scion" {
 					sawCmd = true
+				}
+				if a == "-o" && i+1 < len(c.Args) {
+					binArg = c.Args[i+1]
 				}
 			}
 			if !sawCmd {
 				t.Errorf("build args should contain ./cmd/scion; got %+v", c.Args)
 			}
+			if !strings.Contains(binArg, "lever-scion-lever-jail") {
+				t.Errorf("build output path should include per-machine name lever-scion-lever-jail; got %q", binArg)
+			}
 			sawBuild = true
 		}
-		if c.Name == "sh" && len(c.Args) >= 2 && c.Args[0] == "-c" {
+		if c.Name == "bash" && len(c.Args) >= 2 && c.Args[0] == "-c" {
 			script := c.Args[1]
-			if strings.Contains(script, "orb -m lever-jail -u root") && strings.Contains(script, "/usr/local/bin/scion") {
+			if strings.Contains(script, "set -o pipefail") &&
+				strings.Contains(script, "scion.tmp") &&
+				strings.Contains(script, "mv") &&
+				strings.Contains(script, "'lever-jail'") &&
+				strings.Contains(script, "/usr/local/bin/scion") {
 				sawInstall = true
 			}
 		}
 	}
 	if !sawBuild {
-		t.Fatalf("expected go build for ./cmd/scion in /some/scion-src; calls=%+v", f.Calls)
+		t.Fatalf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
 	}
 	if !sawInstall {
-		t.Fatalf("expected sh -c scion install into jail; calls=%+v", f.Calls)
+		t.Fatalf("expected bash -c atomic scion install into jail; calls=%+v", f.Calls)
 	}
 }
 
@@ -346,9 +359,40 @@ func TestEnsureScionSkippedWhenEmpty(t *testing.T) {
 		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
 			t.Fatalf("go build must NOT be called when ScionSource empty: %+v", c)
 		}
-		if c.Name == "sh" && len(c.Args) >= 2 && strings.Contains(c.Args[1], "/usr/local/bin/scion") {
+		if c.Name == "bash" && len(c.Args) >= 2 && strings.Contains(c.Args[1], "/usr/local/bin/scion") {
 			t.Fatalf("scion install must NOT be called when ScionSource empty: %+v", c)
 		}
+	}
+}
+
+func TestEnsureScionSourceMissing(t *testing.T) {
+	f := exec.NewFakeRunner()
+	scriptedMachine(f)
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	b := New(f, "lever-jail")
+
+	err := b.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: missing,
+	})
+	if err == nil {
+		t.Fatal("expected error for missing scion source, got nil")
+	}
+	if !strings.Contains(err.Error(), "scion source") {
+		t.Fatalf("error should mention scion source; got: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
+			t.Fatalf("go build must NOT be called when source missing (stat short-circuits): %+v", c)
+		}
+	}
+}
+
+func TestShellSingleQuote(t *testing.T) {
+	if got := shellSingleQuote("ab"); got != "'ab'" {
+		t.Errorf("shellSingleQuote(ab): want 'ab' got %q", got)
+	}
+	if got := shellSingleQuote("a'b"); got != `'a'\''b'` {
+		t.Errorf(`shellSingleQuote(a'b): want 'a'\''b' got %q`, got)
 	}
 }
 

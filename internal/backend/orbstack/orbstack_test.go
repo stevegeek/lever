@@ -265,6 +265,25 @@ func TestEnsureUpRejectsOldOrb(t *testing.T) {
 	}
 }
 
+func TestEnsureUpInstallsPodman(t *testing.T) {
+	f := exec.NewFakeRunner()
+	scriptedMachine(f)
+	b := New(f, "lever-jail")
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/t", AllowedPorts: nil}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	var sawPodman bool
+	for _, c := range f.Calls {
+		j := strings.Join(append([]string{c.Name}, c.Args...), " ")
+		if strings.Contains(j, "apt-get install") && strings.Contains(j, "podman") {
+			sawPodman = true
+		}
+	}
+	if !sawPodman {
+		t.Fatalf("expected podman install; calls=%+v", f.Calls)
+	}
+}
+
 func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	f := exec.NewFakeRunner()
 	// No `orb version` needed: ProjectTree guard fires before the preflight.

@@ -79,7 +79,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.resolveRunUser(ctx); err != nil {
 		return err
 	}
-	if err := o.ensureRootlessDocker(ctx); err != nil {
+	if err := o.ensureRuntimes(ctx); err != nil {
 		return err
 	}
 	return o.ApplyEgress(ctx, cfg.AllowedPorts)
@@ -169,9 +169,10 @@ func machineListed(stdout, name string) bool {
 	return false
 }
 
-// ensureRootlessDocker installs prereqs + Docker rootless and starts the daemon.
+// ensureRuntimes installs prereqs + rootless Docker and rootless Podman.
 // Idempotent: the rootless install script and systemctl --start are safe to re-run.
-func (o *OrbStack) ensureRootlessDocker(ctx context.Context) error {
+// Podman is daemonless so no service startup is needed; scion auto-prefers it over Docker.
+func (o *OrbStack) ensureRuntimes(ctx context.Context) error {
 	root := func(script string) error {
 		_, err := o.r.Run(ctx, nil, "orb", "-u", "root", "-m", o.machine, "bash", "-lc", script)
 		return err
@@ -180,7 +181,7 @@ func (o *OrbStack) ensureRootlessDocker(ctx context.Context) error {
 		_, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "bash", "-lc", script)
 		return err
 	}
-	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables`); err != nil {
+	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
 	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; loginctl enable-linger %s`,

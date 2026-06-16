@@ -14,7 +14,7 @@ func TestWaitHubReadySucceeds(t *testing.T) {
 	hubReadyInterval = 0
 
 	f := exec.NewFakeRunner()
-	// "scion" prefix covers both "server start" and "list --global ...".
+	// "scion" prefix covers both "server start" and "list --all ...".
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	if err := c.ServerStart(context.Background()); err != nil {
@@ -28,7 +28,7 @@ func TestWaitHubReadyTimesOut(t *testing.T) {
 	hubReadyAttempts, hubReadyInterval = 2, 0
 
 	f := exec.NewFakeRunner()
-	// Leave "list --global" unscripted so the probe errors every attempt.
+	// Leave "list --all" unscripted so the probe errors every attempt.
 	c := New(f, Options{})
 	err := c.waitHubReady(context.Background())
 	if err == nil {

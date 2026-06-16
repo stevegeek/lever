@@ -82,3 +82,12 @@ func (a *App) Validate() error {
 
 // GroveDir returns the absolute path of a grove dir (tree + relative dir).
 func (a *App) GroveDir(g Grove) string { return filepath.Join(a.Tree, g.Dir) }
+
+// ManagerPromptPath returns the absolute path to the manager's prompt file
+// (relative to the tree), or "" if none is configured.
+func (a *App) ManagerPromptPath() string {
+	if a.Manager.PromptFile == "" {
+		return ""
+	}
+	return filepath.Join(a.Tree, a.Manager.PromptFile)
+}

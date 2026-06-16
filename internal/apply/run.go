@@ -59,8 +59,16 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 		}
 		return d.Scion.HubLink(ctx, s.Target)
 	case "start-manager":
+		task := ""
+		if p := app.ManagerPromptPath(); p != "" {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return fmt.Errorf("reading manager prompt %s: %w", p, err)
+			}
+			task = strings.TrimSpace(string(b))
+		}
 		return d.Scion.Start(ctx, scion.StartOpts{
-			Grove: app.Name, Project: app.Tree, Image: app.Manager.Image, Harness: "claude",
+			Grove: app.Name, Task: task, Project: app.Tree, Image: app.Manager.Image, Harness: "claude",
 		})
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)

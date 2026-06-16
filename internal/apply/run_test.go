@@ -2,6 +2,8 @@ package apply
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -66,5 +68,37 @@ func TestRunCredentialStep(t *testing.T) {
 	}
 	if want := "hub secret set CLAUDE_CODE_OAUTH_TOKEN sk-ant-raw"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
+	}
+}
+
+func TestStartManagerPassesPrompt(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "groves", "worker"), 0o755)
+	if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Dispatch the worker grove to create HELLO."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: dir,
+		Manager: config.Manager{Image: "img", PromptFile: "manager.md"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(f, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sawPrompt bool
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "start hello") && strings.Contains(j, "Dispatch the worker grove to create HELLO.") {
+			sawPrompt = true
+		}
+	}
+	if !sawPrompt {
+		t.Fatalf("manager prompt not passed to start; calls=%+v", f.Calls)
 	}
 }

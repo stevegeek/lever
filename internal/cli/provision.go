@@ -5,12 +5,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newUpCmd(factory BackendFactory) *cobra.Command {
+func newProvisionCmd(factory BackendFactory) *cobra.Command {
 	var machine, tree string
 	var allow []int
 	cmd := &cobra.Command{
-		Use:   "up",
-		Short: "Provision the jail (idempotent)",
+		Use:   "provision",
+		Short: "Provision the jail only (low-level; idempotent)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			b := factory(machine)
 			if err := b.EnsureUp(cmd.Context(), backend.Config{MachineName: machine, ProjectTree: tree, AllowedPorts: allow}); err != nil {

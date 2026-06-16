@@ -26,13 +26,20 @@ func New(host exec.Runner, machine, user, uid string) *Runner {
 	return &Runner{host: host, machine: machine, user: user, uid: uid}
 }
 
-// jailEnv is the fixed environment every in-jail command needs.
-func (r *Runner) jailEnv() []string {
+// jailEnvFor is the fixed environment every in-jail command needs, for a given
+// run-user uid. Shared by Runner.jailEnv and AttachArgv (attach.go) so the env
+// list lives in exactly one place.
+func jailEnvFor(uid string) []string {
 	return []string{
-		"XDG_RUNTIME_DIR=/run/user/" + r.uid,
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"SCION_HUB_ENABLED=true",
 	}
+}
+
+// jailEnv is the fixed environment every in-jail command needs.
+func (r *Runner) jailEnv() []string {
+	return jailEnvFor(r.uid)
 }
 
 func envKVs(env map[string]string) []string {

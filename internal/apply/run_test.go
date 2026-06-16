@@ -179,7 +179,7 @@ func TestStartUsesJailPath(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var sawJailG bool
+	var sawJailG, sawWorkspace bool
 	for _, c := range f.Calls {
 		j := strings.Join(c.Args, " ")
 		if strings.Contains(j, "start hello") {
@@ -189,9 +189,17 @@ func TestStartUsesJailPath(t *testing.T) {
 			if strings.Contains(j, "-g /lever") {
 				sawJailG = true
 			}
+			// In-place live mount: the manager must mount the in-jail tree as
+			// /workspace, else scion mounts a managed copy of the config dir.
+			if strings.Contains(j, "--workspace /lever") {
+				sawWorkspace = true
+			}
 		}
 	}
 	if !sawJailG {
 		t.Fatalf("start call did not use -g /lever; calls=%+v", f.Calls)
+	}
+	if !sawWorkspace {
+		t.Fatalf("start call did not pass --workspace /lever (in-place mount); calls=%+v", f.Calls)
 	}
 }

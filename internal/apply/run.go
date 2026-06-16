@@ -71,8 +71,13 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 			}
 			task = strings.TrimSpace(string(b))
 		}
+		jp := jailPath(app.Tree, app.Tree, d.JailMount)
 		return d.Scion.Start(ctx, scion.StartOpts{
-			Grove: app.Name, Task: task, Project: jailPath(app.Tree, app.Tree, d.JailMount), Image: app.Manager.Image, Harness: "claude",
+			Grove: app.Name, Task: task, Project: jp, Image: app.Manager.Image, Harness: "claude",
+			// Workspace = the in-jail project tree, so the manager edits the real
+			// host files in place (verified 2026-06-16). Without it scion mounts a
+			// managed copy of the externalized config dir, not the live tree.
+			Workspace: jp,
 		})
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)

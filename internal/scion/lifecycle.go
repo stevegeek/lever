@@ -14,6 +14,13 @@ type StartOpts struct {
 	Harness string // default "claude"
 	Project string
 	Image   string // optional
+	// Workspace is the path mounted as /workspace in the agent container,
+	// passed as `--workspace`. For directory projects this MUST be set to the
+	// (in-jail) project tree to get a live in-place bind mount: scion's default
+	// resolution mounts a managed COPY of the externalized config dir instead
+	// (verified 2026-06-16 — the explicit flag takes provision.go's Case-1
+	// "mount this path directly" path). Empty leaves scion to resolve it.
+	Workspace string
 }
 
 func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
@@ -38,6 +45,9 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	args = append(args, "start", o.Grove, o.Task, "--harness", harness, "--harness-auth", "oauth-token")
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
+	}
+	if o.Workspace != "" {
+		args = append(args, "--workspace", o.Workspace)
 	}
 	_, err := c.run(ctx, "", args...)
 	return err

@@ -300,3 +300,21 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 		t.Fatalf("error should mention ProjectTree; got: %v", err)
 	}
 }
+
+func TestRunUserUIDAfterEnsureUp(t *testing.T) {
+	f := exec.NewFakeRunner()
+	scriptedMachine(f) // scripts whoami→leveruser, id -u→501
+	b := New(f, "lever-jail")
+
+	if err := b.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-jail", ProjectTree: "/Users/x/tree",
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if got := b.RunUser(); got != "leveruser" {
+		t.Errorf("RunUser: want %q got %q", "leveruser", got)
+	}
+	if got := b.RunUID(); got != "501" {
+		t.Errorf("RunUID: want %q got %q", "501", got)
+	}
+}

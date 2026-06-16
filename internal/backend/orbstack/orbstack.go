@@ -228,4 +228,16 @@ func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int) error {
 	return nil
 }
 
+// RunUser returns the in-machine run user resolved by EnsureUp (valid after EnsureUp).
+func (o *OrbStack) RunUser() string { return o.runUser }
+
+// RunUID returns the in-machine run user's UID resolved by EnsureUp.
+// Falls back to defaultRunUID if EnsureUp has not yet been called.
+func (o *OrbStack) RunUID() string {
+	if o.runUID == "" {
+		return defaultRunUID
+	}
+	return o.runUID
+}
+
 var _ backend.Backend = (*OrbStack)(nil)

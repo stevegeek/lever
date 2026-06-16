@@ -77,5 +77,6 @@ func buildApplyDeps(ctx context.Context, app *config.App, bf BackendFactory) (ap
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(ctx context.Context, ref string) error { return jail.LoadImage(ctx, machine, user, uid, ref) },
 		Scion:     sc,
+		JailMount: ob.MountDest(),
 	}, nil
 }

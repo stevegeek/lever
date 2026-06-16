@@ -102,3 +102,96 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 		t.Fatalf("manager prompt not passed to start; calls=%+v", f.Calls)
 	}
 }
+
+func TestJailPathTranslation(t *testing.T) {
+	cases := []struct {
+		host, tree, mount, want string
+	}{
+		{"/tmp/foo", "/tmp/foo", "/lever", "/lever"},
+		{"/tmp/foo/groves/worker", "/tmp/foo", "/lever", "/lever/groves/worker"},
+		{"/tmp/foo", "/tmp/foo", "", "/tmp/foo"},
+		{"/elsewhere", "/tmp/foo", "/lever", "/elsewhere"},
+	}
+	for _, c := range cases {
+		if got := jailPath(c.host, c.tree, c.mount); got != c.want {
+			t.Errorf("jailPath(%q, %q, %q) = %q, want %q", c.host, c.tree, c.mount, got, c.want)
+		}
+	}
+}
+
+func TestRegisterUsesJailPaths(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: "/tmp/foo",
+		Manager: config.Manager{Image: "img"},
+		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var managerInit, groveInit bool
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "init --non-interactive") {
+			switch c.Dir {
+			case "/lever":
+				managerInit = true
+			case "/lever/groves/worker":
+				groveInit = true
+			default:
+				t.Errorf("init call used host dir %q, want jail path", c.Dir)
+			}
+		}
+		if strings.Contains(j, "hub link") {
+			if c.Dir != "/lever" && c.Dir != "/lever/groves/worker" {
+				t.Errorf("hub link call used host dir %q, want jail path", c.Dir)
+			}
+		}
+	}
+	if !managerInit {
+		t.Errorf("manager init not run with dir /lever")
+	}
+	if !groveInit {
+		t.Errorf("grove init not run with dir /lever/groves/worker")
+	}
+}
+
+func TestStartUsesJailPath(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: "/tmp/foo",
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sawJailG bool
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "start hello") {
+			if strings.Contains(j, "-g /tmp/foo") {
+				t.Errorf("start call used host path: %q", j)
+			}
+			if strings.Contains(j, "-g /lever") {
+				sawJailG = true
+			}
+		}
+	}
+	if !sawJailG {
+		t.Fatalf("start call did not use -g /lever; calls=%+v", f.Calls)
+	}
+}

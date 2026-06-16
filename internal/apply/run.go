@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/lever-to/lever/internal/config"
@@ -18,6 +20,7 @@ type Deps struct {
 	LoadImage func(ctx context.Context, imageRef string) error
 	Scion     *scion.Client
 	ReadCred  func(path string) (string, error) // nil ⇒ defaultReadCred
+	JailMount string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
@@ -54,10 +57,11 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 		}
 		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 	case "register-manager", "register-grove":
-		if err := d.Scion.InitProject(ctx, s.Target); err != nil {
+		jp := jailPath(s.Target, app.Tree, d.JailMount)
+		if err := d.Scion.InitProject(ctx, jp); err != nil {
 			return err
 		}
-		return d.Scion.HubLink(ctx, s.Target)
+		return d.Scion.HubLink(ctx, jp)
 	case "start-manager":
 		task := ""
 		if p := app.ManagerPromptPath(); p != "" {
@@ -68,11 +72,27 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 			task = strings.TrimSpace(string(b))
 		}
 		return d.Scion.Start(ctx, scion.StartOpts{
-			Grove: app.Name, Task: task, Project: app.Tree, Image: app.Manager.Image, Harness: "claude",
+			Grove: app.Name, Task: task, Project: jailPath(app.Tree, app.Tree, d.JailMount), Image: app.Manager.Image, Harness: "claude",
 		})
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// jailPath maps a host path under tree to its location inside the jail (mount + suffix).
+// Returns hostPath unchanged when mount=="" or hostPath is not under tree.
+func jailPath(hostPath, tree, mount string) string {
+	if mount == "" || tree == "" {
+		return hostPath
+	}
+	rel, err := filepath.Rel(tree, hostPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return hostPath
+	}
+	if rel == "." {
+		return mount
+	}
+	return path.Join(mount, filepath.ToSlash(rel))
 }
 
 func defaultReadCred(path string) (string, error) {

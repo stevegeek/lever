@@ -1,28 +1,98 @@
 package cli
 
 import (
-	"github.com/lever-to/lever/internal/backend"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
+
+	"github.com/lever-to/lever/internal/apply"
+	"github.com/lever-to/lever/internal/config"
+	"github.com/lever-to/lever/internal/jail"
+	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
 
-func newUpCmd(factory BackendFactory) *cobra.Command {
-	var machine, tree string
-	var allow []int
-	cmd := &cobra.Command{
-		Use:   "up",
-		Short: "Provision the jail (idempotent)",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			b := factory(machine)
-			if err := b.EnsureUp(cmd.Context(), backend.Config{MachineName: machine, ProjectTree: tree, AllowedPorts: allow}); err != nil {
+// upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
+func upDecision(phase string, fresh bool) string {
+	if fresh && (phase == "running" || phase == "suspended") {
+		return "restart"
+	}
+	switch phase {
+	case "running":
+		return "none"
+	case "suspended":
+		return "resume"
+	default: // absent, stopped, error
+		return "apply"
+	}
+}
+
+func newUpCmd(bf BackendFactory) *cobra.Command {
+	var fresh, noAttach bool
+	c := &cobra.Command{
+		Use:   "up CONFIG",
+		Args:  cobra.ExactArgs(1),
+		Short: "Bring an application up (if needed) and attach the manager",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := config.Load(args[0])
+			if err != nil {
 				return err
 			}
-			cmd.Printf("jail %q up; DOCKER_HOST=%s; alias=%s\n", machine, b.DockerHost(), b.HostToolAlias())
-			return nil
+			deps, ob, sc, err := buildApplyDeps(cmd.Context(), app, bf)
+			if err != nil {
+				return err
+			}
+			project := ob.MountDest() // in-jail project path == mount root
+
+			phase, err := managerPhase(cmd.Context(), sc, project, app.Name)
+			if err != nil {
+				return err
+			}
+			switch upDecision(phase, fresh) {
+			case "restart":
+				_ = sc.Stop(cmd.Context(), app.Name, project)
+				if err := apply.Run(cmd.Context(), app, deps); err != nil {
+					return err
+				}
+			case "apply":
+				if err := apply.Run(cmd.Context(), app, deps); err != nil {
+					return err
+				}
+			case "resume":
+				if err := sc.Resume(cmd.Context(), app.Name, project); err != nil {
+					return err
+				}
+			case "none":
+			}
+			if noAttach {
+				cmd.Printf("application %q is up.\n", app.Name)
+				return nil
+			}
+			inner := sc.AttachArgv(app.Name, project)
+			argv := jail.AttachArgv(ob.MachineName(), ob.RunUser(), ob.RunUID(), inner)
+			bin, err := exec.LookPath(argv[0])
+			if err != nil {
+				return fmt.Errorf("attach: %w", err)
+			}
+			return syscall.Exec(bin, argv, os.Environ()) // hand over the TTY
 		},
 	}
-	cmd.Flags().StringVar(&machine, "machine", "lever-jail", "jail machine name")
-	cmd.Flags().StringVar(&tree, "tree", "", "host project tree to mount (required)")
-	cmd.Flags().IntSliceVar(&allow, "allow-port", nil, "host tool port to allowlist (repeatable)")
-	_ = cmd.MarkFlagRequired("tree")
-	return cmd
+	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
+	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
+	return c
+}
+
+func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {
+	agents, err := sc.List(ctx, project)
+	if err != nil {
+		return "", err
+	}
+	for _, a := range agents {
+		if a.Slug == name {
+			return a.Phase, nil
+		}
+	}
+	return "", nil
 }

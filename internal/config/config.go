@@ -40,6 +40,25 @@ type App struct {
 
 var knownBackends = map[string]bool{"orbstack": true, "linux-docker": true}
 
+// resolvePath expands a leading ~/ to the home dir, makes a relative path
+// relative to baseDir, and returns an absolute path. Empty in -> empty out.
+func resolvePath(p, baseDir string) string {
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[2:])
+		}
+	} else if !filepath.IsAbs(p) {
+		p = filepath.Join(baseDir, p)
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	return p
+}
+
 func Load(path string) (*App, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -58,20 +77,8 @@ func Load(path string) (*App, error) {
 			app.Tree = abs
 		}
 	}
-	if app.Scion.Source != "" {
-		src := app.Scion.Source
-		if strings.HasPrefix(src, "~/") {
-			if home, err := os.UserHomeDir(); err == nil {
-				src = filepath.Join(home, src[2:])
-			}
-		} else if !filepath.IsAbs(src) {
-			src = filepath.Join(app.dir, src)
-		}
-		if abs, err := filepath.Abs(src); err == nil {
-			src = abs
-		}
-		app.Scion.Source = src
-	}
+	app.Scion.Source = resolvePath(app.Scion.Source, app.dir)
+	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
 	if err := app.Validate(); err != nil {
 		return nil, err
 	}

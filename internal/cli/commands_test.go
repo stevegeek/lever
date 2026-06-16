@@ -22,7 +22,7 @@ func TestUpCommandCallsEnsureUp(t *testing.T) {
 	root := NewRootWithBackend(func(string) backend.Backend { return sb })
 	var out bytes.Buffer
 	root.SetOut(&out)
-	root.SetArgs([]string{"up", "--machine", "lever-jail", "--tree", "/tmp/tree", "--allow-port", "3305"})
+	root.SetArgs([]string{"provision", "--machine", "lever-jail", "--tree", "/tmp/tree", "--allow-port", "3305"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("up: %v", err)
 	}

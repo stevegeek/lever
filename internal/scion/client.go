@@ -116,10 +116,12 @@ func clean(output string) string {
 	return strings.TrimSpace(strings.Join(keep, "\n"))
 }
 
-// parseJSON strips the ANSI dev-auth banner, skips any preamble before the first
-// JSON token, and unmarshals into v. Empty body unmarshals to nothing (no error).
+// parseJSON strips ANSI escapes and the dev-auth WARNING banner (which scion
+// prints on stderr and can land AFTER the JSON, since runIn concatenates
+// stdout+stderr), skips any preamble before the first JSON token, and unmarshals
+// into v. Empty body unmarshals to nothing (no error).
 func parseJSON(raw string, v any) error {
-	body := ansiRE.ReplaceAllString(raw, "")
+	body := clean(ansiRE.ReplaceAllString(raw, ""))
 	loc := jsonStartRE.FindStringIndex(body)
 	if loc == nil {
 		return nil // nothing to parse

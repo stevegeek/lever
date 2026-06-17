@@ -23,22 +23,37 @@ func TestMessageArgv(t *testing.T) {
 	}
 }
 
-func TestInboxUnwrapsItems(t *testing.T) {
+func TestInboxParsesNotifications(t *testing.T) {
 	f := exec.NewFakeRunner()
-	f.Script("scion messages --json", exec.Result{Stdout: `{"items":[{"id":"e1","type":"input-needed"},{"id":"e2","type":"state-change"}]}`})
+	// `scion notifications --json` returns a bare array of typed events.
+	f.Script("scion notifications --json", exec.Result{Stdout: `[{"id":"e1","status":"WAITING_FOR_INPUT"},{"id":"e2","status":"COMPLETED"}]`})
 	c := New(f, Options{})
 	events, err := c.Inbox(context.Background(), true, "")
 	if err != nil {
 		t.Fatalf("Inbox: %v", err)
 	}
-	if len(events) != 2 || events[0].ID() != "e1" || events[1]["type"] != "state-change" {
+	if len(events) != 2 || events[0].ID() != "e1" || events[1]["status"] != "COMPLETED" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestInboxUnwrapsItems(t *testing.T) {
+	f := exec.NewFakeRunner()
+	// Tolerate a wrapped {"items":[...]} shape too (older/alternate scion output).
+	f.Script("scion notifications --json", exec.Result{Stdout: `{"items":[{"id":"e1","status":"WAITING_FOR_INPUT"},{"id":"e2","status":"COMPLETED"}]}`})
+	c := New(f, Options{})
+	events, err := c.Inbox(context.Background(), true, "")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(events) != 2 || events[0].ID() != "e1" || events[1]["status"] != "COMPLETED" {
 		t.Fatalf("events=%+v", events)
 	}
 }
 
 func TestInboxAllFlag(t *testing.T) {
 	f := exec.NewFakeRunner()
-	f.Script("scion messages --json --all", exec.Result{Stdout: `{"items":[]}`})
+	f.Script("scion notifications --json --all", exec.Result{Stdout: `[]`})
 	c := New(f, Options{})
 	if _, err := c.Inbox(context.Background(), false, ""); err != nil {
 		t.Fatalf("Inbox: %v", err)

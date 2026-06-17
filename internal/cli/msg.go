@@ -46,9 +46,9 @@ func msgList(cf ClientFactory) *cobra.Command {
 				return nil
 			}
 			for _, e := range events {
-				typ, _ := e["type"].(string)
-				from, _ := e["from"].(string)
-				cmd.Printf("  [%s] %s %s\n", e.ID(), typ, from)
+				status, _ := e["status"].(string)
+				msg, _ := e["message"].(string)
+				cmd.Printf("  [%s] %s %s\n", e.ID(), status, msg)
 			}
 			return nil
 		}}

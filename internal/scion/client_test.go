@@ -23,6 +23,14 @@ func TestRunInjectsEnvAndBin(t *testing.T) {
 	}
 }
 
+func TestEnvAlwaysEnablesHub(t *testing.T) {
+	f := exec.NewFakeRunner()
+	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
+	if got := c.env()["SCION_HUB_ENABLED"]; got != "true" {
+		t.Fatalf("expected SCION_HUB_ENABLED=true, got %q", got)
+	}
+}
+
 func TestProjectFlag(t *testing.T) {
 	if got := projectFlag(""); len(got) != 0 {
 		t.Fatalf("empty project should yield no flag, got %v", got)

@@ -9,12 +9,14 @@ Lever is the **brain and the interface**; [Scion](https://github.com/GoogleCloud
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool — `lever` — and it drives Scion for you.
 
-> **Status: working, builds from source; not yet packaged/released.** The Go `lever` binary builds
-> and `lever apply` brings a manager up end-to-end in the jail — **live-validated on macOS + OrbStack**
-> (Apple Silicon): isolated machine + rootless podman + egress allowlist, the manager editing a
-> bind-mounted project tree in place, with hub state-tracking. There is no release/install yet (you
-> build it: `go build -o lever ./cmd/lever`), and some features (grove dispatch by the manager,
-> tidier MCP wiring) are in progress. See [Where this is today](#where-this-is-today).
+> **Status: working, builds from source; not yet packaged/released.** Two binaries build from
+> source — host `lever` (control plane) + in-jail `lever-manager` (orchestration) — and bring a
+> manager up end-to-end in the jail, then let it **dispatch grove agents**, all **live-validated on
+> macOS + OrbStack** (Apple Silicon): isolated machine + rootless podman + egress allowlist, the
+> manager editing a bind-mounted project tree in place with hub state-tracking, dispatching a sibling
+> grove, relaying its question back, and closing a task on completion. There is no release/install
+> yet (you build it — `make install`), and some polish (tidier MCP wiring, per-step progress) is in
+> progress. See [Where this is today](#where-this-is-today).
 
 ## Why
 
@@ -77,34 +79,49 @@ assistant as the first instance (dogfooding). See [docs/core-vs-instance.md](doc
 
 ## Where this is today
 
-- **Done:** architecture + security model; containment primitives validated by hand; the Go `lever`
-  binary; `lever apply` (config-driven bring-up) and `lever up` (bring-up + attach); live end-to-end
-  validation on macOS + OrbStack — a manager boots in the jail, edits a bind-mounted tree **in place**,
-  and the hub tracks it (heartbeats, attach).
-- **In progress:** grove dispatch *by* the manager (needs orchestration tooling in the manager image);
-  tidier MCP wiring; broader substrate support (Linux/Docker backend); packaging.
-- **Not yet:** a release/installer. Build from source (below).
-- **You can today:** `go build` the binary and bring an app up with `lever apply` / `lever up`; read
+- **Done:** architecture + security model; containment primitives validated by hand; the host `lever`
+  + in-jail `lever-manager` binaries; `lever apply` (config-driven bring-up) and `lever up` (bring-up +
+  attach); live end-to-end validation on macOS + OrbStack — a manager boots in the jail, edits a
+  bind-mounted tree **in place**, the hub tracks it (heartbeats, attach), and **the manager dispatches
+  a grove agent, relays its question back, and closes a task on completion** (proven 2026-06-17).
+- **In progress:** tidier MCP wiring; per-step bring-up progress; load a grove image at apply time;
+  broader substrate support (Linux/Docker backend); packaging.
+- **Not yet:** a release/installer. Build from source (`make install`).
+- **You can today:** build the binaries (`make all`) and bring an app up with `lever apply` / `lever up`,
+  then have the manager dispatch groves; read
   the [architecture](docs/architecture.md) and [security model](docs/security-model.md).
 
 ## Build & run
 
+There are **two binaries** (one shared `internal/`):
+
+- **`lever`** — the host *control plane* (provisioning + lifecycle). Runs on your machine.
+- **`lever-manager`** — the in-jail *orchestrator* (`agent`/`msg`/`watch`). Cross-compiled for the
+  jail's linux/arm64 and staged into the instance tree, which is bind-mounted into the manager
+  container. The manager runs it to dispatch and steer groves.
+
 ```bash
-go build -o lever ./cmd/lever        # requires Go 1.26+
+make install              # build host `lever` → ~/.local/bin/lever (must be on PATH). Requires Go 1.26+
+make lever-manager-linux  # cross-compile `lever-manager` → $LEVER_INSTANCE/vendor/bin (default $LEVER_INSTANCE)
+make all                  # both
 
 # Bring an application up (jail + scion + manager) and attach the manager TTY:
-./lever up path/to/app.yaml
+lever up path/to/app.yaml
 
 # Or headless (bring up, don't attach):
-./lever apply path/to/app.yaml
-./lever apply path/to/app.yaml --dry-run   # print the bring-up plan only
+lever apply path/to/app.yaml
+lever apply path/to/app.yaml --dry-run   # print the bring-up plan only
 ```
+
+Overrides: `make install PREFIX=/some/bin`, `make lever-manager-linux LEVER_INSTANCE=/path/to/instance`.
 
 An **application** is one `app.yaml` describing the manager + its groves (image, project tree,
 scion source, credential, allowed host ports). See `examples/` for runnable configs and the
 reference instance for a real one.
 
 ## Commands
+
+**Host `lever` (control plane):**
 
 | Command | What it does |
 |---|---|
@@ -113,10 +130,16 @@ reference instance for a real one.
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress). `--machine`, `--tree`, `--allow-port`. Rarely needed directly. |
 | `lever down` | Tear the jail down (removes the isolated machine and everything in it). |
 | `lever doctor` | Diagnose the setup (machine up, image registry, hub health, a credential available); each failing check prints the fix. |
-| `lever agent <new\|list\|start\|attach\|suspend\|resume\|stop> NAME` | Grove/agent lifecycle against a running stack. |
-| `lever msg send --to GROVE "…"` / `lever msg list` | Send a message to a running agent / read the typed agent-event inbox. |
-| `lever watch` | Stream scion events (for a notification bridge). |
 | `lever version` | Print the version. |
+
+**In-jail `lever-manager` (orchestration — run by the manager inside the container):**
+
+| Command | What it does |
+|---|---|
+| `lever-manager agent <list\|start\|stop\|suspend\|resume\|attach\|register> NAME` | Grove/agent lifecycle against the jail-local hub. Dispatch a grove with `agent start NAME --task "…" --image <img> -g <grove-dir-path>`. |
+| `lever-manager msg send --to GROVE "…"` / `lever-manager msg list` | Send a message to a running agent / read the typed agent-event inbox (`scion notifications`). |
+| `lever-manager watch` | Stream scion events to a file the manager `Monitor`s (the notification bridge). |
+| `lever-manager version` | Print the version. |
 
 `lever up` is the muscle-memory entry; `apply` is its non-interactive half for scripts/scheduled
 runs. Both are idempotent — re-running `up` resumes a suspended manager and re-attaches.

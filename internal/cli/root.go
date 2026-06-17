@@ -27,16 +27,32 @@ func defaultClientFactory() *scion.Client {
 	return scion.Default(exec.RealRunner{}, home)
 }
 
-func NewRoot() *cobra.Command { return newRootWith(defaultFactory, defaultClientFactory) }
-
-func NewRootWithBackend(factory BackendFactory) *cobra.Command {
-	return newRootWith(factory, defaultClientFactory)
+func versionCmd() *cobra.Command {
+	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(Version) }}
 }
 
-func newRootWith(bf BackendFactory, cf ClientFactory) *cobra.Command {
-	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration"}
-	root.AddCommand(&cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(Version) }})
+// NewHostRoot builds the host control-plane CLI (`lever`): provisioning only.
+func NewHostRoot() *cobra.Command { return newHostRootWith(defaultFactory) }
+
+// NewRoot is a thin alias for NewHostRoot so existing cmd/lever/main.go still compiles.
+func NewRoot() *cobra.Command { return NewHostRoot() }
+
+// NewRootWithBackend is the host root with an injected backend (test seam).
+func NewRootWithBackend(bf BackendFactory) *cobra.Command { return newHostRootWith(bf) }
+
+func newHostRootWith(bf BackendFactory) *cobra.Command {
+	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)"}
+	root.AddCommand(versionCmd())
 	root.AddCommand(newProvisionCmd(bf), newDownCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf))
+	return root
+}
+
+// NewManagerRoot builds the in-jail orchestration CLI (`lever-manager`).
+func NewManagerRoot() *cobra.Command { return newManagerRootWith(defaultClientFactory) }
+
+func newManagerRootWith(cf ClientFactory) *cobra.Command {
+	root := &cobra.Command{Use: "lever-manager", Short: "In-jail grove orchestration"}
+	root.AddCommand(versionCmd())
 	root.AddCommand(newAgentCmd(cf), newMsgCmd(cf), newWatchCmd(cf))
 	return root
 }

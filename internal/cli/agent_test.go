@@ -18,7 +18,7 @@ func clientWith(f *exec.FakeRunner) ClientFactory {
 func TestAgentStart(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})
-	root := newRootWith(nil, clientWith(f))
+	root := newManagerRootWith(clientWith(f))
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"agent", "start", "appa", "--project", "/g/appa", "--image", "img:1", "--task", "do x"})
@@ -34,7 +34,7 @@ func TestAgentStart(t *testing.T) {
 func TestAgentListPrints(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion list --format json -g /g/appa", exec.Result{Stdout: `[{"slug":"appa","phase":"running"}]`})
-	root := newRootWith(nil, clientWith(f))
+	root := newManagerRootWith(clientWith(f))
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"agent", "list", "--project", "/g/appa"})
@@ -50,7 +50,7 @@ func TestAgentRegister(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion init", exec.Result{})
 	f.Script("scion hub link", exec.Result{})
-	root := newRootWith(nil, clientWith(f))
+	root := newManagerRootWith(clientWith(f))
 	root.SetArgs([]string{"agent", "register", "/g/appa"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("register: %v", err)

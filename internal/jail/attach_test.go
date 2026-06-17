@@ -13,6 +13,7 @@ func TestAttachArgv(t *testing.T) {
 		"XDG_RUNTIME_DIR=/run/user/501",
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"SCION_HUB_ENABLED=true",
+		"SCION_FORCE_HOST_NETWORK=1",
 		"scion", "attach", "assistant", "-g", "/lever",
 	}
 	if !reflect.DeepEqual(got, want) {

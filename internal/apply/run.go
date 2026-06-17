@@ -57,6 +57,16 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 		}
 		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 	case "register-manager", "register-grove":
+		// Remove a stale `.scion` marker FILE left in the tree by a previous
+		// bring-up. It survives `orb delete` (it lives in the bind-mounted tree),
+		// and `scion init` writes workspace_path only on fresh-create — resolving
+		// a stale marker skips it, so the agent mounts an empty managed config-dir
+		// copy instead of the live tree (the in-place mount silently breaks).
+		// Removing it forces a fresh, correct init. s.Target is the host path and
+		// the tree is bind-mounted, so a host-side remove reaches the jail.
+		if err := removeStaleMarker(s.Target); err != nil {
+			return err
+		}
 		jp := jailPath(s.Target, app.Tree, d.JailMount)
 		if err := d.Scion.InitProject(ctx, jp); err != nil {
 			return err
@@ -82,6 +92,25 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// removeStaleMarker removes a `.scion` MARKER FILE at dir (left by a prior
+// bring-up; it persists in the bind-mounted tree across jail teardown). It
+// leaves a `.scion` DIRECTORY untouched — that's an in-repo git-mode project,
+// not a stale directory marker. Absent `.scion` is a no-op.
+func removeStaleMarker(dir string) error {
+	p := filepath.Join(dir, ".scion")
+	info, err := os.Lstat(p)
+	if err != nil {
+		return nil // nothing there (or unreadable) — fine
+	}
+	if info.IsDir() {
+		return nil // in-repo project marker dir — leave it
+	}
+	if err := os.Remove(p); err != nil {
+		return fmt.Errorf("removing stale .scion marker %s: %w", p, err)
+	}
+	return nil
 }
 
 // jailPath maps a host path under tree to its location inside the jail (mount + suffix).

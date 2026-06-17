@@ -120,6 +120,68 @@ func TestJailPathTranslation(t *testing.T) {
 	}
 }
 
+func TestRemoveStaleMarker(t *testing.T) {
+	// marker FILE is removed
+	d1 := t.TempDir()
+	mf := filepath.Join(d1, ".scion")
+	if err := os.WriteFile(mf, []byte("project-id: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStaleMarker(d1); err != nil {
+		t.Fatalf("removeStaleMarker(file): %v", err)
+	}
+	if _, err := os.Stat(mf); !os.IsNotExist(err) {
+		t.Errorf("marker file should be gone, stat err=%v", err)
+	}
+
+	// .scion DIRECTORY is left untouched (in-repo git-mode project)
+	d2 := t.TempDir()
+	md := filepath.Join(d2, ".scion")
+	if err := os.Mkdir(md, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStaleMarker(d2); err != nil {
+		t.Fatalf("removeStaleMarker(dir): %v", err)
+	}
+	if info, err := os.Stat(md); err != nil || !info.IsDir() {
+		t.Errorf("marker DIR should be preserved, err=%v", err)
+	}
+
+	// absent .scion is a no-op
+	if err := removeStaleMarker(t.TempDir()); err != nil {
+		t.Errorf("removeStaleMarker(absent): %v", err)
+	}
+}
+
+func TestRegisterRemovesStaleMarkerBeforeInit(t *testing.T) {
+	// A stale marker in the tree must be gone by the time `scion init` runs,
+	// so init creates a fresh project (writing workspace_path) rather than
+	// resolving the stale marker and skipping it.
+	tree := t.TempDir()
+	marker := filepath.Join(tree, ".scion")
+	if err := os.WriteFile(marker, []byte("project-id: stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("stale marker should have been removed before init, stat err=%v", err)
+	}
+}
+
 func TestRegisterUsesJailPaths(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})

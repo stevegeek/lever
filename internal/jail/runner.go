@@ -34,6 +34,12 @@ func jailEnvFor(uid string) []string {
 		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"SCION_HUB_ENABLED=true",
+		// Force the agent containers onto --network=host so they reach the
+		// jail-local hub on loopback (the broker/agent-launch reads this).
+		// Without it, rootless podman uses pasta networking and the agent
+		// cannot reach the hub → heartbeats fail. scion's official escape
+		// hatch (>= upstream da49e14); applies to any runtime, not just docker.
+		"SCION_FORCE_HOST_NETWORK=1",
 	}
 }
 

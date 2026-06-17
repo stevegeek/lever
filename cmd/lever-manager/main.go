@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	if err := cli.NewHostRoot().Execute(); err != nil {
+	if err := cli.NewManagerRoot().Execute(); err != nil {
 		os.Exit(1)
 	}
 }

@@ -34,9 +34,6 @@ func versionCmd() *cobra.Command {
 // NewHostRoot builds the host control-plane CLI (`lever`): provisioning only.
 func NewHostRoot() *cobra.Command { return newHostRootWith(defaultFactory) }
 
-// NewRoot is a thin alias for NewHostRoot so existing cmd/lever/main.go still compiles.
-func NewRoot() *cobra.Command { return NewHostRoot() }
-
 // NewRootWithBackend is the host root with an injected backend (test seam).
 func NewRootWithBackend(bf BackendFactory) *cobra.Command { return newHostRootWith(bf) }
 

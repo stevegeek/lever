@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"time"
 )
@@ -54,9 +55,13 @@ func (c *Client) ServerStart(ctx context.Context) error {
 	return c.waitHubReady(ctx)
 }
 
-// SecretSet stores a Hub secret. The value is the RAW secret — the vendored scion
-// stores/projects it verbatim; do NOT base64-encode (see the Part-B spike).
+// SecretSet stores a Hub secret. scion (>= da49e14) requires the value to be
+// base64-encoded on input ("value must be base64-encoded", HTTP 400 otherwise)
+// and decodes it for projection to the agent. We pass the raw secret and encode
+// here. (Earlier vendored scion took the raw value verbatim — encoding is
+// version-specific; verified against da49e14 on 2026-06-17.)
 func (c *Client) SecretSet(ctx context.Context, key, value string) error {
-	_, err := c.run(ctx, "", "hub", "secret", "set", key, value)
+	enc := base64.StdEncoding.EncodeToString([]byte(value))
+	_, err := c.run(ctx, "", "hub", "secret", "set", key, enc)
 	return err
 }

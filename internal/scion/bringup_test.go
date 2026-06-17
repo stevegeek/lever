@@ -25,7 +25,8 @@ func TestBringupArgv(t *testing.T) {
 		"init --machine --non-interactive",
 		"config set --global image_registry scionlocal",
 		"server start",
-		"hub secret set CLAUDE_CODE_OAUTH_TOKEN sk-ant-rawtoken",
+		// value is base64-encoded (scion >= da49e14 requires it): b64("sk-ant-rawtoken")
+		"hub secret set CLAUDE_CODE_OAUTH_TOKEN c2stYW50LXJhd3Rva2Vu",
 	} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing %q in %q", want, j)

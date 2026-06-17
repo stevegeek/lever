@@ -66,7 +66,8 @@ func TestRunCredentialStep(t *testing.T) {
 	for _, c := range f.Calls {
 		j += strings.Join(c.Args, " ") + "|"
 	}
-	if want := "hub secret set CLAUDE_CODE_OAUTH_TOKEN sk-ant-raw"; !strings.Contains(j, want) {
+	// secret value is base64-encoded (scion >= da49e14): b64("sk-ant-raw")
+	if want := "hub secret set CLAUDE_CODE_OAUTH_TOKEN c2stYW50LXJhdw=="; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
 	}
 }

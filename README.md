@@ -9,11 +9,12 @@ Lever is the **brain and the interface**; [Scion](https://github.com/GoogleCloud
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool — `lever` — and it drives Scion for you.
 
-> **Status: design + hand-validated containment. Nothing is installable yet.** The architecture and
-> the *containment primitives* have been validated end-to-end by hand on macOS + OrbStack
-> (filesystem isolation, network egress, rootless Docker, the runtime). The full integrated system
-> test and the Go `lever` binary are **in progress** — so the runtime behaviours described in these
-> docs are *designed, not yet shipped*. See [Where this is today](#where-this-is-today).
+> **Status: working, builds from source; not yet packaged/released.** The Go `lever` binary builds
+> and `lever apply` brings a manager up end-to-end in the jail — **live-validated on macOS + OrbStack**
+> (Apple Silicon): isolated machine + rootless podman + egress allowlist, the manager editing a
+> bind-mounted project tree in place, with hub state-tracking. There is no release/install yet (you
+> build it: `go build -o lever ./cmd/lever`), and some features (grove dispatch by the manager,
+> tidier MCP wiring) are in progress. See [Where this is today](#where-this-is-today).
 
 ## Why
 
@@ -76,14 +77,49 @@ assistant as the first instance (dogfooding). See [docs/core-vs-instance.md](doc
 
 ## Where this is today
 
-- **Done:** the architecture and security model are designed; the containment *primitives* are
-  validated by hand on macOS + OrbStack (Apple Silicon).
-- **In progress:** the Go `lever` binary; the full-system integration test that proves the *whole*
-  manager-agent system (not just primitives) inside the jail.
-- **Not yet:** anything installable. There is no release and no binary to run. The runtime
-  behaviours in these docs describe the *intended* design.
-- **You can today:** read the [architecture](docs/architecture.md) and
-  [security model](docs/security-model.md), and watch the repo.
+- **Done:** architecture + security model; containment primitives validated by hand; the Go `lever`
+  binary; `lever apply` (config-driven bring-up) and `lever up` (bring-up + attach); live end-to-end
+  validation on macOS + OrbStack — a manager boots in the jail, edits a bind-mounted tree **in place**,
+  and the hub tracks it (heartbeats, attach).
+- **In progress:** grove dispatch *by* the manager (needs orchestration tooling in the manager image);
+  tidier MCP wiring; broader substrate support (Linux/Docker backend); packaging.
+- **Not yet:** a release/installer. Build from source (below).
+- **You can today:** `go build` the binary and bring an app up with `lever apply` / `lever up`; read
+  the [architecture](docs/architecture.md) and [security model](docs/security-model.md).
+
+## Build & run
+
+```bash
+go build -o lever ./cmd/lever        # requires Go 1.26+
+
+# Bring an application up (jail + scion + manager) and attach the manager TTY:
+./lever up path/to/app.yaml
+
+# Or headless (bring up, don't attach):
+./lever apply path/to/app.yaml
+./lever apply path/to/app.yaml --dry-run   # print the bring-up plan only
+```
+
+An **application** is one `app.yaml` describing the manager + its groves (image, project tree,
+scion source, credential, allowed host ports). See `examples/` for runnable configs and the
+reference instance for a real one.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `lever up <app.yaml>` | Bring the application up *if needed* (create jail, provision scion, start the manager) **and attach** the manager's TTY. `--fresh` starts a new manager thread; `--no-attach` brings up without attaching. The everyday entry point. |
+| `lever apply <app.yaml>` | Headless bring-up — runs the full plan (jail → image → scion init/config/server → credential → register manager + groves → start manager). No attach. `--dry-run` prints the plan and exits. |
+| `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress). `--machine`, `--tree`, `--allow-port`. Rarely needed directly. |
+| `lever down` | Tear the jail down (removes the isolated machine and everything in it). |
+| `lever doctor` | Diagnose the setup (machine up, image registry, hub health, a credential available); each failing check prints the fix. |
+| `lever agent <new\|list\|start\|attach\|suspend\|resume\|stop> NAME` | Grove/agent lifecycle against a running stack. |
+| `lever msg send --to GROVE "…"` / `lever msg list` | Send a message to a running agent / read the typed agent-event inbox. |
+| `lever watch` | Stream scion events (for a notification bridge). |
+| `lever version` | Print the version. |
+
+`lever up` is the muscle-memory entry; `apply` is its non-interactive half for scripts/scheduled
+runs. Both are idempotent — re-running `up` resumes a suspended manager and re-attaches.
 
 ## Requirements (intended)
 

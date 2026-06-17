@@ -52,7 +52,7 @@ func Default(r exec.Runner, home string) *Client {
 }
 
 func (c *Client) env() map[string]string {
-	m := map[string]string{}
+	m := map[string]string{"SCION_HUB_ENABLED": "true"}
 	if c.hubEndpoint != "" {
 		m["SCION_HUB_ENDPOINT"] = c.hubEndpoint
 	}

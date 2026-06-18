@@ -14,8 +14,11 @@ var loadAppConfig = config.Load
 
 // resolveGroveImage looks up the image a grove should run on from the lever
 // config at path. Empty path ⇒ "" (no config; let scion default decide). A
-// grove absent from the config also ⇒ "" (caller may pass --image explicitly).
-// A set-but-unreadable path is a real misconfiguration and returns an error.
+// grove declared in the config uses its image (or the inherited manager image);
+// a grove ABSENT from the config falls back to the manager image — the only
+// image guaranteed loaded into the jail — so ad-hoc dispatches still get a
+// working image instead of scion's unpullable default. A set-but-unreadable
+// path is a real misconfiguration and returns an error.
 func resolveGroveImage(path, grove string) (string, error) {
 	if path == "" {
 		return "", nil
@@ -24,11 +27,10 @@ func resolveGroveImage(path, grove string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	g, ok := app.GroveByName(grove)
-	if !ok {
-		return "", nil
+	if g, ok := app.GroveByName(grove); ok {
+		return app.GroveImage(g), nil
 	}
-	return app.GroveImage(g), nil
+	return app.Manager.Image, nil
 }
 
 func newAgentCmd(cf ClientFactory) *cobra.Command {
@@ -74,8 +76,15 @@ func agentStart(cf ClientFactory) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// An explicit --image wins. Otherwise resolve from the lever config
 			// (the grove's `image:` or the manager image it inherits), so the
-			// caller doesn't have to repeat the image on every dispatch.
+			// caller doesn't have to repeat the image on every dispatch. With no
+			// --config and no $LEVER_CONFIG, discover the canonical config by
+			// walking up from cwd (the manager runs at the in-jail tree mount).
 			if image == "" {
+				if configPath == "" {
+					if p, derr := resolveConfigPath(""); derr == nil {
+						configPath = p
+					}
+				}
 				resolved, err := resolveGroveImage(configPath, args[0])
 				if err != nil {
 					return err

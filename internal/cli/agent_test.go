@@ -139,3 +139,22 @@ func TestAgentStartNoConfigOmitsImage(t *testing.T) {
 		t.Fatalf("argv=%q should not contain --image without config", got)
 	}
 }
+
+func TestAgentStartDiscoversConfigForImage(t *testing.T) {
+	t.Setenv("LEVER_CONFIG", "") // force discovery path, not env
+	dir := instanceDir(t, "demo")
+	t.Chdir(dir)
+
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	root := newManagerRootWith(clientWith(f))
+	// no --config and no --image: image must be resolved from the discovered config
+	root.SetArgs([]string{"agent", "start", "anygrove", "-g", "groves/anygrove"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if !strings.Contains(got, "--image img:1") {
+		t.Fatalf("argv=%q want --image img:1 (manager image inherited via discovery)", got)
+	}
+}

@@ -8,10 +8,14 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 		Use:   "doctor",
 		Short: "Show the backend containment profile",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmd.Println(factory(machine).Profile().Summary())
+			m, err := machineFromFlagOrConfig(machine)
+			if err != nil {
+				return err
+			}
+			cmd.Println(factory(m).Profile().Summary())
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&machine, "machine", "lever-jail", "jail machine name")
+	cmd.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
 	return cmd
 }

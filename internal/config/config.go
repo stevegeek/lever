@@ -41,6 +41,31 @@ type App struct {
 
 var knownBackends = map[string]bool{"orbstack": true, "linux-docker": true}
 
+// CanonicalName is the conventional config filename for a lever instance — a
+// visible manifest at the instance root (package.json / Cargo.toml style).
+const CanonicalName = "lever.yaml"
+
+// FindConfig walks up from startDir looking for the canonical config
+// (CanonicalName), returning its path. The directory that holds it is the
+// instance root. It stops at the filesystem root and errors if none is found.
+func FindConfig(startDir string) (string, error) {
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", err
+	}
+	for {
+		p := filepath.Join(dir, CanonicalName)
+		if fi, statErr := os.Stat(p); statErr == nil && !fi.IsDir() {
+			return p, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir { // reached the filesystem root
+			return "", fmt.Errorf("no %s found in %s or any parent directory", CanonicalName, startDir)
+		}
+		dir = parent
+	}
+}
+
 // resolvePath expands a leading ~/ to the home dir, makes a relative path
 // relative to baseDir, and returns an absolute path. Empty in -> empty out.
 func resolvePath(p, baseDir string) string {
@@ -70,6 +95,11 @@ func Load(path string) (*App, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	app.dir = filepath.Dir(path)
+	// An omitted `tree:` defaults to the config file's directory — the canonical
+	// config sits at the instance root, so the instance root is the tree.
+	if app.Tree == "" {
+		app.Tree = app.dir
+	}
 	if app.Tree != "" && !filepath.IsAbs(app.Tree) {
 		app.Tree = filepath.Join(app.dir, app.Tree)
 	}

@@ -35,7 +35,7 @@ func TestDoctorPrintsProfile(t *testing.T) {
 	root := NewRootWithBackend(func(string) backend.Backend { return &stubBackend{} })
 	var out bytes.Buffer
 	root.SetOut(&out)
-	root.SetArgs([]string{"doctor"})
+	root.SetArgs([]string{"doctor", "--machine", "lever-jail"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("doctor: %v", err)
 	}

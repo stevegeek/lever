@@ -160,6 +160,8 @@ runs. Both are idempotent — re-running `up` resumes a suspended manager and re
 
 ## Documentation
 
+- [Getting started](docs/getting-started.md) — build and run a working instance from scratch (worked example).
+- [Config reference](docs/config-reference.md) — every `lever.yaml` key, defaults, and conventions.
 - [Architecture](docs/architecture.md) — topology, components, the dispatch/notification loop, the project model.
 - [Security model](docs/security-model.md) — threat model, the jail, what containment does and does not buy, validation evidence.
 - [Core vs instance](docs/core-vs-instance.md) — the boundary, and how an instance is built on the core.

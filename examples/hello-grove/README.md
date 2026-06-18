@@ -20,11 +20,15 @@ hello-grove/
 
 ## How to run
 
-Start the application from this directory with:
+From inside this directory (the `lever.yaml` is discovered automatically):
 
 ```sh
-lever apply lever.yaml
+lever up                # bring up the jail + attach the manager
+# or, headless:
+lever apply
+lever apply --dry-run   # preview the bring-up plan only
 ```
 
 The manager will dispatch a task to `worker`, wait for the completion event, and
-report the result.
+report the result. See [../../docs/getting-started.md](../../docs/getting-started.md)
+for the full worked example.

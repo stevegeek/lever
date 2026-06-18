@@ -68,3 +68,30 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 		t.Fatalf("credential target=%q", steps[credIdx].Target)
 	}
 }
+
+func TestPlanLoadsDistinctGroveImages(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "mgr:1"},
+		Groves: []config.Grove{
+			{Name: "a", Dir: "groves/a"},                 // inherits mgr:1
+			{Name: "b", Dir: "groves/b", Image: "alt:1"}, // override
+			{Name: "c", Dir: "groves/c", Image: "alt:1"}, // dup override
+		},
+	}
+	var loads []string
+	for _, s := range Plan(app) {
+		if s.Kind == "load-image" {
+			loads = append(loads, s.Target)
+		}
+	}
+	want := []string{"mgr:1", "alt:1"}
+	if len(loads) != len(want) {
+		t.Fatalf("load-image targets=%v want=%v", loads, want)
+	}
+	for i := range want {
+		if loads[i] != want[i] {
+			t.Fatalf("load[%d]=%q want %q (all=%v)", i, loads[i], want[i], loads)
+		}
+	}
+}

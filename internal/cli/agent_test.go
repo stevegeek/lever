@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/exec"
 	"github.com/lever-to/lever/internal/scion"
 )
@@ -60,5 +61,81 @@ func TestAgentRegister(t *testing.T) {
 	}
 	if f.Calls[1].Args[0] != "hub" {
 		t.Fatalf("hub link call=%+v", f.Calls[1])
+	}
+}
+
+func TestAgentStartResolvesImageFromConfig(t *testing.T) {
+	orig := loadAppConfig
+	loadAppConfig = func(path string) (*config.App, error) {
+		return &config.App{
+			Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
+			Groves: []config.Grove{
+				{Name: "scratch", Dir: "groves/scratch"},
+				{Name: "rust", Dir: "groves/rust", Image: "scionlocal/lever-rust:latest"},
+			},
+		}, nil
+	}
+	defer func() { loadAppConfig = orig }()
+
+	cases := []struct {
+		name      string
+		grove     string
+		wantImage string
+	}{
+		{"inherits manager image", "scratch", "scionlocal/lever-claude:latest"},
+		{"uses grove override", "rust", "scionlocal/lever-rust:latest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := exec.NewFakeRunner()
+			f.Script("scion", exec.Result{})
+			root := newManagerRootWith(clientWith(f))
+			root.SetArgs([]string{"agent", "start", tc.grove, "--config", "/x/lever.yaml", "-g", "groves/" + tc.grove})
+			if err := root.Execute(); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			got := strings.Join(f.Calls[0].Args, " ")
+			if !strings.Contains(got, "--image "+tc.wantImage) {
+				t.Fatalf("argv=%q want --image %q", got, tc.wantImage)
+			}
+		})
+	}
+}
+
+func TestAgentStartExplicitImageWinsOverConfig(t *testing.T) {
+	orig := loadAppConfig
+	loadAppConfig = func(path string) (*config.App, error) {
+		return &config.App{Manager: config.Manager{Image: "from-config:1"},
+			Groves: []config.Grove{{Name: "scratch", Dir: "groves/scratch"}}}, nil
+	}
+	defer func() { loadAppConfig = orig }()
+
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	root := newManagerRootWith(clientWith(f))
+	root.SetArgs([]string{"agent", "start", "scratch", "--config", "/x/lever.yaml", "--image", "explicit:9"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if !strings.Contains(got, "--image explicit:9") || strings.Contains(got, "from-config:1") {
+		t.Fatalf("argv=%q want explicit image to win", got)
+	}
+}
+
+func TestAgentStartNoConfigOmitsImage(t *testing.T) {
+	// no --config, no $LEVER_CONFIG in test env, no --image — flag default
+	// reads the env at construction, so clear it BEFORE building the root.
+	t.Setenv("LEVER_CONFIG", "")
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	root := newManagerRootWith(clientWith(f))
+	root.SetArgs([]string{"agent", "start", "scratch", "-g", "groves/scratch"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if strings.Contains(got, "--image") {
+		t.Fatalf("argv=%q should not contain --image without config", got)
 	}
 }

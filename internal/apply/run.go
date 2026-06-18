@@ -72,6 +72,11 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 			return err
 		}
 		return d.Scion.HubLink(ctx, jp)
+	case "write-manifest":
+		// Host-side write into the mount (s.Target is the host tree path); the
+		// manifest is sanitized (grove→image only) so it is safe to live in the
+		// agent-writable mount. See config.ManifestName.
+		return config.WriteManifest(s.Target, config.ManifestFromApp(app))
 	case "start-manager":
 		task := ""
 		if p := app.ManagerPromptPath(); p != "" {
@@ -129,7 +134,24 @@ func jailPath(hostPath, tree, mount string) string {
 	return path.Join(mount, filepath.ToSlash(rel))
 }
 
+// maxCredentialBytes caps the credential file size — a token is small; a large
+// file is a sign the path points at something that isn't a credential.
+const maxCredentialBytes = 64 << 10
+
+// defaultReadCred reads a credential file, refusing world-readable files (a real
+// credential should be 0600) and oversized files. This is defence-in-depth for
+// the credential projected into agent containers; see security-model.md §5.
 func defaultReadCred(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode().Perm()&0o004 != 0 {
+		return "", fmt.Errorf("credential file %s is world-readable (%#o) — restrict it to 0600", path, info.Mode().Perm())
+	}
+	if info.Size() > maxCredentialBytes {
+		return "", fmt.Errorf("credential file %s is %d bytes — too large to be a credential", path, info.Size())
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

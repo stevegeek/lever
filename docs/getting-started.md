@@ -54,33 +54,34 @@ Verify: `lever version`.
 
 ## 2. Look at the instance
 
-`examples/hello-grove` is a complete, minimal instance:
+`examples/hello-grove` is a complete, minimal instance. The **root** holds the config and boot
+prompt (host-only); only the **`workspace/`** subdir is bind-mounted into the jail:
 
 ```
-hello-grove/
-├── lever.yaml          # the manifest (manager + one grove)
-├── manager.md          # the manager's boot prompt
-└── groves/
-    └── worker/         # the grove's workspace (bind-mounted in place)
+hello-grove/             # instance root — run `lever` here; NOT mounted
+├── lever.yaml           # the config
+├── manager.md           # the manager's boot prompt (host-only)
+└── workspace/           # tree: the bind-mounted subdir (agents edit this)
+    └── groves/
+        └── worker/      # the grove's workspace
 ```
 
 ```yaml
 # examples/hello-grove/lever.yaml
 name: hello-grove
 backend: orbstack
-tree: .
+tree: workspace          # a confined SUBDIR — the root itself is never mounted
 manager:
   image: scionlocal/lever-claude:latest
-  prompt_file: manager.md
+  prompt_file: manager.md   # resolved at the root (host-only), not inside the mount
   allow_ports: []
 groves:
   - name: worker
-    dir: groves/worker
+    dir: groves/worker      # relative to tree → workspace/groves/worker
 ```
 
-`tree: .` mounts the example directory itself; you could omit it and get the same result (the tree
-defaults to the config file's directory). Every relative path (`manager.md`, `groves/worker`)
-resolves against this directory. See [config-reference.md](./config-reference.md) for every key.
+The config and prompt live at the root, *outside* the mount, so a compromised agent can't rewrite
+them. See [config-reference.md](./config-reference.md) for every key.
 
 Stage the in-jail binary into this instance before bringing it up:
 
@@ -90,7 +91,7 @@ make lever-manager-linux LEVER_INSTANCE=/path/to/lever_to/examples/hello-grove
 
 ## 3. Preview the bring-up plan (no side effects)
 
-From anywhere inside the instance — the config is discovered by walking up from cwd:
+Run `lever` from the **instance root** (where `lever.yaml` lives — there's no walk-up discovery):
 
 ```sh
 cd /path/to/lever_to/examples/hello-grove
@@ -100,13 +101,14 @@ lever apply --dry-run
 You'll see the ordered plan:
 
 ```
-  jail-up           /…/hello-grove
+  jail-up           /…/hello-grove/workspace
   load-image        scionlocal/lever-claude:latest
   init-machine
   config-registry
   scion-server
-  register-manager  /…/hello-grove
-  register-grove    /…/hello-grove/groves/worker
+  register-manager  /…/hello-grove/workspace
+  register-grove    /…/hello-grove/workspace/groves/worker
+  write-manifest    /…/hello-grove/workspace
   start-manager     hello-grove
 ```
 
@@ -137,8 +139,9 @@ vendor/bin/lever-manager agent start worker --task "Write a haiku to haiku.md" -
 Notes:
 - **`-g groves/worker` is a path**, resolved relative to the manager's working directory in the
   jail — not a bare slug. (A bare slug silently falls back to the manager's own project.)
-- **No `--image` needed** — the grove's image is resolved from the config (it inherits the manager
-  image here). An explicit `--image` overrides.
+- **No `--image` needed** — the grove's image is resolved from the sanitized runtime manifest the
+  host wrote into the mount at apply (it inherits the manager image here). An explicit `--image`
+  overrides.
 
 Watch progress and relay events:
 

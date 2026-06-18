@@ -3,14 +3,16 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/lever-to/lever/internal/config"
 )
 
-// resolveConfigPath returns an explicit config path when given, otherwise
-// discovers the canonical config by walking up from the current directory
-// (git/npm/cargo-style). This is what lets `lever up` run with no argument from
-// anywhere inside an instance.
+// resolveConfigPath returns an explicit config path when given, otherwise the
+// canonical config in the CURRENT directory only. There is deliberately NO
+// walk-up discovery: run `lever` from the instance root. This prevents a
+// `lever.yaml` planted in a parent directory from being picked up and trusted.
+// See security-model.md §5.
 func resolveConfigPath(arg string) (string, error) {
 	if arg != "" {
 		return arg, nil
@@ -19,7 +21,11 @@ func resolveConfigPath(arg string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return config.FindConfig(wd)
+	p := filepath.Join(wd, config.CanonicalName)
+	if fi, statErr := os.Stat(p); statErr != nil || fi.IsDir() {
+		return "", fmt.Errorf("no %s in the current directory (%s) — run lever from the instance root, or pass a config path", config.CanonicalName, wd)
+	}
+	return p, nil
 }
 
 // argOrEmpty returns args[0] if present, else "".

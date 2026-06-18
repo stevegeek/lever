@@ -17,7 +17,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "start-manager"}
+	want := []string{"jail-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "write-manifest", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}

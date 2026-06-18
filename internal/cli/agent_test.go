@@ -64,33 +64,28 @@ func TestAgentRegister(t *testing.T) {
 	}
 }
 
-func TestAgentStartResolvesImageFromConfig(t *testing.T) {
-	orig := loadAppConfig
-	loadAppConfig = func(path string) (*config.App, error) {
-		return &config.App{
-			Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
-			Groves: []config.Grove{
-				{Name: "scratch", Dir: "groves/scratch"},
-				{Name: "rust", Dir: "groves/rust", Image: "scionlocal/lever-rust:latest"},
-			},
-		}, nil
+func TestAgentStartResolvesImageFromManifest(t *testing.T) {
+	orig := loadManifest
+	loadManifest = func(path string) (*config.Manifest, error) {
+		return &config.Manifest{Groves: []config.ManifestGrove{
+			{Name: "scratch", Image: "scionlocal/lever-claude:latest"},
+			{Name: "rust", Image: "scionlocal/lever-rust:latest"},
+		}}, nil
 	}
-	defer func() { loadAppConfig = orig }()
+	defer func() { loadManifest = orig }()
 
 	cases := []struct {
-		name      string
-		grove     string
-		wantImage string
+		name, grove, wantImage string
 	}{
-		{"inherits manager image", "scratch", "scionlocal/lever-claude:latest"},
-		{"uses grove override", "rust", "scionlocal/lever-rust:latest"},
+		{"inherited image", "scratch", "scionlocal/lever-claude:latest"},
+		{"override image", "rust", "scionlocal/lever-rust:latest"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := exec.NewFakeRunner()
 			f.Script("scion", exec.Result{})
 			root := newManagerRootWith(clientWith(f))
-			root.SetArgs([]string{"agent", "start", tc.grove, "--config", "/x/lever.yaml", "-g", "groves/" + tc.grove})
+			root.SetArgs([]string{"agent", "start", tc.grove, "--manifest", "/x/.lever-manifest.yaml", "-g", "groves/" + tc.grove})
 			if err := root.Execute(); err != nil {
 				t.Fatalf("start: %v", err)
 			}
@@ -102,31 +97,50 @@ func TestAgentStartResolvesImageFromConfig(t *testing.T) {
 	}
 }
 
-func TestAgentStartExplicitImageWinsOverConfig(t *testing.T) {
-	orig := loadAppConfig
-	loadAppConfig = func(path string) (*config.App, error) {
-		return &config.App{Manager: config.Manager{Image: "from-config:1"},
-			Groves: []config.Grove{{Name: "scratch", Dir: "groves/scratch"}}}, nil
+func TestAgentStartExplicitImageWinsOverManifest(t *testing.T) {
+	orig := loadManifest
+	loadManifest = func(path string) (*config.Manifest, error) {
+		return &config.Manifest{Groves: []config.ManifestGrove{{Name: "scratch", Image: "from-manifest:1"}}}, nil
 	}
-	defer func() { loadAppConfig = orig }()
+	defer func() { loadManifest = orig }()
 
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})
 	root := newManagerRootWith(clientWith(f))
-	root.SetArgs([]string{"agent", "start", "scratch", "--config", "/x/lever.yaml", "--image", "explicit:9"})
+	root.SetArgs([]string{"agent", "start", "scratch", "--manifest", "/x/.lever-manifest.yaml", "--image", "explicit:9"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	if !strings.Contains(got, "--image explicit:9") || strings.Contains(got, "from-config:1") {
+	if !strings.Contains(got, "--image explicit:9") || strings.Contains(got, "from-manifest:1") {
 		t.Fatalf("argv=%q want explicit image to win", got)
 	}
 }
 
-func TestAgentStartNoConfigOmitsImage(t *testing.T) {
-	// no --config, no $LEVER_CONFIG in test env, no --image — flag default
-	// reads the env at construction, so clear it BEFORE building the root.
-	t.Setenv("LEVER_CONFIG", "")
+func TestAgentStartUnknownGroveOmitsImage(t *testing.T) {
+	orig := loadManifest
+	loadManifest = func(path string) (*config.Manifest, error) {
+		return &config.Manifest{Groves: []config.ManifestGrove{{Name: "scratch", Image: "img:1"}}}, nil
+	}
+	defer func() { loadManifest = orig }()
+
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	root := newManagerRootWith(clientWith(f))
+	// grove not in the manifest, no --image → no --image passed (caller must specify)
+	root.SetArgs([]string{"agent", "start", "ghost", "--manifest", "/x/.lever-manifest.yaml", "-g", "groves/ghost"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if strings.Contains(got, "--image") {
+		t.Fatalf("argv=%q should omit --image for an unknown grove", got)
+	}
+}
+
+func TestAgentStartNoManifestOmitsImage(t *testing.T) {
+	t.Setenv("LEVER_MANIFEST", "")
+	t.Chdir(t.TempDir()) // no manifest in cwd
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})
 	root := newManagerRootWith(clientWith(f))
@@ -136,25 +150,27 @@ func TestAgentStartNoConfigOmitsImage(t *testing.T) {
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
 	if strings.Contains(got, "--image") {
-		t.Fatalf("argv=%q should not contain --image without config", got)
+		t.Fatalf("argv=%q should not contain --image without a manifest", got)
 	}
 }
 
-func TestAgentStartDiscoversConfigForImage(t *testing.T) {
-	t.Setenv("LEVER_CONFIG", "") // force discovery path, not env
-	dir := instanceDir(t, "demo")
+func TestAgentStartDiscoversManifestForImage(t *testing.T) {
+	t.Setenv("LEVER_MANIFEST", "")
+	dir := t.TempDir()
+	if err := config.WriteManifest(dir, config.Manifest{Groves: []config.ManifestGrove{{Name: "worker", Image: "img:1"}}}); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(dir)
 
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})
 	root := newManagerRootWith(clientWith(f))
-	// no --config and no --image: image must be resolved from the discovered config
-	root.SetArgs([]string{"agent", "start", "anygrove", "-g", "groves/anygrove"})
+	root.SetArgs([]string{"agent", "start", "worker", "-g", "groves/worker"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
 	if !strings.Contains(got, "--image img:1") {
-		t.Fatalf("argv=%q want --image img:1 (manager image inherited via discovery)", got)
+		t.Fatalf("argv=%q want --image img:1 (resolved from discovered manifest)", got)
 	}
 }

@@ -9,11 +9,11 @@ import (
 )
 
 // instanceDir creates a temp dir containing a canonical lever.yaml for the given
-// app name and returns the dir.
+// app name (with a confined tree subdir) and returns the dir.
 func instanceDir(t *testing.T, name string) string {
 	t.Helper()
 	dir := t.TempDir()
-	body := "name: " + name + "\nbackend: orbstack\nmanager:\n  image: img:1\n"
+	body := "name: " + name + "\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img:1\n"
 	if err := os.WriteFile(filepath.Join(dir, config.CanonicalName), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -30,23 +30,30 @@ func TestResolveConfigPathExplicitWins(t *testing.T) {
 	}
 }
 
-func TestResolveConfigPathDiscoversFromCwd(t *testing.T) {
+func TestResolveConfigPathCwdOnlyNoWalkUp(t *testing.T) {
 	dir := instanceDir(t, "demo")
+
+	// In the instance root → found.
+	t.Chdir(dir)
+	got, err := resolveConfigPath("")
+	if err != nil {
+		t.Fatalf("cwd resolve: %v", err)
+	}
+	gotR, _ := filepath.EvalSymlinks(got)
+	wantR, _ := filepath.EvalSymlinks(filepath.Join(dir, config.CanonicalName))
+	if gotR != wantR {
+		t.Fatalf("resolved %q want %q", gotR, wantR)
+	}
+
+	// In a SUBDIR → must NOT walk up; no config in cwd → error (security: a
+	// planted parent config must never be picked up).
 	sub := filepath.Join(dir, "nested", "deep")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(sub)
-	got, err := resolveConfigPath("")
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	want := filepath.Join(dir, config.CanonicalName)
-	// macOS temp dirs are symlinked (/var → /private/var); compare resolved.
-	gotR, _ := filepath.EvalSymlinks(got)
-	wantR, _ := filepath.EvalSymlinks(want)
-	if gotR != wantR {
-		t.Fatalf("discovered %q want %q", gotR, wantR)
+	if _, err := resolveConfigPath(""); err == nil {
+		t.Fatal("resolveConfigPath must not walk up to a parent config")
 	}
 }
 

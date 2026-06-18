@@ -113,50 +113,68 @@ development auth and giving the manager a real credential while groves get only 
 tokens. It is **defence in depth, scheduled after the jail** — the system is already bounded against
 the primary threats (host secrets, LAN) without it, but cross-grove isolation is not yet enforced.
 
-## 5. The operator boundary: `lever.yaml` is trusted input
+## 5. The operator boundary: the config is host-side code, kept out of the mount
 
 Sections 1–4 harden the *inside* of the jail against hostile agents. But the host-side operator
-binary (`lever`) **trusts its config completely**, and the config drives security-relevant host
-actions **before the jail exists**: which host directory to bind-mount, which host file to read as a
-credential, which image to run as the manager, and what text to inject as the manager's task. The
-config is, in effect, host-side code.
+binary (`lever`) reads its config and acts on it **before the jail exists**: which host directory to
+bind-mount, which host file to read as a credential, which image to run, what text to inject as the
+manager's task. The config is, in effect, host-side code — so two things matter: **where it comes
+from** (can an attacker substitute it?) and **whether the agents it constrains can rewrite it**.
 
-**Discovery widens this surface.** `lever up`/`apply`/`down`/`doctor` with no argument discover
-`lever.yaml` by walking **up** from the current directory (npm/git style), with no trust boundary —
-no ownership check, no "stop at `$HOME`". So running `lever` from inside a directory you don't fully
-control (a cloned repo, a downloaded project, a shared or world-writable parent) can load a
-`lever.yaml` **planted in a parent directory** and treat it as trusted. From there a malicious config
-chains:
+Both are now structurally closed:
 
-| Field | If attacker-controlled | Effect |
-|---|---|---|
-| `manager.credential_file` | `~/.ssh/id_rsa`, `~/.aws/credentials`, any readable path | Read **verbatim host-side** and projected into every agent container's env as a secret (§6) — an arbitrary host-file **read + exfiltration** primitive. No check it's actually a credential. |
-| `tree` | `/`, `$HOME`, `/etc`, … | Bind-mounted into the jail at `/lever`, **defeating "host files are absent"** (§2.1) — agents read/write the whole host subtree in place. Only `tree != ""` is checked today. |
-| `manager.image` / `groves[].image` | any registry/ref | An **attacker-chosen image runs as the manager/grove**, with the projected credential. No registry allowlist or digest pin. |
-| `manager.prompt_file` | `../../etc/...` | **Not** `..`-validated (grove `dir` *is*) — traverses out of the tree; contents become the manager's task (host-file read into the LLM context + prompt injection). |
-| `name` | odd charset / leading `-` | Becomes the machine name `lever-<name>` and a shell token in the scion-install path. Currently defended by correct single-quote escaping, but **unvalidated** — fragile, one refactor from injection. |
+### 5.1 The config never enters the mount (no in-jail tamper → host escalation)
 
-**What is already sound (so the gap is specific):** the execution plumbing is argv-clean — no shell
-injection in the hot paths; the single `bash -c` (scion install) correctly single-quote-escapes its
-interpolated values; grove `dir` traversal *is* rejected (absolute or `..`-prefixed); `jailPath`
-never fabricates an in-jail path for an out-of-tree target; and the credential value is base64'd and
-redacted in error output at its one call site. **The gap is config-field validation and discovery
-trust, not the exec layer.**
+The instance **root** holds `lever.yaml` and the boot prompt and is **not** mounted; only a `tree:`
+**subdirectory** is bind-mounted. `tree` is validated as a confined relative subdir — not `.` (the
+root itself), not absolute, no `..` — so it cannot be widened to `/`, `$HOME`, or the root. The boot
+prompt is resolved at the root too (`ManagerPromptPath` joins the root, not the tree) and confined
+there.
 
-**Hardening direction** (tracked in the backlog, not yet shipped):
+Why this matters: if the config or prompt lived *inside* the mount (the natural "config at the
+project root, root == mount" layout), a compromised manager or grove could **rewrite the config the
+host trusts on the next `lever apply`** — an in-jail-compromise → host-escalation persistence
+channel (point it at `credential_file: ~/.ssh/id_rsa`, `tree: /`, an attacker image, etc.). Keeping
+the root unmounted removes that channel: agents can't see or edit what the host re-reads.
 
-1. **Bound discovery to a trust boundary** — stop the upward walk at `$HOME`; refuse a discovered
-   config whose directory is world-writable or not owned by the invoker; or require explicit
-   confirmation when the discovered config is outside the current directory. (Passing an explicit
-   config path is always trusted — the risk is only the no-arg convenience.)
-2. **Validate security-relevant fields in `config.Validate()`** — `credential_file` to an allowlisted
-   location (e.g. under `~/.scion/`) with a permission + shape check; `tree` sanity (reject `/`, the
-   home root, system dirs); `prompt_file` `..` rejection (parity with grove `dir`); image registry
-   allowlist / digest pin; strict `name` charset (`^[a-z0-9][a-z0-9-]{0,62}$`).
+### 5.2 No walk-up discovery (no planted-parent config)
 
-Until then: **only run `lever` with no config argument inside trees you fully control, and review a
-`lever.yaml` before bringing it up** — treat it with the same suspicion as a `Makefile` or a
-`package.json` with install scripts.
+Config is resolved from the **current directory only** — there is deliberately **no walk-up**. A
+`lever.yaml` planted in a parent directory of wherever you happen to `cd` can never be picked up and
+trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
+
+### 5.3 Field validation (defence in depth, even for a trusted config)
+
+`config.Validate()` and the credential read now enforce:
+
+| Field | Check |
+|---|---|
+| `name`, grove `name` | `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes the jail machine name and a shell token). |
+| `tree` | confined relative subdir (not `.`/absolute/`..`). |
+| `manager.prompt_file` | confined relative path under the root (no `..`, not absolute). |
+| `manager.image`, grove `image` | safe OCI-ref charset (no whitespace/shell metacharacters). |
+| `credential_file` | read with a **permission check** (rejected if world-readable) and a **size cap** — defence in depth for the secret it becomes (§6). |
+| grove `dir` | already rejected absolute/`..` (unchanged). |
+
+**What was already sound:** the execution plumbing is argv-clean — no shell injection in the hot
+paths; the single `bash -c` (scion install) correctly single-quote-escapes its interpolated values;
+`jailPath` never fabricates an in-jail path for an out-of-tree target; the credential value is
+base64'd and redacted in error output at its one call site.
+
+### 5.4 The in-jail manifest is sanitized
+
+The in-jail manager no longer reads the operator config (which would require it in the mount and
+would expose host paths). Instead the host writes a **sanitized runtime manifest**
+(`.lever-manifest.yaml`, grove→resolved-image only — no host paths, no credential, no tree/ports)
+into the mount at apply. A compromised manager rewriting it can at most re-select an
+already-loaded image for a grove it dispatches — no host escalation, no secret leak.
+
+### 5.5 Residual
+
+A still-recommended hardening (not yet enforced): an image **registry allowlist / digest pin** (the
+charset check bounds injection but not *which* registry); and redaction by secret-key-name rather
+than argv shape (L1 in the backlog). And the dominant in-jail risks remain §6 (the projected
+credential) and §7 (open-egress exfiltration), addressed by the capability-broker roadmap.
 
 ## 6. Credential blast radius, and the path to capabilities
 

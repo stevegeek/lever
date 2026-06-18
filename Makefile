@@ -4,7 +4,7 @@ PREFIX ?= $(HOME)/.local/bin
 LEVER_INSTANCE ?= $(HOME)/lever-instance
 
 # Install the host `lever` binary (darwin/native) onto PATH — your everyday entry
-# (`lever up $LEVER_INSTANCE/assistant.yaml`).
+# (`lever up` from anywhere inside an instance, or `lever up path/to/lever.yaml`).
 .PHONY: install
 install:
 	@mkdir -p $(PREFIX)

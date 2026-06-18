@@ -17,11 +17,15 @@ import (
 func newApplyCmd(bf BackendFactory) *cobra.Command {
 	var dryRun bool
 	c := &cobra.Command{
-		Use:   "apply CONFIG",
-		Args:  cobra.ExactArgs(1),
+		Use:   "apply [CONFIG]",
+		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an agent-manager application up from a config",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			app, err := config.Load(args[0])
+			path, err := resolveConfigPath(argOrEmpty(args))
+			if err != nil {
+				return err
+			}
+			app, err := config.Load(path)
 			if err != nil {
 				return err
 			}

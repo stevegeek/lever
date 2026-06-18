@@ -32,11 +32,15 @@ func upDecision(phase string, fresh bool) string {
 func newUpCmd(bf BackendFactory) *cobra.Command {
 	var fresh, noAttach bool
 	c := &cobra.Command{
-		Use:   "up CONFIG",
-		Args:  cobra.ExactArgs(1),
+		Use:   "up [CONFIG]",
+		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an application up (if needed) and attach the manager",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			app, err := config.Load(args[0])
+			path, err := resolveConfigPath(argOrEmpty(args))
+			if err != nil {
+				return err
+			}
+			app, err := config.Load(path)
 			if err != nil {
 				return err
 			}

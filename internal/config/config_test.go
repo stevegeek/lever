@@ -175,3 +175,46 @@ groves:
 		t.Fatalf("grove image = %q", app.Groves[0].Image)
 	}
 }
+
+func TestLoadDefaultsTreeToConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, CanonicalName)
+	if err := os.WriteFile(p, []byte("name: demo\nbackend: orbstack\nmanager: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantDir, _ := filepath.Abs(dir)
+	if app.Tree != wantDir {
+		t.Fatalf("tree defaulted to %q, want config dir %q", app.Tree, wantDir)
+	}
+}
+
+func TestFindConfig(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(root, CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: x\nbackend: orbstack\nmanager: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantCfg, _ := filepath.Abs(cfg)
+	// found from the root dir and from a nested subdir (walks up)
+	for _, start := range []string{root, sub} {
+		got, err := FindConfig(start)
+		if err != nil {
+			t.Fatalf("FindConfig(%q): %v", start, err)
+		}
+		if got != wantCfg {
+			t.Fatalf("FindConfig(%q)=%q want %q", start, got, wantCfg)
+		}
+	}
+	// not found anywhere up the tree → error
+	if _, err := FindConfig(t.TempDir()); err == nil {
+		t.Fatal("FindConfig with no config should error")
+	}
+}

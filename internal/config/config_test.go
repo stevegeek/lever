@@ -93,7 +93,7 @@ func mustWriteFile(t *testing.T, path, content string) {
 func TestCredentialFileResolved(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "lever.yaml")
-	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: .\nmanager:\n  credential_file: secrets/tok\n")
+	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: ws\nmanager:\n  credential_file: secrets/tok\n")
 	app, err := Load(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestCredentialFileResolved(t *testing.T) {
 
 	home, _ := os.UserHomeDir()
 	cfg2 := filepath.Join(dir, "l2.yaml")
-	mustWriteFile(t, cfg2, "name: a\nbackend: orbstack\ntree: .\nmanager:\n  credential_file: ~/.scion/oauth-token\n")
+	mustWriteFile(t, cfg2, "name: a\nbackend: orbstack\ntree: ws\nmanager:\n  credential_file: ~/.scion/oauth-token\n")
 	app2, err := Load(cfg2)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func TestCredentialFileResolved(t *testing.T) {
 	}
 
 	cfg3 := filepath.Join(dir, "l3.yaml")
-	mustWriteFile(t, cfg3, "name: a\nbackend: orbstack\ntree: .\n")
+	mustWriteFile(t, cfg3, "name: a\nbackend: orbstack\ntree: ws\n")
 	app3, _ := Load(cfg3)
 	if app3.Manager.CredentialFile != "" {
 		t.Fatalf("empty CredentialFile = %q", app3.Manager.CredentialFile)
@@ -176,45 +176,94 @@ groves:
 	}
 }
 
-func TestLoadDefaultsTreeToConfigDir(t *testing.T) {
+func TestLoadConfinesTree(t *testing.T) {
+	// tree must be a confined relative subdir: reject "." (root==mount),
+	// absolute, "..", and empty. A normal subdir is accepted and joined.
+	base := "name: demo\nbackend: orbstack\nmanager: {}\n"
+	for _, bad := range []string{".", "/abs/tree", "../escape", ""} {
+		body := base
+		if bad != "" {
+			body += "tree: " + bad + "\n"
+		}
+		dir := t.TempDir()
+		p := filepath.Join(dir, CanonicalName)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(p); err == nil {
+			t.Fatalf("tree %q should be rejected", bad)
+		}
+	}
 	dir := t.TempDir()
 	p := filepath.Join(dir, CanonicalName)
-	if err := os.WriteFile(p, []byte("name: demo\nbackend: orbstack\nmanager: {}\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(base+"tree: workspace\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	app, err := Load(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	wantDir, _ := filepath.Abs(dir)
+	wantDir, _ := filepath.Abs(filepath.Join(dir, "workspace"))
 	if app.Tree != wantDir {
-		t.Fatalf("tree defaulted to %q, want config dir %q", app.Tree, wantDir)
+		t.Fatalf("tree = %q, want %q", app.Tree, wantDir)
 	}
 }
 
-func TestFindConfig(t *testing.T) {
-	root := t.TempDir()
-	sub := filepath.Join(root, "a", "b")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
+func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
+	cases := map[string]string{
+		"bad name":         "name: Bad_Name\nbackend: orbstack\ntree: ws\nmanager: {}\n",
+		"bad image":        "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  image: \"bad image;rm\"\n",
+		"prompt traversal": "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  prompt_file: ../../etc/shadow\n",
+		"bad grove name":   "name: demo\nbackend: orbstack\ntree: ws\ngroves:\n  - name: Bad\n    dir: groves/x\n",
 	}
-	cfg := filepath.Join(root, CanonicalName)
-	if err := os.WriteFile(cfg, []byte("name: x\nbackend: orbstack\nmanager: {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	wantCfg, _ := filepath.Abs(cfg)
-	// found from the root dir and from a nested subdir (walks up)
-	for _, start := range []string{root, sub} {
-		got, err := FindConfig(start)
-		if err != nil {
-			t.Fatalf("FindConfig(%q): %v", start, err)
-		}
-		if got != wantCfg {
-			t.Fatalf("FindConfig(%q)=%q want %q", start, got, wantCfg)
+	for label, body := range cases {
+		p := writeTmp(t, body)
+		if _, err := Load(p); err == nil {
+			t.Fatalf("%s should be rejected", label)
 		}
 	}
-	// not found anywhere up the tree → error
-	if _, err := FindConfig(t.TempDir()); err == nil {
-		t.Fatal("FindConfig with no config should error")
+}
+
+func TestManagerPromptPathIsRootRelative(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, CanonicalName)
+	body := "name: demo\nbackend: orbstack\ntree: workspace\nmanager:\n  prompt_file: boot.md\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want, _ := filepath.Abs(filepath.Join(dir, "boot.md")) // root, NOT under workspace/
+	if app.ManagerPromptPath() != want {
+		t.Fatalf("prompt path = %q, want %q (root-relative, outside the mount)", app.ManagerPromptPath(), want)
+	}
+}
+
+func TestManifestRoundTrip(t *testing.T) {
+	app := &App{
+		Manager: Manager{Image: "mgr:1"},
+		Groves: []Grove{
+			{Name: "a", Dir: "groves/a"},                 // inherits mgr:1
+			{Name: "b", Dir: "groves/b", Image: "alt:1"}, // override
+		},
+	}
+	dir := t.TempDir()
+	if err := WriteManifest(dir, ManifestFromApp(app)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadManifest(filepath.Join(dir, ManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img, ok := got.ImageFor("a"); !ok || img != "mgr:1" {
+		t.Fatalf("a image = %q,%v want mgr:1", img, ok)
+	}
+	if img, ok := got.ImageFor("b"); !ok || img != "alt:1" {
+		t.Fatalf("b image = %q,%v want alt:1", img, ok)
+	}
+	if _, ok := got.ImageFor("missing"); ok {
+		t.Fatal("unknown grove should not resolve")
 	}
 }

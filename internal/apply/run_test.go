@@ -16,7 +16,7 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: "/t",
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
 		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
 	}
@@ -50,7 +50,7 @@ func TestRunCredentialStep(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: "/t",
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img", CredentialFile: "/x/token"},
 	}
 	deps := Deps{
@@ -74,16 +74,21 @@ func TestRunCredentialStep(t *testing.T) {
 
 func TestStartManagerPassesPrompt(t *testing.T) {
 	dir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(dir, "groves", "worker"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "workspace", "groves", "worker"), 0o755)
+	// prompt lives at the instance ROOT (host-only), NOT under the mounted tree.
 	if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Dispatch the worker grove to create HELLO."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img\n  prompt_file: manager.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: dir,
-		Manager: config.Manager{Image: "img", PromptFile: "manager.md"},
-	}
 	deps := Deps{
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(context.Context, string) error { return nil },
@@ -183,10 +188,11 @@ func TestRegisterRemovesStaleMarkerBeforeInit(t *testing.T) {
 }
 
 func TestRegisterUsesJailPaths(t *testing.T) {
+	tree := t.TempDir() // real dir so the write-manifest step can write into it
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: "/tmp/foo",
+		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
 		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
 	}
@@ -227,10 +233,11 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 }
 
 func TestStartUsesJailPath(t *testing.T) {
+	tree := t.TempDir() // real dir so the write-manifest step can write into it
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: "/tmp/foo",
+		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
 	}
 	deps := Deps{
@@ -246,7 +253,7 @@ func TestStartUsesJailPath(t *testing.T) {
 	for _, c := range f.Calls {
 		j := strings.Join(c.Args, " ")
 		if strings.Contains(j, "start hello") {
-			if strings.Contains(j, "-g /tmp/foo") {
+			if strings.Contains(j, "-g "+tree) {
 				t.Errorf("start call used host path: %q", j)
 			}
 			if strings.Contains(j, "-g /lever") {
@@ -264,5 +271,23 @@ func TestStartUsesJailPath(t *testing.T) {
 	}
 	if !sawWorkspace {
 		t.Fatalf("start call did not pass --workspace /lever (in-place mount); calls=%+v", f.Calls)
+	}
+}
+
+func TestDefaultReadCredRejectsWorldReadable(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "tok")
+	if err := os.WriteFile(good, []byte("sk-ant-xyz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := defaultReadCred(good); err != nil || v != "sk-ant-xyz" {
+		t.Fatalf("0600 cred: got %q err %v", v, err)
+	}
+	bad := filepath.Join(dir, "open")
+	if err := os.WriteFile(bad, []byte("sk-ant-xyz"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := defaultReadCred(bad); err == nil {
+		t.Fatal("world-readable credential should be rejected")
 	}
 }

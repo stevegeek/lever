@@ -2,35 +2,51 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
 
-// loadAppConfig is the config loader used to resolve a grove's image; a package
-// var so tests can inject a fake without touching the filesystem.
-var loadAppConfig = config.Load
+// loadManifest reads the sanitized runtime manifest; a package var so tests can
+// inject a fake without touching the filesystem.
+var loadManifest = config.LoadManifest
 
-// resolveGroveImage looks up the image a grove should run on from the lever
-// config at path. Empty path ⇒ "" (no config; let scion default decide). A
-// grove declared in the config uses its image (or the inherited manager image);
-// a grove ABSENT from the config falls back to the manager image — the only
-// image guaranteed loaded into the jail — so ad-hoc dispatches still get a
-// working image instead of scion's unpullable default. A set-but-unreadable
-// path is a real misconfiguration and returns an error.
+// resolveGroveImage looks up a grove's image from the sanitized runtime manifest
+// the host wrote into the mount (grove→image only — no host config in the jail).
+// Empty path ⇒ "" (let scion decide / require --image). A grove absent from the
+// manifest also ⇒ "" — an ad-hoc grove not declared in the config must pass an
+// explicit --image. A present-but-unreadable manifest is a real error.
 func resolveGroveImage(path, grove string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	app, err := loadAppConfig(path)
+	m, err := loadManifest(path)
 	if err != nil {
 		return "", err
 	}
-	if g, ok := app.GroveByName(grove); ok {
-		return app.GroveImage(g), nil
+	if img, ok := m.ImageFor(grove); ok {
+		return img, nil
 	}
-	return app.Manager.Image, nil
+	return "", nil
+}
+
+// defaultManifestPath is the manifest location the manager reads: $LEVER_MANIFEST
+// if set, else ManifestName in the current directory (the in-jail mount root).
+func defaultManifestPath() string {
+	if p := os.Getenv("LEVER_MANIFEST"); p != "" {
+		return p
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	p := filepath.Join(wd, config.ManifestName)
+	if fi, statErr := os.Stat(p); statErr != nil || fi.IsDir() {
+		return ""
+	}
+	return p
 }
 
 func newAgentCmd(cf ClientFactory) *cobra.Command {
@@ -71,21 +87,18 @@ func agentList(cf ClientFactory) *cobra.Command {
 }
 
 func agentStart(cf ClientFactory) *cobra.Command {
-	var project, image, task, configPath string
+	var project, image, task, manifestPath string
 	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume-on-suspended) a grove agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// An explicit --image wins. Otherwise resolve from the lever config
-			// (the grove's `image:` or the manager image it inherits), so the
-			// caller doesn't have to repeat the image on every dispatch. With no
-			// --config and no $LEVER_CONFIG, discover the canonical config by
-			// walking up from cwd (the manager runs at the in-jail tree mount).
+			// An explicit --image wins. Otherwise resolve from the sanitized
+			// runtime manifest the host wrote into the mount (grove→image), so the
+			// caller doesn't repeat the image on every dispatch. With no --manifest
+			// set, fall back to the default manifest location.
 			if image == "" {
-				if configPath == "" {
-					if p, derr := resolveConfigPath(""); derr == nil {
-						configPath = p
-					}
+				if manifestPath == "" {
+					manifestPath = defaultManifestPath()
 				}
-				resolved, err := resolveGroveImage(configPath, args[0])
+				resolved, err := resolveGroveImage(manifestPath, args[0])
 				if err != nil {
 					return err
 				}
@@ -98,8 +111,8 @@ func agentStart(cf ClientFactory) *cobra.Command {
 			return nil
 		}}
 	projectFlagVar(c, &project)
-	c.Flags().StringVar(&image, "image", "", "agent image (overrides config)")
-	c.Flags().StringVar(&configPath, "config", os.Getenv("LEVER_CONFIG"), "lever config for grove image lookup (default $LEVER_CONFIG)")
+	c.Flags().StringVar(&image, "image", "", "agent image (overrides the manifest)")
+	c.Flags().StringVar(&manifestPath, "manifest", "", "runtime manifest for grove image lookup (default $LEVER_MANIFEST or ./"+config.ManifestName+")")
 	c.Flags().StringVar(&task, "task", "Read your context, then begin.", "task/boot prompt")
 	return c
 }

@@ -106,11 +106,11 @@ make lever-manager-linux  # cross-compile `lever-manager` → $LEVER_INSTANCE/ve
 make all                  # both
 
 # Bring an application up (jail + scion + manager) and attach the manager TTY.
-# From anywhere inside the instance, the config is discovered automatically:
-lever up
+# Run from the instance root (where lever.yaml lives — resolved from cwd, no walk-up):
+cd path/to/my-instance && lever up
 
-# …or pass an explicit config path:
-lever up path/to/lever.yaml
+# …or pass an explicit config path from anywhere:
+lever up path/to/my-instance/lever.yaml
 
 # Headless (bring up, don't attach):
 lever apply
@@ -121,10 +121,11 @@ Overrides: `make install PREFIX=/some/bin`, `make lever-manager-linux LEVER_INST
 
 An **application** is one config file describing the manager + its groves (image, project tree,
 scion source, credential, allowed host ports). The canonical filename is **`lever.yaml`** at the
-instance root (a package.json-style manifest); commands with no config argument discover it by
-walking up from the current directory. `tree:` defaults to the config file's directory, so the
-minimal config is just `name`, `backend`, and `manager`. See `examples/` for runnable configs and
-the reference instance for a real one.
+instance **root**, which is *not* mounted — only the `tree:` subdirectory is bind-mounted into the
+jail (so the config and boot prompt stay out of the agent-writable mount). Commands with no config
+argument read `./lever.yaml` from the current directory; there is **no walk-up discovery** (run from
+the root, or pass an explicit path). See `examples/` for runnable configs and
+[docs/config-reference.md](docs/config-reference.md) for every key.
 
 ## Commands
 
@@ -132,8 +133,8 @@ the reference instance for a real one.
 
 | Command | What it does |
 |---|---|
-| `lever up [config]` | Bring the application up *if needed* (create jail, provision scion, start the manager) **and attach** the manager's TTY. Config is discovered from cwd when omitted. `--fresh` starts a new manager thread; `--no-attach` brings up without attaching. The everyday entry point. |
-| `lever apply [config]` | Headless bring-up — runs the full plan (jail → images → scion init/config/server → credential → register manager + groves → start manager). No attach. `--dry-run` prints the plan and exits. |
+| `lever up [config]` | Bring the application up *if needed* (create jail, provision scion, start the manager) **and attach** the manager's TTY. Reads `./lever.yaml` from cwd when omitted (no walk-up). `--fresh` starts a new manager thread; `--no-attach` brings up without attaching. The everyday entry point. |
+| `lever apply [config]` | Headless bring-up — runs the full plan (jail → images → scion init/config/server → credential → register manager + groves → write manifest → start manager). No attach. `--dry-run` prints the plan and exits. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress). `--machine`, `--tree`, `--allow-port`. Rarely needed directly. |
 | `lever down` | Tear the jail down (removes the isolated machine and everything in it). Targets `lever-<name>` from the discovered config; override with `--machine`. |
 | `lever doctor` | Diagnose the setup (machine up, image registry, hub health, a credential available); each failing check prints the fix. Targets `lever-<name>` from config; override with `--machine`. |
@@ -143,7 +144,7 @@ the reference instance for a real one.
 
 | Command | What it does |
 |---|---|
-| `lever-manager agent <list\|start\|stop\|suspend\|resume\|attach\|register> NAME` | Grove/agent lifecycle against the jail-local hub. Dispatch a grove with `agent start NAME --task "…" -g <grove-dir-path>`; the image is resolved from the discovered config (grove `image:` or inherited manager image), `--image` overrides. |
+| `lever-manager agent <list\|start\|stop\|suspend\|resume\|attach\|register> NAME` | Grove/agent lifecycle against the jail-local hub. Dispatch a grove with `agent start NAME --task "…" -g <grove-dir-path>`; the image is resolved from the sanitized runtime manifest the host wrote into the mount (`--image` overrides). |
 | `lever-manager msg send --to GROVE "…"` / `lever-manager msg list` | Send a message to a running agent / read the typed agent-event inbox (`scion notifications`). |
 | `lever-manager watch` | Stream scion events to a file the manager `Monitor`s (the notification bridge). |
 | `lever-manager version` | Print the version. |

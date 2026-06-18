@@ -1,9 +1,35 @@
 package cli
 
 import (
+	"os"
+
+	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
+
+// loadAppConfig is the config loader used to resolve a grove's image; a package
+// var so tests can inject a fake without touching the filesystem.
+var loadAppConfig = config.Load
+
+// resolveGroveImage looks up the image a grove should run on from the lever
+// config at path. Empty path ⇒ "" (no config; let scion default decide). A
+// grove absent from the config also ⇒ "" (caller may pass --image explicitly).
+// A set-but-unreadable path is a real misconfiguration and returns an error.
+func resolveGroveImage(path, grove string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	app, err := loadAppConfig(path)
+	if err != nil {
+		return "", err
+	}
+	g, ok := app.GroveByName(grove)
+	if !ok {
+		return "", nil
+	}
+	return app.GroveImage(g), nil
+}
 
 func newAgentCmd(cf ClientFactory) *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Drive grove agents on Scion"}
@@ -43,9 +69,19 @@ func agentList(cf ClientFactory) *cobra.Command {
 }
 
 func agentStart(cf ClientFactory) *cobra.Command {
-	var project, image, task string
+	var project, image, task, configPath string
 	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume-on-suspended) a grove agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// An explicit --image wins. Otherwise resolve from the lever config
+			// (the grove's `image:` or the manager image it inherits), so the
+			// caller doesn't have to repeat the image on every dispatch.
+			if image == "" {
+				resolved, err := resolveGroveImage(configPath, args[0])
+				if err != nil {
+					return err
+				}
+				image = resolved
+			}
 			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: args[0], Task: task, Harness: "claude", Project: project, Image: image}); err != nil {
 				return err
 			}
@@ -53,7 +89,8 @@ func agentStart(cf ClientFactory) *cobra.Command {
 			return nil
 		}}
 	projectFlagVar(c, &project)
-	c.Flags().StringVar(&image, "image", "", "agent image")
+	c.Flags().StringVar(&image, "image", "", "agent image (overrides config)")
+	c.Flags().StringVar(&configPath, "config", os.Getenv("LEVER_CONFIG"), "lever config for grove image lookup (default $LEVER_CONFIG)")
 	c.Flags().StringVar(&task, "task", "Read your context, then begin.", "task/boot prompt")
 	return c
 }

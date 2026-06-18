@@ -17,13 +17,28 @@ type Step struct {
 // must exist and the image loaded before scion runs in it; projects must be
 // registered before the manager (which orchestrates them) starts.
 func Plan(a *config.App) []Step {
-	steps := []Step{
-		{Kind: "jail-up", Target: a.Tree},
-		{Kind: "load-image", Target: a.Manager.Image},
-		{Kind: "init-machine"},
-		{Kind: "config-registry", Detail: "scionlocal"},
-		{Kind: "scion-server"},
+	steps := []Step{{Kind: "jail-up", Target: a.Tree}}
+	// Load every distinct image into the jail's container runtime: the manager
+	// image plus any grove that overrides it (groves default to the manager
+	// image, which is then loaded once). Groves are started later by the
+	// manager, so their images must already be present — they can't be pulled
+	// under the egress allowlist. Dedup preserves first-seen order.
+	seen := map[string]bool{}
+	addLoad := func(img string) {
+		if img != "" && !seen[img] {
+			seen[img] = true
+			steps = append(steps, Step{Kind: "load-image", Target: img})
+		}
 	}
+	addLoad(a.Manager.Image)
+	for _, g := range a.Groves {
+		addLoad(a.GroveImage(g))
+	}
+	steps = append(steps,
+		Step{Kind: "init-machine"},
+		Step{Kind: "config-registry", Detail: "scionlocal"},
+		Step{Kind: "scion-server"},
+	)
 	if a.Manager.CredentialFile != "" {
 		steps = append(steps, Step{Kind: "credential", Target: a.Manager.CredentialFile})
 	}

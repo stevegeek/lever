@@ -134,3 +134,44 @@ func TestValidateRejectsGroveOutsideTree(t *testing.T) {
 		t.Fatal("expected error for grove dir outside tree")
 	}
 }
+
+func TestGroveImageFallsBackToManagerImage(t *testing.T) {
+	app := &App{
+		Manager: Manager{Image: "scionlocal/lever-claude:latest"},
+		Groves: []Grove{
+			{Name: "plain", Dir: "groves/plain"},
+			{Name: "custom", Dir: "groves/custom", Image: "scionlocal/lever-rust:latest"},
+		},
+	}
+	g0, _ := app.GroveByName("plain")
+	if got := app.GroveImage(g0); got != "scionlocal/lever-claude:latest" {
+		t.Fatalf("plain grove image = %q, want manager image", got)
+	}
+	g1, _ := app.GroveByName("custom")
+	if got := app.GroveImage(g1); got != "scionlocal/lever-rust:latest" {
+		t.Fatalf("custom grove image = %q, want override", got)
+	}
+	if _, ok := app.GroveByName("missing"); ok {
+		t.Fatal("GroveByName(missing) should be false")
+	}
+}
+
+func TestLoadParsesGroveImage(t *testing.T) {
+	p := writeTmp(t, `name: demo
+backend: orbstack
+tree: ./tree
+manager:
+  image: scionlocal/lever-claude:latest
+groves:
+  - name: appa
+    dir: groves/appa
+    image: scionlocal/lever-rust:latest
+`)
+	app, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if app.Groves[0].Image != "scionlocal/lever-rust:latest" {
+		t.Fatalf("grove image = %q", app.Groves[0].Image)
+	}
+}

@@ -19,8 +19,9 @@ type Manager struct {
 }
 
 type Grove struct {
-	Name string `yaml:"name"`
-	Dir  string `yaml:"dir"`
+	Name  string `yaml:"name"`
+	Dir   string `yaml:"dir"`
+	Image string `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
 }
 
 type ScionConfig struct {
@@ -108,6 +109,28 @@ func (a *App) Validate() error {
 
 // GroveDir returns the absolute path of a grove dir (tree + relative dir).
 func (a *App) GroveDir(g Grove) string { return filepath.Join(a.Tree, g.Dir) }
+
+// GroveImage returns the container image a grove should run on: its own
+// `image:` if set, else the manager image (the common single-image case, and
+// the image apply already loads into the jail). The manager dispatches groves
+// later, so this is the single source of truth both apply (what to load) and
+// lever-manager (what to pass to `scion start`) resolve against.
+func (a *App) GroveImage(g Grove) string {
+	if g.Image != "" {
+		return g.Image
+	}
+	return a.Manager.Image
+}
+
+// GroveByName returns the configured grove with the given name, or false.
+func (a *App) GroveByName(name string) (Grove, bool) {
+	for _, g := range a.Groves {
+		if g.Name == name {
+			return g, true
+		}
+	}
+	return Grove{}, false
+}
 
 // ManagerPromptPath returns the absolute path to the manager's prompt file
 // (relative to the tree), or "" if none is configured.

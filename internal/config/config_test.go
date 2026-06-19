@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -265,5 +266,52 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if _, ok := got.ImageFor("missing"); ok {
 		t.Fatal("unknown grove should not resolve")
+	}
+}
+
+func TestSecurityImagePolicy(t *testing.T) {
+	mk := func(sec, img string) string {
+		return "name: demo\nbackend: orbstack\ntree: ws\n" + sec + "manager:\n  image: " + img + "\n"
+	}
+	allowlist := "security:\n  allowed_image_registries: [scionlocal]\n"
+	digest := "security:\n  require_image_digest: true\n"
+	both := "security:\n  allowed_image_registries: [scionlocal]\n  require_image_digest: true\n"
+	pinned := "scionlocal/lever-claude@sha256:" + strings.Repeat("a", 64)
+
+	cases := []struct {
+		name   string
+		body   string
+		wantOK bool
+	}{
+		{"no policy, any registry tag", mk("", "ghcr.io/who/x:latest"), true},
+		{"allowlist permits scionlocal", mk(allowlist, "scionlocal/lever-claude:latest"), true},
+		{"allowlist rejects other registry", mk(allowlist, "ghcr.io/who/x:latest"), false},
+		{"allowlist not fooled by prefix", mk(allowlist, "scionlocalevil/x:latest"), false},
+		{"require digest rejects tag", mk(digest, "scionlocal/lever-claude:latest"), false},
+		{"require digest accepts pin", mk(digest, pinned), true},
+		{"both accept allowed+pinned", mk(both, pinned), true},
+		{"both reject allowed+unpinned", mk(both, "scionlocal/lever-claude:latest"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeTmp(t, tc.body)
+			_, err := Load(p)
+			if tc.wantOK && err != nil {
+				t.Fatalf("expected OK, got %v", err)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatal("expected rejection, got nil")
+			}
+		})
+	}
+}
+
+func TestSecurityImagePolicyAppliesToGroves(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\n" +
+		"security:\n  allowed_image_registries: [scionlocal]\n" +
+		"manager:\n  image: scionlocal/mgr:latest\n" +
+		"groves:\n  - name: g\n    dir: groves/g\n    image: ghcr.io/who/x:latest\n"
+	if _, err := Load(writeTmp(t, body)); err == nil {
+		t.Fatal("grove image outside the allowlist should be rejected")
 	}
 }

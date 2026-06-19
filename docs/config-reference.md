@@ -53,6 +53,9 @@ groves:
   - name: scratch
     dir: groves/scratch              # relative to tree (i.e. workspace/groves/scratch)
     # image: <ref>                   # optional; defaults to manager.image
+security:                            # optional image policy (both default off)
+  allowed_image_registries: [scionlocal]   # only run images from these registries/namespaces
+  require_image_digest: false              # true → every image must be @sha256:-pinned
 ```
 
 ## Keys
@@ -90,6 +93,21 @@ groves:
 | `name` | string | **yes** | — | Grove identity (its agent slug / hub project name). |
 | `dir` | path | **yes** | — | Grove directory, **relative to `tree`** and inside it. Mounted in place, so files the grove writes appear on the host. Must not be absolute or escape the tree (`..`). |
 | `image` | string | no | `manager.image` | Container image for this grove. Set it to give a grove a different toolchain; omit to inherit the manager image (the common single-image case). `lever apply` loads **each distinct** image into the jail. |
+
+### `security`
+
+Opt-in image policy applied to `manager.image` and every grove image. Both default off, so existing
+configs are unaffected until you turn them on.
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `allowed_image_registries` | list of string | no | `[]` (off) | An image is allowed only if it equals, or is prefixed by `<entry>/`, one of these entries — a registry host and/or namespace prefix (e.g. `scionlocal`, `ghcr.io/myorg`). Matched on whole path components (`scionlocal` allows `scionlocal/x` but not `scionlocalevil/x`). Empty ⇒ any registry. Stops a config from running an image from an untrusted source (the image is the code that runs as the manager/grove, with the projected credential). |
+| `require_image_digest` | bool | no | `false` | When `true`, every image must be pinned by **content digest** (`…@sha256:<hex>`) rather than a mutable tag like `:latest`. Guarantees you run exactly the bytes you vetted (a tag can be re-pointed to different content later). |
+
+> **Note:** these are enforced at config-load (host side), so they bound what `lever apply` loads and
+> what the manager/groves declare. An explicit `--image` passed to `lever-manager agent start` is a
+> runtime override and isn't policy-checked — but it can only run an image already loaded into the
+> jail (which came from the validated config).
 
 ## Conventions & derived values
 

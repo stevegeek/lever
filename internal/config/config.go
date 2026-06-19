@@ -29,13 +29,28 @@ type ScionConfig struct {
 	Source string `yaml:"source"`
 }
 
+// Security holds opt-in image policy. Both default off (empty/false) for
+// backward compatibility; when set they apply to manager.image and every grove
+// image. See security-model.md §5.
+type Security struct {
+	// AllowedImageRegistries restricts where images may come from: an image is
+	// allowed iff it equals, or is prefixed by "<entry>/", one of these entries
+	// (a registry host and/or namespace prefix, e.g. "scionlocal" or
+	// "ghcr.io/myorg"). Empty ⇒ no restriction.
+	AllowedImageRegistries []string `yaml:"allowed_image_registries"`
+	// RequireImageDigest requires every image to be pinned by digest
+	// (`…@sha256:<hex>`) rather than a mutable tag. False ⇒ tags allowed.
+	RequireImageDigest bool `yaml:"require_image_digest"`
+}
+
 type App struct {
-	Name    string      `yaml:"name"`
-	Backend string      `yaml:"backend"`
-	Tree    string      `yaml:"tree"`
-	Manager Manager     `yaml:"manager"`
-	Scion   ScionConfig `yaml:"scion"`
-	Groves  []Grove     `yaml:"groves"`
+	Name     string      `yaml:"name"`
+	Backend  string      `yaml:"backend"`
+	Tree     string      `yaml:"tree"`
+	Manager  Manager     `yaml:"manager"`
+	Scion    ScionConfig `yaml:"scion"`
+	Groves   []Grove     `yaml:"groves"`
+	Security Security    `yaml:"security"`
 
 	dir     string // instance root (the config file's directory)
 	treeRel string // tree as the confined relative subdir (before joining to dir)
@@ -57,6 +72,37 @@ var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 // imageRE constrains a container image reference to safe OCI-ref characters
 // (no whitespace or shell metacharacters).
 var imageRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*$`)
+
+// digestRE matches an image pinned by content digest (e.g. `…@sha256:<hex>`).
+var digestRE = regexp.MustCompile(`@[a-z0-9]+:[0-9a-fA-F]{32,}$`)
+
+// validateImage checks an image ref against the charset, the optional registry
+// allowlist, and the optional digest-pin requirement. field names the source
+// for error messages (e.g. "manager.image").
+func (s Security) validateImage(field, ref string) error {
+	if !imageRE.MatchString(ref) {
+		return fmt.Errorf("config: %s %q has invalid characters", field, ref)
+	}
+	if len(s.AllowedImageRegistries) > 0 && !registryAllowed(ref, s.AllowedImageRegistries) {
+		return fmt.Errorf("config: %s %q is not from an allowed registry (allowed: %s)", field, ref, strings.Join(s.AllowedImageRegistries, ", "))
+	}
+	if s.RequireImageDigest && !digestRE.MatchString(ref) {
+		return fmt.Errorf("config: %s %q must be pinned by digest (…@sha256:<hex>); a mutable tag is not allowed", field, ref)
+	}
+	return nil
+}
+
+// registryAllowed reports whether ref starts with one of the allowed prefixes,
+// matched on whole path components (so "scionlocal" allows "scionlocal/x" but
+// not "scionlocalevil/x").
+func registryAllowed(ref string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if ref == p || strings.HasPrefix(ref, p+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // confinedRel reports whether p is a relative path that stays strictly inside
 // its base (not absolute, not ".", no ".." escape). Used for `tree` and
@@ -133,8 +179,10 @@ func (a *App) Validate() error {
 	if a.Tree == "" {
 		return fmt.Errorf("config: tree is required")
 	}
-	if a.Manager.Image != "" && !imageRE.MatchString(a.Manager.Image) {
-		return fmt.Errorf("config: manager.image %q has invalid characters", a.Manager.Image)
+	if a.Manager.Image != "" {
+		if err := a.Security.validateImage("manager.image", a.Manager.Image); err != nil {
+			return err
+		}
 	}
 	// prompt_file is host-only (read at the root, NOT in the mount) and must stay
 	// inside the instance root.
@@ -151,8 +199,10 @@ func (a *App) Validate() error {
 		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
 			return fmt.Errorf("config: grove dir %q must be relative and inside the tree", g.Dir)
 		}
-		if g.Image != "" && !imageRE.MatchString(g.Image) {
-			return fmt.Errorf("config: grove %q image %q has invalid characters", g.Name, g.Image)
+		if g.Image != "" {
+			if err := a.Security.validateImage(fmt.Sprintf("grove %q image", g.Name), g.Image); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

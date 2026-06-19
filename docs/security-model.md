@@ -152,7 +152,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `name`, grove `name` | `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes the jail machine name and a shell token). |
 | `tree` | confined relative subdir (not `.`/absolute/`..`). |
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute). |
-| `manager.image`, grove `image` | safe OCI-ref charset (no whitespace/shell metacharacters). |
+| `manager.image`, grove `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected if world-readable) and a **size cap** — defence in depth for the secret it becomes (§6). |
 | grove `dir` | already rejected absolute/`..` (unchanged). |
 
@@ -171,10 +171,11 @@ already-loaded image for a grove it dispatches — no host escalation, no secret
 
 ### 5.5 Residual
 
-A still-recommended hardening (not yet enforced): an image **registry allowlist / digest pin** (the
-charset check bounds injection but not *which* registry); and redaction by secret-key-name rather
-than argv shape (L1 in the backlog). And the dominant in-jail risks remain §6 (the projected
-credential) and §7 (open-egress exfiltration), addressed by the capability-broker roadmap.
+Image **registry allowlist** and **digest pinning** are now available as opt-in `security:` policy
+(§5.3) — enable them to bound *which* registry an image comes from and to require vetted, immutable
+images. Still open: redaction by secret-key-name rather than argv shape (L1 in the backlog). And the
+dominant in-jail risks remain §6 (the projected credential) and §7 (open-egress exfiltration),
+addressed by the capability-broker roadmap.
 
 ## 6. Credential blast radius, and the path to capabilities
 

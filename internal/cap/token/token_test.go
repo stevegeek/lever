@@ -66,3 +66,67 @@ func TestVerifyAllowsBoundAgentAndGrantedTool(t *testing.T) {
 		t.Fatalf("expected allow, got: %v", err)
 	}
 }
+
+func TestVerifyDeniesWrongCaller(t *testing.T) {
+	kp, tok := mintFixture(t)
+	// agent B (caller "evil") presenting agent "scratch"'s token
+	err := Verify(kp.Public, tok, Request{Caller: "evil", Operation: "qmd.read", Now: time.Now(), MinEpoch: 0})
+	if err == nil {
+		t.Fatal("expected denial: caller != bound agent (cross-agent theft)")
+	}
+}
+
+func TestVerifyDeniesUngrantedTool(t *testing.T) {
+	kp, tok := mintFixture(t)
+	err := Verify(kp.Public, tok, Request{Caller: "scratch", Operation: "calendar.write", Now: time.Now(), MinEpoch: 0})
+	if err == nil {
+		t.Fatal("expected denial: operation not in granted tool set")
+	}
+}
+
+func TestVerifyDeniesExpired(t *testing.T) {
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := Mint(kp.Private, Grant{Agent: "scratch", Tools: []string{"qmd.read"}, Expiry: time.Now().Add(-time.Minute), Epoch: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Verify(kp.Public, tok, Request{Caller: "scratch", Operation: "qmd.read", Now: time.Now(), MinEpoch: 0})
+	if err == nil {
+		t.Fatal("expected denial: token expired")
+	}
+}
+
+func TestVerifyDeniesStaleEpoch(t *testing.T) {
+	kp, tok := mintFixture(t) // minted at epoch 0
+	// broker raised min epoch to 1 -> token is revoked
+	err := Verify(kp.Public, tok, Request{Caller: "scratch", Operation: "qmd.read", Now: time.Now(), MinEpoch: 1})
+	if err == nil {
+		t.Fatal("expected denial: token epoch below broker min epoch (revoked)")
+	}
+}
+
+func TestVerifyDeniesWrongKey(t *testing.T) {
+	_, tok := mintFixture(t)
+	other, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Verify(other.Public, tok, Request{Caller: "scratch", Operation: "qmd.read", Now: time.Now(), MinEpoch: 0})
+	if err == nil {
+		t.Fatal("expected denial: token not signed by this key")
+	}
+}
+
+func TestVerifyDeniesGarbage(t *testing.T) {
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Verify(kp.Public, []byte("not a biscuit"), Request{Caller: "scratch", Operation: "qmd.read", Now: time.Now(), MinEpoch: 0})
+	if err == nil {
+		t.Fatal("expected denial: unparseable token must fail closed")
+	}
+}

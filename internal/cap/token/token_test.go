@@ -35,3 +35,34 @@ func TestMintRejectsEmptyAgent(t *testing.T) {
 		t.Fatal("expected error for empty agent")
 	}
 }
+
+func mintFixture(t *testing.T) (KeyPair, []byte) {
+	t.Helper()
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := Mint(kp.Private, Grant{
+		Agent:  "scratch",
+		Tools:  []string{"qmd.read", "qmd.write"},
+		Expiry: time.Now().Add(time.Hour),
+		Epoch:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kp, tok
+}
+
+func TestVerifyAllowsBoundAgentAndGrantedTool(t *testing.T) {
+	kp, tok := mintFixture(t)
+	err := Verify(kp.Public, tok, Request{
+		Caller:    "scratch",
+		Operation: "qmd.read",
+		Now:       time.Now(),
+		MinEpoch:  0,
+	})
+	if err != nil {
+		t.Fatalf("expected allow, got: %v", err)
+	}
+}

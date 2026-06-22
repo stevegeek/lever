@@ -61,3 +61,42 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	}
 	return serialized, nil
 }
+
+// Request is the context the broker checks a token against, per call.
+type Request struct {
+	Caller    string    // the mTLS-authenticated caller identity
+	Operation string    // the operation being attempted (e.g. "qmd.read")
+	Now       time.Time // current time
+	MinEpoch  int       // the broker's current minimum acceptable epoch
+}
+
+// Verify checks tok against the public key and r. It returns nil iff the
+// signature is valid, all intrinsic checks pass (expiry, epoch >= MinEpoch,
+// caller == bound agent), and Operation is in the granted tool set.
+func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
+	b, err := biscuit.Unmarshal(tok)
+	if err != nil {
+		return fmt.Errorf("token: unmarshal: %w", err)
+	}
+	authz, err := b.Authorizer(pub) // verifies the signature against the root public key
+	if err != nil {
+		return fmt.Errorf("token: signature: %w", err)
+	}
+	contents, err := parser.FromStringAuthorizerWithParams(
+		"caller({caller});\noperation({op});\ntime({now});\nmin_epoch({min});\nallow if operation($o), tool($o);\n",
+		map[string]biscuit.Term{
+			"caller": biscuit.String(r.Caller),
+			"op":     biscuit.String(r.Operation),
+			"now":    biscuit.Date(r.Now),
+			"min":    biscuit.Integer(int64(r.MinEpoch)),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("token: parse authorizer: %w", err)
+	}
+	authz.AddAuthorizer(contents)
+	if err := authz.Authorize(); err != nil {
+		return fmt.Errorf("token: denied: %w", err)
+	}
+	return nil
+}

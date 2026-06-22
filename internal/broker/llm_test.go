@@ -29,7 +29,11 @@ func TestLLMProxySwapsKey(t *testing.T) {
 	r.Method = "POST"
 	w := httptest.NewRecorder()
 
-	b.llmHandler().ServeHTTP(w, r)
+	h, err := b.llmHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())

@@ -24,7 +24,15 @@ func (b *Broker) Handler() http.Handler {
 		mux.Handle(rt.PathPrefix, h)
 	}
 	if b.policy.LLM.Mode == LLMAPIKey {
-		mux.Handle("/llm/", b.llmHandler())
+		h, err := b.llmHandler()
+		if err != nil {
+			msg := err.Error()
+			mux.Handle("/llm/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, msg, http.StatusInternalServerError)
+			}))
+		} else {
+			mux.Handle("/llm/", h)
+		}
 	}
 	return mux
 }

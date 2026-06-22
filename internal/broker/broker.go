@@ -59,7 +59,8 @@ func (b *Broker) isRevoked(agent string) bool {
 	return b.revoked[agent]
 }
 
-// audit logs a decision. reason is "" for allows.
+// audit logs an authorization decision. detail is free-form context (grove name,
+// request path, or error reason) and never contains secret or biscuit material.
 func (b *Broker) audit(operation, caller, decision, detail string) {
 	b.log.Info("broker.decision",
 		"operation", operation, "caller", caller, "decision", decision, "detail", detail)

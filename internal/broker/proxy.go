@@ -16,6 +16,16 @@ func (b *Broker) routeHandler(rt Route) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("broker: route %q bad backend %q: %w", rt.Operation, rt.Backend, err)
 	}
+
+	var injectSecret string
+	if rt.SecretName != "" {
+		s, ok := b.policy.Secret(rt.SecretName)
+		if !ok {
+			return nil, fmt.Errorf("broker: route %q references unknown secret %q", rt.Operation, rt.SecretName)
+		}
+		injectSecret = s
+	}
+
 	rp := httputil.NewSingleHostReverseProxy(target)
 	base := rp.Director
 	rp.Director = func(req *http.Request) {
@@ -23,11 +33,13 @@ func (b *Broker) routeHandler(rt Route) (http.Handler, error) {
 		base(req)
 		req.Host = target.Host
 		req.Header.Del("Authorization") // never leak the biscuit upstream
-		if rt.SecretName != "" {
-			if secret, ok := b.policy.Secret(rt.SecretName); ok {
-				req.Header.Set("Authorization", "Bearer "+secret)
-			}
+		if injectSecret != "" {
+			req.Header.Set("Authorization", "Bearer "+injectSecret)
 		}
+		req.Header.Del("Cookie")
+		req.Header.Del("X-Forwarded-For")
+		req.Header.Del("X-Forwarded-Host")
+		req.Header.Del("X-Forwarded-Proto")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, err := b.authorize(r, rt.Operation)

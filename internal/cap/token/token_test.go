@@ -1,8 +1,12 @@
 package token
 
 import (
+	"crypto/rand"
 	"testing"
 	"time"
+
+	"github.com/biscuit-auth/biscuit-go/v2"
+	"github.com/biscuit-auth/biscuit-go/v2/parser"
 )
 
 func TestMintProducesSerializedToken(t *testing.T) {
@@ -128,5 +132,78 @@ func TestVerifyDeniesGarbage(t *testing.T) {
 	err = Verify(kp.Public, []byte("not a biscuit"), Request{Caller: "scratch", Operation: "qmd.read", Now: time.Now(), MinEpoch: 0})
 	if err == nil {
 		t.Fatal("expected denial: unparseable token must fail closed")
+	}
+}
+
+func TestMintAcceptsDuplicateTools(t *testing.T) {
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := Mint(kp.Private, Grant{Agent: "scratch", Tools: []string{"qmd.read", "qmd.read"}, Expiry: time.Now().Add(time.Hour), Epoch: 0})
+	if err != nil {
+		t.Fatalf("mint with duplicate tools should succeed: %v", err)
+	}
+	if err := Verify(kp.Public, tok, Request{Caller: "scratch", Operation: "qmd.read", Now: time.Now(), MinEpoch: 0}); err != nil {
+		t.Fatalf("deduped tool should still be usable: %v", err)
+	}
+}
+
+func TestVerifyDeniesEmptyToolSet(t *testing.T) {
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := Mint(kp.Private, Grant{Agent: "scratch", Tools: nil, Expiry: time.Now().Add(time.Hour), Epoch: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(kp.Public, tok, Request{Caller: "scratch", Operation: "qmd.read", Now: time.Now(), MinEpoch: 0}); err == nil {
+		t.Fatal("expected denial: a token with no tools must authorize nothing")
+	}
+}
+
+func TestVerifyDeniesInjectionShapedOperation(t *testing.T) {
+	kp, tok := mintFixture(t)
+	evil := `qmd.read"); allow if true; //`
+	if err := Verify(kp.Public, tok, Request{Caller: "scratch", Operation: evil, Now: time.Now(), MinEpoch: 0}); err == nil {
+		t.Fatal("expected denial: operation string must be inert opaque data, not Datalog")
+	}
+}
+
+func TestVerifyDeniesZeroTime(t *testing.T) {
+	kp, tok := mintFixture(t)
+	var zero time.Time
+	if err := Verify(kp.Public, tok, Request{Caller: "scratch", Operation: "qmd.read", Now: zero, MinEpoch: 0}); err == nil {
+		t.Fatal("expected denial: zero request time must fail closed")
+	}
+}
+
+// TestVerifyDeniesAppendedAttenuationCannotWiden is the most important property:
+// an attacker who appends a block adding a tool must NOT gain that capability.
+func TestVerifyDeniesAppendedAttenuationCannotWiden(t *testing.T) {
+	kp, tok := mintFixture(t) // tools: qmd.read, qmd.write
+	b, err := biscuit.Unmarshal(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb := b.CreateBlock()
+	blk, err := parser.FromStringBlockWithParams(`tool({t});`, map[string]biscuit.Term{"t": biscuit.String("calendar.write")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bb.AddBlock(blk); err != nil {
+		t.Fatal(err)
+	}
+	widened, err := b.Append(rand.Reader, bb.Build())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ser, err := widened.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(kp.Public, ser, Request{Caller: "scratch", Operation: "calendar.write", Now: time.Now(), MinEpoch: 0}); err == nil {
+		t.Fatal("expected denial: an appended block must not widen the granted tool set")
 	}
 }

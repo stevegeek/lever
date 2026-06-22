@@ -12,8 +12,11 @@ import (
 
 // Grant is the capability the broker mints for one agent.
 type Grant struct {
-	Agent  string    // the agent identity this capability is bound to
-	Tools  []string  // the operations the agent may perform (e.g. "qmd.read")
+	Agent string // the agent identity this capability is bound to
+	// Tools lists the operations the agent may perform (e.g. "qmd.read").
+	// Matching is EXACT and opaque: no globbing or prefix semantics.
+	// Duplicate entries are silently deduplicated.
+	Tools  []string
 	Expiry time.Time // hard expiry
 	Epoch  int       // mint epoch; verified against the broker's current min-epoch
 }
@@ -33,8 +36,13 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	}
 	sb.WriteString("agent({agent});\n")
 	sb.WriteString("epoch({epoch});\n")
-	for i, tool := range g.Tools {
-		key := fmt.Sprintf("t%d", i)
+	seen := make(map[string]struct{}, len(g.Tools))
+	for _, tool := range g.Tools {
+		if _, dup := seen[tool]; dup {
+			continue
+		}
+		seen[tool] = struct{}{}
+		key := fmt.Sprintf("t%d", len(seen)-1)
 		params[key] = biscuit.String(tool)
 		sb.WriteString(fmt.Sprintf("tool({%s});\n", key))
 	}
@@ -73,7 +81,12 @@ type Request struct {
 // Verify checks tok against the public key and r. It returns nil iff the
 // signature is valid, all intrinsic checks pass (expiry, epoch >= MinEpoch,
 // caller == bound agent), and Operation is in the granted tool set.
+// Operation must EXACTLY equal one of the token's tools; no globbing or
+// prefix matching is performed.
 func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
+	if r.Now.IsZero() {
+		return fmt.Errorf("token: request has zero time")
+	}
 	b, err := biscuit.Unmarshal(tok)
 	if err != nil {
 		return fmt.Errorf("token: unmarshal: %w", err)

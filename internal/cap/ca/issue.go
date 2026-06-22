@@ -15,13 +15,13 @@ import (
 // certTTL bounds a leaf cert's lifetime. Short by design; rotation is a later milestone.
 const certTTL = 24 * time.Hour
 
-// IssueAgentCert mints a short-lived client cert whose CommonName is the agent
-// identity. The broker compares this CN to a capability's bound agent.
+// IssueAgentCert mints a short-lived (24h) client cert whose CommonName is the
+// agent identity. The broker compares this CN to a capability's bound agent.
 func (c *CA) IssueAgentCert(agent string) (certPEM, keyPEM []byte, err error) {
 	return c.issue(agent, x509.ExtKeyUsageClientAuth, nil)
 }
 
-// IssueServerCert mints the broker's own server cert for the given hostname.
+// IssueServerCert mints a short-lived (24h) server cert for the given hostname.
 func (c *CA) IssueServerCert(host string) (certPEM, keyPEM []byte, err error) {
 	return c.issue(host, x509.ExtKeyUsageServerAuth, []string{host})
 }

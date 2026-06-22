@@ -30,8 +30,8 @@ func TestIssueAgentCertHasAgentCNAndVerifies(t *testing.T) {
 	if leaf.Subject.CommonName != "scratch" {
 		t.Errorf("CN = %q, want scratch", leaf.Subject.CommonName)
 	}
-	if leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
-		t.Errorf("agent cert EKU = %v, want ClientAuth", leaf.ExtKeyUsage)
+	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
+		t.Errorf("agent cert EKU = %v, want [ClientAuth]", leaf.ExtKeyUsage)
 	}
 
 	pool := x509.NewCertPool()
@@ -55,8 +55,8 @@ func TestIssueServerCertHasServerAuthAndDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
-		t.Errorf("server cert EKU = %v, want ServerAuth", leaf.ExtKeyUsage)
+	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
+		t.Errorf("server cert EKU = %v, want [ServerAuth]", leaf.ExtKeyUsage)
 	}
 	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "host.orb.internal" {
 		t.Errorf("DNSNames = %v, want [host.orb.internal]", leaf.DNSNames)

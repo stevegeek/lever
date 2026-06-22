@@ -3,6 +3,7 @@ package ca
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -83,5 +84,58 @@ func TestMTLSRejectsClientWithoutCert(t *testing.T) {
 	}}}
 	if _, err := client.Get(srv.URL); err == nil {
 		t.Fatal("expected handshake failure when client presents no cert")
+	}
+}
+
+func TestMTLSRejectsCertFromDifferentCA(t *testing.T) {
+	server, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attacker, err := Generate() // a DIFFERENT CA
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCertPEM, serverKeyPEM, err := server.IssueServerCert("example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvTLS, err := server.ServerTLSConfig(serverCertPEM, serverKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.TLS = srvTLS
+	srv.StartTLS()
+	defer srv.Close()
+
+	rogueCertPEM, rogueKeyPEM, err := attacker.IssueAgentCert("scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rogue, err := tls.X509KeyPair(rogueCertPEM, rogueKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Cert) // client trusts the real server's CA
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		Certificates: []tls.Certificate{rogue}, RootCAs: pool, ServerName: "example.test",
+	}}}
+	if _, err := client.Get(srv.URL); err == nil {
+		t.Fatal("expected rejection: client cert signed by a different CA must not be accepted")
+	}
+}
+
+func TestAgentFromConnStateFailsClosed(t *testing.T) {
+	// No verified chains at all.
+	if _, err := AgentFromConnState(tls.ConnectionState{}); err == nil {
+		t.Error("expected error when no verified client certificate is present")
+	}
+	// A verified leaf with an empty CommonName.
+	emptyCN := &x509.Certificate{Subject: pkix.Name{CommonName: ""}}
+	cs := tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{emptyCN}}}
+	if _, err := AgentFromConnState(cs); err == nil {
+		t.Error("expected error when client certificate CommonName is empty")
 	}
 }

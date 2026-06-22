@@ -24,14 +24,13 @@ func TestCASaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	// TODO(Task 7): re-enable once IssueAgentCert exists
-	// certPEM, _, err := loaded.IssueAgentCert("scratch")
-	// if err != nil {
-	//     t.Fatalf("issue after load: %v", err)
-	// }
-	// if len(certPEM) == 0 {
-	//     t.Fatal("empty issued cert")
-	// }
+	certPEM, _, err := loaded.IssueAgentCert("scratch")
+	if err != nil {
+		t.Fatalf("issue after load: %v", err)
+	}
+	if len(certPEM) == 0 {
+		t.Fatal("empty issued cert")
+	}
 	if loaded == nil {
 		t.Fatal("nil CA after load")
 	}

@@ -52,3 +52,30 @@ func TestMintRejectsEmptyCapability(t *testing.T) {
 		t.Fatal("expected error for empty capability")
 	}
 }
+
+func mintFixture(t *testing.T) (KeyPair, []byte) {
+	t.Helper()
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := Mint(kp.Private, sampleGrant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kp, tok
+}
+
+func TestVerifyAllowsBoundAgentCapabilityAndConstraint(t *testing.T) {
+	kp, tok := mintFixture(t)
+	err := Verify(kp.Public, tok, Request{
+		Caller:     "scratch",
+		Capability: Capability{Tool: "db", Operation: "read"},
+		Params:     map[string]string{"table": "A"},
+		Now:        time.Now(),
+		MinEpoch:   0,
+	})
+	if err != nil {
+		t.Fatalf("expected allow, got: %v", err)
+	}
+}

@@ -87,3 +87,67 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	}
 	return serialized, nil
 }
+
+// Request is the context the broker checks a token against, per exercise.
+type Request struct {
+	Caller     string            // the mTLS-authenticated caller identity
+	Capability Capability        // the (tool, operation) being attempted
+	Params     map[string]string // the request's parameters (for constraint checks)
+	Now        time.Time         // current time
+	MinEpoch   int               // the broker's current minimum acceptable epoch
+}
+
+// Verify checks tok against the public key and r. Returns nil iff the signature
+// is valid, caller == bound_agent, the requested capability matches, every
+// constraint check is satisfied by r.Params, and the token is unexpired and at
+// or above MinEpoch. Param values are injected as opaque facts (no injection).
+func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
+	if r.Now.IsZero() {
+		return fmt.Errorf("token: request has zero time")
+	}
+	if r.Capability.Tool == "" || r.Capability.Operation == "" {
+		return fmt.Errorf("token: request has empty capability")
+	}
+	b, err := biscuit.Unmarshal(tok)
+	if err != nil {
+		return fmt.Errorf("token: unmarshal: %w", err)
+	}
+	authz, err := b.Authorizer(pub) // verifies the signature against the root public key
+	if err != nil {
+		return fmt.Errorf("token: signature: %w", err)
+	}
+
+	var sb strings.Builder
+	params := map[string]biscuit.Term{
+		"caller": biscuit.String(r.Caller),
+		"tool":   biscuit.String(r.Capability.Tool),
+		"op":     biscuit.String(r.Capability.Operation),
+		"now":    biscuit.Date(r.Now),
+		"min":    biscuit.Integer(int64(r.MinEpoch)),
+	}
+	sb.WriteString("caller({caller});\n")
+	sb.WriteString("request_tool({tool});\n")
+	sb.WriteString("request_op({op});\n")
+	sb.WriteString("time({now});\n")
+	sb.WriteString("min_epoch({min});\n")
+	i := 0
+	for k, v := range r.Params {
+		kk := fmt.Sprintf("pk%d", i)
+		vk := fmt.Sprintf("pv%d", i)
+		params[kk] = biscuit.String(k)
+		params[vk] = biscuit.String(v)
+		sb.WriteString(fmt.Sprintf("param({%s}, {%s});\n", kk, vk))
+		i++
+	}
+	sb.WriteString("allow if capability($t, $o), request_tool($t), request_op($o);\n")
+
+	contents, err := parser.FromStringAuthorizerWithParams(sb.String(), params)
+	if err != nil {
+		return fmt.Errorf("token: parse authorizer: %w", err)
+	}
+	authz.AddAuthorizer(contents)
+	if err := authz.Authorize(); err != nil {
+		return fmt.Errorf("token: denied: %w", err)
+	}
+	return nil
+}

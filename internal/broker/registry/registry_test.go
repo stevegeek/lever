@@ -107,3 +107,34 @@ func TestMapParamsUnknownToolOrOp(t *testing.T) {
 		t.Error("expected error for unknown operation")
 	}
 }
+
+func TestValidateConstraintsAllowsPermittedValue(t *testing.T) {
+	r := New()
+	_ = r.Register(dbTool()) // table ∈ {A,B}
+	if err := r.ValidateConstraints("db", map[string]string{"table": "A"}); err != nil {
+		t.Fatalf("table=A is permitted: %v", err)
+	}
+}
+
+func TestValidateConstraintsRejectsForbiddenValue(t *testing.T) {
+	r := New()
+	_ = r.Register(dbTool())
+	if err := r.ValidateConstraints("db", map[string]string{"table": "C"}); err == nil {
+		t.Fatal("table=C must be rejected (not in {A,B})")
+	}
+}
+
+func TestValidateConstraintsUnrestrictedKeyPasses(t *testing.T) {
+	r := New()
+	_ = r.Register(dbTool()) // "filter" has no AllowedValues entry
+	if err := r.ValidateConstraints("db", map[string]string{"filter": "anything"}); err != nil {
+		t.Fatalf("unrestricted key should pass: %v", err)
+	}
+}
+
+func TestValidateConstraintsUnknownTool(t *testing.T) {
+	r := New()
+	if err := r.ValidateConstraints("ghost", map[string]string{"table": "A"}); err == nil {
+		t.Fatal("expected error for unknown tool")
+	}
+}

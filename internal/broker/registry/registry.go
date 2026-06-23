@@ -107,3 +107,33 @@ func (r *Registry) MapParams(tool, op string, args map[string]string) (map[strin
 	}
 	return out, nil
 }
+
+// ValidateConstraints returns an error if any (key,value) constraint requests a
+// value the tool's AllowedValues forbids. Keys without an AllowedValues entry
+// are unrestricted at this layer (the tool backstops). Used at mint time as
+// defense-in-depth. Errors if the tool is unregistered.
+func (r *Registry) ValidateConstraints(tool string, constraints map[string]string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[tool]
+	if !ok {
+		return fmt.Errorf("registry: unknown tool %q", tool)
+	}
+	for k, v := range constraints {
+		allowed, restricted := t.AllowedValues[k]
+		if !restricted {
+			continue
+		}
+		found := false
+		for _, a := range allowed {
+			if a == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("registry: tool %q forbids %s=%q", tool, k, v)
+		}
+	}
+	return nil
+}

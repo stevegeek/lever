@@ -48,3 +48,20 @@ func TestTicketRejectsUnknown(t *testing.T) {
 		t.Fatal("unknown ticket must fail")
 	}
 }
+
+func TestIssuePrunesExpiredTickets(t *testing.T) {
+	s := NewTicketStore()
+	if _, err := s.Issue("ghost", time.Nanosecond); err != nil { // expires ~immediately
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := s.Issue("scratch", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	n := len(s.tickets)
+	s.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected the expired ticket pruned on Issue, got %d tickets", n)
+	}
+}

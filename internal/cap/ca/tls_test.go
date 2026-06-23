@@ -109,6 +109,15 @@ func TestAgentFromConnStateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAgentFromConnStateRejectsEmptyCN(t *testing.T) {
+	cs := tls.ConnectionState{
+		VerifiedChains: [][]*x509.Certificate{{&x509.Certificate{Subject: pkix.Name{CommonName: ""}}}},
+	}
+	if _, err := AgentFromConnState(cs); err == nil {
+		t.Fatal("expected error: verified client cert with empty common name")
+	}
+}
+
 func signedClientCert(t *testing.T, c *CA, cn string) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

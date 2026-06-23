@@ -36,9 +36,15 @@ func (s *TicketStore) Issue(grove string, ttl time.Duration) (string, error) {
 		return "", fmt.Errorf("ca: ticket randomness: %w", err)
 	}
 	tk := hex.EncodeToString(buf)
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tickets[tk] = ticket{grove: grove, expires: time.Now().Add(ttl)}
+	for k, t := range s.tickets {
+		if now.After(t.expires) {
+			delete(s.tickets, k)
+		}
+	}
+	s.tickets[tk] = ticket{grove: grove, expires: now.Add(ttl)}
 	return tk, nil
 }
 

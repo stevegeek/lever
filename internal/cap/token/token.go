@@ -131,6 +131,8 @@ func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
 	sb.WriteString("request_op({op});\n")
 	sb.WriteString("time({now});\n")
 	sb.WriteString("min_epoch({min});\n")
+	// Each param fact is self-contained (key and value travel together), so map
+	// iteration order is cosmetic; the pk%d/pv%d indices only name placeholders.
 	i := 0
 	for k, v := range r.Params {
 		kk := fmt.Sprintf("pk%d", i)

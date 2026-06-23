@@ -267,3 +267,54 @@ func TestVerifyDeniesAppendedCapabilityFact(t *testing.T) {
 		t.Fatal("expected denial: an appended capability fact must not widen the grant")
 	}
 }
+
+func TestMintMultipleConstraintsAllMustMatch(t *testing.T) {
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := Mint(kp.Private, Grant{
+		Agent:       "scratch",
+		Capability:  Capability{Tool: "db", Operation: "read"},
+		Constraints: []Constraint{{Key: "table", Value: "A"}, {Key: "filter", Value: "Y"}},
+		Expiry:      time.Now().Add(time.Hour),
+		Epoch:       0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := Request{Caller: "scratch", Capability: Capability{Tool: "db", Operation: "read"}, Now: time.Now(), MinEpoch: 0}
+	r := base
+	r.Params = map[string]string{"table": "A", "filter": "Y"}
+	if err := Verify(kp.Public, tok, r); err != nil {
+		t.Fatalf("expected allow with all constraints satisfied: %v", err)
+	}
+	r2 := base
+	r2.Params = map[string]string{"table": "A"}
+	if err := Verify(kp.Public, tok, r2); err == nil {
+		t.Fatal("expected denial: second constraint filter==Y not satisfied")
+	}
+}
+
+func TestAttenuateChainedTwiceNarrowsCumulatively(t *testing.T) {
+	kp, tok := mintFixture(t) // capability db.read, constraint table==A
+	step1, err := Attenuate(tok, []Constraint{{Key: "filter", Value: "Y"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step2, err := Attenuate(step1, []Constraint{{Key: "region", Value: "Z"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := Request{Caller: "scratch", Capability: Capability{Tool: "db", Operation: "read"}, Now: time.Now(), MinEpoch: 0}
+	r := base
+	r.Params = map[string]string{"table": "A", "filter": "Y", "region": "Z"}
+	if err := Verify(kp.Public, step2, r); err != nil {
+		t.Fatalf("expected allow within doubly-narrowed bounds: %v", err)
+	}
+	r2 := base
+	r2.Params = map[string]string{"table": "A", "filter": "Y"}
+	if err := Verify(kp.Public, step2, r2); err == nil {
+		t.Fatal("expected denial: chained constraint region==Z not satisfied")
+	}
+}

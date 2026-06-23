@@ -138,3 +138,13 @@ func TestValidateConstraintsUnknownTool(t *testing.T) {
 		t.Fatal("expected error for unknown tool")
 	}
 }
+
+func TestValidateConstraintsEmptyAllowedSliceRejectsAll(t *testing.T) {
+	r := New()
+	tool := dbTool()
+	tool.AllowedValues = map[string][]string{"table": {}} // restricted to nothing
+	_ = r.Register(tool)
+	if err := r.ValidateConstraints("db", map[string]string{"table": "A"}); err == nil {
+		t.Fatal("an empty AllowedValues slice must reject every value (fail-closed), not pass")
+	}
+}

@@ -42,7 +42,9 @@ func New() *Registry {
 }
 
 // Register records (or replaces, by name) a tool. Name, Backend, and at least
-// one operation are required.
+// one operation are required. Register takes ownership of t's nested maps
+// (Operations, AllowedValues, and each Operation's CaveatParam); callers must
+// not mutate them after registering.
 func (r *Registry) Register(t Tool) error {
 	if t.Name == "" {
 		return fmt.Errorf("registry: tool has empty name")

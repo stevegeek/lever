@@ -15,7 +15,9 @@ type agentPolicy struct {
 	delegate map[capKey]map[string]struct{} // (tool,op) -> recipients it may delegate to
 }
 
-// Policy holds the per-agent request/delegation policy.
+// Policy holds the per-agent request/delegation policy. It is NOT safe for
+// concurrent mutation: build it fully at boot with AllowObtain/AllowDelegate,
+// then query MayObtain concurrently.
 type Policy struct {
 	agents map[string]*agentPolicy
 }

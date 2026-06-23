@@ -9,7 +9,8 @@ func samplePolicy() *Policy {
 	p := NewPolicy()
 	p.AllowDelegate("manager", "db", "read", "analyst", "worker")
 	p.AllowObtain("analyst", "db", "read")
-	// worker: registered implicitly by being a delegate recipient; no obtain.
+	// worker is a pure executor: it appears only as a delegate recipient, with
+	// no obtain entry of its own.
 	return p
 }
 
@@ -84,5 +85,13 @@ func TestDelegateAccumulatesRecipients(t *testing.T) {
 	p.AllowDelegate("manager", "db", "read", "worker") // second call adds, not replaces
 	if !p.MayObtain("manager", "analyst", "db", "read") || !p.MayObtain("manager", "worker", "db", "read") {
 		t.Fatal("recipients should accumulate across AllowDelegate calls")
+	}
+}
+
+func TestSelfDelegateEntryDoesNotEnableSelfObtain(t *testing.T) {
+	p := NewPolicy()
+	p.AllowDelegate("x", "db", "read", "x") // a delegate entry naming itself
+	if p.MayObtain("x", "x", "db", "read") {
+		t.Fatal("a self-targeted delegate entry must not satisfy a self-obtain (self-actions route through obtain)")
 	}
 }

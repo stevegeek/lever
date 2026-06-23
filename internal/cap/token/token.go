@@ -2,6 +2,7 @@ package token
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"time"
@@ -150,4 +151,44 @@ func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
 		return fmt.Errorf("token: denied: %w", err)
 	}
 	return nil
+}
+
+// Attenuate appends a block adding a narrowing check per extra constraint. It
+// needs only the token (not the root key); appended checks can only restrict,
+// never widen. Origin-scoping guarantees an appended fact cannot satisfy the
+// authority-block authorizer policy.
+func Attenuate(tok []byte, extra []Constraint) ([]byte, error) {
+	b, err := biscuit.Unmarshal(tok)
+	if err != nil {
+		return nil, fmt.Errorf("token: unmarshal: %w", err)
+	}
+	bb := b.CreateBlock()
+	var sb strings.Builder
+	params := map[string]biscuit.Term{}
+	for i, c := range extra {
+		if c.Key == "" {
+			return nil, fmt.Errorf("token: constraint %d has empty key", i)
+		}
+		kk := fmt.Sprintf("ak%d", i)
+		vk := fmt.Sprintf("av%d", i)
+		params[kk] = biscuit.String(c.Key)
+		params[vk] = biscuit.String(c.Value)
+		sb.WriteString(fmt.Sprintf("check if param({%s}, {%s});\n", kk, vk))
+	}
+	block, err := parser.FromStringBlockWithParams(sb.String(), params)
+	if err != nil {
+		return nil, fmt.Errorf("token: parse attenuation block: %w", err)
+	}
+	if err := bb.AddBlock(block); err != nil {
+		return nil, fmt.Errorf("token: add attenuation block: %w", err)
+	}
+	appended, err := b.Append(rand.Reader, bb.Build())
+	if err != nil {
+		return nil, fmt.Errorf("token: append: %w", err)
+	}
+	out, err := appended.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("token: serialize: %w", err)
+	}
+	return out, nil
 }

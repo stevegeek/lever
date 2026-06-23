@@ -67,3 +67,43 @@ func TestHasOperation(t *testing.T) {
 		t.Error("unknown tool must report no operation")
 	}
 }
+
+func TestMapParamsIdentityAndRename(t *testing.T) {
+	r := New()
+	_ = r.Register(dbTool()) // op read maps constraint "table" -> arg "schema.table"
+	out, err := r.MapParams("db", "read", map[string]string{"schema.table": "A", "filter": "Y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Renamed: constraint key "table" gets the value of arg "schema.table".
+	if out["table"] != "A" {
+		t.Errorf(`out["table"] = %q, want "A" (renamed from schema.table)`, out["table"])
+	}
+	// Identity: "filter" passes through unchanged.
+	if out["filter"] != "Y" {
+		t.Errorf(`out["filter"] = %q, want "Y" (identity)`, out["filter"])
+	}
+}
+
+func TestMapParamsMissingRenamedArgProducesNoBinding(t *testing.T) {
+	r := New()
+	_ = r.Register(dbTool())
+	out, err := r.MapParams("db", "read", map[string]string{"filter": "Y"}) // no schema.table
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["table"]; ok {
+		t.Error(`out should have no "table" binding when the renamed arg is absent (a table constraint then fails closed at verify)`)
+	}
+}
+
+func TestMapParamsUnknownToolOrOp(t *testing.T) {
+	r := New()
+	_ = r.Register(dbTool())
+	if _, err := r.MapParams("ghost", "read", nil); err == nil {
+		t.Error("expected error for unknown tool")
+	}
+	if _, err := r.MapParams("db", "write", nil); err == nil {
+		t.Error("expected error for unknown operation")
+	}
+}

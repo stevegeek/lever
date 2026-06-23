@@ -1,0 +1,80 @@
+// Package registry holds the broker's view of registered MCP tools: their
+// backends, operations, the caveat→param mapping that lets the gateway turn a
+// request's real arguments into the constraint-keyed param set the token layer
+// verifies, and optional allowed-value rules. The registry is concurrency-safe; tools register at boot.
+package registry
+
+import (
+	"fmt"
+	"sync"
+)
+
+// Operation describes one operation a tool exposes.
+type Operation struct {
+	Name string
+	// CaveatParam maps a token constraint key to the request parameter name it
+	// constrains, for non-identity mappings (e.g. constraint "table" ⇒ arg
+	// "schema.table"). Constraint keys absent here are identity-mapped
+	// (constraint key == arg name).
+	CaveatParam map[string]string
+}
+
+// Tool is a registered MCP tool.
+type Tool struct {
+	Name       string
+	Backend    string
+	Operations map[string]Operation
+	// AllowedValues optionally restricts a constraint key to a permitted set
+	// (e.g. table ∈ {A,B}). An absent key is unrestricted at this layer; the
+	// tool still backstops in its own logic.
+	AllowedValues map[string][]string
+}
+
+// Registry is the concurrency-safe set of registered tools.
+type Registry struct {
+	mu    sync.RWMutex
+	tools map[string]Tool
+}
+
+// New returns an empty registry.
+func New() *Registry {
+	return &Registry{tools: map[string]Tool{}}
+}
+
+// Register records (or replaces, by name) a tool. Name, Backend, and at least
+// one operation are required.
+func (r *Registry) Register(t Tool) error {
+	if t.Name == "" {
+		return fmt.Errorf("registry: tool has empty name")
+	}
+	if t.Backend == "" {
+		return fmt.Errorf("registry: tool %q has empty backend", t.Name)
+	}
+	if len(t.Operations) == 0 {
+		return fmt.Errorf("registry: tool %q has no operations", t.Name)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[t.Name] = t
+	return nil
+}
+
+// Lookup returns a registered tool by name.
+func (r *Registry) Lookup(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	return t, ok
+}
+
+// HasOperation reports whether tool is registered and exposes op.
+func (r *Registry) HasOperation(tool, op string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[tool]
+	if !ok {
+		return false
+	}
+	_, ok = t.Operations[op]
+	return ok
+}

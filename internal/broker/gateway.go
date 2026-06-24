@@ -106,11 +106,16 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			r.ContentLength = int64(len(cleaned))
 			r.Header.Set("X-Lever-Method", "tools/call")
 			b.audit(toolName, caller, "allow", op)
-		default:
-			// initialize, tools/list, notifications, etc. — forward unchanged.
+		case "initialize", "tools/list", "notifications/initialized", "ping":
+			// Allowlisted non-capability methods — forward unchanged.
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
 			r.Header.Set("X-Lever-Method", method)
+		default:
+			// Any method not in the explicit allowlist is denied. Fail closed.
+			b.audit(toolName, caller, "deny", "method not allowlisted: "+method)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
 		}
 		rp.ServeHTTP(w, r)
 	}), nil

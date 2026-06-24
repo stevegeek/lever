@@ -12,8 +12,14 @@ func parseJSONRPC(body []byte) (string, map[string]any, bool) {
 	return method, msg, true
 }
 
-// toolsCallFields extracts a tools/call's tool name, string arguments (excluding
-// _capability), and the _capability token. ok is false if the shape is wrong.
+// toolsCallFields extracts a tools/call's tool name, canonical string arguments
+// (excluding _capability), and the _capability token. ok is false if the shape
+// is wrong or any argument value cannot be JSON-encoded.
+//
+// String values are passed through raw. Non-string values are canonical-JSON-
+// encoded so the checked projection is faithful to the forwarded value. This
+// closes the bypass where `{"$ne":null}` was silently coerced to "" and could
+// satisfy a constraint of table="".
 func toolsCallFields(msg map[string]any) (string, map[string]string, string, bool) {
 	params, ok := msg["params"].(map[string]any)
 	if !ok {
@@ -24,12 +30,21 @@ func toolsCallFields(msg map[string]any) (string, map[string]string, string, boo
 	args := map[string]string{}
 	capability := ""
 	for k, v := range rawArgs {
-		s, _ := v.(string)
 		if k == "_capability" {
-			capability = s
+			capability, _ = v.(string) // non-string _capability -> "" -> denied downstream
 			continue
 		}
-		args[k] = s
+		if s, ok := v.(string); ok {
+			args[k] = s
+		} else {
+			b, err := json.Marshal(v)
+			if err != nil {
+				// unencodable value: project to something that cannot
+				// masquerade as another value; fail closed at verify.
+				return "", nil, "", false
+			}
+			args[k] = string(b)
+		}
 	}
 	if name == "" {
 		return "", nil, "", false

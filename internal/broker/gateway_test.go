@@ -135,3 +135,118 @@ func TestGatewayEnforcesConstraintAgainstArgs(t *testing.T) {
 		t.Fatal("SECURITY: backend reached despite constraint violation")
 	}
 }
+
+// --- Regression tests for FIX 1 (gateway level): object arg must NOT satisfy empty-string constraint ---
+
+// TestGatewayDeniesObjectArgAgainstEmptyStringConstraint is the end-to-end bypass
+// regression. A token constrained to table="" must NOT be satisfied by table={"x":1}
+// (or any non-string). Before the fix, toolsCallFields coerced {"x":1} to "" and the
+// token.Verify passed — backend reached. After the fix, {"x":1} projects to `{"x":1}`
+// which does not equal "", so token.Verify denies — backend NOT reached (403).
+func TestGatewayDeniesObjectArgAgainstEmptyStringConstraint(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	// Token constrained to table="" — should only allow a literal empty string.
+	cap := mintFor(t, b, "worker", map[string]string{"table": ""})
+	// Request sends table as a JSON object (injection attempt).
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":{"x":1},"_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("SECURITY REGRESSION: status = %d, want 403 (object arg bypassed empty-string constraint)", w.Code)
+	}
+	if reached {
+		t.Fatal("SECURITY REGRESSION: backend reached — object arg bypassed token.Verify constraint check")
+	}
+}
+
+// --- Regression tests for FIX 2: method allowlist (fail-closed) ---
+
+// TestGatewayDeniesUnknownMethodWithoutReachingBackend verifies that a JSON-RPC
+// method outside the explicit allowlist is rejected 403 and the backend is NOT
+// reached. Before the fix, the default: branch forwarded everything — fail-open.
+func TestGatewayDeniesUnknownMethodWithoutReachingBackend(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("SECURITY REGRESSION: status = %d, want 403 (unknown method must be denied)", w.Code)
+	}
+	if reached {
+		t.Fatal("SECURITY REGRESSION: backend reached on unknown method (fail-open bypass)")
+	}
+}
+
+// TestGatewayForwardsInitialize verifies that the allowlisted `initialize` method
+// is forwarded to the backend unchanged (no capability required).
+func TestGatewayForwardsInitialize(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (initialize must be forwarded)", w.Code)
+	}
+	if !reached {
+		t.Fatal("backend must be reached for initialize")
+	}
+}
+
+// TestGatewayToolsListAugmentsSchema verifies that tools/list is forwarded and its
+// response is augmented with _capability injection (ModifyResponse path).
+func TestGatewayToolsListAugmentsSchema(t *testing.T) {
+	var reached bool
+	// The upstream returns a tools list.
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","properties":{"table":{"type":"string"}}}}]}}`)
+	}))
+	defer up.Close()
+
+	b := New(testConfig(t))
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (tools/list must be forwarded)", w.Code)
+	}
+	if !reached {
+		t.Fatal("backend must be reached for tools/list")
+	}
+	respBody := w.Body.String()
+	if !bytes.Contains([]byte(respBody), []byte("_capability")) {
+		t.Fatalf("_capability not injected into tools/list response schema: %s", respBody)
+	}
+}

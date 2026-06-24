@@ -6,8 +6,11 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"testing"
+
+	"github.com/lever-to/lever/internal/broker/registry"
 )
 
 // makeCSRForCN builds a PEM CSR for cn and discards the private key (the broker
@@ -45,4 +48,11 @@ func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}),
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+}
+
+func base64urlNoPad(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+func regTool(name, backend, op string) registry.Tool {
+	return registry.Tool{Name: name, Backend: backend,
+		Operations: map[string]registry.Operation{op: {Name: op}}}
 }

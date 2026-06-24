@@ -31,7 +31,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		writeRPCResult(w, id, map[string]any{"tools": s.toolSchemas()})
 	case "tools/call":
-		s.handleToolsCall(w, id, msg)
+		s.handleToolsCall(w, id, msg, r.Header.Get("X-Lever-Caller"))
 	default:
 		writeRPCError(w, id, -32601, "method not found")
 	}
@@ -69,7 +69,3 @@ func writeRPCError(w http.ResponseWriter, id any, code int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
 }
 
-// replaced in Task 6
-func (s *Server) handleToolsCall(w http.ResponseWriter, id any, msg map[string]any) {
-	writeRPCError(w, id, -32601, "tools/call not yet implemented")
-}

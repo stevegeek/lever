@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lever-to/lever/internal/broker/registry"
 	"github.com/lever-to/lever/internal/cap/token"
 )
 
@@ -216,6 +217,47 @@ func TestGatewayForwardsInitialize(t *testing.T) {
 	}
 	if !reached {
 		t.Fatal("backend must be reached for initialize")
+	}
+}
+
+// firstPartyTool registers a tool with FirstParty=true at the given backend.
+func firstPartyTool(name, backend, op string) registry.Tool {
+	t := regTool(name, backend, op)
+	t.FirstParty = true
+	return t
+}
+
+func TestGatewayFirstPartyForwardsTokenAndInjectsCaller(t *testing.T) {
+	var reached bool
+	var gotBody string
+	var gotCaller string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		gotCaller = r.Header.Get("X-Lever-Caller")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)
+	}))
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(firstPartyTool("db", up.URL, "read"))
+
+	cap := mintFor(t, b, "worker", nil)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	r.Header.Set("X-Lever-Caller", "manager") // FORGERY attempt — must be overwritten
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !reached {
+		t.Fatalf("status=%d reached=%v", w.Code, reached)
+	}
+	if !bytes.Contains([]byte(gotBody), []byte("_capability")) {
+		t.Fatalf("first-party tool must receive the token; body=%s", gotBody)
+	}
+	if gotCaller != "worker" {
+		t.Fatalf("X-Lever-Caller = %q, want worker (forged 'manager' must be overwritten)", gotCaller)
 	}
 }
 

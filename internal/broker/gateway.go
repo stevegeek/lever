@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/lever-to/lever/internal/cap/ca"
@@ -20,6 +21,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	if !ok {
 		return nil, fmt.Errorf("broker: gateway for unregistered tool %q", toolName)
 	}
+	firstParty := t.FirstParty
 	target, err := url.Parse(t.Backend)
 	if err != nil {
 		return nil, fmt.Errorf("broker: tool %q bad backend %q: %w", toolName, t.Backend, err)
@@ -57,6 +59,13 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			b.audit(toolName, "", "deny", err.Error())
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
+		}
+		// Scrub every inbound X-Lever-* header to prevent jail agents from forging
+		// broker-internal context (e.g. X-Lever-Caller).
+		for name := range r.Header {
+			if strings.HasPrefix(http.CanonicalHeaderKey(name), "X-Lever-") {
+				r.Header.Del(name)
+			}
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -101,9 +110,19 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
-			cleaned := stripCapability(msg)
-			r.Body = io.NopCloser(bytes.NewReader(cleaned))
-			r.ContentLength = int64(len(cleaned))
+			if firstParty {
+				// Forward the verified token to the host-side first-party tool so it
+				// can re-verify independently; assert the caller it must trust.
+				// unconstrained args are intentionally forwarded;
+				// pinning every dangerous arg is the minter's job.
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				r.ContentLength = int64(len(body))
+				r.Header.Set("X-Lever-Caller", caller)
+			} else {
+				cleaned := stripCapability(msg)
+				r.Body = io.NopCloser(bytes.NewReader(cleaned))
+				r.ContentLength = int64(len(cleaned))
+			}
 			r.Header.Set("X-Lever-Method", "tools/call")
 			b.audit(toolName, caller, "allow", op)
 		case "initialize", "tools/list", "notifications/initialized", "ping":

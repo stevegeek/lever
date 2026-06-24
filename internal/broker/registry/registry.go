@@ -28,6 +28,10 @@ type Tool struct {
 	// (e.g. table ∈ {A,B}). An absent key is unrestricted at this layer; the
 	// tool still backstops in its own logic.
 	AllowedValues map[string][]string
+	// FirstParty marks a capability-aware tool that runs the captool SDK and
+	// verifies tokens itself; the gateway forwards the token + caller to it
+	// rather than stripping (see the gateway). Third-party tools leave this false.
+	FirstParty bool
 }
 
 // Registry is the concurrency-safe set of registered tools.

@@ -19,6 +19,7 @@ type RegisterRequest struct {
 	Backend       string              `json:"backend"`
 	Operations    []OperationSpec     `json:"operations"`
 	AllowedValues map[string][]string `json:"allowed_values,omitempty"`
+	FirstParty    bool                `json:"first_party,omitempty"`
 }
 
 // handleRegister records a first-party tool's backend, operations, caveat→param
@@ -33,7 +34,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	for _, o := range req.Operations {
 		ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: o.CaveatParam}
 	}
-	t := registry.Tool{Name: req.Name, Backend: req.Backend, Operations: ops, AllowedValues: req.AllowedValues}
+	t := registry.Tool{Name: req.Name, Backend: req.Backend, Operations: ops, AllowedValues: req.AllowedValues, FirstParty: req.FirstParty}
 	if err := b.reg.Register(t); err != nil {
 		b.audit("register", req.Name, "deny", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)

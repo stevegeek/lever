@@ -25,6 +25,24 @@ func TestRegisterAddsTool(t *testing.T) {
 	}
 }
 
+func TestRegisterSetsFirstParty(t *testing.T) {
+	b := New(testConfig(t))
+	body, _ := json.Marshal(RegisterRequest{
+		Name: "db", Backend: "http://127.0.0.1:3201", FirstParty: true,
+		Operations: []OperationSpec{{Name: "read"}},
+	})
+	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	b.handleRegister(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	tool, _ := b.reg.Lookup("db")
+	if !tool.FirstParty {
+		t.Fatal("handleRegister must set FirstParty on the registry tool")
+	}
+}
+
 func TestRegisterRejectsInvalid(t *testing.T) {
 	b := New(testConfig(t))
 	body, _ := json.Marshal(RegisterRequest{Name: "", Backend: "x"}) // empty name

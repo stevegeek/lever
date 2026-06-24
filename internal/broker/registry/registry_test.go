@@ -149,6 +149,20 @@ func TestValidateConstraintsEmptyAllowedSliceRejectsAll(t *testing.T) {
 	}
 }
 
+func TestRegisterPreservesFirstParty(t *testing.T) {
+	r := New()
+	if err := r.Register(Tool{
+		Name: "db", Backend: "http://127.0.0.1:3201", FirstParty: true,
+		Operations: map[string]Operation{"read": {Name: "read"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := r.Lookup("db")
+	if !ok || !tool.FirstParty {
+		t.Fatalf("FirstParty not preserved: ok=%v tool=%+v", ok, tool)
+	}
+}
+
 func TestNamesReturnsBothRegisteredTools(t *testing.T) {
 	r := New()
 	if err := r.Register(dbTool()); err != nil {

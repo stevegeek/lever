@@ -1,6 +1,7 @@
 package ca
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -47,6 +48,33 @@ func (c *CA) SignCSR(csrPEM []byte) ([]byte, error) {
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, csr.PublicKey, c.key)
 	if err != nil {
 		return nil, fmt.Errorf("ca: sign csr: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+}
+
+// SignPublicKey signs an externally-provided public key into a short-lived
+// ClientAuth cert with the given CommonName. Unlike SignCSR, the CN is chosen by
+// the caller — used by /renew to stamp the authenticated identity, never a
+// CSR-supplied CN.
+func (c *CA) SignPublicKey(pub crypto.PublicKey, cn string) ([]byte, error) {
+	if cn == "" {
+		return nil, fmt.Errorf("ca: empty common name")
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("ca: serial: %w", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(certTTL),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, pub, c.key)
+	if err != nil {
+		return nil, fmt.Errorf("ca: sign public key: %w", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }

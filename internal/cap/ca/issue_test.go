@@ -57,6 +57,29 @@ func TestSignCSRHasAgentCNClientAuthAndVerifies(t *testing.T) {
 	}
 }
 
+func TestSignPublicKeyUsesGivenCN(t *testing.T) {
+	c, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, err := c.SignPublicKey(&key.PublicKey, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk, _ := pem.Decode(certPEM)
+	leaf, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.Subject.CommonName != "worker" {
+		t.Fatalf("CN = %q, want worker", leaf.Subject.CommonName)
+	}
+}
+
 func TestSignCSRRejectsGarbage(t *testing.T) {
 	c, err := Generate()
 	if err != nil {

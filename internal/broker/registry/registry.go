@@ -81,6 +81,18 @@ func (r *Registry) HasOperation(tool, op string) bool {
 	return ok
 }
 
+// Names returns the names of all registered tools in unspecified order.
+// It is safe for concurrent use.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	return names
+}
+
 // MapParams builds the constraint-keyed parameter set the token layer verifies
 // against, from the request's actual MCP arguments. Arguments are identity-
 // mapped (constraint key == arg name); the operation's CaveatParam entries add

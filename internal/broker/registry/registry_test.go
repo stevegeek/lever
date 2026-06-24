@@ -148,3 +148,30 @@ func TestValidateConstraintsEmptyAllowedSliceRejectsAll(t *testing.T) {
 		t.Fatal("an empty AllowedValues slice must reject every value (fail-closed), not pass")
 	}
 }
+
+func TestNamesReturnsBothRegisteredTools(t *testing.T) {
+	r := New()
+	if err := r.Register(dbTool()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(Tool{
+		Name: "calendar", Backend: "http://127.0.0.1:3202",
+		Operations: map[string]Operation{"list": {Name: "list"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	names := r.Names()
+	if len(names) != 2 {
+		t.Fatalf("Names() returned %d names, want 2: %v", len(names), names)
+	}
+	found := map[string]bool{}
+	for _, n := range names {
+		found[n] = true
+	}
+	if !found["db"] {
+		t.Error("Names() missing \"db\"")
+	}
+	if !found["calendar"] {
+		t.Error("Names() missing \"calendar\"")
+	}
+}

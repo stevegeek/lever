@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/lever-to/lever/internal/broker/registry"
+	"github.com/lever-to/lever/internal/cap/token"
 )
 
 // OperationSpec is one operation in a registration request.
@@ -20,6 +21,13 @@ type RegisterRequest struct {
 	Operations    []OperationSpec     `json:"operations"`
 	AllowedValues map[string][]string `json:"allowed_values,omitempty"`
 	FirstParty    bool                `json:"first_party,omitempty"`
+}
+
+// RegisterResponse gives the registering tool the broker's verification key and
+// current epoch, so captool can verify tokens independently + check freshness.
+type RegisterResponse struct {
+	PublicKey string `json:"public_key"`
+	Epoch     int    `json:"epoch"`
 }
 
 // handleRegister records a first-party tool's backend, operations, caveat→param
@@ -41,5 +49,9 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("register", req.Name, "allow", req.Backend)
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RegisterResponse{
+		PublicKey: token.EncodePublicKey(b.keys.Public),
+		Epoch:     b.MinEpoch(),
+	})
 }

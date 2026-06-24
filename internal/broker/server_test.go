@@ -156,3 +156,20 @@ func TestResolveAdminAddr(t *testing.T) {
 		})
 	}
 }
+
+func TestEpochEndpointReportsCurrentEpoch(t *testing.T) {
+	b := New(testConfig(t))
+	b.BumpEpoch()
+	b.BumpEpoch() // epoch 2
+	r := httptest.NewRequest("GET", "/epoch", nil)
+	w := httptest.NewRecorder()
+	b.AdminHandler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp EpochResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Epoch != 2 {
+		t.Fatalf("epoch = %d, want 2", resp.Epoch)
+	}
+}

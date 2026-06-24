@@ -41,6 +41,27 @@ func TestKeyPairSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodePublicKeyRoundTrip(t *testing.T) {
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := EncodePublicKey(kp.Public)
+	got, err := DecodePublicKey(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(kp.Public) {
+		t.Fatal("public key did not round-trip")
+	}
+}
+
+func TestDecodePublicKeyRejectsWrongSize(t *testing.T) {
+	if _, err := DecodePublicKey("abcd"); err == nil {
+		t.Fatal("short hex must be rejected")
+	}
+}
+
 func TestSavePrivateIsNotWorldReadable(t *testing.T) {
 	kp, err := Generate()
 	if err != nil {

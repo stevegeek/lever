@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -52,11 +53,23 @@ func (b *Broker) JailHandler() http.Handler {
 	return mux
 }
 
+// EpochResponse reports the broker's current minimum acceptable token epoch.
+type EpochResponse struct {
+	Epoch int `json:"epoch"`
+}
+
+// handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
+func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(EpochResponse{Epoch: b.MinEpoch()})
+}
+
 // AdminHandler builds an http.Handler for the admin (loopback) listener.
-// Routes only /register — no capability-gated or agent-facing endpoints.
+// Routes /register and /epoch — no capability-gated or agent-facing endpoints.
 func (b *Broker) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", b.handleRegister)
+	mux.HandleFunc("/epoch", b.handleEpoch)
 	return mux
 }
 

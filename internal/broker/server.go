@@ -3,10 +3,30 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"time"
 )
+
+// resolveAdminAddr normalizes adminAddr to a loopback bind address. An empty
+// host defaults to 127.0.0.1. Any explicit non-loopback host is rejected so
+// the unauthenticated admin /register endpoint can never bind to a routable
+// interface.
+func resolveAdminAddr(adminAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(adminAddr)
+	if err != nil {
+		return "", fmt.Errorf("broker: admin address %q: %w", adminAddr, err)
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("broker: admin listener must bind to a loopback address, got %q", host)
+	}
+	return net.JoinHostPort(host, port), nil
+}
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
 // Routes: /provision, /enrol, /renew, /request, and one gated gateway per
@@ -50,15 +70,12 @@ func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, serverCe
 		return err
 	}
 
-	// Ensure admin listener is bound only to loopback.
-	adminHost, adminPort, err := net.SplitHostPort(adminAddr)
+	// Ensure admin listener is bound only to loopback — fail closed on
+	// misconfiguration so /register is never reachable from a routable interface.
+	boundAdminAddr, err := resolveAdminAddr(adminAddr)
 	if err != nil {
 		return err
 	}
-	if adminHost == "" {
-		adminHost = "127.0.0.1"
-	}
-	boundAdminAddr := net.JoinHostPort(adminHost, adminPort)
 
 	jailSrv := &http.Server{
 		Addr:              jailAddr,

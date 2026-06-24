@@ -96,3 +96,63 @@ func TestAdminHandlerDoesNotExposeProvision(t *testing.T) {
 		t.Fatalf("/provision on admin handler returned %d, want 404 (should not be exposed)", w.Code)
 	}
 }
+
+// TestResolveAdminAddr verifies the loopback-enforcement helper directly.
+// These tests do not start any server or listener.
+func TestResolveAdminAddr(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "empty host defaults to 127.0.0.1",
+			input: ":9001",
+			want:  "127.0.0.1:9001",
+		},
+		{
+			name:  "explicit 127.0.0.1 accepted",
+			input: "127.0.0.1:9001",
+			want:  "127.0.0.1:9001",
+		},
+		{
+			name:  "IPv6 loopback accepted",
+			input: "[::1]:9001",
+			want:  "[::1]:9001",
+		},
+		{
+			name:    "0.0.0.0 rejected",
+			input:   "0.0.0.0:9001",
+			wantErr: true,
+		},
+		{
+			name:    "routable private IP rejected",
+			input:   "192.168.1.5:9001",
+			wantErr: true,
+		},
+		{
+			name:    "localhost hostname rejected (not a parseable loopback IP)",
+			input:   "localhost:9001",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveAdminAddr(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveAdminAddr(%q) = %q, nil; want error", tc.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAdminAddr(%q) unexpected error: %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Fatalf("resolveAdminAddr(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

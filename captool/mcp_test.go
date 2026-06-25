@@ -19,7 +19,9 @@ func testServer(t *testing.T) *Server {
 			Params:      []ParamSpec{{Name: "table", Type: "string"}, {Name: "filter", Type: "string"}},
 			CaveatParam: map[string]string{"table": "table", "filter": "filter"},
 			Backstop:    func(ValidatedContext, map[string]string) error { return nil },
-			Handler:     func(_ ValidatedContext, a map[string]string) (any, error) { return map[string]string{"table": a["table"]}, nil },
+			Handler: func(_ ValidatedContext, a map[string]string) (any, error) {
+				return map[string]string{"table": a["table"]}, nil
+			},
 		}},
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})

@@ -91,7 +91,7 @@ func TestVerifyDeniesWrongCallerWithoutRunningHandler(t *testing.T) {
 	var ran bool
 	s := serverBoundTo(t, kp, &ran)
 	tok := mintTok(t, kp, "worker", map[string]string{"table": "A"}) // bound to worker
-	w := callRead(t, s, "analyst", "A", tok)                          // caller analyst
+	w := callRead(t, s, "analyst", "A", tok)                         // caller analyst
 	if ran || !strings.Contains(w.Body.String(), "error") {
 		t.Fatalf("bound_agent mismatch must deny; ran=%v", ran)
 	}

@@ -39,8 +39,8 @@ func (s *Store) seed() error {
 	// duplicates rows. Each owner value rides as a bound ? parameter (never
 	// string-concatenated into the query).
 	seedData := []struct {
-		tbl   string
-		rows  []string
+		tbl  string
+		rows []string
 	}{
 		{"A", []string{"alice", "alice", "bob"}},
 		{"B", []string{"bob", "carol"}},

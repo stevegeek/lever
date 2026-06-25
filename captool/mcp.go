@@ -68,4 +68,3 @@ func writeRPCError(w http.ResponseWriter, id any, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
 }
-

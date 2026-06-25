@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -28,8 +27,14 @@ func NewMCPServer(c MCPConfig) *MCPServer {
 
 func (s *MCPServer) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 
+// mcpMaxBodyBytes caps the JSON-RPC request body to 1 MiB. The MCP handler is
+// driven by a potentially-malicious in-jail LLM, so we bound reads to prevent
+// memory exhaustion. (The broker uses the same http.MaxBytesReader pattern with
+// per-endpoint caps; here we allow more headroom for MCP tool arguments.)
+const mcpMaxBodyBytes = 1 << 20 // 1 MiB
+
 func (s *MCPServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mcpMaxBodyBytes))
 	if err != nil {
 		writeRPCError(w, nil, -32700, "read error")
 		return
@@ -51,7 +56,7 @@ func (s *MCPServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		writeRPCResult(w, id, map[string]any{"tools": capabilityToolSchemas()})
 	case "tools/call":
-		s.handleToolsCall(w, id, msg)
+		s.handleToolsCall(w, r, id, msg)
 	default:
 		writeRPCError(w, id, -32601, "method not found")
 	}
@@ -61,31 +66,58 @@ func capabilityToolSchemas() []any {
 	strProp := func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
 	return []any{
 		map[string]any{"name": "request", "description": "mint a capability token bound to self (or bound_to)",
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
-				"tool": strProp("tool name"), "op": strProp("operation"), "bound_to": strProp("agent to bind to (default self)")}}},
+			"inputSchema": map[string]any{"type": "object",
+				"required": []string{"tool", "op"},
+				"properties": map[string]any{
+					"tool": strProp("tool name"),
+					"op":   strProp("operation"),
+					// bound_to is optional: if omitted the server defaults it to the caller's own AgentCN (self).
+					// Security note: whether the caller supplies bound_to or relies on the self default,
+					// the broker's MayObtain policy (keyed on the mTLS caller identity) is the
+					// authoritative gate. A wider bound_to is not a client-side escalation — the
+					// broker will refuse to mint a binding the caller's policy does not allow.
+					"bound_to": strProp("agent to bind to (default self); the broker's MayObtain policy enforces who the caller may bind to"),
+				}}},
 		map[string]any{"name": "attenuate", "description": "narrow a token by adding constraint key=value pairs",
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{"token": strProp("base64url token")}}},
+			"inputSchema": map[string]any{"type": "object",
+				"required":   []string{"token"},
+				"properties": map[string]any{"token": strProp("base64url token")}}},
 		map[string]any{"name": "delegate", "description": "mint a token bound to another agent, narrowed by constraints, to hand off",
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
-				"tool": strProp("tool"), "op": strProp("operation"), "to": strProp("recipient agent")}}},
+			"inputSchema": map[string]any{"type": "object",
+				"required": []string{"tool", "op", "to"},
+				"properties": map[string]any{
+					"tool": strProp("tool"),
+					"op":   strProp("operation"),
+					"to":   strProp("recipient agent"),
+				}}},
 	}
 }
 
-func (s *MCPServer) handleToolsCall(w http.ResponseWriter, id any, msg map[string]any) {
+func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id any, msg map[string]any) {
 	params, _ := msg["params"].(map[string]any)
 	name, _ := params["name"].(string)
 	rawArgs, _ := params["arguments"].(map[string]any)
 	args := map[string]string{}
 	for k, v := range rawArgs {
 		if str, ok := v.(string); ok {
+			// Non-string args are intentionally ignored: dropping an unrecognised
+			// constraint is the safe/narrowing direction since the broker re-validates
+			// every surviving constraint and gates the bind target via MayObtain.
 			args[k] = str
 		}
 	}
-	ctx := context.Background()
+	// Thread the request context so a dropped HTTP connection cancels the outbound
+	// broker call.
+	ctx := r.Context()
 	result := func(tok string) {
 		writeRPCResult(w, id, map[string]any{"content": []any{map[string]any{"type": "text", "text": tok}}})
 	}
 	switch name {
+	// request: mint a capability token.
+	// The bind target (bound_to, defaulted to the server's own AgentCN when absent)
+	// is authoritatively gated by the broker's MayObtain policy keyed on the mTLS
+	// caller identity. An LLM-supplied bound_to that is wider than policy allows is
+	// therefore not a client-side escalation — the broker refuses to mint it.
 	case "request":
 		boundTo := args["bound_to"]
 		if boundTo == "" {

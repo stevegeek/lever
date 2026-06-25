@@ -31,7 +31,7 @@ func TestBootEnrolsAndConfigures(t *testing.T) {
 	if _, ok := LoadIdentity(idDir); !ok {
 		t.Fatal("boot must write the enrolled identity")
 	}
-	if envOverlay["CLAUDE_CODE_CLIENT_CERT"] == "" || envOverlay["NODE_EXTRA_CA_CERTS"] == "" {
+	if envOverlay["CLAUDE_CODE_CLIENT_CERT"] == "" || envOverlay["CLAUDE_CODE_CLIENT_KEY"] == "" || envOverlay["NODE_EXTRA_CA_CERTS"] == "" {
 		t.Fatalf("env overlay missing identity vars: %v", envOverlay)
 	}
 	// capability server + one per broker tool ("db").

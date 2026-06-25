@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -46,14 +47,35 @@ func TestMCPDelegateMintsAndAttenuates(t *testing.T) {
 	if text == "" {
 		t.Fatal("delegate returned an empty token")
 	}
+	// The token must be valid base64url (biscuit tokens are base64url-encoded).
+	if _, err := base64.RawURLEncoding.DecodeString(text); err != nil {
+		t.Fatalf("delegate token is not valid base64url: %v", err)
+	}
 }
 
 func TestMCPServerNeverExposesKey(t *testing.T) {
-	// initialize/tools/list responses must not leak key material or a client handle.
+	// No response path (initialize, tools/list, or error from tools/call) may leak
+	// key material. This matters because the MCP handler is driven by an in-jail LLM.
 	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
+
+	// 1. initialize
 	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	raw, _ := json.Marshal(resp)
 	if strings.Contains(string(raw), "PRIVATE KEY") {
 		t.Fatal("initialize response must never contain key material")
+	}
+
+	// 2. tools/list
+	resp = rpc(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	raw, _ = json.Marshal(resp)
+	if strings.Contains(string(raw), "PRIVATE KEY") {
+		t.Fatal("tools/list response must never contain key material")
+	}
+
+	// 3. tools/call error path (no broker Client configured, so the call will error).
+	resp = rpc(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"unknown_tool","arguments":{}}}`)
+	raw, _ = json.Marshal(resp)
+	if strings.Contains(string(raw), "PRIVATE KEY") {
+		t.Fatal("tools/call error response must never contain key material")
 	}
 }

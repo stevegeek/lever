@@ -68,6 +68,7 @@ func cmdBoot(args []string) error {
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
 	overlayPath := fs.String("overlay", "", "path to write scion env-overlay JSON")
 	toolsCSV := fs.String("tools", "", "comma-separated broker tool names to register via claude mcp add")
+	enrolOnly := fs.Bool("enrol-only", false, "enrol + write the identity only; skip the claude mcp registration and env overlay (no `claude` binary required — used by the VM-level acceptance gate, which drives lever-agent's CLI verbs directly)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -80,13 +81,21 @@ func cmdBoot(args []string) error {
 		}
 	}
 	ctx := context.Background()
-	return agent.Boot(ctx, agent.BootConfig{
+	cfg := agent.BootConfig{
 		BootstrapPath:   *bootstrapPath,
 		IDDir:           *idDir,
 		BrokerTools:     brokerTools,
 		MCPAdd:          claudeMCPAdd,
 		WriteEnvOverlay: writeOverlay(*overlayPath),
-	})
+	}
+	if *enrolOnly {
+		// Enrol + write identity only: nil hooks make agent.Boot skip the env
+		// overlay and the `claude mcp add` registration (no claude in the bare VM).
+		cfg.MCPAdd = nil
+		cfg.WriteEnvOverlay = nil
+		cfg.BrokerTools = nil
+	}
+	return agent.Boot(ctx, cfg)
 }
 
 func claudeMCPAdd(name string, argv ...string) error {

@@ -15,11 +15,22 @@ type Step struct {
 
 // PlanOpts controls optional Plan behaviour.
 type PlanOpts struct {
-	// SkipAgents omits the start-manager step (and any future grove-start steps).
-	// Use this for the VM-acceptance gate which brings up broker+tools+egress
-	// and mints the bootstrap ticket, but cannot start agent containers until the
-	// image bake is complete.
-	SkipAgents bool
+	// BrokerOnly reduces the plan to the steps the VM-level acceptance gate
+	// needs — jail-up (machine + egress allowlist), broker-up (host broker +
+	// tools), and mint-manager-bootstrap (the manager enrol ticket) — and omits
+	// ALL scion/container/registration steps (load-image, init-machine,
+	// config-registry, scion-server, credential, register-*, write-manifest,
+	// start-manager). The gate drives lever-agent directly in the VM, so scion is
+	// never invoked; running init-machine on a fresh machine would fail (no scion
+	// binary). The full container path is a later milestone.
+	BrokerOnly bool
+}
+
+// brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.
+var brokerOnlyKinds = map[string]bool{
+	"jail-up":                true,
+	"broker-up":              true,
+	"mint-manager-bootstrap": true,
 }
 
 // Plan returns the ordered bring-up for an app. Order is load-bearing: the jail
@@ -64,8 +75,15 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	steps = append(steps, Step{Kind: "write-manifest", Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})
-	if !opts.SkipAgents {
-		steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.Manager.Image})
+	steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.Manager.Image})
+	if opts.BrokerOnly {
+		filtered := steps[:0:0]
+		for _, s := range steps {
+			if brokerOnlyKinds[s.Kind] {
+				filtered = append(filtered, s)
+			}
+		}
+		return filtered
 	}
 	return steps
 }

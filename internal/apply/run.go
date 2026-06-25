@@ -33,17 +33,17 @@ type Deps struct {
 	StartBroker          func(ctx context.Context) error
 	BrokerHealthy        func(ctx context.Context) error
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
-	// SkipAgents skips the start-manager step (and future grove-start steps).
-	// Set by the VM-acceptance gate (Task 5) which cannot start agent containers
-	// until the image bake. Default false = full bring-up (unchanged).
-	SkipAgents bool
+	// BrokerOnly reduces the bring-up to {jail-up, broker-up, mint-manager-bootstrap}
+	// for the VM-level acceptance gate (which drives lever-agent directly and
+	// never invokes scion). Default false = full bring-up (unchanged).
+	BrokerOnly bool
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
 // rest run in the jail via Deps.Scion.
 func Run(ctx context.Context, app *config.App, d Deps) error {
 	var boot BootstrapMaterial
-	for _, step := range Plan(app, PlanOpts{SkipAgents: d.SkipAgents}) {
+	for _, step := range Plan(app, PlanOpts{BrokerOnly: d.BrokerOnly}) {
 		if err := runStep(ctx, app, step, d, &boot); err != nil {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
 		}

@@ -25,21 +25,29 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-func TestPlanBrokerOnlyOmitsStartManager(t *testing.T) {
+func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
-		Manager: config.Manager{Image: "img"},
+		Manager: config.Manager{Image: "img", CredentialFile: "cred"},
+		Groves:  []config.Grove{{Name: "worker"}},
 		Broker:  config.Broker{JailPort: 8443, AdminPort: 8444},
 	}
-	steps := planStepNames(Plan(app, PlanOpts{SkipAgents: true}))
-	must := []string{"broker-up", "mint-manager-bootstrap"}
-	for _, m := range must {
-		if !contains(steps, m) {
-			t.Fatalf("broker-only plan missing %q: %v", m, steps)
+	got := planStepNames(Plan(app, PlanOpts{BrokerOnly: true}))
+	want := []string{"jail-up", "broker-up", "mint-manager-bootstrap"}
+	if len(got) != len(want) {
+		t.Fatalf("broker-only plan = %v, want exactly %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("broker-only plan = %v, want exactly %v", got, want)
 		}
 	}
-	if contains(steps, "start-manager") {
-		t.Fatalf("broker-only plan must omit start-manager: %v", steps)
+	// Scion/container/registration steps must NOT appear (the fresh machine has no
+	// scion binary; init-machine would fail).
+	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-manager", "register-grove", "write-manifest", "start-manager", "config-registry", "credential"} {
+		if contains(got, banned) {
+			t.Fatalf("broker-only plan must omit %q: %v", banned, got)
+		}
 	}
 }
 

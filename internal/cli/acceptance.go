@@ -95,16 +95,17 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 // broker via the in-jail `lever-agent` CLI; a check that cannot yet be driven
 // records a failure, never a vacuous pass.
 func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, configPath string, bf BackendFactory) error {
-	// 1. Bring the real jail up BROKER-ONLY (broker + tools + egress +
-	//    mint-manager-bootstrap), NOT the agent containers: the VM-level gate
-	//    enrols and drives lever-agent itself, so SkipAgents omits start-manager
-	//    (which can't succeed until the image bake). The bootstrap step
+	// 1. Bring the real jail up BROKER-ONLY: jail-up (machine + egress allowlist),
+	//    broker-up (host broker + tools), mint-manager-bootstrap. The VM-level gate
+	//    drives lever-agent directly and never invokes scion, so all the
+	//    scion/container/registration steps (incl. init-machine, which needs a
+	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
 	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
 	deps, ob, _, err := buildApplyDeps(ctx, app, configPath, bf)
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}
-	deps.SkipAgents = true
+	deps.BrokerOnly = true
 	if err := apply.Run(ctx, app, deps); err != nil {
 		return fmt.Errorf("acceptance: apply: %w", err)
 	}
@@ -263,7 +264,7 @@ func (h *acceptanceHarness) setup(ctx context.Context, machine string) error {
 	}
 	// 3) Enrol the manager from the deposited bootstrap.json.
 	bootstrap := h.bootDir + "/bootstrap.json"
-	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
 		return fmt.Errorf("enrol manager (lever-agent boot): %w: %s", err, res.Stdout+res.Stderr)
 	}
 	// 4) Provision a worker ticket AS the manager (manager-CN-gated /provision),
@@ -274,7 +275,7 @@ func (h *acceptanceHarness) setup(ctx context.Context, machine string) error {
 	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-grove", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
 		return fmt.Errorf("provision worker (lever-agent provision): %w: %s", err, res.Stdout+res.Stderr)
 	}
-	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-id-dir", h.workerID, "-bootstrap", wbs); err != nil {
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.workerID, "-bootstrap", wbs); err != nil {
 		return fmt.Errorf("enrol worker (lever-agent boot): %w: %s", err, res.Stdout+res.Stderr)
 	}
 	return nil

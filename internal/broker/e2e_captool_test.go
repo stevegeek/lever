@@ -281,6 +281,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 		text := mcpResultText(t, droppedFilterResp)
 		t.Fatalf("SECURITY: dropped-filter call returned 200 with data: %s", text)
 	}
+	assertNoRows(t, droppedFilterResp, "alice")
 }
 
 // mcpResultText reads the MCP JSON-RPC response and returns the text content of

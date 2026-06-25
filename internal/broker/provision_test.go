@@ -3,32 +3,37 @@ package broker
 import (
 	"bytes"
 	"crypto/tls"
-	"encoding/base64"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
-
-	"github.com/lever-to/lever/internal/cap/token"
 )
 
-func provisionReq(t *testing.T, b *Broker, callerCN, grove string) *http.Request {
+// leafFor builds a verified-chain TLS state whose client cert CN is `cn`.
+func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
 	t.Helper()
-	body, _ := json.Marshal(ProvisionRequest{Grove: grove})
-	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
-	certPEM, keyPEM, err := b.ca.IssueAgentCert(callerCN)
+	csr := makeCSRForCN(t, cn)
+	certPEM, err := b.ca.SignCSR(csr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509Cert{{mustLeaf(t, certPEM, keyPEM)}}}
-	return r
+	blk, _ := pem.Decode(certPEM)
+	leaf, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{leaf}}}
 }
 
-func TestProvisionMintsUsableBiscuit(t *testing.T) {
-	b := newTestBroker(t)
+func TestProvisionIssuesTicketForManager(t *testing.T) {
+	b := New(testConfig(t))
+	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
+	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()
-	b.handleProvision(w, provisionReq(t, b, "manager", "scratch"))
+	b.handleProvision(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -36,35 +41,42 @@ func TestProvisionMintsUsableBiscuit(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Cert == "" || resp.Key == "" || resp.Biscuit == "" {
-		t.Fatal("empty provision fields")
-	}
-	// The minted biscuit must authorize scratch for a granted op.
-	raw, err := base64.RawURLEncoding.DecodeString(resp.Biscuit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "scratch", Operation: "qmd", Now: time.Now(), MinEpoch: 0,
-	}); err != nil {
-		t.Fatalf("minted biscuit failed to verify: %v", err)
+	if resp.Ticket == "" {
+		t.Fatal("empty ticket")
 	}
 }
 
 func TestProvisionRejectsNonManager(t *testing.T) {
-	b := newTestBroker(t)
+	b := New(testConfig(t))
+	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
+	r.TLS = leafFor(t, b, "analyst") // not the manager
 	w := httptest.NewRecorder()
-	b.handleProvision(w, provisionReq(t, b, "scratch", "scratch")) // caller is a grove, not the manager
+	b.handleProvision(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", w.Code)
 	}
 }
 
 func TestProvisionRejectsUnknownGrove(t *testing.T) {
-	b := newTestBroker(t)
+	b := New(testConfig(t))
+	body, _ := json.Marshal(ProvisionRequest{Grove: "ghost"})
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
+	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()
-	b.handleProvision(w, provisionReq(t, b, "manager", "ghost"))
+	b.handleProvision(w, r)
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 for grove not in policy", w.Code)
+		t.Fatalf("status = %d, want 403 for grove not in config", w.Code)
+	}
+}
+
+func TestProvisionRejectsNoCert(t *testing.T) {
+	b := New(testConfig(t))
+	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body)) // no r.TLS
+	w := httptest.NewRecorder()
+	b.handleProvision(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no client cert)", w.Code)
 	}
 }

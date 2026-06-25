@@ -28,9 +28,10 @@ func TestCASaveLoadRoundTrip(t *testing.T) {
 	if !bytes.Equal(c.CertPEM(), loaded.CertPEM()) {
 		t.Error("reloaded CA cert PEM differs from original")
 	}
-	certPEM, _, err := loaded.IssueAgentCert("scratch")
+	csrPEM := makeCSR(t, "scratch")
+	certPEM, err := loaded.SignCSR(csrPEM)
 	if err != nil {
-		t.Fatalf("issue after load: %v", err)
+		t.Fatalf("sign csr after load: %v", err)
 	}
 	if len(certPEM) == 0 {
 		t.Fatal("empty issued cert")

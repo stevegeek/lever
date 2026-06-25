@@ -1,0 +1,40 @@
+# acceptance fixture: manager + executor grove `worker` + the `db` tool.
+# The manager delegates db.read → worker; worker has an empty obtain (a pure
+# executor with no ambient authority). `lever acceptance` brings this up on a
+# real jail (OrbStack) and drives the six acceptance capability checks.
+name: acceptance
+backend: orbstack
+tree: workspace
+manager:
+  image: scionlocal/lever-claude:latest
+  prompt_file: manager.md
+  allow_ports: []
+  # The manager may mint db.read tokens bound to the worker (delegation), but
+  # cannot self-read (no obtain entry of its own).
+  delegate:
+    - tool: db
+      op: read
+      to: [worker]
+groves:
+  - name: worker
+    dir: groves/worker
+    # Empty obtain: the worker holds NO self-mint authority. It can only exercise
+    # capabilities the manager delegated to it. This is the no-self-path invariant.
+    obtain: []
+broker:
+  jail_port: 8443
+  admin_port: 8444
+  tools:
+    - name: db
+      command: [lever-tool-db, -dsn, "file:ref.db"]
+      backend: 127.0.0.1:3201
+      operations:
+        - name: read
+          caveat_param:
+            table: table
+            filter: filter
+      # The delegated envelope only covers tables A and B; table C is outside it
+      # (the no-table-c check). The narrowing `filter` caveat is attenuated on the
+      # worker's token (the no-drop-filter check).
+      allowed_values:
+        table: [A, B]

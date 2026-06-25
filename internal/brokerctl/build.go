@@ -1,0 +1,97 @@
+// Package brokerctl is the host-side controller for the lever capability broker:
+// it translates a lever config into a broker.Config, ensures the CA + biscuit
+// root key, supervises first-party tool subprocesses, and runs the broker.
+package brokerctl
+
+import (
+	"fmt"
+
+	"github.com/lever-to/lever/internal/broker"
+	"github.com/lever-to/lever/internal/broker/registry"
+	"github.com/lever-to/lever/internal/broker/rules"
+	"github.com/lever-to/lever/internal/cap/ca"
+	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/lever-to/lever/internal/config"
+)
+
+// serverName is the hostname agents dial; OrbStack forwards it to host loopback.
+const serverName = "host.orb.internal"
+
+// BuildBroker assembles a broker.Config from the parsed app config: the
+// request/delegation policy (from manager+grove grants), the pre-loaded tool
+// registry (config-authoritative envelopes; caveat_param is the config-declared
+// guard, the tool re-supplies it at /register), the agent list, and TTLs. The
+// caller supplies the keys/CA/tickets (EnsureKeys, Task 3).
+func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca.TicketStore) (broker.Config, error) {
+	pol := rules.NewPolicy()
+	addGrants := func(cn string, obtain []config.Grant, delegate []config.DelegateGrant) {
+		for _, g := range obtain {
+			pol.AllowObtain(cn, g.Tool, g.Op)
+		}
+		for _, d := range delegate {
+			pol.AllowDelegate(cn, d.Tool, d.Op, d.To...)
+		}
+	}
+	addGrants(app.ManagerCN(), app.Manager.Obtain, app.Manager.Delegate)
+	agents := make([]string, 0, len(app.Groves))
+	for _, g := range app.Groves {
+		addGrants(g.Name, g.Obtain, g.Delegate)
+		agents = append(agents, g.Name)
+	}
+
+	reg := registry.New()
+	for _, t := range app.Broker.Tools {
+		ops := make(map[string]registry.Operation, len(t.Operations))
+		for _, o := range t.Operations {
+			ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: copyStringMap(o.CaveatParam)}
+		}
+		if err := reg.Register(registry.Tool{
+			Name:          t.Name,
+			Backend:       t.Backend,
+			Operations:    ops,
+			AllowedValues: copyStringSliceMap(t.AllowedValues),
+			FirstParty:    true,
+		}); err != nil {
+			return broker.Config{}, fmt.Errorf("brokerctl: register tool %q: %w", t.Name, err)
+		}
+	}
+
+	return broker.Config{
+		Keys:            keys,
+		CA:              caInst,
+		Tickets:         tickets,
+		Rules:           pol,
+		Registry:        reg,
+		ManagerIdentity: app.ManagerCN(),
+		Agents:          agents,
+		GrantTTL:        app.Broker.GrantTTL,
+		TicketTTL:       app.Broker.TicketTTL,
+		ServerName:      serverName,
+	}, nil
+}
+
+// copyStringMap returns a fresh copy so the registry (which takes ownership)
+// never aliases the parsed config.
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func copyStringSliceMap(m map[string][]string) map[string][]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(m))
+	for k, v := range m {
+		cp := make([]string, len(v))
+		copy(cp, v)
+		out[k] = cp
+	}
+	return out
+}

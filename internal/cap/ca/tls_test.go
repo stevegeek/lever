@@ -1,141 +1,147 @@
 package ca
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
-func TestMTLSHandshakeRecoversAgentIdentity(t *testing.T) {
+func serverFor(t *testing.T, c *CA, h http.Handler) *httptest.Server {
+	t.Helper()
+	certPEM, keyPEM, err := c.IssueServerCert("example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := c.ServerTLSConfig(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(h)
+	srv.TLS = cfg
+	srv.StartTLS()
+	return srv
+}
+
+// TestVerifyIfGivenAllowsCertlessAndProvesIdentityWhenGiven exercises both
+// paths against one server: certless requests reach the handler (RequireAgent
+// returns an error -> 401), and cert-bearing requests recover the CN.
+func TestVerifyIfGivenAllowsCertlessAndProvesIdentityWhenGiven(t *testing.T) {
 	c, err := Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverCertPEM, serverKeyPEM, err := c.IssueServerCert("example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srvTLS, err := c.ServerTLSConfig(serverCertPEM, serverKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		agent, err := AgentFromConnState(*r.TLS)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agent, err := RequireAgent(r)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusForbidden)
+			http.Error(w, "no identity", http.StatusUnauthorized)
 			return
 		}
 		_, _ = io.WriteString(w, agent)
 	})
-	srv := httptest.NewUnstartedServer(handler)
-	srv.TLS = srvTLS
-	srv.StartTLS()
+	srv := serverFor(t, c, h)
 	defer srv.Close()
 
-	agentCertPEM, agentKeyPEM, err := c.IssueAgentCert("scratch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientCert, err := tls.X509KeyPair(agentCertPEM, agentKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
 	pool := x509.NewCertPool()
 	pool.AddCert(c.Cert)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      pool,
-		ServerName:   "example.test",
-	}}}
 
-	resp, err := client.Get(srv.URL)
+	// (a) Certless request: handshake succeeds, handler runs, RequireAgent -> 401.
+	certless := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs: pool, ServerName: "example.test",
+	}}}
+	resp, err := certless.Get(srv.URL)
 	if err != nil {
-		t.Fatalf("request: %v", err)
+		t.Fatalf("certless request should reach the handler: %v", err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("certless status = %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// (b) Cert-bearing request: recovers the CN. Build a keypair + CSR, sign it.
+	clientCert := signedClientCert(t, c, "scratch")
+	withCert := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		Certificates: []tls.Certificate{clientCert}, RootCAs: pool, ServerName: "example.test",
+	}}}
+	resp2, err := withCert.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("cert request: %v", err)
+	}
+	body, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
 	if string(body) != "scratch" {
 		t.Errorf("recovered agent = %q, want scratch", string(body))
 	}
 }
 
-func TestMTLSRejectsClientWithoutCert(t *testing.T) {
+func TestMTLSRejectsCertFromDifferentCA(t *testing.T) {
 	c, err := Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverCertPEM, serverKeyPEM, _ := c.IssueServerCert("example.test")
-	srvTLS, _ := c.ServerTLSConfig(serverCertPEM, serverKeyPEM)
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.TLS = srvTLS
-	srv.StartTLS()
+	other, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := serverFor(t, c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
-
 	pool := x509.NewCertPool()
 	pool.AddCert(c.Cert)
+	foreign := signedClientCert(t, other, "scratch") // signed by a DIFFERENT CA
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		RootCAs:    pool,
-		ServerName: "example.test",
+		Certificates: []tls.Certificate{foreign}, RootCAs: pool, ServerName: "example.test",
 	}}}
 	if _, err := client.Get(srv.URL); err == nil {
-		t.Fatal("expected handshake failure when client presents no cert")
-	}
-}
-
-func TestMTLSRejectsCertFromDifferentCA(t *testing.T) {
-	server, err := Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	attacker, err := Generate() // a DIFFERENT CA
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverCertPEM, serverKeyPEM, err := server.IssueServerCert("example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srvTLS, err := server.ServerTLSConfig(serverCertPEM, serverKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.TLS = srvTLS
-	srv.StartTLS()
-	defer srv.Close()
-
-	rogueCertPEM, rogueKeyPEM, err := attacker.IssueAgentCert("scratch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rogue, err := tls.X509KeyPair(rogueCertPEM, rogueKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(server.Cert) // client trusts the real server's CA
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		Certificates: []tls.Certificate{rogue}, RootCAs: pool, ServerName: "example.test",
-	}}}
-	if _, err := client.Get(srv.URL); err == nil {
-		t.Fatal("expected rejection: client cert signed by a different CA must not be accepted")
+		t.Fatal("expected handshake failure: client cert not signed by the server's CA")
 	}
 }
 
 func TestAgentFromConnStateFailsClosed(t *testing.T) {
-	// No verified chains at all.
 	if _, err := AgentFromConnState(tls.ConnectionState{}); err == nil {
-		t.Error("expected error when no verified client certificate is present")
+		t.Fatal("expected error: no verified client certificate")
 	}
-	// A verified leaf with an empty CommonName.
-	emptyCN := &x509.Certificate{Subject: pkix.Name{CommonName: ""}}
-	cs := tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{emptyCN}}}
+}
+
+func TestAgentFromConnStateRejectsEmptyCN(t *testing.T) {
+	cs := tls.ConnectionState{
+		VerifiedChains: [][]*x509.Certificate{{&x509.Certificate{Subject: pkix.Name{CommonName: ""}}}},
+	}
 	if _, err := AgentFromConnState(cs); err == nil {
-		t.Error("expected error when client certificate CommonName is empty")
+		t.Fatal("expected error: verified client cert with empty common name")
 	}
+}
+
+func signedClientCert(t *testing.T, c *CA, cn string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader,
+		&x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	certPEM, err := c.SignCSR(csrPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pair
 }

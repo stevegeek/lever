@@ -5,10 +5,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net/http"
 )
 
-// ServerTLSConfig builds a TLS config that REQUIRES and verifies a client cert
-// signed by this CA, using the given server cert/key for the server side.
+// ServerTLSConfig builds a TLS config that verifies a client cert *if one is
+// presented* (so the certless /enrol handshake can occur) and otherwise serves
+// with the given server cert/key. Per-route enforcement uses RequireAgent.
 func (c *CA) ServerTLSConfig(serverCertPEM, serverKeyPEM []byte) (*tls.Config, error) {
 	serverCert, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
 	if err != nil {
@@ -18,7 +20,7 @@ func (c *CA) ServerTLSConfig(serverCertPEM, serverKeyPEM []byte) (*tls.Config, e
 	pool.AddCert(c.Cert)
 	return &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 		ClientCAs:    pool,
 		MinVersion:   tls.VersionTLS12,
 	}, nil
@@ -35,4 +37,14 @@ func AgentFromConnState(cs tls.ConnectionState) (string, error) {
 		return "", errors.New("ca: client certificate has empty common name")
 	}
 	return cn, nil
+}
+
+// RequireAgent is the per-route guard for gated handlers: it returns the
+// verified caller identity, or an error if the request carried no verified
+// client cert. Fails closed.
+func RequireAgent(r *http.Request) (string, error) {
+	if r.TLS == nil {
+		return "", errors.New("ca: request has no TLS state")
+	}
+	return AgentFromConnState(*r.TLS)
 }

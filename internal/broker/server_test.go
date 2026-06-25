@@ -2,163 +2,212 @@ package broker
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
+	"context"
 	"encoding/json"
-	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	registry "github.com/lever-to/lever/internal/broker/registry"
 )
 
-func TestEndToEndProvisionThenCall(t *testing.T) {
-	// A fake MCP backend on the host side.
-	var gotPath string
+// TestJailHandlerGatewayDeniesNoCert verifies that a tools/call request to the
+// jail mux's /mcp/<tool>/ path with no client cert is rejected 403.
+// The gateway is bound at JailHandler() time, so the tool must be registered
+// BEFORE calling JailHandler().
+func TestJailHandlerGatewayDeniesNoCert(t *testing.T) {
+	var reached bool
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		_, _ = io.WriteString(w, "backend-ok")
+		reached = true
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	}))
 	defer up.Close()
 
-	b := newTestBroker(t)
-	b.policy.Routes = []Route{{Operation: "qmd", PathPrefix: "/mcp/qmd/", Backend: up.URL}}
-
-	// Start the broker over mTLS.
-	srvCertPEM, srvKeyPEM, err := b.ca.IssueServerCert("example.test")
-	if err != nil {
+	b := New(testConfig(t))
+	// Register a tool BEFORE calling JailHandler() — gateways are bound at call time.
+	if err := b.reg.Register(regTool("db", up.URL, "read")); err != nil {
 		t.Fatal(err)
-	}
-	tlsCfg, err := b.ca.ServerTLSConfig(srvCertPEM, srvKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(b.Handler())
-	srv.TLS = tlsCfg
-	srv.StartTLS()
-	defer srv.Close()
-
-	pool := x509.NewCertPool()
-	pool.AddCert(b.ca.Cert)
-
-	// 1. Manager provisions grove "scratch".
-	mgrCertPEM, mgrKeyPEM, _ := b.ca.IssueAgentCert("manager")
-	mgrCert, _ := tls.X509KeyPair(mgrCertPEM, mgrKeyPEM)
-	mgrClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		Certificates: []tls.Certificate{mgrCert}, RootCAs: pool, ServerName: "example.test",
-	}}}
-	body, _ := json.Marshal(ProvisionRequest{Grove: "scratch"})
-	resp, err := mgrClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pr ProvisionResponse
-	_ = json.NewDecoder(resp.Body).Decode(&pr)
-	resp.Body.Close()
-	if pr.Biscuit == "" {
-		t.Fatal("no biscuit provisioned")
 	}
 
-	// 2. Grove "scratch" uses its provisioned cert + biscuit to call qmd.
-	scratchCert, err := tls.X509KeyPair([]byte(pr.Cert), []byte(pr.Key))
-	if err != nil {
-		t.Fatal(err)
+	h := b.JailHandler()
+
+	// POST with no client cert — RequireAgent must reject with 403.
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"fake"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	// Deliberately no r.TLS set → no client cert.
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no client cert must deny)", w.Code)
 	}
-	scratchClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		Certificates: []tls.Certificate{scratchCert}, RootCAs: pool, ServerName: "example.test",
-	}}}
-	req, _ := http.NewRequest("POST", srv.URL+"/mcp/qmd/tools/call", nil)
-	rawBiscuit, _ := base64.RawURLEncoding.DecodeString(pr.Biscuit)
-	req.Header.Set("Authorization", "Bearer "+base64.RawURLEncoding.EncodeToString(rawBiscuit))
-	callResp, err := scratchClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer callResp.Body.Close()
-	if callResp.StatusCode != http.StatusOK {
-		t.Fatalf("call status = %d", callResp.StatusCode)
-	}
-	if gotPath != "/tools/call" {
-		t.Errorf("backend path = %q", gotPath)
+	if reached {
+		t.Fatal("SECURITY: backend reached despite missing client cert")
 	}
 }
 
-func TestEndToEndDeniesUngrantedOpWithoutReachingBackend(t *testing.T) {
-	var backendHit bool
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backendHit = true
-		_, _ = io.WriteString(w, "should-not-happen")
-	}))
-	defer up.Close()
+// TestAdminHandlerRegisterAddsTool verifies that a POST to /register on the admin
+// handler adds the tool to the registry and returns 200.
+func TestAdminHandlerRegisterAddsTool(t *testing.T) {
+	b := New(testConfig(t))
+	// Pre-load the config envelope for "calendar" (config-authoritative: tool
+	// cannot register unless the host config already knows about it).
+	_ = b.reg.Register(registry.Tool{
+		Name: "calendar", Backend: "http://127.0.0.1:3203",
+		Operations: map[string]registry.Operation{"list": {Name: "list"}},
+	})
+	h := b.AdminHandler()
 
-	b := newTestBroker(t)
-	// scratch is granted {qmd, github.api} by samplePolicy; "calendar" is NOT granted.
-	b.policy.Routes = []Route{{Operation: "calendar", PathPrefix: "/mcp/calendar/", Backend: up.URL}}
+	body, _ := json.Marshal(RegisterRequest{
+		Name:       "calendar",
+		Backend:    "http://127.0.0.1:3203",
+		Operations: []OperationSpec{{Name: "list"}},
+	})
+	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
 
-	srvCertPEM, srvKeyPEM, _ := b.ca.IssueServerCert("example.test")
-	tlsCfg, _ := b.ca.ServerTLSConfig(srvCertPEM, srvKeyPEM)
-	srv := httptest.NewUnstartedServer(b.Handler())
-	srv.TLS = tlsCfg
-	srv.StartTLS()
-	defer srv.Close()
-	pool := x509.NewCertPool()
-	pool.AddCert(b.ca.Cert)
-
-	// Provision scratch (grants qmd, github.api — not calendar).
-	mgrCertPEM, mgrKeyPEM, _ := b.ca.IssueAgentCert("manager")
-	mgrCert, _ := tls.X509KeyPair(mgrCertPEM, mgrKeyPEM)
-	mgrClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		Certificates: []tls.Certificate{mgrCert}, RootCAs: pool, ServerName: "example.test",
-	}}}
-	body, _ := json.Marshal(ProvisionRequest{Grove: "scratch"})
-	resp, _ := mgrClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(body))
-	var pr ProvisionResponse
-	_ = json.NewDecoder(resp.Body).Decode(&pr)
-	resp.Body.Close()
-
-	scratchCert, _ := tls.X509KeyPair([]byte(pr.Cert), []byte(pr.Key))
-	scratchClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		Certificates: []tls.Certificate{scratchCert}, RootCAs: pool, ServerName: "example.test",
-	}}}
-	req, _ := http.NewRequest("POST", srv.URL+"/mcp/calendar/x", nil)
-	req.Header.Set("Authorization", "Bearer "+pr.Biscuit)
-	callResp, err := scratchClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	defer callResp.Body.Close()
-	if callResp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (ungranted op)", callResp.StatusCode)
-	}
-	if backendHit {
-		t.Fatal("SECURITY: backend was reached despite denial")
+	if !b.reg.HasOperation("calendar", "list") {
+		t.Fatal("calendar.list should be registered after POST /register")
 	}
 }
 
-func TestEndToEndNonManagerCannotProvision(t *testing.T) {
-	b := newTestBroker(t)
-	srvCertPEM, srvKeyPEM, _ := b.ca.IssueServerCert("example.test")
-	tlsCfg, _ := b.ca.ServerTLSConfig(srvCertPEM, srvKeyPEM)
-	srv := httptest.NewUnstartedServer(b.Handler())
-	srv.TLS = tlsCfg
-	srv.StartTLS()
-	defer srv.Close()
-	pool := x509.NewCertPool()
-	pool.AddCert(b.ca.Cert)
+// TestJailHandlerRoutesProvision confirms the jail mux wires /provision correctly.
+// We test without a TLS state to trigger an auth error — the handler must not 404.
+func TestJailHandlerRoutesProvision(t *testing.T) {
+	b := New(testConfig(t))
+	h := b.JailHandler()
 
-	// A grove (not the manager) tries to provision.
-	groveCertPEM, groveKeyPEM, _ := b.ca.IssueAgentCert("scratch")
-	groveCert, _ := tls.X509KeyPair(groveCertPEM, groveKeyPEM)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		Certificates: []tls.Certificate{groveCert}, RootCAs: pool, ServerName: "example.test",
-	}}}
-	body, _ := json.Marshal(ProvisionRequest{Grove: "scratch"})
-	resp, err := client.Post(srv.URL+"/provision", "application/json", bytes.NewReader(body))
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader([]byte(`{"grove":"worker"}`)))
+	// No TLS → handleProvision will reject (not manager) but must NOT 404.
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code == http.StatusNotFound {
+		t.Fatalf("/provision returned 404 — not routed in JailHandler")
+	}
+}
+
+// TestAdminHandlerDoesNotExposeProvision verifies that /provision is NOT served
+// on the admin handler (should 404 or 405).
+func TestAdminHandlerDoesNotExposeProvision(t *testing.T) {
+	b := New(testConfig(t))
+	h := b.AdminHandler()
+
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader([]byte(`{}`)))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/provision on admin handler returned %d, want 404 (should not be exposed)", w.Code)
+	}
+}
+
+// TestResolveAdminAddr verifies the loopback-enforcement helper directly.
+// These tests do not start any server or listener.
+func TestResolveAdminAddr(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "empty host defaults to 127.0.0.1",
+			input: ":9001",
+			want:  "127.0.0.1:9001",
+		},
+		{
+			name:  "explicit 127.0.0.1 accepted",
+			input: "127.0.0.1:9001",
+			want:  "127.0.0.1:9001",
+		},
+		{
+			name:  "IPv6 loopback accepted",
+			input: "[::1]:9001",
+			want:  "[::1]:9001",
+		},
+		{
+			name:    "0.0.0.0 rejected",
+			input:   "0.0.0.0:9001",
+			wantErr: true,
+		},
+		{
+			name:    "routable private IP rejected",
+			input:   "192.168.1.5:9001",
+			wantErr: true,
+		},
+		{
+			name:    "localhost hostname rejected (not a parseable loopback IP)",
+			input:   "localhost:9001",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveAdminAddr(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveAdminAddr(%q) = %q, nil; want error", tc.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAdminAddr(%q) unexpected error: %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Fatalf("resolveAdminAddr(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEpochEndpointReportsCurrentEpoch(t *testing.T) {
+	b := New(testConfig(t))
+	b.BumpEpoch()
+	b.BumpEpoch() // epoch 2
+	r := httptest.NewRequest("GET", "/epoch", nil)
+	w := httptest.NewRecorder()
+	b.AdminHandler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp EpochResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Epoch != 2 {
+		t.Fatalf("epoch = %d, want 2", resp.Epoch)
+	}
+}
+
+func TestServeListenersRejectsNonLoopbackAdmin(t *testing.T) {
+	b := New(testConfig(t))
+	jailLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (non-manager provision)", resp.StatusCode)
+	// Bind admin on a non-loopback-guaranteed wildcard address (0.0.0.0).
+	adminLn, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, key, err := b.ca.IssueServerCert("host.orb.internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- b.ServeListeners(context.Background(), jailLn, adminLn, cert, key) }()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("ServeListeners must reject a non-loopback admin listener")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeListeners did not fail closed on a non-loopback admin listener")
 	}
 }

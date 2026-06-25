@@ -1,36 +1,38 @@
 package broker
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"time"
 
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/lever-to/lever/internal/cap/ca"
 )
 
-// ProvisionRequest is the body of POST /provision.
+// ProvisionRequest is the body of POST /provision (manager only).
 type ProvisionRequest struct {
 	Grove string `json:"grove"`
 }
 
-// ProvisionResponse carries the agent's per-spawn identity material.
+// ProvisionResponse carries the one-time enrolment ticket.
 type ProvisionResponse struct {
-	Cert    string `json:"cert"`    // client cert PEM (CN = grove)
-	Key     string `json:"key"`     // client key PEM
-	Biscuit string `json:"biscuit"` // base64url-encoded capability
+	Ticket string `json:"ticket"`
 }
 
-// handleProvision mints a cert + biscuit for a grove. Only the manager identity
-// may call it; the grant is taken strictly from policy (host-side authority).
+// handleProvision issues a single-use enrolment ticket for a grove. Only the
+// configured manager identity may call it, and only for a configured grove. No
+// key material is returned (the grove self-generates its keypair and enrols).
+//
+// gating: caller == manager && grove ∈ configured agents.
+// Possible future refinement: make provisioning itself a rules-governed
+// delegated capability, so "the manager is just an agent with a wider policy"
+// holds for spawning too (rather than a special-cased manager identity here).
 func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
-	caller, err := b.callerID(r)
+	caller, err := ca.RequireAgent(r)
 	if err != nil {
 		b.audit("provision", "", "deny", err.Error())
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if caller != b.policy.ManagerIdentity {
+	if caller != b.manager {
 		b.audit("provision", caller, "deny", "not the manager identity")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -41,34 +43,18 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	grants, ok := b.policy.GrantsFor(req.Grove)
-	if !ok {
-		b.audit("provision", caller, "deny", "grove not in policy: "+req.Grove)
+	if !b.isAgent(req.Grove) {
+		b.audit("provision", caller, "deny", "unknown grove: "+req.Grove)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	certPEM, keyPEM, err := b.ca.IssueAgentCert(req.Grove)
-	if err != nil {
-		b.audit("provision", caller, "error", err.Error())
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	tok, err := token.Mint(b.keys.Private, token.Grant{
-		Agent:  req.Grove,
-		Tools:  grants,
-		Expiry: time.Now().Add(b.policy.GrantTTL),
-		Epoch:  b.MinEpoch(),
-	})
+	tk, err := b.tickets.Issue(req.Grove, b.ticketTTL)
 	if err != nil {
 		b.audit("provision", caller, "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(ProvisionResponse{
-		Cert:    string(certPEM),
-		Key:     string(keyPEM),
-		Biscuit: base64.RawURLEncoding.EncodeToString(tok),
-	})
+	_ = json.NewEncoder(w).Encode(ProvisionResponse{Ticket: tk})
 	b.audit("provision", caller, "allow", req.Grove)
 }

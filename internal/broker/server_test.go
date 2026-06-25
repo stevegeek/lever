@@ -2,10 +2,13 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	registry "github.com/lever-to/lever/internal/broker/registry"
 )
@@ -179,5 +182,32 @@ func TestEpochEndpointReportsCurrentEpoch(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp.Epoch != 2 {
 		t.Fatalf("epoch = %d, want 2", resp.Epoch)
+	}
+}
+
+func TestServeListenersRejectsNonLoopbackAdmin(t *testing.T) {
+	b := New(testConfig(t))
+	jailLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bind admin on a non-loopback-guaranteed wildcard address (0.0.0.0).
+	adminLn, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, key, err := b.ca.IssueServerCert("host.orb.internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- b.ServeListeners(context.Background(), jailLn, adminLn, cert, key) }()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("ServeListeners must reject a non-loopback admin listener")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeListeners did not fail closed on a non-loopback admin listener")
 	}
 }

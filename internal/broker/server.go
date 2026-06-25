@@ -80,8 +80,19 @@ func (b *Broker) AdminHandler() http.Handler {
 // them so it can learn OS-assigned ports before starting tools). Runs until ctx
 // is cancelled. jailLn carries mTLS; adminLn is loopback plain HTTP.
 func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listener, serverCertPEM, serverKeyPEM []byte) error {
+	// Fail closed if the caller bound adminLn on a non-loopback interface.
+	// The unauthenticated admin routes (/bootstrap, /register, /revoke, …) must
+	// never be reachable from a routable interface — enforce the invariant here
+	// rather than relying on every caller to get it right.
+	if ta, ok := adminLn.Addr().(*net.TCPAddr); !ok || !ta.IP.IsLoopback() {
+		_ = jailLn.Close()
+		_ = adminLn.Close()
+		return fmt.Errorf("broker: admin listener must be loopback, got %s", adminLn.Addr())
+	}
 	tlsCfg, err := b.ca.ServerTLSConfig(serverCertPEM, serverKeyPEM)
 	if err != nil {
+		_ = jailLn.Close()
+		_ = adminLn.Close()
 		return err
 	}
 	jailSrv := &http.Server{

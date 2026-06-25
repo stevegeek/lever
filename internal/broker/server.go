@@ -65,11 +65,13 @@ func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.
-// Routes /register and /epoch — no capability-gated or agent-facing endpoints.
+// Routes /register, /epoch, /bump-epoch, /revoke — no capability-gated or agent-facing endpoints.
 func (b *Broker) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", b.handleRegister)
 	mux.HandleFunc("/epoch", b.handleEpoch)
+	mux.HandleFunc("/bump-epoch", b.handleBumpEpoch)
+	mux.HandleFunc("/revoke", b.handleRevoke)
 	return mux
 }
 

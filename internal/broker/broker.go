@@ -20,6 +20,12 @@ const (
 	defaultTicketTTL = 10 * time.Minute
 )
 
+// RevocationState is the persisted revocation floor + per-agent revoke list.
+type RevocationState struct {
+	MinEpoch int      `json:"min_epoch"`
+	Revoked  []string `json:"revoked"`
+}
+
 // Config assembles a Broker. Zero GrantTTL/TicketTTL are defaulted.
 type Config struct {
 	Keys            token.KeyPair
@@ -33,6 +39,12 @@ type Config struct {
 	TicketTTL       time.Duration
 	ServerName      string // the server cert hostname agents dial (host.orb.internal)
 	Log             *slog.Logger
+	// RevocationState seeds the epoch floor + revoke list at construction
+	// (loaded from the state dir) so a restart never silently un-revokes.
+	RevocationState RevocationState
+	// PersistRevocation is called (under the broker lock) whenever revocation
+	// state changes, to write it through to the state dir. nil ⇒ no persistence.
+	PersistRevocation func(RevocationState) error
 }
 
 // Broker is the running capability authority + gateway.
@@ -52,6 +64,7 @@ type Broker struct {
 	mu       sync.Mutex
 	minEpoch int
 	revoked  map[string]bool
+	persist  func(RevocationState) error
 }
 
 // New builds a Broker from c.
@@ -66,11 +79,17 @@ func New(c Config) *Broker {
 	for _, a := range c.Agents {
 		agents[a] = struct{}{}
 	}
+	revoked := make(map[string]bool, len(c.RevocationState.Revoked))
+	for _, a := range c.RevocationState.Revoked {
+		revoked[a] = true
+	}
 	return &Broker{
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
 		manager: c.ManagerIdentity, agents: agents,
 		grantTTL: c.GrantTTL, ticketTTL: c.TicketTTL, srvName: c.ServerName, log: c.Log,
-		revoked: map[string]bool{},
+		minEpoch: c.RevocationState.MinEpoch,
+		revoked:  revoked,
+		persist:  c.PersistRevocation,
 	}
 }
 
@@ -86,6 +105,7 @@ func (b *Broker) BumpEpoch() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.minEpoch++
+	b.persistLocked()
 }
 
 // Revoke blocks one agent from any further authorization.
@@ -93,6 +113,34 @@ func (b *Broker) Revoke(agent string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.revoked[agent] = true
+	b.persistLocked()
+}
+
+// persistLocked writes the current revocation state through the persist hook.
+// Caller holds b.mu.
+func (b *Broker) persistLocked() {
+	if b.persist == nil {
+		return
+	}
+	revoked := make([]string, 0, len(b.revoked))
+	for a := range b.revoked {
+		revoked = append(revoked, a)
+	}
+	if err := b.persist(RevocationState{MinEpoch: b.minEpoch, Revoked: revoked}); err != nil {
+		b.log.Error("broker.persist_revocation", "err", err.Error())
+	}
+}
+
+// revocationState returns a snapshot of the current revocation state.
+// Caller must NOT hold b.mu.
+func (b *Broker) revocationState() RevocationState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	revoked := make([]string, 0, len(b.revoked))
+	for a := range b.revoked {
+		revoked = append(revoked, a)
+	}
+	return RevocationState{MinEpoch: b.minEpoch, Revoked: revoked}
 }
 
 func (b *Broker) isRevoked(agent string) bool {

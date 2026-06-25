@@ -44,6 +44,8 @@ func run(argv []string) error {
 		return cmdServeCapability(argv[2:])
 	case "renew":
 		return cmdRenew(argv[2:])
+	case "provision":
+		return cmdProvision(argv[2:])
 	case "request", "attenuate", "delegate", "call":
 		return cmdCLI(argv[1], argv[2:])
 	default:
@@ -243,6 +245,67 @@ func cmdRenew(args []string) error {
 			}
 		}
 	}
+}
+
+// cmdProvision mints a one-use enrolment ticket for a grove via the broker's
+// /provision endpoint (manager-CN-gated). The resulting Bootstrap JSON is written
+// to -out (0600) so the acceptance harness can drop it in the jail for boot.
+func cmdProvision(args []string) error {
+	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
+	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
+	idDir := fs.String("id-dir", defaultIDDir, "directory for the manager identity (cert+key+ca)")
+	grove := fs.String("grove", "", "grove name to provision a ticket for")
+	out := fs.String("out", "", "path to write the grove bootstrap JSON (0600)")
+	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL if -broker-url not set)")
+	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *grove == "" {
+		return fmt.Errorf("provision: -grove is required")
+	}
+	if *out == "" {
+		return fmt.Errorf("provision: -out is required")
+	}
+
+	id, ok := agent.LoadIdentity(*idDir)
+	if !ok {
+		return fmt.Errorf("provision: no identity in %s — run 'lever-agent boot' first", *idDir)
+	}
+
+	// Resolve broker URL and CA PEM: explicit flag wins, else from bootstrap file.
+	var bURL, caPEM string
+	if *brokerURL != "" {
+		bURL = *brokerURL
+		caPEM = string(id.CAPEM)
+	} else {
+		resolved, err := resolveBrokerURL("", *bootstrapPath)
+		if err != nil {
+			return fmt.Errorf("provision: %w", err)
+		}
+		bURL = resolved
+		caPEM = string(id.CAPEM)
+	}
+
+	client, err := id.Client()
+	if err != nil {
+		return fmt.Errorf("provision: build mTLS client: %w", err)
+	}
+
+	ticket, err := agent.Provision(context.Background(), bURL, client, *grove)
+	if err != nil {
+		return fmt.Errorf("provision: %w", err)
+	}
+
+	bs := agent.BootstrapFor(*grove, ticket, caPEM, bURL)
+	data, err := json.Marshal(bs)
+	if err != nil {
+		return fmt.Errorf("provision: marshal bootstrap: %w", err)
+	}
+	if err := os.WriteFile(*out, data, 0o600); err != nil {
+		return fmt.Errorf("provision: write bootstrap: %w", err)
+	}
+	return nil
 }
 
 func cmdCLI(verb string, args []string) error {

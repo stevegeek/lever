@@ -284,14 +284,60 @@ func (h *acceptanceHarness) checkNoSelfPath(ctx context.Context) (bool, error) {
 	// MayObtain("worker","worker","db","read") is false — the broker's /request
 	// MUST refuse it. (The worker may only exercise a token the MANAGER delegated;
 	// it has no ambient authority of its own.)
+	//
+	// Assumption: if lever-agent is absent entirely, workerToken() (called by other
+	// checks before this one) already fails hard, so we don't need to guard that
+	// case here separately.
 	out, err := h.agent(ctx, "request", "-tool", "db", "-op", "read", "table=A")
 	if err != nil {
-		return true, nil // refused — correct (no ambient authority)
-	}
-	if strings.TrimSpace(lastLine(out)) == "" {
+		// Non-zero exit = broker refused (or lever-agent signalled denial). This
+		// is the expected outcome — the broker's /request MUST deny a worker with
+		// no ambient authority. PASS.
 		return true, nil
 	}
+	// Exit 0 with empty output is AMBIGUOUS: we cannot confirm denial occurred.
+	// Treat as FAIL-CLOSED rather than recording a vacuous PASS.
+	if strings.TrimSpace(out) == "" {
+		return false, fmt.Errorf("no-self-path: ambiguous result — request exited 0 with empty output (expected broker denial / non-zero exit)")
+	}
+	// Exit 0 with any output means the broker ALLOWED the request — escalation.
 	return false, fmt.Errorf("worker self-minted an un-granted cap (must be refused): %s", out)
+}
+
+// classifyCurlResult maps an exec.Result from a curl invocation to a tri-state:
+//
+//   - ("blocked", nil)     -- genuine policy block (curl exit 7 or 28)
+//   - ("allowed", nil)     -- curl connected successfully (exit 0)
+//   - ("uncertain", error) -- curl not found (exit 127) or any other unexpected
+//     exit -- FAIL-CLOSED
+//
+// res.Code is reliable here: jail.Runner wraps exec.RealRunner via `orb`, which
+// passes the inner command's exit code back through *exec.ExitError.ExitCode()
+// even on the non-zero path (see internal/exec/runner.go). Exit 0 means curl
+// succeeded (egress open); exit 7 is CURLE_COULDNT_CONNECT (ECONNREFUSED /
+// network-unreachable); exit 28 is CURLE_OPERATION_TIMEDOUT (packet dropped);
+// exit 127 is command-not-found from the shell.
+func classifyCurlResult(res leverexec.Result, err error) (string, error) {
+	if err == nil {
+		return "allowed", nil
+	}
+	switch res.Code {
+	case 7, 28:
+		// Genuine egress-block signatures: connection rejected or max-time
+		// budget expired because the packet was dropped by the policy.
+		return "blocked", nil
+	case 127:
+		return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail image (exit 127) -- check is UNCERTAIN; image must include curl: %s", res.Stderr)
+	default:
+		// Any other curl exit (DNS failure, SSL error, etc.) is ambiguous:
+		// we cannot tell whether egress was open or blocked. FAIL-CLOSED.
+		combined := res.Stdout + res.Stderr
+		// Guard against shells that emit 126 or the orb wrapper absorbing 127.
+		if strings.Contains(combined, "not found") || strings.Contains(combined, "No such file") {
+			return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail image -- check is UNCERTAIN; image must include curl: %s", combined)
+		}
+		return "uncertain", fmt.Errorf("egress-refused: curl exited %d with unexpected output -- check is UNCERTAIN (FAIL-CLOSED): %s", res.Code, combined)
+	}
 }
 
 // checkEgressRefused — PASS = the jail egress allowlist refuses a
@@ -300,14 +346,18 @@ func (h *acceptanceHarness) checkNoSelfPath(ctx context.Context) (bool, error) {
 func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
 	// curl a non-allowlisted external host from inside the jail. The egress
 	// netns allowlist should drop it (connection fails / times out fast).
-	res, err := h.jr.Run(ctx, nil, "curl", "-sS", "--max-time", "5", "https://example.com/")
-	if err != nil {
-		return true, nil // connection refused/blocked — correct
+	// --connect-timeout 4 catches a DROP policy before the outer max-time.
+	res, err := h.jr.Run(ctx, nil, "curl", "-sS", "--connect-timeout", "4", "--max-time", "5", "https://example.com/")
+	state, cerr := classifyCurlResult(res, err)
+	switch state {
+	case "blocked":
+		return true, nil // egress policy block confirmed -- PASS
+	case "allowed":
+		out := res.Stdout + res.Stderr
+		return false, fmt.Errorf("non-allowlisted egress SUCCEEDED (must be refused): %s", out)
+	default: // "uncertain"
+		return false, cerr // FAIL-CLOSED: do not record PASS when outcome is unknown
 	}
-	if strings.TrimSpace(res.Stdout) == "" && strings.TrimSpace(res.Stderr) == "" {
-		return true, nil
-	}
-	return false, fmt.Errorf("non-allowlisted egress SUCCEEDED (must be refused): %s%s", res.Stdout, res.Stderr)
 }
 
 // checkRevocation — PASS = after /bump-epoch the worker's previously-working

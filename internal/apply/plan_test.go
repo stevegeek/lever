@@ -17,7 +17,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "write-manifest", "start-manager"}
+	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "write-manifest", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -26,13 +26,13 @@ func TestPlanOrder(t *testing.T) {
 			t.Fatalf("step %d = %q want %q (all=%v)", i, kinds[i], want[i], kinds)
 		}
 	}
-	// register-grove targets: first grove is at index 6, second at index 7
-	// (0:jail-up 1:load-image 2:init-machine 3:config-registry 4:scion-server 5:register-manager 6:register-grove 7:register-grove 8:start-manager)
-	if steps[6].Target != "/t/groves/appa" {
-		t.Fatalf("register-grove[0] target=%q", steps[6].Target)
+	// register-grove targets: first grove is at index 7, second at index 8
+	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-grove 8:register-grove 9:write-manifest 10:mint-manager-bootstrap 11:start-manager)
+	if steps[7].Target != "/t/groves/appa" {
+		t.Fatalf("register-grove[0] target=%q", steps[7].Target)
 	}
-	if steps[7].Target != "/t/groves/appb" {
-		t.Fatalf("register-grove[1] target=%q", steps[7].Target)
+	if steps[8].Target != "/t/groves/appb" {
+		t.Fatalf("register-grove[1] target=%q", steps[8].Target)
 	}
 }
 
@@ -66,6 +66,34 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 	}
 	if steps[credIdx].Target != "/home/x/.scion/oauth-token" {
 		t.Fatalf("credential target=%q", steps[credIdx].Target)
+	}
+}
+
+func TestPlanInsertsBrokerSteps(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/tmp/work",
+		Manager: config.Manager{Image: "img"},
+		Broker:  config.Broker{JailPort: 8443, AdminPort: 8444},
+	}
+	steps := Plan(app)
+	idx := map[string]int{}
+	for i, s := range steps {
+		idx[s.Kind] = i
+	}
+	if _, ok := idx["broker-up"]; !ok {
+		t.Fatal("plan must include broker-up")
+	}
+	if _, ok := idx["mint-manager-bootstrap"]; !ok {
+		t.Fatal("plan must include mint-manager-bootstrap")
+	}
+	if idx["broker-up"] <= idx["jail-up"] == false {
+		// broker-up must come after jail-up
+	}
+	if !(idx["jail-up"] < idx["broker-up"]) {
+		t.Fatal("broker-up must come after jail-up")
+	}
+	if !(idx["mint-manager-bootstrap"] < idx["start-manager"]) {
+		t.Fatal("mint-manager-bootstrap must come before start-manager")
 	}
 }
 

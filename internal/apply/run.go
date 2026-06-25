@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -12,32 +13,55 @@ import (
 	"github.com/lever-to/lever/internal/scion"
 )
 
+// BootstrapMaterial is what the manager's lever-agent consumes to enrol.
+type BootstrapMaterial struct {
+	Ticket    string `json:"ticket"`
+	BrokerCA  string `json:"broker_ca"`
+	BrokerURL string `json:"broker_url"`
+	AgentCN   string `json:"agent_cn"`
+}
+
 // Deps are the executor's collaborators, injected so Run is testable offline.
 // JailUp/LoadImage are host-side (backend.EnsureUp, docker-save|podman-load);
 // Scion runs IN the jail (built on a JailRunner).
 type Deps struct {
-	JailUp    func(ctx context.Context, app *config.App) error
-	LoadImage func(ctx context.Context, imageRef string) error
-	Scion     *scion.Client
-	ReadCred  func(path string) (string, error) // nil ⇒ defaultReadCred
-	JailMount string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
+	JailUp               func(ctx context.Context, app *config.App) error
+	LoadImage            func(ctx context.Context, imageRef string) error
+	Scion                *scion.Client
+	ReadCred             func(path string) (string, error) // nil ⇒ defaultReadCred
+	JailMount            string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
+	StartBroker          func(ctx context.Context) error
+	BrokerHealthy        func(ctx context.Context) error
+	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
 // rest run in the jail via Deps.Scion.
 func Run(ctx context.Context, app *config.App, d Deps) error {
+	var boot BootstrapMaterial
 	for _, step := range Plan(app) {
-		if err := runStep(ctx, app, step, d); err != nil {
+		if err := runStep(ctx, app, step, d, &boot); err != nil {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
 		}
 	}
 	return nil
 }
 
-func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
+func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *BootstrapMaterial) error {
 	switch s.Kind {
 	case "jail-up":
 		return d.JailUp(ctx, app)
+	case "broker-up":
+		if d.StartBroker == nil {
+			return nil // tests / dry paths
+		}
+		if err := d.StartBroker(ctx); err != nil {
+			return err
+		}
+		if d.BrokerHealthy != nil {
+			return d.BrokerHealthy(ctx)
+		}
+		return nil
 	case "load-image":
 		return d.LoadImage(ctx, s.Target)
 	case "init-machine":
@@ -77,6 +101,25 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps) error {
 		// manifest is sanitized (grove→image only) so it is safe to live in the
 		// agent-writable mount. See config.ManifestName.
 		return config.WriteManifest(s.Target, config.ManifestFromApp(app))
+	case "mint-manager-bootstrap":
+		if d.MintManagerBootstrap == nil {
+			return nil
+		}
+		m, err := d.MintManagerBootstrap(ctx)
+		if err != nil {
+			return err
+		}
+		*boot = m
+		// Deposit it as a 0600 file in the mount (the lever-agent reads it).
+		dir := filepath.Join(s.Target, ".lever")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, "bootstrap.json"), b, 0o600)
 	case "start-manager":
 		task := ""
 		if p := app.ManagerPromptPath(); p != "" {

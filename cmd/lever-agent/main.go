@@ -85,7 +85,11 @@ func cmdBoot(args []string) error {
 }
 
 func claudeMCPAdd(name string, argv ...string) error {
-	return exec.Command("claude", append([]string{"mcp", "add", name}, argv...)...).Run()
+	out, err := exec.Command("claude", append([]string{"mcp", "add", name}, argv...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("claude mcp add %s: %w: %s", name, err, out)
+	}
+	return nil
 }
 
 func writeOverlay(path string) func(map[string]string) error {
@@ -220,6 +224,7 @@ func cmdCLI(verb string, args []string) error {
 		fs.StringVar(&tokenStr, "token", "", "base64url token to attenuate")
 	case "call":
 		fs.StringVar(&tool, "tool", "", "tool name")
+		fs.StringVar(&op, "op", "", "operation name (maps to params.name in the JSON-RPC envelope)")
 		fs.StringVar(&tokenStr, "token", "", "base64url capability token")
 	}
 	if err := fs.Parse(args); err != nil {
@@ -273,15 +278,17 @@ func cmdCLI(verb string, args []string) error {
 		}
 		fmt.Println(tok)
 	case "call":
-		// call: POST the token to the broker gateway /mcp/<tool>/ as a capability exercise.
-		// The payload and result format are tool-specific; we forward stdin as the body
-		// and print the response to stdout.
-		req, err := http.NewRequestWithContext(ctx, "POST", bURL+"/mcp/"+tool+"/", os.Stdin)
+		// call: POST a JSON-RPC 2.0 tools/call to the broker gateway /mcp/<tool>/.
+		// The capability token MUST be in params.arguments._capability (not a header);
+		// the gateway reads the token exclusively from that field and actively scrubs
+		// all inbound X-Lever-* headers. The tool name is encoded in the URL path;
+		// params.name carries the operation name within that tool.
+		body := buildToolCallBody(op, tokenStr, constraints)
+		req, err := http.NewRequestWithContext(ctx, "POST", bURL+"/mcp/"+tool+"/", bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Capability-Token", tokenStr)
 		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("call: %w", err)
@@ -317,6 +324,30 @@ func resolveBrokerURL(brokerURL, bootstrapPath string) (string, error) {
 		return "", fmt.Errorf("resolve broker URL: %w", err)
 	}
 	return bs.BrokerURL, nil
+}
+
+// buildToolCallBody constructs the JSON-RPC 2.0 body for a tools/call request to
+// the capability gateway. The token is placed in arguments._capability as required
+// by the gateway contract (internal/broker/mcp.go:toolsCallFields). The tool's
+// URL path carries the tool name; op maps to params.name (the operation within
+// that tool). Extra key=value pairs from the CLI are merged into arguments.
+func buildToolCallBody(op, token string, args map[string]string) []byte {
+	arguments := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		arguments[k] = v
+	}
+	arguments["_capability"] = token
+	body := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      op,
+			"arguments": arguments,
+		},
+	}
+	out, _ := json.Marshal(body)
+	return out
 }
 
 // leafCN parses the common name from the first certificate in certPEM.

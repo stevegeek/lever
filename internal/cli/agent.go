@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,11 +25,12 @@ var loadManifest = config.LoadManifest
 // Tests inject a fake; production uses realProvision.
 type ProvisionFunc func(ctx context.Context, grove string) (agent.Bootstrap, error)
 
-// provisionGrove is the active provisioner, injected by tests or defaulted to
-// realProvision at init. A nil value means no broker is configured: agentStart
-// skips staging (no bootstrap.json is written) so existing non-brokered groves
-// continue to work unchanged.
-var provisionGrove ProvisionFunc
+// provisionGrove is the active provisioner. The production default is
+// realProvision, which degrades gracefully (returns empty Bootstrap, nil error)
+// when the manager has no broker configured (bootstrap file absent). Tests
+// inject a fake via the package-level seam. A nil value is also safe: agentStart
+// skips staging entirely, preserving existing non-brokered behaviour.
+var provisionGrove ProvisionFunc = realProvision
 
 // managerBootstrapPath is the canonical path where lever apply deposits the
 // manager's own bootstrap.json inside the jail. Tests can override it.
@@ -46,9 +48,17 @@ var managerIDDir = func() string {
 // one-use enrolment ticket for the given grove. It assembles the full Bootstrap
 // (BrokerCA + BrokerURL come from the manager's bootstrap so the grove agent can
 // trust the same CA and reach the same broker).
+//
+// If the manager's bootstrap file does not exist (no broker configured), it
+// returns an empty Bootstrap with a nil error so agentStart skips staging and
+// non-brokered groves continue to work unchanged.
 func realProvision(ctx context.Context, grove string) (agent.Bootstrap, error) {
 	bs, err := agent.LoadBootstrap(managerBootstrapPath)
 	if err != nil {
+		// LoadBootstrap wraps the os error with %w, so errors.Is sees through it.
+		if errors.Is(err, os.ErrNotExist) {
+			return agent.Bootstrap{}, nil // no broker configured — skip provisioning
+		}
 		return agent.Bootstrap{}, fmt.Errorf("manager bootstrap: %w", err)
 	}
 	id, ok := agent.LoadIdentity(managerIDDir)
@@ -59,7 +69,10 @@ func realProvision(ctx context.Context, grove string) (agent.Bootstrap, error) {
 	if err != nil {
 		return agent.Bootstrap{}, fmt.Errorf("manager mTLS client: %w", err)
 	}
-	body, _ := json.Marshal(map[string]string{"grove": grove})
+	body, err := json.Marshal(map[string]string{"grove": grove})
+	if err != nil {
+		return agent.Bootstrap{}, fmt.Errorf("provision marshal: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", bs.BrokerURL+"/provision", bytes.NewReader(body))
 	if err != nil {
 		return agent.Bootstrap{}, fmt.Errorf("provision request: %w", err)
@@ -100,8 +113,15 @@ func stageGroveBootstrap(groveProject string, bs agent.Bootstrap) error {
 	if err != nil {
 		return fmt.Errorf("stage bootstrap: marshal: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "bootstrap.json"), b, 0o600); err != nil {
+	p := filepath.Join(dir, "bootstrap.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
 		return fmt.Errorf("stage bootstrap: write: %w", err)
+	}
+	// Chmod tightens a pre-existing file: WriteFile truncates but keeps the
+	// existing mode on a file that already exists, so a re-stage would leave a
+	// world-readable bootstrap.json if it was originally created with loose perms.
+	if err := os.Chmod(p, 0o600); err != nil {
+		return fmt.Errorf("stage bootstrap: chmod: %w", err)
 	}
 	return nil
 }
@@ -215,8 +235,10 @@ func agentStart(cf ClientFactory) *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("provision grove %s: %w", grove, err)
 				}
-				if err := stageGroveBootstrap(project, bs); err != nil {
-					return err
+				if bs.Ticket != "" { // empty ⇒ no broker configured ⇒ skip staging
+					if err := stageGroveBootstrap(project, bs); err != nil {
+						return err
+					}
 				}
 			}
 

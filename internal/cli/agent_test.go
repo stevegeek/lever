@@ -287,6 +287,53 @@ func TestAgentStartStagesGroveBootstrap(t *testing.T) {
 	}
 }
 
+// TestAgentStartNoBrokerSkipsBootstrap asserts that when the provisioner returns
+// an empty Bootstrap (no broker configured), agent start: (1) writes NO
+// .lever/bootstrap.json, (2) still invokes scion Start, (3) returns no error.
+func TestAgentStartNoBrokerSkipsBootstrap(t *testing.T) {
+	groveDir := t.TempDir()
+	bootstrapPath := filepath.Join(groveDir, ".lever", "bootstrap.json")
+
+	// Fake provisioner returning empty ticket (no broker configured).
+	var provisionCalled bool
+	fakeProvision := func(_ context.Context, _ string) (agent.Bootstrap, error) {
+		provisionCalled = true
+		return agent.Bootstrap{}, nil // empty ticket = no broker
+	}
+
+	orig := provisionGrove
+	provisionGrove = fakeProvision
+	defer func() { provisionGrove = orig }()
+
+	var startCalled bool
+	interceptor := &interceptRunner{
+		FakeRunner: exec.NewFakeRunner(),
+		onStart: func() {
+			startCalled = true
+		},
+	}
+	interceptor.Script("scion", exec.Result{})
+
+	cf := func() *scion.Client {
+		return scion.New(interceptor, scion.Options{Bin: "scion", HubEndpoint: "http://127.0.0.1:8080"})
+	}
+	root := newManagerRootWith(cf)
+	root.SetArgs([]string{"agent", "start", "worker", "--project", groveDir, "--image", "img:1"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if !provisionCalled {
+		t.Fatal("fake provisioner was not called")
+	}
+	if !startCalled {
+		t.Fatal("scion.Start was not called")
+	}
+	if _, err := os.Stat(bootstrapPath); !os.IsNotExist(err) {
+		t.Fatalf("bootstrap.json should not exist when no broker configured, got stat err: %v", err)
+	}
+}
+
 // interceptRunner wraps FakeRunner and calls onStart when it sees "scion start".
 type interceptRunner struct {
 	*exec.FakeRunner

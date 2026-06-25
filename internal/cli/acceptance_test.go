@@ -89,6 +89,116 @@ func TestClassifyCurlResult(t *testing.T) {
 	}
 }
 
+// TestVMIDDirPerRole asserts the per-role VM identity dirs are distinct and
+// non-empty (the manager delegates, the worker exercises — they must not share
+// an identity directory).
+func TestVMIDDirPerRole(t *testing.T) {
+	m := vmIDDir("manager")
+	w := vmIDDir("worker")
+	if m == w || m == "" || w == "" {
+		t.Fatalf("per-role VM identity dirs must be distinct and non-empty: %q %q", m, w)
+	}
+}
+
+// TestEgressVerdict asserts the pure egress decision: PASS iff the allowlisted
+// broker jail port is reachable AND the non-allowlisted admin port is blocked;
+// every other combination FAILS (fail-closed).
+func TestEgressVerdict(t *testing.T) {
+	cases := []struct {
+		name      string
+		jail      string
+		admin     string
+		wantPass  bool
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:     "jail reachable + admin blocked = PASS",
+			jail:     "reachable",
+			admin:    "blocked",
+			wantPass: true,
+			wantErr:  false,
+		},
+		{
+			name:      "jail reachable + admin reachable = FAIL (admin not contained)",
+			jail:      "reachable",
+			admin:     "reachable",
+			wantPass:  false,
+			wantErr:   true,
+			errSubstr: "ADMIN port",
+		},
+		{
+			name:      "jail blocked = FAIL-CLOSED (allowlist or broker down)",
+			jail:      "blocked",
+			admin:     "blocked",
+			wantPass:  false,
+			wantErr:   true,
+			errSubstr: "jail port not reachable",
+		},
+		{
+			name:      "jail uncertain = FAIL-CLOSED",
+			jail:      "uncertain",
+			admin:     "blocked",
+			wantPass:  false,
+			wantErr:   true,
+			errSubstr: "jail port not reachable",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pass, err := egressVerdict(tc.jail, tc.admin)
+			if pass != tc.wantPass {
+				t.Errorf("pass = %v, want %v", pass, tc.wantPass)
+			}
+			if tc.wantErr && err == nil {
+				t.Errorf("want non-nil error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("want nil error, got %v", err)
+			}
+			if tc.errSubstr != "" && err != nil && !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("error %q missing expected snippet %q", err.Error(), tc.errSubstr)
+			}
+		})
+	}
+}
+
+// TestClassifyEgressProbe asserts the probe classifier: exit 0 and TLS-layer
+// errors (35/60) count as reachable (the TCP connection succeeded — connecting is
+// the point); exit 7/28 are blocked; curl-absent / unexpected exits are uncertain.
+func TestClassifyEgressProbe(t *testing.T) {
+	errNonZero := fmt.Errorf("exit") // classifyEgressProbe keys on err==nil + res.Code
+
+	cases := []struct {
+		name      string
+		res       leverexec.Result
+		err       error
+		wantState string
+	}{
+		{name: "exit 0 = reachable", res: leverexec.Result{Code: 0}, err: nil, wantState: "reachable"},
+		{name: "exit 35 (TLS connect) = reachable", res: leverexec.Result{Code: 35}, err: errNonZero, wantState: "reachable"},
+		{name: "exit 60 (cert verify) = reachable", res: leverexec.Result{Code: 60}, err: errNonZero, wantState: "reachable"},
+		{name: "exit 7 (refused) = blocked", res: leverexec.Result{Code: 7}, err: errNonZero, wantState: "blocked"},
+		{name: "exit 28 (timeout/dropped) = blocked", res: leverexec.Result{Code: 28}, err: errNonZero, wantState: "blocked"},
+		{name: "exit 127 (curl absent) = uncertain", res: leverexec.Result{Code: 127, Stderr: "command not found"}, err: errNonZero, wantState: "uncertain"},
+		{name: "exit 6 (DNS) = uncertain", res: leverexec.Result{Code: 6, Stderr: "could not resolve"}, err: errNonZero, wantState: "uncertain"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := classifyEgressProbe(tc.res, tc.err)
+			if state != tc.wantState {
+				t.Errorf("state = %q, want %q", state, tc.wantState)
+			}
+			if tc.wantState == "uncertain" && err == nil {
+				t.Errorf("uncertain must carry a non-nil error")
+			}
+			if tc.wantState != "uncertain" && err != nil {
+				t.Errorf("non-uncertain must carry a nil error, got %v", err)
+			}
+		})
+	}
+}
+
 // TestAcceptanceWiredAndEnumeratesSixChecks asserts the `lever acceptance`
 // command is wired into the host root and that exactly the six acceptance checks are
 // enumerated, in the spec order.

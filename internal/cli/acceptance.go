@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ func acceptanceCheckNames() []string {
 		"no-table-c",     // worker CANNOT read a scope outside the envelope
 		"no-drop-filter", // worker CANNOT widen by dropping the attenuated filter
 		"no-self-path",   // worker CANNOT self-mint an un-granted capability
-		"egress-refused", // a non-allowlisted egress destination is refused
+		"egress-refused", // jail reaches the allowlisted broker port but NOT the non-allowlisted admin port
 		"revocation",     // after revoke/bump-epoch the next call is denied
 	}
 }
@@ -94,27 +95,42 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 // broker via the in-jail `lever-agent` CLI; a check that cannot yet be driven
 // records a failure, never a vacuous pass.
 func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, configPath string, bf BackendFactory) error {
-	// 1. Bring the real jail up (manager + grove + db tool + broker).
+	// 1. Bring the real jail up BROKER-ONLY (broker + tools + egress +
+	//    mint-manager-bootstrap), NOT the agent containers: the VM-level gate
+	//    enrols and drives lever-agent itself, so SkipAgents omits start-manager
+	//    (which can't succeed until the image bake). The bootstrap step
+	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
 	deps, ob, _, err := buildApplyDeps(ctx, app, configPath, bf)
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}
+	deps.SkipAgents = true
 	if err := apply.Run(ctx, app, deps); err != nil {
 		return fmt.Errorf("acceptance: apply: %w", err)
 	}
 
 	// 2. A jail Runner execs `lever-agent` INSIDE the jail machine (where the
-	//    grove containers and the agent identities live). The worker's delegated
-	//    token is minted by the manager (delegate db.read → worker) and exercised
-	//    here from the worker's identity directory.
+	//    agent identities live). The worker's delegated token is minted by the
+	//    manager (delegate db.read → worker) and exercised here from the worker's
+	//    identity directory. Identity dirs are VM-writable (vmIDDir), not the old
+	//    hardcoded /home/{manager,worker}/.lever-id (those users don't exist in
+	//    the broker-only VM — no agent containers were started).
 	machine := machineName(app.Name)
 	jr := jail.New(leverexec.RealRunner{}, machine, ob.RunUser(), ob.RunUID())
 	h := &acceptanceHarness{
 		app:       app,
 		jr:        jr,
+		hostAlias: ob.HostToolAlias(),
 		bootDir:   bootstrapDirInJail(app, ob.MountDest()),
-		managerID: filepath.Join("/home", "manager", ".lever-id"),
-		workerID:  filepath.Join("/home", "worker", ".lever-id"),
+		managerID: vmIDDir("manager"),
+		workerID:  vmIDDir("worker"),
+	}
+
+	// 2b. Setup phase: install lever-agent in the VM, then enrol the manager and
+	//     provision+enrol the worker. FAIL-CLOSED — any setup error aborts the
+	//     gate with a clear message (never a vacuous check pass).
+	if err := h.setup(ctx, machine); err != nil {
+		return fmt.Errorf("acceptance: setup: %w", err)
 	}
 
 	results := map[string]bool{}
@@ -170,9 +186,96 @@ func bootstrapDirInJail(app *config.App, mount string) string {
 type acceptanceHarness struct {
 	app       *config.App
 	jr        *jail.Runner
+	hostAlias string // host alias reachable from the jail (host.orb.internal); the broker listens behind it
 	bootDir   string // in-jail dir containing bootstrap.json (broker URL + CA)
 	managerID string // in-jail dir holding the manager's mTLS identity (the delegator)
 	workerID  string // in-jail dir holding the worker's mTLS identity (the executor)
+}
+
+// vmIDDir returns a distinct, non-empty, VM-writable identity directory per role.
+// The broker-only VM has no agent containers (so no /home/manager|worker users);
+// these dirs live under /tmp, writable by the run user the JailRunner execs as.
+// Pure (no I/O) so it is unit-testable without a live jail.
+func vmIDDir(role string) string {
+	return "/tmp/lever-acceptance/" + role + "/.lever-id"
+}
+
+// hostAgentBinPath resolves the HOST path of the linux/arm64 lever-agent binary
+// to copy into the VM: $LEVER_AGENT_BIN if set, else $HOME/lever-instance/vendor/bin/
+// lever-agent (the `make lever-agent-linux` output). It errors with a build hint
+// if the resolved path does not exist, so the gate FAILS CLOSED rather than
+// silently skipping the install.
+func hostAgentBinPath() (string, error) {
+	p := os.Getenv("LEVER_AGENT_BIN")
+	if p == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home for lever-agent binary: %w", err)
+		}
+		p = filepath.Join(home, "lever-instance", "vendor", "bin", "lever-agent")
+	}
+	if _, err := os.Stat(p); err != nil {
+		return "", fmt.Errorf("lever-agent binary not found at %s (build it: `make lever-agent-linux`, or set LEVER_AGENT_BIN): %w", p, err)
+	}
+	return p, nil
+}
+
+// installLeverAgent copies the host-built linux/arm64 lever-agent into the VM at
+// /usr/local/bin/lever-agent (mode 0755) AS ROOT, so the existing
+// jr.Run(ctx, nil, "lever-agent", ...) finds it on PATH. Isolated OrbStack
+// machines do NOT mount the Mac filesystem, so we pipe the binary in as stdin to
+// `orb -u root -m <machine> sh -c 'cat > … && chmod …'`. We use os/exec directly
+// because the JailRunner has no stdin channel.
+func installLeverAgent(ctx context.Context, machine string) error {
+	src, err := hostAgentBinPath()
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open lever-agent binary %s: %w", src, err)
+	}
+	defer f.Close()
+	cmd := exec.CommandContext(ctx, "orb", "-u", "root", "-m", machine, "sh", "-c",
+		"cat > /usr/local/bin/lever-agent && chmod 0755 /usr/local/bin/lever-agent")
+	cmd.Stdin = f
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("install lever-agent into jail %s: %w: %s", machine, err, string(out))
+	}
+	return nil
+}
+
+// setup makes the VM gate runnable: install lever-agent, create the VM-writable
+// identity-dir parents, enrol the manager from the deposited bootstrap, then
+// provision a worker ticket (as manager) and enrol the worker. Every step is
+// fail-closed — a setup error aborts the gate (never a vacuous check pass).
+func (h *acceptanceHarness) setup(ctx context.Context, machine string) error {
+	// 1) Install lever-agent into the VM (copied in as root; isolated machines
+	//    have no Mac-fs mount, so a shared-mount exec is impossible).
+	if err := installLeverAgent(ctx, machine); err != nil {
+		return err
+	}
+	// 2) Ensure the per-role identity-dir parents exist and are run-user-writable.
+	for _, dir := range []string{h.managerID, h.workerID} {
+		if out, err := h.jr.Run(ctx, nil, "mkdir", "-p", dir); err != nil {
+			return fmt.Errorf("mkdir -p %s in jail: %w: %s", dir, err, out.Stdout+out.Stderr)
+		}
+	}
+	// 3) Enrol the manager from the deposited bootstrap.json.
+	bootstrap := h.bootDir + "/bootstrap.json"
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
+		return fmt.Errorf("enrol manager (lever-agent boot): %w: %s", err, res.Stdout+res.Stderr)
+	}
+	// 4) Provision a worker ticket AS the manager (manager-CN-gated /provision),
+	//    writing the worker bootstrap to a VM-writable path, then enrol the worker.
+	wbs := "/tmp/lever-acceptance/worker-bootstrap.json"
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-grove", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
+		return fmt.Errorf("provision worker (lever-agent provision): %w: %s", err, res.Stdout+res.Stderr)
+	}
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-id-dir", h.workerID, "-bootstrap", wbs); err != nil {
+		return fmt.Errorf("enrol worker (lever-agent boot): %w: %s", err, res.Stdout+res.Stderr)
+	}
+	return nil
 }
 
 // agentAs runs `lever-agent <verb> <args...>` inside the jail using the given
@@ -340,24 +443,76 @@ func classifyCurlResult(res leverexec.Result, err error) (string, error) {
 	}
 }
 
-// checkEgressRefused — PASS = the jail egress allowlist refuses a
-// non-allowlisted destination from inside the grove. We attempt to reach a
-// destination outside the allowlist from inside the jail; it MUST fail.
-func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
-	// curl a non-allowlisted external host from inside the jail. The egress
-	// netns allowlist should drop it (connection fails / times out fast).
-	// --connect-timeout 4 catches a DROP policy before the outer max-time.
-	res, err := h.jr.Run(ctx, nil, "curl", "-sS", "--connect-timeout", "4", "--max-time", "5", "https://example.com/")
-	state, cerr := classifyCurlResult(res, err)
-	switch state {
-	case "blocked":
-		return true, nil // egress policy block confirmed -- PASS
-	case "allowed":
-		out := res.Stdout + res.Stderr
-		return false, fmt.Errorf("non-allowlisted egress SUCCEEDED (must be refused): %s", out)
-	default: // "uncertain"
-		return false, cerr // FAIL-CLOSED: do not record PASS when outcome is unknown
+// classifyEgressProbe maps a curl probe of a host:port to "reachable"/"blocked"/
+// "uncertain". Unlike classifyCurlResult, a TLS-handshake-level failure counts as
+// REACHABLE: the egress allowlist works at the TCP layer, so if the packet got
+// far enough to start a TLS handshake (curl exit 35 SSL connect error / 60 cert
+// verify failure), the TCP connection SUCCEEDED — connecting is the point. Exit 0
+// is reachable; exit 7 (refused) / 28 (timeout/dropped) is blocked; exit 127
+// (curl absent) or anything else is uncertain (FAIL-CLOSED).
+func classifyEgressProbe(res leverexec.Result, err error) (string, error) {
+	if err == nil {
+		return "reachable", nil
 	}
+	switch res.Code {
+	case 35, 60:
+		// TLS-layer failure: the TCP connection was established, so the port is
+		// reachable through the allowlist (the contrast we want to prove).
+		return "reachable", nil
+	case 7, 28:
+		// CURLE_COULDNT_CONNECT (refused / net-unreachable) or
+		// CURLE_OPERATION_TIMEDOUT (packet dropped by the policy) = blocked.
+		return "blocked", nil
+	case 127:
+		return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail (exit 127): %s", res.Stderr)
+	default:
+		combined := res.Stdout + res.Stderr
+		if strings.Contains(combined, "not found") || strings.Contains(combined, "No such file") {
+			return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail: %s", combined)
+		}
+		return "uncertain", fmt.Errorf("egress-refused: curl exited %d with unexpected output (FAIL-CLOSED): %s", res.Code, combined)
+	}
+}
+
+// egressVerdict is the PURE decision for the egress check: PASS iff the
+// allowlisted broker jail port is REACHABLE and the non-allowlisted admin port is
+// BLOCKED — a non-vacuous contrast that directly proves the allowlist. Any other
+// combination FAILS (and an "uncertain"/unreachable jail port or a reachable
+// admin port FAILS CLOSED). Unit-testable without a live jail.
+func egressVerdict(jailState, adminState string) (bool, error) {
+	if jailState != "reachable" {
+		return false, fmt.Errorf("egress-refused: broker jail port not reachable (got %q) — allowlist or broker down; FAIL-CLOSED", jailState)
+	}
+	if adminState != "blocked" {
+		return false, fmt.Errorf("egress-refused: broker ADMIN port was %q (must be blocked) — allowlist not containing the jail", adminState)
+	}
+	return true, nil
+}
+
+// probeReachable curls host:port from inside the jail and classifies the result
+// as reachable/blocked/uncertain (TLS-handshake errors count as reachable).
+func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (string, error) {
+	url := fmt.Sprintf("https://%s:%d/", h.hostAlias, port)
+	res, err := h.jr.Run(ctx, nil, "curl", "-sS", "--connect-timeout", "4", "--max-time", "5", url)
+	return classifyEgressProbe(res, err)
+}
+
+// checkEgressRefused — PASS = the jail CAN reach the allowlisted broker JAIL port
+// AND CANNOT reach the non-allowlisted broker ADMIN port. Both listen on the host
+// behind host.orb.internal, so the contrast is non-vacuous and directly proves
+// the egress allowlist. FAIL-CLOSED on any ambiguous result. (The public internet
+// is intentionally left OPEN by the allowlist, so curling example.com would NOT
+// test containment — the broker port contrast does.)
+func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
+	jailState, jerr := h.probeReachable(ctx, h.app.Broker.JailPort)
+	if jailState == "uncertain" {
+		return false, jerr // FAIL-CLOSED: cannot classify the jail-port probe
+	}
+	adminState, aerr := h.probeReachable(ctx, h.app.Broker.AdminPort)
+	if adminState == "uncertain" {
+		return false, aerr // FAIL-CLOSED: cannot classify the admin-port probe
+	}
+	return egressVerdict(jailState, adminState)
 }
 
 // checkRevocation — PASS = after /bump-epoch the worker's previously-working

@@ -13,10 +13,19 @@ type Step struct {
 	Detail string
 }
 
+// PlanOpts controls optional Plan behaviour.
+type PlanOpts struct {
+	// SkipAgents omits the start-manager step (and any future grove-start steps).
+	// Use this for the VM-acceptance gate which brings up broker+tools+egress
+	// and mints the bootstrap ticket, but cannot start agent containers until the
+	// image bake is complete.
+	SkipAgents bool
+}
+
 // Plan returns the ordered bring-up for an app. Order is load-bearing: the jail
 // must exist and the image loaded before scion runs in it; projects must be
 // registered before the manager (which orchestrates them) starts.
-func Plan(a *config.App) []Step {
+func Plan(a *config.App, opts PlanOpts) []Step {
 	steps := []Step{{Kind: "jail-up", Target: a.Tree}}
 	// Bring the host broker (+ first-party tools) up early; the jail reaches it
 	// at host.orb.internal. Health-checked before the manager starts.
@@ -55,6 +64,8 @@ func Plan(a *config.App) []Step {
 	steps = append(steps, Step{Kind: "write-manifest", Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})
-	steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.Manager.Image})
+	if !opts.SkipAgents {
+		steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.Manager.Image})
+	}
 	return steps
 }

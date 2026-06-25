@@ -6,13 +6,61 @@ import (
 	"github.com/lever-to/lever/internal/config"
 )
 
+// planStepNames extracts the Kind from each Step.
+func planStepNames(steps []Step) []string {
+	out := make([]string, len(steps))
+	for i, s := range steps {
+		out[i] = s.Kind
+	}
+	return out
+}
+
+// contains reports whether needle is in haystack.
+func contains(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPlanBrokerOnlyOmitsStartManager(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+		Broker:  config.Broker{JailPort: 8443, AdminPort: 8444},
+	}
+	steps := planStepNames(Plan(app, PlanOpts{SkipAgents: true}))
+	must := []string{"broker-up", "mint-manager-bootstrap"}
+	for _, m := range must {
+		if !contains(steps, m) {
+			t.Fatalf("broker-only plan missing %q: %v", m, steps)
+		}
+	}
+	if contains(steps, "start-manager") {
+		t.Fatalf("broker-only plan must omit start-manager: %v", steps)
+	}
+}
+
+func TestPlanDefaultIncludesStartManager(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+	}
+	steps := planStepNames(Plan(app, PlanOpts{}))
+	if !contains(steps, "start-manager") {
+		t.Fatalf("default plan must include start-manager: %v", steps)
+	}
+}
+
 func TestPlanOrder(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img", AllowPorts: []int{3305}},
 		Groves:  []config.Grove{{Name: "appa", Dir: "groves/appa"}, {Name: "appb", Dir: "groves/appb"}},
 	}
-	steps := Plan(app)
+	steps := Plan(app, PlanOpts{})
 	var kinds []string
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
@@ -41,7 +89,7 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img", CredentialFile: "/home/x/.scion/oauth-token"},
 	}
-	steps := Plan(app)
+	steps := Plan(app, PlanOpts{})
 	var kinds []string
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
@@ -75,7 +123,7 @@ func TestPlanInsertsBrokerSteps(t *testing.T) {
 		Manager: config.Manager{Image: "img"},
 		Broker:  config.Broker{JailPort: 8443, AdminPort: 8444},
 	}
-	steps := Plan(app)
+	steps := Plan(app, PlanOpts{})
 	idx := map[string]int{}
 	for i, s := range steps {
 		idx[s.Kind] = i
@@ -105,7 +153,7 @@ func TestPlanLoadsDistinctGroveImages(t *testing.T) {
 		},
 	}
 	var loads []string
-	for _, s := range Plan(app) {
+	for _, s := range Plan(app, PlanOpts{}) {
 		if s.Kind == "load-image" {
 			loads = append(loads, s.Target)
 		}

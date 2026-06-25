@@ -40,7 +40,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			if dryRun {
-				for _, s := range apply.Plan(app) {
+				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					cmd.Printf("  %-16s %s\n", s.Kind, s.Target)
 				}
 				return nil

@@ -30,11 +30,14 @@ func NewSupervisor(tools []config.Tool, adminURL string, logw io.Writer) *Superv
 // Start launches every configured tool as a host subprocess: no shell, an
 // explicit minimal env, and the configured command + injected -backend/-admin
 // flags. It does not wait for registration (the caller health-checks the broker).
+// If any tool fails to start, all already-started tools are force-killed and
+// reaped before returning the error, leaving the supervisor clean.
 func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.tools {
 		if len(t.Command) == 0 {
+			s.stopLocked()
 			return fmt.Errorf("brokerctl: tool %q has no command", t.Name)
 		}
 		args := append([]string{}, t.Command[1:]...)
@@ -44,6 +47,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		cmd.Stdout = s.logw
 		cmd.Stderr = s.logw
 		if err := cmd.Start(); err != nil {
+			s.stopLocked()
 			return fmt.Errorf("brokerctl: start tool %q: %w", t.Name, err)
 		}
 		s.cmds = append(s.cmds, cmd)
@@ -51,10 +55,17 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop signals every launched tool to terminate and reaps it.
+// Stop force-kills (SIGKILL) every launched tool and reaps it.
+// It is safe to call after a failed Start or multiple times.
 func (s *Supervisor) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stopLocked()
+}
+
+// stopLocked kills and reaps all tracked child processes and clears the slice.
+// Caller must hold s.mu.
+func (s *Supervisor) stopLocked() {
 	for _, cmd := range s.cmds {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -62,4 +73,11 @@ func (s *Supervisor) Stop() {
 		}
 	}
 	s.cmds = nil
+}
+
+// trackedCount returns the number of currently-tracked child processes (test aid).
+func (s *Supervisor) trackedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.cmds)
 }

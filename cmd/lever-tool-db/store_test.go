@@ -23,8 +23,8 @@ func TestReadReturnsFilteredRows(t *testing.T) {
 			t.Fatalf("filter leaked a non-alice row: %v", r)
 		}
 	}
-	if len(rows) == 0 {
-		t.Fatal("expected at least one seeded alice row in A")
+	if len(rows) != 2 {
+		t.Fatalf("expected exactly 2 seeded alice rows in A, got %d", len(rows))
 	}
 }
 

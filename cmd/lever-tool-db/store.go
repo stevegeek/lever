@@ -34,19 +34,29 @@ func (s *Store) seed() error {
 			return fmt.Errorf("ref: create %s: %w", tbl, err)
 		}
 	}
-	rows := []struct {
-		tbl, owner string
+	// seedData groups rows by table. Idempotency is enforced per-table: if the
+	// table already has rows we skip it entirely, so reopening the same DB never
+	// duplicates rows. Each owner value rides as a bound ? parameter (never
+	// string-concatenated into the query).
+	seedData := []struct {
+		tbl   string
+		rows  []string
 	}{
-		{"A", "alice"}, {"A", "alice"}, {"A", "bob"},
-		{"B", "bob"}, {"B", "carol"},
-		{"C", "secret"}, {"C", "secret"},
+		{"A", []string{"alice", "alice", "bob"}},
+		{"B", []string{"bob", "carol"}},
+		{"C", []string{"secret", "secret"}},
 	}
-	for _, r := range rows {
+	for _, td := range seedData {
 		var n int
-		_ = s.db.QueryRow(`SELECT COUNT(*) FROM "`+r.tbl+`" WHERE owner = ?`, r.owner).Scan(&n)
-		if n == 0 {
-			if _, err := s.db.Exec(`INSERT INTO "`+r.tbl+`" (owner) VALUES (?)`, r.owner); err != nil {
-				return fmt.Errorf("ref: seed %s: %w", r.tbl, err)
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM "` + td.tbl + `"`).Scan(&n); err != nil {
+			return fmt.Errorf("ref: count %s: %w", td.tbl, err)
+		}
+		if n > 0 {
+			continue // table already seeded — skip to preserve idempotency
+		}
+		for _, owner := range td.rows {
+			if _, err := s.db.Exec(`INSERT INTO "`+td.tbl+`" (owner) VALUES (?)`, owner); err != nil {
+				return fmt.Errorf("ref: seed %s: %w", td.tbl, err)
 			}
 		}
 	}

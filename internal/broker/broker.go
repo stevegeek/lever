@@ -166,3 +166,9 @@ func (b *Broker) isAgent(name string) bool {
 func (b *Broker) audit(op, caller, decision, detail string) {
 	b.log.Info("broker.decision", "op", op, "caller", caller, "decision", decision, "detail", detail)
 }
+
+// Rules returns the broker's policy (for test setup only).
+func (b *Broker) Rules() *rules.Policy { return b.rules }
+
+// Registry returns the broker's tool registry (for test setup only).
+func (b *Broker) Registry() *registry.Registry { return b.reg }

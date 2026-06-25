@@ -7,6 +7,10 @@ import (
 
 // handleBumpEpoch raises the epoch floor (revoke-all). Admin/loopback only.
 func (b *Broker) handleBumpEpoch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	b.BumpEpoch()
 	b.audit("bump-epoch", "", "allow", "")
 	w.WriteHeader(http.StatusOK)
@@ -14,6 +18,10 @@ func (b *Broker) handleBumpEpoch(w http.ResponseWriter, r *http.Request) {
 
 // handleRevoke revokes one agent. Admin/loopback only. Body: {"agent":"<cn>"}.
 func (b *Broker) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	var req struct {
 		Agent string `json:"agent"`
 	}

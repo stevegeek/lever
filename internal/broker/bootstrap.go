@@ -8,6 +8,10 @@ import (
 // handleBootstrap mints the manager's single-use enrolment ticket. Loopback-only
 // (admin mux); not gated by a client cert. Refuses all calls after the first.
 func (b *Broker) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	b.mu.Lock()
 	if b.bootstrapped {
 		b.mu.Unlock()

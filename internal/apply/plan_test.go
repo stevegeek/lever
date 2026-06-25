@@ -86,9 +86,6 @@ func TestPlanInsertsBrokerSteps(t *testing.T) {
 	if _, ok := idx["mint-manager-bootstrap"]; !ok {
 		t.Fatal("plan must include mint-manager-bootstrap")
 	}
-	if idx["broker-up"] <= idx["jail-up"] == false {
-		// broker-up must come after jail-up
-	}
 	if !(idx["jail-up"] < idx["broker-up"]) {
 		t.Fatal("broker-up must come after jail-up")
 	}

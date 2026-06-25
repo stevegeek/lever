@@ -85,8 +85,9 @@ func TestRegisterRejectsInvalid(t *testing.T) {
 	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	b.handleRegister(w, r)
-	if w.Code == http.StatusOK {
-		t.Fatal("registration with empty name must be rejected")
+	// Empty name misses Lookup → 403 Forbidden (tool not configured).
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("registration with empty name must return 403, got %d", w.Code)
 	}
 }
 

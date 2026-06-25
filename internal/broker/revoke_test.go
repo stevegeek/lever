@@ -44,3 +44,13 @@ func TestRevokePersistsAgent(t *testing.T) {
 		t.Fatalf("code=%d revoked=%v saved=%+v", w.Code, b.isRevoked("worker"), saved)
 	}
 }
+
+func TestAdminEndpointsRejectNonPost(t *testing.T) {
+	b := New(testConfig(t))
+	before := b.MinEpoch()
+	w := httptest.NewRecorder()
+	b.AdminHandler().ServeHTTP(w, httptest.NewRequest("GET", "/bump-epoch", nil))
+	if w.Code != http.StatusMethodNotAllowed || b.MinEpoch() != before {
+		t.Fatalf("GET /bump-epoch: code=%d epoch %d->%d (must be 405, no bump)", w.Code, before, b.MinEpoch())
+	}
+}

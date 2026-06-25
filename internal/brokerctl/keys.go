@@ -99,7 +99,7 @@ func (s State) LoadRevocation() (broker.RevocationState, error) {
 func (s State) SaveRevocation(rs broker.RevocationState) error {
 	b, err := json.Marshal(rs)
 	if err != nil {
-		return err
+		return fmt.Errorf("brokerctl: marshal revocation: %w", err)
 	}
 	if err := os.WriteFile(s.Revocation(), b, 0o600); err != nil {
 		return fmt.Errorf("brokerctl: write revocation: %w", err)

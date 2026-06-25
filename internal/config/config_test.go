@@ -385,6 +385,14 @@ func TestLoadRejectsDelegateToUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsGrantWithUnknownOp(t *testing.T) {
+	// db exists but has only op "read"; granting "write" must be rejected.
+	bad := replaceFirst(baseCfg, "op: read, to:", "op: write, to:")
+	if _, err := Load(writeConfig(t, bad)); err == nil {
+		t.Fatal("a delegate grant referencing an undeclared op must be rejected")
+	}
+}
+
 func replaceFirst(s, old, new string) string {
 	i := indexOf(s, old)
 	if i < 0 {

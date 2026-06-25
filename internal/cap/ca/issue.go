@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"time"
 )
 
@@ -79,9 +80,49 @@ func (c *CA) SignPublicKey(pub crypto.PublicKey, cn string) ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
-// IssueServerCert mints a short-lived (24h) server cert for the given hostname.
+// IssueServerCert mints a short-lived (24h) server cert for the given hostname
+// or IP address. If host parses as an IP, the SAN is placed in IPAddresses so
+// Go's TLS stack can validate it; otherwise it is placed in DNSNames.
 func (c *CA) IssueServerCert(host string) (certPEM, keyPEM []byte, err error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return c.issueWithIP(host, ip)
+	}
 	return c.issue(host, x509.ExtKeyUsageServerAuth, []string{host})
+}
+
+// issueWithIP issues a server cert whose SAN is an IP address rather than a DNS name.
+func (c *CA) issueWithIP(cn string, ip net.IP) (certPEM, keyPEM []byte, err error) {
+	if cn == "" {
+		return nil, nil, fmt.Errorf("ca: empty common name")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: generate leaf key: %w", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: serial: %w", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(certTTL),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{ip},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, &key.PublicKey, c.key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: create leaf: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: marshal leaf key: %w", err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, nil
 }
 
 func (c *CA) issue(cn string, eku x509.ExtKeyUsage, dnsNames []string) (certPEM, keyPEM []byte, err error) {

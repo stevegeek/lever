@@ -2,6 +2,7 @@ package broker
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 
 	"github.com/lever-to/lever/internal/broker/registry"
@@ -30,25 +31,58 @@ type RegisterResponse struct {
 	Epoch     int    `json:"epoch"`
 }
 
-// handleRegister records a first-party tool's backend, operations, caveat→param
-// mapping, and allowed values. Served only on the host-loopback admin listener.
+// handleRegister merges a first-party tool's registration against the
+// CONFIG-AUTHORITATIVE envelope pre-loaded at boot (D4): the host config owns
+// backend/allowed_values/FirstParty/permitted-ops; the tool supplies only
+// caveat_param (the stored value, preserving single-source projection-agreement).
+// A tool can never widen its own envelope, and an unconfigured tool is rejected
+// before any registry write. Served only on the host-loopback admin listener.
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		b.audit("register", "", "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	ops := make(map[string]registry.Operation, len(req.Operations))
-	for _, o := range req.Operations {
-		ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: o.CaveatParam}
+	cfg, ok := b.reg.Lookup(req.Name)
+	if !ok {
+		b.audit("register", req.Name, "deny", "tool not configured")
+		http.Error(w, "tool not configured", http.StatusForbidden)
+		return
 	}
-	t := registry.Tool{Name: req.Name, Backend: req.Backend, Operations: ops, AllowedValues: req.AllowedValues, FirstParty: req.FirstParty}
+	// Rebuild ops from the CONFIG op set; attach the body's caveat_param.
+	bodyCP := make(map[string]map[string]string, len(req.Operations))
+	for _, o := range req.Operations {
+		if _, known := cfg.Operations[o.Name]; !known {
+			b.audit("register", req.Name, "deny", "operation not configured: "+o.Name)
+			http.Error(w, "operation not configured", http.StatusForbidden)
+			return
+		}
+		bodyCP[o.Name] = o.CaveatParam
+	}
+	merged := make(map[string]registry.Operation, len(cfg.Operations))
+	for name, op := range cfg.Operations {
+		cp := bodyCP[name] // may be nil if the body didn't include this op
+		if len(op.CaveatParam) > 0 { // config declared a guard — body must match
+			if !maps.Equal(op.CaveatParam, cp) {
+				b.audit("register", req.Name, "deny", "caveat_param mismatch for "+name)
+				http.Error(w, "caveat_param mismatch", http.StatusForbidden)
+				return
+			}
+			cp = op.CaveatParam
+		}
+		merged[name] = registry.Operation{Name: name, CaveatParam: cp}
+	}
+	t := registry.Tool{
+		Name: cfg.Name, Backend: cfg.Backend, AllowedValues: cfg.AllowedValues,
+		FirstParty: cfg.FirstParty, Operations: merged,
+	}
 	if err := b.reg.Register(t); err != nil {
 		b.audit("register", req.Name, "deny", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	b.audit("register", req.Name, "allow", req.Backend)
+	b.audit("register", req.Name, "allow", cfg.Backend)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(RegisterResponse{
 		PublicKey: token.EncodePublicKey(b.keys.Public),

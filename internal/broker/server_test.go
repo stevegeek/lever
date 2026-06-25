@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	registry "github.com/lever-to/lever/internal/broker/registry"
 )
 
 // TestJailHandlerGatewayDeniesNoCert verifies that a tools/call request to the
@@ -47,6 +49,12 @@ func TestJailHandlerGatewayDeniesNoCert(t *testing.T) {
 // handler adds the tool to the registry and returns 200.
 func TestAdminHandlerRegisterAddsTool(t *testing.T) {
 	b := New(testConfig(t))
+	// Pre-load the config envelope for "calendar" (config-authoritative: tool
+	// cannot register unless the host config already knows about it).
+	_ = b.reg.Register(registry.Tool{
+		Name: "calendar", Backend: "http://127.0.0.1:3203",
+		Operations: map[string]registry.Operation{"list": {Name: "list"}},
+	})
 	h := b.AdminHandler()
 
 	body, _ := json.Marshal(RegisterRequest{

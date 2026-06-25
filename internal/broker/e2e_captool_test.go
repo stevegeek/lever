@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/lever-to/lever/captool"
+	registry "github.com/lever-to/lever/internal/broker/registry"
 )
 
 // dbRow is one row in the in-memory store the captool handler reads from.
@@ -118,6 +119,19 @@ func newCaptoolDB(t *testing.T, b *Broker) {
 	})
 	if err != nil {
 		t.Fatalf("captool.New: %v", err)
+	}
+
+	// Pre-load the config envelope with the REAL captool backend URL.
+	// The config-authoritative handleRegister takes backend/allowed_values/
+	// FirstParty from the pre-loaded config, so this must reflect the actual
+	// test server address before captoolSrv.Register() POSTs /register.
+	if err := b.reg.Register(registry.Tool{
+		Name: "db", Backend: captoolTS.URL, FirstParty: true,
+		Operations: map[string]registry.Operation{
+			"read": {Name: "read"},
+		},
+	}); err != nil {
+		t.Fatalf("preload db config envelope: %v", err)
 	}
 
 	// Register the "db" tool (backend=captoolTS.URL, first_party=true) and cache

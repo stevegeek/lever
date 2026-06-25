@@ -1,2 +1,9 @@
 /lever
 *.test
+
+# acceptance gate runtime artifacts (broker keys/state, deposited bootstrap,
+# tool sqlite db, runtime-written note) — never commit (contains secrets).
+/ref.db
+internal/cli/testdata/acceptance/.lever-state/
+internal/cli/testdata/acceptance/workspace/.lever/
+internal/cli/testdata/acceptance/docs/

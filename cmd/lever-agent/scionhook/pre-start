@@ -1,0 +1,16 @@
+#!/bin/sh
+# scion pre-start hook: enrol this agent + configure the harness BEFORE claude
+# launches. Runs as root in the pre-start phase; lever-agent writes 0600 key
+# files which sciontool then chowns to the agent user.
+#
+# Bootstrap-path alignment: Task 6 (internal/cli/agent.go stageGroveBootstrap)
+# writes the bootstrap to <groveProject>/.lever/bootstrap.json, and the
+# container's scion workspace CWD is /workspace. Therefore ./.lever/bootstrap.json
+# (lever-agent boot's canonical default) resolves correctly — no override needed.
+# We let the default take effect rather than hardcoding $HOME/workspace/... which
+# could diverge if the image bakes a different mount point. The absolute in-image
+# path is validated at instance image-bake / Task-8 acceptance time.
+set -eu
+lever-agent boot \
+  --id-dir "$HOME/.lever-id" \
+  --overlay "$HOME/.scion/agent-env.json"

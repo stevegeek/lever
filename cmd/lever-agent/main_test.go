@@ -2,7 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestUnknownSubcommandErrors(t *testing.T) {
@@ -62,6 +67,54 @@ func TestBuildToolCallBody(t *testing.T) {
 	}
 	if got := args["limit"]; got != "10" {
 		t.Errorf("arguments.limit: got %v, want 10", got)
+	}
+}
+
+// TestRenewFlagAcceptance verifies that the renew flagset accepts --loop and
+// --interval without a parse error (reconciles manifest.json sidecar declaration).
+func TestRenewFlagAcceptance(t *testing.T) {
+	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
+	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
+	fs.String("id-dir", defaultIDDir, "")
+	fs.String("broker-url", "", "")
+	fs.String("bootstrap", "", "")
+	loop := fs.Bool("loop", false, "")
+	interval := fs.Duration("interval", 12*time.Hour, "")
+
+	if err := fs.Parse([]string{"--loop", "--interval", "6h"}); err != nil {
+		t.Fatalf("flag parse error (manifest sidecar would crash): %v", err)
+	}
+	if !*loop {
+		t.Error("--loop should be true after parse")
+	}
+	if *interval != 6*time.Hour {
+		t.Errorf("--interval: got %v, want 6h", *interval)
+	}
+}
+
+// TestRenewOnceNoIdentityErrors verifies that renewOnce returns an error (not a
+// panic or hang) when no identity exists in the directory.
+func TestRenewOnceNoIdentityErrors(t *testing.T) {
+	tmp := t.TempDir()
+	err := renewOnce(tmp, "", "")
+	if err == nil {
+		t.Fatal("renewOnce with empty dir must return an error")
+	}
+	if !strings.Contains(err.Error(), "no identity") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestRenewNonLoopReturnsErrorImmediately verifies that run with renew (no
+// --loop) returns immediately with an error for an empty id-dir (no hang).
+func TestRenewNonLoopReturnsErrorImmediately(t *testing.T) {
+	tmp := t.TempDir()
+	err := run([]string{"lever-agent", "renew", "--id-dir", tmp})
+	if err == nil {
+		t.Fatal("renew with no identity must error")
+	}
+	if !strings.Contains(err.Error(), "no identity") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

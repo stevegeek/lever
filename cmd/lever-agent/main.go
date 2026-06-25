@@ -17,8 +17,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/lever-to/lever/internal/agent"
 )
@@ -181,20 +184,14 @@ func cmdServeCapability(args []string) error {
 	return scanner.Err()
 }
 
-func cmdRenew(args []string) error {
-	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	id, ok := agent.LoadIdentity(*idDir)
+// renewOnce performs a single certificate renewal: load identity, resolve broker
+// URL, call agent.Renew, and write the renewed identity back to idDir.
+func renewOnce(idDir, brokerURL, bootstrapPath string) error {
+	id, ok := agent.LoadIdentity(idDir)
 	if !ok {
-		return fmt.Errorf("renew: no identity in %s", *idDir)
+		return fmt.Errorf("renew: no identity in %s", idDir)
 	}
-	bURL, err := resolveBrokerURL(*brokerURL, *bootstrapPath)
+	bURL, err := resolveBrokerURL(brokerURL, bootstrapPath)
 	if err != nil {
 		return fmt.Errorf("renew: %w", err)
 	}
@@ -202,7 +199,50 @@ func cmdRenew(args []string) error {
 	if err != nil {
 		return err
 	}
-	return renewed.Write(*idDir)
+	return renewed.Write(idDir)
+}
+
+// cmdRenew renews the agent certificate. With -loop it runs as a long-lived
+// sidecar, renewing every -interval (default 12h) until signalled. Transient
+// errors in loop mode are logged to stderr and the loop continues; only
+// SIGINT/SIGTERM terminates it. Without -loop it performs a single renewal.
+func cmdRenew(args []string) error {
+	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
+	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
+	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
+	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
+	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
+	loop := fs.Bool("loop", false, "run as a renewal daemon (renew then sleep -interval, repeat until signal)")
+	interval := fs.Duration("interval", 12*time.Hour, "renewal interval in loop mode (default 12h; cert TTL is 24h)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if !*loop {
+		return renewOnce(*idDir, *brokerURL, *bootstrapPath)
+	}
+
+	// Loop mode: renew once immediately, then on each ticker tick.
+	// Signal-cancel the context to exit cleanly on SIGINT/SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := renewOnce(*idDir, *brokerURL, *bootstrapPath); err != nil {
+		fmt.Fprintln(os.Stderr, "lever-agent renew:", err)
+	}
+
+	ticker := time.NewTicker(*interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := renewOnce(*idDir, *brokerURL, *bootstrapPath); err != nil {
+				fmt.Fprintln(os.Stderr, "lever-agent renew:", err)
+			}
+		}
+	}
 }
 
 func cmdCLI(verb string, args []string) error {

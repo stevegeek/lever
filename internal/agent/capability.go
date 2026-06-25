@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/lever-to/lever/internal/cap/token"
@@ -31,9 +32,12 @@ func (id Identity) Client() (*http.Client, error) {
 // Request mints a capability token via the broker's /request endpoint. boundTo is
 // the caller (self-obtain) or another agent (delegation). Returns the base64url token.
 func Request(ctx context.Context, brokerURL string, client *http.Client, tool, op, boundTo string, constraints map[string]string) (string, error) {
-	body, _ := json.Marshal(map[string]any{
+	body, err := json.Marshal(map[string]any{
 		"tool": tool, "op": op, "bound_to": boundTo, "constraints": constraints,
 	})
+	if err != nil {
+		return "", fmt.Errorf("agent: marshal request: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", brokerURL+"/request", bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -45,7 +49,8 @@ func Request(ctx context.Context, brokerURL string, client *http.Client, tool, o
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("agent: request status %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("agent: request status %d: %s", resp.StatusCode, bytes.TrimSpace(b))
 	}
 	var cr struct {
 		Token string `json:"token"`

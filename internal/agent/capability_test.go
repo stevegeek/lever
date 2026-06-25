@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/broker"
 	"github.com/lever-to/lever/internal/broker/registry"
 	"github.com/lever-to/lever/internal/cap/ca"
 	"github.com/lever-to/lever/internal/cap/token"
@@ -14,15 +13,15 @@ import (
 
 // allowDelegate adds a delegation rule to the broker's policy: agent may delegate
 // (tool, op) to recipient.
-func allowDelegate(t *testing.T, b *broker.Broker, agent, tool, op, recipient string) {
+func allowDelegate(t *testing.T, env *brokerEnv, agent, tool, op, recipient string) {
 	t.Helper()
-	b.Rules().AllowDelegate(agent, tool, op, recipient)
+	env.Rules.AllowDelegate(agent, tool, op, recipient)
 }
 
 // regDB registers the "db" tool with a "read" operation in the broker's registry.
-func regDB(t *testing.T, b *broker.Broker) {
+func regDB(t *testing.T, env *brokerEnv) {
 	t.Helper()
-	if err := b.Registry().Register(registry.Tool{
+	if err := env.Registry.Register(registry.Tool{
 		Name:    "db",
 		Backend: "http://127.0.0.1:3201",
 		Operations: map[string]registry.Operation{
@@ -65,22 +64,22 @@ func encodeB64(b []byte) string {
 }
 
 func TestRequestMintsDelegatedToken(t *testing.T) {
-	b, srv, caInst, kp := testBroker(t)
+	env := testBroker(t)
 	// Allow manager to delegate db.read to worker; register the db tool envelope.
-	allowDelegate(t, b, "manager", "db", "read", "worker")
-	regDB(t, b)
-	managerID := enrolManager(t, caInst)
+	allowDelegate(t, env, "manager", "db", "read", "worker")
+	regDB(t, env)
+	managerID := enrolManager(t, env.CA)
 	client, err := managerID.Client()
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokB64, err := Request(context.Background(), srv.URL, client, "db", "read", "worker", map[string]string{"table": "A"})
+	tokB64, err := Request(context.Background(), env.Server.URL, client, "db", "read", "worker", map[string]string{"table": "A"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The minted token must verify as bound to worker for db.read with table=A.
 	raw := decodeB64(t, tokB64)
-	if err := token.Verify(kp.Public, raw, token.Request{
+	if err := token.Verify(env.Keys.Public, raw, token.Request{
 		Caller: "worker", Capability: token.Capability{Tool: "db", Operation: "read"},
 		Params: map[string]string{"table": "A"}, Now: time.Now(), MinEpoch: 0,
 	}); err != nil {

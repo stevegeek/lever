@@ -20,10 +20,21 @@ import (
 	"github.com/lever-to/lever/internal/cap/token"
 )
 
+// brokerEnv holds all test-side handles for a broker under test.
+type brokerEnv struct {
+	Broker   *broker.Broker
+	Server   *httptest.Server
+	CA       *ca.CA
+	Keys     token.KeyPair
+	Rules    *rules.Policy
+	Registry *registry.Registry
+}
+
 // testBroker builds a broker that permits provisioning grove "worker" and a CA
-// server cert, returns the broker + a TLS server over its JailHandler + the CA
-// instance (for cert signing in provisionAs) + the token keypair (for Tasks 2–4).
-func testBroker(t *testing.T) (*broker.Broker, *httptest.Server, *ca.CA, token.KeyPair) {
+// server cert, and returns a brokerEnv with all relevant handles for test setup
+// and assertion (including the policy and registry instances the broker was built
+// from, so callers can drive them directly without any production accessor).
+func testBroker(t *testing.T) *brokerEnv {
 	t.Helper()
 	kp, err := token.Generate()
 	if err != nil {
@@ -57,7 +68,7 @@ func testBroker(t *testing.T) (*broker.Broker, *httptest.Server, *ca.CA, token.K
 	srv.TLS = tlsCfg
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	return b, srv, caInst, kp
+	return &brokerEnv{Broker: b, Server: srv, CA: caInst, Keys: kp, Rules: pol, Registry: reg}
 }
 
 // csrWithKey returns a CSR PEM and private key PEM for cn.
@@ -143,9 +154,9 @@ func assertMode(t *testing.T, path string, want uint32) {
 }
 
 func TestEnrolReturnsSignedIdentity(t *testing.T) {
-	b, srv, caInst, _ := testBroker(t)
-	ticket := provisionAs(t, b, srv, caInst, "worker")
-	id, err := Enrol(context.Background(), srv.URL, caInst.CertPEM(), ticket, "worker")
+	env := testBroker(t)
+	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,10 +170,10 @@ func TestEnrolReturnsSignedIdentity(t *testing.T) {
 }
 
 func TestEnrolRejectsCNMismatch(t *testing.T) {
-	b, srv, caInst, _ := testBroker(t)
-	ticket := provisionAs(t, b, srv, caInst, "worker")
+	env := testBroker(t)
+	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
 	// A CSR CN that doesn't match the ticket's grove must be rejected by the broker.
-	if _, err := Enrol(context.Background(), srv.URL, caInst.CertPEM(), ticket, "evil"); err == nil {
+	if _, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "evil"); err == nil {
 		t.Fatal("enrol with CN != ticket grove must fail")
 	}
 }

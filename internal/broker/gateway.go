@@ -22,7 +22,16 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		return nil, fmt.Errorf("broker: gateway for unregistered tool %q", toolName)
 	}
 	firstParty := t.FirstParty
-	target, err := url.Parse(t.Backend)
+	// The config backend is a bare host:port listen address (config:
+	// `backend: 127.0.0.1:3201`), which url.Parse treats as scheme:opaque and
+	// can't proxy. Normalize a scheme-less authority to http:// (loopback tool
+	// traffic is plain HTTP); a backend that already carries a scheme (e.g. an
+	// httptest server URL) is left untouched.
+	backend := t.Backend
+	if !strings.Contains(backend, "://") {
+		backend = "http://" + backend
+	}
+	target, err := url.Parse(backend)
 	if err != nil {
 		return nil, fmt.Errorf("broker: tool %q bad backend %q: %w", toolName, t.Backend, err)
 	}

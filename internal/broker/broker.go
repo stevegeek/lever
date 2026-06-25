@@ -76,6 +76,13 @@ func New(c Config) *Broker {
 	if c.TicketTTL <= 0 {
 		c.TicketTTL = defaultTicketTTL
 	}
+	if c.Log == nil {
+		// Default to a no-op logger so audit() never nil-panics when a caller
+		// (e.g. brokerctl.Serve, which leaves Log unset) builds a Config without
+		// one. Every decision path audits, so a nil log would otherwise crash
+		// the first request.
+		c.Log = slog.New(slog.DiscardHandler)
+	}
 	agents := make(map[string]struct{}, len(c.Agents))
 	for _, a := range c.Agents {
 		agents[a] = struct{}{}

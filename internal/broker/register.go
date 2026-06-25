@@ -62,7 +62,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	merged := make(map[string]registry.Operation, len(cfg.Operations))
 	for name, op := range cfg.Operations {
-		cp := bodyCP[name] // may be nil if the body didn't include this op
+		cp := bodyCP[name]           // may be nil if the body didn't include this op
 		if len(op.CaveatParam) > 0 { // config declared a guard — body must match
 			if !maps.Equal(op.CaveatParam, cp) {
 				b.audit("register", req.Name, "deny", "caveat_param mismatch for "+name)

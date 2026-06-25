@@ -268,6 +268,8 @@ func (h *acceptanceHarness) setup(ctx context.Context, machine string) error {
 	}
 	// 4) Provision a worker ticket AS the manager (manager-CN-gated /provision),
 	//    writing the worker bootstrap to a VM-writable path, then enrol the worker.
+	// TODO(hardening): this fixed /tmp path (and the vmIDDir parents) would collide
+	// across concurrent `lever acceptance` runs; fine for the single-run merge gate.
 	wbs := "/tmp/lever-acceptance/worker-bootstrap.json"
 	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-grove", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
 		return fmt.Errorf("provision worker (lever-agent provision): %w: %s", err, res.Stdout+res.Stderr)

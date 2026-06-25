@@ -143,6 +143,16 @@ func TestEgressVerdict(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "jail port not reachable",
 		},
+		{
+			// Admin probe couldn't be classified: must NOT pass (can't confirm
+			// the admin port is contained) — fail-closed.
+			name:      "admin uncertain = FAIL-CLOSED (cannot confirm admin contained)",
+			jail:      "reachable",
+			admin:     "uncertain",
+			wantPass:  false,
+			wantErr:   true,
+			errSubstr: "ADMIN port",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

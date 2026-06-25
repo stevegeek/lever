@@ -40,7 +40,7 @@ func NewRootWithBackend(bf BackendFactory) *cobra.Command { return newHostRootWi
 func newHostRootWith(bf BackendFactory) *cobra.Command {
 	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)"}
 	root.AddCommand(versionCmd())
-	root.AddCommand(newProvisionCmd(bf), newDownCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf))
+	root.AddCommand(newProvisionCmd(bf), newDownCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newBrokerCmd(), newRevokeCmd())
 	return root
 }
 

@@ -65,60 +65,36 @@ func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.
-// Routes /register, /epoch, /bump-epoch, /revoke — no capability-gated or agent-facing endpoints.
+// Routes /register, /epoch, /bump-epoch, /revoke, /bootstrap — no capability-gated or agent-facing endpoints.
 func (b *Broker) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", b.handleRegister)
 	mux.HandleFunc("/epoch", b.handleEpoch)
 	mux.HandleFunc("/bump-epoch", b.handleBumpEpoch)
 	mux.HandleFunc("/revoke", b.handleRevoke)
+	mux.HandleFunc("/bootstrap", b.handleBootstrap)
 	return mux
 }
 
-// Serve starts the jail listener over mTLS and the admin listener over plain
-// HTTP bound to loopback. It runs until ctx is cancelled, then shuts both
-// servers down. Returns the first non-ErrServerClosed error from either server,
-// or nil on clean shutdown.
-func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, serverCertPEM, serverKeyPEM []byte) error {
+// ServeListeners runs the broker on pre-bound listeners (the supervisor binds
+// them so it can learn OS-assigned ports before starting tools). Runs until ctx
+// is cancelled. jailLn carries mTLS; adminLn is loopback plain HTTP.
+func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listener, serverCertPEM, serverKeyPEM []byte) error {
 	tlsCfg, err := b.ca.ServerTLSConfig(serverCertPEM, serverKeyPEM)
 	if err != nil {
 		return err
 	}
-
-	// Ensure admin listener is bound only to loopback — fail closed on
-	// misconfiguration so /register is never reachable from a routable interface.
-	boundAdminAddr, err := resolveAdminAddr(adminAddr)
-	if err != nil {
-		return err
-	}
-
 	jailSrv := &http.Server{
-		Addr:              jailAddr,
-		Handler:           b.JailHandler(),
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 16, // 64 KiB — slowloris/header-DoS mitigation
+		Handler: b.JailHandler(), TLSConfig: tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
 	}
 	adminSrv := &http.Server{
-		Addr:              boundAdminAddr,
 		Handler:           b.AdminHandler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 16,
+		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
 	}
-
 	errc := make(chan error, 2)
-
-	go func() {
-		// ListenAndServeTLS with empty cert/key strings uses TLSConfig.
-		errc <- jailSrv.ListenAndServeTLS("", "")
-	}()
-	go func() {
-		errc <- adminSrv.ListenAndServe()
-	}()
-
-	// Wait for context cancellation, then shut both down.
+	go func() { errc <- jailSrv.ServeTLS(jailLn, "", "") }()
+	go func() { errc <- adminSrv.Serve(adminLn) }()
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -126,7 +102,6 @@ func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, serverCe
 		_ = jailSrv.Shutdown(shutCtx)
 		_ = adminSrv.Shutdown(shutCtx)
 	}()
-
 	// Return the first real error (ignore ErrServerClosed from clean shutdown).
 	for i := 0; i < 2; i++ {
 		if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -134,4 +109,27 @@ func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, serverCe
 		}
 	}
 	return nil
+}
+
+// Serve starts the jail listener over mTLS and the admin listener over plain
+// HTTP bound to loopback. It runs until ctx is cancelled, then shuts both
+// servers down. Returns the first non-ErrServerClosed error from either server,
+// or nil on clean shutdown.
+func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, serverCertPEM, serverKeyPEM []byte) error {
+	// Ensure admin listener is bound only to loopback — fail closed on
+	// misconfiguration so /register is never reachable from a routable interface.
+	boundAdminAddr, err := resolveAdminAddr(adminAddr)
+	if err != nil {
+		return err
+	}
+	jailLn, err := net.Listen("tcp", jailAddr)
+	if err != nil {
+		return err
+	}
+	adminLn, err := net.Listen("tcp", boundAdminAddr)
+	if err != nil {
+		_ = jailLn.Close()
+		return err
+	}
+	return b.ServeListeners(ctx, jailLn, adminLn, serverCertPEM, serverKeyPEM)
 }

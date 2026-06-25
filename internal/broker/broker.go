@@ -61,10 +61,11 @@ type Broker struct {
 	srvName   string
 	log       *slog.Logger
 
-	mu       sync.Mutex
-	minEpoch int
-	revoked  map[string]bool
-	persist  func(RevocationState) error
+	mu           sync.Mutex
+	minEpoch     int
+	revoked      map[string]bool
+	persist      func(RevocationState) error
+	bootstrapped bool // /bootstrap latch (one manager ticket per process)
 }
 
 // New builds a Broker from c.

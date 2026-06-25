@@ -35,7 +35,7 @@ func main() {
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|request|attenuate|delegate|call> ...")
+		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|provision|request|attenuate|delegate|call> ...")
 	}
 	switch argv[1] {
 	case "boot":
@@ -274,17 +274,15 @@ func cmdProvision(args []string) error {
 	}
 
 	// Resolve broker URL and CA PEM: explicit flag wins, else from bootstrap file.
-	var bURL, caPEM string
-	if *brokerURL != "" {
-		bURL = *brokerURL
-		caPEM = string(id.CAPEM)
-	} else {
+	// The CA is always the identity's pinned CA regardless of how the URL resolves.
+	caPEM := string(id.CAPEM)
+	bURL := *brokerURL
+	if bURL == "" {
 		resolved, err := resolveBrokerURL("", *bootstrapPath)
 		if err != nil {
 			return fmt.Errorf("provision: %w", err)
 		}
 		bURL = resolved
-		caPEM = string(id.CAPEM)
 	}
 
 	client, err := id.Client()

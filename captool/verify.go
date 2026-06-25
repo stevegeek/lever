@@ -21,6 +21,24 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, id any, msg map[string]a
 		writeRPCError(w, id, -32000, "forbidden")
 		return
 	}
+	// Snapshot pubKey under the mutex so we see Register's write atomically and
+	// avoid a data race (Register writes under s.mu; reads must also hold s.mu).
+	// We release before any I/O (freshEpoch, token.Verify) so we never hold the
+	// lock across network calls.
+	s.mu.Lock()
+	pubKey := s.pubKey
+	s.mu.Unlock()
+
+	// Fail closed: if Register has not yet run the server has no public key and
+	// cannot verify anything — deny early with an audit trace rather than letting
+	// token.Verify panic on a nil key.  Placement here (after caller, before op
+	// extraction) keeps the audit message generic but avoids a partial parse that
+	// could log misleading op/arg detail derived from an untrusted payload.
+	if pubKey == nil {
+		s.audit("", caller, "deny", "not registered")
+		writeRPCError(w, id, -32000, "forbidden")
+		return
+	}
 	op, args, capB64, ok := toolsCallArgs(msg)
 	if !ok || capB64 == "" {
 		s.audit(op, caller, "deny", "missing capability or bad shape")
@@ -40,7 +58,7 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, id any, msg map[string]a
 		return
 	}
 	params := mapConstraintParams(o.CaveatParam, args)
-	if err := token.Verify(s.pubKey, rawTok, token.Request{
+	if err := token.Verify(pubKey, rawTok, token.Request{
 		Caller: caller, Capability: token.Capability{Tool: s.name, Operation: op},
 		Params: params, Now: time.Now(), MinEpoch: s.freshEpoch(context.Background()),
 	}); err != nil {
@@ -50,6 +68,8 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, id any, msg map[string]a
 	}
 	vc := ValidatedContext{Caller: caller, Tool: s.name, Operation: op, Constraints: params}
 	if o.Backstop != nil {
+		// Pass args (raw execution args), not params: the backstop guards what the
+		// Handler actually executes, independent of token constraint mapping.
 		if err := o.Backstop(vc, args); err != nil {
 			s.audit(op, caller, "deny", "backstop: "+err.Error())
 			writeRPCError(w, id, -32000, "forbidden")

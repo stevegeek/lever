@@ -38,6 +38,9 @@ type Operation struct {
 	CaveatParam map[string]string
 	// Backstop enforces the tool's hard invariants AFTER token verification,
 	// independent of the token; a non-nil error denies the call.
+	// It receives the RAW execution args — the same map[string]string the Handler
+	// will run on — not the constraint-keyed params. Use ValidatedContext.Constraints
+	// for the verified constraint-keyed view extracted from the token caveats.
 	Backstop func(ValidatedContext, map[string]string) error
 	// Handler performs the action with clean args (_capability removed).
 	Handler func(ValidatedContext, map[string]string) (any, error)

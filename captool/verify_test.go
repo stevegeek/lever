@@ -131,3 +131,44 @@ func TestVerifyDeniesStaleEpochWithoutRunningHandler(t *testing.T) {
 		t.Fatalf("stale-epoch token must deny; ran=%v", ran)
 	}
 }
+
+// TestVerifyDeniesBeforeRegisterWithoutPanic ensures that serving tools/call
+// before Register() has populated the public key returns a JSON-RPC error,
+// does NOT run the handler, and does NOT panic (previously token.Verify would
+// panic on nil key before the explicit guard was added).
+func TestVerifyDeniesBeforeRegisterWithoutPanic(t *testing.T) {
+	kp, _ := token.Generate()
+	var ran bool
+	// Build a server the same way as other tests but do NOT set pubKey —
+	// simulating tools/call arriving before Register() completes.
+	s, err := New(Config{
+		Name: "db", Backend: "127.0.0.1:0", AdminURL: "http://127.0.0.1:0",
+		Operations: []Operation{{
+			Name:    "read",
+			Handler: func(_ ValidatedContext, _ map[string]string) (any, error) { ran = true; return nil, nil },
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// pubKey is nil — Register never called.
+	tok := mintTok(t, kp, "worker", map[string]string{"table": "A"})
+	var w *httptest.ResponseRecorder
+	require := func() {
+		// Wrap in a recover so a panic is caught and turned into a test failure
+		// rather than a goroutine crash — we want an explicit message.
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("handleToolsCall panicked with nil pubKey: %v", r)
+			}
+		}()
+		w = callRead(t, s, "worker", "A", tok)
+	}
+	require()
+	if ran {
+		t.Fatal("handler must not run when pubKey is nil")
+	}
+	if !strings.Contains(w.Body.String(), "error") {
+		t.Fatalf("must return a JSON-RPC error when pubKey is nil; body=%s", w.Body.String())
+	}
+}

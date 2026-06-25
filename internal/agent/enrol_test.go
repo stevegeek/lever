@@ -3,12 +3,8 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -67,21 +63,11 @@ func testBroker(t *testing.T) (*broker.Broker, *httptest.Server, *ca.CA, token.K
 // csrWithKey returns a CSR PEM and private key PEM for cn.
 func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csr, key, err := GenerateCSR(cn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := x509.CreateCertificateRequest(rand.Reader,
-		&x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return csr, key
 }
 
 // provisionAs signs a manager client cert with the CA, builds an mTLS client,
@@ -187,7 +173,10 @@ func TestWriteIdentityPermissions(t *testing.T) {
 	if err := id.Write(dir); err != nil {
 		t.Fatal(err)
 	}
+	assertMode(t, dir, 0o700)
+	assertMode(t, dir+"/agent.crt", 0o644)
 	assertMode(t, dir+"/agent.key", 0o600)
+	assertMode(t, dir+"/ca.crt", 0o644)
 	got, ok := LoadIdentity(dir)
 	if !ok || string(got.KeyPEM) != "k" {
 		t.Fatalf("LoadIdentity round-trip failed: ok=%v", ok)

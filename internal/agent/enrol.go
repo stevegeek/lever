@@ -99,6 +99,9 @@ func (id Identity) Write(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("agent: chmod dir: %w", err)
+	}
 	for _, f := range []struct {
 		name string
 		data []byte

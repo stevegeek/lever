@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"net"
 	"testing"
 )
 
@@ -119,5 +120,27 @@ func TestIssueServerCertHasServerAuthAndDNS(t *testing.T) {
 	}
 	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "host.orb.internal" {
 		t.Errorf("DNSNames = %v, want [host.orb.internal]", leaf.DNSNames)
+	}
+}
+
+func TestIssueServerCertIPSAN(t *testing.T) {
+	c, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := c.IssueServerCert("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEM)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaf.IPAddresses) != 1 || !leaf.IPAddresses[0].Equal(net.ParseIP("127.0.0.1")) {
+		t.Errorf("IPAddresses = %v, want [127.0.0.1]", leaf.IPAddresses)
+	}
+	if len(leaf.DNSNames) != 0 {
+		t.Errorf("DNSNames = %v, want empty for IP cert", leaf.DNSNames)
 	}
 }

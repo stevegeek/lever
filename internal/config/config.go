@@ -8,21 +8,68 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
+// Grant is a self-obtain capability grant on an agent (mint a token for itself).
+type Grant struct {
+	Tool string `yaml:"tool"`
+	Op   string `yaml:"op"`
+}
+
+// DelegateGrant lets an agent mint a (tool, op) token bound to each recipient in To.
+type DelegateGrant struct {
+	Tool string   `yaml:"tool"`
+	Op   string   `yaml:"op"`
+	To   []string `yaml:"to"`
+}
+
+// Op declares one operation of a first-party tool. CaveatParam, when set, is a
+// DECLARED GUARD: the broker validates the tool-shipped map equals it at
+// registration (the stored value remains the tool's). Empty ⇒ accept whatever
+// the tool ships.
+type Op struct {
+	Name        string            `yaml:"name"`
+	CaveatParam map[string]string `yaml:"caveat_param"`
+}
+
+// Tool declares a first-party (capability-aware) tool the broker supervises.
+type Tool struct {
+	Name          string              `yaml:"name"`
+	Command       []string            `yaml:"command"`
+	Backend       string              `yaml:"backend"`
+	Operations    []Op                `yaml:"operations"`
+	AllowedValues map[string][]string `yaml:"allowed_values"`
+}
+
+// Broker holds broker settings + first-party tool declarations.
+type Broker struct {
+	JailPort        int           `yaml:"jail_port"`
+	AdminPort       int           `yaml:"admin_port"`
+	GrantTTL        time.Duration `yaml:"grant_ttl"`
+	TicketTTL       time.Duration `yaml:"ticket_ttl"`
+	ManagerIdentity string        `yaml:"manager_identity"`
+	APIKeyFile      string        `yaml:"api_key_file"` // api-key mode
+	Tools           []Tool        `yaml:"tools"`
+}
+
 type Manager struct {
-	Image          string `yaml:"image"`
-	PromptFile     string `yaml:"prompt_file"`
-	AllowPorts     []int  `yaml:"allow_ports"`
-	CredentialFile string `yaml:"credential_file"`
+	Image          string          `yaml:"image"`
+	PromptFile     string          `yaml:"prompt_file"`
+	AllowPorts     []int           `yaml:"allow_ports"`
+	CredentialFile string          `yaml:"credential_file"`
+	Obtain         []Grant         `yaml:"obtain"`
+	Delegate       []DelegateGrant `yaml:"delegate"`
 }
 
 type Grove struct {
-	Name  string `yaml:"name"`
-	Dir   string `yaml:"dir"`
-	Image string `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
+	Name     string          `yaml:"name"`
+	Dir      string          `yaml:"dir"`
+	Image    string          `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
+	Obtain   []Grant         `yaml:"obtain"`
+	Delegate []DelegateGrant `yaml:"delegate"`
 }
 
 type ScionConfig struct {
@@ -51,6 +98,7 @@ type App struct {
 	Scion    ScionConfig `yaml:"scion"`
 	Groves   []Grove     `yaml:"groves"`
 	Security Security    `yaml:"security"`
+	Broker   Broker      `yaml:"broker"`
 
 	dir     string // instance root (the config file's directory)
 	treeRel string // tree as the confined relative subdir (before joining to dir)
@@ -205,6 +253,72 @@ func (a *App) Validate() error {
 			}
 		}
 	}
+	if err := a.validateBroker(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateBroker fails closed on capability-config mistakes: duplicate tool
+// names, grants referencing an undeclared tool/op, and delegate.to naming an
+// undeclared agent. A grove with no grants is fine (default-deny ⇒ no path).
+func (a *App) validateBroker() error {
+	// Known tools + their op sets.
+	toolOps := map[string]map[string]bool{}
+	for _, t := range a.Broker.Tools {
+		if t.Name == "" {
+			return fmt.Errorf("config: broker.tools entry has empty name")
+		}
+		if _, dup := toolOps[t.Name]; dup {
+			return fmt.Errorf("config: duplicate broker tool %q", t.Name)
+		}
+		ops := map[string]bool{}
+		for _, o := range t.Operations {
+			ops[o.Name] = true
+		}
+		toolOps[t.Name] = ops
+	}
+	// Known agent identities: the manager CN + every grove name.
+	agents := map[string]bool{a.ManagerCN(): true}
+	for _, g := range a.Groves {
+		agents[g.Name] = true
+	}
+	checkCap := func(who, tool, op string) error {
+		ops, ok := toolOps[tool]
+		if !ok {
+			return fmt.Errorf("config: %s grants tool %q which is not a declared broker.tool", who, tool)
+		}
+		if !ops[op] {
+			return fmt.Errorf("config: %s grants %q on tool %q which has no such operation", who, op, tool)
+		}
+		return nil
+	}
+	validate := func(who string, obtain []Grant, delegate []DelegateGrant) error {
+		for _, g := range obtain {
+			if err := checkCap(who+".obtain", g.Tool, g.Op); err != nil {
+				return err
+			}
+		}
+		for _, d := range delegate {
+			if err := checkCap(who+".delegate", d.Tool, d.Op); err != nil {
+				return err
+			}
+			for _, to := range d.To {
+				if !agents[to] {
+					return fmt.Errorf("config: %s delegates to %q which is not a declared agent", who, to)
+				}
+			}
+		}
+		return nil
+	}
+	if err := validate("manager", a.Manager.Obtain, a.Manager.Delegate); err != nil {
+		return err
+	}
+	for _, g := range a.Groves {
+		if err := validate("grove "+g.Name, g.Obtain, g.Delegate); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -231,6 +345,14 @@ func (a *App) GroveByName(name string) (Grove, bool) {
 		}
 	}
 	return Grove{}, false
+}
+
+// ManagerCN returns the manager's cert CN (broker.manager_identity, default "manager").
+func (a *App) ManagerCN() string {
+	if a.Broker.ManagerIdentity != "" {
+		return a.Broker.ManagerIdentity
+	}
+	return "manager"
 }
 
 // ManagerPromptPath returns the absolute path to the manager's prompt file, or

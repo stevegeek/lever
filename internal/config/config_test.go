@@ -315,3 +315,88 @@ func TestSecurityImagePolicyAppliesToGroves(t *testing.T) {
 		t.Fatal("grove image outside the allowlist should be rejected")
 	}
 }
+
+func writeConfig(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "lever.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+const baseCfg = `
+name: demo
+backend: orbstack
+tree: work
+manager:
+  image: scionlocal/mgr
+  delegate:
+    - {tool: db, op: read, to: [worker]}
+groves:
+  - {name: worker, dir: work, obtain: []}
+broker:
+  jail_port: 8443
+  admin_port: 8444
+  tools:
+    - name: db
+      command: [lever-tool-db, -dsn, "file:ref.db"]
+      backend: 127.0.0.1:3201
+      operations:
+        - {name: read, caveat_param: {table: table, filter: filter}}
+      allowed_values: {table: [A, B]}
+`
+
+func TestLoadParsesBrokerAndGrants(t *testing.T) {
+	app, err := Load(writeConfig(t, baseCfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Broker.JailPort != 8443 || app.Broker.AdminPort != 8444 {
+		t.Fatalf("ports = %+v", app.Broker)
+	}
+	if app.ManagerCN() != "manager" {
+		t.Fatalf("default manager CN = %q", app.ManagerCN())
+	}
+	if len(app.Manager.Delegate) != 1 || app.Manager.Delegate[0].To[0] != "worker" {
+		t.Fatalf("manager delegate = %+v", app.Manager.Delegate)
+	}
+	if len(app.Broker.Tools) != 1 || app.Broker.Tools[0].Operations[0].CaveatParam["table"] != "table" {
+		t.Fatalf("tool = %+v", app.Broker.Tools)
+	}
+}
+
+func TestLoadRejectsGrantWithUnknownTool(t *testing.T) {
+	bad := baseCfg + "\n# trailing\n"
+	bad = replaceFirst(bad, "tool: db, op: read, to: [worker]", "tool: nope, op: read, to: [worker]")
+	if _, err := Load(writeConfig(t, bad)); err == nil {
+		t.Fatal("a delegate grant referencing an undeclared tool must be rejected")
+	}
+}
+
+func TestLoadRejectsDelegateToUnknownAgent(t *testing.T) {
+	bad := replaceFirst(baseCfg, "to: [worker]", "to: [ghost]")
+	if _, err := Load(writeConfig(t, bad)); err == nil {
+		t.Fatal("a delegate.to naming an undeclared agent must be rejected")
+	}
+}
+
+func replaceFirst(s, old, new string) string {
+	i := indexOf(s, old)
+	if i < 0 {
+		return s
+	}
+	return s[:i] + new + s[i+len(old):]
+}
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}

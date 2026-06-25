@@ -130,6 +130,14 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			task = strings.TrimSpace(string(b))
 		}
 		jp := jailPath(app.Tree, app.Tree, d.JailMount)
+		// LEVER_BOOTSTRAP reconciliation: we do NOT set
+		// LEVER_BOOTSTRAP here. lever-agent boot's canonical-path default
+		// (./.lever/bootstrap.json relative to CWD) suffices: scion sets
+		// --workspace = jp (the in-jail project tree), and the container's CWD is
+		// /workspace, so ./.lever/bootstrap.json resolves to jp/.lever/bootstrap.json —
+		// exactly where mint-manager-bootstrap wrote the manager's bootstrap.json.
+		// Injecting an env var would be redundant and add a scion StartOpts.Env
+		// dependency that the file convention avoids.
 		return d.Scion.Start(ctx, scion.StartOpts{
 			Grove: app.Name, Task: task, Project: jp, Image: app.Manager.Image, Harness: "claude",
 			// Workspace = the in-jail project tree, so the manager edits the real

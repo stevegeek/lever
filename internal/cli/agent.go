@@ -1,9 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 
+	"github.com/lever-to/lever/internal/agent"
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
@@ -12,6 +18,93 @@ import (
 // loadManifest reads the sanitized runtime manifest; a package var so tests can
 // inject a fake without touching the filesystem.
 var loadManifest = config.LoadManifest
+
+// ProvisionFunc provisions a grove with the broker and returns a Bootstrap
+// (ticket + broker CA + broker URL + agent CN) ready to be staged for the grove.
+// Tests inject a fake; production uses realProvision.
+type ProvisionFunc func(ctx context.Context, grove string) (agent.Bootstrap, error)
+
+// provisionGrove is the active provisioner, injected by tests or defaulted to
+// realProvision at init. A nil value means no broker is configured: agentStart
+// skips staging (no bootstrap.json is written) so existing non-brokered groves
+// continue to work unchanged.
+var provisionGrove ProvisionFunc
+
+// managerBootstrapPath is the canonical path where lever apply deposits the
+// manager's own bootstrap.json inside the jail. Tests can override it.
+var managerBootstrapPath = "/lever/.lever/bootstrap.json"
+
+// managerIDDir is the directory holding the manager's mTLS identity (cert+key+ca).
+// It is the "~/.lever-id" path resolved at process start. Tests can override it.
+var managerIDDir = func() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".lever-id")
+}()
+
+// realProvision builds an mTLS client from the manager's identity and the broker
+// CA/URL read from the manager's own bootstrap, then POSTs /provision to mint a
+// one-use enrolment ticket for the given grove. It assembles the full Bootstrap
+// (BrokerCA + BrokerURL come from the manager's bootstrap so the grove agent can
+// trust the same CA and reach the same broker).
+func realProvision(ctx context.Context, grove string) (agent.Bootstrap, error) {
+	bs, err := agent.LoadBootstrap(managerBootstrapPath)
+	if err != nil {
+		return agent.Bootstrap{}, fmt.Errorf("manager bootstrap: %w", err)
+	}
+	id, ok := agent.LoadIdentity(managerIDDir)
+	if !ok {
+		return agent.Bootstrap{}, fmt.Errorf("manager identity not found in %s", managerIDDir)
+	}
+	httpClient, err := id.Client()
+	if err != nil {
+		return agent.Bootstrap{}, fmt.Errorf("manager mTLS client: %w", err)
+	}
+	body, _ := json.Marshal(map[string]string{"grove": grove})
+	req, err := http.NewRequestWithContext(ctx, "POST", bs.BrokerURL+"/provision", bytes.NewReader(body))
+	if err != nil {
+		return agent.Bootstrap{}, fmt.Errorf("provision request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return agent.Bootstrap{}, fmt.Errorf("provision: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return agent.Bootstrap{}, fmt.Errorf("provision: broker returned %d", resp.StatusCode)
+	}
+	var pr struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		return agent.Bootstrap{}, fmt.Errorf("provision decode: %w", err)
+	}
+	return agent.Bootstrap{
+		Ticket:    pr.Ticket,
+		BrokerCA:  bs.BrokerCA,
+		BrokerURL: bs.BrokerURL,
+		AgentCN:   grove,
+	}, nil
+}
+
+// stageGroveBootstrap writes a Bootstrap to <groveProject>/.lever/bootstrap.json
+// (dir 0700, file 0600). This is the file that lever-agent boot reads inside the
+// grove container (via its canonical default path: ./.lever/bootstrap.json relative
+// to the container's workspace CWD — no LEVER_BOOTSTRAP env injection needed).
+func stageGroveBootstrap(groveProject string, bs agent.Bootstrap) error {
+	dir := filepath.Join(groveProject, ".lever")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("stage bootstrap: mkdir: %w", err)
+	}
+	b, err := json.Marshal(bs)
+	if err != nil {
+		return fmt.Errorf("stage bootstrap: marshal: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bootstrap.json"), b, 0o600); err != nil {
+		return fmt.Errorf("stage bootstrap: write: %w", err)
+	}
+	return nil
+}
 
 // resolveGroveImage looks up a grove's image from the sanitized runtime manifest
 // the host wrote into the mount (grove→image only — no host config in the jail).
@@ -90,6 +183,8 @@ func agentStart(cf ClientFactory) *cobra.Command {
 	var project, image, task, manifestPath string
 	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume-on-suspended) a grove agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			grove := args[0]
+
 			// An explicit --image wins. Otherwise resolve from the sanitized
 			// runtime manifest the host wrote into the mount (grove→image), so the
 			// caller doesn't repeat the image on every dispatch. With no --manifest
@@ -98,16 +193,37 @@ func agentStart(cf ClientFactory) *cobra.Command {
 				if manifestPath == "" {
 					manifestPath = defaultManifestPath()
 				}
-				resolved, err := resolveGroveImage(manifestPath, args[0])
+				resolved, err := resolveGroveImage(manifestPath, grove)
 				if err != nil {
 					return err
 				}
 				image = resolved
 			}
-			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: args[0], Task: task, Harness: "claude", Project: project, Image: image}); err != nil {
+
+			// Broker provisioning: if a provisioner is wired (non-nil), mint a
+			// one-use enrolment ticket for this grove and stage the bootstrap file
+			// in the grove's workspace BEFORE starting the container. The grove
+			// container's lever-agent boot reads it from the canonical path
+			// ./.lever/bootstrap.json (relative to the container's /workspace CWD,
+			// which scion sets to --workspace = the grove project dir). No
+			// LEVER_BOOTSTRAP env injection is needed: the canonical-path default
+			// in lever-agent boot is the correct seam. provisionGrove is nil when
+			// no broker is configured, in which case staging is skipped so
+			// non-brokered groves continue to work unchanged.
+			if provisionGrove != nil && project != "" {
+				bs, err := provisionGrove(cmd.Context(), grove)
+				if err != nil {
+					return fmt.Errorf("provision grove %s: %w", grove, err)
+				}
+				if err := stageGroveBootstrap(project, bs); err != nil {
+					return err
+				}
+			}
+
+			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image}); err != nil {
 				return err
 			}
-			cmd.Printf("Started %s.\n", args[0])
+			cmd.Printf("Started %s.\n", grove)
 			return nil
 		}}
 	projectFlagVar(c, &project)

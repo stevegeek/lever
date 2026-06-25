@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -115,6 +116,30 @@ func TestRenewNonLoopReturnsErrorImmediately(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no identity") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestRenewLoopFlagsAcceptedByRealCmd exercises the REAL dispatch path through
+// run() to prove that cmdRenew accepts --loop and --interval without a
+// "flag provided but not defined" parse error. Loop mode only exits on
+// SIGINT/SIGTERM, so we send SIGINT to ourselves after a brief delay to unblock
+// it. The test asserts that any returned error is NOT a flag-parse error (an
+// "no identity" or nil return both indicate the flags were accepted).
+func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Send SIGINT to ourselves after 50ms to unblock the loop.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	}()
+
+	err := run([]string{"lever-agent", "renew", "--id-dir", tmp, "--loop", "--interval", "24h"})
+	// Loop mode exits cleanly (nil) on signal. Either way, the error must NOT be
+	// a flag-parse error — that would mean cmdRenew doesn't define --loop/--interval.
+	if err != nil && (strings.Contains(err.Error(), "flag provided but not defined") ||
+		strings.Contains(err.Error(), "flag: help requested")) {
+		t.Fatalf("real cmdRenew rejected --loop/--interval (manifest sidecar would break): %v", err)
 	}
 }
 

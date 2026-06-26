@@ -39,6 +39,7 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.HandleFunc("/enrol", b.handleEnrol)
 	mux.HandleFunc("/renew", b.handleRenew)
 	mux.HandleFunc("/request", b.handleRequest)
+	mux.HandleFunc("/tools", b.handleTools)
 
 	for _, name := range b.reg.Names() {
 		handler, err := b.gatewayHandler(name)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -25,7 +26,7 @@ func ListTools(ctx context.Context, brokerURL string, client *http.Client) ([]st
 	var out struct {
 		Tools []string `json:"tools"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("agent: list tools decode: %w", err)
 	}
 	return out.Tools, nil

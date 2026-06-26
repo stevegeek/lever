@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -135,16 +136,6 @@ func TestBootIsIdempotent(t *testing.T) {
 	assertBrokerToolArgv(t, "db", dbCall2.argv, env.Server.URL)
 }
 
-// contains reports whether s appears in ss.
-func contains(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 func TestBootAutoDiscoversTools(t *testing.T) {
 	env := testBroker(t)
 	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
@@ -168,7 +159,7 @@ func TestBootAutoDiscoversTools(t *testing.T) {
 	if err := Boot(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !contains(mcpAdds, "lever-capability") || !contains(mcpAdds, "db") {
+	if !slices.Contains(mcpAdds, "lever-capability") || !slices.Contains(mcpAdds, "db") {
 		t.Fatalf("expected lever-capability + db registered, got %v", mcpAdds)
 	}
 }

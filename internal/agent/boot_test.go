@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,44 @@ func TestBootIsIdempotent(t *testing.T) {
 		t.Fatal("second (idempotent) boot must still MCPAdd broker tool 'db'")
 	}
 	assertBrokerToolArgv(t, "db", dbCall2.argv, env.Server.URL)
+}
+
+// contains reports whether s appears in ss.
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBootAutoDiscoversTools(t *testing.T) {
+	env := testBroker(t)
+	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	dir := t.TempDir()
+	bsPath := filepath.Join(dir, "bootstrap.json")
+	bs, _ := json.Marshal(Bootstrap{Ticket: ticket, BrokerCA: string(env.CA.CertPEM()), BrokerURL: env.Server.URL, AgentCN: "worker"})
+	_ = os.WriteFile(bsPath, bs, 0o600)
+
+	var mcpAdds []string
+	idDir := filepath.Join(dir, "id")
+	cfg := BootConfig{
+		BootstrapPath:   bsPath,
+		IDDir:           idDir,
+		Now:             time.Now(),
+		MCPAdd:          func(name string, argv ...string) error { mcpAdds = append(mcpAdds, name); return nil },
+		WriteEnvOverlay: func(map[string]string) error { return nil },
+		ListTools: func(_ context.Context, _ string, _ *http.Client) ([]string, error) {
+			return []string{"db"}, nil
+		},
+	}
+	if err := Boot(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(mcpAdds, "lever-capability") || !contains(mcpAdds, "db") {
+		t.Fatalf("expected lever-capability + db registered, got %v", mcpAdds)
+	}
 }
 
 // assertBrokerToolArgv checks that argv for a broker tool registration contains

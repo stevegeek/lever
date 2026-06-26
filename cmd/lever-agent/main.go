@@ -88,12 +88,18 @@ func cmdBoot(args []string) error {
 		MCPAdd:          claudeMCPAdd,
 		WriteEnvOverlay: writeOverlay(*overlayPath),
 	}
+	// Auto-discover tools from the broker when no explicit -tools value was given.
+	// When an explicit list is provided, leave ListTools nil so the list wins.
+	if *toolsCSV == "" {
+		cfg.ListTools = agent.ListTools
+	}
 	if *enrolOnly {
 		// Enrol + write identity only: nil hooks make agent.Boot skip the env
 		// overlay and the `claude mcp add` registration (no claude in the bare VM).
 		cfg.MCPAdd = nil
 		cfg.WriteEnvOverlay = nil
 		cfg.BrokerTools = nil
+		cfg.ListTools = nil
 	}
 	return agent.Boot(ctx, cfg)
 }

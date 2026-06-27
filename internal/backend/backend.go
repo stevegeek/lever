@@ -30,6 +30,12 @@ type Config struct {
 	// ScionSource is the host path to a scion source checkout to cross-compile and
 	// install into the jail. Empty disables scion provisioning (back-compat).
 	ScionSource string
+	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
+	// so the jail can reach ONLY the broker port on the host alias. Required for
+	// api-key mode: LLM traffic must flow broker→Anthropic, not
+	// jail→Anthropic directly. False (open posture) is the default for
+	// subscription mode where the agent reaches Anthropic directly.
+	ClosedInternet bool
 }
 
 // Backend is the contract the rest of Lever drives. Implementations must make
@@ -38,7 +44,7 @@ type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
 	DockerHost() string    // endpoint the broker drives (valid after EnsureUp)
 	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
-	ApplyEgress(ctx context.Context, allowedPorts []int) error
+	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	Profile() Profile
 }

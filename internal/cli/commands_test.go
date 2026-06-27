@@ -13,7 +13,7 @@ type stubBackend struct{ up, down bool }
 func (s *stubBackend) EnsureUp(context.Context, backend.Config) error { s.up = true; return nil }
 func (s *stubBackend) DockerHost() string                             { return "unix:///x" }
 func (s *stubBackend) HostToolAlias() string                          { return "host.orb.internal" }
-func (s *stubBackend) ApplyEgress(context.Context, []int) error       { return nil }
+func (s *stubBackend) ApplyEgress(context.Context, []int, bool) error { return nil }
 func (s *stubBackend) Teardown(context.Context) error                 { s.down = true; return nil }
 func (s *stubBackend) Profile() backend.Profile                       { return backend.Profile{Name: "stub"} }
 

@@ -121,7 +121,7 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
 	b := New(f, "lever-jail")
 
-	if err := b.ApplyEgress(context.Background(), []int{3305}); err != nil {
+	if err := b.ApplyEgress(context.Background(), []int{3305}, false); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
 	var sawAccept, sawDrop bool

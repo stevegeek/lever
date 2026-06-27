@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -44,6 +45,15 @@ type BootConfig struct {
 	// to auto-discover registered tool names from the broker. Injected so tests
 	// can stub it; production sets it to agent.ListTools.
 	ListTools func(ctx context.Context, brokerURL string, client *http.Client) ([]string, error)
+	// LLMAuth selects the LLM-auth mode for this agent ("api-key" | "subscription" | "").
+	// When "api-key", Boot obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN
+	// + ANTHROPIC_BASE_URL into the env overlay. Any other value (or "") leaves those keys absent.
+	LLMAuth string
+	// RequestLLMToken obtains a base64url-encoded capability(llm) token bound to cn
+	// from the broker /request endpoint, over the enrolled mTLS client. The returned
+	// string must be used verbatim as ANTHROPIC_AUTH_TOKEN (already base64url-encoded
+	// by the broker; do not re-encode). Injected so tests can stub it without a live broker.
+	RequestLLMToken func(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error)
 }
 
 // Boot enrols the agent (idempotently) and configures the harness: writes the
@@ -103,6 +113,20 @@ func Boot(ctx context.Context, c BootConfig) error {
 		"CLAUDE_CODE_CLIENT_CERT": filepath.Join(c.IDDir, "agent.crt"),
 		"CLAUDE_CODE_CLIENT_KEY":  filepath.Join(c.IDDir, "agent.key"),
 		"NODE_EXTRA_CA_CERTS":     filepath.Join(c.IDDir, "ca.crt"),
+	}
+	// api-key mode: obtain a capability(llm) token and inject the Anthropic env vars.
+	// Fail closed: a partial overlay without a valid token is worse than a failed boot.
+	if c.LLMAuth == "api-key" && c.RequestLLMToken != nil {
+		llmClient, err := id.Client()
+		if err != nil {
+			return fmt.Errorf("agent boot: build mTLS client for llm token: %w", err)
+		}
+		tok, err := c.RequestLLMToken(ctx, brokerURL, llmClient, bs.AgentCN)
+		if err != nil {
+			return fmt.Errorf("agent boot: obtain llm token: %w", err)
+		}
+		overlay["ANTHROPIC_AUTH_TOKEN"] = tok
+		overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(brokerURL, "/") + "/llm"
 	}
 	if c.WriteEnvOverlay != nil {
 		if err := c.WriteEnvOverlay(overlay); err != nil {

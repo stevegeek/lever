@@ -97,7 +97,7 @@ func TestRenewFlagAcceptance(t *testing.T) {
 // panic or hang) when no identity exists in the directory.
 func TestRenewOnceNoIdentityErrors(t *testing.T) {
 	tmp := t.TempDir()
-	err := renewOnce(tmp, "", "")
+	err := renewOnce(renewOpts{idDir: tmp})
 	if err == nil {
 		t.Fatal("renewOnce with empty dir must return an error")
 	}

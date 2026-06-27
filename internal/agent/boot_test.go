@@ -12,6 +12,64 @@ import (
 	"time"
 )
 
+// baseBootConfig returns a BootConfig wired to a live fake broker with a
+// provisioned "worker" ticket, ready for Boot to enrol and configure.
+// WriteEnvOverlay and MCPAdd are no-ops unless overridden by the caller.
+func baseBootConfig(t *testing.T) BootConfig {
+	t.Helper()
+	env := testBroker(t)
+	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	dir := t.TempDir()
+	bsPath := filepath.Join(dir, "bootstrap.json")
+	bs, _ := json.Marshal(Bootstrap{
+		Ticket:    ticket,
+		BrokerCA:  string(env.CA.CertPEM()),
+		BrokerURL: env.Server.URL,
+		AgentCN:   "worker",
+	})
+	_ = os.WriteFile(bsPath, bs, 0o600)
+	return BootConfig{
+		BootstrapPath:   bsPath,
+		IDDir:           filepath.Join(dir, "id"),
+		BrokerTools:     []string{"db"},
+		Now:             time.Now(),
+		MCPAdd:          func(string, ...string) error { return nil },
+		WriteEnvOverlay: func(map[string]string) error { return nil },
+	}
+}
+
+func TestBootAPIKeyWritesAnthropicEnv(t *testing.T) {
+	var overlay map[string]string
+	c := baseBootConfig(t)
+	c.LLMAuth = "api-key"
+	c.WriteEnvOverlay = func(m map[string]string) error { overlay = m; return nil }
+	c.RequestLLMToken = func(_ context.Context, _ string, _ *http.Client, cn string) (string, error) {
+		return "ENC_TOKEN_FOR_" + cn, nil
+	}
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if overlay["ANTHROPIC_AUTH_TOKEN"] == "" {
+		t.Error("api-key boot must set ANTHROPIC_AUTH_TOKEN")
+	}
+	if !strings.HasSuffix(overlay["ANTHROPIC_BASE_URL"], "/llm") {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want suffix /llm", overlay["ANTHROPIC_BASE_URL"])
+	}
+}
+
+func TestBootSubscriptionOmitsAnthropicAuthToken(t *testing.T) {
+	var overlay map[string]string
+	c := baseBootConfig(t)
+	c.LLMAuth = "subscription"
+	c.WriteEnvOverlay = func(m map[string]string) error { overlay = m; return nil }
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := overlay["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("subscription boot must NOT set ANTHROPIC_AUTH_TOKEN")
+	}
+}
+
 // mcpCall records a single MCPAdd invocation.
 type mcpCall struct {
 	name string

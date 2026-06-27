@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Renew rotates the agent's keypair and re-issues its cert under the broker's
@@ -42,4 +43,32 @@ func Renew(ctx context.Context, brokerURL string, id Identity) (Identity, error)
 		return Identity{}, fmt.Errorf("agent: renew decode: %w", err)
 	}
 	return Identity{CertPEM: []byte(rr.Cert), KeyPEM: keyPEM, CAPEM: id.CAPEM}, nil
+}
+
+// RefreshLLMToken obtains a fresh capability(llm) token from the broker using
+// the enrolled mTLS identity and merges ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL
+// into the provided overlay map. The token is returned verbatim from the broker
+// (already base64url-encoded) — do NOT re-encode it. Called by the renewal sidecar
+// on each cert renewal cycle when LLM auth mode is "api-key".
+//
+// Fail closed: the overlay map is only mutated after a successful token acquisition.
+func RefreshLLMToken(
+	ctx context.Context,
+	brokerURL string,
+	id Identity,
+	cn string,
+	requestFn func(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error),
+	overlay map[string]string,
+) error {
+	client, err := id.Client()
+	if err != nil {
+		return fmt.Errorf("agent: refresh llm token: build mTLS client: %w", err)
+	}
+	tok, err := requestFn(ctx, brokerURL, client, cn)
+	if err != nil {
+		return fmt.Errorf("agent: refresh llm token: obtain: %w", err)
+	}
+	overlay["ANTHROPIC_AUTH_TOKEN"] = tok
+	overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(brokerURL, "/") + "/llm"
+	return nil
 }

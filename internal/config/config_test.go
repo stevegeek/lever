@@ -477,6 +477,41 @@ func TestEffectiveLLMAuthDefaultsToSubscription(t *testing.T) {
 	}
 }
 
+func TestValidateBrokerLLMAuth(t *testing.T) {
+	t.Run("invalid llm_auth rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: bogus\n"
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Fatal("expected error for invalid llm_auth value, got nil")
+		}
+	})
+
+	t.Run("api-key without api_key_file rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n"
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Fatal("expected error: api-key mode requires api_key_file, got nil")
+		}
+	})
+
+	t.Run("api-key with 0644 api_key_file rejects mentioning 0600", func(t *testing.T) {
+		dir := t.TempDir()
+		keyPath := filepath.Join(dir, "api.key")
+		if err := os.WriteFile(keyPath, []byte("sk-ant-test"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(keyPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n  api_key_file: " + keyPath + "\n"
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Fatal("expected error for 0644 api_key_file, got nil")
+		}
+		if !strings.Contains(err.Error(), "0600") {
+			t.Errorf("error must mention 0600, got: %v", err)
+		}
+	})
+}
+
 func TestClosedInternetEgress(t *testing.T) {
 	// all api-key ⇒ closed, no warning
 	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}

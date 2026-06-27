@@ -41,6 +41,10 @@ func (b *Broker) llmProxyHandler() http.Handler {
 		resp.Header.Del("x-api-key")
 		return nil
 	}
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		b.audit("llm", "", "error", "upstream: "+err.Error())
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, err := ca.RequireAgent(r)

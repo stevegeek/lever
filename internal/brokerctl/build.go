@@ -103,7 +103,11 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		if err != nil {
 			return broker.Config{}, fmt.Errorf("brokerctl: read api_key_file: %w", err)
 		}
-		cfg.APIKey = []byte(strings.TrimSpace(string(key)))
+		trimmed := strings.TrimSpace(string(key))
+		if trimmed == "" {
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q is empty", app.Broker.APIKeyFile)
+		}
+		cfg.APIKey = []byte(trimmed)
 	}
 
 	return cfg, nil

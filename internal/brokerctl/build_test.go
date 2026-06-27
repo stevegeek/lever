@@ -3,6 +3,7 @@ package brokerctl
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lever-to/lever/internal/cap/ca"
@@ -131,6 +132,28 @@ func TestBuildBrokerRejectsNonSecretKey(t *testing.T) {
 	_, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
 	if err == nil {
 		t.Fatal("expected error for 0644 api_key_file, got nil")
+	}
+}
+
+func TestBuildBrokerRejectsEmptyAPIKeyFile(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	for _, content := range []string{"", "   ", "\n", "\t\n"} {
+		keyPath := writeKeyFile(t, content, 0o600)
+		app := &config.App{
+			Broker: config.Broker{
+				LLMAuth:    config.LLMAuthAPIKey,
+				APIKeyFile: keyPath,
+			},
+		}
+		_, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+		if err == nil {
+			t.Errorf("content=%q: expected error for empty api_key_file, got nil", content)
+			continue
+		}
+		if !strings.Contains(err.Error(), "empty") {
+			t.Errorf("content=%q: error must mention \"empty\", got: %v", content, err)
+		}
 	}
 }
 

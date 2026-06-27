@@ -49,8 +49,9 @@ func TestBootAPIKeyWritesAnthropicEnv(t *testing.T) {
 	if err := Boot(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
-	if overlay["ANTHROPIC_AUTH_TOKEN"] == "" {
-		t.Error("api-key boot must set ANTHROPIC_AUTH_TOKEN")
+	const wantToken = "ENC_TOKEN_FOR_worker"
+	if overlay["ANTHROPIC_AUTH_TOKEN"] != wantToken {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q (token must be stored verbatim, no re-encode)", overlay["ANTHROPIC_AUTH_TOKEN"], wantToken)
 	}
 	if !strings.HasSuffix(overlay["ANTHROPIC_BASE_URL"], "/llm") {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want suffix /llm", overlay["ANTHROPIC_BASE_URL"])

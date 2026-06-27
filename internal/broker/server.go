@@ -42,6 +42,9 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.HandleFunc("/tools", b.handleTools)
 
 	for _, name := range b.reg.Names() {
+		if name == ReservedLLMTool {
+			continue // served by /llm, not the MCP gateway
+		}
 		handler, err := b.gatewayHandler(name)
 		if err != nil {
 			b.audit("gateway", "", "error", err.Error())

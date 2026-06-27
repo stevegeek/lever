@@ -223,6 +223,7 @@ func Load(path string) (*App, error) {
 	}
 	app.Scion.Source = resolvePath(app.Scion.Source, app.dir)
 	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
+	app.injectLLMGrants()
 	if err := app.Validate(); err != nil {
 		return nil, err
 	}
@@ -294,7 +295,7 @@ func (a *App) validateBroker() error {
 			return fmt.Errorf("config: grove %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
 	}
-	if closed, _ := a.ClosedInternetEgress(); closed || a.anyAPIKeyAgent() {
+	if closed, _ := a.ClosedInternetEgress(); closed || a.AnyAPIKeyAgent() {
 		if a.Broker.APIKeyFile == "" {
 			return fmt.Errorf("config: broker.api_key_file is required when llm_auth is api-key")
 		}
@@ -309,8 +310,9 @@ func (a *App) validateBroker() error {
 	return a.validateBrokerGrants()
 }
 
-// anyAPIKeyAgent reports whether any agent (manager or grove) is api-key.
-func (a *App) anyAPIKeyAgent() bool {
+// AnyAPIKeyAgent reports whether any agent (manager or grove) is api-key.
+// Exported so brokerctl can decide whether to register the reserved llm pseudo-tool.
+func (a *App) AnyAPIKeyAgent() bool {
 	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
 		return true
 	}
@@ -322,11 +324,35 @@ func (a *App) anyAPIKeyAgent() bool {
 	return false
 }
 
+// injectLLMGrants adds the implicit obtain {llm, generate} capability to every
+// api-key agent (R3). LLM access is universal in api-key mode; a grove opts out
+// with llm_auth: subscription. Idempotent.
+func (a *App) injectLLMGrants() {
+	add := func(obtain *[]Grant) {
+		for _, g := range *obtain {
+			if g.Tool == "llm" && g.Op == "generate" {
+				return
+			}
+		}
+		*obtain = append(*obtain, Grant{Tool: "llm", Op: "generate"})
+	}
+	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
+		add(&a.Manager.Obtain)
+	}
+	for i := range a.Groves {
+		if a.EffectiveGroveLLMAuth(a.Groves[i]) == LLMAuthAPIKey {
+			add(&a.Groves[i].Obtain)
+		}
+	}
+}
+
 // validateBrokerGrants validates tool declarations, grant references, and
 // delegate targets. Called by validateBroker after the LLM-auth block.
 func (a *App) validateBrokerGrants() error {
 	// Known tools + their op sets.
 	toolOps := map[string]map[string]bool{}
+	// Built-in reserved pseudo-tool: llm (broker /llm proxy, no backend subprocess).
+	toolOps["llm"] = map[string]bool{"generate": true}
 	for _, t := range a.Broker.Tools {
 		if t.Name == "" {
 			return fmt.Errorf("config: broker.tools entry has empty name")

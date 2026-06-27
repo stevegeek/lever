@@ -17,6 +17,11 @@ import (
 // serverName is the hostname agents dial; OrbStack forwards it to host loopback.
 const serverName = "host.orb.internal"
 
+// llmSentinelBackend is the Backend value of the reserved llm pseudo-tool. It
+// satisfies registry.Register's non-empty-Backend invariant but is NEVER dialed:
+// the llm capability is exercised by the broker /llm proxy, not the MCP gateway.
+const llmSentinelBackend = "lever:llm-proxy"
+
 // BuildBroker assembles a broker.Config from the parsed app config: the
 // request/delegation policy (from manager+grove grants), the pre-loaded tool
 // registry (config-authoritative envelopes; caveat_param is the config-declared
@@ -53,6 +58,17 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			FirstParty:    true,
 		}); err != nil {
 			return broker.Config{}, fmt.Errorf("brokerctl: register tool %q: %w", t.Name, err)
+		}
+	}
+
+	if app.AnyAPIKeyAgent() {
+		if err := reg.Register(registry.Tool{
+			Name:       broker.ReservedLLMTool,
+			Backend:    llmSentinelBackend,
+			Operations: map[string]registry.Operation{broker.ReservedLLMOp: {Name: broker.ReservedLLMOp}},
+			FirstParty: true,
+		}); err != nil {
+			return broker.Config{}, fmt.Errorf("brokerctl: register reserved llm tool: %w", err)
 		}
 	}
 

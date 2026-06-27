@@ -409,6 +409,51 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+func TestLoadInjectsLLMGrantForAPIKeyAgents(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "api-key")
+	if err := os.WriteFile(keyPath, []byte("sk-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "lever.yaml")
+	cfg := `name: demo
+backend: orbstack
+tree: work
+broker:
+  llm_auth: api-key
+  api_key_file: ` + keyPath + `
+groves:
+  - name: worker
+    dir: w
+    llm_auth: subscription
+`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !hasGrant(a.Manager.Obtain, "llm", "generate") {
+		t.Errorf("manager (api-key) missing injected llm grant: %+v", a.Manager.Obtain)
+	}
+	if hasGrant(a.Groves[0].Obtain, "llm", "generate") {
+		t.Errorf("subscription grove must NOT get an llm grant: %+v", a.Groves[0].Obtain)
+	}
+}
+
+func hasGrant(gs []Grant, tool, op string) bool {
+	for _, g := range gs {
+		if g.Tool == tool && g.Op == op {
+			return true
+		}
+	}
+	return false
+}
+
 func TestEffectiveLLMAuthGroveOverride(t *testing.T) {
 	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
 	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {

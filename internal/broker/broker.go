@@ -20,6 +20,15 @@ const (
 	defaultTicketTTL = 10 * time.Minute
 )
 
+const (
+	// ReservedLLMTool is the built-in pseudo-tool name for the LLM proxy. It is
+	// registered (api-key mode) so /request can mint capability(llm) tokens, but
+	// it gets NO /mcp/llm/ gateway route and is hidden from /tools — it is served
+	// only by the /llm proxy route.
+	ReservedLLMTool = "llm"
+	ReservedLLMOp   = "generate"
+)
+
 // RevocationState is the persisted revocation floor + per-agent revoke list.
 type RevocationState struct {
 	MinEpoch int      `json:"min_epoch"`

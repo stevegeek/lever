@@ -51,6 +51,35 @@ func TestBuildBrokerAssemblesRulesAndRegistry(t *testing.T) {
 	}
 }
 
+func TestBuildBrokerRegistersLLMPseudoToolForAPIKey(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	app := &config.App{
+		Broker:  config.Broker{LLMAuth: config.LLMAuthAPIKey},
+		Manager: config.Manager{Obtain: []config.Grant{{Tool: "llm", Op: "generate"}}},
+	}
+	bc, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !bc.Registry.HasOperation("llm", "generate") {
+		t.Fatal("api-key build: registry missing llm/generate")
+	}
+}
+
+func TestBuildBrokerNoLLMToolForSubscription(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	app := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}
+	bc, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if bc.Registry.HasOperation("llm", "generate") {
+		t.Fatal("subscription build: registry must not register llm")
+	}
+}
+
 func TestBuildBrokerDeepCopiesMaps(t *testing.T) {
 	app := sampleApp()
 	kp, _ := token.Generate()

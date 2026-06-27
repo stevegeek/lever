@@ -5,6 +5,8 @@ package brokerctl
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/lever-to/lever/internal/broker"
 	"github.com/lever-to/lever/internal/broker/registry"
@@ -72,7 +74,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		}
 	}
 
-	return broker.Config{
+	cfg := broker.Config{
 		Keys:            keys,
 		CA:              caInst,
 		Tickets:         tickets,
@@ -83,7 +85,28 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		GrantTTL:        app.Broker.GrantTTL,
 		TicketTTL:       app.Broker.TicketTTL,
 		ServerName:      serverName,
-	}, nil
+	}
+
+	// Load the api_key_file into the broker config so the /llm proxy has the
+	// key. This is host-side only; the key never enters a container.
+	// Defense-in-depth: re-check 0600 here even though config.Validate also
+	// checks it — brokerctl may be invoked outside the apply/validate path.
+	if app.AnyAPIKeyAgent() {
+		fi, err := os.Stat(app.Broker.APIKeyFile)
+		if err != nil {
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file: %w", err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file must be 0600, got %#o", perm)
+		}
+		key, err := os.ReadFile(app.Broker.APIKeyFile)
+		if err != nil {
+			return broker.Config{}, fmt.Errorf("brokerctl: read api_key_file: %w", err)
+		}
+		cfg.APIKey = []byte(strings.TrimSpace(string(key)))
+	}
+
+	return cfg, nil
 }
 
 // copyStringMap returns a fresh copy so the registry (which takes ownership)

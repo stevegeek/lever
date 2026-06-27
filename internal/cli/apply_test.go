@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lever-to/lever/internal/config"
 )
 
 // writeTmpConfig writes a minimal app.yaml with a real tree directory structure
@@ -32,6 +34,30 @@ groves:
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestApplyResolvesClosedInternetFromConfig verifies that an api-key instance
+// resolves to closed egress (no warning). This documents the posture contract
+// consumed by buildApplyDeps when it sets cfg.ClosedInternet.
+func TestApplyResolvesClosedInternetFromConfig(t *testing.T) {
+	app := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthAPIKey, JailPort: 8443}}
+	closed, warn := app.ClosedInternetEgress()
+	if !closed || warn != "" {
+		t.Fatalf("api-key instance must resolve closed egress: closed=%v warn=%q", closed, warn)
+	}
+}
+
+// TestApplyOpenEgressForSubscription verifies that a subscription instance does
+// not set the closed posture (and emits no warning since it's a pure subscription).
+func TestApplyOpenEgressForSubscription(t *testing.T) {
+	app := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthSubscription, JailPort: 8443}}
+	closed, warn := app.ClosedInternetEgress()
+	if closed {
+		t.Fatalf("subscription instance must not resolve closed egress")
+	}
+	if warn != "" {
+		t.Fatalf("pure subscription must not produce warning; got %q", warn)
+	}
 }
 
 func TestApplyDryRun(t *testing.T) {

@@ -1,6 +1,8 @@
 package brokerctl
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/lever-to/lever/internal/cap/ca"
@@ -54,8 +56,9 @@ func TestBuildBrokerAssemblesRulesAndRegistry(t *testing.T) {
 func TestBuildBrokerRegistersLLMPseudoToolForAPIKey(t *testing.T) {
 	kp, _ := token.Generate()
 	caInst, _ := ca.Generate()
+	keyPath := writeKeyFile(t, "sk-ant-test", 0o600)
 	app := &config.App{
-		Broker:  config.Broker{LLMAuth: config.LLMAuthAPIKey},
+		Broker:  config.Broker{LLMAuth: config.LLMAuthAPIKey, APIKeyFile: keyPath},
 		Manager: config.Manager{Obtain: []config.Grant{{Tool: "llm", Op: "generate"}}},
 	}
 	bc, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
@@ -77,6 +80,70 @@ func TestBuildBrokerNoLLMToolForSubscription(t *testing.T) {
 	}
 	if bc.Registry.HasOperation("llm", "generate") {
 		t.Fatal("subscription build: registry must not register llm")
+	}
+}
+
+// writeKeyFile writes content to a temp file with the given perm and returns the path.
+func writeKeyFile(t *testing.T, content string, perm os.FileMode) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "api_key")
+	if err := os.WriteFile(p, []byte(content), perm); err != nil {
+		t.Fatal(err)
+	}
+	// Explicitly set the mode (WriteFile may not honour it reliably with umask).
+	if err := os.Chmod(p, perm); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestBuildBrokerLoadsAPIKey(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	keyPath := writeKeyFile(t, "sk-test\n", 0o600)
+	app := &config.App{
+		Broker: config.Broker{
+			LLMAuth:    config.LLMAuthAPIKey,
+			APIKeyFile: keyPath,
+		},
+		Manager: config.Manager{Obtain: []config.Grant{{Tool: "llm", Op: "generate"}}},
+	}
+	bc, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err != nil {
+		t.Fatalf("BuildBroker: %v", err)
+	}
+	if string(bc.APIKey) != "sk-test" {
+		t.Fatalf("expected APIKey %q, got %q", "sk-test", string(bc.APIKey))
+	}
+}
+
+func TestBuildBrokerRejectsNonSecretKey(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	keyPath := writeKeyFile(t, "sk-test", 0o644)
+	app := &config.App{
+		Broker: config.Broker{
+			LLMAuth:    config.LLMAuthAPIKey,
+			APIKeyFile: keyPath,
+		},
+	}
+	_, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err == nil {
+		t.Fatal("expected error for 0644 api_key_file, got nil")
+	}
+}
+
+func TestBuildBrokerNoAPIKeyForSubscription(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	app := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}
+	bc, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err != nil {
+		t.Fatalf("BuildBroker: %v", err)
+	}
+	if len(bc.APIKey) != 0 {
+		t.Fatal("subscription build must not populate APIKey")
 	}
 }
 

@@ -408,3 +408,47 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestEffectiveLLMAuthGroveOverride(t *testing.T) {
+	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {
+		t.Fatalf("manager: got %q want api-key", got)
+	}
+	// grove inherits broker default when unset
+	if got := a.EffectiveGroveLLMAuth(a.Groves[0]); got != LLMAuthAPIKey {
+		t.Fatalf("grove inherit: got %q want api-key", got)
+	}
+	// grove override wins
+	a.Groves[0].LLMAuth = LLMAuthSubscription
+	if got := a.EffectiveGroveLLMAuth(a.Groves[0]); got != LLMAuthSubscription {
+		t.Fatalf("grove override: got %q want subscription", got)
+	}
+}
+
+func TestEffectiveLLMAuthDefaultsToSubscription(t *testing.T) {
+	a := &App{Groves: []Grove{{Name: "w"}}}
+	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthSubscription {
+		t.Fatalf("default: got %q want subscription", got)
+	}
+}
+
+func TestClosedInternetEgress(t *testing.T) {
+	// all api-key ⇒ closed, no warning
+	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	closed, warn := a.ClosedInternetEgress()
+	if !closed || warn != "" {
+		t.Fatalf("all-api-key: closed=%v warn=%q want true/empty", closed, warn)
+	}
+	// mixed ⇒ open + warning
+	a.Groves[0].LLMAuth = LLMAuthSubscription
+	closed, warn = a.ClosedInternetEgress()
+	if closed || warn == "" {
+		t.Fatalf("mixed: closed=%v warn=%q want false/non-empty", closed, warn)
+	}
+	// all subscription ⇒ open, no warning
+	a2 := &App{Groves: []Grove{{Name: "w"}}}
+	closed, warn = a2.ClosedInternetEgress()
+	if closed || warn != "" {
+		t.Fatalf("all-subscription: closed=%v warn=%q want false/empty", closed, warn)
+	}
+}

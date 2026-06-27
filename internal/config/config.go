@@ -44,6 +44,18 @@ type Tool struct {
 	AllowedValues map[string][]string `yaml:"allowed_values"`
 }
 
+// LLMAuthMode selects how an agent authenticates to the Anthropic API.
+//   - subscription: the container reaches api.anthropic.com directly with the
+//     owner's subscription credentials (dev/personal carve-out).
+//   - api-key: the container holds only a capability(llm) token and reaches the
+//     model through the broker /llm proxy, which injects the real Console key.
+type LLMAuthMode string
+
+const (
+	LLMAuthSubscription LLMAuthMode = "subscription"
+	LLMAuthAPIKey       LLMAuthMode = "api-key"
+)
+
 // Broker holds broker settings + first-party tool declarations.
 type Broker struct {
 	JailPort        int           `yaml:"jail_port"`
@@ -52,6 +64,7 @@ type Broker struct {
 	TicketTTL       time.Duration `yaml:"ticket_ttl"`
 	ManagerIdentity string        `yaml:"manager_identity"`
 	APIKeyFile      string        `yaml:"api_key_file"` // api-key mode
+	LLMAuth         LLMAuthMode   `yaml:"llm_auth"`
 	Tools           []Tool        `yaml:"tools"`
 }
 
@@ -60,6 +73,7 @@ type Manager struct {
 	PromptFile     string          `yaml:"prompt_file"`
 	AllowPorts     []int           `yaml:"allow_ports"`
 	CredentialFile string          `yaml:"credential_file"`
+	LLMAuth        LLMAuthMode     `yaml:"llm_auth"`
 	Obtain         []Grant         `yaml:"obtain"`
 	Delegate       []DelegateGrant `yaml:"delegate"`
 }
@@ -68,6 +82,7 @@ type Grove struct {
 	Name     string          `yaml:"name"`
 	Dir      string          `yaml:"dir"`
 	Image    string          `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
+	LLMAuth  LLMAuthMode     `yaml:"llm_auth"`
 	Obtain   []Grant         `yaml:"obtain"`
 	Delegate []DelegateGrant `yaml:"delegate"`
 }
@@ -263,6 +278,53 @@ func (a *App) Validate() error {
 // names, grants referencing an undeclared tool/op, and delegate.to naming an
 // undeclared agent. A grove with no grants is fine (default-deny ⇒ no path).
 func (a *App) validateBroker() error {
+	// LLM-auth: validate the enum and, when any agent is api-key, require an
+	// api_key_file that exists at 0600 (fail closed on a world/group-readable key).
+	validMode := func(m LLMAuthMode) bool {
+		return m == "" || m == LLMAuthSubscription || m == LLMAuthAPIKey
+	}
+	if !validMode(a.Broker.LLMAuth) {
+		return fmt.Errorf("config: broker.llm_auth %q invalid (want subscription|api-key)", a.Broker.LLMAuth)
+	}
+	if !validMode(a.Manager.LLMAuth) {
+		return fmt.Errorf("config: manager.llm_auth %q invalid (want subscription|api-key)", a.Manager.LLMAuth)
+	}
+	for _, g := range a.Groves {
+		if !validMode(g.LLMAuth) {
+			return fmt.Errorf("config: grove %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
+		}
+	}
+	if closed, _ := a.ClosedInternetEgress(); closed || a.anyAPIKeyAgent() {
+		if a.Broker.APIKeyFile == "" {
+			return fmt.Errorf("config: broker.api_key_file is required when llm_auth is api-key")
+		}
+		fi, err := os.Stat(a.Broker.APIKeyFile)
+		if err != nil {
+			return fmt.Errorf("config: broker.api_key_file %q: %w", a.Broker.APIKeyFile, err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			return fmt.Errorf("config: broker.api_key_file %q must be 0600, got %#o", a.Broker.APIKeyFile, perm)
+		}
+	}
+	return a.validateBrokerGrants()
+}
+
+// anyAPIKeyAgent reports whether any agent (manager or grove) is api-key.
+func (a *App) anyAPIKeyAgent() bool {
+	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
+		return true
+	}
+	for _, g := range a.Groves {
+		if a.EffectiveGroveLLMAuth(g) == LLMAuthAPIKey {
+			return true
+		}
+	}
+	return false
+}
+
+// validateBrokerGrants validates tool declarations, grant references, and
+// delegate targets. Called by validateBroker after the LLM-auth block.
+func (a *App) validateBrokerGrants() error {
 	// Known tools + their op sets.
 	toolOps := map[string]map[string]bool{}
 	for _, t := range a.Broker.Tools {
@@ -324,6 +386,57 @@ func (a *App) validateBroker() error {
 
 // GroveDir returns the absolute path of a grove dir (tree + relative dir).
 func (a *App) GroveDir(g Grove) string { return filepath.Join(a.Tree, g.Dir) }
+
+// EffectiveManagerLLMAuth resolves the manager's LLM-auth mode: the broker
+// default (subscription when unset).
+func (a *App) EffectiveManagerLLMAuth() LLMAuthMode {
+	if a.Manager.LLMAuth != "" {
+		return a.Manager.LLMAuth
+	}
+	return a.brokerLLMAuthDefault()
+}
+
+// EffectiveGroveLLMAuth resolves a grove's LLM-auth mode: its own override else
+// the broker default.
+func (a *App) EffectiveGroveLLMAuth(g Grove) LLMAuthMode {
+	if g.LLMAuth != "" {
+		return g.LLMAuth
+	}
+	return a.brokerLLMAuthDefault()
+}
+
+func (a *App) brokerLLMAuthDefault() LLMAuthMode {
+	if a.Broker.LLMAuth != "" {
+		return a.Broker.LLMAuth
+	}
+	return LLMAuthSubscription
+}
+
+// ClosedInternetEgress resolves the instance-level egress posture (R2). Egress
+// is applied jail-wide, not per container, so the jail can be closed only if
+// EVERY agent is api-key. Any subscription agent forces the open posture and a
+// warning that api-key groves in this instance are not egress-isolated (their
+// key-isolation via the proxy still holds; only the belt-and-suspenders egress
+// is relaxed).
+func (a *App) ClosedInternetEgress() (closed bool, warning string) {
+	modes := []LLMAuthMode{a.EffectiveManagerLLMAuth()}
+	for _, g := range a.Groves {
+		modes = append(modes, a.EffectiveGroveLLMAuth(g))
+	}
+	anyAPIKey, anySubscription := false, false
+	for _, m := range modes {
+		switch m {
+		case LLMAuthAPIKey:
+			anyAPIKey = true
+		default:
+			anySubscription = true
+		}
+	}
+	if anyAPIKey && anySubscription {
+		return false, "llm_auth mixed across instance: api-key agents are not egress-isolated from direct Anthropic reach (key isolation via the proxy still holds); per-container egress is not yet implemented"
+	}
+	return anyAPIKey && !anySubscription, ""
+}
 
 // GroveImage returns the container image a grove should run on: its own
 // `image:` if set, else the manager image (the common single-image case, and

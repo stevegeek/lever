@@ -6,6 +6,7 @@ package broker
 
 import (
 	"log/slog"
+	"net/url"
 	"sync"
 	"time"
 
@@ -54,6 +55,13 @@ type Config struct {
 	// PersistRevocation is called (under the broker lock) whenever revocation
 	// state changes, to write it through to the state dir. nil ⇒ no persistence.
 	PersistRevocation func(RevocationState) error
+
+	// APIKey is the real Anthropic Console key bytes (loaded host-side from the
+	// 0600 api_key_file by brokerctl). nil ⇒ no /llm route is served.
+	APIKey []byte
+	// LLMUpstream is the proxy target; empty defaults to https://api.anthropic.com.
+	// Set by tests to a fake upstream. NEVER derived from a client request.
+	LLMUpstream string
 }
 
 // Broker is the running capability authority + gateway.
@@ -69,6 +77,9 @@ type Broker struct {
 	ticketTTL time.Duration
 	srvName   string
 	log       *slog.Logger
+
+	apiKey      []byte
+	llmUpstream *url.URL
 
 	mu           sync.Mutex
 	minEpoch     int
@@ -100,6 +111,11 @@ func New(c Config) *Broker {
 	for _, a := range c.RevocationState.Revoked {
 		revoked[a] = true
 	}
+	upstream := c.LLMUpstream
+	if upstream == "" {
+		upstream = "https://api.anthropic.com"
+	}
+	up, _ := url.Parse(upstream) // operator/test-controlled, validated at serve time
 	return &Broker{
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
 		manager: c.ManagerIdentity, agents: agents,
@@ -107,6 +123,7 @@ func New(c Config) *Broker {
 		minEpoch: c.RevocationState.MinEpoch,
 		revoked:  revoked,
 		persist:  c.PersistRevocation,
+		apiKey:   c.APIKey, llmUpstream: up,
 	}
 }
 

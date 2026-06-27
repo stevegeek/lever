@@ -54,6 +54,9 @@ func (b *Broker) JailHandler() http.Handler {
 		prefix := "/mcp/" + name
 		mux.Handle(prefix+"/", http.StripPrefix(prefix, handler))
 	}
+	if b.apiKey != nil {
+		mux.Handle("/llm/", http.StripPrefix("/llm", b.llmProxyHandler()))
+	}
 	return mux
 }
 

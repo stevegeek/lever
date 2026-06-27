@@ -21,6 +21,14 @@ func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	names := b.reg.Names()
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == ReservedLLMTool {
+			continue
+		}
+		out = append(out, n)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string][]string{"tools": b.reg.Names()})
+	_ = json.NewEncoder(w).Encode(map[string][]string{"tools": out})
 }

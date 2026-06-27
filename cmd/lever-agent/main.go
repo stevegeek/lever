@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,6 +69,7 @@ func cmdBoot(args []string) error {
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
 	overlayPath := fs.String("overlay", "", "path to write scion env-overlay JSON")
 	toolsCSV := fs.String("tools", "", "comma-separated broker tool names to register via claude mcp add")
+	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL to the env overlay; 'subscription' (default) leaves those keys absent and uses the user's own key")
 	enrolOnly := fs.Bool("enrol-only", false, "enrol + write the identity only; skip the claude mcp registration and env overlay (no `claude` binary required — used by the VM-level acceptance gate, which drives lever-agent's CLI verbs directly)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -96,6 +98,7 @@ func cmdBoot(args []string) error {
 		BrokerTools:     brokerTools,
 		MCPAdd:          claudeMCPAdd,
 		WriteEnvOverlay: writeOverlay(*overlayPath),
+		LLMAuth:         *llmAuth,
 	}
 	// Auto-discover tools from the broker only when -tools was not explicitly set.
 	// When -tools is set (even to ""), the explicit list wins and discovery is skipped.
@@ -109,8 +112,48 @@ func cmdBoot(args []string) error {
 		cfg.WriteEnvOverlay = nil
 		cfg.BrokerTools = nil
 		cfg.ListTools = nil
+		cfg.LLMAuth = ""
+	} else if *llmAuth == "api-key" {
+		// Wire the real requestLLMToken only in non-enrol-only mode and when api-key
+		// is requested; enrol-only mode skips overlay writing entirely.
+		cfg.RequestLLMToken = requestLLMToken
 	}
 	return agent.Boot(ctx, cfg)
+}
+
+// requestLLMToken obtains a capability(llm) token from the broker /request
+// endpoint over mTLS. The broker returns {"token":"<base64url>"} — the token
+// field is already base64url-encoded (broker does RawURLEncoding.EncodeToString
+// server-side), so we return it verbatim. Do NOT re-encode. The proxy's
+// bearerToken does RawURLEncoding.DecodeString on the value after "Bearer ",
+// so ANTHROPIC_AUTH_TOKEN must equal cr.Token exactly.
+func requestLLMToken(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"tool": "llm", "op": "generate", "bound_to": cn})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(brokerURL, "/")+"/request", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("broker /request: %s: %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	var cr struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		return "", fmt.Errorf("broker /request: decode: %w", err)
+	}
+	if cr.Token == "" {
+		return "", fmt.Errorf("broker /request: empty token in response")
+	}
+	return cr.Token, nil // already base64url-encoded; return verbatim
 }
 
 func claudeMCPAdd(name string, argv ...string) error {
@@ -210,28 +253,64 @@ func cmdServeCapability(args []string) error {
 	return scanner.Err()
 }
 
+// renewOpts collects the parameters for renewOnce.
+type renewOpts struct {
+	idDir, brokerURL, bootstrapPath string
+	// llmAuth, when "api-key", triggers a fresh ANTHROPIC_AUTH_TOKEN request
+	// after the cert is renewed, and rewrites the full env overlay.
+	llmAuth     string
+	overlayPath string
+}
+
 // renewOnce performs a single certificate renewal: load identity, resolve broker
-// URL, call agent.Renew, and write the renewed identity back to idDir.
-func renewOnce(idDir, brokerURL, bootstrapPath string) error {
-	id, ok := agent.LoadIdentity(idDir)
+// URL, call agent.Renew, write the renewed identity back to idDir. If llmAuth is
+// "api-key" and overlayPath is set, also refreshes the ANTHROPIC_AUTH_TOKEN via
+// the broker /request endpoint and rewrites the complete env overlay.
+func renewOnce(opts renewOpts) error {
+	id, ok := agent.LoadIdentity(opts.idDir)
 	if !ok {
-		return fmt.Errorf("renew: no identity in %s", idDir)
+		return fmt.Errorf("renew: no identity in %s", opts.idDir)
 	}
-	bURL, err := resolveBrokerURL(brokerURL, bootstrapPath)
+	bURL, err := resolveBrokerURL(opts.brokerURL, opts.bootstrapPath)
 	if err != nil {
 		return fmt.Errorf("renew: %w", err)
 	}
-	renewed, err := agent.Renew(context.Background(), bURL, id)
+	ctx := context.Background()
+	renewed, err := agent.Renew(ctx, bURL, id)
 	if err != nil {
 		return err
 	}
-	return renewed.Write(idDir)
+	if err := renewed.Write(opts.idDir); err != nil {
+		return err
+	}
+	// api-key mode: refresh the LLM capability token and rewrite the full overlay
+	// so the scion harness picks up both the renewed cert paths and the fresh token.
+	if opts.llmAuth == "api-key" && opts.overlayPath != "" {
+		cn, err := leafCN(renewed.CertPEM)
+		if err != nil {
+			return fmt.Errorf("renew: parse CN for llm token: %w", err)
+		}
+		overlay := map[string]string{
+			"CLAUDE_CODE_CLIENT_CERT": filepath.Join(opts.idDir, "agent.crt"),
+			"CLAUDE_CODE_CLIENT_KEY":  filepath.Join(opts.idDir, "agent.key"),
+			"NODE_EXTRA_CA_CERTS":     filepath.Join(opts.idDir, "ca.crt"),
+		}
+		if err := agent.RefreshLLMToken(ctx, bURL, renewed, cn, requestLLMToken, overlay); err != nil {
+			return err
+		}
+		if err := writeOverlay(opts.overlayPath)(overlay); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // cmdRenew renews the agent certificate. With -loop it runs as a long-lived
 // sidecar, renewing every -interval (default 12h) until signalled. Transient
 // errors in loop mode are logged to stderr and the loop continues; only
 // SIGINT/SIGTERM terminates it. Without -loop it performs a single renewal.
+// When -llm-auth api-key, also refreshes ANTHROPIC_AUTH_TOKEN after each cert
+// renewal and rewrites the full env overlay at -overlay.
 func cmdRenew(args []string) error {
 	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
 	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
@@ -240,12 +319,22 @@ func cmdRenew(args []string) error {
 	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
 	loop := fs.Bool("loop", false, "run as a renewal daemon (renew then sleep -interval, repeat until signal)")
 	interval := fs.Duration("interval", 12*time.Hour, "renewal interval in loop mode (default 12h; cert TTL is 24h)")
+	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' refreshes ANTHROPIC_AUTH_TOKEN after each cert renewal")
+	overlayPath := fs.String("overlay", "", "path to write scion env-overlay JSON (required for -llm-auth api-key refresh)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
+	opts := renewOpts{
+		idDir:         *idDir,
+		brokerURL:     *brokerURL,
+		bootstrapPath: *bootstrapPath,
+		llmAuth:       *llmAuth,
+		overlayPath:   *overlayPath,
+	}
+
 	if !*loop {
-		return renewOnce(*idDir, *brokerURL, *bootstrapPath)
+		return renewOnce(opts)
 	}
 
 	// Loop mode: renew once immediately, then on each ticker tick.
@@ -253,7 +342,7 @@ func cmdRenew(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := renewOnce(*idDir, *brokerURL, *bootstrapPath); err != nil {
+	if err := renewOnce(opts); err != nil {
 		fmt.Fprintln(os.Stderr, "lever-agent renew:", err)
 	}
 
@@ -264,7 +353,7 @@ func cmdRenew(args []string) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := renewOnce(*idDir, *brokerURL, *bootstrapPath); err != nil {
+			if err := renewOnce(opts); err != nil {
 				fmt.Fprintln(os.Stderr, "lever-agent renew:", err)
 			}
 		}

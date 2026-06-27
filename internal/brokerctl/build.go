@@ -5,6 +5,8 @@ package brokerctl
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/lever-to/lever/internal/broker"
 	"github.com/lever-to/lever/internal/broker/registry"
@@ -16,6 +18,11 @@ import (
 
 // serverName is the hostname agents dial; OrbStack forwards it to host loopback.
 const serverName = "host.orb.internal"
+
+// llmSentinelBackend is the Backend value of the reserved llm pseudo-tool. It
+// satisfies registry.Register's non-empty-Backend invariant but is NEVER dialed:
+// the llm capability is exercised by the broker /llm proxy, not the MCP gateway.
+const llmSentinelBackend = "lever:llm-proxy"
 
 // BuildBroker assembles a broker.Config from the parsed app config: the
 // request/delegation policy (from manager+grove grants), the pre-loaded tool
@@ -56,7 +63,18 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		}
 	}
 
-	return broker.Config{
+	if app.AnyAPIKeyAgent() {
+		if err := reg.Register(registry.Tool{
+			Name:       broker.ReservedLLMTool,
+			Backend:    llmSentinelBackend,
+			Operations: map[string]registry.Operation{broker.ReservedLLMOp: {Name: broker.ReservedLLMOp}},
+			FirstParty: true,
+		}); err != nil {
+			return broker.Config{}, fmt.Errorf("brokerctl: register reserved llm tool: %w", err)
+		}
+	}
+
+	cfg := broker.Config{
 		Keys:            keys,
 		CA:              caInst,
 		Tickets:         tickets,
@@ -67,7 +85,32 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		GrantTTL:        app.Broker.GrantTTL,
 		TicketTTL:       app.Broker.TicketTTL,
 		ServerName:      serverName,
-	}, nil
+	}
+
+	// Load the api_key_file into the broker config so the /llm proxy has the
+	// key. This is host-side only; the key never enters a container.
+	// Defense-in-depth: re-check 0600 here even though config.Validate also
+	// checks it — brokerctl may be invoked outside the apply/validate path.
+	if app.AnyAPIKeyAgent() {
+		fi, err := os.Stat(app.Broker.APIKeyFile)
+		if err != nil {
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file: %w", err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file must be 0600, got %#o", perm)
+		}
+		key, err := os.ReadFile(app.Broker.APIKeyFile)
+		if err != nil {
+			return broker.Config{}, fmt.Errorf("brokerctl: read api_key_file: %w", err)
+		}
+		trimmed := strings.TrimSpace(string(key))
+		if trimmed == "" {
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q is empty", app.Broker.APIKeyFile)
+		}
+		cfg.APIKey = []byte(trimmed)
+	}
+
+	return cfg, nil
 }
 
 // copyStringMap returns a fresh copy so the registry (which takes ownership)

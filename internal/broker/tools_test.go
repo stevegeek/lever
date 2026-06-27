@@ -65,6 +65,50 @@ func TestToolsListsRegisteredToolsForAgent(t *testing.T) {
 	}
 }
 
+// TestToolsOmitsReservedLLMTool verifies that /tools never exposes the reserved
+// "llm" pseudo-tool even when it is present in the registry.
+func TestToolsOmitsReservedLLMTool(t *testing.T) {
+	b := toolsBroker(t)
+	if err := b.reg.Register(regTool("db", "http://127.0.0.1:3201", "read")); err != nil {
+		t.Fatal(err)
+	}
+	// Also register the reserved llm pseudo-tool (as BuildBroker would for api-key mode).
+	if err := b.reg.Register(registry.Tool{
+		Name:       ReservedLLMTool,
+		Backend:    "lever:llm-proxy",
+		Operations: map[string]registry.Operation{ReservedLLMOp: {Name: ReservedLLMOp}},
+		FirstParty: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := jailServer(t, b)
+	defer srv.Close()
+
+	cert := signedCert(t, b, "worker")
+	client := agentClient(t, b, cert)
+
+	resp, err := client.Get(srv.URL + "/tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /tools status = %d, body = %s", resp.StatusCode, body)
+	}
+	var out struct {
+		Tools []string `json:"tools"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range out.Tools {
+		if n == ReservedLLMTool {
+			t.Fatalf("/tools must not expose the reserved llm pseudo-tool; got %v", out.Tools)
+		}
+	}
+}
+
 func TestToolsRejectsNonGet(t *testing.T) {
 	b := toolsBroker(t)
 	srv := jailServer(t, b)

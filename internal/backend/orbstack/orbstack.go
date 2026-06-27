@@ -89,7 +89,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 			return err
 		}
 	}
-	return o.ApplyEgress(ctx, cfg.AllowedPorts)
+	return o.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
 }
 
 // ensureScion cross-compiles scion from a host source checkout for linux/arm64
@@ -260,13 +260,13 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 	return nil
 }
 
-func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int) error {
+func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
 	v4, v6, err := resolveHostAlias(ctx, o.r, o.machine)
 	if err != nil {
 		return err
 	}
 	o.aliasV4, o.aliasV6 = v4, v6
-	for _, rule := range egress.BuildRules(v4, v6, allowedPorts) {
+	for _, rule := range egress.BuildRules(v4, v6, allowedPorts, closedInternet) {
 		args := append([]string{"-u", "root", "-m", o.machine, rule.Family.Binary()}, rule.Args...)
 		if _, err := o.r.Run(ctx, nil, "orb", args...); err != nil {
 			return fmt.Errorf("apply %s: %w", rule.Render(), err)

@@ -168,6 +168,36 @@ func TestResolveAdminAddr(t *testing.T) {
 	}
 }
 
+// newTestBrokerWithLLMTool builds a broker whose registry contains the real "db"
+// tool (from testConfig) plus the reserved "llm" pseudo-tool, as BuildBroker
+// would create for an api-key instance.
+func newTestBrokerWithLLMTool(t *testing.T) *Broker {
+	t.Helper()
+	b := New(testConfig(t))
+	if err := b.reg.Register(registry.Tool{
+		Name:       ReservedLLMTool,
+		Backend:    "lever:llm-proxy",
+		Operations: map[string]registry.Operation{ReservedLLMOp: {Name: ReservedLLMOp}},
+		FirstParty: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestJailHandlerNoGatewayRouteForReservedLLM verifies that the reserved "llm"
+// pseudo-tool never gets a /mcp/llm/ gateway route even when it is present in
+// the registry (api-key mode). A 404 proves the mux never bound that prefix.
+func TestJailHandlerNoGatewayRouteForReservedLLM(t *testing.T) {
+	b := newTestBrokerWithLLMTool(t)
+	h := b.JailHandler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp/llm/", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/mcp/llm/ got %d, want 404 (no gateway route for reserved tool)", rec.Code)
+	}
+}
+
 func TestEpochEndpointReportsCurrentEpoch(t *testing.T) {
 	b := New(testConfig(t))
 	b.BumpEpoch()

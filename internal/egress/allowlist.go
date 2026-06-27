@@ -33,7 +33,12 @@ var (
 // host.orb.internal addresses; allowedPorts are host-loopback tool ports.
 // Assumes the OUTPUT chain default policy is ACCEPT: the public internet stays
 // open; only the host alias and the listed private/special-use ranges are dropped.
-func BuildRules(aliasV4, aliasV6 string, allowedPorts []int) []Rule {
+// When closedInternet is true a catch-all OUTPUT DROP is appended AFTER all
+// per-port ACCEPTs, so the jail can reach ONLY the already-ACCEPTed destinations
+// (the broker port on the host alias). This is the api-key mode posture.
+// When closedInternet is false behaviour is byte-identical to the pre-existing open
+// posture (no catch-all DROP; public internet remains reachable).
+func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool) []Rule {
 	ports := append([]int(nil), allowedPorts...)
 	sort.Ints(ports)
 	var rules []Rule
@@ -60,6 +65,16 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int) []Rule {
 	}
 	for _, c := range ipv6Local {
 		rules = append(rules, Rule{IPv6, out("-d", c, "-j", "DROP")})
+	}
+	if closedInternet {
+		// Final catch-all: drop everything not already ACCEPTed above (the broker
+		// port to the host alias). The jail can then reach ONLY the broker — LLM
+		// traffic must flow broker→Anthropic. Order matters: this follows the
+		// per-port ACCEPTs.
+		rules = append(rules,
+			Rule{Family: IPv4, Args: []string{"-A", "OUTPUT", "-j", "DROP"}},
+			Rule{Family: IPv6, Args: []string{"-A", "OUTPUT", "-j", "DROP"}},
+		)
 	}
 	return rules
 }

@@ -408,3 +408,127 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestLoadInjectsLLMGrantForAPIKeyAgents(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "api-key")
+	if err := os.WriteFile(keyPath, []byte("sk-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "lever.yaml")
+	cfg := `name: demo
+backend: orbstack
+tree: work
+broker:
+  llm_auth: api-key
+  api_key_file: ` + keyPath + `
+groves:
+  - name: worker
+    dir: w
+    llm_auth: subscription
+`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !hasGrant(a.Manager.Obtain, "llm", "generate") {
+		t.Errorf("manager (api-key) missing injected llm grant: %+v", a.Manager.Obtain)
+	}
+	if hasGrant(a.Groves[0].Obtain, "llm", "generate") {
+		t.Errorf("subscription grove must NOT get an llm grant: %+v", a.Groves[0].Obtain)
+	}
+}
+
+func hasGrant(gs []Grant, tool, op string) bool {
+	for _, g := range gs {
+		if g.Tool == tool && g.Op == op {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEffectiveLLMAuthGroveOverride(t *testing.T) {
+	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {
+		t.Fatalf("manager: got %q want api-key", got)
+	}
+	// grove inherits broker default when unset
+	if got := a.EffectiveGroveLLMAuth(a.Groves[0]); got != LLMAuthAPIKey {
+		t.Fatalf("grove inherit: got %q want api-key", got)
+	}
+	// grove override wins
+	a.Groves[0].LLMAuth = LLMAuthSubscription
+	if got := a.EffectiveGroveLLMAuth(a.Groves[0]); got != LLMAuthSubscription {
+		t.Fatalf("grove override: got %q want subscription", got)
+	}
+}
+
+func TestEffectiveLLMAuthDefaultsToSubscription(t *testing.T) {
+	a := &App{Groves: []Grove{{Name: "w"}}}
+	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthSubscription {
+		t.Fatalf("default: got %q want subscription", got)
+	}
+}
+
+func TestValidateBrokerLLMAuth(t *testing.T) {
+	t.Run("invalid llm_auth rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: bogus\n"
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Fatal("expected error for invalid llm_auth value, got nil")
+		}
+	})
+
+	t.Run("api-key without api_key_file rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n"
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Fatal("expected error: api-key mode requires api_key_file, got nil")
+		}
+	})
+
+	t.Run("api-key with 0644 api_key_file rejects mentioning 0600", func(t *testing.T) {
+		dir := t.TempDir()
+		keyPath := filepath.Join(dir, "api.key")
+		if err := os.WriteFile(keyPath, []byte("sk-ant-test"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(keyPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n  api_key_file: " + keyPath + "\n"
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Fatal("expected error for 0644 api_key_file, got nil")
+		}
+		if !strings.Contains(err.Error(), "0600") {
+			t.Errorf("error must mention 0600, got: %v", err)
+		}
+	})
+}
+
+func TestClosedInternetEgress(t *testing.T) {
+	// all api-key ⇒ closed, no warning
+	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	closed, warn := a.ClosedInternetEgress()
+	if !closed || warn != "" {
+		t.Fatalf("all-api-key: closed=%v warn=%q want true/empty", closed, warn)
+	}
+	// mixed ⇒ open + warning
+	a.Groves[0].LLMAuth = LLMAuthSubscription
+	closed, warn = a.ClosedInternetEgress()
+	if closed || warn == "" {
+		t.Fatalf("mixed: closed=%v warn=%q want false/non-empty", closed, warn)
+	}
+	// all subscription ⇒ open, no warning
+	a2 := &App{Groves: []Grove{{Name: "w"}}}
+	closed, warn = a2.ClosedInternetEgress()
+	if closed || warn != "" {
+		t.Fatalf("all-subscription: closed=%v warn=%q want false/empty", closed, warn)
+	}
+}

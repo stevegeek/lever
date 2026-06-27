@@ -75,11 +75,17 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return apply.Deps{}, nil, nil, fmt.Errorf("apply currently supports the orbstack backend only")
 	}
 	allowed := append([]int{app.Broker.JailPort}, app.Manager.AllowPorts...)
+	closed, warn := app.ClosedInternetEgress()
+	if warn != "" {
+		// Surface the mixed-mode egress relaxation (R2); not fatal.
+		fmt.Fprintf(os.Stderr, "lever: warning: %s\n", warn)
+	}
 	cfg := backend.Config{
-		MachineName:  machine,
-		ProjectTree:  app.Tree,
-		AllowedPorts: allowed,
-		ScionSource:  app.Scion.Source,
+		MachineName:    machine,
+		ProjectTree:    app.Tree,
+		AllowedPorts:   allowed,
+		ScionSource:    app.Scion.Source,
+		ClosedInternet: closed,
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.
 	if err := ob.EnsureUp(ctx, cfg); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -39,6 +40,10 @@ type BootConfig struct {
 	Now             time.Time
 	MCPAdd          func(name string, argv ...string) error
 	WriteEnvOverlay func(map[string]string) error
+	// ListTools, when non-nil and BrokerTools is empty, is called after enrolment
+	// to auto-discover registered tool names from the broker. Injected so tests
+	// can stub it; production sets it to agent.ListTools.
+	ListTools func(ctx context.Context, brokerURL string, client *http.Client) ([]string, error)
 }
 
 // Boot enrols the agent (idempotently) and configures the harness: writes the
@@ -77,6 +82,22 @@ func Boot(ctx context.Context, c BootConfig) error {
 		}
 	}
 
+	// Resolve broker tools: use explicit list when provided; otherwise auto-discover
+	// via the broker's /tools endpoint (fail-closed — a booting agent that can't
+	// learn its tools is a real failure, not a tolerable degraded state).
+	brokerTools := c.BrokerTools
+	if len(brokerTools) == 0 && c.ListTools != nil && brokerURL != "" {
+		client, err := id.Client()
+		if err != nil {
+			return fmt.Errorf("agent: boot: build mTLS client for tool discovery: %w", err)
+		}
+		discovered, err := c.ListTools(ctx, brokerURL, client)
+		if err != nil {
+			return err
+		}
+		brokerTools = discovered
+	}
+
 	// Env overlay points the harness at the identity files (paths only, never key bytes).
 	overlay := map[string]string{
 		"CLAUDE_CODE_CLIENT_CERT": filepath.Join(c.IDDir, "agent.crt"),
@@ -96,7 +117,7 @@ func Boot(ctx context.Context, c BootConfig) error {
 		// Broker tools are HTTP MCP servers at the broker. The mTLS client cert
 		// for these calls is wired in by the env overlay above (paths only).
 		// If brokerURL is empty (no bootstrap configured), skip registration.
-		for _, tool := range c.BrokerTools {
+		for _, tool := range brokerTools {
 			if brokerURL == "" {
 				continue
 			}

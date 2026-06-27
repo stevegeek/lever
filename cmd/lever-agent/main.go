@@ -72,8 +72,17 @@ func cmdBoot(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Detect whether -tools was explicitly set (even to "") via fs.Visit.
+	// This distinguishes "flag omitted" (auto-discover) from "-tools ''" (explicit empty list).
+	toolsSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "tools" {
+			toolsSet = true
+		}
+	})
 	var brokerTools []string
-	if *toolsCSV != "" {
+	if toolsSet {
+		// Explicit -tools value: parse the CSV (may be empty, yielding nil slice).
 		for _, t := range strings.Split(*toolsCSV, ",") {
 			if t = strings.TrimSpace(t); t != "" {
 				brokerTools = append(brokerTools, t)
@@ -88,12 +97,18 @@ func cmdBoot(args []string) error {
 		MCPAdd:          claudeMCPAdd,
 		WriteEnvOverlay: writeOverlay(*overlayPath),
 	}
+	// Auto-discover tools from the broker only when -tools was not explicitly set.
+	// When -tools is set (even to ""), the explicit list wins and discovery is skipped.
+	if !toolsSet {
+		cfg.ListTools = agent.ListTools
+	}
 	if *enrolOnly {
 		// Enrol + write identity only: nil hooks make agent.Boot skip the env
 		// overlay and the `claude mcp add` registration (no claude in the bare VM).
 		cfg.MCPAdd = nil
 		cfg.WriteEnvOverlay = nil
 		cfg.BrokerTools = nil
+		cfg.ListTools = nil
 	}
 	return agent.Boot(ctx, cfg)
 }

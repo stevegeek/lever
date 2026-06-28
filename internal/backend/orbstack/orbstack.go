@@ -267,6 +267,13 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 }
 
 func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
+	// Reset the dedicated chain FIRST: this makes re-apply idempotent (no rule
+	// accumulation) and — critically — flushing the chain removes any prior
+	// catch-all DROP, restoring DNS so the host-alias re-resolve below works even
+	// when a previous closed-egress posture is still in place.
+	if err := o.resetEgressChain(ctx); err != nil {
+		return err
+	}
 	v4, v6, err := resolveHostAlias(ctx, o.r, o.machine)
 	if err != nil {
 		return err
@@ -276,6 +283,34 @@ func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedIn
 		args := append([]string{"-u", "root", "-m", o.machine, rule.Family.Binary()}, rule.Args...)
 		if _, err := o.r.Run(ctx, nil, "orb", args...); err != nil {
 			return fmt.Errorf("apply %s: %w", rule.Render(), err)
+		}
+	}
+	return nil
+}
+
+// resetEgressChain ensures the LEVER_EGRESS chain exists and OUTPUT jumps to it
+// exactly once, then flushes it, for both address families. Idempotent: the chain
+// holds ALL of lever's egress rules, so flushing wipes the prior apply's rules
+// (no accumulation) without touching any non-lever OUTPUT rules, and removes the
+// catch-all DROP so DNS works for the subsequent host-alias resolve.
+func (o *OrbStack) resetEgressChain(ctx context.Context) error {
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		base := []string{"-u", "root", "-m", o.machine, bin}
+		run := func(args ...string) error {
+			_, err := o.r.Run(ctx, nil, "orb", append(append([]string{}, base...), args...)...)
+			return err
+		}
+		// Create the chain if absent (-N errors if it already exists — tolerate).
+		_ = run("-N", egress.Chain)
+		// Ensure the OUTPUT jump exists exactly once: -C checks, -A adds if missing.
+		if err := run("-C", "OUTPUT", "-j", egress.Chain); err != nil {
+			if err := run("-A", "OUTPUT", "-j", egress.Chain); err != nil {
+				return fmt.Errorf("egress: add OUTPUT jump (%s): %w", bin, err)
+			}
+		}
+		// Flush our chain (idempotent re-apply; restores DNS for the re-resolve).
+		if err := run("-F", egress.Chain); err != nil {
+			return fmt.Errorf("egress: flush %s (%s): %w", egress.Chain, bin, err)
 		}
 	}
 	return nil

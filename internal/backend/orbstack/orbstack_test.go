@@ -10,6 +10,35 @@ import (
 	"github.com/lever-to/lever/internal/exec"
 )
 
+func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	b := New(f, "lever-jail")
+	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
+		t.Fatalf("ApplyEgress: %v", err)
+	}
+	flushIdx, getentIdx := -1, -1
+	for i, c := range f.Calls {
+		argv := strings.Join(c.Args, " ")
+		if strings.Contains(argv, "iptables -F LEVER_EGRESS") {
+			flushIdx = i
+		}
+		if strings.Contains(argv, "getent ahosts host.orb.internal") {
+			getentIdx = i
+		}
+	}
+	if flushIdx < 0 {
+		t.Fatal("ApplyEgress must flush LEVER_EGRESS (idempotent re-apply, no rule accumulation)")
+	}
+	// Flush BEFORE resolve: under a prior closed posture the catch-all DROP blocks
+	// DNS/53; flushing the chain first restores it so the re-resolve succeeds.
+	if getentIdx < 0 || flushIdx > getentIdx {
+		t.Fatalf("flush (idx %d) must precede the host-alias resolve (idx %d)", flushIdx, getentIdx)
+	}
+}
+
 // orbVersionScript scripts a successful `orb version` response for >= 2.1.1.
 func orbVersionScript(f *exec.FakeRunner) {
 	f.Script("orb version", exec.Result{Stdout: "Version: 2.2.1 (2020100)\n"})

@@ -11,6 +11,12 @@ import (
 	"strings"
 )
 
+// Chain is the dedicated iptables chain lever's egress rules live in. OUTPUT
+// jumps to it; ApplyEgress flushes ONLY this chain before re-populating, so a
+// re-apply is idempotent (no rule accumulation) and — because flushing removes
+// the catch-all DROP — DNS works again for the host-alias re-resolve.
+const Chain = "LEVER_EGRESS"
+
 type Family int
 
 const (
@@ -51,8 +57,8 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 	// (where the default-ACCEPT policy already permits loopback).
 	if closedInternet {
 		rules = append(rules,
-			Rule{Family: IPv4, Args: []string{"-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"}},
-			Rule{Family: IPv6, Args: []string{"-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"}},
+			Rule{Family: IPv4, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},
+			Rule{Family: IPv6, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},
 		)
 	}
 
@@ -85,14 +91,14 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 		// traffic must flow broker→Anthropic. Order matters: this follows the
 		// per-port ACCEPTs.
 		rules = append(rules,
-			Rule{Family: IPv4, Args: []string{"-A", "OUTPUT", "-j", "DROP"}},
-			Rule{Family: IPv6, Args: []string{"-A", "OUTPUT", "-j", "DROP"}},
+			Rule{Family: IPv4, Args: []string{"-A", Chain, "-j", "DROP"}},
+			Rule{Family: IPv6, Args: []string{"-A", Chain, "-j", "DROP"}},
 		)
 	}
 	return rules
 }
 
-func out(a ...string) []string { return append([]string{"-A", "OUTPUT"}, a...) }
+func out(a ...string) []string { return append([]string{"-A", Chain}, a...) }
 
 // Binary returns the iptables binary name for a family.
 func (f Family) Binary() string {

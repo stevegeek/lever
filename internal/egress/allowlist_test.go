@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestBuildRulesTargetDedicatedChain(t *testing.T) {
+	// Rules append to the dedicated LEVER_EGRESS chain (which OUTPUT jumps to),
+	// NOT OUTPUT directly — so ApplyEgress can flush ONLY lever's rules on
+	// re-apply (idempotent; no accumulation; restores DNS before re-resolving).
+	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, true)
+	for i, r := range rules {
+		if len(r.Args) < 2 || r.Args[0] != "-A" || r.Args[1] != Chain {
+			t.Fatalf("rule %d %v must append to %s, not %q", i, r.Args, Chain, r.Args[1])
+		}
+	}
+}
+
 func TestBuildRulesAllowsListedPortToBothAliasFamilies(t *testing.T) {
 	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, false)
 	v4 := familyArgs(rules, IPv4)
@@ -106,7 +118,7 @@ func loIdx(rules []Rule, fam Family) int {
 
 // dropIdxFamily returns the index of the catch-all DROP for a family, or -1.
 func dropIdxFamily(rules []Rule, fam Family) int {
-	catchAll := []string{"-A", "OUTPUT", "-j", "DROP"}
+	catchAll := []string{"-A", Chain, "-j", "DROP"}
 	for i, r := range rules {
 		if r.Family == fam && slices.Equal(r.Args, catchAll) {
 			return i
@@ -137,7 +149,7 @@ func indexOfRule(lines []string, needle string) int {
 
 // helpers for closedInternet test
 func hasCatchAllDropFamily(rules []Rule, fam Family) bool {
-	catchAll := []string{"-A", "OUTPUT", "-j", "DROP"}
+	catchAll := []string{"-A", Chain, "-j", "DROP"}
 	for _, r := range rules {
 		if r.Family == fam && slices.Equal(r.Args, catchAll) {
 			return true
@@ -161,7 +173,7 @@ func acceptIdx(rules []Rule, port string) int {
 }
 
 func dropIdx(rules []Rule) int {
-	catchAll := []string{"-A", "OUTPUT", "-j", "DROP"}
+	catchAll := []string{"-A", Chain, "-j", "DROP"}
 	for i, r := range rules {
 		if slices.Equal(r.Args, catchAll) {
 			return i

@@ -65,7 +65,10 @@ type Broker struct {
 	ManagerIdentity string        `yaml:"manager_identity"`
 	APIKeyFile      string        `yaml:"api_key_file"` // api-key mode
 	LLMAuth         LLMAuthMode   `yaml:"llm_auth"`
-	Tools           []Tool        `yaml:"tools"`
+	// LLMUpstream overrides the /llm proxy target (default https://api.anthropic.com).
+	// Set to a fake upstream for testing; never client-controlled. Empty = default.
+	LLMUpstream string `yaml:"llm_upstream"`
+	Tools       []Tool `yaml:"tools"`
 }
 
 type Manager struct {

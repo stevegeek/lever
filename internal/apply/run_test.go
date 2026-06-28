@@ -2,15 +2,84 @@ package apply
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/exec"
 	"github.com/lever-to/lever/internal/scion"
 )
+
+// flakyStartRunner fails the first startFails `scion start` calls with the
+// runtime-broker-unavailable error (the registration race), then defers to the
+// wrapped FakeRunner. Used to prove start-manager retries.
+type flakyStartRunner struct {
+	*exec.FakeRunner
+	startFails int
+	startCalls int
+}
+
+func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" {
+		hasStart, hasServer := false, false
+		for _, a := range args {
+			if a == "start" {
+				hasStart = true
+			}
+			if a == "server" {
+				hasServer = true
+			}
+		}
+		if hasStart && !hasServer { // agent start, not `scion server start`
+			r.startCalls++
+			if r.startCalls <= r.startFails {
+				// Client.run builds its error from Stdout+Stderr, so the marker must
+				// live there, not just in the Go error.
+				return exec.Result{Code: 1, Stderr: "no_runtime_broker: No runtime brokers available for this project"}, fmt.Errorf("exit status 1")
+			}
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
+	// Make the retry fast for the test.
+	origAtt, origInt := brokerStartAttempts, brokerStartInterval
+	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
+	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
+
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &flakyStartRunner{FakeRunner: exec.NewFakeRunner(), startFails: 2}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run should succeed after the broker race resolves: %v", err)
+	}
+	if r.startCalls != 3 {
+		t.Fatalf("start attempted %d times, want 3 (2 transient failures + 1 success)", r.startCalls)
+	}
+}
 
 func TestRunDispatchesStepsInOrder(t *testing.T) {
 	f := exec.NewFakeRunner()

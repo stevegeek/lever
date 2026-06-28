@@ -8,10 +8,34 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/scion"
 )
+
+// brokerStartAttempts/brokerStartInterval bound the start-manager retry that
+// absorbs the runtime-broker registration race: the scion runtime broker
+// registers with the hub ASYNCHRONOUSLY after the server starts, so a
+// start-manager that runs too soon gets "no runtime brokers available". The hub
+// itself is up (the scion-server health check passed), so this is purely a
+// timing window — retry until the broker comes online. Package vars so tests run
+// fast. (Only the first start races; groves start later when the broker is ready.)
+var (
+	brokerStartAttempts = 30
+	brokerStartInterval = 1 * time.Second
+)
+
+// isBrokerUnavailable reports whether err is the transient "runtime broker not
+// yet registered" error from `scion start` (the registration race), as opposed
+// to a real failure.
+func isBrokerUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "no_runtime_broker") || strings.Contains(s, "No runtime brokers available")
+}
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
 // api-key instances. It is NOT a real credential: it exists only to satisfy
@@ -171,7 +195,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		// exactly where mint-manager-bootstrap wrote the manager's bootstrap.json.
 		// Injecting an env var would be redundant and add a scion StartOpts.Env
 		// dependency that the file convention avoids.
-		return d.Scion.Start(ctx, scion.StartOpts{
+		opts := scion.StartOpts{
 			Grove: app.Name, Task: task, Project: jp, Image: app.Manager.Image, Harness: "claude",
 			// Workspace = the in-jail project tree, so the manager edits the real
 			// host files in place (verified 2026-06-16). Without it scion mounts a
@@ -180,7 +204,21 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			// api-key: start with --harness-auth api-key (satisfied by the placeholder
 			// secret set above); the real credential arrives in-container.
 			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
-		})
+		}
+		// Retry past the runtime-broker registration race (see brokerStartAttempts).
+		var startErr error
+		for attempt := 0; attempt < brokerStartAttempts; attempt++ {
+			startErr = d.Scion.Start(ctx, opts)
+			if startErr == nil || !isBrokerUnavailable(startErr) {
+				return startErr
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(brokerStartInterval):
+			}
+		}
+		return startErr
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}

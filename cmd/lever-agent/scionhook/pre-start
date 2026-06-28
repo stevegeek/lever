@@ -21,7 +21,14 @@
 # LLM token after this hook. scion reads that file just after pre-start hooks; it
 # must be written at runtime because ~/.scion is under the /home/scion bind-mount.
 set -eu
+# Bootstrap path: pass it ABSOLUTELY. scion mounts the agent's project tree at
+# /workspace in the container and `lever apply` stages the bootstrap at
+# <tree>/.lever/bootstrap.json → /workspace/.lever/bootstrap.json. boot's default
+# (./.lever/bootstrap.json) does NOT resolve here: the pre-start hook's CWD is the
+# agent home, not /workspace (verified live 2026-06-28), so the relative default
+# fails with "read bootstrap: no such file".
 lever-agent boot \
   --id-dir "$HOME/.lever-id" \
+  --bootstrap /workspace/.lever/bootstrap.json \
   --llm-auth "${LEVER_LLM_AUTH:-subscription}" \
   --settings "$HOME/.claude/settings.json"

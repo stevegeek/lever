@@ -282,9 +282,10 @@ func agentStart(cf ClientFactory) *cobra.Command {
 				}
 			}
 
-			// api-key: scion must propagate no auth (no CLAUDE_CODE_OAUTH_TOKEN exists);
-			// the credential arrives in-container via the broker /llm capability.
-			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image, NoAuth: apiKey}); err != nil {
+			// api-key: start with --harness-auth api-key (satisfied by the placeholder
+			// ANTHROPIC_API_KEY Hub secret set at apply time); the real credential
+			// arrives in-container via the broker /llm capability.
+			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image, APIKey: apiKey}); err != nil {
 				return err
 			}
 			cmd.Printf("Started %s.\n", grove)

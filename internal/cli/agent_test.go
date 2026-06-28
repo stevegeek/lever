@@ -377,10 +377,10 @@ func TestAgentStartConveysLLMAuthForAPIKeyGrove(t *testing.T) {
 		if startIdx == -1 || envIdx > startIdx {
 			t.Fatalf("env-set (idx %d) must precede start (idx %d)", envIdx, startIdx)
 		}
-		// The api-key grove must start with --no-auth (no oauth-token gather).
+		// The api-key grove must start with --harness-auth api-key (not oauth-token).
 		startArgv := strings.Join(f.Calls[startIdx].Args, " ")
-		if !strings.Contains(startArgv, "--no-auth") || strings.Contains(startArgv, "oauth-token") {
-			t.Fatalf("api-key grove start must use --no-auth (not oauth-token); argv=%q", startArgv)
+		if !strings.Contains(startArgv, "--harness-auth api-key") || strings.Contains(startArgv, "oauth-token") {
+			t.Fatalf("api-key grove start must use --harness-auth api-key (not oauth-token); argv=%q", startArgv)
 		}
 	})
 

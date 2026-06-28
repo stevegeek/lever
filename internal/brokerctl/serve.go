@@ -43,7 +43,14 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	adminURL := "http://" + adminLn.Addr().String()
 
-	certPEM, keyPEM, err := caInst.IssueServerCert(serverName)
+	// Issue the broker server cert. Always include the host.orb.internal DNS SAN;
+	// additionally include the jail's resolved host-alias IP (passed by `lever
+	// apply` via $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can
+	// dial the broker by IP — DNS/53 is dropped in that posture, so they cannot
+	// resolve the hostname and instead connect to the already-allowlisted alias IP,
+	// which TLS validates against this IP SAN. Absent (e.g. a direct `lever broker
+	// serve`), fall back to the hostname-only cert.
+	certPEM, keyPEM, err := caInst.IssueServerCertSANs(serverName, []string{serverName}, []string{os.Getenv("LEVER_HOST_ALIAS_IP")})
 	if err != nil {
 		_ = jailLn.Close()
 		_ = adminLn.Close()

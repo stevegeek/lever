@@ -13,6 +13,14 @@ import (
 	"github.com/lever-to/lever/internal/scion"
 )
 
+// apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
+// api-key instances. It is NOT a real credential: it exists only to satisfy
+// scion's start-time auth gate so the container (and lever-agent boot) can run.
+// claude sends it as x-api-key to the broker /llm, which strips it and injects
+// the real Console key host-side. Shaped like an Anthropic key (sk-ant- prefix,
+// long) in case scion's auth resolution sanity-checks the format.
+const apiKeyPlaceholder = "sk-ant-placeholder0lever0broker0injects0the0real0key0do0not0use000000000000000000000000"
+
 // BootstrapMaterial is what the manager's lever-agent consumes to enrol.
 type BootstrapMaterial struct {
 	Ticket    string `json:"ticket"`
@@ -143,6 +151,17 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			if err := d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
 				return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
 			}
+			// Satisfy scion's start-time auth gate with a placeholder ANTHROPIC_API_KEY
+			// (Hub secret, projected to every container — fine since the instance is
+			// uniformly api-key). It is a sentinel, NOT a real credential: the agent's
+			// real LLM credential is the in-container broker capability biscuit, and
+			// the broker /llm overwrites this placeholder x-api-key with the real key.
+			// Without it scion's env-gather/auth-resolution refuses to launch the
+			// container (and thus lever-agent boot, which writes the real token). Set
+			// once here; later-started groves inherit the same Hub secret.
+			if err := d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
+				return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
+			}
 		}
 		// LEVER_BOOTSTRAP reconciliation: we do NOT set
 		// LEVER_BOOTSTRAP here. lever-agent boot's canonical-path default
@@ -158,9 +177,9 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			// host files in place (verified 2026-06-16). Without it scion mounts a
 			// managed copy of the externalized config dir, not the live tree.
 			Workspace: jp,
-			// api-key: no CLAUDE_CODE_OAUTH_TOKEN exists, so scion must not gather it
-			// (its credential arrives in-container via the broker /llm capability).
-			NoAuth: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
+			// api-key: start with --harness-auth api-key (satisfied by the placeholder
+			// secret set above); the real credential arrives in-container.
+			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
 		})
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)

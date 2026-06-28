@@ -90,6 +90,33 @@ func (c *CA) IssueServerCert(host string) (certPEM, keyPEM []byte, err error) {
 	return c.issue(host, x509.ExtKeyUsageServerAuth, []string{host}, nil)
 }
 
+// IssueServerCertSANs mints a server cert carrying BOTH the given DNS names and
+// IP-address SANs, with cn as the Subject CommonName. The broker uses this so an
+// agent can reach it by hostname (host.orb.internal) OR by its resolved alias IP
+// — the latter is required under closed-internet egress, where DNS/53 is dropped
+// so the agent must dial the already-allowlisted IP directly while TLS still
+// validates against the IP SAN. Any "" entries are ignored.
+func (c *CA) IssueServerCertSANs(cn string, dnsNames []string, ips []string) (certPEM, keyPEM []byte, err error) {
+	var dns []string
+	for _, d := range dnsNames {
+		if d != "" {
+			dns = append(dns, d)
+		}
+	}
+	var parsed []net.IP
+	for _, s := range ips {
+		if s == "" {
+			continue
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return nil, nil, fmt.Errorf("ca: invalid IP SAN %q", s)
+		}
+		parsed = append(parsed, ip)
+	}
+	return c.issue(cn, x509.ExtKeyUsageServerAuth, dns, parsed)
+}
+
 func (c *CA) issue(cn string, eku x509.ExtKeyUsage, dnsNames []string, ipAddrs []net.IP) (certPEM, keyPEM []byte, err error) {
 	if cn == "" {
 		return nil, nil, fmt.Errorf("ca: empty common name")

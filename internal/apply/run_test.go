@@ -135,12 +135,16 @@ func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var sawEnvSet bool
+	var sawEnvSet, sawPlaceholder bool
 	var startArgv string
 	for _, c := range f.Calls {
 		argv := strings.Join(c.Args, " ")
 		if argv == "hub env set --project LEVER_LLM_AUTH=api-key" {
 			sawEnvSet = true
+		}
+		// SecretSet base64-encodes the value, so match on the verb + key, not value.
+		if len(c.Args) >= 4 && c.Args[0] == "hub" && c.Args[1] == "secret" && c.Args[2] == "set" && c.Args[3] == "ANTHROPIC_API_KEY" {
+			sawPlaceholder = true
 		}
 		if c.Name == "scion" && strings.Contains(argv, " start ") {
 			startArgv = argv
@@ -149,9 +153,12 @@ func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 	if !sawEnvSet {
 		t.Fatalf("api-key manager: expected LEVER_LLM_AUTH env set; calls=%+v", f.Calls)
 	}
-	// api-key manager must start with --no-auth (no oauth-token gather).
-	if !strings.Contains(startArgv, "--no-auth") || strings.Contains(startArgv, "oauth-token") {
-		t.Fatalf("api-key manager start must use --no-auth (not oauth-token); argv=%q", startArgv)
+	if !sawPlaceholder {
+		t.Fatalf("api-key manager: expected placeholder ANTHROPIC_API_KEY secret set; calls=%+v", f.Calls)
+	}
+	// api-key manager must start with --harness-auth api-key (not oauth-token).
+	if !strings.Contains(startArgv, "--harness-auth api-key") || strings.Contains(startArgv, "oauth-token") {
+		t.Fatalf("api-key manager start must use --harness-auth api-key (not oauth-token); argv=%q", startArgv)
 	}
 }
 

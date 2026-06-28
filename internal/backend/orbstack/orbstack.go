@@ -63,6 +63,12 @@ func (o *OrbStack) DockerHost() string {
 }
 func (o *OrbStack) HostToolAlias() string { return "host.orb.internal" }
 
+// HostAliasV4 returns the resolved IPv4 of host.orb.internal as seen from the
+// jail, valid after EnsureUp/ApplyEgress. Empty if not yet resolved. Used to mint
+// the broker cert with an IP SAN and to build IP-based broker URLs so agents
+// reach the broker without DNS under closed-internet egress.
+func (o *OrbStack) HostAliasV4() string { return o.aliasV4 }
+
 func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {
 		return fmt.Errorf("EnsureUp: ProjectTree is required")

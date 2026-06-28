@@ -54,9 +54,10 @@ func run(argv []string) error {
 	}
 }
 
-// cmdBoot wires the real claude-mcp-add exec + the scion env-overlay path into
-// agent.Boot. Flags: -bootstrap (default $LEVER_BOOTSTRAP or ./.lever/bootstrap.json),
-// -id-dir (default $HOME/.lever-id), -overlay (scion env-overlay output path),
+// cmdBoot wires the real claude-mcp-add exec + the claude settings.json env-block
+// writer into agent.Boot. Flags: -bootstrap (default $LEVER_BOOTSTRAP or
+// ./.lever/bootstrap.json), -id-dir (default $HOME/.lever-id), -settings (claude
+// settings.json path; its env block receives the dynamic LLM vars),
 // -tools (comma-separated broker tool names).
 func cmdBoot(args []string) error {
 	fs := flag.NewFlagSet("boot", flag.ContinueOnError)
@@ -67,9 +68,9 @@ func cmdBoot(args []string) error {
 	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
 	bootstrapPath := fs.String("bootstrap", defaultBootstrap, "path to bootstrap.json")
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
-	overlayPath := fs.String("overlay", "", "path to write scion env-overlay JSON")
+	settingsPath := fs.String("settings", "", "path to the claude settings.json whose env block receives ANTHROPIC_AUTH_TOKEN/BASE_URL (api-key mode)")
 	toolsCSV := fs.String("tools", "", "comma-separated broker tool names to register via claude mcp add")
-	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL to the env overlay; 'subscription' (default) leaves those keys absent and uses the user's own key")
+	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL into the claude settings.json env block; 'subscription' (default) leaves those keys absent and uses the user's own key")
 	enrolOnly := fs.Bool("enrol-only", false, "enrol + write the identity only; skip the claude mcp registration and env overlay (no `claude` binary required — used by the VM-level acceptance gate, which drives lever-agent's CLI verbs directly)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -97,7 +98,7 @@ func cmdBoot(args []string) error {
 		IDDir:           *idDir,
 		BrokerTools:     brokerTools,
 		MCPAdd:          claudeMCPAdd,
-		WriteEnvOverlay: writeOverlay(*overlayPath),
+		WriteEnvOverlay: writeClaudeSettingsEnv(*settingsPath),
 		LLMAuth:         *llmAuth,
 	}
 	// Auto-discover tools from the broker only when -tools was not explicitly set.
@@ -164,12 +165,43 @@ func claudeMCPAdd(name string, argv ...string) error {
 	return nil
 }
 
-func writeOverlay(path string) func(map[string]string) error {
+// writeClaudeSettingsEnv returns a writer that MERGES the given env vars into the
+// `env` block of the claude settings.json at path, preserving any existing
+// settings and env keys (read-modify-write). This is how the dynamic
+// ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL reach the in-container `claude`:
+// Claude Code natively reads its settings.json `env` block at startup (verified
+// live 2026-06-28), whereas the scion harness env-overlay path is inert for our
+// builtin harness. Empty path is a no-op (e.g. enrol-only). Written 0600.
+func writeClaudeSettingsEnv(path string) func(map[string]string) error {
 	return func(m map[string]string) error {
 		if path == "" {
 			return nil
 		}
-		b, _ := json.Marshal(m)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("settings dir %s: %w", filepath.Dir(path), err)
+		}
+		// Merge into existing settings rather than clobber (claude may already have
+		// written model/permissions/etc; mcp config lives in a separate ~/.claude.json).
+		settings := map[string]any{}
+		if b, err := os.ReadFile(path); err == nil {
+			if err := json.Unmarshal(b, &settings); err != nil {
+				return fmt.Errorf("settings %s: parse existing: %w", path, err)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("settings %s: read: %w", path, err)
+		}
+		env, _ := settings["env"].(map[string]any)
+		if env == nil {
+			env = map[string]any{}
+		}
+		for k, v := range m {
+			env[k] = v
+		}
+		settings["env"] = env
+		b, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return err
+		}
 		return os.WriteFile(path, b, 0o600)
 	}
 }
@@ -257,15 +289,15 @@ func cmdServeCapability(args []string) error {
 type renewOpts struct {
 	idDir, brokerURL, bootstrapPath string
 	// llmAuth, when "api-key", triggers a fresh ANTHROPIC_AUTH_TOKEN request
-	// after the cert is renewed, and rewrites the full env overlay.
-	llmAuth     string
-	overlayPath string
+	// after the cert is renewed, and rewrites the claude settings.json env block.
+	llmAuth      string
+	settingsPath string
 }
 
 // renewOnce performs a single certificate renewal: load identity, resolve broker
 // URL, call agent.Renew, write the renewed identity back to idDir. If llmAuth is
-// "api-key" and overlayPath is set, also refreshes the ANTHROPIC_AUTH_TOKEN via
-// the broker /request endpoint and rewrites the complete env overlay.
+// "api-key" and settingsPath is set, also refreshes the ANTHROPIC_AUTH_TOKEN via
+// the broker /request endpoint and rewrites the claude settings.json env block.
 func renewOnce(opts renewOpts) error {
 	id, ok := agent.LoadIdentity(opts.idDir)
 	if !ok {
@@ -283,9 +315,9 @@ func renewOnce(opts renewOpts) error {
 	if err := renewed.Write(opts.idDir); err != nil {
 		return err
 	}
-	// api-key mode: refresh the LLM capability token and rewrite the full overlay
-	// so the scion harness picks up both the renewed cert paths and the fresh token.
-	if opts.llmAuth == "api-key" && opts.overlayPath != "" {
+	// api-key mode: refresh the LLM capability token and rewrite the claude
+	// settings.json env block so the next claude launch picks up the fresh token.
+	if opts.llmAuth == "api-key" && opts.settingsPath != "" {
 		cn, err := leafCN(renewed.CertPEM)
 		if err != nil {
 			return fmt.Errorf("renew: parse CN for llm token: %w", err)
@@ -298,7 +330,7 @@ func renewOnce(opts renewOpts) error {
 		if err := agent.RefreshLLMToken(ctx, bURL, renewed, cn, requestLLMToken, overlay); err != nil {
 			return err
 		}
-		if err := writeOverlay(opts.overlayPath)(overlay); err != nil {
+		if err := writeClaudeSettingsEnv(opts.settingsPath)(overlay); err != nil {
 			return err
 		}
 	}
@@ -310,7 +342,7 @@ func renewOnce(opts renewOpts) error {
 // errors in loop mode are logged to stderr and the loop continues; only
 // SIGINT/SIGTERM terminates it. Without -loop it performs a single renewal.
 // When -llm-auth api-key, also refreshes ANTHROPIC_AUTH_TOKEN after each cert
-// renewal and rewrites the full env overlay at -overlay.
+// renewal and rewrites the claude settings.json env block at -settings.
 func cmdRenew(args []string) error {
 	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
 	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
@@ -320,7 +352,7 @@ func cmdRenew(args []string) error {
 	loop := fs.Bool("loop", false, "run as a renewal daemon (renew then sleep -interval, repeat until signal)")
 	interval := fs.Duration("interval", 12*time.Hour, "renewal interval in loop mode (default 12h; cert TTL is 24h)")
 	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' refreshes ANTHROPIC_AUTH_TOKEN after each cert renewal")
-	overlayPath := fs.String("overlay", "", "path to write scion env-overlay JSON (required for -llm-auth api-key refresh)")
+	settingsPath := fs.String("settings", "", "path to the claude settings.json whose env block is rewritten on -llm-auth api-key refresh")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -330,7 +362,7 @@ func cmdRenew(args []string) error {
 		brokerURL:     *brokerURL,
 		bootstrapPath: *bootstrapPath,
 		llmAuth:       *llmAuth,
-		overlayPath:   *overlayPath,
+		settingsPath:  *settingsPath,
 	}
 
 	if !*loop {

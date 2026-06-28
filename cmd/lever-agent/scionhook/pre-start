@@ -10,7 +10,14 @@
 # We let the default take effect rather than hardcoding $HOME/workspace/... which
 # could diverge if the image bakes a different mount point. The absolute in-image
 # path is validated at instance image-bake / Task-8 acceptance time.
+# LLM-auth mode: the launcher sets LEVER_LLM_AUTH=api-key for an agent that must
+# route the model through the broker /llm proxy (holding only a capability(llm)
+# token). Default 'subscription' = no change (claude uses CLAUDE_CODE_OAUTH_TOKEN
+# and reaches Anthropic directly). In api-key mode boot writes ANTHROPIC_AUTH_TOKEN
+# /ANTHROPIC_BASE_URL into the claude settings.json env block — the path claude
+# actually reads (the scion env-overlay is inert for our builtin harness).
 set -eu
 lever-agent boot \
   --id-dir "$HOME/.lever-id" \
-  --overlay "$HOME/.scion/agent-env.json"
+  --llm-auth "${LEVER_LLM_AUTH:-subscription}" \
+  --settings "$HOME/.claude/settings.json"

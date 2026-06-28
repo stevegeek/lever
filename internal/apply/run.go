@@ -158,6 +158,9 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			// host files in place (verified 2026-06-16). Without it scion mounts a
 			// managed copy of the externalized config dir, not the live tree.
 			Workspace: jp,
+			// api-key: no CLAUDE_CODE_OAUTH_TOKEN exists, so scion must not gather it
+			// (its credential arrives in-container via the broker /llm capability).
+			NoAuth: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
 		})
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)

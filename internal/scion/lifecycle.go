@@ -21,6 +21,12 @@ type StartOpts struct {
 	// (verified 2026-06-16 — the explicit flag takes provision.go's Case-1
 	// "mount this path directly" path). Empty leaves scion to resolve it.
 	Workspace string
+	// NoAuth disables scion's auth propagation (`--no-auth`) instead of requesting
+	// `--harness-auth oauth-token`. Set for api-key agents: they hold no
+	// CLAUDE_CODE_OAUTH_TOKEN (scion's oauth-token env-gather would fail), and get
+	// their credential in-container instead (mTLS cert via image env, LLM
+	// capability token written into the claude settings.json by lever-agent boot).
+	NoAuth bool
 }
 
 func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
@@ -42,7 +48,13 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 		harness = "claude"
 	}
 	args := projectFlag(o.Project)
-	args = append(args, "start", o.Grove, o.Task, "--harness", harness, "--harness-auth", "oauth-token")
+	args = append(args, "start", o.Grove, o.Task, "--harness", harness)
+	if o.NoAuth {
+		// api-key: propagate no auth; the agent's credential arrives in-container.
+		args = append(args, "--no-auth")
+	} else {
+		args = append(args, "--harness-auth", "oauth-token")
+	}
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
 	}

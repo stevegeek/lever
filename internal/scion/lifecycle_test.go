@@ -37,6 +37,26 @@ func TestStartArgv(t *testing.T) {
 	}
 }
 
+func TestStartAPIKeyUsesNoAuth(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	c := New(f, Options{})
+	// api-key mode: scion must propagate NO auth — the agent gets its credential
+	// in-container (mTLS cert via image env; LLM token via settings.json), so
+	// scion's oauth-token env-gather (which requires CLAUDE_CODE_OAUTH_TOKEN) must
+	// be disabled, or `scion start` fails for an api-key agent with no OAuth token.
+	if err := c.Start(context.Background(), StartOpts{Grove: "a", Task: "x", Harness: "claude", Project: "/g/a", NoAuth: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if !strings.Contains(got, "--no-auth") {
+		t.Fatalf("api-key Start argv %q must contain --no-auth", got)
+	}
+	if strings.Contains(got, "--harness-auth oauth-token") {
+		t.Fatalf("api-key Start argv %q must NOT request oauth-token auth", got)
+	}
+}
+
 func TestStartOmitsWorkspaceWhenEmpty(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})

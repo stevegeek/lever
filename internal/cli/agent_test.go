@@ -377,9 +377,14 @@ func TestAgentStartConveysLLMAuthForAPIKeyGrove(t *testing.T) {
 		if startIdx == -1 || envIdx > startIdx {
 			t.Fatalf("env-set (idx %d) must precede start (idx %d)", envIdx, startIdx)
 		}
+		// The api-key grove must start with --no-auth (no oauth-token gather).
+		startArgv := strings.Join(f.Calls[startIdx].Args, " ")
+		if !strings.Contains(startArgv, "--no-auth") || strings.Contains(startArgv, "oauth-token") {
+			t.Fatalf("api-key grove start must use --no-auth (not oauth-token); argv=%q", startArgv)
+		}
 	})
 
-	t.Run("subscription grove gets no env-set", func(t *testing.T) {
+	t.Run("subscription grove gets no env-set and oauth-token auth", func(t *testing.T) {
 		f := exec.NewFakeRunner()
 		f.Script("scion", exec.Result{})
 		root := newManagerRootWith(clientWith(f))
@@ -387,10 +392,18 @@ func TestAgentStartConveysLLMAuthForAPIKeyGrove(t *testing.T) {
 		if err := root.Execute(); err != nil {
 			t.Fatalf("start: %v", err)
 		}
+		var startArgv string
 		for _, c := range f.Calls {
-			if strings.Contains(strings.Join(c.Args, " "), "LEVER_LLM_AUTH") {
+			argv := strings.Join(c.Args, " ")
+			if strings.Contains(argv, "LEVER_LLM_AUTH") {
 				t.Fatalf("subscription grove should not set LEVER_LLM_AUTH; got %+v", c)
 			}
+			if c.Name == "scion" && strings.Contains(argv, " start ") {
+				startArgv = argv
+			}
+		}
+		if !strings.Contains(startArgv, "--harness-auth oauth-token") || strings.Contains(startArgv, "--no-auth") {
+			t.Fatalf("subscription grove start must use oauth-token (not --no-auth); argv=%q", startArgv)
 		}
 	})
 }

@@ -263,27 +263,28 @@ func agentStart(cf ClientFactory) *cobra.Command {
 				}
 			}
 
-			// api-key mode: convey LEVER_LLM_AUTH=api-key to the grove container so
-			// its pre-start hook enters api-key mode (the hook reads $LEVER_LLM_AUTH;
-			// scion projects Hub env before pre-start hooks run). Project-scoped to
-			// this grove's dir so it never leaks to other agents. Set BEFORE start so
-			// it is present when the container boots. The grove's effective mode comes
-			// from the sanitized manifest — the only config available in the jail.
-			// Needs a project dir to scope to; a project-less ad-hoc start can't be
-			// isolated, so it stays subscription (the safe default).
-			if project != "" {
-				mode, err := resolveGroveLLMAuth(manifestPath, grove)
-				if err != nil {
-					return err
-				}
-				if mode == config.LLMAuthAPIKey {
-					if err := cf().EnvSet(cmd.Context(), project, "LEVER_LLM_AUTH", "api-key"); err != nil {
-						return fmt.Errorf("set LEVER_LLM_AUTH for grove %s: %w", grove, err)
-					}
+			// api-key mode: the grove's effective mode comes from the sanitized
+			// manifest — the only config available in the jail.
+			mode, err := resolveGroveLLMAuth(manifestPath, grove)
+			if err != nil {
+				return err
+			}
+			apiKey := mode == config.LLMAuthAPIKey
+			// Convey LEVER_LLM_AUTH=api-key to the grove container so its pre-start
+			// hook enters api-key mode (the hook reads $LEVER_LLM_AUTH; scion projects
+			// Hub env before pre-start hooks run). Project-scoped to this grove's dir
+			// so it never leaks to other agents. Set BEFORE start. Needs a project dir
+			// to scope to; a project-less ad-hoc start can't be isolated, so it stays
+			// subscription (the safe default).
+			if apiKey && project != "" {
+				if err := cf().EnvSet(cmd.Context(), project, "LEVER_LLM_AUTH", "api-key"); err != nil {
+					return fmt.Errorf("set LEVER_LLM_AUTH for grove %s: %w", grove, err)
 				}
 			}
 
-			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image}); err != nil {
+			// api-key: scion must propagate no auth (no CLAUDE_CODE_OAUTH_TOKEN exists);
+			// the credential arrives in-container via the broker /llm capability.
+			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image, NoAuth: apiKey}); err != nil {
 				return err
 			}
 			cmd.Printf("Started %s.\n", grove)

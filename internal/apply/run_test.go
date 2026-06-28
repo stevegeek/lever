@@ -136,13 +136,22 @@ func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	var sawEnvSet bool
+	var startArgv string
 	for _, c := range f.Calls {
-		if strings.Join(c.Args, " ") == "hub env set --project LEVER_LLM_AUTH=api-key" {
+		argv := strings.Join(c.Args, " ")
+		if argv == "hub env set --project LEVER_LLM_AUTH=api-key" {
 			sawEnvSet = true
+		}
+		if c.Name == "scion" && strings.Contains(argv, " start ") {
+			startArgv = argv
 		}
 	}
 	if !sawEnvSet {
 		t.Fatalf("api-key manager: expected LEVER_LLM_AUTH env set; calls=%+v", f.Calls)
+	}
+	// api-key manager must start with --no-auth (no oauth-token gather).
+	if !strings.Contains(startArgv, "--no-auth") || strings.Contains(startArgv, "oauth-token") {
+		t.Fatalf("api-key manager start must use --no-auth (not oauth-token); argv=%q", startArgv)
 	}
 }
 
@@ -167,10 +176,19 @@ func TestStartManagerNoLLMAuthEnvForSubscription(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	var startArgv string
 	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "LEVER_LLM_AUTH") {
+		argv := strings.Join(c.Args, " ")
+		if strings.Contains(argv, "LEVER_LLM_AUTH") {
 			t.Fatalf("subscription manager must not set LEVER_LLM_AUTH; calls=%+v", f.Calls)
 		}
+		if c.Name == "scion" && strings.Contains(argv, " start ") {
+			startArgv = argv
+		}
+	}
+	// subscription manager keeps oauth-token auth (scion projects the OAuth token).
+	if !strings.Contains(startArgv, "--harness-auth oauth-token") || strings.Contains(startArgv, "--no-auth") {
+		t.Fatalf("subscription manager start must use oauth-token (not --no-auth); argv=%q", startArgv)
 	}
 }
 

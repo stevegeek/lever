@@ -43,6 +43,19 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 	sort.Ints(ports)
 	var rules []Rule
 
+	// 0) When closing the internet, ACCEPT loopback FIRST. The catch-all DROP
+	// below matches locally-generated packets to 127.0.0.1/::1 too, so without
+	// this every in-machine localhost service breaks — the scion hub on
+	// 127.0.0.1:8080 (its readiness check) and host-loopback tools. Only added in
+	// the closed posture so the open posture stays byte-identical to pre-existing
+	// (where the default-ACCEPT policy already permits loopback).
+	if closedInternet {
+		rules = append(rules,
+			Rule{Family: IPv4, Args: []string{"-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"}},
+			Rule{Family: IPv6, Args: []string{"-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"}},
+		)
+	}
+
 	// 1) ACCEPT allowlisted ports to each alias family (BEFORE any drop).
 	for _, p := range ports {
 		if aliasV4 != "" {

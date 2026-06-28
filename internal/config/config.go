@@ -298,6 +298,16 @@ func (a *App) validateBroker() error {
 			return fmt.Errorf("config: grove %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
 	}
+	// Mixed instances are UNSUPPORTED: the OAuth credential is a single jail-wide
+	// Hub secret and egress is applied jail-wide, so a subscription agent forces
+	// the real token into — and open internet egress for — the api-key agents'
+	// containers, defeating their key isolation. An instance must be uniformly
+	// api-key OR uniformly subscription. See security-model.md §6.1. (Resolved
+	// modes, so a broker/manager default that disagrees with a grove override is
+	// caught too.)
+	if a.mixedLLMAuth() {
+		return fmt.Errorf("config: llm_auth is mixed across the instance (both api-key and subscription agents) — this is unsupported; an instance must be uniformly api-key or uniformly subscription (see security-model.md §6.1)")
+	}
 	if closed, _ := a.ClosedInternetEgress(); closed || a.AnyAPIKeyAgent() {
 		if a.Broker.APIKeyFile == "" {
 			return fmt.Errorf("config: broker.api_key_file is required when llm_auth is api-key")
@@ -313,18 +323,36 @@ func (a *App) validateBroker() error {
 	return a.validateBrokerGrants()
 }
 
+// llmAuthModes scans every agent's effective LLM-auth mode and reports whether
+// any is api-key and whether any is subscription. The single source of truth for
+// the api-key/subscription/mixed predicates below.
+func (a *App) llmAuthModes() (anyAPIKey, anySubscription bool) {
+	mark := func(m LLMAuthMode) {
+		if m == LLMAuthAPIKey {
+			anyAPIKey = true
+		} else {
+			anySubscription = true
+		}
+	}
+	mark(a.EffectiveManagerLLMAuth())
+	for _, g := range a.Groves {
+		mark(a.EffectiveGroveLLMAuth(g))
+	}
+	return
+}
+
+// mixedLLMAuth reports whether the instance mixes api-key and subscription
+// agents — an unsupported configuration (see validateBroker / security-model.md §6.1).
+func (a *App) mixedLLMAuth() bool {
+	anyAPIKey, anySubscription := a.llmAuthModes()
+	return anyAPIKey && anySubscription
+}
+
 // AnyAPIKeyAgent reports whether any agent (manager or grove) is api-key.
 // Exported so brokerctl can decide whether to register the reserved llm pseudo-tool.
 func (a *App) AnyAPIKeyAgent() bool {
-	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
-		return true
-	}
-	for _, g := range a.Groves {
-		if a.EffectiveGroveLLMAuth(g) == LLMAuthAPIKey {
-			return true
-		}
-	}
-	return false
+	anyAPIKey, _ := a.llmAuthModes()
+	return anyAPIKey
 }
 
 // injectLLMGrants adds the implicit obtain {llm, generate} capability to every
@@ -442,27 +470,15 @@ func (a *App) brokerLLMAuthDefault() LLMAuthMode {
 }
 
 // ClosedInternetEgress resolves the instance-level egress posture (R2). Egress
-// is applied jail-wide, not per container, so the jail can be closed only if
-// EVERY agent is api-key. Any subscription agent forces the open posture and a
-// warning that api-key groves in this instance are not egress-isolated (their
-// key-isolation via the proxy still holds; only the belt-and-suspenders egress
-// is relaxed).
+// is applied jail-wide, not per container, so the jail is closed only when EVERY
+// agent is api-key (uniform); a uniform-subscription instance stays open. Mixed
+// instances are rejected at validation (validateBroker / security-model.md §6.1),
+// so the mixed branch here is defence-in-depth — it should be unreachable for a
+// validated config, and returns a warning rather than a posture if ever hit.
 func (a *App) ClosedInternetEgress() (closed bool, warning string) {
-	modes := []LLMAuthMode{a.EffectiveManagerLLMAuth()}
-	for _, g := range a.Groves {
-		modes = append(modes, a.EffectiveGroveLLMAuth(g))
-	}
-	anyAPIKey, anySubscription := false, false
-	for _, m := range modes {
-		switch m {
-		case LLMAuthAPIKey:
-			anyAPIKey = true
-		default:
-			anySubscription = true
-		}
-	}
+	anyAPIKey, anySubscription := a.llmAuthModes()
 	if anyAPIKey && anySubscription {
-		return false, "llm_auth mixed across instance: api-key agents are not egress-isolated from direct Anthropic reach (key isolation via the proxy still holds); per-container egress is not yet implemented"
+		return false, "llm_auth mixed across instance (unsupported; should have been rejected at validation): api-key agents are NOT key-isolated — the OAuth credential is hub-projected to every container and jail egress stays open (see security-model.md §6.1)"
 	}
 	return anyAPIKey && !anySubscription, ""
 }

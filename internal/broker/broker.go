@@ -17,7 +17,17 @@ import (
 )
 
 const (
-	defaultGrantTTL  = time.Hour
+	// defaultGrantTTL is the lifetime stamped on minted capability tokens when the
+	// operator sets no broker.grant_ttl. It is session-scale (matching the 24h
+	// agent cert TTL) by design: in api-key mode a long-running claude reads the
+	// LLM capability token (ANTHROPIC_AUTH_TOKEN) from its settings.json env block
+	// once at startup and holds it for the whole session, and the in-container
+	// lever-renew sidecar only refreshes every 12h — so a short TTL would strand a
+	// session between refreshes. Token TTL is a backstop only; the live
+	// epoch/revoke gate (checked per call at the gateway and /llm proxy) is the
+	// real security cut, so a generous default is safe. Operators wanting tighter
+	// expiry can lower broker.grant_ttl, but should keep it above the renew interval.
+	defaultGrantTTL  = 24 * time.Hour
 	defaultTicketTTL = 10 * time.Minute
 )
 

@@ -269,6 +269,38 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestManifestCarriesGroveLLMAuth(t *testing.T) {
+	// Broker default is api-key; grove "a" inherits it, grove "b" overrides to
+	// subscription. The sanitized manifest must carry each grove's *effective*
+	// mode so the in-jail manager (which has only the manifest, not the host
+	// config) can convey LEVER_LLM_AUTH to api-key groves.
+	app := &App{
+		Broker: Broker{LLMAuth: LLMAuthAPIKey},
+		Groves: []Grove{
+			{Name: "a", Dir: "groves/a"},                               // inherits api-key
+			{Name: "b", Dir: "groves/b", LLMAuth: LLMAuthSubscription}, // override
+		},
+	}
+	dir := t.TempDir()
+	if err := WriteManifest(dir, ManifestFromApp(app)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadManifest(filepath.Join(dir, ManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := got.LLMAuthFor("a"); m != LLMAuthAPIKey {
+		t.Fatalf("a llm_auth = %q, want %q", m, LLMAuthAPIKey)
+	}
+	if m := got.LLMAuthFor("b"); m != LLMAuthSubscription {
+		t.Fatalf("b llm_auth = %q, want %q", m, LLMAuthSubscription)
+	}
+	// Unknown grove resolves to empty (caller treats as not-api-key).
+	if m := got.LLMAuthFor("missing"); m != "" {
+		t.Fatalf("missing llm_auth = %q, want empty", m)
+	}
+}
+
 func TestSecurityImagePolicy(t *testing.T) {
 	mk := func(sec, img string) string {
 		return "name: demo\nbackend: orbstack\ntree: ws\n" + sec + "manager:\n  image: " + img + "\n"
@@ -409,39 +441,65 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
-func TestLoadInjectsLLMGrantForAPIKeyAgents(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "work"), 0o755); err != nil {
-		t.Fatal(err)
+// TestRejectsMixedLLMAuthInstance: an instance that mixes api-key and
+// subscription agents is UNSUPPORTED and must fail validation — the OAuth
+// credential is a single jail-wide Hub secret and egress is jail-wide, so a
+// subscription agent forces the real token into (and open egress for) the
+// api-key agents' containers, defeating their key isolation. See
+// security-model.md §6.1.
+func TestRejectsMixedLLMAuthInstance(t *testing.T) {
+	// Broker default api-key ⇒ manager is api-key; grove overrides to subscription.
+	a := &App{
+		Name: "demo", Backend: "orbstack", Tree: "/x",
+		Broker: Broker{LLMAuth: LLMAuthAPIKey},
+		Groves: []Grove{{Name: "worker", Dir: "w", LLMAuth: LLMAuthSubscription}},
 	}
+	err := a.Validate()
+	if err == nil || !strings.Contains(err.Error(), "mixed") {
+		t.Fatalf("mixed instance must be rejected with a 'mixed' error, got: %v", err)
+	}
+}
+
+// TestUniformInstancesValidate: the two pure cases are accepted (uniform
+// subscription needs no key; uniform api-key needs a 0600 api_key_file).
+func TestUniformInstancesValidate(t *testing.T) {
+	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "api-key")
 	if err := os.WriteFile(keyPath, []byte("sk-test"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := filepath.Join(dir, "lever.yaml")
-	cfg := `name: demo
-backend: orbstack
-tree: work
-broker:
-  llm_auth: api-key
-  api_key_file: ` + keyPath + `
-groves:
-  - name: worker
-    dir: w
-    llm_auth: subscription
-`
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
-		t.Fatal(err)
+	subscription := &App{
+		Name: "demo", Backend: "orbstack", Tree: "/x",
+		Groves: []Grove{{Name: "worker", Dir: "w"}}, // both default to subscription
 	}
-	a, err := Load(cfgPath)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	if err := subscription.Validate(); err != nil {
+		t.Fatalf("uniform subscription should validate: %v", err)
 	}
+	apikey := &App{
+		Name: "demo", Backend: "orbstack", Tree: "/x",
+		Broker: Broker{LLMAuth: LLMAuthAPIKey, APIKeyFile: keyPath},
+		Groves: []Grove{{Name: "worker", Dir: "w"}}, // both inherit api-key
+	}
+	if err := apikey.Validate(); err != nil {
+		t.Fatalf("uniform api-key should validate: %v", err)
+	}
+}
+
+// TestInjectsLLMGrantPerAgentMode unit-tests the grant-injection discrimination
+// directly (a valid instance is uniform, so this is exercised on an in-memory
+// App rather than through Load): an api-key agent gets the implicit llm grant, a
+// subscription agent does not.
+func TestInjectsLLMGrantPerAgentMode(t *testing.T) {
+	a := &App{
+		Manager: Manager{LLMAuth: LLMAuthAPIKey},
+		Groves:  []Grove{{Name: "worker", LLMAuth: LLMAuthSubscription}},
+	}
+	a.injectLLMGrants()
 	if !hasGrant(a.Manager.Obtain, "llm", "generate") {
 		t.Errorf("manager (api-key) missing injected llm grant: %+v", a.Manager.Obtain)
 	}
 	if hasGrant(a.Groves[0].Obtain, "llm", "generate") {
-		t.Errorf("subscription grove must NOT get an llm grant: %+v", a.Groves[0].Obtain)
+		t.Errorf("subscription agent must NOT get an llm grant: %+v", a.Groves[0].Obtain)
 	}
 }
 

@@ -16,6 +16,10 @@
 # and reaches Anthropic directly). In api-key mode boot writes ANTHROPIC_AUTH_TOKEN
 # /ANTHROPIC_BASE_URL into the claude settings.json env block — the path claude
 # actually reads (the scion env-overlay is inert for our builtin harness).
+# G2: as its final step boot also writes $HOME/.scion/scion-services.yaml (the
+# lever-renew sidecar) so scion auto-refreshes the cert and, in api-key mode, the
+# LLM token after this hook. scion reads that file just after pre-start hooks; it
+# must be written at runtime because ~/.scion is under the /home/scion bind-mount.
 set -eu
 lever-agent boot \
   --id-dir "$HOME/.lever-id" \

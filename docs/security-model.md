@@ -222,6 +222,37 @@ identity for narrow capabilities.**
 This subsumes the §4 dev-auth weakness (one authority issuing scoped tokens replaces "every agent
 gets the same broker token") and directly bounds the credential blast radius identified above.
 
+### 6.1 Built state (api-key mode) and the mixed-instance residual
+
+The capability broker is now built: an agent in **`llm_auth: api-key`** mode holds only a
+short-lived, CN-bound `capability(llm)` biscuit and routes the model through the broker `/llm` proxy,
+which strips the biscuit and injects the real Console key host-side. Such an agent **never receives a
+real Anthropic credential**, and in a **uniformly api-key** instance the jail also runs closed-internet
+egress (§2.2) — so the §6 blast radius is closed for that instance.
+
+**Mixed instances are unsupported — rejected at config validation.** The OAuth credential is set as a
+single Hub *secret* (`internal/scion/bringup.go:SecretSet`, user/owner scope), gated only by
+`manager.credential_file` and **projected into every container regardless of its `llm_auth` mode**;
+and egress is applied **jail-wide, not per-container**. So in a *mixed* instance (any subscription
+agent ⇒ `credential_file` set ⇒ token hub-projected; and egress forced open) an `api-key` grove would
+*also* hold `$CLAUDE_CODE_OAUTH_TOKEN` and have open internet egress, letting it read the real token
+and reach `api.anthropic.com` directly, bypassing the proxy's capability gating — its key isolation
+would silently not hold.
+
+Rather than ship that footgun, **an instance must be uniformly api-key OR uniformly subscription**:
+`App.Validate` (`internal/config/config.go:validateBroker`) rejects any config whose *effective*
+agent modes mix the two (`mixedLLMAuth`), so a mixed instance never reaches apply. The two pure cases
+are both clean: **all-subscription** = every agent holds the OAuth key, open egress (the owner/dev
+trade, by design); **all-api-key** = no agent holds a real key, capabilities gated by biscuits, egress
+closed jail-wide. Note this is *not* an escalation surface: the `api-key` flag controls only whether an
+agent obtains a capability token, **not** credential availability, so flipping a grove's
+(manager-writable) manifest mode could never *conjure* a token the host did not project; the validation
+gate is about preventing a misleading config, not about containment.
+
+To *support* mixed instances later would require per-container egress and/or projecting the OAuth secret
+only into subscription agents' projects (not as a hub-wide secret) — deferred; until then, mixed is a
+hard config error.
+
 ## 7. What this model does *not* claim
 
 - **Data-exfiltration protection.** The bound is on host-secret and LAN reach, **not** on

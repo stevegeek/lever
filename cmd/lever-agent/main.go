@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/lever-to/lever/internal/agent"
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -119,7 +121,18 @@ func cmdBoot(args []string) error {
 		// is requested; enrol-only mode skips overlay writing entirely.
 		cfg.RequestLLMToken = requestLLMToken
 	}
-	return agent.Boot(ctx, cfg)
+	if err := agent.Boot(ctx, cfg); err != nil {
+		return err
+	}
+	// G2: emit the renew sidecar so scion auto-refreshes the cert and (in api-key
+	// mode) the LLM token. Skip in enrol-only mode — the bare VM acceptance gate
+	// has no long-running container to run sidecars in.
+	if !*enrolOnly {
+		if err := writeRenewServices(os.Getenv("HOME"), *idDir, *bootstrapPath, *settingsPath, *llmAuth); err != nil {
+			return fmt.Errorf("emit renew sidecar: %w", err)
+		}
+	}
+	return nil
 }
 
 // requestLLMToken obtains a capability(llm) token from the broker /request
@@ -204,6 +217,69 @@ func writeClaudeSettingsEnv(path string) func(map[string]string) error {
 		}
 		return os.WriteFile(path, b, 0o600)
 	}
+}
+
+// renewServiceSpec mirrors the subset of scion's api.ServiceSpec we emit (scion
+// unmarshals scion-services.yaml into []api.ServiceSpec). Local copy to avoid a
+// dependency on the vendored scion module; the yaml keys must match.
+type renewServiceSpec struct {
+	Name    string   `yaml:"name"`
+	Command []string `yaml:"command"`
+	Restart string   `yaml:"restart"`
+}
+
+// writeRenewServices emits $HOME/.scion/scion-services.yaml describing the
+// lever-renew sidecar, so scion launches in-container auto-refresh of the agent
+// cert and (in api-key mode) the LLM capability token right after the pre-start
+// hooks. scion reads this file as []api.ServiceSpec and launches each entry as
+// the agent user with the container env inherited (so the projected
+// LEVER_LLM_AUTH still flows), but it does NOT set the sidecar's working
+// directory — so every path here is made absolute and the broker URL is resolved
+// from an explicit --bootstrap rather than renew's CWD-relative default.
+//
+// The broker URL is resolved here from the bootstrap and baked into the sidecar
+// as --broker-url, so the sidecar never reads the bootstrap file at all: it
+// avoids re-touching the one-time enrolment ticket the bootstrap also carries,
+// and removes any dependency on the sidecar's uid/CWD matching the bootstrap's
+// perms (the sidecar runs as the agent user; the bootstrap is 0600). No-op when
+// the bootstrap is absent or carries no broker URL: a non-brokered agent has
+// nothing to renew against. The renew loop self-heals transient errors (logged,
+// loop continues); restart:on-failure covers a hard crash.
+//
+// Tamper window: this file sits at $HOME/.scion/ under the agent-writable
+// /home/scion bind-mount, so a compromised agent could rewrite it. That grants
+// no escalation — scion launches the sidecar at the agent's OWN uid (nothing it
+// couldn't already exec), and boot runs inside the pre-start hook, which scion
+// runs BEFORE it reads scion-services.yaml, so this write always wins over any
+// pre-seeded value before the spec is consumed.
+func writeRenewServices(homeDir, idDir, bootstrapPath, settingsPath, llmAuth string) error {
+	bs, err := agent.LoadBootstrap(bootstrapPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // no bootstrap deposited — non-brokered agent, emit no sidecar
+		}
+		return fmt.Errorf("load bootstrap: %w", err)
+	}
+	if bs.BrokerURL == "" {
+		return nil // brokerless bootstrap — nothing to renew against
+	}
+	command := []string{
+		"lever-agent", "renew", "--loop",
+		"--id-dir", idDir,
+		"--broker-url", bs.BrokerURL,
+		"--llm-auth", llmAuth,
+		"--settings", settingsPath,
+	}
+	specs := []renewServiceSpec{{Name: "lever-renew", Command: command, Restart: "on-failure"}}
+	b, err := yaml.Marshal(specs)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(homeDir, ".scion")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("scion dir %s: %w", dir, err)
+	}
+	return os.WriteFile(filepath.Join(dir, "scion-services.yaml"), b, 0o644)
 }
 
 // cmdServeCapability serves the capability MCP server over stdio using

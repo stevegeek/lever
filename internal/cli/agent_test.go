@@ -334,6 +334,67 @@ func TestAgentStartNoBrokerSkipsBootstrap(t *testing.T) {
 	}
 }
 
+// TestAgentStartConveysLLMAuthForAPIKeyGrove asserts that when the manifest
+// marks a grove api-key, agent start issues a project-scoped
+// `hub env set --project LEVER_LLM_AUTH=api-key` (in the grove's project dir)
+// BEFORE scion start — mirroring the manager path so the grove's pre-start hook
+// enters api-key mode. A subscription grove gets no such call.
+func TestAgentStartConveysLLMAuthForAPIKeyGrove(t *testing.T) {
+	orig := loadManifest
+	loadManifest = func(string) (*config.Manifest, error) {
+		return &config.Manifest{Groves: []config.ManifestGrove{
+			{Name: "secure", Image: "img:1", LLMAuth: config.LLMAuthAPIKey},
+			{Name: "open", Image: "img:1", LLMAuth: config.LLMAuthSubscription},
+		}}, nil
+	}
+	defer func() { loadManifest = orig }()
+	// Skip provisioning (no broker) so the only calls are env-set + start.
+	op := provisionGrove
+	provisionGrove = nil
+	defer func() { provisionGrove = op }()
+
+	t.Run("api-key grove gets env-set before start", func(t *testing.T) {
+		f := exec.NewFakeRunner()
+		f.Script("scion", exec.Result{})
+		root := newManagerRootWith(clientWith(f))
+		root.SetArgs([]string{"agent", "start", "secure", "--manifest", "/x/.lever-manifest.yaml", "-g", "/g/secure"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		envIdx, startIdx := -1, -1
+		for i, c := range f.Calls {
+			argv := strings.Join(c.Args, " ")
+			if strings.Contains(argv, "hub env set --project LEVER_LLM_AUTH=api-key") && c.Dir == "/g/secure" {
+				envIdx = i
+			}
+			if c.Name == "scion" && strings.Contains(argv, " start ") {
+				startIdx = i
+			}
+		}
+		if envIdx == -1 {
+			t.Fatalf("no `hub env set --project LEVER_LLM_AUTH=api-key` in /g/secure; calls=%+v", f.Calls)
+		}
+		if startIdx == -1 || envIdx > startIdx {
+			t.Fatalf("env-set (idx %d) must precede start (idx %d)", envIdx, startIdx)
+		}
+	})
+
+	t.Run("subscription grove gets no env-set", func(t *testing.T) {
+		f := exec.NewFakeRunner()
+		f.Script("scion", exec.Result{})
+		root := newManagerRootWith(clientWith(f))
+		root.SetArgs([]string{"agent", "start", "open", "--manifest", "/x/.lever-manifest.yaml", "-g", "/g/open"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		for _, c := range f.Calls {
+			if strings.Contains(strings.Join(c.Args, " "), "LEVER_LLM_AUTH") {
+				t.Fatalf("subscription grove should not set LEVER_LLM_AUTH; got %+v", c)
+			}
+		}
+	})
+}
+
 // interceptRunner wraps FakeRunner and calls onStart when it sees "scion start".
 type interceptRunner struct {
 	*exec.FakeRunner

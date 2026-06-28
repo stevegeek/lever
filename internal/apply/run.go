@@ -134,6 +134,16 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			task = strings.TrimSpace(string(b))
 		}
 		jp := jailPath(app.Tree, app.Tree, d.JailMount)
+		// api-key mode: convey LEVER_LLM_AUTH=api-key to the manager container so
+		// its pre-start hook enters api-key mode (the hook reads $LEVER_LLM_AUTH;
+		// scion projects Hub env before pre-start hooks run). Project-scoped (the
+		// manager's project = jp) so it never leaks to other agents. Set BEFORE
+		// start so it is present when the container boots.
+		if app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey {
+			if err := d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
+				return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
+			}
+		}
 		// LEVER_BOOTSTRAP reconciliation: we do NOT set
 		// LEVER_BOOTSTRAP here. lever-agent boot's canonical-path default
 		// (./.lever/bootstrap.json relative to CWD) suffices: scion sets

@@ -65,3 +65,16 @@ func (c *Client) SecretSet(ctx context.Context, key, value string) error {
 	_, err := c.run(ctx, "", "hub", "secret", "set", key, enc)
 	return err
 }
+
+// EnvSet sets a NON-secret Hub env var scoped to one agent's project. Unlike
+// SecretSet (encrypted, user-scoped), this is a plain value scoped to the agent
+// by running `hub env set --project` with the agent's project dir as cwd (bare
+// --project infers the project from the working directory), so it does not leak
+// to other agents in the instance. Used to convey LEVER_LLM_AUTH=api-key so an
+// agent's pre-start hook enters api-key mode (scion projects Hub env into the
+// container before pre-start hooks run, so the hook sees it). projectDir must be
+// a registered project's dir (run after register-manager / InitProject).
+func (c *Client) EnvSet(ctx context.Context, projectDir, key, value string) error {
+	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", key+"="+value)
+	return err
+}

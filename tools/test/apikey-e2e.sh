@@ -39,6 +39,10 @@ bad()  { printf '  FAIL: %s\n' "$*"; fail=1; }
 inctr(){ orb -m "$MACHINE" bash -lc "podman exec $CONTAINER sh -lc '$*'" 2>/dev/null; }
 
 cleanup() {
+  # `go run` forks a child, so kill the fakeupstream by its listen address (the
+  # parent PID alone leaks the child); the broker is detached (Setpgid) so pkill
+  # by its instance config path.
+  pkill -f "fakeupstream -addr 127.0.0.1:$FAKE_PORT" 2>/dev/null
   [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null
   if [ "${KEEP:-0}" = "1" ]; then
     echo "KEEP=1: leaving machine $MACHINE + broker up; work dir $WORK"

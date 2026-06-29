@@ -1,0 +1,37 @@
+title: Lever
+description: >-
+  Run Scion coding agents in a sealed jail where the real API key never enters
+  the container and the agent can reach nothing but a capability broker.
+url: ""
+baseurl: ""
+
+theme: jekyll-vitepress-theme
+plugins:
+  - jekyll-vitepress-theme
+
+collections:
+  guides:
+    output: true
+    permalink: "/:name/"
+  reference:
+    output: true
+    permalink: "/reference/:name/"
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+jekyll_vitepress:
+  branding:
+    site_title: Lever
+  syntax:
+    light_theme: github
+    dark_theme: github.dark
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+  - README.md

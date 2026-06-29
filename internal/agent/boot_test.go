@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,6 +56,27 @@ func TestBootAPIKeyWritesAnthropicEnv(t *testing.T) {
 	}
 	if !strings.HasSuffix(overlay["ANTHROPIC_BASE_URL"], "/llm") {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want suffix /llm", overlay["ANTHROPIC_BASE_URL"])
+	}
+}
+
+func TestBootAPIKeyFailsClosedOnTokenError(t *testing.T) {
+	// Fail closed (boot.go:118): if the broker won't mint an llm token, Boot must
+	// abort BEFORE writing the env overlay — a partial overlay with cert paths but a
+	// missing/empty ANTHROPIC_AUTH_TOKEN would hand claude an unauthenticated proxy
+	// config. Boot must error and WriteEnvOverlay must never be called.
+	wroteOverlay := false
+	c := baseBootConfig(t)
+	c.LLMAuth = "api-key"
+	c.WriteEnvOverlay = func(map[string]string) error { wroteOverlay = true; return nil }
+	c.RequestLLMToken = func(context.Context, string, *http.Client, string) (string, error) {
+		return "", errors.New("broker refused")
+	}
+	err := Boot(context.Background(), c)
+	if err == nil {
+		t.Fatal("Boot must fail closed when the llm token cannot be obtained")
+	}
+	if wroteOverlay {
+		t.Fatal("Boot must NOT write the env overlay after a failed llm-token acquisition")
 	}
 }
 

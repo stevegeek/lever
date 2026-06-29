@@ -6,7 +6,37 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/lever-to/lever/internal/cap/token"
 )
+
+// rpcText drives a tools/call and returns the result token text, failing if the
+// call returned a JSON-RPC error.
+func rpcText(t *testing.T, s *MCPServer, body string) string {
+	t.Helper()
+	resp := rpc(t, s, body)
+	if e, isErr := resp["error"]; isErr {
+		t.Fatalf("tools/call errored: %v", e)
+	}
+	content := resp["result"].(map[string]any)["content"].([]any)
+	return content[0].(map[string]any)["text"].(string)
+}
+
+// verifies reports whether tok verifies for caller with the given params.
+func verifies(pub []byte, tokB64, caller string, params map[string]string) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(tokB64)
+	if err != nil {
+		return false
+	}
+	return token.Verify(pub, raw, token.Request{
+		Caller:     caller,
+		Capability: token.Capability{Tool: "db", Operation: "read"},
+		Params:     params,
+		Now:        time.Now(),
+		MinEpoch:   0,
+	}) == nil
+}
 
 func rpc(t *testing.T, s *MCPServer, body string) map[string]any {
 	t.Helper()
@@ -37,19 +67,58 @@ func TestMCPDelegateMintsAndAttenuates(t *testing.T) {
 	managerID := enrolManager(t, env.CA)
 	client, _ := managerID.Client()
 	s := NewMCPServer(MCPConfig{BrokerURL: env.Server.URL, AgentCN: "manager", Client: client})
-	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":{"tool":"db","op":"read","to":"worker","table":"A","filter":"alice"}}}`)
-	if _, isErr := resp["error"]; isErr {
-		t.Fatalf("delegate errored: %s", resp["error"])
-	}
-	// The result content carries a non-empty token string.
-	content := resp["result"].(map[string]any)["content"].([]any)
-	text := content[0].(map[string]any)["text"].(string)
+	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":{"tool":"db","op":"read","to":"worker","table":"A","filter":"alice"}}}`)
 	if text == "" {
 		t.Fatal("delegate returned an empty token")
 	}
-	// The token must be valid base64url (biscuit tokens are base64url-encoded).
-	if _, err := base64.RawURLEncoding.DecodeString(text); err != nil {
-		t.Fatalf("delegate token is not valid base64url: %v", err)
+	pub := env.Keys.Public
+	// Bound to the recipient (worker), NOT the delegator (manager).
+	if !verifies(pub, text, "worker", map[string]string{"table": "A", "filter": "alice"}) {
+		t.Fatal("delegated token must verify for the recipient (worker)")
+	}
+	if verifies(pub, text, "manager", map[string]string{"table": "A", "filter": "alice"}) {
+		t.Fatal("delegated token must NOT verify for the delegator (manager)")
+	}
+	// Narrowed by the constraint kv: a request missing the bound params is denied.
+	if verifies(pub, text, "worker", map[string]string{}) {
+		t.Fatal("delegated token must require its table/filter constraints (narrowing lost)")
+	}
+}
+
+func TestMCPRequestMintsSelfBoundConstrainedToken(t *testing.T) {
+	// The LLM-facing `request` tool (mcpserver.go:121): with no bound_to it defaults
+	// to the caller's own CN, and extra (non-reserved) kv args become narrowing
+	// constraints baked into the minted token (constraintArgs strips tool/op/bound_to).
+	env := testBroker(t)
+	env.Rules.AllowObtain("manager", "db", "read")
+	regDB(t, env)
+	managerID := enrolManager(t, env.CA)
+	client, _ := managerID.Client()
+	s := NewMCPServer(MCPConfig{BrokerURL: env.Server.URL, AgentCN: "manager", Client: client})
+
+	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request","arguments":{"tool":"db","op":"read","table":"A"}}}`)
+	pub := env.Keys.Public
+	// Self-bound (default bound_to == caller CN).
+	if !verifies(pub, text, "manager", map[string]string{"table": "A"}) {
+		t.Fatal("request token must verify self-bound for the caller (manager) with the constraint satisfied")
+	}
+	// The table=A constraint must be baked in: a request without it is denied.
+	if verifies(pub, text, "manager", map[string]string{}) {
+		t.Fatal("request token must carry the table=A constraint (constraintArgs failed to bake it)")
+	}
+}
+
+func TestMCPUnknownToolDenied(t *testing.T) {
+	// The default case (mcpserver.go:151) must reject an unrecognised tool name with
+	// the JSON-RPC method-not-found code rather than silently minting anything.
+	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"bogus","arguments":{}}}`)
+	e, isErr := resp["error"].(map[string]any)
+	if !isErr {
+		t.Fatalf("unknown tool must return a JSON-RPC error, got %v", resp)
+	}
+	if code, _ := e["code"].(float64); int(code) != -32601 {
+		t.Fatalf("unknown tool error code = %v, want -32601", e["code"])
 	}
 }
 

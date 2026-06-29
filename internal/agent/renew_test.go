@@ -2,11 +2,37 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRefreshLLMTokenFailsClosedLeavesOverlayUntouched(t *testing.T) {
+	// Fail closed (renew.go:54): the overlay map is only mutated after a successful
+	// token acquisition. A failed refresh must leave the overlay byte-identical — it
+	// must not add a stale/empty ANTHROPIC_AUTH_TOKEN that a long-running sidecar
+	// would then write over the live, working config.
+	env := testBroker(t)
+	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]string{"ANTHROPIC_AUTH_TOKEN": "STILL_GOOD", "OTHER": "x"}
+	overlay := map[string]string{"ANTHROPIC_AUTH_TOKEN": "STILL_GOOD", "OTHER": "x"}
+	failing := func(context.Context, string, *http.Client, string) (string, error) {
+		return "", errors.New("broker refused")
+	}
+	if err := RefreshLLMToken(context.Background(), env.Server.URL, id, "worker", failing, overlay); err == nil {
+		t.Fatal("RefreshLLMToken must return the requestFn error")
+	}
+	if !reflect.DeepEqual(overlay, before) {
+		t.Fatalf("failed refresh mutated the overlay: got %v, want %v", overlay, before)
+	}
+}
 
 func TestRefreshLLMTokenWritesAnthropicOverlay(t *testing.T) {
 	env := testBroker(t)

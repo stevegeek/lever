@@ -98,6 +98,16 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	state := brokerctl.StateDir(filepath.Dir(configPath))
 	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.Broker.AdminPort)
 
+	// The jail's resolved host-alias IP (host.orb.internal as seen from the jail).
+	// Agents dial the broker by this IP — under closed-internet egress DNS/53 is
+	// dropped, so the hostname can't be resolved; the IP is already allowlisted and
+	// the broker cert carries it as a SAN. Falls back to the hostname if unresolved.
+	aliasV4 := ob.HostAliasV4()
+	brokerHost := ob.HostToolAlias() // host.orb.internal (DNS) by default…
+	if aliasV4 != "" {
+		brokerHost = aliasV4 // …but prefer the resolved IP (no DNS needed)
+	}
+
 	return apply.Deps{
 		// JailUp is a no-op: buildApplyDeps already brought the jail up
 		// (idempotent; resolves user/uid). The apply executor's jail-up step
@@ -112,6 +122,9 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		StartBroker: func(ctx context.Context) error {
 			cmd := exec.Command(os.Args[0], "broker", "serve", configPath)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			// Pass the resolved host-alias IP so the broker mints its server cert
+			// with that IP as a SAN (agents dial it by IP under closed egress).
+			cmd.Env = append(os.Environ(), "LEVER_HOST_ALIAS_IP="+aliasV4)
 			cmd.Stdout = io.Discard
 			cmd.Stderr = io.Discard
 			if err := cmd.Start(); err != nil {
@@ -165,6 +178,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 				return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusForbidden {
+				// Single-use latch already consumed — signal the mint step to tolerate
+				// it (idempotent re-apply against the same broker process).
+				return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
+			}
 			if resp.StatusCode != http.StatusOK {
 				return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap returned %d", resp.StatusCode)
 			}
@@ -181,7 +199,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return apply.BootstrapMaterial{
 				Ticket:    result.Ticket,
 				BrokerCA:  string(caPEM),
-				BrokerURL: fmt.Sprintf("https://host.orb.internal:%d", app.Broker.JailPort),
+				BrokerURL: fmt.Sprintf("https://%s:%d", brokerHost, app.Broker.JailPort),
 				AgentCN:   app.ManagerCN(),
 			}, nil
 		},

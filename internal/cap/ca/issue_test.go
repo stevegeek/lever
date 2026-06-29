@@ -123,6 +123,31 @@ func TestIssueServerCertHasServerAuthAndDNS(t *testing.T) {
 	}
 }
 
+func TestIssueServerCertSANsHasBothDNSAndIP(t *testing.T) {
+	c, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := c.IssueServerCertSANs("host.orb.internal", []string{"host.orb.internal", ""}, []string{"0.250.250.254", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEM)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "host.orb.internal" {
+		t.Errorf("DNSNames = %v, want [host.orb.internal]", leaf.DNSNames)
+	}
+	if len(leaf.IPAddresses) != 1 || !leaf.IPAddresses[0].Equal(net.ParseIP("0.250.250.254")) {
+		t.Errorf("IPAddresses = %v, want [0.250.250.254]", leaf.IPAddresses)
+	}
+	if _, _, err := c.IssueServerCertSANs("x", nil, []string{"not-an-ip"}); err == nil {
+		t.Error("expected error for invalid IP SAN")
+	}
+}
+
 func TestIssueServerCertIPSAN(t *testing.T) {
 	c, err := Generate()
 	if err != nil {

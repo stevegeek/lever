@@ -37,6 +37,26 @@ func TestStartArgv(t *testing.T) {
 	}
 }
 
+func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	c := New(f, Options{})
+	// api-key mode: scion starts with --harness-auth api-key, satisfied by a
+	// placeholder ANTHROPIC_API_KEY (Hub secret); the real credential is the
+	// in-container broker capability biscuit (settings.json). Must NOT request
+	// oauth-token (no CLAUDE_CODE_OAUTH_TOKEN exists in api-key mode).
+	if err := c.Start(context.Background(), StartOpts{Grove: "a", Task: "x", Harness: "claude", Project: "/g/a", APIKey: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if !strings.Contains(got, "--harness-auth api-key") {
+		t.Fatalf("api-key Start argv %q must use --harness-auth api-key", got)
+	}
+	if strings.Contains(got, "oauth-token") {
+		t.Fatalf("api-key Start argv %q must NOT request oauth-token auth", got)
+	}
+}
+
 func TestStartOmitsWorkspaceWhenEmpty(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})

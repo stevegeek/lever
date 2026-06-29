@@ -6,6 +6,7 @@ package orbstack
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -62,6 +63,12 @@ func (o *OrbStack) DockerHost() string {
 	return fmt.Sprintf("unix:///run/user/%s/docker.sock", uid)
 }
 func (o *OrbStack) HostToolAlias() string { return "host.orb.internal" }
+
+// HostAliasV4 returns the resolved IPv4 of host.orb.internal as seen from the
+// jail, valid after EnsureUp/ApplyEgress. Empty if not yet resolved. Used to mint
+// the broker cert with an IP SAN and to build IP-based broker URLs so agents
+// reach the broker without DNS under closed-internet egress.
+func (o *OrbStack) HostAliasV4() string { return o.aliasV4 }
 
 func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {
@@ -261,6 +268,29 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 }
 
 func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
+	// I2 — never briefly open egress under a running closed instance. If the closed
+	// posture is ALREADY active (LEVER_EGRESS has the catch-all DROP), a running
+	// jailed agent depends on it; flushing+rebuilding would leave the chain empty
+	// (→ OUTPUT default ACCEPT) for the resolve+rebuild window. The ruleset is a
+	// pure function of (alias, ports, closed) and is unchanged on a normal
+	// re-apply, so leave the working chain intact and skip the rebuild. (A fresh
+	// machine, the open/subscription posture, or a genuine egress-config change all
+	// have no active DROP and fall through to a full rebuild — and a fresh apply has
+	// no running container to leak. Changing egress config on a live closed instance
+	// requires `lever down` + `up`, not a re-apply.)
+	if closedInternet {
+		if alias, ok := o.existingClosedAlias(ctx); ok {
+			o.aliasV4 = alias
+			return nil
+		}
+	}
+	// Reset the dedicated chain FIRST: this makes re-apply idempotent (no rule
+	// accumulation) and — critically — flushing the chain removes any prior
+	// catch-all DROP, restoring DNS so the host-alias re-resolve below works even
+	// when a previous closed-egress posture is still in place.
+	if err := o.resetEgressChain(ctx); err != nil {
+		return err
+	}
 	v4, v6, err := resolveHostAlias(ctx, o.r, o.machine)
 	if err != nil {
 		return err
@@ -270,6 +300,67 @@ func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedIn
 		args := append([]string{"-u", "root", "-m", o.machine, rule.Family.Binary()}, rule.Args...)
 		if _, err := o.r.Run(ctx, nil, "orb", args...); err != nil {
 			return fmt.Errorf("apply %s: %w", rule.Render(), err)
+		}
+	}
+	return nil
+}
+
+// existingClosedAlias returns the v4 host alias already encoded in an ACTIVE
+// closed LEVER_EGRESS chain (i.e. the chain contains the catch-all DROP), so
+// ApplyEgress can skip the flush+rebuild that would briefly open egress (I2).
+// Returns ("", false) when the chain is absent, open (no catch-all DROP), or
+// unreadable — the caller then (re)builds the chain normally. The alias is read
+// from the per-port ACCEPT rule (`-d <ip>/32 … --dport … -j ACCEPT`), so we never
+// need DNS (which the active DROP blocks anyway).
+func (o *OrbStack) existingClosedAlias(ctx context.Context) (string, bool) {
+	res, err := o.r.Run(ctx, nil, "orb", "-u", "root", "-m", o.machine, "iptables", "-S", egress.Chain)
+	if err != nil {
+		return "", false // chain absent (fresh machine) or unreadable
+	}
+	out := res.Stdout + res.Stderr
+	if !strings.Contains(out, "-A "+egress.Chain+" -j DROP") {
+		return "", false // not in the closed posture (no catch-all DROP)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "--dport") || !strings.Contains(line, "-j ACCEPT") {
+			continue
+		}
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "-d" && i+1 < len(fields) {
+				ip := strings.TrimSuffix(fields[i+1], "/32")
+				if net.ParseIP(ip) != nil {
+					return ip, true
+				}
+			}
+		}
+	}
+	return "", false // closed but no parseable alias — rebuild to be safe
+}
+
+// resetEgressChain ensures the LEVER_EGRESS chain exists and OUTPUT jumps to it
+// exactly once, then flushes it, for both address families. Idempotent: the chain
+// holds ALL of lever's egress rules, so flushing wipes the prior apply's rules
+// (no accumulation) without touching any non-lever OUTPUT rules, and removes the
+// catch-all DROP so DNS works for the subsequent host-alias resolve.
+func (o *OrbStack) resetEgressChain(ctx context.Context) error {
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		base := []string{"-u", "root", "-m", o.machine, bin}
+		run := func(args ...string) error {
+			_, err := o.r.Run(ctx, nil, "orb", append(append([]string{}, base...), args...)...)
+			return err
+		}
+		// Create the chain if absent (-N errors if it already exists — tolerate).
+		_ = run("-N", egress.Chain)
+		// Ensure the OUTPUT jump exists exactly once: -C checks, -A adds if missing.
+		if err := run("-C", "OUTPUT", "-j", egress.Chain); err != nil {
+			if err := run("-A", "OUTPUT", "-j", egress.Chain); err != nil {
+				return fmt.Errorf("egress: add OUTPUT jump (%s): %w", bin, err)
+			}
+		}
+		// Flush our chain (idempotent re-apply; restores DNS for the re-resolve).
+		if err := run("-F", egress.Chain); err != nil {
+			return fmt.Errorf("egress: flush %s (%s): %w", egress.Chain, bin, err)
 		}
 	}
 	return nil

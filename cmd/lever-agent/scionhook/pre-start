@@ -10,7 +10,25 @@
 # We let the default take effect rather than hardcoding $HOME/workspace/... which
 # could diverge if the image bakes a different mount point. The absolute in-image
 # path is validated at instance image-bake / Task-8 acceptance time.
+# LLM-auth mode: the launcher sets LEVER_LLM_AUTH=api-key for an agent that must
+# route the model through the broker /llm proxy (holding only a capability(llm)
+# token). Default 'subscription' = no change (claude uses CLAUDE_CODE_OAUTH_TOKEN
+# and reaches Anthropic directly). In api-key mode boot writes ANTHROPIC_AUTH_TOKEN
+# /ANTHROPIC_BASE_URL into the claude settings.json env block — the path claude
+# actually reads (the scion env-overlay is inert for our builtin harness).
+# G2: as its final step boot also writes $HOME/.scion/scion-services.yaml (the
+# lever-renew sidecar) so scion auto-refreshes the cert and, in api-key mode, the
+# LLM token after this hook. scion reads that file just after pre-start hooks; it
+# must be written at runtime because ~/.scion is under the /home/scion bind-mount.
 set -eu
+# Bootstrap path: pass it ABSOLUTELY. scion mounts the agent's project tree at
+# /workspace in the container and `lever apply` stages the bootstrap at
+# <tree>/.lever/bootstrap.json → /workspace/.lever/bootstrap.json. boot's default
+# (./.lever/bootstrap.json) does NOT resolve here: the pre-start hook's CWD is the
+# agent home, not /workspace (verified live 2026-06-28), so the relative default
+# fails with "read bootstrap: no such file".
 lever-agent boot \
   --id-dir "$HOME/.lever-id" \
-  --overlay "$HOME/.scion/agent-env.json"
+  --bootstrap /workspace/.lever/bootstrap.json \
+  --llm-auth "${LEVER_LLM_AUTH:-subscription}" \
+  --settings "$HOME/.claude/settings.json"

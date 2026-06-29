@@ -2,15 +2,166 @@ package apply
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/exec"
 	"github.com/lever-to/lever/internal/scion"
 )
+
+// flakyStartRunner fails the first startFails `scion start` calls with the
+// runtime-broker-unavailable error (the registration race), then defers to the
+// wrapped FakeRunner. Used to prove start-manager retries.
+type flakyStartRunner struct {
+	*exec.FakeRunner
+	startFails int
+	startCalls int
+}
+
+func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" {
+		hasStart, hasServer := false, false
+		for _, a := range args {
+			if a == "start" {
+				hasStart = true
+			}
+			if a == "server" {
+				hasServer = true
+			}
+		}
+		if hasStart && !hasServer { // agent start, not `scion server start`
+			r.startCalls++
+			if r.startCalls <= r.startFails {
+				// Client.run builds its error from Stdout+Stderr, so the marker must
+				// live there, not just in the Go error.
+				return exec.Result{Code: 1, Stderr: "no_runtime_broker: No runtime brokers available for this project"}, fmt.Errorf("exit status 1")
+			}
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// alreadyUpRunner simulates a fully-up instance on re-apply: `scion server
+// start` and agent `start` return "already running"; everything else succeeds.
+type alreadyUpRunner struct{ *exec.FakeRunner }
+
+func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" {
+		hasServer, hasStart := false, false
+		for _, a := range args {
+			if a == "server" {
+				hasServer = true
+			}
+			if a == "start" {
+				hasStart = true
+			}
+		}
+		if hasServer && hasStart {
+			return exec.Result{Code: 1, Stderr: "Error: server is already running (PID: 123)"}, fmt.Errorf("exit status 1")
+		}
+		if hasStart && !hasServer {
+			return exec.Result{Code: 1, Stderr: "Error: agent already running"}, fmt.Errorf("exit status 1")
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestRunIdempotentReapply: re-applying a fully-up instance is a clean no-op —
+// an already-running scion server and manager are tolerated, and the mint step
+// tolerates the broker's spent single-use /bootstrap latch (ErrBootstrapLatched).
+func TestRunIdempotentReapply(t *testing.T) {
+	tree := t.TempDir()
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner()}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	mintCalled := false
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		JailMount: "/lever",
+		// Same broker process as a prior apply ⇒ latch spent ⇒ ErrBootstrapLatched.
+		// The mint step must tolerate it (the manager already has its bootstrap).
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			mintCalled = true
+			return BootstrapMaterial{}, ErrBootstrapLatched
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("re-apply of a fully-up instance must be a clean no-op: %v", err)
+	}
+	if !mintCalled {
+		t.Fatal("mint must be CALLED (and tolerate the latch) — tied to the live broker, not a stale file")
+	}
+}
+
+// TestRunMintBootstrapPropagatesRealError: a non-latch mint error (e.g. the
+// broker is down) must NOT be swallowed.
+func TestRunMintBootstrapPropagatesRealError(t *testing.T) {
+	tree := t.TempDir()
+	app := &config.App{Name: "demo", Backend: "orbstack", Tree: tree, Manager: config.Manager{Image: "img"}}
+	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner()}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		JailMount: "/lever",
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			return BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: connection refused")
+		},
+	}
+	if err := Run(context.Background(), app, deps); err == nil {
+		t.Fatal("a real mint error (not the latch) must propagate, not be tolerated")
+	}
+}
+
+func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
+	// Make the retry fast for the test.
+	origAtt, origInt := brokerStartAttempts, brokerStartInterval
+	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
+	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
+
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &flakyStartRunner{FakeRunner: exec.NewFakeRunner(), startFails: 2}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run should succeed after the broker race resolves: %v", err)
+	}
+	if r.startCalls != 3 {
+		t.Fatalf("start attempted %d times, want 3 (2 transient failures + 1 success)", r.startCalls)
+	}
+}
 
 func TestRunDispatchesStepsInOrder(t *testing.T) {
 	f := exec.NewFakeRunner()
@@ -106,6 +257,96 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	}
 	if !sawPrompt {
 		t.Fatalf("manager prompt not passed to start; calls=%+v", f.Calls)
+	}
+}
+
+func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	keyPath := filepath.Join(dir, "api.key")
+	if err := os.WriteFile(keyPath, []byte("sk-ant-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, config.CanonicalName)
+	body := "name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: api-key\n  api_key_file: " + keyPath + "\nmanager:\n  image: img\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(f, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sawEnvSet, sawPlaceholder bool
+	var startArgv string
+	for _, c := range f.Calls {
+		argv := strings.Join(c.Args, " ")
+		if argv == "hub env set --project LEVER_LLM_AUTH=api-key" {
+			sawEnvSet = true
+		}
+		// SecretSet base64-encodes the value, so match on the verb + key, not value.
+		if len(c.Args) >= 4 && c.Args[0] == "hub" && c.Args[1] == "secret" && c.Args[2] == "set" && c.Args[3] == "ANTHROPIC_API_KEY" {
+			sawPlaceholder = true
+		}
+		if c.Name == "scion" && strings.Contains(argv, " start ") {
+			startArgv = argv
+		}
+	}
+	if !sawEnvSet {
+		t.Fatalf("api-key manager: expected LEVER_LLM_AUTH env set; calls=%+v", f.Calls)
+	}
+	if !sawPlaceholder {
+		t.Fatalf("api-key manager: expected placeholder ANTHROPIC_API_KEY secret set; calls=%+v", f.Calls)
+	}
+	// api-key manager must start with --harness-auth api-key (not oauth-token).
+	if !strings.Contains(startArgv, "--harness-auth api-key") || strings.Contains(startArgv, "oauth-token") {
+		t.Fatalf("api-key manager start must use --harness-auth api-key (not oauth-token); argv=%q", startArgv)
+	}
+}
+
+func TestStartManagerNoLLMAuthEnvForSubscription(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(f, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var startArgv string
+	for _, c := range f.Calls {
+		argv := strings.Join(c.Args, " ")
+		if strings.Contains(argv, "LEVER_LLM_AUTH") {
+			t.Fatalf("subscription manager must not set LEVER_LLM_AUTH; calls=%+v", f.Calls)
+		}
+		if c.Name == "scion" && strings.Contains(argv, " start ") {
+			startArgv = argv
+		}
+	}
+	// subscription manager keeps oauth-token auth (scion projects the OAuth token).
+	if !strings.Contains(startArgv, "--harness-auth oauth-token") || strings.Contains(startArgv, "--no-auth") {
+		t.Fatalf("subscription manager start must use oauth-token (not --no-auth); argv=%q", startArgv)
 	}
 }
 

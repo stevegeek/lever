@@ -3,15 +3,56 @@ package apply
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/scion"
 )
+
+// ErrBootstrapLatched is returned by MintManagerBootstrap when the broker's
+// single-use /bootstrap latch is already consumed (HTTP 403). The mint step
+// tolerates it (the manager already has its bootstrap from a prior apply against
+// the SAME broker process). A broker RESTART reopens the latch, so mint then
+// succeeds and re-deposits a fresh ticket — letting a partially-failed first
+// apply recover on re-apply (vs the old skip-if-file-exists, which deadlocked).
+var ErrBootstrapLatched = errors.New("broker /bootstrap latch already consumed")
+
+// brokerStartAttempts/brokerStartInterval bound the start-manager retry that
+// absorbs the runtime-broker registration race: the scion runtime broker
+// registers with the hub ASYNCHRONOUSLY after the server starts, so a
+// start-manager that runs too soon gets "no runtime brokers available". The hub
+// itself is up (the scion-server health check passed), so this is purely a
+// timing window — retry until the broker comes online. Package vars so tests run
+// fast. (Only the first start races; groves start later when the broker is ready.)
+var (
+	brokerStartAttempts = 30
+	brokerStartInterval = 1 * time.Second
+)
+
+// isBrokerUnavailable reports whether err is the transient "runtime broker not
+// yet registered" error from `scion start` (the registration race), as opposed
+// to a real failure.
+func isBrokerUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "no_runtime_broker") || strings.Contains(s, "No runtime brokers available")
+}
+
+// apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
+// api-key instances. It is NOT a real credential: it exists only to satisfy
+// scion's start-time auth gate so the container (and lever-agent boot) can run.
+// claude sends it as x-api-key to the broker /llm, which strips it and injects
+// the real Console key host-side. Shaped like an Anthropic key (sk-ant- prefix,
+// long) in case scion's auth resolution sanity-checks the format.
+const apiKeyPlaceholder = "sk-ant-placeholder0lever0broker0injects0the0real0key0do0not0use000000000000000000000000"
 
 // BootstrapMaterial is what the manager's lever-agent consumes to enrol.
 type BootstrapMaterial struct {
@@ -109,8 +150,17 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		if d.MintManagerBootstrap == nil {
 			return nil
 		}
+		// Idempotent (tied to the LIVE broker latch, not a stale file): mint; if the
+		// latch is already consumed (same broker process as a prior apply), tolerate
+		// it — the manager has its bootstrap.json from then. After a broker restart
+		// the latch reopens, mint succeeds, and a fresh ticket is deposited, so a
+		// partially-failed first apply (bootstrap written but manager never enrolled)
+		// recovers on re-apply. (*boot is not read after this step.)
 		m, err := d.MintManagerBootstrap(ctx)
 		if err != nil {
+			if errors.Is(err, ErrBootstrapLatched) {
+				return nil
+			}
 			return err
 		}
 		*boot = m
@@ -134,6 +184,27 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			task = strings.TrimSpace(string(b))
 		}
 		jp := jailPath(app.Tree, app.Tree, d.JailMount)
+		// api-key mode: convey LEVER_LLM_AUTH=api-key to the manager container so
+		// its pre-start hook enters api-key mode (the hook reads $LEVER_LLM_AUTH;
+		// scion projects Hub env before pre-start hooks run). Project-scoped (the
+		// manager's project = jp) so it never leaks to other agents. Set BEFORE
+		// start so it is present when the container boots.
+		if app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey {
+			if err := d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
+				return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
+			}
+			// Satisfy scion's start-time auth gate with a placeholder ANTHROPIC_API_KEY
+			// (Hub secret, projected to every container — fine since the instance is
+			// uniformly api-key). It is a sentinel, NOT a real credential: the agent's
+			// real LLM credential is the in-container broker capability biscuit, and
+			// the broker /llm overwrites this placeholder x-api-key with the real key.
+			// Without it scion's env-gather/auth-resolution refuses to launch the
+			// container (and thus lever-agent boot, which writes the real token). Set
+			// once here; later-started groves inherit the same Hub secret.
+			if err := d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
+				return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
+			}
+		}
 		// LEVER_BOOTSTRAP reconciliation: we do NOT set
 		// LEVER_BOOTSTRAP here. lever-agent boot's canonical-path default
 		// (./.lever/bootstrap.json relative to CWD) suffices: scion sets
@@ -142,13 +213,34 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		// exactly where mint-manager-bootstrap wrote the manager's bootstrap.json.
 		// Injecting an env var would be redundant and add a scion StartOpts.Env
 		// dependency that the file convention avoids.
-		return d.Scion.Start(ctx, scion.StartOpts{
+		opts := scion.StartOpts{
 			Grove: app.Name, Task: task, Project: jp, Image: app.Manager.Image, Harness: "claude",
 			// Workspace = the in-jail project tree, so the manager edits the real
 			// host files in place (verified 2026-06-16). Without it scion mounts a
 			// managed copy of the externalized config dir, not the live tree.
 			Workspace: jp,
-		})
+			// api-key: start with --harness-auth api-key (satisfied by the placeholder
+			// secret set above); the real credential arrives in-container.
+			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
+		}
+		// Retry past the runtime-broker registration race (see brokerStartAttempts).
+		var startErr error
+		for attempt := 0; attempt < brokerStartAttempts; attempt++ {
+			startErr = d.Scion.Start(ctx, opts)
+			// Idempotent: a manager already running (re-apply) is success, not error.
+			if startErr != nil && scion.AlreadyRunning(startErr) {
+				return nil
+			}
+			if startErr == nil || !isBrokerUnavailable(startErr) {
+				return startErr
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(brokerStartInterval):
+			}
+		}
+		return startErr
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}

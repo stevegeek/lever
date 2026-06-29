@@ -8,6 +8,26 @@ import (
 	"github.com/lever-to/lever/internal/exec"
 )
 
+func TestEnvSetArgvAndProjectScope(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	if err := c.EnvSet(context.Background(), "/jail/work", "LEVER_LLM_AUTH", "api-key"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("want 1 call, got %d", len(f.Calls))
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if got != "hub env set --project LEVER_LLM_AUTH=api-key" {
+		t.Errorf("args = %q", got)
+	}
+	// Project scope is conveyed by the working directory (bare --project infers it).
+	if f.Calls[0].Dir != "/jail/work" {
+		t.Errorf("cwd = %q, want /jail/work (project scope)", f.Calls[0].Dir)
+	}
+}
+
 func TestBringupArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})

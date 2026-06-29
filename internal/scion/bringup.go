@@ -4,8 +4,19 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 )
+
+// AlreadyRunning reports whether err is a scion "already running" error — used to
+// make bring-up steps idempotent on re-apply (the server/agent is already up).
+func AlreadyRunning(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "already running") || strings.Contains(s, "already exists")
+}
 
 // hubReadyAttempts/hubReadyInterval are package vars so tests can shrink them.
 var hubReadyAttempts = 30
@@ -49,7 +60,9 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises and
 // returns. Dev auth is default-on, so no `hub enable` is needed.
 func (c *Client) ServerStart(ctx context.Context) error {
-	if _, err := c.run(ctx, "", "server", "start"); err != nil {
+	// Idempotent: tolerate an already-running server on re-apply; waitHubReady
+	// then confirms the existing server is actually serving.
+	if _, err := c.run(ctx, "", "server", "start"); err != nil && !AlreadyRunning(err) {
 		return err
 	}
 	return c.waitHubReady(ctx)
@@ -63,5 +76,18 @@ func (c *Client) ServerStart(ctx context.Context) error {
 func (c *Client) SecretSet(ctx context.Context, key, value string) error {
 	enc := base64.StdEncoding.EncodeToString([]byte(value))
 	_, err := c.run(ctx, "", "hub", "secret", "set", key, enc)
+	return err
+}
+
+// EnvSet sets a NON-secret Hub env var scoped to one agent's project. Unlike
+// SecretSet (encrypted, user-scoped), this is a plain value scoped to the agent
+// by running `hub env set --project` with the agent's project dir as cwd (bare
+// --project infers the project from the working directory), so it does not leak
+// to other agents in the instance. Used to convey LEVER_LLM_AUTH=api-key so an
+// agent's pre-start hook enters api-key mode (scion projects Hub env into the
+// container before pre-start hooks run, so the hook sees it). projectDir must be
+// a registered project's dir (run after register-manager / InitProject).
+func (c *Client) EnvSet(ctx context.Context, projectDir, key, value string) error {
+	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", key+"="+value)
 	return err
 }

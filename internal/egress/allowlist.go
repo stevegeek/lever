@@ -11,6 +11,12 @@ import (
 	"strings"
 )
 
+// Chain is the dedicated iptables chain lever's egress rules live in. OUTPUT
+// jumps to it; ApplyEgress flushes ONLY this chain before re-populating, so a
+// re-apply is idempotent (no rule accumulation) and — because flushing removes
+// the catch-all DROP — DNS works again for the host-alias re-resolve.
+const Chain = "LEVER_EGRESS"
+
 type Family int
 
 const (
@@ -43,6 +49,19 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 	sort.Ints(ports)
 	var rules []Rule
 
+	// 0) When closing the internet, ACCEPT loopback FIRST. The catch-all DROP
+	// below matches locally-generated packets to 127.0.0.1/::1 too, so without
+	// this every in-machine localhost service breaks — the scion hub on
+	// 127.0.0.1:8080 (its readiness check) and host-loopback tools. Only added in
+	// the closed posture so the open posture stays byte-identical to pre-existing
+	// (where the default-ACCEPT policy already permits loopback).
+	if closedInternet {
+		rules = append(rules,
+			Rule{Family: IPv4, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},
+			Rule{Family: IPv6, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},
+		)
+	}
+
 	// 1) ACCEPT allowlisted ports to each alias family (BEFORE any drop).
 	for _, p := range ports {
 		if aliasV4 != "" {
@@ -72,14 +91,14 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 		// traffic must flow broker→Anthropic. Order matters: this follows the
 		// per-port ACCEPTs.
 		rules = append(rules,
-			Rule{Family: IPv4, Args: []string{"-A", "OUTPUT", "-j", "DROP"}},
-			Rule{Family: IPv6, Args: []string{"-A", "OUTPUT", "-j", "DROP"}},
+			Rule{Family: IPv4, Args: []string{"-A", Chain, "-j", "DROP"}},
+			Rule{Family: IPv6, Args: []string{"-A", Chain, "-j", "DROP"}},
 		)
 	}
 	return rules
 }
 
-func out(a ...string) []string { return append([]string{"-A", "OUTPUT"}, a...) }
+func out(a ...string) []string { return append([]string{"-A", Chain}, a...) }
 
 // Binary returns the iptables binary name for a family.
 func (f Family) Binary() string {

@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestBuildRulesTargetDedicatedChain(t *testing.T) {
+	// Rules append to the dedicated LEVER_EGRESS chain (which OUTPUT jumps to),
+	// NOT OUTPUT directly — so ApplyEgress can flush ONLY lever's rules on
+	// re-apply (idempotent; no accumulation; restores DNS before re-resolving).
+	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, true)
+	for i, r := range rules {
+		if len(r.Args) < 2 || r.Args[0] != "-A" || r.Args[1] != Chain {
+			t.Fatalf("rule %d %v must append to %s, not %q", i, r.Args, Chain, r.Args[1])
+		}
+	}
+}
+
 func TestBuildRulesAllowsListedPortToBothAliasFamilies(t *testing.T) {
 	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, false)
 	v4 := familyArgs(rules, IPv4)
@@ -71,6 +83,50 @@ func TestBuildRulesClosedInternetAppendsCatchAllDrop(t *testing.T) {
 	}
 }
 
+func TestBuildRulesClosedInternetExemptsLoopback(t *testing.T) {
+	open := BuildRules("10.0.0.1", "fd00::1", []int{8443}, false)
+	closed := BuildRules("10.0.0.1", "fd00::1", []int{8443}, true)
+
+	// Closed posture MUST allow loopback before the catch-all DROP, or in-machine
+	// localhost traffic (the scion hub on 127.0.0.1:8080, host-loopback tools) is
+	// dropped. Required for BOTH families.
+	for _, fam := range []Family{IPv4, IPv6} {
+		lo := loIdx(closed, fam)
+		if lo < 0 {
+			t.Fatalf("closed posture must ACCEPT loopback (-o lo) for family %v", fam)
+		}
+		if drop := dropIdxFamily(closed, fam); drop >= 0 && lo > drop {
+			t.Fatalf("loopback ACCEPT (idx %d) must precede the catch-all DROP (idx %d) for family %v", lo, drop, fam)
+		}
+	}
+	// Open posture stays byte-identical to pre-existing: no loopback rule added.
+	if loIdx(open, IPv4) >= 0 || loIdx(open, IPv6) >= 0 {
+		t.Fatal("open posture must NOT add a loopback rule (byte-identical to pre-existing)")
+	}
+}
+
+// loIdx returns the index of the `-o lo -j ACCEPT` rule for a family, or -1.
+func loIdx(rules []Rule, fam Family) int {
+	for i, r := range rules {
+		args := strings.Join(r.Args, " ")
+		if r.Family == fam && strings.Contains(args, "-o lo") && strings.Contains(args, "-j ACCEPT") {
+			return i
+		}
+	}
+	return -1
+}
+
+// dropIdxFamily returns the index of the catch-all DROP for a family, or -1.
+func dropIdxFamily(rules []Rule, fam Family) int {
+	catchAll := []string{"-A", Chain, "-j", "DROP"}
+	for i, r := range rules {
+		if r.Family == fam && slices.Equal(r.Args, catchAll) {
+			return i
+		}
+	}
+	return -1
+}
+
 // helpers
 func familyArgs(rules []Rule, fam Family) []string {
 	var out []string
@@ -93,7 +149,7 @@ func indexOfRule(lines []string, needle string) int {
 
 // helpers for closedInternet test
 func hasCatchAllDropFamily(rules []Rule, fam Family) bool {
-	catchAll := []string{"-A", "OUTPUT", "-j", "DROP"}
+	catchAll := []string{"-A", Chain, "-j", "DROP"}
 	for _, r := range rules {
 		if r.Family == fam && slices.Equal(r.Args, catchAll) {
 			return true
@@ -117,7 +173,7 @@ func acceptIdx(rules []Rule, port string) int {
 }
 
 func dropIdx(rules []Rule) int {
-	catchAll := []string{"-A", "OUTPUT", "-j", "DROP"}
+	catchAll := []string{"-A", Chain, "-j", "DROP"}
 	for i, r := range rules {
 		if slices.Equal(r.Args, catchAll) {
 			return i

@@ -49,3 +49,10 @@ lever-image-bins:
 # Build + install both: host control plane (PATH) and the in-jail manager (instance tree).
 .PHONY: all
 all: install lever-manager-linux
+
+# Live api-key headline e2e (fake upstream; no real key). Rebuilds the host lever
+# + image bins, bakes the image, then runs the e2e script. Needs OrbStack + podman.
+.PHONY: test-apikey-e2e
+test-apikey-e2e: install lever-image-bins
+	bash $(LEVER_INSTANCE)/image/tools/scion/build-lever-image.sh
+	bash tools/test/apikey-e2e.sh

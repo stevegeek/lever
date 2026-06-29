@@ -145,6 +145,25 @@ func resolveGroveImage(path, grove string) (string, error) {
 	return "", nil
 }
 
+// resolveGroveLLMAuth looks up a grove's effective LLM-auth mode from the
+// sanitized runtime manifest (the only config the in-jail manager has). Empty
+// path, an unreadable manifest path that doesn't exist, or a grove absent from
+// the manifest ⇒ "" (caller treats as not-api-key — the safe default). A
+// present-but-unparseable manifest is a real error.
+func resolveGroveLLMAuth(path, grove string) (config.LLMAuthMode, error) {
+	if path == "" {
+		return "", nil
+	}
+	m, err := loadManifest(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return m.LLMAuthFor(grove), nil
+}
+
 // defaultManifestPath is the manifest location the manager reads: $LEVER_MANIFEST
 // if set, else ManifestName in the current directory (the in-jail mount root).
 func defaultManifestPath() string {
@@ -205,14 +224,16 @@ func agentStart(cf ClientFactory) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			grove := args[0]
 
+			// Resolve the manifest path once — it feeds both image and LLM-auth
+			// lookup. With no --manifest set, fall back to the default location.
+			if manifestPath == "" {
+				manifestPath = defaultManifestPath()
+			}
+
 			// An explicit --image wins. Otherwise resolve from the sanitized
 			// runtime manifest the host wrote into the mount (grove→image), so the
-			// caller doesn't repeat the image on every dispatch. With no --manifest
-			// set, fall back to the default manifest location.
+			// caller doesn't repeat the image on every dispatch.
 			if image == "" {
-				if manifestPath == "" {
-					manifestPath = defaultManifestPath()
-				}
 				resolved, err := resolveGroveImage(manifestPath, grove)
 				if err != nil {
 					return err
@@ -242,7 +263,29 @@ func agentStart(cf ClientFactory) *cobra.Command {
 				}
 			}
 
-			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image}); err != nil {
+			// api-key mode: the grove's effective mode comes from the sanitized
+			// manifest — the only config available in the jail.
+			mode, err := resolveGroveLLMAuth(manifestPath, grove)
+			if err != nil {
+				return err
+			}
+			apiKey := mode == config.LLMAuthAPIKey
+			// Convey LEVER_LLM_AUTH=api-key to the grove container so its pre-start
+			// hook enters api-key mode (the hook reads $LEVER_LLM_AUTH; scion projects
+			// Hub env before pre-start hooks run). Project-scoped to this grove's dir
+			// so it never leaks to other agents. Set BEFORE start. Needs a project dir
+			// to scope to; a project-less ad-hoc start can't be isolated, so it stays
+			// subscription (the safe default).
+			if apiKey && project != "" {
+				if err := cf().EnvSet(cmd.Context(), project, "LEVER_LLM_AUTH", "api-key"); err != nil {
+					return fmt.Errorf("set LEVER_LLM_AUTH for grove %s: %w", grove, err)
+				}
+			}
+
+			// api-key: start with --harness-auth api-key (satisfied by the placeholder
+			// ANTHROPIC_API_KEY Hub secret set at apply time); the real credential
+			// arrives in-container via the broker /llm capability.
+			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image, APIKey: apiKey}); err != nil {
 				return err
 			}
 			cmd.Printf("Started %s.\n", grove)

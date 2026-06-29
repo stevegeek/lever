@@ -10,6 +10,82 @@ import (
 	"github.com/lever-to/lever/internal/exec"
 )
 
+// closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for `iptables -S`
+// and records whether the chain was flushed or the alias re-resolved.
+type closedChainRunner struct {
+	*exec.FakeRunner
+	flushed, resolved bool
+}
+
+func (r *closedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	argv := strings.Join(args, " ")
+	if name == "orb" {
+		switch {
+		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
+			return exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"}, nil
+		case strings.Contains(argv, "-F LEVER_EGRESS"):
+			r.flushed = true
+		case strings.Contains(argv, "getent ahosts"):
+			r.resolved = true
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *closedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
+	r := &closedChainRunner{FakeRunner: exec.NewFakeRunner()}
+	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
+	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	b := New(r, "lever-jail")
+	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
+		t.Fatalf("ApplyEgress: %v", err)
+	}
+	// I2: an already-closed chain must NOT be flushed or re-resolved — that would
+	// briefly open egress for a running agent.
+	if r.flushed {
+		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
+	}
+	if r.resolved {
+		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
+	}
+	if b.HostAliasV4() != "0.250.250.254" {
+		t.Fatalf("alias should be read from the existing chain, got %q", b.HostAliasV4())
+	}
+}
+
+func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	b := New(f, "lever-jail")
+	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
+		t.Fatalf("ApplyEgress: %v", err)
+	}
+	flushIdx, getentIdx := -1, -1
+	for i, c := range f.Calls {
+		argv := strings.Join(c.Args, " ")
+		if strings.Contains(argv, "iptables -F LEVER_EGRESS") {
+			flushIdx = i
+		}
+		if strings.Contains(argv, "getent ahosts host.orb.internal") {
+			getentIdx = i
+		}
+	}
+	if flushIdx < 0 {
+		t.Fatal("ApplyEgress must flush LEVER_EGRESS (idempotent re-apply, no rule accumulation)")
+	}
+	// Flush BEFORE resolve: under a prior closed posture the catch-all DROP blocks
+	// DNS/53; flushing the chain first restores it so the re-resolve succeeds.
+	if getentIdx < 0 || flushIdx > getentIdx {
+		t.Fatalf("flush (idx %d) must precede the host-alias resolve (idx %d)", flushIdx, getentIdx)
+	}
+}
+
 // orbVersionScript scripts a successful `orb version` response for >= 2.1.1.
 func orbVersionScript(f *exec.FakeRunner) {
 	f.Script("orb version", exec.Result{Stdout: "Version: 2.2.1 (2020100)\n"})

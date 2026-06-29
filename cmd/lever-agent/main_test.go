@@ -9,7 +9,164 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+// svcSpec mirrors the subset of scion's api.ServiceSpec that the renew sidecar
+// uses, for parsing the emitted scion-services.yaml back in tests.
+type svcSpec struct {
+	Name    string   `yaml:"name"`
+	Command []string `yaml:"command"`
+	Restart string   `yaml:"restart"`
+}
+
+func TestWriteRenewServicesAPIKey(t *testing.T) {
+	home := t.TempDir()
+	bsDir := filepath.Join(home, "ws", ".lever")
+	if err := os.MkdirAll(bsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := filepath.Join(bsDir, "bootstrap.json")
+	const brokerURL = "https://host.orb.internal:8443"
+	if err := os.WriteFile(bootstrap, []byte(`{"broker_url":"`+brokerURL+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idDir := filepath.Join(home, ".lever-id")
+	settings := filepath.Join(home, ".claude", "settings.json")
+
+	if err := writeRenewServices(home, idDir, bootstrap, settings, "api-key"); err != nil {
+		t.Fatalf("writeRenewServices: %v", err)
+	}
+
+	out := filepath.Join(home, ".scion", "scion-services.yaml")
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read services file: %v", err)
+	}
+	var specs []svcSpec
+	if err := yaml.Unmarshal(b, &specs); err != nil {
+		t.Fatalf("parse services yaml: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("want 1 service, got %d: %s", len(specs), b)
+	}
+	s := specs[0]
+	if s.Name != "lever-renew" {
+		t.Errorf("name = %q, want lever-renew", s.Name)
+	}
+	if s.Restart != "on-failure" {
+		t.Errorf("restart = %q, want on-failure", s.Restart)
+	}
+	cmd := strings.Join(s.Command, " ")
+	for _, want := range []string{
+		"lever-agent renew --loop",
+		"--id-dir " + idDir,
+		"--broker-url " + brokerURL, // resolved at boot; no sidecar file-read
+		"--llm-auth api-key",
+		"--settings " + settings,
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command %q missing %q", cmd, want)
+		}
+	}
+}
+
+// TestWriteRenewServicesNoBootstrapIsNoop: a non-brokered agent (no bootstrap
+// file) gets no sidecar — there is nothing to renew against.
+func TestWriteRenewServicesNoBootstrapIsNoop(t *testing.T) {
+	home := t.TempDir()
+	missing := filepath.Join(home, "ws", ".lever", "bootstrap.json")
+	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), missing, "", "subscription"); err != nil {
+		t.Fatalf("writeRenewServices: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("services file should not exist for a non-brokered agent; stat err = %v", err)
+	}
+}
+
+// TestWriteRenewServicesEmptyBrokerURLIsNoop: a bootstrap that exists but carries
+// no broker URL (brokerless) is a distinct path from a missing bootstrap — it too
+// gets no sidecar, since there is nothing to renew against.
+func TestWriteRenewServicesEmptyBrokerURLIsNoop(t *testing.T) {
+	home := t.TempDir()
+	bsDir := filepath.Join(home, "ws", ".lever")
+	if err := os.MkdirAll(bsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := filepath.Join(bsDir, "bootstrap.json")
+	if err := os.WriteFile(bootstrap, []byte(`{"ticket":"tk","broker_url":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), bootstrap, "", "api-key"); err != nil {
+		t.Fatalf("writeRenewServices: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("services file should not exist for a brokerless bootstrap; stat err = %v", err)
+	}
+}
+
+func TestWriteClaudeSettingsEnvMergesNotClobbers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-existing settings: an unrelated top-level key + an existing env var.
+	if err := os.WriteFile(path, []byte(`{"model":"sonnet","env":{"EXISTING":"keep"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := writeClaudeSettingsEnv(path)
+	if err := w(map[string]string{"ANTHROPIC_AUTH_TOKEN": "tok", "ANTHROPIC_BASE_URL": "http://x/llm"}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	if got["model"] != "sonnet" {
+		t.Errorf("clobbered unrelated top-level key: model=%v", got["model"])
+	}
+	env, ok := got["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("env is not an object: %v", got["env"])
+	}
+	if env["EXISTING"] != "keep" {
+		t.Errorf("clobbered pre-existing env var: EXISTING=%v", env["EXISTING"])
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "tok" || env["ANTHROPIC_BASE_URL"] != "http://x/llm" {
+		t.Errorf("dynamic vars not merged into env: %v", env)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("settings perm = %o, want 600", fi.Mode().Perm())
+	}
+}
+
+func TestWriteClaudeSettingsEnvCreatesWhenAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".claude", "settings.json")
+	if err := writeClaudeSettingsEnv(path)(map[string]string{"ANTHROPIC_AUTH_TOKEN": "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	b, _ := os.ReadFile(path)
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := got["env"].(map[string]any)
+	if env["ANTHROPIC_AUTH_TOKEN"] != "tok" {
+		t.Fatalf("absent-file case did not create env block: %v", got)
+	}
+}
+
+func TestWriteClaudeSettingsEnvEmptyPathNoop(t *testing.T) {
+	if err := writeClaudeSettingsEnv("")(map[string]string{"X": "y"}); err != nil {
+		t.Fatalf("empty path should be a no-op, got %v", err)
+	}
+}
 
 func TestUnknownSubcommandErrors(t *testing.T) {
 	if err := run([]string{"lever-agent", "bogus"}); err == nil {

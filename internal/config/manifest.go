@@ -22,18 +22,28 @@ type Manifest struct {
 	Groves []ManifestGrove `yaml:"groves"`
 }
 
-// ManifestGrove is one grove's resolved image.
+// ManifestGrove is one grove's resolved image and LLM-auth mode. LLMAuth is a
+// posture flag, not a secret: it tells the in-jail manager whether to convey
+// LEVER_LLM_AUTH=api-key to the grove. A compromised manager rewriting it can at
+// most change its own grove's mode — it cannot conjure a credential (the
+// CLAUDE_CODE_OAUTH_TOKEN secret is host-projected and gated solely by
+// Manager.CredentialFile, independent of this flag). See security-model.md §5.
 type ManifestGrove struct {
-	Name  string `yaml:"name"`
-	Image string `yaml:"image"`
+	Name    string      `yaml:"name"`
+	Image   string      `yaml:"image"`
+	LLMAuth LLMAuthMode `yaml:"llm_auth,omitempty"`
 }
 
 // ManifestFromApp builds the sanitized manifest, resolving each grove's image
-// host-side (its override or the inherited manager image).
+// and effective LLM-auth mode host-side (override or the broker default).
 func ManifestFromApp(a *App) Manifest {
 	m := Manifest{}
 	for _, g := range a.Groves {
-		m.Groves = append(m.Groves, ManifestGrove{Name: g.Name, Image: a.GroveImage(g)})
+		m.Groves = append(m.Groves, ManifestGrove{
+			Name:    g.Name,
+			Image:   a.GroveImage(g),
+			LLMAuth: a.EffectiveGroveLLMAuth(g),
+		})
 	}
 	return m
 }
@@ -68,4 +78,16 @@ func (m *Manifest) ImageFor(name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// LLMAuthFor returns the resolved LLM-auth mode for a grove name, or "" if the
+// grove is absent (an old manifest without the field also yields "", which the
+// caller treats as not-api-key — the safe default).
+func (m *Manifest) LLMAuthFor(name string) LLMAuthMode {
+	for _, g := range m.Groves {
+		if g.Name == name {
+			return g.LLMAuth
+		}
+	}
+	return ""
 }

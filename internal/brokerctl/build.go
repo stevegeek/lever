@@ -85,6 +85,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		GrantTTL:        app.Broker.GrantTTL,
 		TicketTTL:       app.Broker.TicketTTL,
 		ServerName:      serverName,
+		LLMUpstream:     app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com
 	}
 
 	// Load the api_key_file into the broker config so the /llm proxy has the

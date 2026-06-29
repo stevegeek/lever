@@ -19,7 +19,7 @@ type CapRequest struct {
 	Constraints map[string]string `json:"constraints,omitempty"`
 }
 
-// CapResponse carries the minted capability token (base64url biscuit).
+// CapResponse carries the minted capability token (base64url signed token).
 type CapResponse struct {
 	Token string `json:"token"`
 }

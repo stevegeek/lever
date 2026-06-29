@@ -5,13 +5,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-
-	"github.com/lever-to/lever/internal/cap/token"
 )
 
 // Client builds an mTLS http.Client presenting this identity's cert and trusting its CA.
@@ -59,21 +56,4 @@ func Request(ctx context.Context, brokerURL string, client *http.Client, tool, o
 		return "", fmt.Errorf("agent: request decode: %w", err)
 	}
 	return cr.Token, nil
-}
-
-// Attenuate appends narrowing constraints to a base64url token, offline (no broker).
-func Attenuate(tokenB64 string, constraints map[string]string) (string, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(tokenB64)
-	if err != nil {
-		return "", fmt.Errorf("agent: decode token: %w", err)
-	}
-	extra := make([]token.Constraint, 0, len(constraints))
-	for k, v := range constraints {
-		extra = append(extra, token.Constraint{Key: k, Value: v})
-	}
-	narrowed, err := token.Attenuate(raw, extra)
-	if err != nil {
-		return "", fmt.Errorf("agent: attenuate: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(narrowed), nil
 }

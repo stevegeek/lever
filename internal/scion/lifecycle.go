@@ -25,10 +25,10 @@ type StartOpts struct {
 	// with `--harness-auth api-key` (instead of `--harness-auth oauth-token`),
 	// satisfied by a PLACEHOLDER ANTHROPIC_API_KEY the host sets as a Hub secret.
 	// The placeholder is a sentinel, not a real credential: the agent's actual LLM
-	// credential is the broker /llm capability biscuit, written into the claude
+	// credential is the broker /llm capability token, written into the claude
 	// settings.json as ANTHROPIC_AUTH_TOKEN by lever-agent boot. claude sends that
-	// biscuit as `Authorization: Bearer` AND the placeholder as `x-api-key`, both to
-	// ANTHROPIC_BASE_URL (the broker /llm), which verifies the biscuit and
+	// token as `Authorization: Bearer` AND the placeholder as `x-api-key`, both to
+	// ANTHROPIC_BASE_URL (the broker /llm), which verifies the token and
 	// overwrites x-api-key with the real key host-side (verified live 2026-06-28).
 	// This placeholder is needed only because scion's start-time auth gate requires
 	// some credential before the container — and thus lever-agent boot — can run.
@@ -58,7 +58,7 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	if o.APIKey {
 		// api-key: satisfy scion's start gate with the placeholder ANTHROPIC_API_KEY
 		// (set as a Hub secret host-side); the real credential is the in-container
-		// broker capability biscuit. See StartOpts.APIKey.
+		// broker capability token. See StartOpts.APIKey.
 		args = append(args, "--harness-auth", "api-key")
 	} else {
 		args = append(args, "--harness-auth", "oauth-token")

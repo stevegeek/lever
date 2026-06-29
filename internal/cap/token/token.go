@@ -1,14 +1,20 @@
+// Mint/Verify for the capability token: a compact Ed25519-signed struct that
+// binds one (tool, operation) capability to a single agent identity, with
+// optional parameter constraints, a hard expiry, and a mint epoch (revocation
+// floor). It replaced a biscuit/Datalog token: the only biscuit-specific
+// feature — offline holder-side attenuation — was unused, because every
+// capability is minted online by the broker, which is always on the
+// verification path. A typed signed struct carries everything actually relied
+// upon (bound agent, capability match, equality constraints, expiry, epoch)
+// with one fewer dependency and no policy interpreter.
+
 package token
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
+	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
-
-	"github.com/biscuit-auth/biscuit-go/v2"
-	"github.com/biscuit-auth/biscuit-go/v2/parser"
 )
 
 // Capability is the single (tool, operation) a token authorizes.
@@ -17,9 +23,9 @@ type Capability struct {
 	Operation string
 }
 
-// Constraint binds a request parameter to a fixed value. Each constraint
-// becomes a `check if param(key, value)` in the token, so a request is allowed
-// only if it carries that exact parameter. Constraints can only narrow.
+// Constraint binds a request parameter to a fixed value. Verification requires
+// the request to carry that exact (key, value) parameter, so a constraint can
+// only narrow what a request may do, never widen it.
 type Constraint struct {
 	Key   string
 	Value string
@@ -34,9 +40,28 @@ type Grant struct {
 	Epoch       int          // mint epoch; verified against the broker's min-epoch
 }
 
-// Mint builds a biscuit for g, signed with the broker's private key. The token
-// carries bound_agent, the capability, the epoch, one check per constraint, and
-// three intrinsic checks: expiry, epoch floor (revocation), caller==bound_agent.
+// payload is the signed body of a token. The exact serialized bytes are what
+// the signature covers and what Verify re-reads; field tags are short and
+// stable.
+type payload struct {
+	Agent       string       `json:"a"`
+	Tool        string       `json:"t"`
+	Op          string       `json:"o"`
+	Constraints []Constraint `json:"c,omitempty"`
+	ExpiryNanos int64        `json:"x"`
+	Epoch       int          `json:"e"`
+}
+
+// envelope wraps the signed payload bytes and the detached Ed25519 signature.
+// encoding/json renders []byte as base64, so a serialized token is compact ASCII.
+type envelope struct {
+	Payload []byte `json:"p"`
+	Sig     []byte `json:"s"`
+}
+
+// Mint builds a token for g, signed with the broker's private key. The signature
+// covers the canonical payload bytes (bound agent, capability, constraints,
+// expiry, epoch); Verify checks the signature and then those fields.
 func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	if g.Agent == "" {
 		return nil, fmt.Errorf("token: grant has empty agent")
@@ -44,49 +69,27 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	if g.Capability.Tool == "" || g.Capability.Operation == "" {
 		return nil, fmt.Errorf("token: grant has empty capability")
 	}
-	var sb strings.Builder
-	params := map[string]biscuit.Term{
-		"agent":  biscuit.String(g.Agent),
-		"tool":   biscuit.String(g.Capability.Tool),
-		"op":     biscuit.String(g.Capability.Operation),
-		"expiry": biscuit.Date(g.Expiry),
-		"epoch":  biscuit.Integer(int64(g.Epoch)),
-	}
-	sb.WriteString("bound_agent({agent});\n")
-	sb.WriteString("capability({tool}, {op});\n")
-	sb.WriteString("epoch({epoch});\n")
 	for i, c := range g.Constraints {
 		if c.Key == "" {
 			return nil, fmt.Errorf("token: constraint %d has empty key", i)
 		}
-		kk := fmt.Sprintf("ck%d", i)
-		vk := fmt.Sprintf("cv%d", i)
-		params[kk] = biscuit.String(c.Key)
-		params[vk] = biscuit.String(c.Value)
-		sb.WriteString(fmt.Sprintf("check if param({%s}, {%s});\n", kk, vk))
 	}
-	// Intrinsic checks (reference authorizer-injected facts).
-	sb.WriteString("check if time($t), $t < {expiry};\n")
-	sb.WriteString("check if epoch($e), min_epoch($m), $e >= $m;\n")
-	sb.WriteString("check if caller($c), bound_agent($a), $c == $a;\n")
-
-	block, err := parser.FromStringBlockWithParams(sb.String(), params)
+	plBytes, err := json.Marshal(payload{
+		Agent:       g.Agent,
+		Tool:        g.Capability.Tool,
+		Op:          g.Capability.Operation,
+		Constraints: g.Constraints,
+		ExpiryNanos: g.Expiry.UnixNano(),
+		Epoch:       g.Epoch,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("token: parse block: %w", err)
+		return nil, fmt.Errorf("token: marshal payload: %w", err)
 	}
-	b := biscuit.NewBuilder(priv)
-	if err := b.AddBlock(block); err != nil {
-		return nil, fmt.Errorf("token: add block: %w", err)
-	}
-	built, err := b.Build()
+	tok, err := json.Marshal(envelope{Payload: plBytes, Sig: ed25519.Sign(priv, plBytes)})
 	if err != nil {
-		return nil, fmt.Errorf("token: build: %w", err)
+		return nil, fmt.Errorf("token: marshal envelope: %w", err)
 	}
-	serialized, err := built.Serialize()
-	if err != nil {
-		return nil, fmt.Errorf("token: serialize: %w", err)
-	}
-	return serialized, nil
+	return tok, nil
 }
 
 // Request is the context the broker checks a token against, per exercise.
@@ -98,10 +101,10 @@ type Request struct {
 	MinEpoch   int               // the broker's current minimum acceptable epoch
 }
 
-// Verify checks tok against the public key and r. Returns nil iff the signature
-// is valid, caller == bound_agent, the requested capability matches, every
-// constraint check is satisfied by r.Params, and the token is unexpired and at
-// or above MinEpoch. Param values are injected as opaque facts (no injection).
+// Verify returns nil iff the signature is valid for pub, caller == bound_agent,
+// the requested capability matches, every constraint is satisfied by a present,
+// equal request parameter, and the token is unexpired and at or above MinEpoch.
+// Fails closed at every gate; param values are compared as opaque data.
 func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
 	if r.Now.IsZero() {
 		return fmt.Errorf("token: request has zero time")
@@ -109,88 +112,37 @@ func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
 	if r.Capability.Tool == "" || r.Capability.Operation == "" {
 		return fmt.Errorf("token: request has empty capability")
 	}
-	b, err := biscuit.Unmarshal(tok)
-	if err != nil {
+	if len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("token: bad public key")
+	}
+	var env envelope
+	if err := json.Unmarshal(tok, &env); err != nil {
 		return fmt.Errorf("token: unmarshal: %w", err)
 	}
-	authz, err := b.Authorizer(pub) // verifies the signature against the root public key
-	if err != nil {
-		return fmt.Errorf("token: signature: %w", err)
+	if !ed25519.Verify(pub, env.Payload, env.Sig) {
+		return fmt.Errorf("token: signature")
 	}
-
-	var sb strings.Builder
-	params := map[string]biscuit.Term{
-		"caller": biscuit.String(r.Caller),
-		"tool":   biscuit.String(r.Capability.Tool),
-		"op":     biscuit.String(r.Capability.Operation),
-		"now":    biscuit.Date(r.Now),
-		"min":    biscuit.Integer(int64(r.MinEpoch)),
+	var pl payload
+	if err := json.Unmarshal(env.Payload, &pl); err != nil {
+		return fmt.Errorf("token: unmarshal payload: %w", err)
 	}
-	sb.WriteString("caller({caller});\n")
-	sb.WriteString("request_tool({tool});\n")
-	sb.WriteString("request_op({op});\n")
-	sb.WriteString("time({now});\n")
-	sb.WriteString("min_epoch({min});\n")
-	// Each param fact is self-contained (key and value travel together), so map
-	// iteration order is cosmetic; the pk%d/pv%d indices only name placeholders.
-	i := 0
-	for k, v := range r.Params {
-		kk := fmt.Sprintf("pk%d", i)
-		vk := fmt.Sprintf("pv%d", i)
-		params[kk] = biscuit.String(k)
-		params[vk] = biscuit.String(v)
-		sb.WriteString(fmt.Sprintf("param({%s}, {%s});\n", kk, vk))
-		i++
+	if r.Caller != pl.Agent {
+		return fmt.Errorf("token: denied: caller %q != bound_agent %q", r.Caller, pl.Agent)
 	}
-	sb.WriteString("allow if capability($t, $o), request_tool($t), request_op($o);\n")
-
-	contents, err := parser.FromStringAuthorizerWithParams(sb.String(), params)
-	if err != nil {
-		return fmt.Errorf("token: parse authorizer: %w", err)
+	if r.Capability.Tool != pl.Tool || r.Capability.Operation != pl.Op {
+		return fmt.Errorf("token: denied: capability not granted")
 	}
-	authz.AddAuthorizer(contents)
-	if err := authz.Authorize(); err != nil {
-		return fmt.Errorf("token: denied: %w", err)
+	for _, c := range pl.Constraints {
+		v, ok := r.Params[c.Key]
+		if !ok || v != c.Value {
+			return fmt.Errorf("token: denied: constraint %s=%q not satisfied", c.Key, c.Value)
+		}
+	}
+	if !r.Now.Before(time.Unix(0, pl.ExpiryNanos)) {
+		return fmt.Errorf("token: denied: expired")
+	}
+	if pl.Epoch < r.MinEpoch {
+		return fmt.Errorf("token: denied: epoch %d below min %d", pl.Epoch, r.MinEpoch)
 	}
 	return nil
-}
-
-// Attenuate appends a block adding a narrowing check per extra constraint. It
-// needs only the token (not the root key); appended checks can only restrict,
-// never widen. Origin-scoping guarantees an appended fact cannot satisfy the
-// authority-block authorizer policy.
-func Attenuate(tok []byte, extra []Constraint) ([]byte, error) {
-	b, err := biscuit.Unmarshal(tok)
-	if err != nil {
-		return nil, fmt.Errorf("token: unmarshal: %w", err)
-	}
-	bb := b.CreateBlock()
-	var sb strings.Builder
-	params := map[string]biscuit.Term{}
-	for i, c := range extra {
-		if c.Key == "" {
-			return nil, fmt.Errorf("token: constraint %d has empty key", i)
-		}
-		kk := fmt.Sprintf("ak%d", i)
-		vk := fmt.Sprintf("av%d", i)
-		params[kk] = biscuit.String(c.Key)
-		params[vk] = biscuit.String(c.Value)
-		sb.WriteString(fmt.Sprintf("check if param({%s}, {%s});\n", kk, vk))
-	}
-	block, err := parser.FromStringBlockWithParams(sb.String(), params)
-	if err != nil {
-		return nil, fmt.Errorf("token: parse attenuation block: %w", err)
-	}
-	if err := bb.AddBlock(block); err != nil {
-		return nil, fmt.Errorf("token: add attenuation block: %w", err)
-	}
-	appended, err := b.Append(rand.Reader, bb.Build())
-	if err != nil {
-		return nil, fmt.Errorf("token: append: %w", err)
-	}
-	out, err := appended.Serialize()
-	if err != nil {
-		return nil, fmt.Errorf("token: serialize: %w", err)
-	}
-	return out, nil
 }

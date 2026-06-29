@@ -17,7 +17,7 @@ func TestEnsureKeysGeneratesThenReloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(kp1.Public) != string(kp2.Public) {
-		t.Fatal("biscuit key changed across EnsureKeys calls — must persist + reload")
+		t.Fatal("capability-signing key changed across EnsureKeys calls — must persist + reload")
 	}
 	if string(ca1.CertPEM()) != string(ca2.CertPEM()) {
 		t.Fatal("CA cert changed across EnsureKeys calls — must persist + reload")

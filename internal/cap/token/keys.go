@@ -1,4 +1,5 @@
-// Package token mints and verifies per-agent biscuit capability tokens.
+// Package token mints and verifies per-agent capability tokens: a compact
+// Ed25519-signed struct (see token.go).
 package token
 
 import (
@@ -12,8 +13,8 @@ import (
 // osStat is a package indirection so tests can assert file permissions.
 var osStat = os.Stat
 
-// KeyPair is the broker's biscuit root keypair (Ed25519). The private key is
-// the forge; the public key is published for verification.
+// KeyPair is the broker's capability-signing root keypair (Ed25519). The
+// private key is the forge; the public key is published for verification.
 type KeyPair struct {
 	Public  ed25519.PublicKey
 	Private ed25519.PrivateKey

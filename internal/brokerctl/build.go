@@ -1,6 +1,6 @@
 // Package brokerctl is the host-side controller for the lever capability broker:
-// it translates a lever config into a broker.Config, ensures the CA + biscuit
-// root key, supervises first-party tool subprocesses, and runs the broker.
+// it translates a lever config into a broker.Config, ensures the CA + capability
+// signing root key, supervises first-party tool subprocesses, and runs the broker.
 package brokerctl
 
 import (

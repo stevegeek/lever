@@ -13,7 +13,7 @@ type MCPConfig struct {
 	Client    *http.Client // mTLS client (this agent's identity)
 }
 
-// MCPServer is the LLM-facing capability tool: request / attenuate / delegate.
+// MCPServer is the LLM-facing capability tool: request / delegate.
 // It holds the mTLS client + the agent's CN and never exposes key material.
 type MCPServer struct {
 	brokerURL string
@@ -78,11 +78,7 @@ func capabilityToolSchemas() []any {
 					// broker will refuse to mint a binding the caller's policy does not allow.
 					"bound_to": strProp("agent to bind to (default self); the broker's MayObtain policy enforces who the caller may bind to"),
 				}}},
-		map[string]any{"name": "attenuate", "description": "narrow a token by adding constraint key=value pairs",
-			"inputSchema": map[string]any{"type": "object",
-				"required":   []string{"token"},
-				"properties": map[string]any{"token": strProp("base64url token")}}},
-		map[string]any{"name": "delegate", "description": "mint a token bound to another agent, narrowed by constraints, to hand off",
+		map[string]any{"name": "delegate", "description": "mint a token bound to another agent, narrowed by constraint key=value pairs, to hand off",
 			"inputSchema": map[string]any{"type": "object",
 				"required": []string{"tool", "op", "to"},
 				"properties": map[string]any{
@@ -129,25 +125,17 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 			return
 		}
 		result(tok)
-	case "attenuate":
-		tok, err := Attenuate(args["token"], constraintArgs(args, "token"))
+	// delegate: mint a token bound to another agent, narrowed by the extra kv
+	// constraints. The broker's MayObtain policy authoritatively gates whether the
+	// mTLS caller may delegate this capability to `to`, and re-validates every
+	// constraint; minting bound-to-other is a single online call.
+	case "delegate":
+		tok, err := Request(ctx, s.brokerURL, s.client, args["tool"], args["op"], args["to"], constraintArgs(args, "tool", "op", "to"))
 		if err != nil {
 			writeRPCError(w, id, -32000, err.Error())
 			return
 		}
 		result(tok)
-	case "delegate":
-		tok, err := Request(ctx, s.brokerURL, s.client, args["tool"], args["op"], args["to"], nil)
-		if err != nil {
-			writeRPCError(w, id, -32000, err.Error())
-			return
-		}
-		narrowed, err := Attenuate(tok, constraintArgs(args, "tool", "op", "to"))
-		if err != nil {
-			writeRPCError(w, id, -32000, err.Error())
-			return
-		}
-		result(narrowed)
 	default:
 		writeRPCError(w, id, -32601, "unknown tool")
 	}

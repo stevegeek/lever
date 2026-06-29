@@ -58,11 +58,6 @@ func decodeB64(t *testing.T, s string) []byte {
 	return b
 }
 
-// encodeB64 encodes bytes to base64url (no-padding).
-func encodeB64(b []byte) string {
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
 func TestRequestMintsDelegatedToken(t *testing.T) {
 	env := testBroker(t)
 	// Allow manager to delegate db.read to worker; register the db tool envelope.
@@ -84,34 +79,5 @@ func TestRequestMintsDelegatedToken(t *testing.T) {
 		Params: map[string]string{"table": "A"}, Now: time.Now(), MinEpoch: 0,
 	}); err != nil {
 		t.Fatalf("minted token must verify for worker/db.read/table=A: %v", err)
-	}
-}
-
-func TestAttenuateNarrowsOnly(t *testing.T) {
-	// Mint a base token (no filter) directly, then attenuate adding filter=alice;
-	// the attenuated token must still verify with filter=alice AND fail without it.
-	kp, _ := token.Generate()
-	raw, _ := token.Mint(kp.Private, token.Grant{
-		Agent: "worker", Capability: token.Capability{Tool: "db", Operation: "read"},
-		Constraints: []token.Constraint{{Key: "table", Value: "A"}},
-		Expiry:      time.Now().Add(time.Hour), Epoch: 0,
-	})
-	baseB64 := encodeB64(raw)
-	narrowed, err := Attenuate(baseB64, map[string]string{"filter": "alice"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	nraw := decodeB64(t, narrowed)
-	req := func(params map[string]string) error {
-		return token.Verify(kp.Public, nraw, token.Request{
-			Caller: "worker", Capability: token.Capability{Tool: "db", Operation: "read"},
-			Params: params, Now: time.Now(), MinEpoch: 0,
-		})
-	}
-	if err := req(map[string]string{"table": "A", "filter": "alice"}); err != nil {
-		t.Fatalf("attenuated token must satisfy with the added constraint: %v", err)
-	}
-	if req(map[string]string{"table": "A"}) == nil {
-		t.Fatal("attenuated token must FAIL without the added filter constraint")
 	}
 }

@@ -19,7 +19,7 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 	// ── Assertion 1: Inject + Strip ──────────────────────────────────────────
 	// The real key arrives at the fake upstream (x-api-key == configured key)
 	// AND the inbound capability token does NOT (no Authorization/x-api-key
-	// carrying the biscuit upstream).
+	// carrying the capability token upstream).
 	t.Run("InjectAndStrip", func(t *testing.T) {
 		var gotKey, gotAuth string
 		up := fakeAnthropic(t, &gotKey, &gotAuth)
@@ -44,8 +44,8 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 		if gotAuth != "" {
 			t.Errorf("capability token leaked upstream as Authorization=%q", gotAuth)
 		}
-		// gotKey already asserts only the real key reached upstream (not the biscuit
-		// token), so a non-equal gotKey would also catch token-as-key forwarding.
+		// gotKey already asserts only the real key reached upstream (not the
+		// capability token), so a non-equal gotKey would also catch token-as-key forwarding.
 	})
 
 	// ── Assertion 2: Key never leaks back — incl. error path ────────────────

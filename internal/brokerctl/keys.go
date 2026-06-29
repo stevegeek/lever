@@ -26,7 +26,7 @@ func (s State) Revocation() string { return filepath.Join(s.Dir, "revocation.jso
 func (s State) PID() string        { return filepath.Join(s.Dir, "broker.pid") }
 func (s State) Log() string        { return filepath.Join(s.Dir, "broker.log") }
 
-// EnsureKeys loads the CA + biscuit root keypair from the state dir, generating
+// EnsureKeys loads the CA + capability-signing root keypair from the state dir, generating
 // and persisting them (0600 secrets) on first use. Reused across restarts so
 // issued agent certs survive a broker restart.
 func (s State) EnsureKeys() (token.KeyPair, *ca.CA, error) {

@@ -11,8 +11,8 @@ func TestKeyPairSaveLoadRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	priv := filepath.Join(dir, "biscuit.key")
-	pub := filepath.Join(dir, "biscuit.pub")
+	priv := filepath.Join(dir, "cap.key")
+	pub := filepath.Join(dir, "cap.pub")
 
 	if err := kp.SavePrivate(priv); err != nil {
 		t.Fatalf("save private: %v", err)
@@ -67,7 +67,7 @@ func TestSavePrivateIsNotWorldReadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(t.TempDir(), "biscuit.key")
+	p := filepath.Join(t.TempDir(), "cap.key")
 	if err := kp.SavePrivate(p); err != nil {
 		t.Fatal(err)
 	}

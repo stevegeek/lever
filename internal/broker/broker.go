@@ -1,5 +1,5 @@
 // Package broker is the host-side capability authority and MCP gateway. It mints
-// per-agent biscuit capabilities under the request/delegation policy and the
+// per-agent signed capability tokens under the request/delegation policy and the
 // tool registry, and gates every MCP call so real credentials never enter a
 // container.
 package broker

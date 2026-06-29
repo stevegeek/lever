@@ -55,12 +55,15 @@ func TestMCPToolsListAdvertisesCapabilityTools(t *testing.T) {
 	for _, tl := range tools {
 		names[tl.(map[string]any)["name"].(string)] = true
 	}
-	if !names["request"] || !names["attenuate"] || !names["delegate"] {
+	if !names["request"] || !names["delegate"] {
 		t.Fatalf("capability tools missing: %v", names)
+	}
+	if names["attenuate"] {
+		t.Fatalf("offline attenuate verb must no longer be advertised: %v", names)
 	}
 }
 
-func TestMCPDelegateMintsAndAttenuates(t *testing.T) {
+func TestMCPDelegateMintsRecipientBoundConstrainedToken(t *testing.T) {
 	env := testBroker(t)
 	allowDelegate(t, env, "manager", "db", "read", "worker")
 	regDB(t, env)

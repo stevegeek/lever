@@ -196,7 +196,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			// Satisfy scion's start-time auth gate with a placeholder ANTHROPIC_API_KEY
 			// (Hub secret, projected to every container — fine since the instance is
 			// uniformly api-key). It is a sentinel, NOT a real credential: the agent's
-			// real LLM credential is the in-container broker capability biscuit, and
+			// real LLM credential is the in-container broker capability token, and
 			// the broker /llm overwrites this placeholder x-api-key with the real key.
 			// Without it scion's env-gather/auth-resolution refuses to launch the
 			// container (and thus lever-agent boot, which writes the real token). Set

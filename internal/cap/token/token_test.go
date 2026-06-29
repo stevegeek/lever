@@ -1,12 +1,8 @@
 package token
 
 import (
-	"crypto/rand"
 	"testing"
 	"time"
-
-	"github.com/biscuit-auth/biscuit-go/v2"
-	"github.com/biscuit-auth/biscuit-go/v2/parser"
 )
 
 func sampleGrant() Grant {
@@ -180,7 +176,7 @@ func TestVerifyDeniesGarbage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Verify(kp.Public, []byte("not a biscuit"), baseReq()); err == nil {
+	if err := Verify(kp.Public, []byte("not a token"), baseReq()); err == nil {
 		t.Fatal("expected denial: unparseable token must fail closed")
 	}
 }
@@ -194,77 +190,34 @@ func TestVerifyDeniesZeroTime(t *testing.T) {
 	}
 }
 
+// A constrained param value is matched as opaque data; a value that looks like
+// policy syntax must not be interpreted, only compared literally (and so denied
+// when it does not equal the minted constraint).
 func TestVerifyDeniesInjectionShapedValue(t *testing.T) {
 	kp, tok := mintFixture(t)
 	r := baseReq()
 	r.Params = map[string]string{"table": `A"); allow if true; //`}
 	if err := Verify(kp.Public, tok, r); err == nil {
-		t.Fatal("expected denial: param value must be inert opaque data, not Datalog")
+		t.Fatal("expected denial: param value must be inert opaque data, not policy")
 	}
 }
 
-func TestAttenuateNarrowsWithExtraConstraint(t *testing.T) {
-	kp, tok := mintFixture(t) // capability db.read, constraint table==A
-	narrowed, err := Attenuate(tok, []Constraint{{Key: "filter", Value: "Y"}})
-	if err != nil {
-		t.Fatalf("attenuate: %v", err)
-	}
-	// Satisfies BOTH the original (table==A) and the appended (filter==Y).
-	ok := Request{Caller: "scratch", Capability: Capability{Tool: "db", Operation: "read"},
-		Params: map[string]string{"table": "A", "filter": "Y"}, Now: time.Now(), MinEpoch: 0}
-	if err := Verify(kp.Public, narrowed, ok); err != nil {
-		t.Fatalf("expected allow within narrowed bounds: %v", err)
-	}
-	// Missing the appended constraint -> denied.
-	missing := ok
-	missing.Params = map[string]string{"table": "A"}
-	if err := Verify(kp.Public, narrowed, missing); err == nil {
-		t.Fatal("expected denial: appended constraint filter==Y not satisfied")
-	}
-}
-
-func TestAttenuateCannotWidenCapability(t *testing.T) {
+// A single flipped byte anywhere in the serialized token must invalidate it —
+// either the envelope no longer parses or the signature no longer matches.
+func TestVerifyDeniesTamperedToken(t *testing.T) {
 	kp, tok := mintFixture(t)
-	// Append a block trying to grant a NEW capability the broker never minted.
-	widened, err := Attenuate(tok, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Even a no-op append cannot let an ungranted capability through.
-	r := baseReq()
-	r.Capability = Capability{Tool: "db", Operation: "write"}
-	if err := Verify(kp.Public, widened, r); err == nil {
-		t.Fatal("expected denial: appended block must not widen the capability")
+	tampered := make([]byte, len(tok))
+	copy(tampered, tok)
+	tampered[len(tampered)/2] ^= 0xff
+	if err := Verify(kp.Public, tampered, baseReq()); err == nil {
+		t.Fatal("expected denial: a tampered token must fail verification")
 	}
 }
 
-func TestVerifyDeniesAppendedCapabilityFact(t *testing.T) {
+func TestVerifyDeniesTruncatedToken(t *testing.T) {
 	kp, tok := mintFixture(t)
-	b, err := biscuit.Unmarshal(tok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bb := b.CreateBlock()
-	blk, err := parser.FromStringBlockWithParams(`capability({t}, {o});`,
-		map[string]biscuit.Term{"t": biscuit.String("db"), "o": biscuit.String("write")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bb.AddBlock(blk); err != nil {
-		t.Fatal(err)
-	}
-	forged, err := b.Append(rand.Reader, bb.Build())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ser, err := forged.Serialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := baseReq()
-	r.Capability = Capability{Tool: "db", Operation: "write"}
-	if err := Verify(kp.Public, ser, r); err == nil {
-		t.Fatal("expected denial: an appended capability fact must not widen the grant")
+	if err := Verify(kp.Public, tok[:len(tok)/2], baseReq()); err == nil {
+		t.Fatal("expected denial: a truncated token must fail closed")
 	}
 }
 
@@ -293,28 +246,5 @@ func TestMintMultipleConstraintsAllMustMatch(t *testing.T) {
 	r2.Params = map[string]string{"table": "A"}
 	if err := Verify(kp.Public, tok, r2); err == nil {
 		t.Fatal("expected denial: second constraint filter==Y not satisfied")
-	}
-}
-
-func TestAttenuateChainedTwiceNarrowsCumulatively(t *testing.T) {
-	kp, tok := mintFixture(t) // capability db.read, constraint table==A
-	step1, err := Attenuate(tok, []Constraint{{Key: "filter", Value: "Y"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	step2, err := Attenuate(step1, []Constraint{{Key: "region", Value: "Z"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := Request{Caller: "scratch", Capability: Capability{Tool: "db", Operation: "read"}, Now: time.Now(), MinEpoch: 0}
-	r := base
-	r.Params = map[string]string{"table": "A", "filter": "Y", "region": "Z"}
-	if err := Verify(kp.Public, step2, r); err != nil {
-		t.Fatalf("expected allow within doubly-narrowed bounds: %v", err)
-	}
-	r2 := base
-	r2.Params = map[string]string{"table": "A", "filter": "Y"}
-	if err := Verify(kp.Public, step2, r2); err == nil {
-		t.Fatal("expected denial: chained constraint region==Z not satisfied")
 	}
 }

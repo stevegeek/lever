@@ -153,7 +153,7 @@ func workerCert(t *testing.T, caInst *ca.CA, cn string) tls.Certificate {
 }
 
 // mintWorkerToken mints a delegated db.read token bound to "worker" constrained to
-// table=A + filter=alice, signed with the broker's biscuit private key at the
+// table=A + filter=alice, signed with the broker's capability private key at the
 // given epoch, and base64url-encodes it for the _capability arg.
 func mintWorkerToken(t *testing.T, kp token.KeyPair, epoch int) string {
 	t.Helper()

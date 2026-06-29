@@ -1,7 +1,7 @@
 // Command lever-agent is the in-jail capability helper: it enrols the agent's
 // mTLS identity (key generated in-container, never leaves), serves the capability
 // MCP tool the LLM drives, renews before expiry, and (via CLI verbs) lets the
-// acceptance harness mint/attenuate/delegate/exercise deterministically.
+// acceptance harness mint/delegate/exercise deterministically.
 package main
 
 import (
@@ -38,7 +38,7 @@ func main() {
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|provision|request|attenuate|delegate|call> ...")
+		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|provision|request|delegate|call> ...")
 	}
 	switch argv[1] {
 	case "boot":
@@ -49,7 +49,7 @@ func run(argv []string) error {
 		return cmdRenew(argv[2:])
 	case "provision":
 		return cmdProvision(argv[2:])
-	case "request", "attenuate", "delegate", "call":
+	case "request", "delegate", "call":
 		return cmdCLI(argv[1], argv[2:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", argv[1])
@@ -298,7 +298,7 @@ func writeRenewServices(homeDir, idDir, bootstrapPath, settingsPath, llmAuth str
 // inside the jail (no port allocation, no cross-container TLS needed for the MCP
 // channel). The tradeoff is that the bridge is not streaming — it batches each
 // JSON-RPC object as one line and replies synchronously. For the capability tool
-// (request/attenuate/delegate) this is fine; revisit if the MCP session needs
+// (request/delegate) this is fine; revisit if the MCP session needs
 // notifications.
 //
 // PAIRING WITH BOOT.GO: boot.go calls MCPAdd("lever-capability", "lever-agent",
@@ -542,8 +542,6 @@ func cmdCLI(verb string, args []string) error {
 		if verb == "delegate" {
 			fs.StringVar(&to, "to", "", "recipient agent CN")
 		}
-	case "attenuate":
-		fs.StringVar(&tokenStr, "token", "", "base64url token to attenuate")
 	case "call":
 		fs.StringVar(&tool, "tool", "", "tool name")
 		fs.StringVar(&op, "op", "", "operation name (maps to params.name in the JSON-RPC envelope)")
@@ -587,12 +585,6 @@ func cmdCLI(verb string, args []string) error {
 			return err
 		}
 		fmt.Println(tok)
-	case "attenuate":
-		narrowed, err := agent.Attenuate(tokenStr, constraints)
-		if err != nil {
-			return err
-		}
-		fmt.Println(narrowed)
 	case "delegate":
 		tok, err := agent.Request(ctx, bURL, client, tool, op, to, constraints)
 		if err != nil {

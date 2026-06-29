@@ -43,7 +43,7 @@ func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
 	c := New(f, Options{})
 	// api-key mode: scion starts with --harness-auth api-key, satisfied by a
 	// placeholder ANTHROPIC_API_KEY (Hub secret); the real credential is the
-	// in-container broker capability biscuit (settings.json). Must NOT request
+	// in-container broker capability token (settings.json). Must NOT request
 	// oauth-token (no CLAUDE_CODE_OAUTH_TOKEN exists in api-key mode).
 	if err := c.Start(context.Background(), StartOpts{Grove: "a", Task: "x", Harness: "claude", Project: "/g/a", APIKey: true}); err != nil {
 		t.Fatalf("Start: %v", err)

@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -13,6 +14,14 @@ import (
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/scion"
 )
+
+// ErrBootstrapLatched is returned by MintManagerBootstrap when the broker's
+// single-use /bootstrap latch is already consumed (HTTP 403). The mint step
+// tolerates it (the manager already has its bootstrap from a prior apply against
+// the SAME broker process). A broker RESTART reopens the latch, so mint then
+// succeeds and re-deposits a fresh ticket — letting a partially-failed first
+// apply recover on re-apply (vs the old skip-if-file-exists, which deadlocked).
+var ErrBootstrapLatched = errors.New("broker /bootstrap latch already consumed")
 
 // brokerStartAttempts/brokerStartInterval bound the start-manager retry that
 // absorbs the runtime-broker registration race: the scion runtime broker
@@ -141,15 +150,17 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		if d.MintManagerBootstrap == nil {
 			return nil
 		}
-		// Idempotent: the broker's /bootstrap latch is single-use per broker
-		// process, so re-minting on re-apply fails. If the manager's bootstrap was
-		// already deposited (a prior apply), the manager has enrolled with it —
-		// skip. (*boot is not read after this step, so leaving it zero is fine.)
-		if _, err := os.Stat(filepath.Join(s.Target, ".lever", "bootstrap.json")); err == nil {
-			return nil
-		}
+		// Idempotent (tied to the LIVE broker latch, not a stale file): mint; if the
+		// latch is already consumed (same broker process as a prior apply), tolerate
+		// it — the manager has its bootstrap.json from then. After a broker restart
+		// the latch reopens, mint succeeds, and a fresh ticket is deposited, so a
+		// partially-failed first apply (bootstrap written but manager never enrolled)
+		// recovers on re-apply. (*boot is not read after this step.)
 		m, err := d.MintManagerBootstrap(ctx)
 		if err != nil {
+			if errors.Is(err, ErrBootstrapLatched) {
+				return nil
+			}
 			return err
 		}
 		*boot = m

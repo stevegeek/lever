@@ -80,15 +80,10 @@ func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name s
 }
 
 // TestRunIdempotentReapply: re-applying a fully-up instance is a clean no-op —
-// an already-running scion server and manager are tolerated, and the single-use
-// /bootstrap mint is skipped because the bootstrap was already deposited.
+// an already-running scion server and manager are tolerated, and the mint step
+// tolerates the broker's spent single-use /bootstrap latch (ErrBootstrapLatched).
 func TestRunIdempotentReapply(t *testing.T) {
 	tree := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tree, ".lever"), 0o700)
-	// Pre-deposit the manager bootstrap (a prior apply) so mint is skipped.
-	if err := os.WriteFile(filepath.Join(tree, ".lever", "bootstrap.json"), []byte(`{"ticket":"t"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -101,17 +96,39 @@ func TestRunIdempotentReapply(t *testing.T) {
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
 		JailMount: "/lever",
-		// If mint were called it would fail — proves the skip-if-deposited path.
+		// Same broker process as a prior apply ⇒ latch spent ⇒ ErrBootstrapLatched.
+		// The mint step must tolerate it (the manager already has its bootstrap).
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			mintCalled = true
-			return BootstrapMaterial{}, fmt.Errorf("/bootstrap latch already consumed")
+			return BootstrapMaterial{}, ErrBootstrapLatched
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("re-apply of a fully-up instance must be a clean no-op: %v", err)
 	}
-	if mintCalled {
-		t.Fatal("mint-manager-bootstrap must be skipped when the bootstrap was already deposited")
+	if !mintCalled {
+		t.Fatal("mint must be CALLED (and tolerate the latch) — tied to the live broker, not a stale file")
+	}
+}
+
+// TestRunMintBootstrapPropagatesRealError: a non-latch mint error (e.g. the
+// broker is down) must NOT be swallowed.
+func TestRunMintBootstrapPropagatesRealError(t *testing.T) {
+	tree := t.TempDir()
+	app := &config.App{Name: "demo", Backend: "orbstack", Tree: tree, Manager: config.Manager{Image: "img"}}
+	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner()}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		JailMount: "/lever",
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			return BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: connection refused")
+		},
+	}
+	if err := Run(context.Background(), app, deps); err == nil {
+		t.Fatal("a real mint error (not the latch) must propagate, not be tolerated")
 	}
 }
 

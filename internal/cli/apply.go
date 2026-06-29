@@ -178,6 +178,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 				return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusForbidden {
+				// Single-use latch already consumed — signal the mint step to tolerate
+				// it (idempotent re-apply against the same broker process).
+				return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
+			}
 			if resp.StatusCode != http.StatusOK {
 				return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap returned %d", resp.StatusCode)
 			}

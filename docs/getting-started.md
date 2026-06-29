@@ -44,7 +44,7 @@ This builds two binaries:
   cross-compiled for the jail's linux/arm64. It's staged into the instance tree so the manager can
   run it inside the container.
 
-By default `LEVER_INSTANCE` is `$LEVER_INSTANCE`. For a different instance:
+Set `LEVER_INSTANCE` to your instance directory (the default is a neutral placeholder). For a different instance:
 
 ```sh
 make lever-manager-linux LEVER_INSTANCE=/path/to/your/instance
@@ -86,7 +86,7 @@ them. See [config-reference.md](./config-reference.md) for every key.
 Stage the in-jail binary into this instance before bringing it up:
 
 ```sh
-make lever-manager-linux LEVER_INSTANCE=/path/to/lever_to/examples/hello-grove
+make lever-manager-linux LEVER_INSTANCE="$PWD/examples/hello-grove"
 ```
 
 ## 3. Preview the bring-up plan (no side effects)
@@ -94,7 +94,7 @@ make lever-manager-linux LEVER_INSTANCE=/path/to/lever_to/examples/hello-grove
 Run `lever` from the **instance root** (where `lever.yaml` lives — there's no walk-up discovery):
 
 ```sh
-cd /path/to/lever_to/examples/hello-grove
+cd examples/hello-grove
 lever apply --dry-run
 ```
 

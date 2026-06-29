@@ -25,7 +25,7 @@ multi-project/
 Start the application from this directory with:
 
 ```sh
-lever apply lever.yaml
+lever apply
 ```
 
 The manager dispatches independent tasks to `svc-a`, `svc-b`, and `svc-c` in

@@ -24,7 +24,7 @@ two-agents-comms/
 Start the application from this directory with:
 
 ```sh
-lever apply lever.yaml
+lever apply
 ```
 
 The manager instructs `producer` to emit a value, relays it to `consumer`, and

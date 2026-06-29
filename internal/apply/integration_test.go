@@ -14,7 +14,7 @@ package apply_test
 //
 //	LEVER_IT=1 \
 //	LEVER_IT_IMAGE=scionlocal/lever-claude:latest \
-//	LEVER_IT_SCION_SRC=$HOME/lever-instance/vendor/scion-src \
+//	LEVER_IT_SCION_SRC=$LEVER_INSTANCE/vendor/scion-src \
 //	LEVER_IT_CRED=$HOME/.scion/oauth-token \
 //	go test -tags integration -run TestApplyLiveHelloGrove -timeout 35m ./internal/apply/
 //

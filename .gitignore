@@ -7,3 +7,9 @@
 internal/cli/testdata/acceptance/.lever-state/
 internal/cli/testdata/acceptance/workspace/.lever/
 internal/cli/testdata/acceptance/docs/
+
+# Local design drafts (not tracked)
+drafts/
+
+# Machine-specific Makefile overrides (LEVER_INSTANCE etc.) — copy from local.mk.example
+local.mk

@@ -63,13 +63,13 @@ func TestMachineFromFlagOrConfig(t *testing.T) {
 		t.Fatalf("explicit machine: got %q err %v", m, err)
 	}
 	// no flag → derived from discovered config
-	dir := instanceDir(t, "assistant")
+	dir := instanceDir(t, "demo")
 	t.Chdir(dir)
 	m, err := machineFromFlagOrConfig("")
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	if m != "lever-assistant" {
-		t.Fatalf("derived machine = %q, want lever-assistant", m)
+	if m != "lever-demo" {
+		t.Fatalf("derived machine = %q, want lever-demo", m)
 	}
 }

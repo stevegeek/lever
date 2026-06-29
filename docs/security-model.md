@@ -8,11 +8,11 @@ directory subtree and a curated set of network endpoints — enforced by the OS,
 behaving.**
 
 > **Validation status.** *Shipped and validated:* the containment primitives (§8); the capability
-> broker — mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance` gate
-> and the **api-key `/llm` strip-and-inject path end-to-end**
-> (broker verifies the biscuit, strips it, injects the real Console key host-side; live-validated
-> 2026-06-29, guarded by `make test-apikey-e2e`); container boot enrols the agent and registers the
-> broker tools over mTLS. *Still pending:* the full in-container claude driving a first-party tool
+> broker — mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance` gate,
+> and the **api-key `/llm` strip-and-inject path end-to-end** (broker verifies the biscuit, strips
+> it, injects the real Console key host-side), guarded by `make test-apikey-e2e`; container boot
+> enrols the agent and registers the broker tools over mTLS. *Still pending:* the full in-container
+> claude driving a first-party tool
 > (`/mcp/db/`) end-to-end, and mid-session token-refresh pickup (the agent reads `ANTHROPIC_AUTH_TOKEN`
 > once at startup — the 12h renew sidecar runs, but a running session's pickup of a rotated token is
 > unverified). The §4 inner cross-grove auth layer remains open by design (the broker gates LLM +

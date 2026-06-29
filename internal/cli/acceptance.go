@@ -202,18 +202,22 @@ func vmIDDir(role string) string {
 }
 
 // hostAgentBinPath resolves the HOST path of the linux/arm64 lever-agent binary
-// to copy into the VM: $LEVER_AGENT_BIN if set, else $HOME/lever-instance/vendor/bin/
-// lever-agent (the `make lever-agent-linux` output). It errors with a build hint
-// if the resolved path does not exist, so the gate FAILS CLOSED rather than
-// silently skipping the install.
+// to copy into the VM: $LEVER_AGENT_BIN if set, else $LEVER_INSTANCE/vendor/bin/
+// lever-agent (the `make lever-agent-linux` output; $LEVER_INSTANCE defaults to
+// $HOME/lever-instance). It errors with a build hint if the resolved path does not
+// exist, so the gate FAILS CLOSED rather than silently skipping the install.
 func hostAgentBinPath() (string, error) {
 	p := os.Getenv("LEVER_AGENT_BIN")
 	if p == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve home for lever-agent binary: %w", err)
+		inst := os.Getenv("LEVER_INSTANCE")
+		if inst == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("resolve home for lever-agent binary: %w", err)
+			}
+			inst = filepath.Join(home, "lever-instance")
 		}
-		p = filepath.Join(home, "lever-instance", "vendor", "bin", "lever-agent")
+		p = filepath.Join(inst, "vendor", "bin", "lever-agent")
 	}
 	if _, err := os.Stat(p); err != nil {
 		return "", fmt.Errorf("lever-agent binary not found at %s (build it: `make lever-agent-linux`, or set LEVER_AGENT_BIN): %w", p, err)

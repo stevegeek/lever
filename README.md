@@ -102,7 +102,7 @@ There are **two binaries** (one shared `internal/`):
 
 ```bash
 make install              # build host `lever` → ~/.local/bin/lever (must be on PATH). Requires Go 1.26+
-make lever-manager-linux  # cross-compile `lever-manager` → $LEVER_INSTANCE/vendor/bin (default $LEVER_INSTANCE)
+make lever-manager-linux  # cross-compile `lever-manager` → $LEVER_INSTANCE/vendor/bin (set LEVER_INSTANCE)
 make all                  # both
 
 # Bring an application up (jail + scion + manager) and attach the manager TTY.

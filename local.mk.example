@@ -1,0 +1,20 @@
+# Machine-specific Makefile overrides.
+#
+# Copy this file to `local.mk` (which is gitignored) and set your own paths.
+# `local.mk` is `-include`d at the top of the Makefile, so these values win over
+# the `?=` defaults without you editing the tracked Makefile.
+#
+#   cp local.mk.example local.mk
+#
+# Then edit the values below.
+
+# The instance tree (config + prompt at the root; a `tree:` subdir is mounted into
+# the manager container). Build outputs (lever-manager, lever-agent) are staged here.
+# LEVER_INSTANCE := $(HOME)/ai/my-instance
+
+# Where the `lever-claude` image is built (build-lever-image.sh runs `docker build`
+# here). Defaults to $(LEVER_INSTANCE)/image/lever-claude.
+# LEVER_IMAGE_CTX := $(LEVER_INSTANCE)/image/lever-claude
+
+# Where the host `lever` binary is installed (must be on PATH).
+# PREFIX := $(HOME)/.local/bin

@@ -1,6 +1,14 @@
+# Local overrides: put machine-specific paths in an untracked `local.mk` (e.g.
+#   LEVER_INSTANCE := $(HOME)/ai/my-instance
+# It is included first, so its values win over the `?=` defaults below. You can
+# also override per-invocation on the command line (`make install LEVER_INSTANCE=...`)
+# or via the environment — every var below uses `?=`. See local.mk.example.
+-include local.mk
+
 # Where the host `lever` control-plane binary is installed (must be on PATH).
 PREFIX ?= $(HOME)/.local/bin
-# The instance tree, bind-mounted into the manager container.
+# The instance tree, bind-mounted into the manager container. Set this to your
+# own instance directory (this default is a neutral placeholder).
 LEVER_INSTANCE ?= $(HOME)/lever-instance
 
 # Install the host `lever` binary (darwin/native) onto PATH — your everyday entry
@@ -29,8 +37,9 @@ lever-agent-linux:
 		go build -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
 	@file $(LEVER_INSTANCE)/vendor/bin/lever-agent
 
-# The lever-claude image build context (where build-lever-image.sh runs docker build).
-LEVER_IMAGE_CTX ?= $(LEVER_INSTANCE)/image/tools/scion/lever-claude
+# The lever-claude image build context (where build-lever-image.sh runs docker
+# build). Instance-specific — override to point at your image build dir.
+LEVER_IMAGE_CTX ?= $(LEVER_INSTANCE)/image/lever-claude
 
 # Cross-compile the agent helper + the reference db tool (linux/arm64) into the
 # lever-claude image build context, and sync the scion pre-start hook there. Run
@@ -54,5 +63,5 @@ all: install lever-manager-linux
 # + image bins, bakes the image, then runs the e2e script. Needs OrbStack + podman.
 .PHONY: test-apikey-e2e
 test-apikey-e2e: install lever-image-bins
-	bash $(LEVER_INSTANCE)/image/tools/scion/build-lever-image.sh
+	bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
 	bash tools/test/apikey-e2e.sh

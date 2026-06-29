@@ -85,6 +85,9 @@ security:                            # optional image policy (both default off)
 | `prompt_file` | path | no | — | A file whose contents become the manager's boot task. Resolved at the instance **root** (host-only, **outside** the mount, so an agent can't rewrite its own next boot prompt). Must be a confined relative path (no `..`, not absolute). Omit to start with scion's default task. |
 | `credential_file` | path | no | — | A file whose contents are set as the `CLAUDE_CODE_OAUTH_TOKEN` Hub secret and **projected into agent containers**. Relative paths resolve against the config file's directory; `~/` is expanded. Read at apply time with a **permission check (rejected if world-readable) and size cap**. **Its contents reach every agent — point it only at a real, least-privilege, `0600` credential.** See [security-model.md](./security-model.md). |
 | `allow_ports` | list of int | no | `[]` | Host tool ports the jail may reach over the host alias (`host.orb.internal`). Everything else outbound to the host and the LAN is dropped by the egress allowlist. Used for host-side MCP servers, etc. |
+| `llm_auth` | enum | no | inherits `broker.llm_auth` (or `subscription`) | `subscription` (the OAuth token is projected to this agent) or `api-key` (this agent holds only a `capability(llm)` biscuit; the broker injects the real key). **The whole instance must be uniform** — mixing `api-key` and `subscription` across manager/groves is rejected at config load (see [security-model.md](./security-model.md) §6.1). |
+| `obtain` | list of `{tool, op}` | no | `[]` | Capabilities this agent may self-obtain from the broker. `api-key` agents are auto-granted `obtain: [{tool: llm, op: generate}]`. |
+| `delegate` | list of `{tool, op, to: [...]}` | no | `[]` | Capabilities this agent may mint *bound to another agent* (`to`) to hand off. A delegated token is strictly narrower than what the delegator holds. |
 
 ### `groves[]`
 
@@ -93,6 +96,8 @@ security:                            # optional image policy (both default off)
 | `name` | string | **yes** | — | Grove identity (its agent slug / hub project name). |
 | `dir` | path | **yes** | — | Grove directory, **relative to `tree`** and inside it. Mounted in place, so files the grove writes appear on the host. Must not be absolute or escape the tree (`..`). |
 | `image` | string | no | `manager.image` | Container image for this grove. Set it to give a grove a different toolchain; omit to inherit the manager image (the common single-image case). `lever apply` loads **each distinct** image into the jail. |
+| `llm_auth` | enum | no | inherits `broker.llm_auth` | Same as `manager.llm_auth`, per grove — but the instance-uniform rule still applies. |
+| `obtain` / `delegate` | list | no | `[]` | Same shape and meaning as `manager.obtain` / `manager.delegate`. |
 
 ### `security`
 
@@ -108,6 +113,20 @@ configs are unaffected until you turn them on.
 > what the manager/groves declare. An explicit `--image` passed to `lever-manager agent start` is a
 > runtime override and isn't policy-checked — but it can only run an image already loaded into the
 > jail (which came from the validated config).
+
+### `broker`
+
+The host-side capability broker (outside the jail) that holds the real credential and mints
+CN-bound, short-lived capability tokens. See [security-model.md](./security-model.md) §6.
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `llm_auth` | enum | no | `subscription` | Instance-wide default LLM-auth mode (`subscription` \| `api-key`), inherited by manager/groves that don't set their own. **The effective set must be uniform** — a mixed instance is a hard config error. `api-key` also flips the jail to **closed-internet egress** (§2.2). |
+| `api_key_file` | path | **yes for `api-key`** | — | A file holding the real Anthropic Console key. Read host-side by the broker `/llm` proxy and injected into the upstream request; **never enters a container.** Must be **`0600`** (rejected otherwise), mirroring `credential_file`. |
+| `jail_port` | int | no | (assigned) | mTLS port the in-jail agents reach the broker on (allowlisted in the egress rules). |
+| `admin_port` | int | no | (assigned) | **Loopback-only** unauthenticated admin port (`/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`). Bind is rejected if non-loopback. |
+| `grant_ttl` | duration | no | `24h` | Capability token lifetime. A backstop only — the per-call epoch/revocation check is the real cut, so a session-scale TTL is safe (and must outlive the 12h renew cycle). |
+| `tools` | list of `{name, backend, operations, allowed_values}` | no | `[]` | First-party / brokered tools registered for capability minting. `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. |
 
 ## Conventions & derived values
 

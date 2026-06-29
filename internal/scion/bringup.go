@@ -4,8 +4,19 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 )
+
+// AlreadyRunning reports whether err is a scion "already running" error — used to
+// make bring-up steps idempotent on re-apply (the server/agent is already up).
+func AlreadyRunning(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "already running") || strings.Contains(s, "already exists")
+}
 
 // hubReadyAttempts/hubReadyInterval are package vars so tests can shrink them.
 var hubReadyAttempts = 30
@@ -49,7 +60,9 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises and
 // returns. Dev auth is default-on, so no `hub enable` is needed.
 func (c *Client) ServerStart(ctx context.Context) error {
-	if _, err := c.run(ctx, "", "server", "start"); err != nil {
+	// Idempotent: tolerate an already-running server on re-apply; waitHubReady
+	// then confirms the existing server is actually serving.
+	if _, err := c.run(ctx, "", "server", "start"); err != nil && !AlreadyRunning(err) {
 		return err
 	}
 	return c.waitHubReady(ctx)

@@ -50,6 +50,71 @@ func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name 
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
+// alreadyUpRunner simulates a fully-up instance on re-apply: `scion server
+// start` and agent `start` return "already running"; everything else succeeds.
+type alreadyUpRunner struct{ *exec.FakeRunner }
+
+func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" {
+		hasServer, hasStart := false, false
+		for _, a := range args {
+			if a == "server" {
+				hasServer = true
+			}
+			if a == "start" {
+				hasStart = true
+			}
+		}
+		if hasServer && hasStart {
+			return exec.Result{Code: 1, Stderr: "Error: server is already running (PID: 123)"}, fmt.Errorf("exit status 1")
+		}
+		if hasStart && !hasServer {
+			return exec.Result{Code: 1, Stderr: "Error: agent already running"}, fmt.Errorf("exit status 1")
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestRunIdempotentReapply: re-applying a fully-up instance is a clean no-op —
+// an already-running scion server and manager are tolerated, and the single-use
+// /bootstrap mint is skipped because the bootstrap was already deposited.
+func TestRunIdempotentReapply(t *testing.T) {
+	tree := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tree, ".lever"), 0o700)
+	// Pre-deposit the manager bootstrap (a prior apply) so mint is skipped.
+	if err := os.WriteFile(filepath.Join(tree, ".lever", "bootstrap.json"), []byte(`{"ticket":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner()}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	mintCalled := false
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		JailMount: "/lever",
+		// If mint were called it would fail — proves the skip-if-deposited path.
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			mintCalled = true
+			return BootstrapMaterial{}, fmt.Errorf("/bootstrap latch already consumed")
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("re-apply of a fully-up instance must be a clean no-op: %v", err)
+	}
+	if mintCalled {
+		t.Fatal("mint-manager-bootstrap must be skipped when the bootstrap was already deposited")
+	}
+}
+
 func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	// Make the retry fast for the test.
 	origAtt, origInt := brokerStartAttempts, brokerStartInterval

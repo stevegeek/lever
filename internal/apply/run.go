@@ -141,6 +141,13 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		if d.MintManagerBootstrap == nil {
 			return nil
 		}
+		// Idempotent: the broker's /bootstrap latch is single-use per broker
+		// process, so re-minting on re-apply fails. If the manager's bootstrap was
+		// already deposited (a prior apply), the manager has enrolled with it —
+		// skip. (*boot is not read after this step, so leaving it zero is fine.)
+		if _, err := os.Stat(filepath.Join(s.Target, ".lever", "bootstrap.json")); err == nil {
+			return nil
+		}
 		m, err := d.MintManagerBootstrap(ctx)
 		if err != nil {
 			return err
@@ -209,6 +216,10 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		var startErr error
 		for attempt := 0; attempt < brokerStartAttempts; attempt++ {
 			startErr = d.Scion.Start(ctx, opts)
+			// Idempotent: a manager already running (re-apply) is success, not error.
+			if startErr != nil && scion.AlreadyRunning(startErr) {
+				return nil
+			}
 			if startErr == nil || !isBrokerUnavailable(startErr) {
 				return startErr
 			}

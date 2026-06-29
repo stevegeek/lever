@@ -120,6 +120,20 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// StartBroker spawns `lever broker serve <config>` detached from the
 		// current process group so it outlives the apply invocation.
 		StartBroker: func(ctx context.Context) error {
+			// Idempotent (M2): if a broker is already serving (re-apply), don't spawn
+			// a duplicate — it would fail to bind the ports, die, and clobber
+			// broker.pid with a dead PID. A fast single-shot probe (no listener =>
+			// instant connection-refused, so no penalty on a fresh apply).
+			probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			if req, err := http.NewRequestWithContext(probeCtx, "GET", adminURL+"/epoch", nil); err == nil {
+				if resp, err := http.DefaultClient.Do(req); err == nil {
+					_ = resp.Body.Close()
+					if resp.StatusCode == http.StatusOK {
+						return nil // already serving; keep the existing process + PID
+					}
+				}
+			}
 			cmd := exec.Command(os.Args[0], "broker", "serve", configPath)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			// Pass the resolved host-alias IP so the broker mints its server cert

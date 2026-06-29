@@ -8,6 +8,9 @@
 # biscuit and INJECTS the real (fake) Console key, reaching the fake upstream. Key
 # isolation is verified: the real key appears in NO container byte; the agent holds
 # only the biscuit + a placeholder. The G2 renew sidecar is confirmed running.
+# Finally it asserts closed-egress containment: from inside the jail the
+# allowlisted broker jail_port is reachable while the non-allowlisted admin_port and
+# the public internet are DROPped.
 #
 # Prereqs: OrbStack + rootless podman; the lever-claude image built with the
 # current hook + lever-agent (the Makefile target rebuilds the host `lever` and the
@@ -123,6 +126,29 @@ inctr 'printenv ANTHROPIC_API_KEY' | grep -q 'placeholder' && ok "container ANTH
 
 say "assert: G2 renew sidecar running"
 inctr 'ps aux | grep -q "[l]ever-agent renew --loop" && echo yes' | grep -q yes && ok "lever-renew sidecar is running" || bad "renew sidecar not running"
+
+# --- closed-egress containment (the headline property) ---------------------------------
+# Differential, host-internet-independent: on the broker's alias IP the allowlisted
+# jail_port must be reachable while the non-allowlisted admin_port is DROPped (the
+# catch-all/alias DROP makes a non-allowlisted port hang → curl timeout, exit 28).
+# This proves the egress allowlist does port-level filtering on the alias, not just
+# "the host happens to have no route".
+say "assert: closed-egress allowlist (jail_port reachable, admin_port + public internet DROPped)"
+aliasip="$(inctr 'cat /home/scion/.claude/settings.json' | grep -oE 'https://[0-9.]+:' | head -1 | sed -E 's#https://([0-9.]+):#\1#')"
+if [ -z "$aliasip" ]; then
+  bad "could not resolve broker alias IP from settings.json"
+else
+  echo "  broker alias IP: $aliasip (jail_port=$JAIL_PORT admin_port=$ADMIN_PORT)"
+  # jail_port: allowed → TCP connects (TLS may fail without a client cert, but NOT a timeout).
+  jx="$(inctr "curl -sS -k --max-time 6 -o /dev/null https://$aliasip:$JAIL_PORT/ ; echo \$?" | tail -1)"
+  if [ "$jx" = "28" ] || [ "$jx" = "7" ]; then bad "jail_port unreachable (exit $jx) — allowlist too tight"; else ok "jail_port reachable (curl exit $jx, TCP allowed)"; fi
+  # admin_port on the alias: NOT allowlisted for the jail → DROP → timeout (exit 28).
+  ax="$(inctr "curl -sS --max-time 6 -o /dev/null http://$aliasip:$ADMIN_PORT/epoch ; echo \$?" | tail -1)"
+  [ "$ax" = "28" ] && ok "admin_port DROPped from the jail (curl timeout)" || bad "admin_port reachable from the jail (exit $ax) — loopback admin surface exposed"
+  # arbitrary public internet (literal IP, bypasses the dropped DNS): catch-all DROP → timeout.
+  px="$(inctr "curl -sS --max-time 6 -o /dev/null https://1.1.1.1/ ; echo \$?" | tail -1)"
+  [ "$px" = "28" ] && ok "public internet DROPped (curl timeout to 1.1.1.1)" || bad "public internet reachable from the jail (exit $px) — egress not closed"
+fi
 
 # --- verdict ---------------------------------------------------------------------
 say "result"

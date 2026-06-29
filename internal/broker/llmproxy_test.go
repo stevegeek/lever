@@ -161,3 +161,47 @@ func TestLLMProxyDeniesMissingToken(t *testing.T) {
 		t.Fatal("no token got 200; want 401/403")
 	}
 }
+
+func TestLLMProxyDeniesNoClientCert(t *testing.T) {
+	// RequireAgent (llmproxy.go:50) is the first gate: with no mTLS client cert at
+	// all, the proxy must 403 and never reach the upstream — the token is always
+	// CN-bound (R4 closed by failing closed).
+	var gotKey, gotAuth string
+	up := fakeAnthropic(t, &gotKey, &gotAuth)
+	defer up.Close()
+	b, _ := newTestBrokerForLLM(t, []byte("sk-REAL-KEY"), up.URL)
+
+	rec := httptest.NewRecorder()
+	// No req.TLS → no verified client cert.
+	req := httptest.NewRequest(http.MethodPost, "/llm/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+mintLLM(t, b.keys.Private, "worker", b.MinEpoch()))
+	b.JailHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no client cert)", rec.Code)
+	}
+	if gotKey != "" {
+		t.Fatal("no-cert request reached the upstream (key forwarded)")
+	}
+}
+
+func TestLLMProxyDeniesMalformedBearer(t *testing.T) {
+	// bearerToken (llmproxy.go:91) base64url-decodes the credential; junk after
+	// "Bearer " must yield 401 with no upstream call (no real key injected).
+	var gotKey, gotAuth string
+	up := fakeAnthropic(t, &gotKey, &gotAuth)
+	defer up.Close()
+	b, caller := newTestBrokerForLLM(t, []byte("sk-REAL-KEY"), up.URL)
+
+	rec := httptest.NewRecorder()
+	req := newMTLSRequest(t, b, caller, http.MethodPost, "/llm/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer !!!not-base64url!!!")
+	b.JailHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (malformed bearer)", rec.Code)
+	}
+	if gotKey != "" {
+		t.Fatal("malformed-bearer request reached the upstream (key forwarded)")
+	}
+}

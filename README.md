@@ -1,5 +1,7 @@
 # Lever
 
+Homepage: **[lever.to](https://lever.to)**
+
 **Containerised, jailed multi-agent orchestration.** Lever lets a single *manager* agent (the
 brain) drive a fleet of *grove* agents that do real work — each in its own isolated container —
 while the whole stack runs inside a **jail** designed so that a compromised or prompt-injected agent
@@ -170,4 +172,4 @@ runs. Both are idempotent — re-running `up` resumes a suspended manager and re
 
 ## Licence
 
-Open source; specific licence to be finalised (MIT/Apache-2.0 intended).
+[MIT](LICENSE) © Stephen Ierodiaconou.

@@ -9,8 +9,8 @@ behaving.**
 
 > **Validation status.** *Shipped and validated:* the containment primitives (§8); the capability
 > broker — mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance` gate,
-> and the **api-key `/llm` strip-and-inject path end-to-end** (broker verifies the biscuit, strips
-> it, injects the real Console key host-side), guarded by `make test-apikey-e2e`; container boot
+> and the **api-key `/llm` strip-and-inject path end-to-end** (broker verifies the capability token,
+> strips it, injects the real Console key host-side), guarded by `make test-apikey-e2e`; container boot
 > enrols the agent and registers the broker tools over mTLS. *Still pending:* the full in-container
 > claude driving a first-party tool
 > (`/mcp/db/`) end-to-end, and mid-session token-refresh pickup (the agent reads `ANTHROPIC_AUTH_TOKEN`
@@ -114,7 +114,7 @@ layer around every agent. On the OrbStack VM's modern kernel the rootless daemon
 | arbitrary host path bind-mount | accepted by the runtime (hub does no path validation) | bounded to the project tree |
 | host LAN / business network | full reach via host networking | **unreachable** (OrbStack routing; firewall to back it) |
 | host loopback (local tools) | n/a | only allowlisted `host:port`s; rest dropped |
-| real LLM credential in every container | ambient, shared, long-lived OAuth token in every agent | **api-key mode:** no real key in any container — only a CN-bound, short-lived `capability(llm)` biscuit; the broker injects the Console key host-side (§6.1) |
+| real LLM credential in every container | ambient, shared, long-lived OAuth token in every agent | **api-key mode:** no real key in any container — only a CN-bound, short-lived `capability(llm)` token; the broker injects the Console key host-side (§6.1) |
 | exfiltration of in-tree data | n/a | **not bounded** in subscription mode; narrowed (not eliminated) under api-key closed egress — see §7 |
 
 **Result:** an injected manager or grove can reach neither host secrets nor the LAN; its blast
@@ -209,9 +209,14 @@ subscription mode.
 ## 6. Credential blast radius, and the path to capabilities
 
 > **STATUS: BUILT.** The capability broker described below as "target" now ships and is
-> enforced — realised with **biscuits** (Datalog), not macaroons. The "Finding" and "Target design"
-> text is kept as the threat narrative; **§6.1 + §6.2 describe the built, enforced state.** When this
-> section says *macaroon*, read *biscuit*.
+> enforced — realised with a **typed Ed25519-signed capability token** (`internal/cap/token`), not
+> macaroons. (It was first built on biscuits/Datalog; that was simplified to a typed signed token after
+> an audit found the only biscuit-specific feature — offline, holder-side attenuation — went unused,
+> because every capability is minted online by the broker, which is always on the verification path.)
+> The "Finding" and "Target design" text is kept as the threat narrative; **§6.1 + §6.2 describe the
+> built, enforced state.** Where this section says *macaroon*, read *signed capability token* — with one
+> correction: narrowing happens at **mint** (the broker bakes constraints into the signed token), not by
+> offline holder-side attenuation.
 
 **Finding.** The manager sets the upstream credential (`CLAUDE_CODE_OAUTH_TOKEN`) as a Hub secret;
 scion **resolves and injects it into every agent container's environment** at start (user/owner
@@ -225,31 +230,32 @@ highest-value secret in the system.
 This is the strongest argument for replacing **pushing keys to agents** with **agents exchanging
 identity for narrow capabilities.**
 
-### Target design: a host-side capability broker (macaroons)
+### Target design: a host-side capability broker (capability tokens)
 
 - **Today:** the raw upstream credential is pushed into every agent. Any holder has full authority —
   no attenuation, no expiry, no audience binding.
 - **Target:** a **capability broker on the host** (outside the jail) holds the raw credential and
-  never projects it into a container. Agents present their identity and **exchange it for an
-  attenuated, caveated, short-TTL capability** (a [macaroon](https://research.google/pubs/pub41892/)
-  or equivalent) scoped to exactly what they need — bound by caveats to **audience** (the specific
-  upstream/model endpoint), **scope** (this project / read-only / these tools), and **expiry**. An
-  agent uses the capability and it expires; compromising one grove leaks at most a narrow,
-  short-lived token, not the master credential.
+  never projects it into a container. Agents present their identity and **exchange it for a
+  caveated, short-TTL capability** (a signed capability token) scoped to exactly what they need —
+  bound by constraints to **audience** (the specific upstream/model endpoint), **scope** (this
+  project / read-only / these tools), and **expiry**. An agent uses the capability and it expires;
+  compromising one grove leaks at most a narrow, short-lived token, not the master credential.
 - **Placement rides the existing fence:** the broker is reachable only via the allowlisted host
   alias (it becomes one of the `allow_ports` endpoints), so the egress allowlist (§2.2) already gates
   which containers can reach it. The raw credential stays on the host.
-- **Macaroon caveats** encode the attenuation: the broker mints a broad (but still caveated)
-  capability for the manager, and the manager (or broker) further attenuates per grove — a grove's
-  token is strictly weaker than the manager's, by construction.
+- **Signed-token constraints** encode the scoping at mint: the broker mints each agent a token scoped
+  to exactly the (tool, operation) and parameter values its policy allows — a grove's token is
+  strictly weaker than the manager's because the broker mints it that way. Delegation (a manager
+  obtaining a token bound to a grove) is likewise an **online broker mint** gated by the
+  request/delegation policy, not an offline hand-off.
 
 ### Migration path
 
 1. **Pull, don't push** — move the credential out of per-agent env into the broker the agents call.
 2. **Coarse scoping first** — issue per-project tokens (this is the §4 "groves get project-scoped
    tokens" step), retiring development auth so the broker becomes the single token authority.
-3. **Caveats for least privilege** — add macaroon caveats (expiry, audience, method/scope) for true
-   least-privilege, attenuated per grove.
+3. **Caveats for least privilege** — add signed-token constraints (expiry, audience, method/scope)
+   for true least-privilege, scoped per grove at mint.
 4. **Pair with an egress proxy** — close the §7 exfiltration gap so even a leaked capability can only
    be used against approved endpoints, not arbitrary internet.
 
@@ -259,8 +265,8 @@ gets the same broker token") and directly bounds the credential blast radius ide
 ### 6.1 Built state (api-key mode) and the mixed-instance residual
 
 The capability broker is now built: an agent in **`llm_auth: api-key`** mode holds only a
-short-lived, CN-bound `capability(llm)` biscuit and routes the model through the broker `/llm` proxy,
-which strips the biscuit and injects the real Console key host-side. Such an agent **never receives a
+short-lived, CN-bound `capability(llm)` token and routes the model through the broker `/llm` proxy,
+which strips the token and injects the real Console key host-side. Such an agent **never receives a
 real Anthropic credential**, and in a **uniformly api-key** instance the jail also runs closed-internet
 egress (§2.2) — so the §6 blast radius is closed for that instance.
 
@@ -277,7 +283,7 @@ Rather than ship that footgun, **an instance must be uniformly api-key OR unifor
 `App.Validate` (`internal/config/config.go:validateBroker`) rejects any config whose *effective*
 agent modes mix the two (`mixedLLMAuth`), so a mixed instance never reaches apply. The two pure cases
 are both clean: **all-subscription** = every agent holds the OAuth key, open egress (the owner/dev
-trade, by design); **all-api-key** = no agent holds a real key, capabilities gated by biscuits, egress
+trade, by design); **all-api-key** = no agent holds a real key, capabilities gated by signed tokens, egress
 closed jail-wide. Note this is *not* an escalation surface: the `api-key` flag controls only whether an
 agent obtains a capability token, **not** credential availability, so flipping a grove's
 (manager-writable) manifest mode could never *conjure* a token the host did not project; the validation
@@ -301,10 +307,11 @@ These are the shipped, code-enforced properties of the capability layer — the 
   (`/revoke` and `/bump-epoch`, persisted across restarts and seeded at construction). Revoking an
   agent or bumping the epoch denies its outstanding tokens immediately — this is verified for both the
   `/llm` proxy and the first-party tool gateway.
-- **Constraints can only narrow at mint.** `/request` validates each requested constraint against the
-  tool's `AllowedValues` (fail closed) and bakes it into the token as a `check if param(...)`, so the
-  minted capability is usable only for that exact parameter value; attenuation can add checks but never
-  remove them.
+- **Constraints can only narrow, and only the broker mints.** `/request` validates each requested
+  constraint against the tool's `AllowedValues` (fail closed) and bakes it into the signed token as an
+  equality check on that request parameter (`internal/cap/token`), so the minted capability is usable
+  only for that exact value. The broker is the sole minter — there is no offline way to widen a token,
+  and any tampered token fails Ed25519 signature verification.
 - **Forged identity headers are scrubbed.** The gateway deletes every inbound `X-Lever-*` header before
   processing (`internal/broker/gateway.go`), then sets `X-Lever-Caller` itself from the verified CN — a
   jail agent cannot forge broker-internal context.

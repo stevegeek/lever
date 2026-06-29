@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,46 @@ import (
 
 	"github.com/lever-to/lever/internal/scion"
 )
+
+type errInbox struct{}
+
+func (errInbox) Inbox(context.Context, bool, string) ([]scion.Event, error) {
+	return nil, errors.New("scion unreachable")
+}
+
+func TestPollOncePropagatesInboxErrorWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "events.log")
+	b := New(errInbox{}, file)
+	if _, err := b.PollOnce(context.Background()); err == nil {
+		t.Fatal("PollOnce must propagate the Inbox error")
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatal("PollOnce must not create the events file when Inbox fails")
+	}
+}
+
+func TestPollOnceSkipsEventsWithoutID(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "events.log")
+	// One event has no "id" (id guard at bridge.go:46) — it must be dropped, leaving
+	// only the identified event written.
+	fi := &fakeInbox{batches: [][]scion.Event{
+		{{"type": "noise"}, {"id": "e1", "type": "input-needed"}},
+	}}
+	b := New(fi, file)
+	fresh, err := b.PollOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 || fresh[0].ID() != "e1" {
+		t.Fatalf("want only e1, got %v", fresh)
+	}
+	data, _ := os.ReadFile(file)
+	if lines := strings.Split(strings.TrimSpace(string(data)), "\n"); len(lines) != 1 {
+		t.Fatalf("want 1 written line, got %d: %q", len(lines), string(data))
+	}
+}
 
 type fakeInbox struct {
 	batches [][]scion.Event

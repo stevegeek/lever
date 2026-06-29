@@ -193,3 +193,12 @@ func TestWriteIdentityPermissions(t *testing.T) {
 		t.Fatalf("LoadIdentity round-trip failed: ok=%v", ok)
 	}
 }
+
+func TestLoadIdentityMissingReturnsFalse(t *testing.T) {
+	// Boot's idempotency hinges on this: an empty dir must report ok=false so Boot
+	// re-enrols rather than proceeding with a non-existent identity (a wrong true
+	// here would skip enrolment and then fail building the mTLS client).
+	if _, ok := LoadIdentity(t.TempDir()); ok {
+		t.Fatal("LoadIdentity on an empty dir must return ok=false")
+	}
+}

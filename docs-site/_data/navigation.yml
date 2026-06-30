@@ -1,0 +1,6 @@
+- title: Guide
+  url: /introduction/
+  collections: [guides]
+- title: Reference
+  url: /reference/config/
+  collections: [reference]

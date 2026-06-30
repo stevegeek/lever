@@ -511,11 +511,11 @@ func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (strin
 // is intentionally left OPEN by the allowlist, so curling example.com would NOT
 // test containment — the broker port contrast does.)
 func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
-	jailState, jerr := h.probeReachable(ctx, h.app.Broker.JailPort)
+	jailState, jerr := h.probeReachable(ctx, h.app.EffectiveJailPort())
 	if jailState == "uncertain" {
 		return false, jerr // FAIL-CLOSED: cannot classify the jail-port probe
 	}
-	adminState, aerr := h.probeReachable(ctx, h.app.Broker.AdminPort)
+	adminState, aerr := h.probeReachable(ctx, h.app.EffectiveAdminPort())
 	if adminState == "uncertain" {
 		return false, aerr // FAIL-CLOSED: cannot classify the admin-port probe
 	}

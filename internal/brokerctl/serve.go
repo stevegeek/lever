@@ -32,11 +32,11 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	cfg.PersistRevocation = state.SaveRevocation
 	b := broker.New(cfg)
 
-	jailLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.Broker.JailPort))
+	jailLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveJailPort()))
 	if err != nil {
 		return fmt.Errorf("brokerctl: bind jail listener: %w", err)
 	}
-	adminLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.Broker.AdminPort))
+	adminLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveAdminPort()))
 	if err != nil {
 		_ = jailLn.Close()
 		return fmt.Errorf("brokerctl: bind admin listener: %w", err)

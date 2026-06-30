@@ -1,7 +1,9 @@
-# hello-grove: the smallest agent-manager application — a manager + one grove.
+# hello-grove: the smallest agent-manager application, a manager + one grove.
 name: hello-grove
 backend: orbstack
 tree: workspace
+scion:
+  version: 666333f9   # pin a scion commit; fetched + cross-compiled into the jail
 # api-key is the secure default (real key never in the container) but needs a
 # Console API key; this demo opts into subscription (your Claude OAuth token).
 broker:
@@ -9,6 +11,7 @@ broker:
 manager:
   image: scionlocal/lever-claude:latest
   prompt_file: manager.md
+  credential_file: ~/.scion/oauth-token  # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []
 groves:
   - name: worker

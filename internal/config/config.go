@@ -74,6 +74,16 @@ const (
 	EgressClosed EgressMode = "closed"
 )
 
+// Default broker ports, used when the config leaves jail_port/admin_port unset
+// (0). They are fixed constants rather than dynamically allocated so the apply
+// process and the separately-spawned `lever broker serve` (which re-reads the
+// same config) agree on the ports without any cross-process plumbing. Set
+// explicit ports to run more than one instance's broker on the host at once.
+const (
+	DefaultBrokerJailPort  = 8443
+	DefaultBrokerAdminPort = 8444
+)
+
 // Broker holds broker settings + first-party tool declarations.
 type Broker struct {
 	JailPort        int           `yaml:"jail_port"`
@@ -501,6 +511,24 @@ func (a *App) EffectiveGroveLLMAuth(g Grove) LLMAuthMode {
 		return g.LLMAuth
 	}
 	return a.brokerLLMAuthDefault()
+}
+
+// EffectiveJailPort is the broker's in-jail mTLS port: the configured value, or
+// DefaultBrokerJailPort when unset (0).
+func (a *App) EffectiveJailPort() int {
+	if a.Broker.JailPort != 0 {
+		return a.Broker.JailPort
+	}
+	return DefaultBrokerJailPort
+}
+
+// EffectiveAdminPort is the broker's loopback admin port: the configured value,
+// or DefaultBrokerAdminPort when unset (0).
+func (a *App) EffectiveAdminPort() int {
+	if a.Broker.AdminPort != 0 {
+		return a.Broker.AdminPort
+	}
+	return DefaultBrokerAdminPort
 }
 
 func (a *App) brokerLLMAuthDefault() LLMAuthMode {

@@ -49,7 +49,7 @@ func newBrokerServeCmd() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			cmd.Printf("broker %q serving on 127.0.0.1:%d (admin :%d)\n", app.Name, app.Broker.JailPort, app.Broker.AdminPort)
+			cmd.Printf("broker %q serving on 127.0.0.1:%d (admin :%d)\n", app.Name, app.EffectiveJailPort(), app.EffectiveAdminPort())
 			return brokerctl.Serve(ctx, app, stateFor(path))
 		},
 	}
@@ -88,7 +88,7 @@ func newRevokeCmd() *cobra.Command {
 
 // adminPost POSTs to the running broker's loopback admin port (from config).
 func adminPost(ctx context.Context, app *config.App, path string, body []byte) error {
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", app.Broker.AdminPort, path)
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), path)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err

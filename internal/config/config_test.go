@@ -156,6 +156,27 @@ func TestDefaultLLMAuthIsAPIKey(t *testing.T) {
 	}
 }
 
+// Broker ports default to fixed constants when unset (0), so a config need not
+// declare them; an explicit value still wins. Both `apply` and the spawned
+// `broker serve` read the same config, so the default is computed identically
+// in both processes.
+func TestBrokerPortsDefaultWhenUnset(t *testing.T) {
+	a := &App{}
+	if got := a.EffectiveJailPort(); got != DefaultBrokerJailPort {
+		t.Fatalf("EffectiveJailPort default = %d, want %d", got, DefaultBrokerJailPort)
+	}
+	if got := a.EffectiveAdminPort(); got != DefaultBrokerAdminPort {
+		t.Fatalf("EffectiveAdminPort default = %d, want %d", got, DefaultBrokerAdminPort)
+	}
+	a2 := &App{Broker: Broker{JailPort: 9001, AdminPort: 9002}}
+	if a2.EffectiveJailPort() != 9001 || a2.EffectiveAdminPort() != 9002 {
+		t.Fatalf("explicit ports not honoured: jail=%d admin=%d", a2.EffectiveJailPort(), a2.EffectiveAdminPort())
+	}
+	if DefaultBrokerJailPort == DefaultBrokerAdminPort {
+		t.Fatal("jail and admin default ports must differ")
+	}
+}
+
 // The api-key default must demand a broker.api_key_file — a minimal config that
 // opts into neither subscription nor a key must fail closed.
 func TestAPIKeyDefaultRequiresAPIKeyFile(t *testing.T) {

@@ -159,7 +159,16 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		m, err := d.MintManagerBootstrap(ctx)
 		if err != nil {
 			if errors.Is(err, ErrBootstrapLatched) {
-				return nil
+				// A spent latch is only tolerable when a bootstrap ticket is already
+				// staged (true idempotent re-apply against the same broker). If none
+				// is staged, a stale broker from a prior run is being reused and the
+				// new manager could never enrol — fail loudly instead of booting a
+				// doomed manager.
+				staged := filepath.Join(s.Target, ".lever", "bootstrap.json")
+				if _, statErr := os.Stat(staged); statErr == nil {
+					return nil
+				}
+				return fmt.Errorf("broker /bootstrap latch already consumed but no bootstrap ticket is staged at %s; a stale broker is likely still running — run `lever down` then retry", staged)
 			}
 			return err
 		}

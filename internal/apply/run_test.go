@@ -84,6 +84,14 @@ func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name s
 // tolerates the broker's spent single-use /bootstrap latch (ErrBootstrapLatched).
 func TestRunIdempotentReapply(t *testing.T) {
 	tree := t.TempDir()
+	// A prior apply already staged the manager's bootstrap ticket, so a spent
+	// latch on this re-apply is tolerable (the manager has what it needs).
+	if err := os.MkdirAll(filepath.Join(tree, ".lever"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, ".lever", "bootstrap.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -129,6 +137,34 @@ func TestRunMintBootstrapPropagatesRealError(t *testing.T) {
 	}
 	if err := Run(context.Background(), app, deps); err == nil {
 		t.Fatal("a real mint error (not the latch) must propagate, not be tolerated")
+	}
+}
+
+// TestRunLatchedWithoutStagedBootstrapFails: a spent latch with NO staged
+// bootstrap ticket means a stale broker is being reused (its latch was consumed
+// by an earlier run, but this tree has no ticket). The new manager could never
+// enrol, so the mint step must fail loudly and point at `lever down`, rather than
+// silently boot a doomed manager.
+func TestRunLatchedWithoutStagedBootstrapFails(t *testing.T) {
+	tree := t.TempDir() // nothing staged
+	app := &config.App{Name: "demo", Backend: "orbstack", Tree: tree, Manager: config.Manager{Image: "img"}}
+	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner()}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		JailMount: "/lever",
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			return BootstrapMaterial{}, ErrBootstrapLatched
+		},
+	}
+	err := Run(context.Background(), app, deps)
+	if err == nil {
+		t.Fatal("a spent latch with no staged bootstrap must fail loudly (stale broker)")
+	}
+	if !strings.Contains(err.Error(), "lever down") {
+		t.Fatalf("error should guide the user to `lever down`, got: %v", err)
 	}
 }
 

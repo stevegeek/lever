@@ -74,7 +74,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	if !ok {
 		return apply.Deps{}, nil, nil, fmt.Errorf("apply currently supports the orbstack backend only")
 	}
-	allowed := append([]int{app.Broker.JailPort}, app.Manager.AllowPorts...)
+	allowed := append([]int{app.EffectiveJailPort()}, app.Manager.AllowPorts...)
 	closed, warn := app.ClosedInternetEgress()
 	if warn != "" {
 		// Surface the mixed-mode egress relaxation (R2); not fatal.
@@ -97,7 +97,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	sc := scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 
 	state := brokerctl.StateDir(filepath.Dir(configPath))
-	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.Broker.AdminPort)
+	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort())
 
 	// The jail's resolved host-alias IP (host.orb.internal as seen from the jail).
 	// Agents dial the broker by this IP — under closed-internet egress DNS/53 is
@@ -214,7 +214,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return apply.BootstrapMaterial{
 				Ticket:    result.Ticket,
 				BrokerCA:  string(caPEM),
-				BrokerURL: fmt.Sprintf("https://%s:%d", brokerHost, app.Broker.JailPort),
+				BrokerURL: fmt.Sprintf("https://%s:%d", brokerHost, app.EffectiveJailPort()),
 				AgentCN:   app.ManagerCN(),
 			}, nil
 		},

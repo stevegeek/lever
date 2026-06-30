@@ -1,3 +1,5 @@
+.idea
+
 /lever
 *.test
 
@@ -10,6 +12,16 @@ internal/cli/testdata/acceptance/docs/
 
 # Local design drafts (not tracked)
 drafts/
+docs/audits/
+
+# Per-instance runtime state + staged binaries from running the examples
+# (broker keys/state, deposited bootstrap, scion project markers, cross-compiled
+# in-jail binaries) — never commit.
+**/.lever-state/
+**/.lever/
+**/.scion
+**/.lever-manifest.yaml
+examples/*/workspace/vendor/
 
 # Machine-specific Makefile overrides (LEVER_INSTANCE etc.) — copy from local.mk.example
 local.mk

@@ -3,6 +3,7 @@ package brokerctl
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 
@@ -30,6 +31,18 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	cfg.RevocationState = rev
 	cfg.PersistRevocation = state.SaveRevocation
+
+	// Persist the broker's audit decisions (provision/enrol/request/revoke …) to
+	// the state-dir log. Without this the broker defaults to a discard logger, so
+	// every allow/deny — the first thing you need when a grove can't enrol — is
+	// lost. Opened before broker.New so cfg.Log is set; reused by the supervisor.
+	logf, err := os.OpenFile(state.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logf.Close()
+	cfg.Log = slog.New(slog.NewTextHandler(logf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
 	b := broker.New(cfg)
 
 	jailLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveJailPort()))
@@ -56,14 +69,6 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		_ = adminLn.Close()
 		return err
 	}
-
-	logf, err := os.OpenFile(state.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		_ = jailLn.Close()
-		_ = adminLn.Close()
-		return err
-	}
-	defer logf.Close()
 
 	sup := NewSupervisor(app.Broker.Tools, adminURL, logf)
 	if err := sup.Start(ctx); err != nil {

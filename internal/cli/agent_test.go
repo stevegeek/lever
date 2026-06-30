@@ -15,6 +15,17 @@ import (
 	"github.com/lever-to/lever/internal/scion"
 )
 
+// realProvision runs inside the manager CONTAINER, where scion mounts the tree
+// at /workspace (the jail-level /lever mount does not exist in the container).
+// The manager's bootstrap therefore lives at /workspace/.lever/bootstrap.json;
+// pointing at /lever silently skips grove provisioning (file absent → empty
+// Bootstrap, nil error), leaving every dispatched grove unable to enrol.
+func TestManagerBootstrapPathIsContainerWorkspace(t *testing.T) {
+	if !strings.HasPrefix(managerBootstrapPath, "/workspace/") {
+		t.Fatalf("managerBootstrapPath = %q; must be under the container /workspace mount, not the jail-level /lever", managerBootstrapPath)
+	}
+}
+
 func clientWith(f *exec.FakeRunner) ClientFactory {
 	return func() *scion.Client {
 		return scion.New(f, scion.Options{Bin: "scion", HubEndpoint: "http://127.0.0.1:8080"})

@@ -32,9 +32,12 @@ type ProvisionFunc func(ctx context.Context, grove string) (agent.Bootstrap, err
 // skips staging entirely, preserving existing non-brokered behaviour.
 var provisionGrove ProvisionFunc = realProvision
 
-// managerBootstrapPath is the canonical path where lever apply deposits the
-// manager's own bootstrap.json inside the jail. Tests can override it.
-var managerBootstrapPath = "/lever/.lever/bootstrap.json"
+// managerBootstrapPath is where the manager's own bootstrap.json is readable
+// from inside the manager CONTAINER, where realProvision runs. scion mounts the
+// manager's tree at /workspace in the container (the jail-level /lever mount does
+// not exist there), so the bootstrap deposited by `lever apply` at
+// <tree>/.lever/bootstrap.json appears here. Tests can override it.
+var managerBootstrapPath = "/workspace/.lever/bootstrap.json"
 
 // managerIDDir is the directory holding the manager's mTLS identity (cert+key+ca).
 // It is the "~/.lever-id" path resolved at process start. Tests can override it.

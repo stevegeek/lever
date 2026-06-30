@@ -47,7 +47,7 @@ name: assistant                      # instance identity → jail machine "lever
 backend: orbstack                    # containment backend
 tree: workspace                      # bind-mounted SUBDIR (the root is not mounted)
 scion:
-  source: vendor/scion-src           # scion source to cross-compile into the jail
+  version: 666333f9                  # pin a scion commit; fetched + cross-compiled into the jail
 manager:
   image: scionlocal/lever-claude:latest
   prompt_file: prompt.md             # boot task; resolved at the ROOT (host-only, outside the mount)
@@ -71,15 +71,18 @@ security:                            # optional image policy (both default off)
 | `name` | string | **yes** | — | Instance identity. The jail machine is named `lever-<name>`; the manager agent's slug is `<name>`. Must match `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes a machine name and a shell token). |
 | `backend` | string | **yes** | — | Containment backend. `orbstack` is the validated backend today; `linux-docker` is reserved (not yet implemented). |
 | `tree` | path | **yes** | — | A **confined relative subdirectory** of the instance root, bind-mounted **in place** into the jail (agents edit these real files live). Must not be `.` (the root itself is never mounted), absolute, or contain `..`. |
-| `scion` | object | no | — | Scion engine source (see below). |
+| `scion` | object | no | — | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | — | The manager agent (see below). |
 | `groves` | list | no | `[]` | Project agents the manager orchestrates (see below). |
 
 ### `scion`
 
+Provide **at most one** of `version` or `source` (they are mutually exclusive). Omit both to rely on a scion already present in the jail.
+
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `source` | path | no | — | Path to the scion source tree, cross-compiled into the jail at provision time. Relative paths resolve against the config file's directory. Omit to rely on a scion already present in the jail. |
+| `version` | string | no | — | A scion module version/commit (a commit hash like `666333f9`, or a `vX.Y.Z` tag) fetched via the Go module system and cross-compiled into the jail at provision time. **No vendored source tree** — this is the recommended way to pin Scion. Requires a Go toolchain on the host. |
+| `source` | path | no | — | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. |
 
 ### `manager`
 

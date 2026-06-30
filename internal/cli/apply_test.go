@@ -22,6 +22,8 @@ func writeTmpConfig(t *testing.T) string {
 	body := `name: demo
 backend: orbstack
 tree: ./tree
+broker:
+  llm_auth: subscription
 manager:
   image: scionlocal/lever-claude:latest
   allow_ports: [3305]
@@ -36,14 +38,16 @@ groves:
 	return p
 }
 
-// TestApplyResolvesClosedInternetFromConfig verifies that an api-key instance
-// resolves to closed egress (no warning). This documents the posture contract
-// consumed by buildApplyDeps when it sets cfg.ClosedInternet.
-func TestApplyResolvesClosedInternetFromConfig(t *testing.T) {
-	app := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthAPIKey, JailPort: 8443}}
-	closed, warn := app.ClosedInternetEgress()
-	if !closed || warn != "" {
-		t.Fatalf("api-key instance must resolve closed egress: closed=%v warn=%q", closed, warn)
+// Egress is an explicit posture, decoupled from llm_auth: closed only when
+// `egress: closed` is set; api-key alone leaves egress open.
+func TestApplyEgressPostureFromConfig(t *testing.T) {
+	closedApp := &config.App{Egress: config.EgressClosed, Broker: config.Broker{LLMAuth: config.LLMAuthAPIKey, JailPort: 8443}}
+	if closed, warn := closedApp.ClosedInternetEgress(); !closed || warn != "" {
+		t.Fatalf("egress: closed must resolve closed egress: closed=%v warn=%q", closed, warn)
+	}
+	openApp := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthAPIKey, JailPort: 8443}}
+	if closed, _ := openApp.ClosedInternetEgress(); closed {
+		t.Fatal("api-key WITHOUT egress: closed must leave egress open (decoupled)")
 	}
 }
 

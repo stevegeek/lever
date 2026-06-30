@@ -13,7 +13,7 @@ import (
 func instanceDir(t *testing.T, name string) string {
 	t.Helper()
 	dir := t.TempDir()
-	body := "name: " + name + "\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img:1\n"
+	body := "name: " + name + "\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img:1\n"
 	if err := os.WriteFile(filepath.Join(dir, config.CanonicalName), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

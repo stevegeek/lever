@@ -22,6 +22,7 @@ groves:
     # capabilities the manager delegated to it. This is the no-self-path invariant.
     obtain: []
 broker:
+  llm_auth: subscription
   jail_port: 8443
   admin_port: 8444
   tools:

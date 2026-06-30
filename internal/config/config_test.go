@@ -9,6 +9,12 @@ import (
 
 func writeTmp(t *testing.T, body string) string {
 	t.Helper()
+	// The default llm_auth is api-key, which requires a broker.api_key_file these
+	// minimal fixtures don't provide. Tests that don't exercise llm_auth default to
+	// subscription; tests that care set broker:/llm_auth: explicitly.
+	if !strings.Contains(body, "llm_auth") && !strings.Contains(body, "broker:") {
+		body += "broker:\n  llm_auth: subscription\n"
+	}
 	dir := t.TempDir()
 	tree := filepath.Join(dir, "tree")
 	_ = os.MkdirAll(filepath.Join(tree, "groves", "appa"), 0o755)
@@ -94,7 +100,7 @@ func mustWriteFile(t *testing.T, path, content string) {
 func TestCredentialFileResolved(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "lever.yaml")
-	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: ws\nmanager:\n  credential_file: secrets/tok\n")
+	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager:\n  credential_file: secrets/tok\n")
 	app, err := Load(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +111,7 @@ func TestCredentialFileResolved(t *testing.T) {
 
 	home, _ := os.UserHomeDir()
 	cfg2 := filepath.Join(dir, "l2.yaml")
-	mustWriteFile(t, cfg2, "name: a\nbackend: orbstack\ntree: ws\nmanager:\n  credential_file: ~/.scion/oauth-token\n")
+	mustWriteFile(t, cfg2, "name: a\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager:\n  credential_file: ~/.scion/oauth-token\n")
 	app2, err := Load(cfg2)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +121,7 @@ func TestCredentialFileResolved(t *testing.T) {
 	}
 
 	cfg3 := filepath.Join(dir, "l3.yaml")
-	mustWriteFile(t, cfg3, "name: a\nbackend: orbstack\ntree: ws\n")
+	mustWriteFile(t, cfg3, "name: a\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n")
 	app3, _ := Load(cfg3)
 	if app3.Manager.CredentialFile != "" {
 		t.Fatalf("empty CredentialFile = %q", app3.Manager.CredentialFile)
@@ -140,6 +146,58 @@ func TestValidateRejectsScionSourceAndVersionTogether(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: ./scion-src\n  version: abc123\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("expected error: scion.source and scion.version are mutually exclusive")
+	}
+}
+
+func TestDefaultLLMAuthIsAPIKey(t *testing.T) {
+	a := &App{}
+	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {
+		t.Fatalf("default llm_auth = %q, want api-key (secure default)", got)
+	}
+}
+
+// The api-key default must demand a broker.api_key_file — a minimal config that
+// opts into neither subscription nor a key must fail closed.
+func TestAPIKeyDefaultRequiresAPIKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, CanonicalName)
+	mustWriteFile(t, p, "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("api-key default must require broker.api_key_file")
+	}
+}
+
+// egress: closed requires a uniformly api-key instance.
+func TestEgressClosedRejectsSubscription(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, CanonicalName)
+	mustWriteFile(t, p, "name: demo\nbackend: orbstack\negress: closed\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("egress: closed with a subscription agent must be rejected")
+	}
+}
+
+func TestRejectsInvalidEgress(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, CanonicalName)
+	mustWriteFile(t, p, "name: demo\nbackend: orbstack\negress: maybe\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("invalid egress value must be rejected")
+	}
+}
+
+// api-key + egress: closed + a 0600 api_key_file is the fully-locked-down posture.
+func TestAPIKeyEgressClosedLoads(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "console.key")
+	mustWriteFile(t, key, "sk-ant-fake")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, CanonicalName)
+	mustWriteFile(t, p, "name: demo\nbackend: orbstack\negress: closed\ntree: ws\nbroker:\n  llm_auth: api-key\n  api_key_file: "+key+"\nmanager: {}\n")
+	if _, err := Load(p); err != nil {
+		t.Fatalf("api-key + egress: closed + api_key_file must load: %v", err)
 	}
 }
 
@@ -187,7 +245,7 @@ groves:
 func TestLoadConfinesTree(t *testing.T) {
 	// tree must be a confined relative subdir: reject "." (root==mount),
 	// absolute, "..", and empty. A normal subdir is accepted and joined.
-	base := "name: demo\nbackend: orbstack\nmanager: {}\n"
+	base := "name: demo\nbackend: orbstack\nbroker:\n  llm_auth: subscription\nmanager: {}\n"
 	for _, bad := range []string{".", "/abs/tree", "../escape", ""} {
 		body := base
 		if bad != "" {
@@ -235,7 +293,7 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 func TestManagerPromptPathIsRootRelative(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, CanonicalName)
-	body := "name: demo\nbackend: orbstack\ntree: workspace\nmanager:\n  prompt_file: boot.md\n"
+	body := "name: demo\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  prompt_file: boot.md\n"
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -379,6 +437,7 @@ manager:
 groves:
   - {name: worker, dir: work, obtain: []}
 broker:
+  llm_auth: subscription
   jail_port: 8443
   admin_port: 8444
   tools:
@@ -477,7 +536,8 @@ func TestUniformInstancesValidate(t *testing.T) {
 	}
 	subscription := &App{
 		Name: "demo", Backend: "orbstack", Tree: "/x",
-		Groves: []Grove{{Name: "worker", Dir: "w"}}, // both default to subscription
+		Broker: Broker{LLMAuth: LLMAuthSubscription},
+		Groves: []Grove{{Name: "worker", Dir: "w"}}, // both subscription (explicit opt-in)
 	}
 	if err := subscription.Validate(); err != nil {
 		t.Fatalf("uniform subscription should validate: %v", err)
@@ -535,13 +595,6 @@ func TestEffectiveLLMAuthGroveOverride(t *testing.T) {
 	}
 }
 
-func TestEffectiveLLMAuthDefaultsToSubscription(t *testing.T) {
-	a := &App{Groves: []Grove{{Name: "w"}}}
-	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthSubscription {
-		t.Fatalf("default: got %q want subscription", got)
-	}
-}
-
 func TestValidateBrokerLLMAuth(t *testing.T) {
 	t.Run("invalid llm_auth rejects", func(t *testing.T) {
 		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: bogus\n"
@@ -578,22 +631,17 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 }
 
 func TestClosedInternetEgress(t *testing.T) {
-	// all api-key ⇒ closed, no warning
-	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
-	closed, warn := a.ClosedInternetEgress()
-	if !closed || warn != "" {
-		t.Fatalf("all-api-key: closed=%v warn=%q want true/empty", closed, warn)
+	// Explicit knob, decoupled from llm_auth: egress: closed ⇒ closed; unset ⇒ open.
+	closedApp := &App{Egress: EgressClosed, Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	if closed, warn := closedApp.ClosedInternetEgress(); !closed || warn != "" {
+		t.Fatalf("egress: closed ⇒ closed=%v warn=%q want true/empty", closed, warn)
 	}
-	// mixed ⇒ open + warning
-	a.Groves[0].LLMAuth = LLMAuthSubscription
-	closed, warn = a.ClosedInternetEgress()
-	if closed || warn == "" {
-		t.Fatalf("mixed: closed=%v warn=%q want false/non-empty", closed, warn)
+	openAPIKey := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	if closed, _ := openAPIKey.ClosedInternetEgress(); closed {
+		t.Fatal("api-key without egress: closed must leave egress open (decoupled)")
 	}
-	// all subscription ⇒ open, no warning
-	a2 := &App{Groves: []Grove{{Name: "w"}}}
-	closed, warn = a2.ClosedInternetEgress()
-	if closed || warn != "" {
-		t.Fatalf("all-subscription: closed=%v warn=%q want false/empty", closed, warn)
+	openSub := &App{Broker: Broker{LLMAuth: LLMAuthSubscription}, Groves: []Grove{{Name: "w"}}}
+	if closed, warn := openSub.ClosedInternetEgress(); closed || warn != "" {
+		t.Fatalf("default (open): closed=%v warn=%q want false/empty", closed, warn)
 	}
 }

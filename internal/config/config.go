@@ -45,15 +45,33 @@ type Tool struct {
 }
 
 // LLMAuthMode selects how an agent authenticates to the Anthropic API.
+//   - api-key (the default): the container holds only a capability(llm) token
+//     and reaches the model through the broker /llm proxy, which injects the
+//     real Console key host-side — the real key never enters the container.
 //   - subscription: the container reaches api.anthropic.com directly with the
-//     owner's subscription credentials (dev/personal carve-out).
-//   - api-key: the container holds only a capability(llm) token and reaches the
-//     model through the broker /llm proxy, which injects the real Console key.
+//     owner's OAuth credential (a dev/personal opt-in — the real token is
+//     projected into the container).
 type LLMAuthMode string
 
 const (
 	LLMAuthSubscription LLMAuthMode = "subscription"
 	LLMAuthAPIKey       LLMAuthMode = "api-key"
+)
+
+// EgressMode selects the jail's outbound network posture. It is independent of
+// LLMAuthMode: api-key isolates the credential; egress controls what the agent
+// can reach on the network.
+//   - open (the default): the allowlist drops the LAN and non-allowlisted
+//     host-alias ports but leaves the public internet reachable (so agents can
+//     fetch dependencies).
+//   - closed: a catch-all DROP so the jail reaches ONLY the broker port — the
+//     most locked-down posture. Requires a uniformly api-key instance (a
+//     subscription agent needs direct internet to reach Anthropic).
+type EgressMode string
+
+const (
+	EgressOpen   EgressMode = "open"
+	EgressClosed EgressMode = "closed"
 )
 
 // Broker holds broker settings + first-party tool declarations.
@@ -117,6 +135,7 @@ type Security struct {
 type App struct {
 	Name     string      `yaml:"name"`
 	Backend  string      `yaml:"backend"`
+	Egress   EgressMode  `yaml:"egress"`
 	Tree     string      `yaml:"tree"`
 	Manager  Manager     `yaml:"manager"`
 	Scion    ScionConfig `yaml:"scion"`
@@ -317,7 +336,20 @@ func (a *App) validateBroker() error {
 	if a.mixedLLMAuth() {
 		return fmt.Errorf("config: llm_auth is mixed across the instance (both api-key and subscription agents) — this is unsupported; an instance must be uniformly api-key or uniformly subscription (see security-model.md §6.1)")
 	}
-	if closed, _ := a.ClosedInternetEgress(); closed || a.AnyAPIKeyAgent() {
+	// Egress is an independent posture (not derived from llm_auth). `closed`
+	// requires a uniformly api-key instance — a subscription agent needs direct
+	// internet to reach Anthropic, which a closed jail forbids.
+	switch a.Egress {
+	case "", EgressOpen, EgressClosed:
+	default:
+		return fmt.Errorf("config: egress %q invalid (want open|closed)", a.Egress)
+	}
+	if a.Egress == EgressClosed {
+		if _, anySub := a.llmAuthModes(); anySub {
+			return fmt.Errorf("config: egress: closed requires every agent to be api-key (a subscription agent needs direct internet to reach Anthropic)")
+		}
+	}
+	if a.AnyAPIKeyAgent() {
 		if a.Broker.APIKeyFile == "" {
 			return fmt.Errorf("config: broker.api_key_file is required when llm_auth is api-key")
 		}
@@ -475,21 +507,17 @@ func (a *App) brokerLLMAuthDefault() LLMAuthMode {
 	if a.Broker.LLMAuth != "" {
 		return a.Broker.LLMAuth
 	}
-	return LLMAuthSubscription
+	return LLMAuthAPIKey
 }
 
-// ClosedInternetEgress resolves the instance-level egress posture (R2). Egress
-// is applied jail-wide, not per container, so the jail is closed only when EVERY
-// agent is api-key (uniform); a uniform-subscription instance stays open. Mixed
-// instances are rejected at validation (validateBroker / security-model.md §6.1),
-// so the mixed branch here is defence-in-depth — it should be unreachable for a
-// validated config, and returns a warning rather than a posture if ever hit.
+// ClosedInternetEgress reports the jail's egress posture, applied jail-wide. It
+// is an explicit, independent knob (App.Egress) — NOT derived from llm_auth:
+// closed iff `egress: closed` is set. validateBroker guarantees `closed`
+// implies a uniformly api-key instance, so a subscription agent is never left
+// unable to reach Anthropic. The warning return is retained for the apply call
+// site but is always empty now that the posture is explicit.
 func (a *App) ClosedInternetEgress() (closed bool, warning string) {
-	anyAPIKey, anySubscription := a.llmAuthModes()
-	if anyAPIKey && anySubscription {
-		return false, "llm_auth mixed across instance (unsupported; should have been rejected at validation): api-key agents are NOT key-isolated — the OAuth credential is hub-projected to every container and jail egress stays open (see security-model.md §6.1)"
-	}
-	return anyAPIKey && !anySubscription, ""
+	return a.Egress == EgressClosed, ""
 }
 
 // GroveImage returns the container image a grove should run on: its own

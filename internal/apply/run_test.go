@@ -141,7 +141,7 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
 	cfg := filepath.Join(dir, config.CanonicalName)
-	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	app, err := config.Load(cfg)
@@ -231,7 +231,7 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, config.CanonicalName)
-	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img\n  prompt_file: manager.md\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  prompt_file: manager.md\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	app, err := config.Load(cfg)
@@ -317,7 +317,7 @@ func TestStartManagerNoLLMAuthEnvForSubscription(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
 	cfg := filepath.Join(dir, config.CanonicalName)
-	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nmanager:\n  image: img\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	app, err := config.Load(cfg)

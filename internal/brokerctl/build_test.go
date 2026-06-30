@@ -21,6 +21,7 @@ func sampleApp() *config.App {
 		},
 		Groves: []config.Grove{{Name: "worker", Dir: "work"}},
 		Broker: config.Broker{
+			LLMAuth:   config.LLMAuthSubscription,
 			JailPort:  8443,
 			AdminPort: 8444,
 			Tools: []config.Tool{{

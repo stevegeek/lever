@@ -221,6 +221,7 @@ groves:
   - name: worker
     dir: w
 broker:
+  llm_auth: subscription
   jail_port: 0
   admin_port: 0
   tools:

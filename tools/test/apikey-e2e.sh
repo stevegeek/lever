@@ -71,6 +71,7 @@ name: $NAME
 scion:
   version: ${SCION_VERSION:-666333f9}
 backend: orbstack
+egress: closed
 tree: workspace
 manager:
   image: scionlocal/lever-claude:latest

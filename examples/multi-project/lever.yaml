@@ -1,6 +1,10 @@
 name: multi-project
 backend: orbstack
 tree: workspace
+# api-key is the secure default (real key never in the container) but needs a
+# Console API key; this demo opts into subscription (your Claude OAuth token).
+broker:
+  llm_auth: subscription
 manager:
   image: scionlocal/lever-claude:latest
   prompt_file: manager.md

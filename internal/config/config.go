@@ -91,7 +91,13 @@ type Grove struct {
 }
 
 type ScionConfig struct {
+	// Source is a host path to a scion source checkout to cross-compile into the
+	// jail (local development). Mutually exclusive with Version.
 	Source string `yaml:"source"`
+	// Version pins a scion module version/commit (e.g. a commit hash or a
+	// vX.Y.Z tag) that lever fetches via the Go module system and cross-compiles
+	// into the jail — no vendored source tree. Mutually exclusive with Source.
+	Version string `yaml:"version"`
 }
 
 // Security holds opt-in image policy. Both default off (empty/false) for
@@ -225,6 +231,9 @@ func Load(path string) (*App, error) {
 		app.Tree = abs
 	}
 	app.Scion.Source = resolvePath(app.Scion.Source, app.dir)
+	if app.Scion.Source != "" && app.Scion.Version != "" {
+		return nil, fmt.Errorf("config: scion.source and scion.version are mutually exclusive")
+	}
 	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
 	app.injectLLMGrants()
 	if err := app.Validate(); err != nil {

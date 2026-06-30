@@ -30,6 +30,10 @@ type Config struct {
 	// ScionSource is the host path to a scion source checkout to cross-compile and
 	// install into the jail. Empty disables scion provisioning (back-compat).
 	ScionSource string
+	// ScionVersion pins a scion module version/commit that the backend fetches
+	// via the Go module system and cross-compiles into the jail (no vendored
+	// source tree). Mutually exclusive with ScionSource. Empty = none.
+	ScionVersion string
 	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
 	// so the jail can reach ONLY the broker port on the host alias. Required for
 	// api-key mode: LLM traffic must flow broker→Anthropic, not

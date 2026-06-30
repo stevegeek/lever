@@ -136,6 +136,13 @@ func TestValidateRejectsGroveOutsideTree(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsScionSourceAndVersionTogether(t *testing.T) {
+	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: ./scion-src\n  version: abc123\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected error: scion.source and scion.version are mutually exclusive")
+	}
+}
+
 func TestGroveImageFallsBackToManagerImage(t *testing.T) {
 	app := &App{
 		Manager: Manager{Image: "scionlocal/lever-claude:latest"},

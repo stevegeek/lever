@@ -69,7 +69,7 @@ EOF
 cat > "$INST/lever.yaml" <<EOF
 name: $NAME
 scion:
-  source: $REPO_ROOT/../lever/workspace/vendor/scion-src
+  version: ${SCION_VERSION:-666333f9}
 backend: orbstack
 tree: workspace
 manager:

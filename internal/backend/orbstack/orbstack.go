@@ -5,6 +5,7 @@ package orbstack
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -91,8 +92,8 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.ensureRuntimes(ctx); err != nil {
 		return err
 	}
-	if cfg.ScionSource != "" {
-		if err := o.ensureScion(ctx, cfg.ScionSource); err != nil {
+	if cfg.ScionSource != "" || cfg.ScionVersion != "" {
+		if err := o.ensureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
 			return err
 		}
 	}
@@ -110,17 +111,31 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 // left-side failure (e.g. the host `cat`) propagate instead of being masked by a
 // successful right side. bash (not sh) is required because dash on Linux hosts —
 // where the linux-docker backend will run — does not support `set -o pipefail`.
-func (o *OrbStack) ensureScion(ctx context.Context, source string) error {
-	fi, err := os.Stat(source)
-	if err != nil {
-		return fmt.Errorf("scion source %q: %w", source, err)
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("scion source %q is not a directory", source)
+// scionModulePath is the upstream scion Go module. `version` ("" → source mode)
+// pins a commit/tag fetched via the Go module system.
+const scionModulePath = "github.com/GoogleCloudPlatform/scion"
+
+func (o *OrbStack) ensureScion(ctx context.Context, source, version string) error {
+	goBin := "go"
+	buildDir := source
+	if version != "" {
+		gb, dir, err := o.fetchScionModule(ctx, version)
+		if err != nil {
+			return err
+		}
+		goBin, buildDir = gb, dir
+	} else {
+		fi, err := os.Stat(source)
+		if err != nil {
+			return fmt.Errorf("scion source %q: %w", source, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("scion source %q is not a directory", source)
+		}
 	}
 	bin := filepath.Join(os.TempDir(), "lever-scion-"+o.machine)
-	if _, err := o.r.RunIn(ctx, source, map[string]string{"GOOS": "linux", "GOARCH": "arm64"},
-		"go", "build", "-o", bin, "./cmd/scion"); err != nil {
+	if _, err := o.r.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": "arm64"},
+		goBin, "build", "-o", bin, "./cmd/scion"); err != nil {
 		return fmt.Errorf("cross-compile scion: %w", err)
 	}
 	install := fmt.Sprintf(
@@ -130,6 +145,35 @@ func (o *OrbStack) ensureScion(ctx context.Context, source string) error {
 		return fmt.Errorf("install scion into jail: %w", err)
 	}
 	return nil
+}
+
+// fetchScionModule downloads the pinned scion module via the Go module system
+// and returns (goBinary, moduleSourceDir) for the cross-compile. It resolves the
+// REAL go binary (GOROOT/bin/go) and uses it for the build because the module
+// cache lives outside any toolchain-manager project dir — e.g. a version manager
+// that resolves `go` by walking up for a project file (asdf) cannot resolve it
+// from the read-only module cache, whereas the absolute binary always works.
+func (o *OrbStack) fetchScionModule(ctx context.Context, version string) (goBin, dir string, err error) {
+	root, err := o.r.Run(ctx, nil, "go", "env", "GOROOT")
+	if err != nil {
+		return "", "", fmt.Errorf("resolve go toolchain (is go on PATH?): %w", err)
+	}
+	goBin = filepath.Join(strings.TrimSpace(root.Stdout), "bin", "go")
+	out, err := o.r.Run(ctx, nil, goBin, "mod", "download", "-json", scionModulePath+"@"+version)
+	if err != nil {
+		return "", "", fmt.Errorf("download scion %s: %w", version, err)
+	}
+	var dl struct{ Dir, Error string }
+	if jerr := json.Unmarshal([]byte(out.Stdout), &dl); jerr != nil {
+		return "", "", fmt.Errorf("parse `go mod download` output for scion %s: %w", version, jerr)
+	}
+	if dl.Error != "" {
+		return "", "", fmt.Errorf("download scion %s: %s", version, dl.Error)
+	}
+	if dl.Dir == "" {
+		return "", "", fmt.Errorf("`go mod download` returned no source dir for scion %s", version)
+	}
+	return goBin, dl.Dir, nil
 }
 
 // shellSingleQuote wraps s in single quotes safe for POSIX shells, escaping any

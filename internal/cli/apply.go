@@ -85,6 +85,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		ProjectTree:    app.Tree,
 		AllowedPorts:   allowed,
 		ScionSource:    app.Scion.Source,
+		ScionVersion:   app.Scion.Version,
 		ClosedInternet: closed,
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.

@@ -6,11 +6,11 @@ nav_order: 3
 # Example: a personal AI assistant
 
 A good fit for Lever is a **personal assistant made of several long-running
-agents** — distinct personas, each trusted with a different slice of your data
-and tools. You talk to a **manager**; it dispatches work to the personas. The
-question Lever answers is: *how do you give one persona access to your notes and
-another only web search, without ever putting a real credential in any
-container — and without trusting the agents to behave?*
+agents**: distinct personas, each trusted with a different slice of your data
+and tools. You talk to a **manager** and it dispatches work to the personas.
+Lever lets you give one persona access to your notes and another only web search,
+without ever putting a real credential in any container, and without trusting the
+agents to behave.
 
 This page builds a small, generic version of that. Nothing here reflects a real
 setup; the tools (`notes`, `web`) are illustrative.
@@ -19,15 +19,15 @@ setup; the tools (`notes`, `web`) are illustrative.
 
 ```
 manager  ── dispatches ──▶  archivist   (reads & writes your notes)
-                            researcher  (web search only — no notes)
+                            researcher  (web search only, no notes)
 ```
 
 - **`archivist`** is a trusted persona: it may read *and* write the `notes` tool.
 - **`researcher`** is less trusted (it reads untrusted web content, a prime
-  prompt-injection vector), so it gets **only** `web` search — it cannot touch
+  prompt-injection vector), so it gets **only** `web` search. It cannot touch
   notes at all.
-- Both run in **api-key mode**: the real model key lives host-side in the broker,
-  and the jail runs with **closed internet egress**. Neither container ever holds
+- Both run in **api-key mode** (the default): the real model key lives host-side
+  in the broker, and `egress: closed` seals the jail. Neither container ever holds
   a usable credential, and neither can reach anything but the broker.
 
 ## The config
@@ -36,24 +36,30 @@ manager  ── dispatches ──▶  archivist   (reads & writes your notes)
 name: assistant
 backend: orbstack
 tree: workspace
+egress: closed                            # seal the jail: agents reach only the broker
 scion:
-  source: vendor/scion-src
+  version: 666333f9                       # pin a scion commit; fetched + cross-compiled into the jail
 manager:
   image: scionlocal/lever-claude:latest
   prompt_file: manager.md
 
 broker:
-  llm_auth: api-key                       # no real key in any container; closed egress
+  llm_auth: api-key                       # no real key in any container (the default)
   api_key_file: ~/.secrets/anthropic-key  # 0600; read host-side by the /llm proxy only
   tools:
     - name: notes
-      backend: 127.0.0.1:3201
-      operations: [read, write]
+      command: [lever-tool-notes]         # the supervised subprocess the broker proxies to
+      backend: 127.0.0.1:3201             # loopback address it listens on (injected as -backend)
+      operations:
+        - { name: read }
+        - { name: write }
       allowed_values:
         folder: [journal, reference]      # a notes capability may only be pinned to these
     - name: web
+      command: [lever-tool-web]
       backend: 127.0.0.1:3202
-      operations: [search]
+      operations:
+        - { name: search }
 
 groves:
   - name: archivist                       # trusted: read + write notes
@@ -70,6 +76,11 @@ groves:
 Every field here is in the [configuration reference](/reference/config/). The
 two things doing the security work are **`broker`** (the credential boundary) and
 the per-grove **`obtain`** grants (the capability boundary).
+
+Each `tools` entry is a host-side subprocess the broker supervises: `command`
+launches it and `backend` is the loopback address it listens on (injected as
+`-backend`). The broker proxies gated calls to that address, so the tool's real
+backend never enters a container.
 
 ## What happens at run time
 
@@ -100,7 +111,7 @@ Behind that one command, the boundary is enforced at three points:
 3. **Gated call.** The agent calls the `notes` tool through the broker's MCP
    gateway at `/mcp/notes/`, presenting the token. The gateway verifies the
    signature, that the caller *is* the bound agent, and that the request matches
-   the pinned constraint — then forwards it. The real key for the model, and the
+   the pinned constraint, then forwards it. The real key for the model, and the
    real backend for the tool, stay on the host side.
 
 Now consider `researcher`, fed a malicious web page that tells it to read your
@@ -113,9 +124,9 @@ vendor/bin/lever-manager agent start researcher \
 
 - It has no `notes` grant, so the broker **refuses to mint** any `notes`
   capability for it (`/request` → 403). 
-- Even if it somehow obtained a token, every token is **identity-bound** — a
+- Even if it somehow obtained a token, every token is **identity-bound**, a
   capability minted for `archivist` is rejected when presented by `researcher`.
-- It cannot reach `api.anthropic.com`, your host, or the LAN directly — egress is
+- It cannot reach `api.anthropic.com`, your host, or the LAN directly, egress is
   closed, so its only outbound path is the broker, and the broker only does what
   its capabilities allow.
 
@@ -133,16 +144,15 @@ manager:
 ```
 
 Now the manager can ask the broker to mint a `notes/read` token **bound to
-`researcher`** and narrowed (e.g. `folder: reference`) — a one-off, strictly
+`researcher`** and narrowed (e.g. `folder: reference`), a one-off, strictly
 weaker capability the broker enforces. Delegation always goes through the broker
 (it is the sole minter), so a delegated token can only ever be *narrower* than
 what policy allows, never wider.
 
 ## Why this needs Lever
 
-Scion would run these three agents and message between them — but it would inject
+Scion would run these three agents and message between them, but it would inject
 the real model key into every container in cleartext, leave egress open, and gate
-tools only with a coarse shared token. The per-persona "you may read notes, you
-may not" boundary, the key never touching a container, and the closed egress are
-exactly what Lever adds. See [the introduction](/introduction/) and
-[security model](/security-model/).
+tools only with a coarse shared token. The per-persona boundary, the key never
+touching a container, and the closed egress are what Lever adds. See the
+[security model](/security-model/) for how each is enforced.

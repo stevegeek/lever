@@ -4,7 +4,7 @@ nav_order: 2
 ---
 # Getting started
 
-This walks you from nothing to a running lever application — a **manager** agent that dispatches
+This walks you from nothing to a running lever application, a **manager** agent that dispatches
 work to a **grove** (project agent), all inside a jail that contains the whole stack. We use the
 bundled [`examples/hello-grove`](https://github.com/lever-to/lever/tree/main/examples/hello-grove) as the worked example.
 
@@ -19,7 +19,7 @@ your machine
 ```
 
 The jail is the security boundary. Your project tree is bind-mounted **in place**, so agents edit
-the real files — there's no copy or sync. See [security-model.md](/security-model/) for what
+the real files, there's no copy or sync. See [security-model.md](/security-model/) for what
 the jail does and doesn't protect.
 
 ## Prerequisites
@@ -30,9 +30,9 @@ the jail does and doesn't protect.
 - **A manager container image** on your host Docker, e.g. `scionlocal/lever-claude:latest`. `lever
   apply` loads this image into the jail; it can't be pulled from inside (egress is locked down).
   Confirm with `docker images | grep scionlocal/lever-claude`.
-- **A Claude OAuth token** in a file (mint with `claude setup-token`), if your manager image runs
-  Claude Code. Point `manager.credential_file` at it. Use a least-privilege token — it is projected
-  into agent containers (see the security doc).
+- **A Claude OAuth token** in a file (mint with `claude setup-token`) for this subscription demo.
+  Point `manager.credential_file` at it. Use a least-privilege token; in subscription mode it is
+  projected into the agent containers (see the security doc).
 
 ## 1. Install the binaries
 
@@ -45,13 +45,15 @@ This builds two binaries:
 
 - **`lever`** (host control plane) → `~/.local/bin/lever` (make sure that's on your `PATH`).
 - **`lever-manager`** (in-jail orchestration) → `$LEVER_INSTANCE/vendor/bin/lever-manager`,
-  cross-compiled for the jail's linux/arm64. It's staged into the instance tree so the manager can
-  run it inside the container.
+  cross-compiled for the jail's linux/arm64. It must land **inside the bind-mounted `tree:`** so the
+  manager can run it in the container, so `LEVER_INSTANCE` points at the **tree directory** (the
+  `tree:` subdir), not the instance root.
 
-Set `LEVER_INSTANCE` to your instance directory (the default is a neutral placeholder). For a different instance:
+Set `LEVER_INSTANCE` to the bind-mounted tree (the default is a neutral placeholder). For a different
+instance, point it at that instance's tree:
 
 ```sh
-make lever-manager-linux LEVER_INSTANCE=/path/to/your/instance
+make lever-manager-linux LEVER_INSTANCE=/path/to/your/instance/workspace
 ```
 
 Verify: `lever version`.
@@ -62,10 +64,11 @@ Verify: `lever version`.
 prompt (host-only); only the **`workspace/`** subdir is bind-mounted into the jail:
 
 ```
-hello-grove/             # instance root — run `lever` here; NOT mounted
+hello-grove/             # instance root, run `lever` here; NOT mounted
 ├── lever.yaml           # the config
 ├── manager.md           # the manager's boot prompt (host-only)
 └── workspace/           # tree: the bind-mounted subdir (agents edit this)
+    ├── vendor/bin/      # staged lever-manager (must be inside the tree)
     └── groves/
         └── worker/      # the grove's workspace
 ```
@@ -74,28 +77,41 @@ hello-grove/             # instance root — run `lever` here; NOT mounted
 # examples/hello-grove/lever.yaml
 name: hello-grove
 backend: orbstack
-tree: workspace          # a confined SUBDIR — the root itself is never mounted
+tree: workspace          # a confined SUBDIR; the root itself is never mounted
+scion:
+  version: 666333f9      # pin a scion commit; fetched + cross-compiled into the jail
+# api-key is the secure default (the real key never enters the container) but
+# needs a Console API key. This demo opts into subscription (your Claude OAuth
+# token), so egress stays open and the token is projected to the agents.
+broker:
+  llm_auth: subscription
 manager:
   image: scionlocal/lever-claude:latest
   prompt_file: manager.md   # resolved at the root (host-only), not inside the mount
+  credential_file: ~/.scion/oauth-token  # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []
 groves:
   - name: worker
-    dir: groves/worker      # relative to tree → workspace/groves/worker
+    dir: groves/worker      # relative to tree, i.e. workspace/groves/worker
 ```
+
+The `credential_file` is the one thing you add: point it at a least-privilege
+Claude OAuth token (mint with `claude setup-token`). In subscription mode its
+contents are projected into the agent containers, so keep it `0600`.
 
 The config and prompt live at the root, *outside* the mount, so a compromised agent can't rewrite
 them. See [config-reference.md](/reference/config/) for every key.
 
-Stage the in-jail binary into this instance before bringing it up:
+Stage the in-jail binary into the **tree** (`workspace/`) before bringing it up, so it lands inside
+the bind-mount the manager can see:
 
 ```sh
-make lever-manager-linux LEVER_INSTANCE="$PWD/examples/hello-grove"
+make lever-manager-linux LEVER_INSTANCE="$PWD/examples/hello-grove/workspace"
 ```
 
 ## 3. Preview the bring-up plan (no side effects)
 
-Run `lever` from the **instance root** (where `lever.yaml` lives — there's no walk-up discovery):
+Run `lever` from the **instance root** (where `lever.yaml` lives, there's no walk-up discovery):
 
 ```sh
 cd examples/hello-grove
@@ -105,15 +121,17 @@ lever apply --dry-run
 You'll see the ordered plan:
 
 ```
-  jail-up           /…/hello-grove/workspace
-  load-image        scionlocal/lever-claude:latest
+  jail-up                 /…/hello-grove/workspace
+  broker-up
+  load-image              scionlocal/lever-claude:latest
   init-machine
   config-registry
   scion-server
-  register-manager  /…/hello-grove/workspace
-  register-grove    /…/hello-grove/workspace/groves/worker
-  write-manifest    /…/hello-grove/workspace
-  start-manager     hello-grove
+  register-manager        /…/hello-grove/workspace
+  register-grove          /…/hello-grove/workspace/groves/worker
+  write-manifest          /…/hello-grove/workspace
+  mint-manager-bootstrap  /…/hello-grove/workspace
+  start-manager           hello-grove
 ```
 
 ## 4. Bring it up
@@ -124,7 +142,7 @@ lever up
 
 `lever up` creates the jail if needed (isolated machine → rootless podman → cross-compiled scion →
 egress allowlist), loads the image, registers the manager + groves, starts the manager, and hands
-you its terminal. **First boot takes ~10–15 minutes** (runtimes + a multi-GB image load); after that
+you its terminal. **First boot takes ~10-15 minutes** (runtimes + a multi-GB image load); after that
 it's fast.
 
 `up` is idempotent: re-running it resumes a suspended manager and re-attaches. Detach with
@@ -142,21 +160,21 @@ vendor/bin/lever-manager agent start worker --task "Write a haiku to haiku.md" -
 
 Notes:
 - **`-g groves/worker` is a path**, resolved relative to the manager's working directory in the
-  jail — not a bare slug. (A bare slug silently falls back to the manager's own project.)
-- **No `--image` needed** — the grove's image is resolved from the sanitized runtime manifest the
+  jail, not a bare slug. (A bare slug silently falls back to the manager's own project.)
+- **No `--image` needed**, the grove's image is resolved from the sanitized runtime manifest the
   host wrote into the mount at apply (it inherits the manager image here). An explicit `--image`
   overrides.
 
 Watch progress and relay events:
 
 ```sh
-vendor/bin/lever-manager watch &           # streams scion events to a file you can tail
+vendor/bin/lever-manager watch --events-file events.jsonl &   # appends scion events to a file you can tail
 vendor/bin/lever-manager agent list        # phases of running agents
 vendor/bin/lever-manager msg list          # typed inbox (input-needed, completion, …)
 vendor/bin/lever-manager msg send "answer" --to worker
 ```
 
-When `worker` finishes, the file it wrote (`groves/worker/haiku.md`) is there on your host — it was
+When `worker` finishes, the file it wrote (`groves/worker/haiku.md`) is there on your host, it was
 mounted in place.
 
 ## 6. Tear down
@@ -165,13 +183,13 @@ mounted in place.
 lever down
 ```
 
-`down` removes the jail machine named `lever-<name>` (derived from the config — run it inside the
+`down` removes the jail machine named `lever-<name>` (derived from the config, run it inside the
 instance, or pass `--machine`). Your tree on disk is untouched; only the jail goes away. The next
 `lever up` re-provisions it.
 
 ## Where to go next
 
-- [config-reference.md](/reference/config/) — every config key, defaults, conventions.
-- [security-model.md](/security-model/) — trust boundaries, the threat model, and the
+- [config-reference.md](/reference/config/), every config key, defaults, conventions.
+- [security-model.md](/security-model/), trust boundaries, the threat model, and the
   credential flow.
-- `examples/two-agents-comms` and `examples/multi-project` — richer topologies.
+- `examples/two-agents-comms` and `examples/multi-project`, richer topologies.

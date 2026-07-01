@@ -1,5 +1,7 @@
-// Package backend defines the substrate contract every virtualization backend
-// satisfies. v1 backends: orbstack, linux-docker.
+// Package backend defines the substrate contract every containment backend
+// satisfies. The declared backends and their guarantees live in candidates.go
+// (the single source of the guarantee matrix); construction is in
+// internal/backend/registry.
 package backend
 
 import (

@@ -328,65 +328,6 @@ func TestManagerPromptPathIsRootRelative(t *testing.T) {
 	}
 }
 
-func TestManifestRoundTrip(t *testing.T) {
-	app := &App{
-		Manager: Manager{Image: "mgr:1"},
-		Groves: []Grove{
-			{Name: "a", Dir: "groves/a"},                 // inherits mgr:1
-			{Name: "b", Dir: "groves/b", Image: "alt:1"}, // override
-		},
-	}
-	dir := t.TempDir()
-	if err := WriteManifest(dir, ManifestFromApp(app)); err != nil {
-		t.Fatal(err)
-	}
-	got, err := LoadManifest(filepath.Join(dir, ManifestName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if img, ok := got.ImageFor("a"); !ok || img != "mgr:1" {
-		t.Fatalf("a image = %q,%v want mgr:1", img, ok)
-	}
-	if img, ok := got.ImageFor("b"); !ok || img != "alt:1" {
-		t.Fatalf("b image = %q,%v want alt:1", img, ok)
-	}
-	if _, ok := got.ImageFor("missing"); ok {
-		t.Fatal("unknown grove should not resolve")
-	}
-}
-
-func TestManifestCarriesGroveLLMAuth(t *testing.T) {
-	// Broker default is api-key; grove "a" inherits it, grove "b" overrides to
-	// subscription. The sanitized manifest must carry each grove's *effective*
-	// mode so the in-jail manager (which has only the manifest, not the host
-	// config) can convey LEVER_LLM_AUTH to api-key groves.
-	app := &App{
-		Broker: Broker{LLMAuth: LLMAuthAPIKey},
-		Groves: []Grove{
-			{Name: "a", Dir: "groves/a"},                               // inherits api-key
-			{Name: "b", Dir: "groves/b", LLMAuth: LLMAuthSubscription}, // override
-		},
-	}
-	dir := t.TempDir()
-	if err := WriteManifest(dir, ManifestFromApp(app)); err != nil {
-		t.Fatal(err)
-	}
-	got, err := LoadManifest(filepath.Join(dir, ManifestName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m := got.LLMAuthFor("a"); m != LLMAuthAPIKey {
-		t.Fatalf("a llm_auth = %q, want %q", m, LLMAuthAPIKey)
-	}
-	if m := got.LLMAuthFor("b"); m != LLMAuthSubscription {
-		t.Fatalf("b llm_auth = %q, want %q", m, LLMAuthSubscription)
-	}
-	// Unknown grove resolves to empty (caller treats as not-api-key).
-	if m := got.LLMAuthFor("missing"); m != "" {
-		t.Fatalf("missing llm_auth = %q, want empty", m)
-	}
-}
-
 func TestSecurityImagePolicy(t *testing.T) {
 	mk := func(sec, img string) string {
 		return "name: demo\nbackend: orbstack\ntree: ws\n" + sec + "manager:\n  image: " + img + "\n"

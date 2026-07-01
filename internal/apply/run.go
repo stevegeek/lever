@@ -141,15 +141,6 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			return err
 		}
 		return d.Scion.HubLink(ctx, jp)
-	case "write-manifest":
-		// Host-side write into the mount (s.Target is the host tree path); the
-		// manifest is sanitized (grove→image + jail mount root, no host paths) so
-		// it is safe to live in the agent-writable mount. The mount root lets the
-		// in-jail manager build a grove's jail-absolute path for scion. See
-		// config.ManifestName.
-		m := config.ManifestFromApp(app)
-		m.MountRoot = d.JailMount
-		return config.WriteManifest(s.Target, m)
 	case "mint-manager-bootstrap":
 		if d.MintManagerBootstrap == nil {
 			return nil

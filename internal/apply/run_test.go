@@ -465,7 +465,7 @@ func TestRegisterRemovesStaleMarkerBeforeInit(t *testing.T) {
 }
 
 func TestRegisterUsesJailPaths(t *testing.T) {
-	tree := t.TempDir() // real dir so the write-manifest step can write into it
+	tree := t.TempDir() // real dir so file-writing steps can write into it
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	app := &config.App{
@@ -510,7 +510,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 }
 
 func TestStartUsesJailPath(t *testing.T) {
-	tree := t.TempDir() // real dir so the write-manifest step can write into it
+	tree := t.TempDir() // real dir so file-writing steps can write into it
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	app := &config.App{

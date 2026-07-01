@@ -8,7 +8,7 @@ import "github.com/lever-to/lever/internal/config"
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
 // carry operands (a dir to register, the manager image, etc.).
 type Step struct {
-	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | scion-server | credential | register-manager | register-grove | write-manifest | mint-manager-bootstrap | start-manager
+	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | scion-server | credential | register-manager | register-grove | mint-manager-bootstrap | start-manager
 	Target string
 	Detail string
 }
@@ -19,7 +19,7 @@ type PlanOpts struct {
 	// needs — jail-up (machine + egress allowlist), broker-up (host broker +
 	// tools), and mint-manager-bootstrap (the manager enrol ticket) — and omits
 	// ALL scion/container/registration steps (load-image, init-machine,
-	// config-registry, scion-server, credential, register-*, write-manifest,
+	// config-registry, scion-server, credential, register-*,
 	// start-manager). The gate drives lever-agent directly in the VM, so scion is
 	// never invoked; running init-machine on a fresh machine would fail (no scion
 	// binary). The full container path is a later milestone.
@@ -69,10 +69,6 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	for _, g := range a.Groves {
 		steps = append(steps, Step{Kind: "register-grove", Target: a.GroveDir(g)})
 	}
-	// Write the sanitized runtime manifest (grove→image) into the mount so the
-	// in-jail manager can resolve grove images without reading the operator
-	// config (which stays host-only, outside the mount).
-	steps = append(steps, Step{Kind: "write-manifest", Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})
 	steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.Manager.Image})

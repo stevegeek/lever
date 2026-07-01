@@ -73,7 +73,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "write-manifest", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -83,7 +83,7 @@ func TestPlanOrder(t *testing.T) {
 		}
 	}
 	// register-grove targets: first grove is at index 7, second at index 8
-	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-grove 8:register-grove 9:write-manifest 10:mint-manager-bootstrap 11:start-manager)
+	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-grove 8:register-grove 9:mint-manager-bootstrap 10:start-manager)
 	if steps[7].Target != "/t/groves/appa" {
 		t.Fatalf("register-grove[0] target=%q", steps[7].Target)
 	}
@@ -147,6 +147,19 @@ func TestPlanInsertsBrokerSteps(t *testing.T) {
 	}
 	if !(idx["mint-manager-bootstrap"] < idx["start-manager"]) {
 		t.Fatal("mint-manager-bootstrap must come before start-manager")
+	}
+}
+
+func TestApplyPlan_noWriteManifest(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+	}
+	for _, s := range Plan(app, PlanOpts{}) {
+		if s.Kind == "write-manifest" {
+			t.Fatal("plan must not include write-manifest (manifest is write-only dead code)")
+		}
 	}
 }
 

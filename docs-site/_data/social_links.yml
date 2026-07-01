@@ -1,0 +1,5 @@
+# Nav-bar social links (jekyll-vitepress-theme). `icon: github` uses the theme's
+# built-in GitHub glyph; `url` is the repo.
+- icon: github
+  url: https://github.com/stevegeek/lever
+  label: Lever on GitHub

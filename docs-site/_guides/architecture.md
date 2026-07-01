@@ -132,7 +132,7 @@ sequenceDiagram
     participant Sc as Scion
     participant Gv as Grove agent
     Hu->>Mg: "do X in app-a"
-    Mg->>Br: start grove (POST /grove/start, mTLS; correlation id)
+    Mg->>Br: start grove (POST /grove/start, mTLS, correlation id)
     Br->>Sc: start grove (operator identity, host-side)
     Sc->>Gv: launch container, deliver task
     Gv-->>Sc: event: input-needed ("which DB?")

@@ -4,6 +4,9 @@ title: Lever
 hero:
   name: Lever
   text: Coding agents in a sealed jail.
+  image:
+    src: /assets/logo.png
+    alt: Lever
   tagline: >-
     Lever seals your agents inside a jail with no path to your host, your
     secrets, or your network. A host-side broker then grants and gates every

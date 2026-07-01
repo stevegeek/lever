@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="Lever" width="140">
+</p>
+
 # Lever
 
 Homepage: **[lever.to](https://lever.to)**

@@ -26,6 +26,11 @@ defaults:
 jekyll_vitepress:
   branding:
     site_title: Lever
+    logo:
+      default: /assets/logo.png
+      width: 24
+      height: 24
+      alt: Lever
   syntax:
     light_theme: github
     dark_theme: github.dark

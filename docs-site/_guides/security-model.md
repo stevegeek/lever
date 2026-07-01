@@ -110,6 +110,46 @@ runs rootful nested Docker fine). Rootless `runc` does not manage device cgroups
 layer around every agent. On the OrbStack VM's modern kernel the rootless daemon uses native
 `overlayfs` (not the slow userspace `fuse-overlayfs`), so the performance cost is small.
 
+### 2.4 Substrates: the jail is a contract, not a product
+
+Everything above describes OrbStack, but the jail is a **contract**, not that one product. A
+containment backend must provide four things:
+
+1. **No host filesystem** beyond the one chosen project tree (§2.1).
+2. **A network namespace Lever controls**, so the egress allowlist can be enforced *outside* the agent
+   containers (§2.2).
+3. **Egress enforced in that namespace**, not by the agent behaving.
+4. **A host-reachable broker endpoint** for capability, LLM, and tool traffic.
+
+OrbStack is the **reference implementation** of that contract. Others are on the roadmap, and each
+one **declares** what it actually guarantees rather than pretending they are equivalent — a
+`Profile` in code, surfaced by `lever backends`:
+
+| Backend | Status | Kernel boundary | FS bounded by | Egress enforced at |
+|---|---|---|---|---|
+| **orbstack** | implemented | shared jail-VM kernel | isolated machine: no host files + one bind mount | jail netns iptables/ip6tables |
+| **linux-docker** | planned | **none** (host kernel) | host netns+userns + one bind mount | jail netns nftables/iptables |
+| **lima** | planned | own VM kernel | VM: no host files + one bind mount | jail netns iptables/ip6tables |
+| **apple-container** | experimental | **per-agent** VM kernel | per-agent VM: no host files + mount | per-VM / gateway |
+
+Two consequences worth stating plainly:
+
+- **Docker Desktop is *not* a backend.** The jail is a VM-isolation construct, not a container
+  runtime. Docker Desktop's VM is *shared* infrastructure — it auto-mounts your home directory and
+  its network namespace is not yours to control — so it satisfies neither guarantee 1 nor 2. Running
+  Lever's containers directly in it would appear to work while silently voiding the containment. This
+  is exactly why config validation rejects any backend that is declared-but-unbuilt instead of
+  quietly falling back to OrbStack: a containment posture must never be silently substituted.
+- **`apple-container` is a different topology.** It runs each agent in its own micro-VM (a kernel per
+  agent — the strongest isolation of any Mac option, turning the shared-kernel trade in §7 into a
+  non-issue), but there is no single jail to hang one egress chokepoint on, and its networking is
+  young (full support needs macOS 26). Hence *experimental*.
+
+The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
+all groves — see §7. That trade is a property of the *backend*, not of Lever, and the table above is
+how you see it before you choose. Run `lever backends` for the live matrix; set the backend with the
+`backend:` key ([config reference](/reference/config/)).
+
 ## 3. What containment buys
 
 | Concern | Without the jail | With the jail |

@@ -101,6 +101,13 @@ rootless containers. The result the design targets:
 No fork of the runtime is required, the containment is enforced from outside it. Full detail,
 caveats, and the validation evidence are in [security model](docs-site/_guides/security-model.md).
 
+**The jail is a VM-isolation contract, not a container runtime.** OrbStack is the reference
+implementation of that contract; `lima`, native `linux-docker`, and Apple's per-agent-VM
+`container` are on the roadmap, each declaring its own guarantees (`lever backends`, or the
+[containment backends](docs-site/_reference/backends.md) matrix). Docker Desktop is *not* an
+implementation, its shared VM auto-mounts your home directory and its network namespace is not
+yours to control, so it cannot provide the boundary.
+
 ## Core + instance
 
 `lever.to` ships the **generic core**: the orchestration engine, the manager *runtime/role*, the

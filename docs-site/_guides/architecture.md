@@ -57,11 +57,18 @@ graph TD
 
 - **Only the OrbStack VM is a hardware-virtualization boundary**, you already run it for all Docker
   use. The jail (an OrbStack *isolated machine*) and every container below it are kernel namespaces,
-  so there is effectively no per-level CPU tax; nesting is cheap. (This also means a *single* kernel
-  is shared across the manager and all groves, a security trade noted in
-  [security-model.md §5](/security-model/).)
+  so there is effectively no per-level CPU tax; nesting is cheap. (With the `orbstack`/`lima`
+  backends this also means a *single* kernel is shared across the manager and all groves, a security
+  trade noted in [security-model.md §7](/security-model/); the `apple-container` backend gives each
+  agent its own VM kernel instead.)
 - **The jail is the containment boundary**, not Scion. The egress allowlist is enforced in the
   jail's network namespace, outside the agent containers.
+- **OrbStack is the reference *backend*, not a hard dependency.** The jail is a contract (no host
+  files, a controllable netns, egress enforced in it, a host-reachable broker); OrbStack is one
+  implementation, with `lima`, native `linux-docker`, and `apple-container` on the roadmap. Each
+  declares its own guarantees, run `lever backends` or see
+  [containment backends](/reference/backends/). Notably, **Docker Desktop is not a backend** (its
+  shared VM auto-mounts your home and its netns is not yours to control).
 
 ## 2. The project model: a project is a directory
 

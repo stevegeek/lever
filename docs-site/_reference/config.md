@@ -102,7 +102,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `name` | string | **yes** | - | Instance identity. The jail machine is named `lever-<name>` and the manager's Scion agent slug is `<name>`. (Its capability identity at the broker is separate: `broker.manager_identity`, default `manager`.) Must match `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes a machine name and a shell token). |
-| `backend` | string | **yes** | - | Containment backend. `orbstack` is the validated backend today; `linux-docker` is reserved (not yet implemented). |
+| `backend` | string | **yes** | - | Containment backend (the jail substrate). `orbstack` is the only *implemented* value today; `linux-docker`, `lima`, and `apple-container` are declared but not yet built, and are **rejected at load** rather than silently substituted. Run `lever backends` for the guarantee matrix. See [containment backends](/reference/backends/). |
 | `tree` | path | **yes** | - | A **confined relative subdirectory** of the instance root, bind-mounted **in place** into the jail (agents edit these real files live). Must not be `.` (the root itself is never mounted), absolute, or contain `..`. |
 | `scion` | object | no | - | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | - | The manager agent (see below). |

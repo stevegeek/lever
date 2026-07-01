@@ -46,14 +46,12 @@ type OrbStack struct {
 
 func New(r exec.Runner, machine string) *OrbStack { return &OrbStack{r: r, machine: machine} }
 
+// Profile returns orbstack's declared guarantees. The value lives once in
+// backend.Candidates (the single source of the guarantee matrix); returning it
+// here keeps the runtime profile and the documented one identical.
 func (o *OrbStack) Profile() backend.Profile {
-	return backend.Profile{
-		Name:             "orbstack",
-		SeparateKernel:   false, // shares the OrbStack VM kernel
-		FSBoundedBy:      "isolated machine: no host files + project tree mounted at /lever",
-		EgressEnforcedAt: "jail netns iptables/ip6tables",
-		VersionFragile:   true, // depends on OrbStack --isolated behaviours
-	}
+	p, _ := backend.ProfileFor("orbstack")
+	return p
 }
 
 func (o *OrbStack) DockerHost() string {

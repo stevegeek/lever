@@ -10,6 +10,18 @@ import (
 	"github.com/lever-to/lever/internal/exec"
 )
 
+// TestProfileIsSingleSourced guards against re-hardcoding the profile: OrbStack's
+// runtime Profile() must be the same value the guarantee matrix declares.
+func TestProfileIsSingleSourced(t *testing.T) {
+	want, ok := backend.ProfileFor("orbstack")
+	if !ok {
+		t.Fatal("backend.Candidates is missing orbstack")
+	}
+	if got := New(exec.RealRunner{}, "m").Profile(); got != want {
+		t.Errorf("Profile() = %+v, want declared %+v", got, want)
+	}
+}
+
 // closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for `iptables -S`
 // and records whether the chain was flushed or the alias re-resolved.
 type closedChainRunner struct {

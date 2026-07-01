@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lever-to/lever/internal/backend"
 	"gopkg.in/yaml.v3"
 )
 
@@ -157,7 +158,23 @@ type App struct {
 	treeRel string // tree as the confined relative subdir (before joining to dir)
 }
 
-var knownBackends = map[string]bool{"orbstack": true, "linux-docker": true}
+// validateBackend rejects a config's backend unless it is implemented. A
+// declared-but-unbuilt backend ("planned"/"experimental") and an unknown name
+// give distinct errors, so nothing is ever silently swapped for the default.
+// The set of backends and their statuses live in package backend (the single
+// source), not a list duplicated here.
+func validateBackend(name string) error {
+	if name == "" {
+		return fmt.Errorf("config: backend is required (selectable: %s)", strings.Join(backend.SelectableNames(), ", "))
+	}
+	if backend.IsSelectable(name) {
+		return nil
+	}
+	if c, ok := backend.Lookup(name); ok {
+		return fmt.Errorf("config: backend %q is %s, not yet implemented (selectable: %s)", name, c.Status, strings.Join(backend.SelectableNames(), ", "))
+	}
+	return fmt.Errorf("config: unknown backend %q (selectable: %s)", name, strings.Join(backend.SelectableNames(), ", "))
+}
 
 // CanonicalName is the config filename for a lever instance — a manifest at the
 // instance root (package.json / Cargo.toml style). It is resolved from the
@@ -278,8 +295,8 @@ func (a *App) Validate() error {
 	if !nameRE.MatchString(a.Name) {
 		return fmt.Errorf("config: name %q must match %s (it becomes the jail machine name and a shell token)", a.Name, nameRE)
 	}
-	if !knownBackends[a.Backend] {
-		return fmt.Errorf("config: unknown backend %q (known: orbstack, linux-docker)", a.Backend)
+	if err := validateBackend(a.Backend); err != nil {
+		return err
 	}
 	if a.Tree == "" {
 		return fmt.Errorf("config: tree is required")

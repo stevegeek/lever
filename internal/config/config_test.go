@@ -130,8 +130,36 @@ func TestCredentialFileResolved(t *testing.T) {
 
 func TestValidateRejectsUnknownBackend(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n")
-	if _, err := Load(p); err == nil {
+	_, err := Load(p)
+	if err == nil {
 		t.Fatal("expected error for unknown backend")
+	}
+	if !strings.Contains(err.Error(), "unknown backend") {
+		t.Errorf("error %q should say 'unknown backend'", err)
+	}
+}
+
+// A backend that is DECLARED (on the roadmap) but not yet implemented must be
+// rejected as "planned", not silently substituted with the default backend.
+func TestValidateRejectsPlannedBackend(t *testing.T) {
+	p := writeTmp(t, "name: x\nbackend: linux-docker\ntree: ./tree\nmanager: {}\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for a planned-but-unimplemented backend")
+	}
+	if !strings.Contains(err.Error(), "not yet implemented") || !strings.Contains(err.Error(), "orbstack") {
+		t.Errorf("error %q should say 'not yet implemented' and name the selectable set", err)
+	}
+}
+
+func TestValidateRequiresBackend(t *testing.T) {
+	p := writeTmp(t, "name: x\ntree: ./tree\nmanager: {}\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error when backend is omitted")
+	}
+	if !strings.Contains(err.Error(), "backend is required") {
+		t.Errorf("error %q should say 'backend is required'", err)
 	}
 }
 

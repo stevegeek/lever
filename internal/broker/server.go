@@ -36,6 +36,11 @@ func resolveAdminAddr(adminAddr string) (string, error) {
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/provision", b.handleProvision)
+	mux.HandleFunc("/grove/start", b.handleGroveStart)
+	mux.HandleFunc("/grove/stop", b.handleGroveStop)
+	mux.HandleFunc("/grove/suspend", b.handleGroveSuspend)
+	mux.HandleFunc("/grove/resume", b.handleGroveResume)
+	mux.HandleFunc("/grove/list", b.handleGroveList)
 	mux.HandleFunc("/enrol", b.handleEnrol)
 	mux.HandleFunc("/renew", b.handleRenew)
 	mux.HandleFunc("/request", b.handleRequest)

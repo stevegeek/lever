@@ -72,6 +72,15 @@ type Config struct {
 	// LLMUpstream is the proxy target; empty defaults to https://api.anthropic.com.
 	// Set by tests to a fake upstream. NEVER derived from a client request.
 	LLMUpstream string
+
+	// Grove dispatch (host-side). Runtime is the scion client the broker drives;
+	// Groves are the config-derived, path-authoritative grove descriptions;
+	// BrokerCAPEM/BrokerURL are copied into each grove's staged bootstrap so it
+	// trusts the same CA and dials the same broker as the manager.
+	Runtime     GroveRuntime
+	Groves      []GroveSpec
+	BrokerCAPEM string
+	BrokerURL   string
 }
 
 // Broker is the running capability authority + gateway.
@@ -90,6 +99,11 @@ type Broker struct {
 
 	apiKey      []byte
 	llmUpstream *url.URL
+
+	runtime     GroveRuntime
+	groves      map[string]GroveSpec
+	brokerCAPEM string
+	brokerURL   string
 
 	mu           sync.Mutex
 	minEpoch     int
@@ -126,6 +140,10 @@ func New(c Config) *Broker {
 		upstream = "https://api.anthropic.com"
 	}
 	up, _ := url.Parse(upstream) // operator/test-controlled, validated at serve time
+	groves := make(map[string]GroveSpec, len(c.Groves))
+	for _, g := range c.Groves {
+		groves[g.Name] = g
+	}
 	return &Broker{
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
 		manager: c.ManagerIdentity, agents: agents,
@@ -134,6 +152,7 @@ func New(c Config) *Broker {
 		revoked:  revoked,
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
+		runtime: c.Runtime, groves: groves, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 	}
 }
 

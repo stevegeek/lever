@@ -7,9 +7,13 @@ import (
 	"net"
 	"os"
 
+	"github.com/lever-to/lever/internal/backend/orbstack"
 	"github.com/lever-to/lever/internal/broker"
 	"github.com/lever-to/lever/internal/cap/ca"
 	"github.com/lever-to/lever/internal/config"
+	leverexec "github.com/lever-to/lever/internal/exec"
+	"github.com/lever-to/lever/internal/jail"
+	"github.com/lever-to/lever/internal/scion"
 )
 
 // Serve runs the host-side broker for app until ctx is cancelled: ensure keys +
@@ -31,6 +35,29 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	cfg.RevocationState = rev
 	cfg.PersistRevocation = state.SaveRevocation
+
+	// Grove dispatch runs host-side with operator identity (jail runner). apply
+	// passes the resolved run-user/uid via env (LEVER_JAIL_USER/UID); the mount
+	// dest is a backend constant. Without the env (manual `broker serve` with no
+	// prior apply) cfg.Runtime stays nil; the grove handlers detect this via
+	// runtimeReady and return 502 — they do not panic. apply is the real path.
+	machine := "lever-" + app.Name
+	jailMount := orbstack.New(leverexec.RealRunner{}, machine).MountDest()
+	if u, id := os.Getenv("LEVER_JAIL_USER"), os.Getenv("LEVER_JAIL_UID"); u != "" && id != "" {
+		jr := jail.New(leverexec.RealRunner{}, machine, u, id)
+		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
+	}
+	cfg.Groves = GroveSpecs(app, jailMount)
+	if caPEM, err := os.ReadFile(state.CACert()); err == nil {
+		cfg.BrokerCAPEM = string(caPEM)
+	} else {
+		fmt.Fprintf(os.Stderr, "lever: warning: broker CA read: %v\n", err)
+	}
+	host := os.Getenv("LEVER_HOST_ALIAS_IP")
+	if host == "" {
+		host = cfg.ServerName
+	}
+	cfg.BrokerURL = groveBrokerURL(host, app.EffectiveJailPort())
 
 	// Persist the broker's audit decisions (provision/enrol/request/revoke …) to
 	// the state-dir log. Without this the broker defaults to a discard logger, so

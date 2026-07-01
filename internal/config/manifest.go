@@ -17,9 +17,15 @@ import (
 // leak). See security-model.md §5.
 const ManifestName = ".lever-manifest.yaml"
 
-// Manifest is the in-jail view: grove name → resolved image.
+// Manifest is the in-jail view: grove name → resolved image, plus the jail mount
+// root. MountRoot is the path the project tree is bind-mounted at INSIDE the jail
+// (e.g. /lever). The in-jail manager joins it with a grove's tree-relative dir to
+// get the jail-absolute path scion needs for `-g` and `--workspace` — without it
+// a grove dispatch falls back to mounting the manager's whole tree. It is the
+// jail mount point, NOT a host path, so it carries no host-layout leak.
 type Manifest struct {
-	Groves []ManifestGrove `yaml:"groves"`
+	MountRoot string          `yaml:"mount_root,omitempty"`
+	Groves    []ManifestGrove `yaml:"groves"`
 }
 
 // ManifestGrove is one grove's resolved image and LLM-auth mode. LLMAuth is a

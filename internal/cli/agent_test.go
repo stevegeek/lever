@@ -26,6 +26,21 @@ func TestManagerBootstrapPathIsContainerWorkspace(t *testing.T) {
 	}
 }
 
+// startCallArgs returns the joined args of the scion `start` call. The idempotent
+// phase probe issues a `list` first, so the start call is no longer Calls[0].
+func startCallArgs(t *testing.T, f *exec.FakeRunner) string {
+	t.Helper()
+	for _, c := range f.Calls {
+		for _, a := range c.Args {
+			if a == "start" {
+				return strings.Join(c.Args, " ")
+			}
+		}
+	}
+	t.Fatal("no scion start call recorded")
+	return ""
+}
+
 func clientWith(f *exec.FakeRunner) ClientFactory {
 	return func() *scion.Client {
 		return scion.New(f, scion.Options{Bin: "scion", HubEndpoint: "http://127.0.0.1:8080"})
@@ -42,9 +57,84 @@ func TestAgentStart(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startCallArgs(t, f)
 	if !strings.Contains(got, "start appa do x") || !strings.Contains(got, "-g /g/appa") {
 		t.Fatalf("argv=%q", got)
+	}
+}
+
+// A relative grove dir + a manifest carrying the jail mount root must produce a
+// jail-absolute -g AND --workspace, so scion targets the registered grove project
+// and bind-mounts the grove dir in place rather than falling back to the
+// manager's whole-tree mount (which would feed the grove the manager's bootstrap).
+func TestAgentStartUsesJailAbsoluteProjectAndWorkspace(t *testing.T) {
+	orig := loadManifest
+	loadManifest = func(string) (*config.Manifest, error) {
+		return &config.Manifest{MountRoot: "/lever", Groves: []config.ManifestGrove{{Name: "worker", Image: "img:1"}}}, nil
+	}
+	defer func() { loadManifest = orig }()
+
+	op := provisionGrove
+	provisionGrove = nil // skip staging; we only assert the scion args
+	defer func() { provisionGrove = op }()
+
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	root := newManagerRootWith(clientWith(f))
+	root.SetArgs([]string{"agent", "start", "worker", "--project", "groves/worker", "--manifest", "/x/.lever-manifest.yaml"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	got := startCallArgs(t, f)
+	if !strings.Contains(got, "-g /lever/groves/worker ") {
+		t.Fatalf("project not jail-absolute: %q", got)
+	}
+	if !strings.Contains(got, "--workspace /lever/groves/worker") {
+		t.Fatalf("--workspace not the grove jail path: %q", got)
+	}
+}
+
+// `agent start` on an already-existing (stopped/suspended) grove must RESUME it,
+// not 409 on a fresh start. A stopped agent already holds its enrolled identity,
+// so it must NOT be re-provisioned.
+func TestAgentStartResumesStoppedAgent(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion list --format json -g /g/appa", exec.Result{Stdout: `[{"slug":"appa","phase":"stopped"}]`})
+	f.Script("scion resume", exec.Result{})
+
+	op := provisionGrove
+	provisionGrove = func(context.Context, string) (agent.Bootstrap, error) {
+		t.Fatal("a stopped (already-enrolled) agent must NOT be re-provisioned")
+		return agent.Bootstrap{}, nil
+	}
+	defer func() { provisionGrove = op }()
+
+	root := newManagerRootWith(clientWith(f))
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"agent", "start", "appa", "--project", "/g/appa", "--image", "img:1"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	var sawResume, sawStart bool
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "resume appa") {
+			sawResume = true
+		}
+		if strings.Contains(j, "start appa") {
+			sawStart = true
+		}
+	}
+	if !sawResume {
+		t.Fatal("a stopped agent must be resumed")
+	}
+	if sawStart {
+		t.Fatal("must not issue a fresh `start` for an existing agent")
+	}
+	if !strings.Contains(out.String(), "Resumed appa") {
+		t.Fatalf("out = %q, want 'Resumed appa'", out.String())
 	}
 }
 
@@ -105,7 +195,7 @@ func TestAgentStartResolvesImageFromManifest(t *testing.T) {
 			if err := root.Execute(); err != nil {
 				t.Fatalf("start: %v", err)
 			}
-			got := strings.Join(f.Calls[0].Args, " ")
+			got := startCallArgs(t, f)
 			if !strings.Contains(got, "--image "+tc.wantImage) {
 				t.Fatalf("argv=%q want --image %q", got, tc.wantImage)
 			}
@@ -127,7 +217,7 @@ func TestAgentStartExplicitImageWinsOverManifest(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startCallArgs(t, f)
 	if !strings.Contains(got, "--image explicit:9") || strings.Contains(got, "from-manifest:1") {
 		t.Fatalf("argv=%q want explicit image to win", got)
 	}
@@ -148,7 +238,7 @@ func TestAgentStartUnknownGroveOmitsImage(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startCallArgs(t, f)
 	if strings.Contains(got, "--image") {
 		t.Fatalf("argv=%q should omit --image for an unknown grove", got)
 	}
@@ -164,7 +254,7 @@ func TestAgentStartNoManifestOmitsImage(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startCallArgs(t, f)
 	if strings.Contains(got, "--image") {
 		t.Fatalf("argv=%q should not contain --image without a manifest", got)
 	}
@@ -185,7 +275,7 @@ func TestAgentStartDiscoversManifestForImage(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startCallArgs(t, f)
 	if !strings.Contains(got, "--image img:1") {
 		t.Fatalf("argv=%q want --image img:1 (resolved from discovered manifest)", got)
 	}

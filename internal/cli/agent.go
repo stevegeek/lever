@@ -167,6 +167,48 @@ func resolveGroveLLMAuth(path, grove string) (config.LLMAuthMode, error) {
 	return m.LLMAuthFor(grove), nil
 }
 
+// manifestMountRoot reads the jail mount root from the runtime manifest (empty
+// path, an unreadable/absent file, or no field ⇒ ""). The in-jail manager joins
+// it with a grove's tree-relative dir to form the jail-absolute path scion needs.
+func manifestMountRoot(path string) string {
+	if path == "" {
+		return ""
+	}
+	m, err := loadManifest(path)
+	if err != nil {
+		return ""
+	}
+	return m.MountRoot
+}
+
+// scionGroveProject translates a grove's tree-relative dir into its jail-absolute
+// path (mountRoot + dir), which scion needs for both `-g` and `--workspace`. An
+// empty mount root or an already-absolute dir is returned unchanged. Without this
+// scion falls back to mounting the manager's whole tree at the grove's
+// /workspace, so the grove reads the manager's bootstrap and cannot enrol.
+func scionGroveProject(mountRoot, dir string) string {
+	if mountRoot == "" || dir == "" || filepath.IsAbs(dir) {
+		return dir
+	}
+	return filepath.Join(mountRoot, dir)
+}
+
+// groveAgentPhase returns the scion phase of the named grove agent in project
+// (""=absent). Mirrors managerPhase; List tolerates empty output, so a hub with
+// no such agent yields absent rather than an error.
+func groveAgentPhase(ctx context.Context, c *scion.Client, project, grove string) (string, error) {
+	agents, err := c.List(ctx, project)
+	if err != nil {
+		return "", err
+	}
+	for _, a := range agents {
+		if a.Slug == grove {
+			return a.Phase, nil
+		}
+	}
+	return "", nil
+}
+
 // defaultManifestPath is the manifest location the manager reads: $LEVER_MANIFEST
 // if set, else ManifestName in the current directory (the in-jail mount root).
 func defaultManifestPath() string {
@@ -244,16 +286,40 @@ func agentStart(cf ClientFactory) *cobra.Command {
 				image = resolved
 			}
 
-			// Broker provisioning: if a provisioner is wired (non-nil), mint a
-			// one-use enrolment ticket for this grove and stage the bootstrap file
-			// in the grove's workspace BEFORE starting the container. The grove
-			// container's lever-agent boot reads it from the canonical path
-			// ./.lever/bootstrap.json (relative to the container's /workspace CWD,
-			// which scion sets to --workspace = the grove project dir). No
-			// LEVER_BOOTSTRAP env injection is needed: the canonical-path default
-			// in lever-agent boot is the correct seam. provisionGrove is nil when
-			// no broker is configured, in which case staging is skipped so
-			// non-brokered groves continue to work unchanged.
+			// Translate the grove's tree-relative dir into its jail-absolute path
+			// for scion (-g + --workspace + the phase probe below). The bootstrap is
+			// staged via the relative `project` (the manager container's filesystem
+			// view), but scion runs in the jail and needs the jail path; without
+			// --workspace it would mount the manager's whole tree at the grove's
+			// /workspace and the grove would read the manager's bootstrap.
+			scionProject := scionGroveProject(manifestMountRoot(manifestPath), project)
+
+			// Idempotent: if the grove agent already exists, resume it rather than
+			// 409 on a fresh `start`. A stopped/suspended agent already holds its
+			// enrolled identity, so it is NOT re-provisioned; only an absent agent is
+			// provisioned + started below. (`scion delete` remains the hard reset.)
+			phase, err := groveAgentPhase(cmd.Context(), cf(), scionProject, grove)
+			if err != nil {
+				return err
+			}
+			switch phase {
+			case "running":
+				cmd.Printf("%s is already running.\n", grove)
+				return nil
+			case "suspended", "stopped":
+				if err := cf().Resume(cmd.Context(), grove, scionProject); err != nil {
+					return err
+				}
+				cmd.Printf("Resumed %s.\n", grove)
+				return nil
+			}
+
+			// Absent: provision (mint a one-use enrolment ticket) and stage the
+			// bootstrap in the grove's workspace BEFORE starting the container. The
+			// grove's lever-agent boot reads it from /workspace/.lever/bootstrap.json
+			// (the hook passes that absolute path). provisionGrove is nil when no
+			// broker is configured, in which case staging is skipped so non-brokered
+			// groves continue to work unchanged.
 			if provisionGrove != nil && project != "" {
 				bs, err := provisionGrove(cmd.Context(), grove)
 				if err != nil {
@@ -279,8 +345,8 @@ func agentStart(cf ClientFactory) *cobra.Command {
 			// so it never leaks to other agents. Set BEFORE start. Needs a project dir
 			// to scope to; a project-less ad-hoc start can't be isolated, so it stays
 			// subscription (the safe default).
-			if apiKey && project != "" {
-				if err := cf().EnvSet(cmd.Context(), project, "LEVER_LLM_AUTH", "api-key"); err != nil {
+			if apiKey && scionProject != "" {
+				if err := cf().EnvSet(cmd.Context(), scionProject, "LEVER_LLM_AUTH", "api-key"); err != nil {
 					return fmt.Errorf("set LEVER_LLM_AUTH for grove %s: %w", grove, err)
 				}
 			}
@@ -288,7 +354,7 @@ func agentStart(cf ClientFactory) *cobra.Command {
 			// api-key: start with --harness-auth api-key (satisfied by the placeholder
 			// ANTHROPIC_API_KEY Hub secret set at apply time); the real credential
 			// arrives in-container via the broker /llm capability.
-			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: project, Image: image, APIKey: apiKey}); err != nil {
+			if err := cf().Start(cmd.Context(), scion.StartOpts{Grove: grove, Task: task, Harness: "claude", Project: scionProject, Workspace: scionProject, Image: image, APIKey: apiKey}); err != nil {
 				return err
 			}
 			cmd.Printf("Started %s.\n", grove)

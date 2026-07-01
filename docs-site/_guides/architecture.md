@@ -25,28 +25,32 @@ surface** (`lever`).
 ```mermaid
 graph TD
     subgraph host[macOS host]
-        L[lever CLI, operator binary, runs on host]
-        MCP[Local tool servers<br/>bound to 127.0.0.1]
+        L[lever CLI, operator binary]
+        BK["Capability broker<br/>real credentials, capability minting,<br/>/llm proxy, grove dispatch, MCP gateway"]
+        MCP[first-party tool servers<br/>bound to 127.0.0.1]
     end
     subgraph vm[OrbStack VM, the one hardware-virtualization boundary]
         subgraph jail[Isolated machine, THE JAIL]
-            SS[Scion server + broker]
+            SS[Scion server + runtime broker]
             RD[rootless dockerd]
             FW{{egress allowlist<br/>iptables / ip6tables<br/>enforced in jail netns}}
             subgraph agents[Agent containers, rootless]
-                MGR[Manager agent]
+                MGR[Manager agent, the coordinator]
                 GA[Grove agent A]
                 GB[Grove agent B]
             end
         end
     end
     L -->|attach / drive| SS
+    L -.->|spawns| BK
     SS --> RD
     RD --> MGR
     RD --> GA
     RD --> GB
+    BK --- MCP
+    BK -->|drives Scion for grove dispatch| SS
     agents -->|all network egress| FW
-    FW -->|allowlisted host:port<br/>via host.orb.internal| MCP
+    FW -->|"allowlisted: broker + model API<br/>via host.orb.internal"| BK
     FW -.->|LAN ranges dropped| LAN[LAN / other hosts]
 ```
 {% endraw %}

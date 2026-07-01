@@ -47,24 +47,50 @@ dispatches work to groves, watches a typed event stream for progress and questio
 single thing a human talks to.
 
 ```mermaid
-graph TD
-    H[Human] -->|talks to| M[Manager agent<br/>the coordinator]
-    M -->|dispatch / message| G1[Grove agent A]
-    M -->|dispatch / message| G2[Grove agent B]
-    G1 -.->|typed events:<br/>input-needed, completed| M
-    G2 -.->|typed events| M
-    M -->|drives| S[(Scion runtime)]
-    S --> G1
-    S --> G2
+graph TB
+    Hu([Human])
+
+    subgraph host["Host (macOS) — outside the jail"]
+        CLI[lever CLI]
+        BK["Capability broker<br/>holds real credentials<br/>capabilities · /llm · /grove/* · MCP gateway"]
+        TOOLS[first-party tools<br/>host subprocesses]
+        TREE[("project tree<br/>on host disk")]
+    end
+
+    subgraph jail["Jail — OrbStack isolated machine (the containment boundary)"]
+        HUB["Scion server + runtime<br/>(rootless containers)"]
+        FW{{egress allowlist<br/>in the jail's netns}}
+        subgraph cons["Agent containers"]
+            CO["Coordinator<br/>whole-tree workspace"]
+            GA["Grove A → groves/a/"]
+            GB["Grove B → groves/b/"]
+        end
+    end
+
+    Hu <-->|converses with| CO
+    CLI -->|brings up / drives| HUB
+    CO -->|"dispatch · capabilities · LLM · tools<br/>(mTLS via host.orb.internal)"| FW
+    GA -->|capabilities · LLM · tools| FW
+    GB -->|capabilities · LLM · tools| FW
+    FW -->|"allowlisted: broker + model API"| BK
+    BK --- TOOLS
+    BK -->|"/grove/start → Scion (operator)"| HUB
+    HUB --> CO
+    HUB --> GA
+    HUB --> GB
+    TREE -.->|"bind-mount: whole tree"| CO
+    TREE -.->|"bind-mount: groves/a only"| GA
+    TREE -.->|"bind-mount: groves/b only"| GB
 ```
 
 ## How it stays contained
 
 The runtime and every agent run inside **one jail**, an [OrbStack](https://orbstack.dev) *isolated
 machine*: a Linux guest that, unlike a normal machine, shares **none** of the host's files and has
-its own network namespace by default. The `lever` operator binary runs on the host and drives into
-the jail; the Scion server/broker, the container runtime, and all agents run *inside* it. The jail
-mounts only the project tree you choose and cannot route to your LAN. Inside it, agents run as
+its own network namespace by default. The `lever` operator binary and Lever's **capability broker**
+(which holds your real credentials) run on the host; Scion's server and runtime broker, the
+container runtime, and all agents run *inside* the jail. The jail mounts only the project tree you
+choose and cannot route to your LAN. Inside it, agents run as
 rootless containers. The result the design targets:
 
 - **Filesystem:** host secrets (`~/.ssh`, cloud creds) are *not in the environment*, so they cannot

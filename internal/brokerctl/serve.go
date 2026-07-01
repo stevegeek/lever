@@ -7,7 +7,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/lever-to/lever/internal/backend/orbstack"
+	"github.com/lever-to/lever/internal/backend/registry"
 	"github.com/lever-to/lever/internal/broker"
 	"github.com/lever-to/lever/internal/cap/ca"
 	"github.com/lever-to/lever/internal/config"
@@ -42,7 +42,14 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	// prior apply) cfg.Runtime stays nil; the grove handlers detect this via
 	// runtimeReady and return 502 — they do not panic. apply is the real path.
 	machine := "lever-" + app.Name
-	jailMount := orbstack.New(leverexec.RealRunner{}, machine).MountDest()
+	// app.Backend was validated selectable at config.Load, so this cannot pick a
+	// planned backend; routing through the registry keeps the mount dest coming
+	// from the SELECTED backend rather than a hardwired one.
+	be, err := registry.Select(app.Backend, leverexec.RealRunner{}, machine)
+	if err != nil {
+		return err
+	}
+	jailMount := be.MountDest()
 	if u, id := os.Getenv("LEVER_JAIL_USER"), os.Getenv("LEVER_JAIL_UID"); u != "" && id != "" {
 		jr := jail.New(leverexec.RealRunner{}, machine, u, id)
 		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})

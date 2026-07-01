@@ -48,6 +48,7 @@ type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
 	DockerHost() string    // endpoint the broker drives (valid after EnsureUp)
 	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
+	MountDest() string     // path inside the jail where the project tree is bind-mounted
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	Profile() Profile

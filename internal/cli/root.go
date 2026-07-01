@@ -4,7 +4,7 @@ import (
 	"os"
 
 	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/backend/orbstack"
+	"github.com/lever-to/lever/internal/backend/registry"
 	"github.com/lever-to/lever/internal/exec"
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
@@ -18,8 +18,18 @@ type BackendFactory func(machine string) backend.Backend
 // ClientFactory builds a scion client.
 type ClientFactory func() *scion.Client
 
+// defaultFactory builds the default backend via the registry. It selects the
+// registry Default because the only selectable backend is orbstack and config
+// validation guarantees a config never asks for anything else. When a second
+// backend is implemented, thread the configured app.Backend name in here (and
+// through the call sites) — TestExactlyOneSelectableBackend is the tripwire that
+// fails until that happens, so this cannot silently substitute.
 func defaultFactory(machine string) backend.Backend {
-	return orbstack.New(exec.RealRunner{}, machine)
+	b, err := registry.Select("", exec.RealRunner{}, machine)
+	if err != nil {
+		panic("registry: default backend must always be constructible: " + err.Error())
+	}
+	return b
 }
 
 func defaultClientFactory() *scion.Client {
@@ -40,7 +50,7 @@ func NewRootWithBackend(bf BackendFactory) *cobra.Command { return newHostRootWi
 func newHostRootWith(bf BackendFactory) *cobra.Command {
 	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)"}
 	root.AddCommand(versionCmd())
-	root.AddCommand(newProvisionCmd(bf), newDownCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf))
+	root.AddCommand(newProvisionCmd(bf), newDownCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf), newBackendsCmd())
 	return root
 }
 

@@ -39,6 +39,11 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// State the containment posture every bring-up runs under, so the
+			// selected backend's guarantees are visible, not assumed.
+			if p, ok := backend.ProfileFor(app.Backend); ok {
+				cmd.Printf("backend: %s\n", p.Summary())
+			}
 			if dryRun {
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					cmd.Printf("  %-16s %s\n", s.Kind, s.Target)

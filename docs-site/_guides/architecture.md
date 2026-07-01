@@ -103,7 +103,7 @@ shared-worktree path is unreliable; the directory model sidesteps all of it.
 | Scion server + Scion broker | container lifecycle, sessions, attach/resume, typed messaging | core (runs inside the jail) |
 | rootless dockerd | the container runtime the Scion broker drives (rootless, see security-model.md) | core (inside the jail) |
 | Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls | **core** (runs on host) |
-| Manager **runtime/role** | the brain: a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
+| Manager **runtime/role** | the coordinator: a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
 | Manager **prompt / skills / tool (MCP) config** | what makes it *this* manager | **instance-supplied config** |
 | Grove agents | workers; one project each; isolated | core lifecycle; instance defines the groves |
 | Agent base image | the coding-agent harness container | **core ships a generic minimal base; the instance extends/bakes its own** (see §6) |

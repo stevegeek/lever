@@ -3,11 +3,11 @@
 Homepage: **[lever.to](https://lever.to)**
 
 **Containerised, jailed multi-agent orchestration.** Lever lets a single *manager* agent (the
-brain) drive a fleet of *grove* agents that do real work, each in its own isolated container,
+coordinator) drive a fleet of *grove* agents that do real work, each in its own isolated container,
 while the whole stack runs inside a **jail** designed so that a compromised or prompt-injected agent
 cannot read host secrets or reach your local network.
 
-Lever is the **brain and the interface**; [Scion](https://github.com/GoogleCloudPlatform/scion) is
+Lever is the **orchestration and interface layer**; [Scion](https://github.com/GoogleCloudPlatform/scion) is
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool, `lever`, and it drives Scion for you.
 
@@ -44,7 +44,7 @@ single thing a human talks to.
 
 ```mermaid
 graph TD
-    H[Human] -->|talks to| M[Manager agent<br/>the brain]
+    H[Human] -->|talks to| M[Manager agent<br/>the coordinator]
     M -->|dispatch / message| G1[Grove agent A]
     M -->|dispatch / message| G2[Grove agent B]
     G1 -.->|typed events:<br/>input-needed, completed| M

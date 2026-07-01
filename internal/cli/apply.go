@@ -139,7 +139,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			// Pass the resolved host-alias IP so the broker mints its server cert
 			// with that IP as a SAN (agents dial it by IP under closed egress).
-			cmd.Env = append(os.Environ(), "LEVER_HOST_ALIAS_IP="+aliasV4)
+			cmd.Env = append(os.Environ(),
+				"LEVER_HOST_ALIAS_IP="+aliasV4,
+				"LEVER_JAIL_USER="+ob.RunUser(),
+				"LEVER_JAIL_UID="+ob.RunUID(),
+			)
 			cmd.Stdout = io.Discard
 			cmd.Stderr = io.Discard
 			if err := cmd.Start(); err != nil {

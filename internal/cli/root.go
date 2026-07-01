@@ -50,6 +50,6 @@ func NewManagerRoot() *cobra.Command { return newManagerRootWith(defaultClientFa
 func newManagerRootWith(cf ClientFactory) *cobra.Command {
 	root := &cobra.Command{Use: "lever-manager", Short: "In-jail grove orchestration"}
 	root.AddCommand(versionCmd())
-	root.AddCommand(newAgentCmd(cf), newMsgCmd(cf), newWatchCmd(cf))
+	root.AddCommand(newAgentCmd(), newMsgCmd(cf), newWatchCmd(cf))
 	return root
 }

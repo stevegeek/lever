@@ -6,7 +6,14 @@ import (
 	"testing"
 
 	"github.com/lever-to/lever/internal/exec"
+	"github.com/lever-to/lever/internal/scion"
 )
+
+func clientWith(f *exec.FakeRunner) ClientFactory {
+	return func() *scion.Client {
+		return scion.New(f, scion.Options{Bin: "scion", HubEndpoint: "http://127.0.0.1:8080"})
+	}
+}
 
 func TestMsgSend(t *testing.T) {
 	f := exec.NewFakeRunner()

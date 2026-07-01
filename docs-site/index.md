@@ -5,8 +5,9 @@ hero:
   name: Lever
   text: Coding agents in a sealed jail.
   tagline: >-
-    Lever runs Scion agents so the real model key never enters the container.
-    One switch seals the agent off to reach nothing but a capability broker.
+    Lever seals your agents inside a jail with no path to your host, your
+    secrets, or your network. A host-side broker then grants and gates every
+    capability they get: which tools, which operations, which credentials.
   actions:
     - theme: brand
       text: Get started
@@ -17,9 +18,9 @@ hero:
 features:
   - title: Containment, not trust
     details: >-
-      The whole stack, Scion, the broker, the container runtime, every agent,
-      runs inside one isolated machine with rootless podman and an egress
-      allowlist. Host secrets and the LAN simply aren't reachable.
+      Scion, the container runtime, and every agent run inside one isolated
+      machine with rootless podman and an egress allowlist. Host secrets and the
+      LAN simply aren't reachable; the broker stays host-side, outside the jail.
   - title: The key never lands in the container
     details: >-
       By default the broker holds the real model key and injects it host-side;

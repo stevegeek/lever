@@ -1,0 +1,32 @@
+{%- comment -%}
+  Mermaid diagram rendering.
+
+  Kramdown + Rouge render a ```mermaid fenced block as
+    <div class="language-mermaid highlighter-rouge">…<code>graph …</code>…</div>
+  i.e. highlighted source, not a diagram. This hook (included at end of <body>
+  by the theme's default layout) loads Mermaid, replaces each of those blocks
+  with a <pre class="mermaid"> carrying the raw graph text, and renders them.
+{%- endcomment -%}
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+  function renderMermaid() {
+    document.querySelectorAll('.language-mermaid').forEach(function (block) {
+      var code = block.querySelector('code') || block;
+      var pre = document.createElement('pre');
+      pre.className = 'mermaid';
+      // textContent reconstructs the raw graph source even when Rouge has
+      // wrapped it in highlight spans.
+      pre.textContent = code.textContent;
+      block.replaceWith(pre);
+    });
+
+    var dark = document.documentElement.classList.contains('dark') ||
+               (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default' });
+    mermaid.run({ querySelector: 'pre.mermaid' });
+  }
+
+  if (document.readyState !== 'loading') renderMermaid();
+  else document.addEventListener('DOMContentLoaded', renderMermaid);
+</script>

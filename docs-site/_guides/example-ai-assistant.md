@@ -94,8 +94,7 @@ Inside the manager session you dispatch a persona:
 
 ```sh
 vendor/bin/lever-manager agent start archivist \
-  --task "Summarise this week's journal entries into reference/weekly.md" \
-  -g groves/archivist
+  --task "Summarise this week's journal entries into reference/weekly.md"
 ```
 
 Behind that one command, the boundary is enforced at three points:
@@ -119,7 +118,7 @@ private notes:
 
 ```sh
 vendor/bin/lever-manager agent start researcher \
-  --task "Research X and report back" -g groves/researcher
+  --task "Research X and report back"
 ```
 
 - It has no `notes` grant, so the broker **refuses to mint** any `notes`

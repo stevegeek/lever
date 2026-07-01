@@ -189,18 +189,18 @@ paths; the single `bash -c` (scion install) correctly single-quote-escapes its i
 `jailPath` never fabricates an in-jail path for an out-of-tree target; the credential value is
 base64'd and redacted in error output at its one call site.
 
-### 5.4 The in-jail manifest is sanitized
+### 5.4 The manager holds no grove-dispatch authority
 
-The in-jail manager no longer reads the operator config (which would require it in the mount and
-would expose host paths). Instead the host writes a **sanitized runtime manifest**
-(`.lever-manifest.yaml`, grove→resolved-image only, no host paths, no credential, no tree/ports)
-into the mount at apply. It carries **per grove → {resolved-image, llm-auth mode}** and nothing else
-(no host paths, no credential, no tree/ports). A compromised manager rewriting it can at most
-re-select an already-loaded image for a grove it dispatches, or flip a grove's `llm_auth`, and the
-latter is **not** an escalation surface: the mode controls only whether the grove *requests* a
-capability token, never whether a credential exists in its container (the host projects credentials,
-not the manifest), so it can never conjure a key the host did not project. No host escalation, no
-secret leak.
+Grove lifecycle is owned by the host-side capability broker, not the in-jail manager. The manager's
+`agent start/stop/suspend/resume` commands are thin mTLS clients of the broker's `/grove/*`
+endpoints; the manager holds no scion authority of its own for dispatch. Each request is
+authenticated by the manager's certificate CN and authorized against the config: only a grove
+**declared in the config** can be dispatched, and the manager passes a grove **name**, never a
+filesystem path or scion project — the broker resolves the path, image, and LLM-auth mode from the
+config host-side. A compromised manager therefore cannot start an arbitrary scion project, mount
+another project's tree, or inject a host path; the worst it can do is (re)dispatch a grove it was
+already permitted to dispatch. Because the broker (not the mount) is the source of grove
+configuration, there is no in-jail config file for a compromised manager to tamper with.
 
 ### 5.5 Residual
 
@@ -266,9 +266,9 @@ are both clean: **all-api-key** (the default) = no agent holds a real key, capab
 signed tokens, and `egress: closed` is available to seal the network jail-wide; **all-subscription**
 = every agent holds the OAuth key with open egress (the owner/dev trade, by design). Note this is
 *not* an escalation surface: the `api-key` flag controls only whether an agent obtains a capability
-token, **not** credential availability, so flipping a grove's (manager-writable) manifest mode could
-never *conjure* a token the host did not project; the validation gate is about preventing a
-misleading config, not about containment.
+token, **not** credential availability, and a grove's mode is fixed by the config the broker reads
+(nothing the manager can rewrite), so it could never *conjure* a token the host did not project; the
+validation gate is about preventing a misleading config, not about containment.
 
 To *support* mixed instances later would require per-container egress and/or projecting the OAuth secret
 only into subscription agents' projects (not as a hub-wide secret), deferred; until then, mixed is a

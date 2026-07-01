@@ -136,7 +136,7 @@ the root, or pass an explicit path). See `examples/` for runnable configs and
 | Command | What it does |
 |---|---|
 | `lever up [config]` | Bring the application up *if needed* (create jail, provision scion, start the manager) **and attach** the manager's TTY. Reads `./lever.yaml` from cwd when omitted (no walk-up). `--fresh` starts a new manager thread; `--no-attach` brings up without attaching. The everyday entry point. |
-| `lever apply [config]` | Headless bring-up, runs the full plan (jail → images → scion init/config/server → credential → register manager + groves → write manifest → start manager). No attach. `--dry-run` prints the plan and exits. |
+| `lever apply [config]` | Headless bring-up, runs the full plan (jail → images → scion init/config/server → credential → register manager + groves → mint bootstrap → start manager). No attach. `--dry-run` prints the plan and exits. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress). `--machine`, `--tree`, `--allow-port`. Rarely needed directly. |
 | `lever down` | Tear the jail down (removes the isolated machine and everything in it). Targets `lever-<name>` from the discovered config; override with `--machine`. |
 | `lever doctor` | Diagnose the setup (machine up, image registry, hub health, a credential available); each failing check prints the fix. Targets `lever-<name>` from config; override with `--machine`. |
@@ -146,7 +146,7 @@ the root, or pass an explicit path). See `examples/` for runnable configs and
 
 | Command | What it does |
 |---|---|
-| `lever-manager agent <list\|start\|stop\|suspend\|resume\|attach\|register> NAME` | Grove/agent lifecycle against the jail-local hub. Dispatch a grove with `agent start NAME --task "…" -g <grove-dir-path>`; the image is resolved from the sanitized runtime manifest the host wrote into the mount (`--image` overrides). |
+| `lever-manager agent <list\|start\|stop\|suspend\|resume> NAME` | Grove lifecycle, routed through the capability broker. Dispatch a grove with `agent start NAME --task "…"`, where NAME is a grove declared in the config; the broker authenticates the call, validates the name, and resolves the grove's image and workspace from the config before starting it (`--image` overrides). |
 | `lever-manager msg send --to GROVE "…"` / `lever-manager msg list` | Send a message to a running agent / read the typed agent-event inbox (`scion notifications`). |
 | `lever-manager watch` | Stream scion events to a file the manager `Monitor`s (the notification bridge). |
 | `lever-manager version` | Print the version. |

@@ -4,11 +4,11 @@ nav_order: 4
 ---
 # Architecture
 
-> **Mostly built; §4 is design intent.** Jail bring-up, the manager up/attach lifecycle, the
-> capability broker, and the `lever watch` bridge are implemented and validated (see
-> [security-model.md](/security-model/)). The dispatch and notification loop in §4 (the
-> `input-needed`/`completed` event contract) is not yet wired end-to-end; treat that section as
-> design intent and its event names as illustrative, not literal identifiers.
+> **Mostly built.** Jail bring-up, the manager up/attach lifecycle, the capability broker, grove
+> dispatch (the manager calling the broker's `/grove/*` endpoints), and the `lever watch` bridge are
+> implemented and validated (see [security-model.md](/security-model/)). The notification contract in
+> §4 (the `input-needed`/`completed` event names) is still being refined; treat those event names as
+> illustrative, not literal identifiers.
 
 Lever is a thin orchestration-and-interface layer over [Scion](https://github.com/GoogleCloudPlatform/scion),
 which provides the container runtime, agent sessions, attach/resume, and typed messaging. Two Scion
@@ -83,10 +83,12 @@ graph TD
 - **Grove projects**, each `groves/<name>/` is its own project, isolated from the manager and
   from siblings. A grove agent sees only its own directory.
 - **Overlapping mounts are intentional**, the manager's workspace physically contains the grove
-  directories, so edits are live to all parties. Note this is a single writable tree: isolation
-  *between* the manager and groves currently rests on convention, not enforcement, and is hardened
-  by the planned inner auth layer ([security-model.md §4](/security-model/)). It is **not** a
-  security control against a hostile grove today.
+  directories, so edits are live to all parties. Note this is a single writable tree: *file-level*
+  isolation between the manager and groves currently rests on convention, not enforcement, and is
+  hardened by the planned inner auth layer ([security-model.md §4](/security-model/)). It is **not** a
+  file-access control against a hostile grove today. The *dispatch* boundary, by contrast, is
+  enforced: the manager can only start groves declared in the config, and only via the broker (see
+  [security-model.md §5.4](/security-model/)).
 - The core only requires a tree root plus a configured grove location; the `knowledge base + tools`
   layout above is an *instance* convention.
 
@@ -122,10 +124,12 @@ terminal `completed`.
 sequenceDiagram
     participant Hu as Human
     participant Mg as Manager
+    participant Br as Broker
     participant Sc as Scion
     participant Gv as Grove agent
     Hu->>Mg: "do X in app-a"
-    Mg->>Sc: start grove + dispatch task (with a correlation id)
+    Mg->>Br: start grove (POST /grove/start, mTLS; correlation id)
+    Br->>Sc: start grove (operator identity, host-side)
     Sc->>Gv: launch container, deliver task
     Gv-->>Sc: event: input-needed ("which DB?")
     Sc-->>Mg: typed event (via bridge)

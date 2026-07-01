@@ -182,11 +182,10 @@ CN-bound, short-lived capability tokens. See [security-model.md](/security-model
 - **Machine name:** `lever-<name>`. `up`/`apply`/`down`/`doctor` all agree on this, derived from the
   config (override on `down`/`doctor` with `--machine`).
 - **Grove image inheritance:** a grove with no `image:` runs on `manager.image`. The bring-up plan
-  loads every distinct image once (deduped). At apply time the host writes a **sanitized runtime
-  manifest** (`.lever-manifest.yaml`, grove→image only) into the mount; the in-jail manager resolves
-  each grove's image from it, no `--image` needed (an explicit `--image` still overrides). The
-  manifest carries no host paths or credentials, so tampering it only re-selects an already-loaded
-  image.
+  loads every distinct image once (deduped). At dispatch the capability broker reads the config
+  directly and supplies each grove's resolved image, so `agent start NAME` needs no `--image` (an
+  explicit `--image` still overrides). The manager never handles host paths or credentials: it names
+  a configured grove and the broker resolves everything host-side.
 - **In-place mounts:** the `tree` subdir (and each `groves[].dir` within it) is bind-mounted into the
   jail so agents edit the real host files. There is no copy/sync step.
 - **Path resolution base:** relative `tree`/`prompt_file`/`scion.source`/`credential_file` resolve

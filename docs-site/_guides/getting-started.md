@@ -129,7 +129,6 @@ You'll see the ordered plan:
   scion-server
   register-manager        /…/hello-grove/workspace
   register-grove          /…/hello-grove/workspace/groves/worker
-  write-manifest          /…/hello-grove/workspace
   mint-manager-bootstrap  /…/hello-grove/workspace
   start-manager           hello-grove
 ```
@@ -155,15 +154,16 @@ You're now talking to the manager agent. It drives groves with the in-jail `leve
 A dispatch looks like:
 
 ```sh
-vendor/bin/lever-manager agent start worker --task "Write a haiku to haiku.md" -g groves/worker
+vendor/bin/lever-manager agent start worker --task "Write a haiku to haiku.md"
 ```
 
 Notes:
-- **`-g groves/worker` is a path**, resolved relative to the manager's working directory in the
-  jail, not a bare slug. (A bare slug silently falls back to the manager's own project.)
-- **No `--image` needed**, the grove's image is resolved from the sanitized runtime manifest the
-  host wrote into the mount at apply (it inherits the manager image here). An explicit `--image`
-  overrides.
+- **`worker` is the grove's configured name**, not a path or a bare scion slug. The command is a
+  thin client of the capability broker: the broker authenticates the manager, validates the name
+  against the config, and starts the grove host-side (with operator identity) so it mounts its own
+  `groves/worker/` workspace rather than the manager's whole tree.
+- **No `--image` needed**, the broker resolves the grove's image from the config (it inherits the
+  manager image here). An explicit `--image` overrides.
 
 Watch progress and relay events:
 

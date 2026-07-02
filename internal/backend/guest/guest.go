@@ -55,7 +55,9 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 // GOARCH returns the guest's Go cross-compile arch, detected via `uname -m`
 // run inside the guest (as the run user).
 func (g Guest) GOARCH(ctx context.Context) (string, error) {
-	res, err := g.Host.Run(ctx, nil, g.UserPrefix[0], append(g.UserPrefix[1:], "uname", "-m")...)
+	// Defensive copy: appending directly to g.UserPrefix[1:] risks aliasing/
+	// corrupting the shared slice's backing array when capacity allows reuse.
+	res, err := g.Host.Run(ctx, nil, g.UserPrefix[0], append(append([]string{}, g.UserPrefix[1:]...), "uname", "-m")...)
 	if err != nil {
 		return "", fmt.Errorf("uname -m: %w", err)
 	}

@@ -35,8 +35,8 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			if err := g.EnsureRuntimes(context.Background(), "stephen"); err != nil {
 				t.Fatalf("EnsureRuntimes: %v", err)
 			}
-			if len(f.Calls) != 4 {
-				t.Fatalf("expected 4 calls, got %d: %+v", len(f.Calls), f.Calls)
+			if len(f.Calls) != 5 {
+				t.Fatalf("expected 5 calls, got %d: %+v", len(f.Calls), f.Calls)
 			}
 
 			// call 0: root apt install — RootPrefix then bash -lc <script>.
@@ -50,34 +50,44 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 				t.Errorf("call 0 script missing apt-get install/podman: %q", firstScript)
 			}
 
-			// call 1: root subuid/subgid/linger — must mention the run user.
-			second := f.Calls[1]
+			// call 1: root relax unprivileged userns (rootless-runtime prereq).
+			userns := f.Calls[1]
+			if userns.Name != shape.rootPrefix[0] {
+				t.Fatalf("call 1 should be root-prefixed, got %+v", userns)
+			}
+			usernsScript := userns.Args[len(userns.Args)-1]
+			if !strings.Contains(usernsScript, "apparmor_restrict_unprivileged_userns") {
+				t.Errorf("call 1 script missing userns relaxation: %q", usernsScript)
+			}
+
+			// call 2: root subuid/subgid/linger — must mention the run user.
+			second := f.Calls[2]
 			if second.Name != shape.rootPrefix[0] {
-				t.Fatalf("call 1 should be root-prefixed, got %+v", second)
+				t.Fatalf("call 2 should be root-prefixed, got %+v", second)
 			}
 			secondScript := second.Args[len(second.Args)-1]
 			if !strings.Contains(secondScript, "stephen") || !strings.Contains(secondScript, "loginctl enable-linger") {
-				t.Errorf("call 1 script missing subid/linger for runUser: %q", secondScript)
+				t.Errorf("call 2 script missing subid/linger for runUser: %q", secondScript)
 			}
 
-			// call 2: user rootless install.
-			third := f.Calls[2]
+			// call 3: user rootless install.
+			third := f.Calls[3]
 			if third.Name != shape.userPrefix[0] {
-				t.Fatalf("call 2 should be user-prefixed, got %+v", third)
+				t.Fatalf("call 3 should be user-prefixed, got %+v", third)
 			}
 			thirdScript := third.Args[len(third.Args)-1]
 			if !strings.Contains(thirdScript, "get.docker.com/rootless") {
-				t.Errorf("call 2 script missing rootless install: %q", thirdScript)
+				t.Errorf("call 3 script missing rootless install: %q", thirdScript)
 			}
 
-			// call 3: user dockerd start.
-			fourth := f.Calls[3]
+			// call 4: user dockerd start.
+			fourth := f.Calls[4]
 			if fourth.Name != shape.userPrefix[0] {
-				t.Fatalf("call 3 should be user-prefixed, got %+v", fourth)
+				t.Fatalf("call 4 should be user-prefixed, got %+v", fourth)
 			}
 			fourthScript := fourth.Args[len(fourth.Args)-1]
 			if !strings.Contains(fourthScript, "docker info") {
-				t.Errorf("call 3 script missing dockerd start: %q", fourthScript)
+				t.Errorf("call 4 script missing dockerd start: %q", fourthScript)
 			}
 		})
 	}

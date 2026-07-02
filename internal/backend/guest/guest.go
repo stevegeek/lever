@@ -39,6 +39,21 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
+	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships
+	// kernel.apparmor_restrict_unprivileged_userns=1, which blocks the rootless
+	// runtimes' rootlesskit/pasta from creating the unprivileged user namespace
+	// they require — without this the rootless Docker/Podman install fails with
+	// "fork/exec /proc/self/exe: permission denied". The jail is a dedicated VM
+	// whose OWN kernel is the containment boundary (backend Guarantee 0:
+	// separate-kernel), and its sole purpose is to run the agent's untrusted
+	// rootless containers, so relaxing this in-guest knob is the intended jail
+	// posture — it is scoped to the throwaway guest kernel and does not touch the
+	// host's. Persisted so it survives a guest reboot and applied live for this
+	// boot. Tolerant of guests without the knob (e.g. the OrbStack distro), where
+	// the sysctl key simply doesn't exist.
+	if err := root(`printf 'kernel.apparmor_restrict_unprivileged_userns=0\n' > /etc/sysctl.d/99-lever-userns.conf; sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true`); err != nil {
+		return fmt.Errorf("relax unprivileged userns for rootless runtimes: %w", err)
+	}
 	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; loginctl enable-linger %s`,
 		runUser, runUser, runUser, runUser, runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)

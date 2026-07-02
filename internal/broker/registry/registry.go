@@ -19,6 +19,12 @@ type Operation struct {
 	CaveatParam map[string]string
 }
 
+// WildcardOp is the operation name of a coarse tool's single capability. It is
+// a literal op value — minted, granted, and verified by exact match — so the
+// token layer needs no wildcard logic; the gateway simply REQUIRES this op for
+// a coarse tool (and never for a fine one, so "*" cannot widen a fine tool).
+const WildcardOp = "*"
+
 // Tool is a registered MCP tool.
 type Tool struct {
 	Name       string
@@ -32,6 +38,14 @@ type Tool struct {
 	// verifies tokens itself; the gateway forwards the token + caller to it
 	// rather than stripping (see the gateway). Third-party tools leave this false.
 	FirstParty bool
+	// External marks an already-running host server the broker fronts but does
+	// not spawn or expect to self-register: it is registered from config at
+	// boot, and /register rejects it.
+	External bool
+	// Coarse marks an external tool gated by the single wildcard capability
+	// ({tool, WildcardOp}): the gateway requires that capability for every
+	// tools/call instead of the per-MCP-tool operation.
+	Coarse bool
 }
 
 // Registry is the concurrency-safe set of registered tools.

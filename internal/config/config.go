@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lever-to/lever/internal/backend"
+	"github.com/lever-to/lever/internal/broker/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,13 +38,116 @@ type Op struct {
 	CaveatParam map[string]string `yaml:"caveat_param"`
 }
 
-// Tool declares a first-party (capability-aware) tool the broker supervises.
+// Tool declares a tool the broker gates behind its mTLS MCP gateway: either a
+// first-party (capability-aware) subprocess the broker supervises, or — with
+// External — an already-running host MCP server the broker fronts.
 type Tool struct {
 	Name          string              `yaml:"name"`
 	Command       []string            `yaml:"command"`
 	Backend       string              `yaml:"backend"`
 	Operations    []Op                `yaml:"operations"`
 	AllowedValues map[string][]string `yaml:"allowed_values"`
+	// External marks an already-running host MCP server the broker fronts but
+	// does NOT spawn (its lifecycle — and any TCC/Automation grant — stays with
+	// the user session). It is registered from config with FirstParty=false, so
+	// the gateway enforces the rules and strips the capability token. Command
+	// must be empty; Backend is the server's own listen address,
+	// host:port[/path], loopback unless AllowNonLoopback.
+	External bool `yaml:"external"`
+	// Gate selects the capability grain (fine|coarse, default fine). Only
+	// valid on an external tool.
+	Gate Gate `yaml:"gate"`
+	// AllowNonLoopback permits an external Backend beyond a literal loopback
+	// IP. The gateway proxies HOST-side, so a non-loopback backend hands the
+	// jailed agent a path to another host THROUGH the broker, bypassing the
+	// jail's LAN-drop egress — leave this off unless that is exactly intended.
+	AllowNonLoopback bool `yaml:"allow_non_loopback"`
+}
+
+// EffectiveGate resolves a tool's capability grain: the declared gate, or
+// GateFine when unset.
+func (t Tool) EffectiveGate() Gate {
+	if t.Gate != "" {
+		return t.Gate
+	}
+	return GateFine
+}
+
+// validate checks one broker.tools entry's shape, failing closed. External
+// tools are fronted, not spawned: backend required, command forbidden,
+// backend a literal loopback IP unless explicitly opted out. gate applies to
+// external tools only; coarse replaces the operations list with the wildcard.
+func (t Tool) validate() error {
+	switch t.Gate {
+	case "", GateFine, GateCoarse:
+	default:
+		return fmt.Errorf("config: broker tool %q gate %q invalid (want fine|coarse)", t.Name, t.Gate)
+	}
+	for _, o := range t.Operations {
+		if o.Name == registry.WildcardOp {
+			return fmt.Errorf("config: broker tool %q declares operation %q, which is reserved for gate: coarse", t.Name, registry.WildcardOp)
+		}
+	}
+	if !t.External {
+		if t.Gate != "" {
+			return fmt.Errorf("config: broker tool %q sets gate but is not external (gate applies to external tools only)", t.Name)
+		}
+		if len(t.Command) == 0 {
+			return fmt.Errorf("config: broker tool %q has no command (a supervised tool needs one; did you mean external: true?)", t.Name)
+		}
+		return nil
+	}
+	if len(t.Command) != 0 {
+		return fmt.Errorf("config: external broker tool %q must not set command (the broker fronts external servers, it does not spawn them)", t.Name)
+	}
+	if t.Backend == "" {
+		return fmt.Errorf("config: external broker tool %q needs backend (the server's own listen address, host:port[/path])", t.Name)
+	}
+	if err := t.validateExternalBackend(); err != nil {
+		return err
+	}
+	if t.EffectiveGate() == GateCoarse {
+		if len(t.Operations) != 0 {
+			return fmt.Errorf("config: external broker tool %q is gate: coarse and must not declare operations (coarse admits the whole surface; use gate: fine to enumerate)", t.Name)
+		}
+		if len(t.AllowedValues) != 0 {
+			return fmt.Errorf("config: external broker tool %q is gate: coarse and must not declare allowed_values (there are no per-operation params to pin)", t.Name)
+		}
+		return nil
+	}
+	if len(t.Operations) == 0 {
+		return fmt.Errorf("config: external broker tool %q is gate: fine and needs operations (or set gate: coarse to admit the whole surface)", t.Name)
+	}
+	return nil
+}
+
+// validateExternalBackend confines an external backend to a literal loopback
+// IP (127.0.0.1 / [::1]) unless allow_non_loopback is set. The gateway proxies
+// host-side, so a non-loopback backend would let the jailed agent reach other
+// hosts through the broker, circumventing the jail's LAN-drop egress.
+// Hostnames (even "localhost") are rejected: only a literal IP can be
+// loopback-checked without trusting a resolver.
+func (t Tool) validateExternalBackend() error {
+	b := t.Backend
+	if strings.Contains(b, "://") {
+		return fmt.Errorf("config: external broker tool %q backend %q must not carry a scheme (want host:port[/path])", t.Name, b)
+	}
+	hostport := b
+	if i := strings.IndexByte(b, '/'); i >= 0 {
+		hostport = b[:i]
+	}
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return fmt.Errorf("config: external broker tool %q backend %q: %v (want host:port[/path])", t.Name, b, err)
+	}
+	if t.AllowNonLoopback {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("config: external broker tool %q backend %q is not a literal loopback IP — the gateway proxies host-side, so a non-loopback backend would let the jailed agent reach other hosts through the broker; set allow_non_loopback: true only if that is exactly what you intend", t.Name, b)
+	}
+	return nil
 }
 
 // LLMAuthMode selects how an agent authenticates to the Anthropic API.
@@ -57,6 +162,19 @@ type LLMAuthMode string
 const (
 	LLMAuthSubscription LLMAuthMode = "subscription"
 	LLMAuthAPIKey       LLMAuthMode = "api-key"
+)
+
+// Gate selects the capability grain the gateway enforces on an EXTERNAL tool.
+//   - fine (the default): only the declared operations are callable; a token
+//     must name the specific MCP tool being invoked (op == params.name).
+//   - coarse: one wildcard capability ({tool, "*"}) admits every MCP call the
+//     server exposes — wholesale trust of its whole surface. Use for tools
+//     where per-operation gating adds nothing; keep sensitive servers fine.
+type Gate string
+
+const (
+	GateFine   Gate = "fine"
+	GateCoarse Gate = "coarse"
 )
 
 // EgressMode selects the jail's outbound network posture. It is independent of
@@ -467,7 +585,13 @@ func (a *App) validateBrokerGrants() error {
 		if _, dup := toolOps[t.Name]; dup {
 			return fmt.Errorf("config: duplicate broker tool %q", t.Name)
 		}
+		if err := t.validate(); err != nil {
+			return err
+		}
 		ops := map[string]bool{}
+		if t.External && t.EffectiveGate() == GateCoarse {
+			ops[registry.WildcardOp] = true
+		}
 		for _, o := range t.Operations {
 			ops[o.Name] = true
 		}
@@ -484,6 +608,9 @@ func (a *App) validateBrokerGrants() error {
 			return fmt.Errorf("config: %s grants tool %q which is not a declared broker.tool", who, tool)
 		}
 		if !ops[op] {
+			if op == registry.WildcardOp {
+				return fmt.Errorf("config: %s grants op %q on tool %q, but the wildcard is honored only for a gate: coarse external tool", who, op, tool)
+			}
 			return fmt.Errorf("config: %s grants %q on tool %q which has no such operation", who, op, tool)
 		}
 		return nil

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,5 +166,21 @@ func TestRequestDeniesUnregisteredOperation(t *testing.T) {
 	b.handleRequest(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (db.drop not a registered op)", w.Code)
+	}
+}
+
+func TestRequestDeniesWildcardMintOnFineTool(t *testing.T) {
+	cfg := testConfig(t)
+	// Simulate a policy misconfiguration that slipped past config validation:
+	// the registry gate (HasOperation) must still deny — a fine tool has no "*".
+	cfg.Rules.AllowObtain("analyst", "db", registry.WildcardOp)
+	b := New(cfg)
+	body := `{"tool":"db","op":"*"}`
+	r := httptest.NewRequest("POST", "/request", strings.NewReader(body))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (fine tool exposes no wildcard op)", w.Code)
 	}
 }

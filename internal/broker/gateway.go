@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lever-to/lever/internal/broker/registry"
 	"github.com/lever-to/lever/internal/cap/ca"
 	"github.com/lever-to/lever/internal/cap/token"
 )
@@ -22,6 +23,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		return nil, fmt.Errorf("broker: gateway for unregistered tool %q", toolName)
 	}
 	firstParty := t.FirstParty
+	coarse := t.Coarse
 	// The config backend is a bare host:port listen address (config:
 	// `backend: 127.0.0.1:3201`), which url.Parse treats as scheme:opaque and
 	// can't proxy. Normalize a scheme-less authority to http:// (loopback tool
@@ -100,7 +102,16 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
-			params, err := b.reg.MapParams(toolName, op, args)
+			// A coarse tool's whole surface rides one wildcard capability:
+			// require {tool, "*"} regardless of which MCP tool is invoked. The
+			// gateway CHOOSES the required op, so a "*" token can never satisfy
+			// a fine tool (whose required op is the real params.name) — the
+			// wildcard cannot cross grains.
+			requiredOp := op
+			if coarse {
+				requiredOp = registry.WildcardOp
+			}
+			params, err := b.reg.MapParams(toolName, requiredOp, args)
 			if err != nil {
 				b.audit(toolName, caller, "deny", err.Error())
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -112,7 +123,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 				return
 			}
 			if err := token.Verify(b.keys.Public, rawTok, token.Request{
-				Caller: caller, Capability: token.Capability{Tool: toolName, Operation: op},
+				Caller: caller, Capability: token.Capability{Tool: toolName, Operation: requiredOp},
 				Params: params, Now: time.Now(), MinEpoch: b.MinEpoch(),
 			}); err != nil {
 				b.audit(toolName, caller, "deny", err.Error())
@@ -133,6 +144,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 				r.ContentLength = int64(len(cleaned))
 			}
 			r.Header.Set("X-Lever-Method", "tools/call")
+			// audit the real MCP tool name, even on the coarse path
 			b.audit(toolName, caller, "allow", op)
 		case "initialize", "tools/list", "notifications/initialized", "ping":
 			// Allowlisted non-capability methods — forward unchanged.

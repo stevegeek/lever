@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	registry "github.com/lever-to/lever/internal/broker/registry"
@@ -164,5 +165,24 @@ func TestRegisterRejectsUnknownOpAndCaveatMismatch(t *testing.T) {
 	b.handleRegister(w, r)
 	if w.Code == http.StatusOK {
 		t.Fatal("caveat_param not matching the config guard must be rejected")
+	}
+}
+
+func TestRegisterRejectsExternalTool(t *testing.T) {
+	b := New(testConfig(t))
+	_ = b.reg.Register(registry.Tool{
+		Name: "things3", Backend: "127.0.0.1:3300", External: true, Coarse: true,
+		Operations: map[string]registry.Operation{registry.WildcardOp: {Name: registry.WildcardOp}},
+	})
+	body := `{"name":"things3","backend":"127.0.0.1:9999","operations":[{"name":"*"}]}`
+	r := httptest.NewRequest("POST", "/register", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	b.handleRegister(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (external tools do not self-register)", w.Code)
+	}
+	got, _ := b.reg.Lookup("things3")
+	if got.Backend != "127.0.0.1:3300" {
+		t.Fatalf("envelope overwritten by a rejected registration: backend = %q", got.Backend)
 	}
 }

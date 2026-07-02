@@ -36,7 +36,15 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 		_, err := g.Host.Run(ctx, nil, g.UserPrefix[0], append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", script)...)
 		return err
 	}
-	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman`); err != nil {
+	// Guard the apt step behind a dpkg presence check so a re-apply (or a second
+	// egress posture on the same VM) does NOT re-run apt. This is not just an
+	// optimisation: once lever's egress chain is active it drops the RFC1918
+	// ranges, which on Lima include the guest's own DNS upstream (systemd-resolved
+	// forwards to a 192.168.x address), so `apt-get update` can no longer resolve
+	// the mirrors and hangs. The first EnsureUp (fresh VM, no chain yet) installs
+	// everything; subsequent ones find the packages present and skip apt entirely,
+	// needing no guest DNS. `dpkg -s <pkgs>` succeeds iff ALL are installed.
+	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman; }`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
 	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships

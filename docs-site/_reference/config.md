@@ -210,8 +210,8 @@ broker:
       backend: 127.0.0.1:3101/mcp
       gate: coarse
 groves:
-  - name: agentY
-    dir: groves/agentY
+  - name: agent-y
+    dir: groves/agent-y
     obtain:
       - {tool: devonthink, op: search}   # Y: devonthink search ONLY
 manager:

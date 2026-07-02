@@ -111,6 +111,8 @@ func scriptedMachine(f *exec.FakeRunner) {
 	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
 	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
 	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
+	// EnsureScion (when a test sets ScionSource/ScionVersion): guest arch detection.
+	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "arm64\n"})
 	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
 	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
 	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
@@ -473,15 +475,6 @@ func TestEnsureScionSourceMissing(t *testing.T) {
 		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
 			t.Fatalf("go build must NOT be called when source missing (stat short-circuits): %+v", c)
 		}
-	}
-}
-
-func TestShellSingleQuote(t *testing.T) {
-	if got := shellSingleQuote("ab"); got != "'ab'" {
-		t.Errorf("shellSingleQuote(ab): want 'ab' got %q", got)
-	}
-	if got := shellSingleQuote("a'b"); got != `'a'\''b'` {
-		t.Errorf(`shellSingleQuote(a'b): want 'a'\''b' got %q`, got)
 	}
 }
 

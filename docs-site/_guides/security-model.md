@@ -165,6 +165,45 @@ Full mechanism detail, the roadmap entry, and rejected backends live on the
 This is exactly why config validation rejects any backend name that isn't implemented instead of
 quietly falling back to OrbStack: a containment posture must never be silently substituted.
 
+**Lima operational notes**, from the T13 security review:
+
+- **Lima's in-guest kernel attack surface is intentionally widened for rootless runtimes.**
+  Provisioning re-enables the unprivileged user-namespace knob
+  (`kernel.apparmor_restrict_unprivileged_userns=0`) that Ubuntu ≥ 23.10 disables by default, a
+  prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
+  guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
+  the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
+  this surface reaches VM root, not the host, consistent with the §7 "containing daemon authority
+  inside the jail" stance (in-jail privilege escalation is accepted; the jail's own bound is not).
+- **The jail VM survives host reboots.** It is destroyed only by `lever down` (`limactl delete
+  --force`); there is no `lever stop` or reboot-triggered teardown. "Throwaway guest" therefore means
+  per-`lever down`, not per-boot — a long-lived instance keeps the same guest state (and any in-guest
+  compromise) across host restarts until explicitly torn down.
+- **The egress allowlist (§2.2) depends on the VM/rootless boundary above it.** Every no-reopen /
+  allowlist property in this document assumes the agent lacks `CAP_NET_ADMIN` in the VM's *init*
+  network namespace — enforcement lives in that namespace, not the agent's container namespace (§2.2).
+  A container→VM-root escape would let the agent rewrite `LEVER_EGRESS` directly, bypassing the
+  allowlist rather than merely being contained by it; that escape reduces to the kernel/runtime
+  caveats in §7.
+- **A global lima config can widen the containment surface beyond what the lever template
+  requests.** `~/.lima/_config/{default,override}.yaml`, if present on the host, is merged into every
+  lima instance's *realized* config, including this one — an operator's own global lima settings could
+  add a mount or port-forward the lever-rendered template (template.go) never asked for. This is a
+  host-operator supply-chain concern (an attacker would need to already control the operator's
+  `~/.lima/_config`, not just the guest), not a guest-exploitable path. The realized-config drift check
+  (`Lima.verifyRealizedConfig`, `internal/backend/lima/lima.go`) is the backstop: `lever up` fails
+  closed if the VM's live merged config (mounts/port-forwards/containerd) doesn't match the template's
+  intent, whether adopting a pre-existing VM or verifying a freshly created one.
+- **Open-posture IPv6 caveat.** The alias-scoped ACCEPT/DROP rules (§2.2) are only emitted for a
+  family whose alias actually resolved; `host.lima.internal` is typically IPv4-only today, so under
+  the OPEN posture no v6-specific alias DROP is emitted (there is no resolved v6 alias to drop traffic
+  to). Safe today — the CLOSED posture's catch-all DROP covers v6 regardless of alias resolution — but
+  if a future lima version or host configuration ever resolves `host.lima.internal` to a *global-scope*
+  IPv6 address, the OPEN posture's protection depends on that address actually being picked up as the
+  resolved `aliasV6`: the unconditional private-range drops (`fe80::/10`, `fc00::/7`) don't cover a
+  global-scope address. `make test-lima-e2e` could assert `getent ahosts host.lima.internal` returns no
+  global-scope v6 today, to catch this drifting silently in the future.
+
 The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
 all groves — see §7; `lima` carries the same trade one level up (its own kernel is separate from the
 host, but still one kernel shared *within* the jail by the manager and every grove). That trade is a

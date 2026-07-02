@@ -828,6 +828,18 @@ func TestLoadAcceptsExistingValidToolNames(t *testing.T) {
 	}
 }
 
+// TestLoadAcceptsUnderscoreToolName pins that a real MCP server name with an
+// underscore (e.g. apple_notes) is a valid broker tool name: MCP server names
+// legitimately use underscores, and they are safe in the /mcp/<name>/ URL path.
+// This is the case the initial nameRE reuse wrongly rejected.
+func TestLoadAcceptsUnderscoreToolName(t *testing.T) {
+	cfg := replaceFirst(baseCfg, "name: db", "name: apple_notes")
+	cfg = replaceFirst(cfg, "tool: db, op: read", "tool: apple_notes, op: read")
+	if _, err := Load(writeConfig(t, cfg)); err != nil {
+		t.Fatalf("underscore tool name apple_notes must be accepted: %v", err)
+	}
+}
+
 // TestLoadRejectsEmptyOperationName: an operation with an empty name is a
 // config mistake — it can never be granted (checkCap compares op strings) and
 // would silently sink into the tool's op set undetected.

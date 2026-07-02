@@ -51,7 +51,7 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	jailMount := be.MountDest()
 	if u, id := os.Getenv("LEVER_JAIL_USER"), os.Getenv("LEVER_JAIL_UID"); u != "" && id != "" {
-		jr := jail.New(leverexec.RealRunner{}, machine, u, id)
+		jr := jail.New(leverexec.RealRunner{}, jail.OrbPrefix(machine, u), id)
 		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 	}
 	cfg.Groves = GroveSpecs(app, jailMount)

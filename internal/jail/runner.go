@@ -1,8 +1,10 @@
 // Package jail provides a JailRunner: an exec.Runner that executes commands
-// INSIDE an OrbStack machine via `orb -m <machine> -u <user> env [-C dir] K=V… cmd args`.
-// GNU `env` sets the jail environment (and cwd via -C) with no shell quoting, so
-// scion.Client runs unchanged inside the jail. The host runner it wraps
-// is the real one (orb runs on the host).
+// INSIDE a jail via a backend-supplied argv prefix — e.g.
+// ["orb","-m",m,"-u",u] (OrbStack) or ["limactl","shell",vm] (Lima) — followed
+// by `env [-C dir] K=V… cmd args`. GNU `env` sets the jail environment (and
+// cwd via -C) with no shell quoting, so scion.Client runs unchanged inside the
+// jail. The host runner it wraps is the real one (the prefix binary runs on
+// the host).
 package jail
 
 import (
@@ -16,14 +18,18 @@ import (
 var _ exec.Runner = (*Runner)(nil)
 
 type Runner struct {
-	host    exec.Runner
-	machine string
-	user    string
-	uid     string // run-user uid, for XDG_RUNTIME_DIR
+	host   exec.Runner
+	prefix []string
+	uid    string // run-user uid, for XDG_RUNTIME_DIR
 }
 
-func New(host exec.Runner, machine, user, uid string) *Runner {
-	return &Runner{host: host, machine: machine, user: user, uid: uid}
+func New(host exec.Runner, prefix []string, uid string) *Runner {
+	return &Runner{host: host, prefix: prefix, uid: uid}
+}
+
+// OrbPrefix is the argv prefix that executes inside an OrbStack machine.
+func OrbPrefix(machine, user string) []string {
+	return []string{"orb", "-m", machine, "-u", user}
 }
 
 // jailEnvFor is the fixed environment every in-jail command needs, for a given
@@ -62,13 +68,14 @@ func (r *Runner) Run(ctx context.Context, env map[string]string, name string, ar
 }
 
 func (r *Runner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
-	orbArgs := []string{"-m", r.machine, "-u", r.user, "env"}
+	argv := append([]string{}, r.prefix[1:]...)
+	argv = append(argv, "env")
 	if dir != "" {
-		orbArgs = append(orbArgs, "-C", dir)
+		argv = append(argv, "-C", dir)
 	}
-	orbArgs = append(orbArgs, r.jailEnv()...)
-	orbArgs = append(orbArgs, envKVs(env)...)
-	orbArgs = append(orbArgs, name)
-	orbArgs = append(orbArgs, args...)
-	return r.host.Run(ctx, nil, "orb", orbArgs...)
+	argv = append(argv, r.jailEnv()...)
+	argv = append(argv, envKVs(env)...)
+	argv = append(argv, name)
+	argv = append(argv, args...)
+	return r.host.Run(ctx, nil, r.prefix[0], argv...)
 }

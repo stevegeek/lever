@@ -98,7 +98,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return apply.Deps{}, nil, nil, err
 	}
 	user, uid := ob.RunUser(), ob.RunUID()
-	jr := jail.New(leverexec.RealRunner{}, machine, user, uid)
+	jr := jail.New(leverexec.RealRunner{}, jail.OrbPrefix(machine, user), uid)
 	sc := scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 
 	state := brokerctl.StateDir(filepath.Dir(configPath))
@@ -118,8 +118,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// JailUp is a no-op: buildApplyDeps already brought the jail up
 		// (idempotent; resolves user/uid). The apply executor's jail-up step
 		// is thus a confirmed no-op here.
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(ctx context.Context, ref string) error { return jail.LoadImage(ctx, machine, user, uid, ref) },
+		JailUp: func(context.Context, *config.App) error { return nil },
+		LoadImage: func(ctx context.Context, ref string) error {
+			return jail.LoadImage(ctx, jail.OrbPrefix(machine, user), uid, ref)
+		},
 		Scion:     sc,
 		JailMount: ob.MountDest(),
 

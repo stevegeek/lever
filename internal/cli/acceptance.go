@@ -117,7 +117,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    hardcoded /home/{manager,worker}/.lever-id (those users don't exist in
 	//    the broker-only VM — no agent containers were started).
 	machine := machineName(app.Name)
-	jr := jail.New(leverexec.RealRunner{}, machine, ob.RunUser(), ob.RunUID())
+	jr := jail.New(leverexec.RealRunner{}, jail.OrbPrefix(machine, ob.RunUser()), ob.RunUID())
 	h := &acceptanceHarness{
 		app:       app,
 		jr:        jr,

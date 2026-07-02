@@ -6,10 +6,9 @@ import (
 )
 
 func TestLoadImageArgs(t *testing.T) {
-	got := LoadImageArgs("lever-demo", "leveruser", "501")
+	got := LoadImageArgs(OrbPrefix("lever-demo", "leveruser"), "501")
 	want := []string{
-		"-m", "lever-demo",
-		"-u", "leveruser",
+		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
 		"XDG_RUNTIME_DIR=/run/user/501",
 		"podman", "load",

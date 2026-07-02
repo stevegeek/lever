@@ -75,7 +75,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return nil
 			}
 			inner := sc.AttachArgv(app.Name, project)
-			argv := jail.AttachArgv(ob.MachineName(), ob.RunUser(), ob.RunUID(), inner)
+			argv := jail.AttachArgv(jail.OrbPrefix(ob.MachineName(), ob.RunUser()), ob.RunUID(), inner)
 			bin, err := exec.LookPath(argv[0])
 			if err != nil {
 				return fmt.Errorf("attach: %w", err)

@@ -26,7 +26,8 @@ func (s *stubBackend) JailRunner() leverexec.Runner                   { return l
 func (s *stubBackend) AttachArgv(inner []string) []string {
 	return append([]string{"stub-attach"}, inner...)
 }
-func (s *stubBackend) LoadImage(context.Context, string) error { return nil }
+func (s *stubBackend) LoadImage(context.Context, string) error                  { return nil }
+func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {
 	sb := &stubBackend{}

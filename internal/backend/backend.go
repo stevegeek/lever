@@ -61,6 +61,10 @@ type Backend interface {
 	JailRunner() exec.Runner            // command transport into the jail
 	AttachArgv(inner []string) []string // interactive TTY argv (lever up)
 	LoadImage(ctx context.Context, imageRef string) error
+	// InstallGuestBinary streams a host-local executable into the guest at
+	// destPath as root (used by the acceptance gate to place lever-agent). The
+	// transport is the backend's root prefix, so callers stay backend-agnostic.
+	InstallGuestBinary(ctx context.Context, localPath, destPath string) error
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	Profile() Profile

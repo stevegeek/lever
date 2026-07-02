@@ -318,4 +318,10 @@ func (l *Lima) LoadImage(ctx context.Context, imageRef string) error {
 	return jail.LoadImage(ctx, JailPrefix(l.vm), l.RunUID(), imageRef)
 }
 
+// InstallGuestBinary streams a host-local executable into the VM at destPath as
+// root, via the shared guest provisioner (RootPrefix = `limactl shell <vm> sudo`).
+func (l *Lima) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {
+	return l.guest().InstallRootBinary(ctx, localPath, destPath)
+}
+
 var _ backend.Backend = (*Lima)(nil)

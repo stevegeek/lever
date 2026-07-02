@@ -262,4 +262,11 @@ func (o *OrbStack) LoadImage(ctx context.Context, imageRef string) error {
 	return jail.LoadImage(ctx, JailPrefix(o.machine, o.runUser), o.RunUID(), imageRef)
 }
 
+// InstallGuestBinary streams a host-local executable into the machine at
+// destPath as root, via the shared guest provisioner (RootPrefix =
+// `orb -u root -m <machine>`).
+func (o *OrbStack) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {
+	return o.guest().InstallRootBinary(ctx, localPath, destPath)
+}
+
 var _ backend.Backend = (*OrbStack)(nil)

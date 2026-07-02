@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/lever-to/lever/internal/apply"
+	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/config"
 	leverexec "github.com/lever-to/lever/internal/exec"
 	"github.com/spf13/cobra"
@@ -115,7 +115,6 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    identity directory. Identity dirs are VM-writable (vmIDDir), not the old
 	//    hardcoded /home/{manager,worker}/.lever-id (those users don't exist in
 	//    the broker-only VM — no agent containers were started).
-	machine := machineName(app.Name)
 	jr := b.JailRunner()
 	h := &acceptanceHarness{
 		app:       app,
@@ -129,7 +128,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	// 2b. Setup phase: install lever-agent in the VM, then enrol the manager and
 	//     provision+enrol the worker. FAIL-CLOSED — any setup error aborts the
 	//     gate with a clear message (never a vacuous check pass).
-	if err := h.setup(ctx, machine); err != nil {
+	if err := h.setup(ctx, b); err != nil {
 		return fmt.Errorf("acceptance: setup: %w", err)
 	}
 
@@ -224,27 +223,20 @@ func hostAgentBinPath() (string, error) {
 	return p, nil
 }
 
-// installLeverAgent copies the host-built linux/arm64 lever-agent into the VM at
-// /usr/local/bin/lever-agent (mode 0755) AS ROOT, so the existing
-// jr.Run(ctx, nil, "lever-agent", ...) finds it on PATH. Isolated OrbStack
-// machines do NOT mount the Mac filesystem, so we pipe the binary in as stdin to
-// `orb -u root -m <machine> sh -c 'cat > … && chmod …'`. We use os/exec directly
-// because the JailRunner has no stdin channel.
-func installLeverAgent(ctx context.Context, machine string) error {
+// installLeverAgent copies the host-built lever-agent into the jail guest at
+// /usr/local/bin/lever-agent AS ROOT, so the existing
+// jr.Run(ctx, nil, "lever-agent", ...) finds it on PATH. Isolated jail guests
+// (OrbStack machines, Lima VMs) do NOT mount the host filesystem, so the binary
+// is streamed in over the backend's root transport. Delegating to the backend
+// keeps this backend-agnostic — the "how do I reach the guest as root" knowledge
+// lives only in each backend's RootPrefix, not here.
+func installLeverAgent(ctx context.Context, b backend.Backend) error {
 	src, err := hostAgentBinPath()
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open lever-agent binary %s: %w", src, err)
-	}
-	defer f.Close()
-	cmd := exec.CommandContext(ctx, "orb", "-u", "root", "-m", machine, "sh", "-c",
-		"cat > /usr/local/bin/lever-agent && chmod 0755 /usr/local/bin/lever-agent")
-	cmd.Stdin = f
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("install lever-agent into jail %s: %w: %s", machine, err, string(out))
+	if err := b.InstallGuestBinary(ctx, src, "/usr/local/bin/lever-agent"); err != nil {
+		return fmt.Errorf("install lever-agent into jail: %w", err)
 	}
 	return nil
 }
@@ -253,10 +245,10 @@ func installLeverAgent(ctx context.Context, machine string) error {
 // identity-dir parents, enrol the manager from the deposited bootstrap, then
 // provision a worker ticket (as manager) and enrol the worker. Every step is
 // fail-closed — a setup error aborts the gate (never a vacuous check pass).
-func (h *acceptanceHarness) setup(ctx context.Context, machine string) error {
+func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error {
 	// 1) Install lever-agent into the VM (copied in as root; isolated machines
-	//    have no Mac-fs mount, so a shared-mount exec is impossible).
-	if err := installLeverAgent(ctx, machine); err != nil {
+	//    have no host-fs mount, so a shared-mount exec is impossible).
+	if err := installLeverAgent(ctx, b); err != nil {
 		return err
 	}
 	// 2) Ensure the per-role identity-dir parents exist and are run-user-writable.

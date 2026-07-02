@@ -113,15 +113,35 @@ func (g Guest) EnsureScion(ctx context.Context, source, version string) error {
 		goBin, "build", "-o", bin, "./cmd/scion"); err != nil {
 		return fmt.Errorf("cross-compile scion: %w", err)
 	}
+	return g.InstallRootBinary(ctx, bin, "/usr/local/bin/scion")
+}
+
+// InstallRootBinary streams a host-local executable into the guest at destPath
+// (mode +x), owned by root, via the RootPrefix transport. It is the backend-
+// agnostic way to place a binary the guest needs — scion (above) and the
+// acceptance gate's lever-agent both use it, so the "which prefix reaches the
+// guest as root" knowledge lives only in the backend's RootPrefix, never in a
+// caller.
+//
+// The install is atomic: it pipes the host file to a temp path in the guest,
+// makes it executable, then mv's it over destPath (mv is atomic on the same
+// filesystem), so a mid-stream failure can't leave a truncated, executable
+// binary at destPath. `set -o pipefail` propagates a left-side (host `cat`)
+// failure instead of letting the successful right side mask it. bash (not sh)
+// is required for pipefail. destPath is a fixed, caller-controlled path (not
+// attacker input), so it is embedded literally; only the host source path,
+// which can contain a temp-dir name, is shell-quoted.
+func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string) error {
 	rootWords := make([]string, 0, len(g.RootPrefix))
 	for _, w := range g.RootPrefix {
 		rootWords = append(rootWords, shellSingleQuote(w))
 	}
+	tmp := destPath + ".tmp"
 	install := fmt.Sprintf(
-		`set -o pipefail; cat %s | %s bash -c 'cat > /usr/local/bin/scion.tmp && chmod +x /usr/local/bin/scion.tmp && mv /usr/local/bin/scion.tmp /usr/local/bin/scion'`,
-		shellSingleQuote(bin), strings.Join(rootWords, " "))
+		`set -o pipefail; cat %s | %s bash -c 'cat > %s && chmod +x %s && mv %s %s'`,
+		shellSingleQuote(localPath), strings.Join(rootWords, " "), tmp, tmp, tmp, destPath)
 	if _, err := g.Host.Run(ctx, nil, "bash", "-c", install); err != nil {
-		return fmt.Errorf("install scion into jail: %w", err)
+		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}
 	return nil
 }

@@ -400,12 +400,44 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	}
 }
 
+// closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for
+// `iptables -S` and records whether the chain was flushed or the alias
+// re-resolved. It intercepts those substrings in a fixed switch order BEFORE
+// falling through to the embedded FakeRunner, so results are deterministic —
+// FakeRunner.Script matches by HasPrefix over its (randomized-iteration-order)
+// map, so two overlapping keys like "...iptables -S LEVER_EGRESS" and the
+// shorter generic "...iptables" are both valid prefixes of the same call, and
+// which one "wins" is nondeterministic. Mirrors orbstack_test.go's
+// closedChainRunner exactly (see orbstack_test.go:28-79).
+type closedChainRunner struct {
+	*exec.FakeRunner
+	flushed, resolved bool
+}
+
+func (r *closedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	argv := strings.Join(args, " ")
+	if name == "limactl" {
+		switch {
+		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
+			return exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"}, nil
+		case strings.Contains(argv, "-F LEVER_EGRESS"):
+			r.flushed = true
+		case strings.Contains(argv, "getent ahosts"):
+			r.resolved = true
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *closedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl shell lever-x sudo iptables -S LEVER_EGRESS", exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"})
-	f.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
-	l := New(f, "lever-x")
+	r := &closedChainRunner{FakeRunner: exec.NewFakeRunner()}
+	r.Script("limactl shell lever-x sudo iptables", exec.Result{})
+	r.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	l := New(r, "lever-x")
 	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
 	// live chain, so a re-apply that hits the skip must leave a prior
 	// aliasV6 untouched rather than zeroing it.
@@ -414,14 +446,13 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	if err := l.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
-	for _, c := range f.Calls {
-		j := strings.Join(append([]string{c.Name}, c.Args...), " ")
-		if strings.Contains(j, "getent ahosts") {
-			t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
-		}
-		if strings.Contains(j, "-F LEVER_EGRESS") {
-			t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
-		}
+	// I2: an already-closed chain must NOT be flushed or re-resolved — that
+	// would briefly open egress for a running agent.
+	if r.flushed {
+		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
+	}
+	if r.resolved {
+		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
 	}
 	if l.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", l.HostAliasV4())

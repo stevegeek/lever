@@ -42,8 +42,12 @@ var (
 // When closedInternet is true a catch-all OUTPUT DROP is appended AFTER all
 // per-port ACCEPTs, so the jail can reach ONLY the already-ACCEPTed destinations
 // (the broker port on the host alias). This is the api-key mode posture.
-// When closedInternet is false behaviour is byte-identical to the pre-existing open
-// posture (no catch-all DROP; public internet remains reachable).
+// When closedInternet is false, behaviour matches the pre-existing open posture
+// (no catch-all DROP; public internet remains reachable) with one addition present
+// in BOTH postures: rule 1b, an alias-scoped ESTABLISHED ACCEPT that lets a
+// host-initiated control channel into the jail (e.g. Lima's SSH, seen by the guest
+// as the alias IP) answer through the alias DROP below, without granting the guest
+// any NEW outbound (see rule 1b's comment for why this doesn't widen containment).
 func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool) []Rule {
 	ports := append([]int(nil), allowedPorts...)
 	sort.Ints(ports)

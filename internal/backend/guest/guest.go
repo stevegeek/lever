@@ -54,8 +54,17 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	if err := root(`printf 'kernel.apparmor_restrict_unprivileged_userns=0\n' > /etc/sysctl.d/99-lever-userns.conf; sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true`); err != nil {
 		return fmt.Errorf("relax unprivileged userns for rootless runtimes: %w", err)
 	}
-	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; loginctl enable-linger %s`,
-		runUser, runUser, runUser, runUser, runUser)); err != nil {
+	// Enable lingering so the run user's systemd instance (and thus rootless
+	// dockerd) survives after the provisioning SSH session closes. `loginctl
+	// enable-linger` is the canonical path (used on OrbStack), but on the Lima
+	// Ubuntu guest systemd-logind's D-Bus interface intermittently hangs — every
+	// loginctl call then blocks until timeout and the step fails ("Could not
+	// enable linger: Connection timed out"). enable-linger merely creates
+	// /var/lib/systemd/linger/<user>, so fall back to writing that marker directly
+	// (the documented equivalent) when loginctl is unresponsive: try it under a
+	// short timeout, else touch the marker. Deterministic on both backends.
+	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; timeout 8 loginctl enable-linger %s 2>/dev/null || { mkdir -p /var/lib/systemd/linger && : > /var/lib/systemd/linger/%s; }`,
+		runUser, runUser, runUser, runUser, runUser, runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)
 	}
 	if err := user(`command -v dockerd-rootless.sh >/dev/null 2>&1 || curl -fsSL https://get.docker.com/rootless | sh`); err != nil {

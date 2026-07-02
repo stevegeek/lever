@@ -15,11 +15,8 @@ import (
 
 	"github.com/lever-to/lever/internal/apply"
 	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/backend/orbstack"
 	"github.com/lever-to/lever/internal/brokerctl"
 	"github.com/lever-to/lever/internal/config"
-	leverexec "github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/jail"
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
@@ -66,18 +63,17 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 }
 
 // buildApplyDeps wires the live dependencies for apply.Run.
-// It eagerly calls EnsureUp so the OrbStack backend resolves the in-machine
+// It eagerly calls EnsureUp so the backend resolves the in-machine
 // run-user and UID before the JailRunner and scion.Client are constructed.
 // JailUp is therefore a no-op in the returned Deps — the jail is already
 // confirmed up and the user/uid are known.
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
-func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory) (apply.Deps, *orbstack.OrbStack, *scion.Client, error) {
+func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory) (apply.Deps, backend.Backend, *scion.Client, error) {
 	machine := "lever-" + app.Name
-	b := bf(machine)
-	ob, ok := b.(*orbstack.OrbStack)
-	if !ok {
-		return apply.Deps{}, nil, nil, fmt.Errorf("apply currently supports the orbstack backend only")
+	b, err := bf(app.Backend, machine)
+	if err != nil {
+		return apply.Deps{}, nil, nil, err
 	}
 	allowed := append([]int{app.EffectiveJailPort()}, app.Manager.AllowPorts...)
 	closed, warn := app.ClosedInternetEgress()
@@ -94,11 +90,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		ClosedInternet: closed,
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.
-	if err := ob.EnsureUp(ctx, cfg); err != nil {
+	if err := b.EnsureUp(ctx, cfg); err != nil {
 		return apply.Deps{}, nil, nil, err
 	}
-	user, uid := ob.RunUser(), ob.RunUID()
-	jr := jail.New(leverexec.RealRunner{}, jail.OrbPrefix(machine, user), uid)
+	jr := b.JailRunner()
 	sc := scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 
 	state := brokerctl.StateDir(filepath.Dir(configPath))
@@ -108,8 +103,8 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// Agents dial the broker by this IP — under closed-internet egress DNS/53 is
 	// dropped, so the hostname can't be resolved; the IP is already allowlisted and
 	// the broker cert carries it as a SAN. Falls back to the hostname if unresolved.
-	aliasV4 := ob.HostAliasV4()
-	brokerHost := ob.HostToolAlias() // host.orb.internal (DNS) by default…
+	aliasV4 := b.HostAliasV4()
+	brokerHost := b.HostToolAlias() // host.orb.internal (DNS) by default…
 	if aliasV4 != "" {
 		brokerHost = aliasV4 // …but prefer the resolved IP (no DNS needed)
 	}
@@ -120,10 +115,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// is thus a confirmed no-op here.
 		JailUp: func(context.Context, *config.App) error { return nil },
 		LoadImage: func(ctx context.Context, ref string) error {
-			return jail.LoadImage(ctx, jail.OrbPrefix(machine, user), uid, ref)
+			return b.LoadImage(ctx, ref)
 		},
 		Scion:     sc,
-		JailMount: ob.MountDest(),
+		JailMount: b.MountDest(),
 
 		// StartBroker spawns `lever broker serve <config>` detached from the
 		// current process group so it outlives the apply invocation.
@@ -148,8 +143,8 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			// with that IP as a SAN (agents dial it by IP under closed egress).
 			cmd.Env = append(os.Environ(),
 				"LEVER_HOST_ALIAS_IP="+aliasV4,
-				"LEVER_JAIL_USER="+ob.RunUser(),
-				"LEVER_JAIL_UID="+ob.RunUID(),
+				"LEVER_JAIL_USER="+b.RunUser(),
+				"LEVER_JAIL_UID="+b.RunUID(),
 			)
 			cmd.Stdout = io.Discard
 			cmd.Stderr = io.Discard
@@ -229,5 +224,5 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 				AgentCN:   app.ManagerCN(),
 			}, nil
 		},
-	}, ob, sc, nil
+	}, b, sc, nil
 }

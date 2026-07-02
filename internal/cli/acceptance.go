@@ -12,7 +12,6 @@ import (
 	"github.com/lever-to/lever/internal/apply"
 	"github.com/lever-to/lever/internal/config"
 	leverexec "github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/jail"
 	"github.com/spf13/cobra"
 )
 
@@ -101,7 +100,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    scion/container/registration steps (incl. init-machine, which needs a
 	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
 	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
-	deps, ob, _, err := buildApplyDeps(ctx, app, configPath, bf)
+	deps, b, _, err := buildApplyDeps(ctx, app, configPath, bf)
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}
@@ -117,12 +116,12 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    hardcoded /home/{manager,worker}/.lever-id (those users don't exist in
 	//    the broker-only VM — no agent containers were started).
 	machine := machineName(app.Name)
-	jr := jail.New(leverexec.RealRunner{}, jail.OrbPrefix(machine, ob.RunUser()), ob.RunUID())
+	jr := b.JailRunner()
 	h := &acceptanceHarness{
 		app:       app,
 		jr:        jr,
-		hostAlias: ob.HostToolAlias(),
-		bootDir:   bootstrapDirInJail(app, ob.MountDest()),
+		hostAlias: b.HostToolAlias(),
+		bootDir:   bootstrapDirInJail(app, b.MountDest()),
 		managerID: vmIDDir("manager"),
 		workerID:  vmIDDir("worker"),
 	}
@@ -186,7 +185,7 @@ func bootstrapDirInJail(app *config.App, mount string) string {
 // `lever-agent` inside the jail machine.
 type acceptanceHarness struct {
 	app       *config.App
-	jr        *jail.Runner
+	jr        leverexec.Runner
 	hostAlias string // host alias reachable from the jail (host.orb.internal); the broker listens behind it
 	bootDir   string // in-jail dir containing bootstrap.json (broker URL + CA)
 	managerID string // in-jail dir holding the manager's mTLS identity (the delegator)

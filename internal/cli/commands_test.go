@@ -30,7 +30,7 @@ func (s *stubBackend) LoadImage(context.Context, string) error { return nil }
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {
 	sb := &stubBackend{}
-	root := NewRootWithBackend(func(string) backend.Backend { return sb })
+	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"provision", "--machine", "lever-jail", "--tree", "/tmp/tree", "--allow-port", "3305"})
@@ -43,7 +43,7 @@ func TestUpCommandCallsEnsureUp(t *testing.T) {
 }
 
 func TestDoctorPrintsProfile(t *testing.T) {
-	root := NewRootWithBackend(func(string) backend.Backend { return &stubBackend{} })
+	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return &stubBackend{}, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"doctor", "--machine", "lever-jail"})
@@ -52,5 +52,23 @@ func TestDoctorPrintsProfile(t *testing.T) {
 	}
 	if out.Len() == 0 {
 		t.Fatal("doctor printed nothing")
+	}
+}
+
+func TestFactoryReceivesConfiguredBackendName(t *testing.T) {
+	var gotName string
+	bf := func(name, machine string) (backend.Backend, error) {
+		gotName = name
+		return &stubBackend{}, nil
+	}
+	root := NewRootWithBackend(bf)
+	root.SetArgs([]string{"doctor", "--machine", "lever-x", "--backend", "orbstack"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	if err := root.Execute(); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if gotName != "orbstack" {
+		t.Fatalf("factory got name %q, want %q", gotName, "orbstack")
 	}
 }

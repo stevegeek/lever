@@ -2,17 +2,21 @@ package cli
 
 import (
 	"github.com/lever-to/lever/internal/backend"
+	"github.com/lever-to/lever/internal/backend/registry"
 	"github.com/spf13/cobra"
 )
 
 func newProvisionCmd(factory BackendFactory) *cobra.Command {
-	var machine, tree string
+	var machine, tree, backendName string
 	var allow []int
 	cmd := &cobra.Command{
 		Use:   "provision",
 		Short: "Provision the jail only (low-level; idempotent)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			b := factory(machine)
+			b, err := factory(backendName, machine)
+			if err != nil {
+				return err
+			}
 			if err := b.EnsureUp(cmd.Context(), backend.Config{MachineName: machine, ProjectTree: tree, AllowedPorts: allow}); err != nil {
 				return err
 			}
@@ -22,6 +26,7 @@ func newProvisionCmd(factory BackendFactory) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&machine, "machine", "lever-jail", "jail machine name")
 	cmd.Flags().StringVar(&tree, "tree", "", "host project tree to mount (required)")
+	cmd.Flags().StringVar(&backendName, "backend", registry.Default, "containment backend")
 	cmd.Flags().IntSliceVar(&allow, "allow-port", nil, "host tool port to allowlist (repeatable)")
 	_ = cmd.MarkFlagRequired("tree")
 	return cmd

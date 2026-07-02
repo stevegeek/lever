@@ -12,24 +12,17 @@ import (
 
 const Version = "0.0.0-dev"
 
-// BackendFactory builds a backend for a given machine name.
-type BackendFactory func(machine string) backend.Backend
+// BackendFactory builds a named backend for a given machine name.
+type BackendFactory func(name, machine string) (backend.Backend, error)
 
 // ClientFactory builds a scion client.
 type ClientFactory func() *scion.Client
 
-// defaultFactory builds the default backend via the registry. It selects the
-// registry Default because the only selectable backend is orbstack and config
-// validation guarantees a config never asks for anything else. When a second
-// backend is implemented, thread the configured app.Backend name in here (and
-// through the call sites) — TestExactlyOneSelectableBackend is the tripwire that
-// fails until that happens, so this cannot silently substitute.
-func defaultFactory(machine string) backend.Backend {
-	b, err := registry.Select("", exec.RealRunner{}, machine)
-	if err != nil {
-		panic("registry: default backend must always be constructible: " + err.Error())
-	}
-	return b
+// defaultFactory builds the named backend via the registry. Config validation
+// guarantees a config's name is valid; flag-driven commands (provision, down,
+// doctor with explicit --backend) surface registry errors directly.
+func defaultFactory(name, machine string) (backend.Backend, error) {
+	return registry.Select(name, exec.RealRunner{}, machine)
 }
 
 func defaultClientFactory() *scion.Client {

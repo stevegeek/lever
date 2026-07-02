@@ -10,7 +10,7 @@ import (
 )
 
 func newDownCmd(factory BackendFactory) *cobra.Command {
-	var machine string
+	var machine, backendFlag string
 	cmd := &cobra.Command{
 		Use:   "down",
 		Short: "Tear down the jail",
@@ -37,7 +37,11 @@ func newDownCmd(factory BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := factory(m).Teardown(cmd.Context()); err != nil {
+			b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+			if err != nil {
+				return err
+			}
+			if err := b.Teardown(cmd.Context()); err != nil {
 				return err
 			}
 			cmd.Printf("jail %q down\n", m)
@@ -45,6 +49,7 @@ func newDownCmd(factory BackendFactory) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
+	cmd.Flags().StringVar(&backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
 	return cmd
 }
 

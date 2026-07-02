@@ -780,3 +780,61 @@ func TestLoadAcceptsBackendWithPath(t *testing.T) {
 		t.Fatalf("a loopback backend with a path (qmd-style) must be accepted: %v", err)
 	}
 }
+
+// TestLoadRejectsNonExternalAllowNonLoopback: allow_non_loopback only makes
+// sense on an external (fronted) tool, mirroring the existing gate check — a
+// supervised tool setting it is a config mistake that should fail closed, not
+// be silently ignored.
+func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
+	cfg := replaceFirst(baseCfg, "command: [lever-tool-db, -dsn, \"file:ref.db\"]",
+		"command: [lever-tool-db, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true")
+	_, err := Load(writeConfig(t, cfg))
+	if err == nil {
+		t.Fatal("a non-external tool setting allow_non_loopback must be rejected")
+	}
+	if !strings.Contains(err.Error(), "allow_non_loopback") || !strings.Contains(err.Error(), "external") {
+		t.Errorf("error %q should mention allow_non_loopback and external", err)
+	}
+}
+
+// TestLoadRejectsIllegalToolNames: tool names flow into the broker's
+// /mcp/<name>/ gateway route and into `claude mcp add`, so they must be
+// constrained to a safe charset like instance/grove names. Both the tool
+// declaration AND the grant referencing it are renamed together, so the
+// failure is the charset check itself, not an unrelated "undeclared tool"
+// error from a stale grant reference.
+func TestLoadRejectsIllegalToolNames(t *testing.T) {
+	bad := []string{"bad/name", "Bad", "has space", "star*"}
+	for _, name := range bad {
+		t.Run(name, func(t *testing.T) {
+			cfg := replaceFirst(baseCfg, "name: db", "name: "+name)
+			cfg = replaceFirst(cfg, "tool: db, op: read", "tool: "+name+", op: read")
+			if _, err := Load(writeConfig(t, cfg)); err == nil {
+				t.Fatalf("tool name %q should be rejected", name)
+			}
+		})
+	}
+}
+
+// TestLoadAcceptsExistingValidToolNames pins the existing legitimate tool
+// names (which contain a digit, but no uppercase/space/slash/star) as staying
+// valid once the charset check lands.
+func TestLoadAcceptsExistingValidToolNames(t *testing.T) {
+	if _, err := Load(writeConfig(t, baseCfg)); err != nil {
+		t.Fatalf("tool name %q (db) should remain valid: %v", "db", err)
+	}
+	if _, err := Load(writeConfig(t, extCfg)); err != nil {
+		t.Fatalf("tool names devonthink/things3 should remain valid: %v", err)
+	}
+}
+
+// TestLoadRejectsEmptyOperationName: an operation with an empty name is a
+// config mistake — it can never be granted (checkCap compares op strings) and
+// would silently sink into the tool's op set undetected.
+func TestLoadRejectsEmptyOperationName(t *testing.T) {
+	cfg := replaceFirst(baseCfg, "{name: read, caveat_param: {table: table, filter: filter}}",
+		"{name: read, caveat_param: {table: table, filter: filter}}\n        - {name: \"\"}")
+	if _, err := Load(writeConfig(t, cfg)); err == nil {
+		t.Fatal("an operation with an empty name must be rejected")
+	}
+}

@@ -84,6 +84,9 @@ func (t Tool) validate() error {
 		return fmt.Errorf("config: broker tool %q gate %q invalid (want fine|coarse)", t.Name, t.Gate)
 	}
 	for _, o := range t.Operations {
+		if o.Name == "" {
+			return fmt.Errorf("config: broker tool %q has an operation with an empty name", t.Name)
+		}
 		if o.Name == registry.WildcardOp {
 			return fmt.Errorf("config: broker tool %q declares operation %q, which is reserved for gate: coarse", t.Name, registry.WildcardOp)
 		}
@@ -91,6 +94,9 @@ func (t Tool) validate() error {
 	if !t.External {
 		if t.Gate != "" {
 			return fmt.Errorf("config: broker tool %q sets gate but is not external (gate applies to external tools only)", t.Name)
+		}
+		if t.AllowNonLoopback {
+			return fmt.Errorf("config: broker tool %q sets allow_non_loopback but is not external (applies to external tools only)", t.Name)
 		}
 		if len(t.Command) == 0 {
 			return fmt.Errorf("config: broker tool %q has no command (a supervised tool needs one; did you mean external: true?)", t.Name)
@@ -581,6 +587,9 @@ func (a *App) validateBrokerGrants() error {
 	for _, t := range a.Broker.Tools {
 		if t.Name == "" {
 			return fmt.Errorf("config: broker.tools entry has empty name")
+		}
+		if !nameRE.MatchString(t.Name) {
+			return fmt.Errorf("config: broker tool name %q must match %s (it becomes the /mcp/%s/ gateway route and a claude mcp add token)", t.Name, nameRE, t.Name)
 		}
 		if _, dup := toolOps[t.Name]; dup {
 			return fmt.Errorf("config: duplicate broker tool %q", t.Name)

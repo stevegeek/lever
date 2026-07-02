@@ -41,6 +41,35 @@ func TestBuildRulesDropsRestToAliasAfterAllows(t *testing.T) {
 	}
 }
 
+// TestBuildRulesAcceptsEstablishedRepliesToAliasBeforeDrop pins the stateful
+// carve-out that keeps a host→guest control channel (Lima's SSH) alive: replies
+// to the host alias on ESTABLISHED,RELATED connections are ACCEPTed before the
+// blanket alias DROP. It is scoped to the alias (never the internet) and present
+// in BOTH postures (the alias DROP exists in both). A NEW dial is unaffected, so
+// containment is unchanged.
+func TestBuildRulesAcceptsEstablishedRepliesToAliasBeforeDrop(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, closed)
+		for _, fam := range []Family{IPv4, IPv6} {
+			args := familyArgs(rules, fam)
+			estIdx := indexOfRule(args, "-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT")
+			var dropNeedle string
+			if fam == IPv4 {
+				dropNeedle = "-d 0.250.250.254 -j DROP"
+			} else {
+				dropNeedle = "-d fd07:b51a:cc66:f0::fe -j DROP"
+			}
+			dropIdx := indexOfRule(args, dropNeedle)
+			if estIdx < 0 {
+				t.Fatalf("closed=%v family=%v: missing ESTABLISHED,RELATED accept to alias:\n%s", closed, fam, strings.Join(args, "\n"))
+			}
+			if dropIdx < 0 || estIdx > dropIdx {
+				t.Fatalf("closed=%v family=%v: established accept (idx %d) must precede the alias DROP (idx %d)", closed, fam, estIdx, dropIdx)
+			}
+		}
+	}
+}
+
 func TestBuildRulesDropsFC00AfterV6Allows(t *testing.T) {
 	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, false)
 	v6 := familyArgs(rules, IPv6)

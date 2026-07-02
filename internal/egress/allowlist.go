@@ -71,6 +71,24 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 			rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-p", "tcp", "--dport", strconv.Itoa(p), "-j", "ACCEPT")})
 		}
 	}
+	// 1b) ACCEPT established/related replies TO THE HOST ALIAS, before the alias
+	// DROP below. On some backends lever's own control channel into the jail is a
+	// connection the HOST initiates to the guest — Lima drives the guest over SSH
+	// from the host, which the guest sees as the alias IP — and the guest's replies
+	// flow OUTPUT→alias, so the blanket alias DROP below would sever that channel.
+	// Accepting only ESTABLISHED,RELATED traffic TO THE ALIAS lets the guest answer
+	// host-initiated connections WITHOUT letting it initiate any new outbound: a new
+	// connection is state NEW and still falls through to the per-port allow / DROP /
+	// catch-all, so the egress containment assertions are unchanged (a NEW dial to a
+	// non-allowlisted alias port, or to the internet under closed egress, is still
+	// dropped). Scoped to the alias so it never broadens internet egress. Inert on
+	// backends whose transport isn't a host→guest connection (e.g. OrbStack's `orb`).
+	if aliasV4 != "" {
+		rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")})
+	}
+	if aliasV6 != "" {
+		rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")})
+	}
 	// 2) DROP everything else to the alias (closes non-allowlisted host loopback).
 	if aliasV4 != "" {
 		rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-j", "DROP")})

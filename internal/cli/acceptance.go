@@ -22,7 +22,7 @@ func acceptanceCheckNames() []string {
 	return []string{
 		"delegated-read", // worker CAN read its delegated, filtered rows
 		"no-table-c",     // worker CANNOT read a scope outside the envelope
-		"no-drop-filter", // worker CANNOT widen by dropping the attenuated filter
+		"no-drop-filter", // worker CANNOT widen by dropping the delegated filter caveat
 		"no-self-path",   // worker CANNOT self-mint an un-granted capability
 		"egress-refused", // jail reaches the allowlisted broker port but NOT the non-allowlisted admin port
 		"revocation",     // after revoke/bump-epoch the next call is denied
@@ -313,29 +313,26 @@ func (h *acceptanceHarness) run(ctx context.Context, name string) (bool, error) 
 }
 
 // workerToken obtains the worker's delegated db.read token. The worker has an
-// EMPTY obtain (no ambient authority), so it cannot self-mint — the MANAGER
-// mints the token via its `delegate db.read → worker` grant (bound_to=worker),
-// and the worker then attenuates the narrowing filter so it only sees its rows.
+// EMPTY obtain (no ambient authority), so it cannot self-mint — the MANAGER mints
+// the token via its `delegate db.read → worker` grant (bound_to=worker). The
+// narrowing caveats (table, and the owner filter when withFilter) are baked into
+// the delegated envelope at mint time: delegation is online-only and there is no
+// offline holder-side attenuation, so the worker can only ever exercise a token
+// that already carries these caveats (which it then cannot drop at call time).
 func (h *acceptanceHarness) workerToken(ctx context.Context, withFilter bool) (string, error) {
-	// Manager delegates db.read to the worker (the manager holds the delegate grant).
-	out, err := h.agentAs(ctx, h.managerID, "delegate", "-tool", "db", "-op", "read", "-to", "worker", "table=A")
+	extra := []string{"-tool", "db", "-op", "read", "-to", "worker", "table=A"}
+	if withFilter {
+		extra = append(extra, "filter=owner=worker")
+	}
+	out, err := h.agentAs(ctx, h.managerID, "delegate", extra...)
 	if err != nil {
 		return "", fmt.Errorf("manager delegate db.read → worker: %w: %s", err, out)
 	}
-	tok := strings.TrimSpace(lastLine(out))
-	if !withFilter {
-		return tok, nil
-	}
-	// Worker attenuates: append the narrowing filter caveat (offline, no broker).
-	att, err := h.agent(ctx, "attenuate", "-token", tok, "filter=owner=worker")
-	if err != nil {
-		return "", fmt.Errorf("worker attenuate filter: %w: %s", err, att)
-	}
-	return strings.TrimSpace(lastLine(att)), nil
+	return strings.TrimSpace(lastLine(out)), nil
 }
 
-// checkDelegatedRead — PASS = worker's delegated+attenuated token reads its
-// filtered rows (the call is ALLOWED and returns the filtered result).
+// checkDelegatedRead — PASS = the worker's delegated token (carrying the owner
+// filter caveat) reads its filtered rows (the call is ALLOWED and returns them).
 func (h *acceptanceHarness) checkDelegatedRead(ctx context.Context) (bool, error) {
 	tok, err := h.workerToken(ctx, true)
 	if err != nil {
@@ -362,14 +359,14 @@ func (h *acceptanceHarness) checkNoTableC(ctx context.Context) (bool, error) {
 	return false, fmt.Errorf("table C read was ALLOWED (must be denied): %s", out)
 }
 
-// checkNoDropFilter — PASS = worker CANNOT widen by dropping the attenuated
-// narrowing filter. Calling with the filter omitted MUST be denied.
+// checkNoDropFilter — PASS = worker CANNOT widen by dropping the delegated
+// narrowing filter caveat. Calling with the filter omitted MUST be denied.
 func (h *acceptanceHarness) checkNoDropFilter(ctx context.Context) (bool, error) {
-	tok, err := h.workerToken(ctx, true) // token carries the attenuated filter caveat
+	tok, err := h.workerToken(ctx, true) // token carries the delegated filter caveat
 	if err != nil {
 		return false, err
 	}
-	// Omit the filter argument: the attenuated caveat is not satisfied.
+	// Omit the filter argument: the delegated caveat is not satisfied.
 	out, err := h.agent(ctx, "call", "-tool", "db", "-op", "read", "-token", tok, "table=A")
 	if err != nil {
 		return true, nil // denied — the dropped filter is caught

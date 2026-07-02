@@ -36,9 +36,14 @@ portForwards:
     # explicit: auto-inference only since lima 2.0 (4d04ff37)
     guestIPMustBeZero: true
     guestPortRange: [1, 65535]
+    # proto defaults to "tcp" when omitted; lima's builtin fallback forward rule
+    # is proto: "any" and forwards UDP guest listeners too, so an omitted proto
+    # here would leave UDP auto-forwarding unsuppressed.
+    proto: "any"
     ignore: true
   - guestIP: "127.0.0.1"
     guestPortRange: [1, 65535]
+    proto: "any"
     ignore: true
 `
 

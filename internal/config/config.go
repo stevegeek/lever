@@ -302,6 +302,18 @@ func (a *App) Validate() error {
 			return err
 		}
 	}
+	// manager.allow_ports opens a host-loopback port to the jailed agent (via
+	// the egress allowlist's per-port ACCEPT on the host alias); the broker's
+	// admin port (/bootstrap, /revoke, /bump-epoch — unauthenticated, meant to
+	// be reachable only from the host loopback) must never be listed there,
+	// or the allowlist — the ONLY thing isolating that API from the guest —
+	// would hand the jail a direct path to it.
+	adminPort := a.EffectiveAdminPort()
+	for _, p := range a.Manager.AllowPorts {
+		if p == adminPort {
+			return fmt.Errorf("config: manager.allow_ports must not include the broker admin port (%d) — this would hand the jailed agent a direct, unauthenticated path to /bootstrap, /revoke, /bump-epoch (the egress allowlist is the only thing isolating the host-loopback admin API from the guest)", adminPort)
+		}
+	}
 	// prompt_file is host-only (read at the root, NOT in the mount) and must stay
 	// inside the instance root.
 	if a.Manager.PromptFile != "" && !confinedRel(a.Manager.PromptFile) {

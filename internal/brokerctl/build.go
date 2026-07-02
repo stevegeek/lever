@@ -16,7 +16,8 @@ import (
 	"github.com/lever-to/lever/internal/config"
 )
 
-// serverName is the hostname agents dial; OrbStack forwards it to host loopback.
+// serverName is the DEFAULT (orbstack) server name; Serve overrides it from the
+// selected backend's HostToolAlias.
 const serverName = "host.orb.internal"
 
 // llmSentinelBackend is the Backend value of the reserved llm pseudo-tool. It

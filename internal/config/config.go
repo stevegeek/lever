@@ -307,6 +307,13 @@ const CanonicalName = "lever.yaml"
 // (`lever-<name>`) and a shell token in the scion-install path.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
+// toolNameRE constrains a broker tool name: it becomes the /mcp/<name>/ gateway
+// route and a `claude mcp add <name>` token. Underscores are admitted (real MCP
+// server names use them, e.g. `apple_notes`), unlike a jail machine name; but
+// whitespace, `/`, `*`, and uppercase are still excluded so the name is safe in
+// a URL path and can never collide with the reserved wildcard op.
+var toolNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+
 // imageRE constrains a container image reference to safe OCI-ref characters
 // (no whitespace or shell metacharacters).
 var imageRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*$`)
@@ -588,8 +595,8 @@ func (a *App) validateBrokerGrants() error {
 		if t.Name == "" {
 			return fmt.Errorf("config: broker.tools entry has empty name")
 		}
-		if !nameRE.MatchString(t.Name) {
-			return fmt.Errorf("config: broker tool name %q must match %s (it becomes the /mcp/%s/ gateway route and a claude mcp add token)", t.Name, nameRE, t.Name)
+		if !toolNameRE.MatchString(t.Name) {
+			return fmt.Errorf("config: broker tool name %q must match %s (it becomes the /mcp/%s/ gateway route and a claude mcp add token)", t.Name, toolNameRE, t.Name)
 		}
 		if _, dup := toolOps[t.Name]; dup {
 			return fmt.Errorf("config: duplicate broker tool %q", t.Name)

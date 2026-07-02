@@ -57,8 +57,10 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 	// below matches locally-generated packets to 127.0.0.1/::1 too, so without
 	// this every in-machine localhost service breaks — the scion hub on
 	// 127.0.0.1:8080 (its readiness check) and host-loopback tools. Only added in
-	// the closed posture so the open posture stays byte-identical to pre-existing
-	// (where the default-ACCEPT policy already permits loopback).
+	// the closed posture; in the open posture the default-ACCEPT policy already
+	// permits loopback, so this rule is unnecessary there. (The open posture is
+	// not otherwise byte-identical to pre-existing: rule 1b below is emitted in
+	// both postures — see the BuildRules docstring.)
 	if closedInternet {
 		rules = append(rules,
 			Rule{Family: IPv4, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},

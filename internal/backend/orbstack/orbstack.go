@@ -144,7 +144,7 @@ func orbVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch i
 // resolveRunUser caches the in-machine run user and UID so the subid/linger
 // script and the rootless Docker socket path work for any OrbStack user, not a
 // hardcoded one. Called after ensureMachine (the machine must exist) and before
-// ensureRuntimes.
+// guest provisioning (guest.EnsureRuntimes).
 func (o *OrbStack) resolveRunUser(ctx context.Context) error {
 	res, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "whoami")
 	if err != nil {

@@ -33,6 +33,8 @@ containerd:
   user: false
 portForwards:
   - guestIP: "0.0.0.0"
+    # explicit: auto-inference only since lima 2.0 (4d04ff37)
+    guestIPMustBeZero: true
     guestPortRange: [1, 65535]
     ignore: true
   - guestIP: "127.0.0.1"

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lever-to/lever/internal/broker/registry"
 	"github.com/lever-to/lever/internal/cap/ca"
 	"github.com/lever-to/lever/internal/cap/token"
 	"github.com/lever-to/lever/internal/config"
@@ -184,5 +185,41 @@ func TestBuildBrokerDeepCopiesMaps(t *testing.T) {
 	tool, _ := cfg.Registry.Lookup("db")
 	if tool.AllowedValues["table"][0] == "MUTATED" {
 		t.Fatal("registry aliased the config slice — must deep-copy (registry takes ownership)")
+	}
+}
+
+func TestBuildBrokerRegistersExternalTools(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	app := sampleApp()
+	app.Broker.Tools = append(app.Broker.Tools,
+		config.Tool{
+			Name: "devonthink", External: true, Backend: "127.0.0.1:3302",
+			Operations:    []config.Op{{Name: "search"}},
+			AllowedValues: map[string][]string{"database": {"work"}},
+		},
+		config.Tool{Name: "things3", External: true, Backend: "127.0.0.1:3300", Gate: config.GateCoarse},
+	)
+	cfg, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dt, ok := cfg.Registry.Lookup("devonthink")
+	if !ok || dt.FirstParty || !dt.External || dt.Coarse {
+		t.Fatalf("devonthink envelope = %+v ok=%v; want external fine, NOT first-party", dt, ok)
+	}
+	if !cfg.Registry.HasOperation("devonthink", "search") || cfg.Registry.HasOperation("devonthink", registry.WildcardOp) {
+		t.Fatal("fine external tool must expose exactly its declared ops — and never the wildcard")
+	}
+	th, ok := cfg.Registry.Lookup("things3")
+	if !ok || th.FirstParty || !th.External || !th.Coarse {
+		t.Fatalf("things3 envelope = %+v ok=%v; want external coarse, NOT first-party", th, ok)
+	}
+	if !cfg.Registry.HasOperation("things3", registry.WildcardOp) {
+		t.Fatal("coarse tool must expose the wildcard op (the /request mint path gates on HasOperation)")
+	}
+	db, _ := cfg.Registry.Lookup("db")
+	if !db.FirstParty || db.External {
+		t.Fatalf("supervised tool envelope changed: %+v", db)
 	}
 }

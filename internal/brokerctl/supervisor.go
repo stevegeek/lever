@@ -10,7 +10,7 @@ import (
 	"github.com/lever-to/lever/internal/config"
 )
 
-// Supervisor launches + tears down the configured first-party tool subprocesses.
+// Supervisor launches + tears down the configured first-party tool subprocesses; external tools (broker-fronted, not spawned) are skipped.
 // Tools are host-side, bind loopback, and self-register over the broker admin URL.
 type Supervisor struct {
 	tools    []config.Tool
@@ -36,6 +36,9 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.tools {
+		if t.External {
+			continue // fronted, not spawned — lifecycle stays with the user session
+		}
 		if len(t.Command) == 0 {
 			s.stopLocked()
 			return fmt.Errorf("brokerctl: tool %q has no command", t.Name)

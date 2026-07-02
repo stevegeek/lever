@@ -50,3 +50,32 @@ func TestSupervisorStartCleansUpOnPartialFailure(t *testing.T) {
 	}
 	s.Stop() // must be safe to call again (no-op)
 }
+
+func TestSupervisorSkipsExternalTools(t *testing.T) {
+	tools := []config.Tool{
+		{Name: "things3", External: true, Backend: "127.0.0.1:3300", Gate: config.GateCoarse},
+	}
+	s := NewSupervisor(tools, "http://127.0.0.1:1", io.Discard)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start with only external tools must succeed (nothing to spawn): %v", err)
+	}
+	defer s.Stop()
+	if n := s.trackedCount(); n != 0 {
+		t.Fatalf("tracked = %d, want 0 (external tools are fronted, not spawned)", n)
+	}
+}
+
+func TestSupervisorMixedSpawnsOnlySupervised(t *testing.T) {
+	tools := []config.Tool{
+		{Name: "ext", External: true, Backend: "127.0.0.1:3300", Gate: config.GateCoarse},
+		{Name: "db", Command: []string{"/bin/sleep", "60"}, Backend: "127.0.0.1:3201"},
+	}
+	s := NewSupervisor(tools, "http://127.0.0.1:1", io.Discard)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+	if n := s.trackedCount(); n != 1 {
+		t.Fatalf("tracked = %d, want 1 (only the supervised tool spawns)", n)
+	}
+}

@@ -3,6 +3,7 @@ package orbstack
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -498,6 +499,23 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ProjectTree") {
 		t.Fatalf("error should mention ProjectTree; got: %v", err)
+	}
+}
+
+func TestJailTransportMethods(t *testing.T) {
+	o := New(exec.NewFakeRunner(), "lever-x")
+	// Pre-EnsureUp the prefix uses the zero-value user; we only test post-resolve.
+	o.runUser, o.runUID = "stephen", "501"
+
+	if got := JailPrefix("lever-x", "stephen"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
+		t.Fatalf("JailPrefix = %v", got)
+	}
+	if o.JailRunner() == nil {
+		t.Fatal("JailRunner() = nil")
+	}
+	attach := o.AttachArgv([]string{"scion", "attach"})
+	if attach[0] != "orb" || attach[len(attach)-1] != "attach" {
+		t.Fatalf("AttachArgv = %v", attach)
 	}
 }
 

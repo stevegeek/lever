@@ -17,6 +17,7 @@ import (
 	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/egress"
 	"github.com/lever-to/lever/internal/exec"
+	"github.com/lever-to/lever/internal/jail"
 )
 
 const (
@@ -424,6 +425,26 @@ func (o *OrbStack) RunUID() string {
 		return defaultRunUID
 	}
 	return o.runUID
+}
+
+// JailPrefix is the argv prefix that executes inside this backend's machine as
+// the given user. Exported for registry.JailRunner (broker-side re-derivation).
+func JailPrefix(machine, user string) []string { return jail.OrbPrefix(machine, user) }
+
+// JailRunner returns the command transport into the jail (valid after EnsureUp,
+// which resolves the run user).
+func (o *OrbStack) JailRunner() exec.Runner {
+	return jail.New(o.r, JailPrefix(o.machine, o.runUser), o.RunUID())
+}
+
+// AttachArgv builds the host argv for an interactive in-jail command.
+func (o *OrbStack) AttachArgv(inner []string) []string {
+	return jail.AttachArgv(JailPrefix(o.machine, o.runUser), o.RunUID(), inner)
+}
+
+// LoadImage streams a host docker image into the jail's rootless podman.
+func (o *OrbStack) LoadImage(ctx context.Context, imageRef string) error {
+	return jail.LoadImage(ctx, JailPrefix(o.machine, o.runUser), o.RunUID(), imageRef)
 }
 
 var _ backend.Backend = (*OrbStack)(nil)

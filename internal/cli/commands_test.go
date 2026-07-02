@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/lever-to/lever/internal/backend"
+	leverexec "github.com/lever-to/lever/internal/exec"
 )
 
 type stubBackend struct{ up, down bool }
@@ -17,6 +18,15 @@ func (s *stubBackend) MountDest() string                              { return "
 func (s *stubBackend) ApplyEgress(context.Context, []int, bool) error { return nil }
 func (s *stubBackend) Teardown(context.Context) error                 { s.down = true; return nil }
 func (s *stubBackend) Profile() backend.Profile                       { return backend.Profile{Name: "stub"} }
+func (s *stubBackend) HostAliasV4() string                            { return "" }
+func (s *stubBackend) MachineName() string                            { return "lever-stub" }
+func (s *stubBackend) RunUser() string                                { return "stub" }
+func (s *stubBackend) RunUID() string                                 { return "501" }
+func (s *stubBackend) JailRunner() leverexec.Runner                   { return leverexec.RealRunner{} }
+func (s *stubBackend) AttachArgv(inner []string) []string {
+	return append([]string{"stub-attach"}, inner...)
+}
+func (s *stubBackend) LoadImage(context.Context, string) error { return nil }
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {
 	sb := &stubBackend{}

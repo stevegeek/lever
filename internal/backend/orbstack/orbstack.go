@@ -5,18 +5,15 @@ package orbstack
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/egress"
+	"github.com/lever-to/lever/internal/backend/guest"
 	"github.com/lever-to/lever/internal/exec"
+	"github.com/lever-to/lever/internal/jail"
 )
 
 const (
@@ -87,98 +84,27 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.resolveRunUser(ctx); err != nil {
 		return err
 	}
-	if err := o.ensureRuntimes(ctx); err != nil {
+	if err := o.guest().EnsureRuntimes(ctx, o.runUser); err != nil {
 		return err
 	}
 	if cfg.ScionSource != "" || cfg.ScionVersion != "" {
-		if err := o.ensureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
+		if err := o.guest().EnsureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
 			return err
 		}
 	}
 	return o.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
 }
 
-// ensureScion cross-compiles scion from a host source checkout for linux/arm64
-// and installs it into the jail at /usr/local/bin/scion. The build runs on the
-// HOST (Go's build cache makes re-runs incremental, so this is cheap to repeat).
-// The binary is piped into the jail via `bash -c "cat <bin> | orb … bash -c 'cat
-// > … .tmp && chmod && mv'"` because the Runner has no stdin channel. The install
-// is atomic: it writes a temp file then mv's it over the destination (mv is
-// atomic on the same filesystem), so a mid-stream failure can't leave a
-// truncated, executable /usr/local/bin/scion. `set -o pipefail` makes a
-// left-side failure (e.g. the host `cat`) propagate instead of being masked by a
-// successful right side. bash (not sh) is required because dash on Linux hosts —
-// where the linux-docker backend will run — does not support `set -o pipefail`.
-// scionModulePath is the upstream scion Go module. `version` ("" → source mode)
-// pins a commit/tag fetched via the Go module system.
-const scionModulePath = "github.com/GoogleCloudPlatform/scion"
-
-func (o *OrbStack) ensureScion(ctx context.Context, source, version string) error {
-	goBin := "go"
-	buildDir := source
-	if version != "" {
-		gb, dir, err := o.fetchScionModule(ctx, version)
-		if err != nil {
-			return err
-		}
-		goBin, buildDir = gb, dir
-	} else {
-		fi, err := os.Stat(source)
-		if err != nil {
-			return fmt.Errorf("scion source %q: %w", source, err)
-		}
-		if !fi.IsDir() {
-			return fmt.Errorf("scion source %q is not a directory", source)
-		}
+// guest returns the shared guest provisioner scoped to this machine, used to
+// install runtimes and scion via host-side argv prefixes. See
+// internal/backend/guest for the provisioning scripts themselves.
+func (o *OrbStack) guest() guest.Guest {
+	return guest.Guest{
+		Host:       o.r,
+		UserPrefix: []string{"orb", "-m", o.machine},
+		RootPrefix: []string{"orb", "-u", "root", "-m", o.machine},
+		Machine:    o.machine,
 	}
-	bin := filepath.Join(os.TempDir(), "lever-scion-"+o.machine)
-	if _, err := o.r.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": "arm64"},
-		goBin, "build", "-o", bin, "./cmd/scion"); err != nil {
-		return fmt.Errorf("cross-compile scion: %w", err)
-	}
-	install := fmt.Sprintf(
-		`set -o pipefail; cat %s | orb -m %s -u root bash -c 'cat > /usr/local/bin/scion.tmp && chmod +x /usr/local/bin/scion.tmp && mv /usr/local/bin/scion.tmp /usr/local/bin/scion'`,
-		shellSingleQuote(bin), shellSingleQuote(o.machine))
-	if _, err := o.r.Run(ctx, nil, "bash", "-c", install); err != nil {
-		return fmt.Errorf("install scion into jail: %w", err)
-	}
-	return nil
-}
-
-// fetchScionModule downloads the pinned scion module via the Go module system
-// and returns (goBinary, moduleSourceDir) for the cross-compile. It resolves the
-// REAL go binary (GOROOT/bin/go) and uses it for the build because the module
-// cache lives outside any toolchain-manager project dir — e.g. a version manager
-// that resolves `go` by walking up for a project file (asdf) cannot resolve it
-// from the read-only module cache, whereas the absolute binary always works.
-func (o *OrbStack) fetchScionModule(ctx context.Context, version string) (goBin, dir string, err error) {
-	root, err := o.r.Run(ctx, nil, "go", "env", "GOROOT")
-	if err != nil {
-		return "", "", fmt.Errorf("resolve go toolchain (is go on PATH?): %w", err)
-	}
-	goBin = filepath.Join(strings.TrimSpace(root.Stdout), "bin", "go")
-	out, err := o.r.Run(ctx, nil, goBin, "mod", "download", "-json", scionModulePath+"@"+version)
-	if err != nil {
-		return "", "", fmt.Errorf("download scion %s: %w", version, err)
-	}
-	var dl struct{ Dir, Error string }
-	if jerr := json.Unmarshal([]byte(out.Stdout), &dl); jerr != nil {
-		return "", "", fmt.Errorf("parse `go mod download` output for scion %s: %w", version, jerr)
-	}
-	if dl.Error != "" {
-		return "", "", fmt.Errorf("download scion %s: %s", version, dl.Error)
-	}
-	if dl.Dir == "" {
-		return "", "", fmt.Errorf("`go mod download` returned no source dir for scion %s", version)
-	}
-	return goBin, dl.Dir, nil
-}
-
-// shellSingleQuote wraps s in single quotes safe for POSIX shells, escaping any
-// embedded single quote as the standard '\” sequence (close quote, escaped
-// quote, reopen quote).
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // orbVersionAtLeast runs `orb version`, parses the semver, and returns whether
@@ -218,7 +144,7 @@ func orbVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch i
 // resolveRunUser caches the in-machine run user and UID so the subid/linger
 // script and the rootless Docker socket path work for any OrbStack user, not a
 // hardcoded one. Called after ensureMachine (the machine must exist) and before
-// ensureRuntimes.
+// guest provisioning (guest.EnsureRuntimes).
 func (o *OrbStack) resolveRunUser(ctx context.Context) error {
 	res, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "whoami")
 	if err != nil {
@@ -265,34 +191,6 @@ func machineListed(stdout, name string) bool {
 	return false
 }
 
-// ensureRuntimes installs prereqs + rootless Docker and rootless Podman.
-// Idempotent: the rootless install script and systemctl --start are safe to re-run.
-// Podman is daemonless so no service startup is needed; scion auto-prefers it over Docker.
-func (o *OrbStack) ensureRuntimes(ctx context.Context) error {
-	root := func(script string) error {
-		_, err := o.r.Run(ctx, nil, "orb", "-u", "root", "-m", o.machine, "bash", "-lc", script)
-		return err
-	}
-	user := func(script string) error {
-		_, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "bash", "-lc", script)
-		return err
-	}
-	if err := root(`DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman`); err != nil {
-		return fmt.Errorf("apt prereqs: %w", err)
-	}
-	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; loginctl enable-linger %s`,
-		o.runUser, o.runUser, o.runUser, o.runUser, o.runUser)); err != nil {
-		return fmt.Errorf("subid/linger: %w", err)
-	}
-	if err := user(`command -v dockerd-rootless.sh >/dev/null 2>&1 || curl -fsSL https://get.docker.com/rootless | sh`); err != nil {
-		return fmt.Errorf("rootless install: %w", err)
-	}
-	if err := user(`export XDG_RUNTIME_DIR=/run/user/$(id -u); export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock; systemctl --user enable --now docker 2>/dev/null || (nohup dockerd-rootless.sh >/tmp/lever-dockerd.log 2>&1 &); timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'`); err != nil {
-		return fmt.Errorf("start rootless dockerd: %w", err)
-	}
-	return nil
-}
-
 // Teardown deletes the jail machine. Idempotent: a no-op if the machine is
 // already absent.
 func (o *OrbStack) Teardown(ctx context.Context) error {
@@ -310,100 +208,18 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 }
 
 func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	// I2 — never briefly open egress under a running closed instance. If the closed
-	// posture is ALREADY active (LEVER_EGRESS has the catch-all DROP), a running
-	// jailed agent depends on it; flushing+rebuilding would leave the chain empty
-	// (→ OUTPUT default ACCEPT) for the resolve+rebuild window. The ruleset is a
-	// pure function of (alias, ports, closed) and is unchanged on a normal
-	// re-apply, so leave the working chain intact and skip the rebuild. (A fresh
-	// machine, the open/subscription posture, or a genuine egress-config change all
-	// have no active DROP and fall through to a full rebuild — and a fresh apply has
-	// no running container to leak. Changing egress config on a live closed instance
-	// requires `lever down` + `up`, not a re-apply.)
-	if closedInternet {
-		if alias, ok := o.existingClosedAlias(ctx); ok {
-			o.aliasV4 = alias
-			return nil
-		}
-	}
-	// Reset the dedicated chain FIRST: this makes re-apply idempotent (no rule
-	// accumulation) and — critically — flushing the chain removes any prior
-	// catch-all DROP, restoring DNS so the host-alias re-resolve below works even
-	// when a previous closed-egress posture is still in place.
-	if err := o.resetEgressChain(ctx); err != nil {
-		return err
-	}
-	v4, v6, err := resolveHostAlias(ctx, o.r, o.machine)
+	v4, v6, rebuilt, err := o.guest().ApplyEgress(ctx,
+		func(ctx context.Context) (string, string, error) { return resolveHostAlias(ctx, o.r, o.machine) },
+		allowedPorts, closedInternet)
 	if err != nil {
 		return err
 	}
-	o.aliasV4, o.aliasV6 = v4, v6
-	for _, rule := range egress.BuildRules(v4, v6, allowedPorts, closedInternet) {
-		args := append([]string{"-u", "root", "-m", o.machine, rule.Family.Binary()}, rule.Args...)
-		if _, err := o.r.Run(ctx, nil, "orb", args...); err != nil {
-			return fmt.Errorf("apply %s: %w", rule.Render(), err)
-		}
-	}
-	return nil
-}
-
-// existingClosedAlias returns the v4 host alias already encoded in an ACTIVE
-// closed LEVER_EGRESS chain (i.e. the chain contains the catch-all DROP), so
-// ApplyEgress can skip the flush+rebuild that would briefly open egress (I2).
-// Returns ("", false) when the chain is absent, open (no catch-all DROP), or
-// unreadable — the caller then (re)builds the chain normally. The alias is read
-// from the per-port ACCEPT rule (`-d <ip>/32 … --dport … -j ACCEPT`), so we never
-// need DNS (which the active DROP blocks anyway).
-func (o *OrbStack) existingClosedAlias(ctx context.Context) (string, bool) {
-	res, err := o.r.Run(ctx, nil, "orb", "-u", "root", "-m", o.machine, "iptables", "-S", egress.Chain)
-	if err != nil {
-		return "", false // chain absent (fresh machine) or unreadable
-	}
-	out := res.Stdout + res.Stderr
-	if !strings.Contains(out, "-A "+egress.Chain+" -j DROP") {
-		return "", false // not in the closed posture (no catch-all DROP)
-	}
-	for _, line := range strings.Split(out, "\n") {
-		if !strings.Contains(line, "--dport") || !strings.Contains(line, "-j ACCEPT") {
-			continue
-		}
-		fields := strings.Fields(line)
-		for i, f := range fields {
-			if f == "-d" && i+1 < len(fields) {
-				ip := strings.TrimSuffix(fields[i+1], "/32")
-				if net.ParseIP(ip) != nil {
-					return ip, true
-				}
-			}
-		}
-	}
-	return "", false // closed but no parseable alias — rebuild to be safe
-}
-
-// resetEgressChain ensures the LEVER_EGRESS chain exists and OUTPUT jumps to it
-// exactly once, then flushes it, for both address families. Idempotent: the chain
-// holds ALL of lever's egress rules, so flushing wipes the prior apply's rules
-// (no accumulation) without touching any non-lever OUTPUT rules, and removes the
-// catch-all DROP so DNS works for the subsequent host-alias resolve.
-func (o *OrbStack) resetEgressChain(ctx context.Context) error {
-	for _, bin := range []string{"iptables", "ip6tables"} {
-		base := []string{"-u", "root", "-m", o.machine, bin}
-		run := func(args ...string) error {
-			_, err := o.r.Run(ctx, nil, "orb", append(append([]string{}, base...), args...)...)
-			return err
-		}
-		// Create the chain if absent (-N errors if it already exists — tolerate).
-		_ = run("-N", egress.Chain)
-		// Ensure the OUTPUT jump exists exactly once: -C checks, -A adds if missing.
-		if err := run("-C", "OUTPUT", "-j", egress.Chain); err != nil {
-			if err := run("-A", "OUTPUT", "-j", egress.Chain); err != nil {
-				return fmt.Errorf("egress: add OUTPUT jump (%s): %w", bin, err)
-			}
-		}
-		// Flush our chain (idempotent re-apply; restores DNS for the re-resolve).
-		if err := run("-F", egress.Chain); err != nil {
-			return fmt.Errorf("egress: flush %s (%s): %w", egress.Chain, bin, err)
-		}
+	if rebuilt {
+		o.aliasV4, o.aliasV6 = v4, v6
+	} else {
+		// I2 skip path: v6 is not authoritative here (existingClosedAlias only
+		// parses v4 from the live chain) — do not clobber a prior aliasV6.
+		o.aliasV4 = v4
 	}
 	return nil
 }
@@ -424,6 +240,33 @@ func (o *OrbStack) RunUID() string {
 		return defaultRunUID
 	}
 	return o.runUID
+}
+
+// JailPrefix is the argv prefix that executes inside this backend's machine as
+// the given user. Exported for registry.JailRunner (broker-side re-derivation).
+func JailPrefix(machine, user string) []string { return jail.OrbPrefix(machine, user) }
+
+// JailRunner returns the command transport into the jail (valid after EnsureUp,
+// which resolves the run user).
+func (o *OrbStack) JailRunner() exec.Runner {
+	return jail.New(o.r, JailPrefix(o.machine, o.runUser), o.RunUID())
+}
+
+// AttachArgv builds the host argv for an interactive in-jail command.
+func (o *OrbStack) AttachArgv(inner []string) []string {
+	return jail.AttachArgv(JailPrefix(o.machine, o.runUser), o.RunUID(), inner)
+}
+
+// LoadImage streams a host docker image into the jail's rootless podman.
+func (o *OrbStack) LoadImage(ctx context.Context, imageRef string) error {
+	return jail.LoadImage(ctx, JailPrefix(o.machine, o.runUser), o.RunUID(), imageRef)
+}
+
+// InstallGuestBinary streams a host-local executable into the machine at
+// destPath as root, via the shared guest provisioner (RootPrefix =
+// `orb -u root -m <machine>`).
+func (o *OrbStack) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {
+	return o.guest().InstallRootBinary(ctx, localPath, destPath)
 }
 
 var _ backend.Backend = (*OrbStack)(nil)

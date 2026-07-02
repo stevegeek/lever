@@ -113,42 +113,103 @@ layer around every agent. On the OrbStack VM's modern kernel the rootless daemon
 ### 2.4 Substrates: the jail is a contract, not a product
 
 Everything above describes OrbStack, but the jail is a **contract**, not that one product. A
-containment backend must provide four things:
+containment backend must provide five things. Guarantee 0 was added 2026-07-02, after rejecting a
+native-Linux backend on exactly this ground (see below):
 
+0. **A hypervisor boundary between the agent workload and the host kernel.** Mandatory: agents run
+   arbitrary, potentially adversarial code (§1), and a network/mount/user namespace is not a
+   substitute for a separate kernel — one kernel-level exploit from any agent reaches everything
+   sharing that kernel. No backend without a VM boundary is added to `lever backends`.
 1. **No host filesystem** beyond the one chosen project tree (§2.1).
 2. **A network namespace Lever controls**, so the egress allowlist can be enforced *outside* the agent
    containers (§2.2).
 3. **Egress enforced in that namespace**, not by the agent behaving.
 4. **A host-reachable broker endpoint** for capability, LLM, and tool traffic.
 
-OrbStack is the **reference implementation** of that contract. Others are on the roadmap, and each
-one **declares** what it actually guarantees rather than pretending they are equivalent — a
-`Profile` in code, surfaced by `lever backends`:
+OrbStack is the **reference implementation** of that contract; `lima` is the second, both are
+**implemented**. Each **declares** what it actually guarantees rather than pretending they are
+equivalent — a `Profile` in code, surfaced by `lever backends`:
 
-| Backend | Status | Kernel boundary | FS bounded by | Egress enforced at |
-|---|---|---|---|---|
-| **orbstack** | implemented | shared jail-VM kernel | isolated machine: no host files + one bind mount | jail netns iptables/ip6tables |
-| **linux-docker** | planned | **none** (host kernel) | host netns+userns + one bind mount | jail netns nftables/iptables |
-| **lima** | planned | own VM kernel | VM: no host files + one bind mount | jail netns iptables/ip6tables |
-| **apple-container** | experimental | **per-agent** VM kernel | per-agent VM: no host files + mount | per-VM / gateway |
+| Backend | Kernel boundary | FS bounded by | Egress enforced at |
+|---|---|---|---|
+| **orbstack** | shared jail-VM kernel | isolated machine: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables |
+| **lima** | own VM kernel | VM: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables |
 
-Two consequences worth stating plainly:
+Full mechanism detail, the roadmap entry, and rejected backends live on the
+[containment backends](/reference/backends/) page; the highlights:
 
+- **`lima`'s containment surface is a lever-owned template**, not a stock one. Besides the VM kernel
+  boundary and the single project-tree mount, it closes a hazard specific to Lima: by default Lima
+  forwards *every* guest listener to the host's `127.0.0.1` (live-confirmed 2026-07-02: on a stock
+  template, a guest-side `0.0.0.0` listener is reachable at the host's loopback), which would let a
+  jailed agent squat a host-loopback port and impersonate a local service (a dev server, a
+  credential helper). The template's `portForwards` block carries an ignore-all rule, closing this
+  before the guest VM ever exists.
 - **Docker Desktop is *not* a backend.** The jail is a VM-isolation construct, not a container
   runtime. Docker Desktop's VM is *shared* infrastructure — it auto-mounts your home directory and
   its network namespace is not yours to control — so it satisfies neither guarantee 1 nor 2. Running
-  Lever's containers directly in it would appear to work while silently voiding the containment. This
-  is exactly why config validation rejects any backend that is declared-but-unbuilt instead of
-  quietly falling back to OrbStack: a containment posture must never be silently substituted.
-- **`apple-container` is a different topology.** It runs each agent in its own micro-VM (a kernel per
-  agent — the strongest isolation of any Mac option, turning the shared-kernel trade in §7 into a
-  non-issue), but there is no single jail to hang one egress chokepoint on, and its networking is
-  young (full support needs macOS 26). Hence *experimental*.
+  Lever's containers directly in it would appear to work while silently voiding the containment.
+- **A native, no-VM Linux backend (`linux-docker`) was explored and rejected**, the opposite failure
+  from Docker Desktop's: its namespace-based design (root-owned netns, mount-namespace + `tmpfs`
+  shadowing) would have satisfied guarantees 1-3, but shares the host kernel outright, violating the
+  new guarantee 0 — an adversarial agent (§1) is one kernel-level privilege escalation from host
+  root. Its egress and filesystem answers were sound and are recorded on the backends page for the
+  record; a weaker, explicit-opt-in variant for hosts with no nested-virtualization support (a bare
+  VPS) remains a possible future direction, never a silent substitute for a VM backend.
+- **`apple-container` (roadmap) is a different topology.** It runs each agent in its own micro-VM (a
+  kernel per agent — the strongest isolation of any Mac option, satisfying guarantee 0 *per agent*
+  rather than per jail, turning the shared-kernel trade in §7 into a non-issue), but there is no
+  single jail to hang one egress chokepoint on, and its networking is young (full support needs
+  macOS 26).
+
+This is exactly why config validation rejects any backend name that isn't implemented instead of
+quietly falling back to OrbStack: a containment posture must never be silently substituted.
+
+**Lima operational notes**, from the T13 security review:
+
+- **Lima's in-guest kernel attack surface is intentionally widened for rootless runtimes.**
+  Provisioning re-enables the unprivileged user-namespace knob
+  (`kernel.apparmor_restrict_unprivileged_userns=0`) that Ubuntu ≥ 23.10 disables by default, a
+  prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
+  guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
+  the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
+  this surface reaches VM root, not the host, consistent with the §7 "containing daemon authority
+  inside the jail" stance (in-jail privilege escalation is accepted; the jail's own bound is not).
+- **The jail VM survives host reboots.** It is destroyed only by `lever down` (`limactl delete
+  --force`); there is no `lever stop` or reboot-triggered teardown. "Throwaway guest" therefore means
+  per-`lever down`, not per-boot — a long-lived instance keeps the same guest state (and any in-guest
+  compromise) across host restarts until explicitly torn down.
+- **The egress allowlist (§2.2) depends on the VM/rootless boundary above it.** Every no-reopen /
+  allowlist property in this document assumes the agent lacks `CAP_NET_ADMIN` in the VM's *init*
+  network namespace — enforcement lives in that namespace, not the agent's container namespace (§2.2).
+  A container→VM-root escape would let the agent rewrite `LEVER_EGRESS` directly, bypassing the
+  allowlist rather than merely being contained by it; that escape reduces to the kernel/runtime
+  caveats in §7.
+- **A global lima config can widen the containment surface beyond what the lever template
+  requests.** `~/.lima/_config/{default,override}.yaml`, if present on the host, is merged into every
+  lima instance's *realized* config, including this one — an operator's own global lima settings could
+  add a mount or port-forward the lever-rendered template (template.go) never asked for. This is a
+  host-operator supply-chain concern (an attacker would need to already control the operator's
+  `~/.lima/_config`, not just the guest), not a guest-exploitable path. The realized-config drift check
+  (`Lima.verifyRealizedConfig`, `internal/backend/lima/lima.go`) is the backstop: `lever up` fails
+  closed if the VM's live merged config (mounts/port-forwards/containerd) doesn't match the template's
+  intent, whether adopting a pre-existing VM or verifying a freshly created one.
+- **Open-posture IPv6 caveat.** The alias-scoped ACCEPT/DROP rules (§2.2) are only emitted for a
+  family whose alias actually resolved; `host.lima.internal` is typically IPv4-only today, so under
+  the OPEN posture no v6-specific alias DROP is emitted (there is no resolved v6 alias to drop traffic
+  to). Safe today — the CLOSED posture's catch-all DROP covers v6 regardless of alias resolution — but
+  if a future lima version or host configuration ever resolves `host.lima.internal` to a *global-scope*
+  IPv6 address, the OPEN posture's protection depends on that address actually being picked up as the
+  resolved `aliasV6`: the unconditional private-range drops (`fe80::/10`, `fc00::/7`) don't cover a
+  global-scope address. `make test-lima-e2e` could assert `getent ahosts host.lima.internal` returns no
+  global-scope v6 today, to catch this drifting silently in the future.
 
 The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
-all groves — see §7. That trade is a property of the *backend*, not of Lever, and the table above is
-how you see it before you choose. Run `lever backends` for the live matrix; set the backend with the
-`backend:` key ([config reference](/reference/config/)).
+all groves — see §7; `lima` carries the same trade one level up (its own kernel is separate from the
+host, but still one kernel shared *within* the jail by the manager and every grove). That trade is a
+property of the *backend*, not of Lever, and the table above is how you see it before you choose.
+Run `lever backends` for the live matrix; set the backend with the `backend:` key
+([config reference](/reference/config/)).
 
 ## 3. What containment buys
 
@@ -374,9 +435,12 @@ These are the shipped, code-enforced properties of the capability layer, the *ho
 - **A separate kernel.** An isolated machine shares the host VM's kernel, and the manager and all
   groves share that one kernel *with each other*. So a kernel-level escape from any single agent
   defeats inter-agent isolation wholesale and reaches the VM, not merely host-secret protection.
-  For a hypervisor-hard kernel boundary, a dedicated VM (e.g. Lima/Colima) is the stronger
-  substrate; the isolated machine is judged sufficient for a single-operator workstation under this
-  threat model. This is an explicit, documented trade.
+  For a hypervisor-hard boundary between the agent workload and the *host* kernel, the `lima`
+  backend is the stronger substrate (its own VM kernel, not shared with the host); the manager and
+  its groves still share *that* kernel with each other, the same inter-agent trade one level up.
+  The OrbStack isolated machine is judged sufficient for a single-operator workstation under this
+  threat model. This is an explicit, documented trade — see the
+  [containment backends](/reference/backends/) matrix to compare before choosing.
 - **Hostile multi-tenant / cloud.** The model targets a single operator's workstation. A
   remote/cloud deployment faces a harsher threat model and would need the inner layer (§4), egress
   controls (above), and hardening not yet specified.

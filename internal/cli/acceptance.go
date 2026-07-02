@@ -4,15 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/lever-to/lever/internal/apply"
+	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/config"
 	leverexec "github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/jail"
 	"github.com/spf13/cobra"
 )
 
@@ -23,7 +22,7 @@ func acceptanceCheckNames() []string {
 	return []string{
 		"delegated-read", // worker CAN read its delegated, filtered rows
 		"no-table-c",     // worker CANNOT read a scope outside the envelope
-		"no-drop-filter", // worker CANNOT widen by dropping the attenuated filter
+		"no-drop-filter", // worker CANNOT widen by dropping the delegated filter caveat
 		"no-self-path",   // worker CANNOT self-mint an un-granted capability
 		"egress-refused", // jail reaches the allowlisted broker port but NOT the non-allowlisted admin port
 		"revocation",     // after revoke/bump-epoch the next call is denied
@@ -101,7 +100,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    scion/container/registration steps (incl. init-machine, which needs a
 	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
 	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
-	deps, ob, _, err := buildApplyDeps(ctx, app, configPath, bf)
+	deps, b, _, err := buildApplyDeps(ctx, app, configPath, bf)
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}
@@ -116,13 +115,12 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    identity directory. Identity dirs are VM-writable (vmIDDir), not the old
 	//    hardcoded /home/{manager,worker}/.lever-id (those users don't exist in
 	//    the broker-only VM — no agent containers were started).
-	machine := machineName(app.Name)
-	jr := jail.New(leverexec.RealRunner{}, machine, ob.RunUser(), ob.RunUID())
+	jr := b.JailRunner()
 	h := &acceptanceHarness{
 		app:       app,
 		jr:        jr,
-		hostAlias: ob.HostToolAlias(),
-		bootDir:   bootstrapDirInJail(app, ob.MountDest()),
+		hostAlias: b.HostToolAlias(),
+		bootDir:   bootstrapDirInJail(app, b.MountDest()),
 		managerID: vmIDDir("manager"),
 		workerID:  vmIDDir("worker"),
 	}
@@ -130,7 +128,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	// 2b. Setup phase: install lever-agent in the VM, then enrol the manager and
 	//     provision+enrol the worker. FAIL-CLOSED — any setup error aborts the
 	//     gate with a clear message (never a vacuous check pass).
-	if err := h.setup(ctx, machine); err != nil {
+	if err := h.setup(ctx, b); err != nil {
 		return fmt.Errorf("acceptance: setup: %w", err)
 	}
 
@@ -186,7 +184,7 @@ func bootstrapDirInJail(app *config.App, mount string) string {
 // `lever-agent` inside the jail machine.
 type acceptanceHarness struct {
 	app       *config.App
-	jr        *jail.Runner
+	jr        leverexec.Runner
 	hostAlias string // host alias reachable from the jail (host.orb.internal); the broker listens behind it
 	bootDir   string // in-jail dir containing bootstrap.json (broker URL + CA)
 	managerID string // in-jail dir holding the manager's mTLS identity (the delegator)
@@ -225,27 +223,20 @@ func hostAgentBinPath() (string, error) {
 	return p, nil
 }
 
-// installLeverAgent copies the host-built linux/arm64 lever-agent into the VM at
-// /usr/local/bin/lever-agent (mode 0755) AS ROOT, so the existing
-// jr.Run(ctx, nil, "lever-agent", ...) finds it on PATH. Isolated OrbStack
-// machines do NOT mount the Mac filesystem, so we pipe the binary in as stdin to
-// `orb -u root -m <machine> sh -c 'cat > … && chmod …'`. We use os/exec directly
-// because the JailRunner has no stdin channel.
-func installLeverAgent(ctx context.Context, machine string) error {
+// installLeverAgent copies the host-built lever-agent into the jail guest at
+// /usr/local/bin/lever-agent AS ROOT, so the existing
+// jr.Run(ctx, nil, "lever-agent", ...) finds it on PATH. Isolated jail guests
+// (OrbStack machines, Lima VMs) do NOT mount the host filesystem, so the binary
+// is streamed in over the backend's root transport. Delegating to the backend
+// keeps this backend-agnostic — the "how do I reach the guest as root" knowledge
+// lives only in each backend's RootPrefix, not here.
+func installLeverAgent(ctx context.Context, b backend.Backend) error {
 	src, err := hostAgentBinPath()
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open lever-agent binary %s: %w", src, err)
-	}
-	defer f.Close()
-	cmd := exec.CommandContext(ctx, "orb", "-u", "root", "-m", machine, "sh", "-c",
-		"cat > /usr/local/bin/lever-agent && chmod 0755 /usr/local/bin/lever-agent")
-	cmd.Stdin = f
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("install lever-agent into jail %s: %w: %s", machine, err, string(out))
+	if err := b.InstallGuestBinary(ctx, src, "/usr/local/bin/lever-agent"); err != nil {
+		return fmt.Errorf("install lever-agent into jail: %w", err)
 	}
 	return nil
 }
@@ -254,10 +245,10 @@ func installLeverAgent(ctx context.Context, machine string) error {
 // identity-dir parents, enrol the manager from the deposited bootstrap, then
 // provision a worker ticket (as manager) and enrol the worker. Every step is
 // fail-closed — a setup error aborts the gate (never a vacuous check pass).
-func (h *acceptanceHarness) setup(ctx context.Context, machine string) error {
+func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error {
 	// 1) Install lever-agent into the VM (copied in as root; isolated machines
-	//    have no Mac-fs mount, so a shared-mount exec is impossible).
-	if err := installLeverAgent(ctx, machine); err != nil {
+	//    have no host-fs mount, so a shared-mount exec is impossible).
+	if err := installLeverAgent(ctx, b); err != nil {
 		return err
 	}
 	// 2) Ensure the per-role identity-dir parents exist and are run-user-writable.
@@ -322,29 +313,26 @@ func (h *acceptanceHarness) run(ctx context.Context, name string) (bool, error) 
 }
 
 // workerToken obtains the worker's delegated db.read token. The worker has an
-// EMPTY obtain (no ambient authority), so it cannot self-mint — the MANAGER
-// mints the token via its `delegate db.read → worker` grant (bound_to=worker),
-// and the worker then attenuates the narrowing filter so it only sees its rows.
+// EMPTY obtain (no ambient authority), so it cannot self-mint — the MANAGER mints
+// the token via its `delegate db.read → worker` grant (bound_to=worker). The
+// narrowing caveats (table, and the owner filter when withFilter) are baked into
+// the delegated envelope at mint time: delegation is online-only and there is no
+// offline holder-side attenuation, so the worker can only ever exercise a token
+// that already carries these caveats (which it then cannot drop at call time).
 func (h *acceptanceHarness) workerToken(ctx context.Context, withFilter bool) (string, error) {
-	// Manager delegates db.read to the worker (the manager holds the delegate grant).
-	out, err := h.agentAs(ctx, h.managerID, "delegate", "-tool", "db", "-op", "read", "-to", "worker", "table=A")
+	extra := []string{"-tool", "db", "-op", "read", "-to", "worker", "table=A"}
+	if withFilter {
+		extra = append(extra, "filter=owner=worker")
+	}
+	out, err := h.agentAs(ctx, h.managerID, "delegate", extra...)
 	if err != nil {
 		return "", fmt.Errorf("manager delegate db.read → worker: %w: %s", err, out)
 	}
-	tok := strings.TrimSpace(lastLine(out))
-	if !withFilter {
-		return tok, nil
-	}
-	// Worker attenuates: append the narrowing filter caveat (offline, no broker).
-	att, err := h.agent(ctx, "attenuate", "-token", tok, "filter=owner=worker")
-	if err != nil {
-		return "", fmt.Errorf("worker attenuate filter: %w: %s", err, att)
-	}
-	return strings.TrimSpace(lastLine(att)), nil
+	return strings.TrimSpace(lastLine(out)), nil
 }
 
-// checkDelegatedRead — PASS = worker's delegated+attenuated token reads its
-// filtered rows (the call is ALLOWED and returns the filtered result).
+// checkDelegatedRead — PASS = the worker's delegated token (carrying the owner
+// filter caveat) reads its filtered rows (the call is ALLOWED and returns them).
 func (h *acceptanceHarness) checkDelegatedRead(ctx context.Context) (bool, error) {
 	tok, err := h.workerToken(ctx, true)
 	if err != nil {
@@ -371,14 +359,14 @@ func (h *acceptanceHarness) checkNoTableC(ctx context.Context) (bool, error) {
 	return false, fmt.Errorf("table C read was ALLOWED (must be denied): %s", out)
 }
 
-// checkNoDropFilter — PASS = worker CANNOT widen by dropping the attenuated
-// narrowing filter. Calling with the filter omitted MUST be denied.
+// checkNoDropFilter — PASS = worker CANNOT widen by dropping the delegated
+// narrowing filter caveat. Calling with the filter omitted MUST be denied.
 func (h *acceptanceHarness) checkNoDropFilter(ctx context.Context) (bool, error) {
-	tok, err := h.workerToken(ctx, true) // token carries the attenuated filter caveat
+	tok, err := h.workerToken(ctx, true) // token carries the delegated filter caveat
 	if err != nil {
 		return false, err
 	}
-	// Omit the filter argument: the attenuated caveat is not satisfied.
+	// Omit the filter argument: the delegated caveat is not satisfied.
 	out, err := h.agent(ctx, "call", "-tool", "db", "-op", "read", "-token", tok, "table=A")
 	if err != nil {
 		return true, nil // denied — the dropped filter is caught

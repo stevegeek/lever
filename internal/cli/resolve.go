@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/lever-to/lever/internal/backend/registry"
 	"github.com/lever-to/lever/internal/config"
 )
 
@@ -57,4 +58,19 @@ func machineFromFlagOrConfig(machine string) (string, error) {
 		return "", err
 	}
 	return machineName(app.Name), nil
+}
+
+// backendFromFlagOrConfig returns the explicit --backend when set, else the
+// resolved config's backend, else the registry default (flag-only usage away
+// from an instance root).
+func backendFromFlagOrConfig(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	if path, err := resolveConfigPath(""); err == nil {
+		if app, err := config.Load(path); err == nil {
+			return app.Backend
+		}
+	}
+	return registry.Default
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,16 +140,16 @@ func TestValidateRejectsUnknownBackend(t *testing.T) {
 	}
 }
 
-// A backend that is DECLARED (on the roadmap) but not yet implemented must be
-// rejected as "planned", not silently substituted with the default backend.
-func TestValidateRejectsPlannedBackend(t *testing.T) {
+// A backend lever cannot run — including ex-roadmap names like linux-docker —
+// must be rejected at config load, naming the valid set.
+func TestConfigRejectsUnknownBackend(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: linux-docker\ntree: ./tree\nmanager: {}\n")
 	_, err := Load(p)
 	if err == nil {
-		t.Fatal("expected error for a planned-but-unimplemented backend")
+		t.Fatal("expected error for an unknown backend")
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") || !strings.Contains(err.Error(), "orbstack") {
-		t.Errorf("error %q should say 'not yet implemented' and name the selectable set", err)
+	if !strings.Contains(err.Error(), "unknown backend") || !strings.Contains(err.Error(), "orbstack") {
+		t.Errorf("error %q should say 'unknown backend' and name the valid set", err)
 	}
 }
 
@@ -336,6 +337,38 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 		if _, err := Load(p); err == nil {
 			t.Fatalf("%s should be rejected", label)
 		}
+	}
+}
+
+// manager.allow_ports opens host-loopback ports to the jailed agent — the
+// egress allowlist is the ONLY thing isolating the host-loopback admin API
+// (bootstrap/revoke/bump-epoch) from the guest, so listing the admin port
+// there must be rejected at config load, not left as an operator footgun.
+func TestManagerAllowPortsRejectsExplicitAdminPort(t *testing.T) {
+	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  admin_port: 9444\nmanager:\n  allow_ports: [9444]\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("manager.allow_ports containing the (explicit) broker admin port must be rejected")
+	}
+	if !strings.Contains(err.Error(), "allow_ports") || !strings.Contains(err.Error(), "admin") {
+		t.Errorf("error %q should mention allow_ports and the admin port", err)
+	}
+}
+
+func TestManagerAllowPortsRejectsDefaultAdminPortWhenUnset(t *testing.T) {
+	// broker.admin_port is left unset, so the effective admin port is the
+	// package default (DefaultBrokerAdminPort) — the rejection must use the
+	// EFFECTIVE port, not just a configured one.
+	p := writeTmp(t, fmt.Sprintf("name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  allow_ports: [%d]\n", DefaultBrokerAdminPort))
+	if _, err := Load(p); err == nil {
+		t.Fatal("manager.allow_ports containing the DEFAULT broker admin port must be rejected")
+	}
+}
+
+func TestManagerAllowPortsAcceptsOrdinaryPorts(t *testing.T) {
+	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  allow_ports: [3305]\n")
+	if _, err := Load(p); err != nil {
+		t.Fatalf("an ordinary allow_ports entry should load fine: %v", err)
 	}
 }
 

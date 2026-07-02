@@ -2,45 +2,25 @@ package backend
 
 import "testing"
 
-func TestCandidatesCoverAllKnownBackends(t *testing.T) {
-	want := map[string]Status{
-		"orbstack":        StatusImplemented,
-		"linux-docker":    StatusPlanned,
-		"lima":            StatusPlanned,
-		"apple-container": StatusExperimental,
-	}
-	got := map[string]Status{}
-	for _, c := range Candidates {
-		got[c.Name] = c.Status
-	}
+// Candidates lists exactly the implemented backends — roadmap and rejected
+// backends are documentation (docs-site/_reference/backends.md), not code.
+func TestCandidatesAreExactlyTheImplemented(t *testing.T) {
+	want := []string{"lima", "orbstack"} // sorted
+	got := Names()
 	if len(got) != len(want) {
-		t.Fatalf("Candidates has %d entries, want %d: %v", len(got), len(want), got)
+		t.Fatalf("Names() = %v, want %v", got, want)
 	}
-	for name, status := range want {
-		if got[name] != status {
-			t.Errorf("candidate %q status = %q, want %q", name, got[name], status)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Names() = %v, want %v", got, want)
 		}
 	}
 }
 
 func TestCandidateProfileNameMatchesCandidateName(t *testing.T) {
-	// A candidate's declared Profile.Name must equal its Name, so ProfileFor and
-	// the guarantee matrix cannot disagree about which backend a row describes.
 	for _, c := range Candidates {
 		if c.Profile.Name != c.Name {
 			t.Errorf("candidate %q has Profile.Name %q", c.Name, c.Profile.Name)
-		}
-	}
-}
-
-func TestSelectableNamesAreExactlyTheImplemented(t *testing.T) {
-	sel := SelectableNames()
-	if len(sel) != 1 || sel[0] != "orbstack" {
-		t.Fatalf("SelectableNames() = %v, want [orbstack]", sel)
-	}
-	for _, c := range Candidates {
-		if IsSelectable(c.Name) != (c.Status == StatusImplemented) {
-			t.Errorf("IsSelectable(%q)=%v but status=%q", c.Name, IsSelectable(c.Name), c.Status)
 		}
 	}
 }

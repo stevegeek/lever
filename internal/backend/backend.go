@@ -7,6 +7,8 @@ package backend
 import (
 	"context"
 	"fmt"
+
+	"github.com/lever-to/lever/internal/exec"
 )
 
 // Profile DECLARES what a backend actually guarantees, so the security posture
@@ -45,12 +47,24 @@ type Config struct {
 }
 
 // Backend is the contract the rest of Lever drives. Implementations must make
-// EnsureUp idempotent.
+// EnsureUp idempotent. RunUser/RunUID/HostAliasV4/JailRunner are valid after
+// EnsureUp (constructors may return sensible defaults before).
 type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
-	DockerHost() string    // endpoint the broker drives (valid after EnsureUp)
-	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
-	MountDest() string     // path inside the jail where the project tree is bind-mounted
+	DockerHost() string                 // endpoint the broker drives (valid after EnsureUp)
+	HostToolAlias() string              // how an agent reaches allowlisted host tools ("" if none)
+	HostAliasV4() string                // resolved IPv4 of HostToolAlias as seen from the jail ("" if unresolved)
+	MountDest() string                  // path inside the jail where the project tree is bind-mounted
+	MachineName() string                // the jail identifier this backend targets
+	RunUser() string                    // the in-jail run user
+	RunUID() string                     // the in-jail run user's uid
+	JailRunner() exec.Runner            // command transport into the jail
+	AttachArgv(inner []string) []string // interactive TTY argv (lever up)
+	LoadImage(ctx context.Context, imageRef string) error
+	// InstallGuestBinary streams a host-local executable into the guest at
+	// destPath as root (used by the acceptance gate to place lever-agent). The
+	// transport is the backend's root prefix, so callers stay backend-agnostic.
+	InstallGuestBinary(ctx context.Context, localPath, destPath string) error
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	Profile() Profile

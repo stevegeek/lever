@@ -65,3 +65,11 @@ all: install lever-manager-linux
 test-apikey-e2e: install lever-image-bins
 	bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
 	bash tools/test/apikey-e2e.sh
+
+# Live lima-backend e2e: §19 `lever acceptance` six checks under both egress
+# postures + guest port-forward suppression + idempotent closed re-bring-up +
+# teardown, on a real Lima VM. Needs Lima >= 2.0 (brew install lima). The script
+# builds the native lever-tool-db and the linux/<guestarch> lever-agent it needs.
+.PHONY: test-lima-e2e
+test-lima-e2e: install
+	bash tools/test/lima-e2e.sh

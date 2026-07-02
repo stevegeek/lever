@@ -9,7 +9,6 @@ import (
 
 	"github.com/lever-to/lever/internal/apply"
 	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/jail"
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
@@ -44,11 +43,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			deps, ob, sc, err := buildApplyDeps(cmd.Context(), app, path, bf)
+			deps, b, sc, err := buildApplyDeps(cmd.Context(), app, path, bf)
 			if err != nil {
 				return err
 			}
-			project := ob.MountDest() // in-jail project path == mount root
+			project := b.MountDest() // in-jail project path == mount root
 
 			phase, err := managerPhase(cmd.Context(), sc, project, app.Name)
 			if err != nil {
@@ -75,7 +74,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return nil
 			}
 			inner := sc.AttachArgv(app.Name, project)
-			argv := jail.AttachArgv(ob.MachineName(), ob.RunUser(), ob.RunUID(), inner)
+			argv := b.AttachArgv(inner)
 			bin, err := exec.LookPath(argv[0])
 			if err != nil {
 				return fmt.Errorf("attach: %w", err)

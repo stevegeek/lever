@@ -3,6 +3,7 @@ package orbstack
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -53,6 +54,11 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
 	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
 	b := New(r, "lever-jail")
+	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
+	// live chain (existingClosedAlias never reads v6), so a re-apply that hits
+	// the skip must leave the previously-resolved v6 alias untouched rather
+	// than zeroing it.
+	b.aliasV6 = "fd07::fe"
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
@@ -66,6 +72,9 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	if b.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", b.HostAliasV4())
+	}
+	if b.aliasV6 != "fd07::fe" {
+		t.Fatalf("skip path must not clobber a prior aliasV6 (it cannot know v6 from the live chain); got %q", b.aliasV6)
 	}
 }
 
@@ -110,6 +119,8 @@ func scriptedMachine(f *exec.FakeRunner) {
 	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
 	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
 	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
+	// EnsureScion (when a test sets ScionSource/ScionVersion): guest arch detection.
+	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "arm64\n"})
 	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
 	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
 	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
@@ -475,15 +486,6 @@ func TestEnsureScionSourceMissing(t *testing.T) {
 	}
 }
 
-func TestShellSingleQuote(t *testing.T) {
-	if got := shellSingleQuote("ab"); got != "'ab'" {
-		t.Errorf("shellSingleQuote(ab): want 'ab' got %q", got)
-	}
-	if got := shellSingleQuote("a'b"); got != `'a'\''b'` {
-		t.Errorf(`shellSingleQuote(a'b): want 'a'\''b' got %q`, got)
-	}
-}
-
 func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	f := exec.NewFakeRunner()
 	// No `orb version` needed: ProjectTree guard fires before the preflight.
@@ -498,6 +500,23 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ProjectTree") {
 		t.Fatalf("error should mention ProjectTree; got: %v", err)
+	}
+}
+
+func TestJailTransportMethods(t *testing.T) {
+	o := New(exec.NewFakeRunner(), "lever-x")
+	// Pre-EnsureUp the prefix uses the zero-value user; we only test post-resolve.
+	o.runUser, o.runUID = "stephen", "501"
+
+	if got := JailPrefix("lever-x", "stephen"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
+		t.Fatalf("JailPrefix = %v", got)
+	}
+	if o.JailRunner() == nil {
+		t.Fatal("JailRunner() = nil")
+	}
+	attach := o.AttachArgv([]string{"scion", "attach"})
+	if attach[0] != "orb" || attach[len(attach)-1] != "attach" {
+		t.Fatalf("AttachArgv = %v", attach)
 	}
 }
 

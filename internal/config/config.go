@@ -158,22 +158,18 @@ type App struct {
 	treeRel string // tree as the confined relative subdir (before joining to dir)
 }
 
-// validateBackend rejects a config's backend unless it is implemented. A
-// declared-but-unbuilt backend ("planned"/"experimental") and an unknown name
-// give distinct errors, so nothing is ever silently swapped for the default.
-// The set of backends and their statuses live in package backend (the single
-// source), not a list duplicated here.
+// validateBackend rejects a config's backend unless lever can run it. The set
+// of valid backends lives in package backend (the single source; implemented
+// only — roadmap/rejected backends are documentation), not a list duplicated
+// here, so nothing is ever silently swapped for the default.
 func validateBackend(name string) error {
 	if name == "" {
-		return fmt.Errorf("config: backend is required (selectable: %s)", strings.Join(backend.SelectableNames(), ", "))
+		return fmt.Errorf("config: backend is required (valid: %s)", strings.Join(backend.Names(), ", "))
 	}
-	if backend.IsSelectable(name) {
-		return nil
+	if _, ok := backend.Lookup(name); !ok {
+		return fmt.Errorf("config: unknown backend %q (valid: %s)", name, strings.Join(backend.Names(), ", "))
 	}
-	if c, ok := backend.Lookup(name); ok {
-		return fmt.Errorf("config: backend %q is %s, not yet implemented (selectable: %s)", name, c.Status, strings.Join(backend.SelectableNames(), ", "))
-	}
-	return fmt.Errorf("config: unknown backend %q (selectable: %s)", name, strings.Join(backend.SelectableNames(), ", "))
+	return nil
 }
 
 // CanonicalName is the config filename for a lever instance — a manifest at the
@@ -304,6 +300,18 @@ func (a *App) Validate() error {
 	if a.Manager.Image != "" {
 		if err := a.Security.validateImage("manager.image", a.Manager.Image); err != nil {
 			return err
+		}
+	}
+	// manager.allow_ports opens a host-loopback port to the jailed agent (via
+	// the egress allowlist's per-port ACCEPT on the host alias); the broker's
+	// admin port (/bootstrap, /revoke, /bump-epoch — unauthenticated, meant to
+	// be reachable only from the host loopback) must never be listed there,
+	// or the allowlist — the ONLY thing isolating that API from the guest —
+	// would hand the jail a direct path to it.
+	adminPort := a.EffectiveAdminPort()
+	for _, p := range a.Manager.AllowPorts {
+		if p == adminPort {
+			return fmt.Errorf("config: manager.allow_ports must not include the broker admin port (%d) — this would hand the jailed agent a direct, unauthenticated path to /bootstrap, /revoke, /bump-epoch (the egress allowlist is the only thing isolating the host-loopback admin API from the guest)", adminPort)
 		}
 	}
 	// prompt_file is host-only (read at the root, NOT in the mount) and must stay

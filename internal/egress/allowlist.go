@@ -42,8 +42,12 @@ var (
 // When closedInternet is true a catch-all OUTPUT DROP is appended AFTER all
 // per-port ACCEPTs, so the jail can reach ONLY the already-ACCEPTed destinations
 // (the broker port on the host alias). This is the api-key mode posture.
-// When closedInternet is false behaviour is byte-identical to the pre-existing open
-// posture (no catch-all DROP; public internet remains reachable).
+// When closedInternet is false, behaviour matches the pre-existing open posture
+// (no catch-all DROP; public internet remains reachable) with one addition present
+// in BOTH postures: rule 1b, an alias-scoped ESTABLISHED ACCEPT that lets a
+// host-initiated control channel into the jail (e.g. Lima's SSH, seen by the guest
+// as the alias IP) answer through the alias DROP below, without granting the guest
+// any NEW outbound (see rule 1b's comment for why this doesn't widen containment).
 func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool) []Rule {
 	ports := append([]int(nil), allowedPorts...)
 	sort.Ints(ports)
@@ -53,8 +57,10 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 	// below matches locally-generated packets to 127.0.0.1/::1 too, so without
 	// this every in-machine localhost service breaks — the scion hub on
 	// 127.0.0.1:8080 (its readiness check) and host-loopback tools. Only added in
-	// the closed posture so the open posture stays byte-identical to pre-existing
-	// (where the default-ACCEPT policy already permits loopback).
+	// the closed posture; in the open posture the default-ACCEPT policy already
+	// permits loopback, so this rule is unnecessary there. (The open posture is
+	// not otherwise byte-identical to pre-existing: rule 1b below is emitted in
+	// both postures — see the BuildRules docstring.)
 	if closedInternet {
 		rules = append(rules,
 			Rule{Family: IPv4, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},
@@ -70,6 +76,28 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 		if aliasV6 != "" {
 			rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-p", "tcp", "--dport", strconv.Itoa(p), "-j", "ACCEPT")})
 		}
+	}
+	// 1b) ACCEPT established replies TO THE HOST ALIAS, before the alias DROP
+	// below. On some backends lever's own control channel into the jail is a
+	// connection the HOST initiates to the guest — Lima drives the guest over SSH
+	// from the host, which the guest sees as the alias IP — and the guest's replies
+	// flow OUTPUT→alias, so the blanket alias DROP below would sever that channel.
+	// Accepting only ESTABLISHED traffic TO THE ALIAS lets the guest answer
+	// host-initiated connections WITHOUT letting it initiate any new outbound: a new
+	// connection is state NEW and still falls through to the per-port allow / DROP /
+	// catch-all, so the egress containment assertions are unchanged (a NEW dial to a
+	// non-allowlisted alias port, or to the internet under closed egress, is still
+	// dropped). Scoped to ESTABLISHED only, not RELATED: Lima's host→guest SSH reply
+	// traffic is a single ESTABLISHED TCP flow, and RELATED would additionally admit
+	// conntrack-helper-spawned expectations (the FTP/SIP ALG bypass class) that
+	// nothing here needs — least privilege, defence in depth. Scoped to the alias so
+	// it never broadens internet egress. Inert on backends whose transport isn't a
+	// host→guest connection (e.g. OrbStack's `orb`).
+	if aliasV4 != "" {
+		rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "ACCEPT")})
+	}
+	if aliasV6 != "" {
+		rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "ACCEPT")})
 	}
 	// 2) DROP everything else to the alias (closes non-allowlisted host loopback).
 	if aliasV4 != "" {

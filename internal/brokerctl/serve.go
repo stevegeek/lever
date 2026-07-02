@@ -12,7 +12,6 @@ import (
 	"github.com/lever-to/lever/internal/cap/ca"
 	"github.com/lever-to/lever/internal/config"
 	leverexec "github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/jail"
 	"github.com/lever-to/lever/internal/scion"
 )
 
@@ -29,12 +28,6 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
-	if err != nil {
-		return err
-	}
-	cfg.RevocationState = rev
-	cfg.PersistRevocation = state.SaveRevocation
 
 	// Grove dispatch runs host-side with operator identity (jail runner). apply
 	// passes the resolved run-user/uid via env (LEVER_JAIL_USER/UID); the mount
@@ -49,9 +42,21 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	if err != nil {
 		return err
 	}
+
+	cfg, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err != nil {
+		return err
+	}
+	cfg.RevocationState = rev
+	cfg.PersistRevocation = state.SaveRevocation
+	cfg.ServerName = be.HostToolAlias()
+
 	jailMount := be.MountDest()
 	if u, id := os.Getenv("LEVER_JAIL_USER"), os.Getenv("LEVER_JAIL_UID"); u != "" && id != "" {
-		jr := jail.New(leverexec.RealRunner{}, machine, u, id)
+		jr, jerr := registry.JailRunner(app.Backend, leverexec.RealRunner{}, machine, u, id)
+		if jerr != nil {
+			return jerr
+		}
 		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 	}
 	cfg.Groves = GroveSpecs(app, jailMount)
@@ -90,14 +95,15 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	adminURL := "http://" + adminLn.Addr().String()
 
-	// Issue the broker server cert. Always include the host.orb.internal DNS SAN;
-	// additionally include the jail's resolved host-alias IP (passed by `lever
-	// apply` via $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can
-	// dial the broker by IP — DNS/53 is dropped in that posture, so they cannot
-	// resolve the hostname and instead connect to the already-allowlisted alias IP,
+	// Issue the broker server cert. Always include the selected backend's host
+	// alias (cfg.ServerName, e.g. host.orb.internal) as a DNS SAN; additionally
+	// include the jail's resolved host-alias IP (passed by `lever apply` via
+	// $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can dial the
+	// broker by IP — DNS/53 is dropped in that posture, so they cannot resolve
+	// the hostname and instead connect to the already-allowlisted alias IP,
 	// which TLS validates against this IP SAN. Absent (e.g. a direct `lever broker
 	// serve`), fall back to the hostname-only cert.
-	certPEM, keyPEM, err := caInst.IssueServerCertSANs(serverName, []string{serverName}, []string{os.Getenv("LEVER_HOST_ALIAS_IP")})
+	certPEM, keyPEM, err := caInst.IssueServerCertSANs(cfg.ServerName, []string{cfg.ServerName}, []string{os.Getenv("LEVER_HOST_ALIAS_IP")})
 	if err != nil {
 		_ = jailLn.Close()
 		_ = adminLn.Close()

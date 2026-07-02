@@ -102,11 +102,12 @@ No fork of the runtime is required, the containment is enforced from outside it.
 caveats, and the validation evidence are in [security model](docs-site/_guides/security-model.md).
 
 **The jail is a VM-isolation contract, not a container runtime.** OrbStack is the reference
-implementation of that contract; `lima`, native `linux-docker`, and Apple's per-agent-VM
-`container` are on the roadmap, each declaring its own guarantees (`lever backends`, or the
-[containment backends](docs-site/_reference/backends.md) matrix). Docker Desktop is *not* an
-implementation, its shared VM auto-mounts your home directory and its network namespace is not
-yours to control, so it cannot provide the boundary.
+implementation; `lima` (macOS/Linux, its own VM kernel) is the second, both selectable today.
+Apple's per-agent-VM `container` is on the roadmap; each declares its own guarantees (`lever
+backends`, or the [containment backends](docs-site/_reference/backends.md) matrix). Docker Desktop
+is *not* an implementation, its shared VM auto-mounts your home directory and its network namespace
+is not yours to control, so it cannot provide the boundary; a native, no-VM Linux backend was
+explored and rejected on the mirror-image ground (no VM at all) — see the backends page.
 
 ## Core + instance
 
@@ -193,8 +194,9 @@ runs. Both are idempotent, re-running `up` resumes a suspended manager and re-at
 
 ## Requirements (intended)
 
-- macOS on Apple Silicon with [OrbStack](https://orbstack.dev) (the validated host today; a
-  dedicated VM such as Lima/Colima is a planned alternative substrate).
+- macOS on Apple Silicon with [OrbStack](https://orbstack.dev) (the validated host today), or
+  [Lima](https://lima-vm.io) (macOS or Linux, its own VM kernel; requires Lima ≥ 2.0.0) as the
+  non-OrbStack backend. See [containment backends](docs-site/_reference/backends.md).
 - [Scion](https://github.com/GoogleCloudPlatform/scion) as the runtime engine.
 - An LLM coding-agent harness (e.g. an OAuth-authenticated Claude Code).
 

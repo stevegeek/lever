@@ -124,6 +124,10 @@ assistant as the first instance (dogfooding). See [core vs instance](docs-site/_
   attach); live end-to-end validation on macOS + OrbStack, a manager boots in the jail, edits a
   bind-mounted tree **in place**, the hub tracks it (heartbeats, attach), and **the manager dispatches
   a grove agent, relays its question back, and closes a task on completion** (proven 2026-06-17).
+  The second backend, **Lima**, passes the §19 acceptance gate on macOS (vz) under both egress
+  postures — `make test-lima-e2e`, proven 2026-07-02. Lima's **Linux** (QEMU/KVM) path is covered by
+  unit tests; live validation there needs a KVM-capable host (CI runner / real Linux box) and is
+  pending — it is not exercised by nesting inside another VM (no nested KVM).
 - **In progress:** tidier MCP wiring; per-step bring-up progress; load a grove image at apply time;
   broader substrate support (Linux/Docker backend); packaging.
 - **Not yet:** a release/installer. Build from source (`make install`).

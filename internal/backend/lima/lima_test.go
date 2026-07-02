@@ -41,6 +41,7 @@ func limaVersionScript(f *exec.FakeRunner) {
 func scriptedVM(f *exec.FakeRunner) {
 	limaVersionScript(f)
 	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
+	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
 	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
 	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
 	f.Script("limactl shell lever-x bash", exec.Result{Stdout: "ok\n"})
@@ -80,6 +81,7 @@ func TestEnsureUpFreshHostFullSequence(t *testing.T) {
 	limaVersionScript(f)
 	f.Script("limactl list --format", exec.Result{Stdout: ""}) // no VMs yet
 	f.Script("limactl create --name=lever-x --tty=false", exec.Result{Stdout: "created\n"})
+	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
 	f.Script("limactl start --tty=false lever-x", exec.Result{Stdout: "started\n"})
 	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
 	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
@@ -158,6 +160,7 @@ func TestEnsureUpStartsStoppedVMWithoutCreate(t *testing.T) {
 	f := exec.NewFakeRunner()
 	limaVersionScript(f)
 	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Stopped\n"})
+	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
 	f.Script("limactl start --tty=false lever-x", exec.Result{})
 	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
 	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
@@ -293,6 +296,7 @@ func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	f := exec.NewFakeRunner()
 	limaVersionScript(f)
 	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
+	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
 	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
 	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "1000\n"}) // non-default uid
 	f.Script("limactl shell lever-x bash", exec.Result{Stdout: "ok\n"})

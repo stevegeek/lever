@@ -2,6 +2,7 @@ package lima
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -168,12 +169,110 @@ func (l *Lima) ensureVM(ctx context.Context, projectTree string) error {
 		}
 		status = "Stopped" // freshly created, not yet started
 	}
+	// Verify the REALIZED containment config on every path that reaches a
+	// live VM — a fresh create (belt-and-braces: a global lima config could
+	// still widen it) AND, critically, an ADOPTED pre-existing VM (one from a
+	// prior run, one booted before a template fix, or one an operator's
+	// global ~/.lima/_config/override.yaml has widened). mounts/portForwards/
+	// containerd are `limactl create`-time only, so without this check an
+	// adopted VM is used wholesale with no drift check even though the
+	// template IS the containment surface (template.go).
+	if err := l.verifyRealizedConfig(ctx, projectTree); err != nil {
+		return err
+	}
 	if status == "Running" {
-		// Idempotent: already up.
+		// Idempotent: already up (and just verified un-drifted).
 		return nil
 	}
 	if _, err := l.r.Run(ctx, nil, "limactl", "start", "--tty=false", l.vm); err != nil {
 		return fmt.Errorf("limactl start: %w", err)
+	}
+	return nil
+}
+
+// realizedInstance is the subset of `limactl list --json <vm>` needed to
+// verify the containment surface. Deliberately NOT read from the raw
+// ~/.lima/<vm>/lima.yaml lima persists at `limactl create` time: that file
+// holds the pre-merge template bytes only. `limactl list --json` goes through
+// lima's store.Inspect, which re-loads and re-merges the instance config with
+// any ~/.lima/_config/{default,override}.yaml on EVERY call — that merged
+// result is what lima actually applies the next time the VM starts, so it is
+// the only read-back that can catch a global override widening the surface
+// (see security-model.md's lima operator-boundary note).
+type realizedInstance struct {
+	Config struct {
+		Mounts []struct {
+			Location   string `json:"location"`
+			MountPoint string `json:"mountPoint"`
+			Writable   bool   `json:"writable"`
+		} `json:"mounts"`
+		PortForwards []struct {
+			GuestIP           string `json:"guestIP"`
+			GuestIPMustBeZero bool   `json:"guestIPMustBeZero"`
+			GuestPortRange    []int  `json:"guestPortRange"`
+			Proto             string `json:"proto"`
+			Ignore            bool   `json:"ignore"`
+		} `json:"portForwards"`
+		Containerd struct {
+			System bool `json:"system"`
+			User   bool `json:"user"`
+		} `json:"containerd"`
+	} `json:"config"`
+}
+
+// matchesContainment reports whether the realized config is exactly the
+// containment surface template.go renders for projectTree: one writable
+// mount at mountDest, exactly the two full-range proto:any ignore rules (see
+// FIX 1), and containerd fully disabled.
+func (inst realizedInstance) matchesContainment(projectTree string) bool {
+	c := inst.Config
+	if len(c.Mounts) != 1 {
+		return false
+	}
+	if c.Mounts[0].Location != projectTree || c.Mounts[0].MountPoint != mountDest || !c.Mounts[0].Writable {
+		return false
+	}
+	if c.Containerd.System || c.Containerd.User {
+		return false
+	}
+	if len(c.PortForwards) != 2 {
+		return false
+	}
+	var sawZero, sawLoopback bool
+	for _, pf := range c.PortForwards {
+		if !pf.Ignore || pf.Proto != "any" ||
+			len(pf.GuestPortRange) != 2 || pf.GuestPortRange[0] != 1 || pf.GuestPortRange[1] != 65535 {
+			return false
+		}
+		switch pf.GuestIP {
+		case "0.0.0.0":
+			if !pf.GuestIPMustBeZero {
+				return false
+			}
+			sawZero = true
+		case "127.0.0.1":
+			sawLoopback = true
+		default:
+			return false
+		}
+	}
+	return sawZero && sawLoopback
+}
+
+// verifyRealizedConfig reads back the VM's realized config (see
+// realizedInstance) and fails closed unless it matches the containment
+// template's intent for projectTree.
+func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) error {
+	res, err := l.r.Run(ctx, nil, "limactl", "list", "--json", l.vm)
+	if err != nil {
+		return fmt.Errorf("read back realized config for %q: %w", l.vm, err)
+	}
+	var inst realizedInstance
+	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &inst); err != nil {
+		return fmt.Errorf("parse realized config for %q: %w", l.vm, err)
+	}
+	if !inst.matchesContainment(projectTree) {
+		return fmt.Errorf("lima VM %q exists with a mismatched containment config (mounts/port-forwards/containerd drifted from the lever template); run 'lever down' then 'lever up' to recreate", l.vm)
 	}
 	return nil
 }

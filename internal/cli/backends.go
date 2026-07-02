@@ -8,23 +8,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newBackendsCmd lists every containment backend Lever knows about and the
+// newBackendsCmd lists every containment backend Lever can run and the
 // guarantees it declares, straight from backend.Candidates (the same source the
-// docs and config validation use). Read-only; no jail required.
+// docs and config validation use). Roadmap and rejected backends are
+// documentation: docs-site/_reference/backends.md. Read-only; no jail required.
 func newBackendsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "backends",
 		Short: "List containment backends and their declared guarantees",
-		Long: "Show every containment backend and the isolation guarantees it declares.\n" +
-			"Only 'implemented' backends can be selected by a config; 'planned' and\n" +
-			"'experimental' entries state their TARGET guarantees so the roadmap is visible.",
+		Long: "Show every containment backend lever can run and the isolation guarantees\n" +
+			"it declares. Roadmap and rejected backends are documented on the backends\n" +
+			"reference page, not listed here.",
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, _ []string) {
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tSTATUS\tKERNEL\tFS BOUND BY\tEGRESS AT\tFRAGILE")
+			fmt.Fprintln(w, "NAME\tKERNEL\tFS BOUND BY\tEGRESS AT\tFRAGILE")
 			for _, c := range backend.Candidates {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\n",
-					c.Name, c.Status, kernelWord(c.Profile.SeparateKernel),
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\n",
+					c.Name, kernelWord(c.Profile.SeparateKernel),
 					c.Profile.FSBoundedBy, c.Profile.EgressEnforcedAt, c.Profile.VersionFragile)
 			}
 			w.Flush()

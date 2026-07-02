@@ -139,16 +139,16 @@ func TestValidateRejectsUnknownBackend(t *testing.T) {
 	}
 }
 
-// A backend that is DECLARED (on the roadmap) but not yet implemented must be
-// rejected as "planned", not silently substituted with the default backend.
-func TestValidateRejectsPlannedBackend(t *testing.T) {
+// A backend lever cannot run — including ex-roadmap names like linux-docker —
+// must be rejected at config load, naming the valid set.
+func TestConfigRejectsUnknownBackend(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: linux-docker\ntree: ./tree\nmanager: {}\n")
 	_, err := Load(p)
 	if err == nil {
-		t.Fatal("expected error for a planned-but-unimplemented backend")
+		t.Fatal("expected error for an unknown backend")
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") || !strings.Contains(err.Error(), "orbstack") {
-		t.Errorf("error %q should say 'not yet implemented' and name the selectable set", err)
+	if !strings.Contains(err.Error(), "unknown backend") || !strings.Contains(err.Error(), "orbstack") {
+		t.Errorf("error %q should say 'unknown backend' and name the valid set", err)
 	}
 }
 

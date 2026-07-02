@@ -26,16 +26,6 @@ func TestSelectEmptyIsDefault(t *testing.T) {
 	}
 }
 
-func TestSelectPlannedIsRejected(t *testing.T) {
-	_, err := Select("linux-docker", exec.RealRunner{}, "lever-x")
-	if err == nil {
-		t.Fatal("Select(linux-docker) should error — it is planned, not implemented")
-	}
-	if !strings.Contains(err.Error(), "planned") || !strings.Contains(err.Error(), "orbstack") {
-		t.Errorf("error %q should name the status and the selectable set", err)
-	}
-}
-
 func TestSelectUnknownIsRejected(t *testing.T) {
 	_, err := Select("nope", exec.RealRunner{}, "lever-x")
 	if err == nil || !strings.Contains(err.Error(), "unknown") {
@@ -43,14 +33,15 @@ func TestSelectUnknownIsRejected(t *testing.T) {
 	}
 }
 
-// TestConstructorsMatchImplementedStatus keeps the registry and the guarantee
-// matrix in lockstep: exactly the Implemented candidates have a constructor.
-func TestConstructorsMatchImplementedStatus(t *testing.T) {
+// TestConstructorsMatchCandidates keeps the registry and the guarantee matrix
+// in lockstep: exactly the declared candidates have a constructor.
+func TestConstructorsMatchCandidates(t *testing.T) {
+	if len(constructors) != len(backend.Candidates) {
+		t.Fatalf("constructors has %d entries, Candidates has %d", len(constructors), len(backend.Candidates))
+	}
 	for _, c := range backend.Candidates {
-		_, hasCtor := constructors[c.Name]
-		wantCtor := c.Status == backend.StatusImplemented
-		if hasCtor != wantCtor {
-			t.Errorf("backend %q: hasConstructor=%v but Status=%q (implemented⇔constructor)", c.Name, hasCtor, c.Status)
+		if _, ok := constructors[c.Name]; !ok {
+			t.Errorf("candidate %q has no constructor", c.Name)
 		}
 	}
 }

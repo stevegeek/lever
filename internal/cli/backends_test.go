@@ -17,14 +17,14 @@ func TestBackendsCommandListsEveryCandidate(t *testing.T) {
 		t.Fatalf("backends: %v", err)
 	}
 	got := out.String()
-	for _, name := range []string{"orbstack", "linux-docker", "lima", "apple-container"} {
+	for _, name := range []string{"orbstack"} { // Task 10 adds "lima"
 		if !strings.Contains(got, name) {
 			t.Errorf("output missing backend %q\n%s", name, got)
 		}
 	}
-	for _, status := range []string{"implemented", "planned", "experimental"} {
-		if !strings.Contains(got, status) {
-			t.Errorf("output missing status %q\n%s", status, got)
+	for _, gone := range []string{"linux-docker", "apple-container", "planned", "experimental", "implemented"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("output should no longer mention %q\n%s", gone, got)
 		}
 	}
 }
@@ -35,7 +35,7 @@ func TestBackendsCommandListsEveryCandidate(t *testing.T) {
 // must be accompanied by threading app.Backend through the factory — at which
 // point delete this test.
 func TestExactlyOneSelectableBackend(t *testing.T) {
-	if sel := backend.SelectableNames(); len(sel) != 1 {
-		t.Fatalf("defaultFactory assumes a single selectable backend, got %v — make the factory name-aware before implementing a second backend", sel)
+	if names := backend.Names(); len(names) != 1 {
+		t.Fatalf("defaultFactory assumes a single backend, got %v — make the factory name-aware (Task 5) before adding a second", names)
 	}
 }

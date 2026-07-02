@@ -171,7 +171,61 @@ CN-bound, short-lived capability tokens. See [security-model.md](/security-model
 | `grant_ttl` | duration | no | `24h` | Capability token lifetime. A backstop only: the per-call epoch/revocation check is the real cut, so a session-scale TTL is safe (and must outlive the 12h renew cycle). |
 | `ticket_ttl` | duration | no | (default) | Lifetime of a one-time enrolment ticket (the manager-bootstrap and agent-enrol tickets minted at apply). Short by design; only needs to outlive container boot. |
 | `manager_identity` | string | no | `manager` | The capability CN the manager enrols under (its certificate identity at the broker), distinct from its Scion agent slug (`name`). |
-| `tools` | list of `{name, command, backend, operations, allowed_values}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs; `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. |
+| `tools` | list of `{name, command, backend, operations, allowed_values, external, gate, allow_non_loopback}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs; `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. With `external: true` the broker FRONTS an already-running host MCP server instead of spawning one: no `command`, `backend` is the server's own listen address (`host:port[/path]`, literal loopback IP unless `allow_non_loopback: true`), and the tool registers third-party — the gateway enforces the rules and strips the capability before proxying. |
+
+#### External MCP servers (`external: true`)
+
+An **external tool** is a host MCP server the broker *fronts but does not spawn* — it keeps
+running as your own user-session process (launchd, a terminal, however you run it), which is
+what keeps macOS Automation/TCC grants intact for AppleScript-driven servers. The broker
+registers it from config at boot, exposes it at `/mcp/<name>/` on the mTLS gateway, and
+proxies to `backend`. Jailed agents therefore reach it **only through a capability** — no
+`manager.allow_ports` hole, no hand-authored `.mcp.json`.
+
+Per-tool capability grain, `gate`:
+
+- **`fine` (default):** only the MCP tools listed under `operations` are callable; a token
+  must name the specific operation, and `allowed_values` can pin arguments.
+- **`coarse`:** one wildcard grant — `{tool: <name>, op: "*"}` — admits **every** MCP call
+  the server exposes (declare no `operations`). The wildcard is honored *only* for a
+  `gate: coarse` tool: the gateway chooses which capability to require, so a `"*"` token
+  can never widen a `fine` tool. The audit log records the real MCP tool called either way.
+
+```yaml
+broker:
+  tools:
+    - name: devonthink            # fine: only search is callable, database pinnable
+      external: true
+      backend: 127.0.0.1:3302
+      operations:
+        - {name: search}
+      allowed_values:
+        database: [work, personal]
+    - name: things3               # coarse: whole surface behind one wildcard grant
+      external: true
+      backend: 127.0.0.1:3300
+      gate: coarse
+    - name: qmd                   # the server mounts its MCP endpoint under a path
+      external: true
+      backend: 127.0.0.1:3101/mcp
+      gate: coarse
+groves:
+  - name: agentY
+    dir: groves/agentY
+    obtain:
+      - {tool: devonthink, op: search}   # Y: devonthink search ONLY
+manager:
+  obtain:
+    - {tool: things3, op: "*"}           # manager: full things3
+```
+
+`backend` must be a **literal loopback IP** (`127.0.0.1` / `[::1]`; hostnames are rejected):
+the gateway proxies host-side, so a non-loopback backend would let a jailed agent reach
+another host *through the broker*, bypassing the jail's LAN-drop egress. If you truly need
+that, set `allow_non_loopback: true` on the tool — an explicit, per-tool opt-in.
+
+Liveness is yours: the broker does not restart an external server; if it is down, gateway
+calls return 502.
 
 ## Conventions & derived values
 

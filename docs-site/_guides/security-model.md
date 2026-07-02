@@ -411,6 +411,25 @@ These are the shipped, code-enforced properties of the capability layer, the *ho
   host-side. Projecting it to every container is safe precisely because the instance is uniformly
   api-key (§6.1).
 
+**External MCP servers (broker-fronted).** A `broker.tools` entry with `external: true` is a
+host server the broker *fronts but does not spawn*: it registers from config, is gated at the
+mTLS gateway like any third-party tool (token verified, then **stripped** — the server never
+sees a capability), and replaces the old ambient pattern (per-server `allow_ports` holes + a
+`.mcp.json` pointing at the host alias). Three honest boundaries:
+
+- **`gate: coarse` is wholesale trust.** One wildcard capability (`{tool,"*"}`) admits every
+  MCP call the server exposes, including destructive ones. It is honored *only* for a
+  declared-coarse tool — the gateway picks the required op per tool, so a wildcard token can
+  never satisfy a `fine` tool — and the audit log records the real MCP tool called either
+  way. Put sensitive servers behind `gate: fine`.
+- **The loopback-backend guard closes a LAN bypass.** The gateway proxies host-side, so a
+  non-loopback `backend` would hand a jailed agent a path to other hosts *through the
+  broker*, circumventing the jail's LAN-drop egress. Config validation rejects it unless the
+  tool sets `allow_non_loopback: true` (an explicit, reviewed opt-in).
+- **The gate protects the *jailed agent's* path, nothing more.** Any other host-local
+  process can still hit the server's `127.0.0.1` port directly — host processes are already
+  inside the host trust boundary; the broker does not claim to sandbox them from each other.
+
 ## 7. What this model does *not* claim
 
 - **Data-exfiltration protection.** The bound is on host-secret and LAN reach, **not** on

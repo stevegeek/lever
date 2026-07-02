@@ -3,9 +3,8 @@ package orbstack
 import (
 	"context"
 	"fmt"
-	"net"
-	"strings"
 
+	"github.com/lever-to/lever/internal/backend/guest"
 	"github.com/lever-to/lever/internal/exec"
 )
 
@@ -16,21 +15,7 @@ func resolveHostAlias(ctx context.Context, r exec.Runner, machine string) (v4, v
 	if err != nil {
 		return "", "", fmt.Errorf("getent host.orb.internal: %w", err)
 	}
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		ip := net.ParseIP(fields[0])
-		if ip == nil {
-			continue
-		}
-		if ip.To4() != nil {
-			v4 = fields[0]
-		} else {
-			v6 = fields[0]
-		}
-	}
+	v4, v6 = guest.ParseAhosts(res.Stdout)
 	if v4 == "" && v6 == "" {
 		return "", "", fmt.Errorf("host.orb.internal resolved to no addresses")
 	}

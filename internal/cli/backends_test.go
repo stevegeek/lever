@@ -17,7 +17,7 @@ func TestBackendsCommandListsEveryCandidate(t *testing.T) {
 		t.Fatalf("backends: %v", err)
 	}
 	got := out.String()
-	for _, name := range []string{"orbstack"} { // Task 10 adds "lima"
+	for _, name := range []string{"orbstack", "lima"} {
 		if !strings.Contains(got, name) {
 			t.Errorf("output missing backend %q\n%s", name, got)
 		}

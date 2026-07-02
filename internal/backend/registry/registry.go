@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/lever-to/lever/internal/backend"
+	"github.com/lever-to/lever/internal/backend/lima"
 	"github.com/lever-to/lever/internal/backend/orbstack"
 	"github.com/lever-to/lever/internal/exec"
 )
@@ -22,6 +23,7 @@ const Default = "orbstack"
 // TestConstructorsMatchCandidates.
 var constructors = map[string]func(exec.Runner, string) backend.Backend{
 	"orbstack": func(r exec.Runner, machine string) backend.Backend { return orbstack.New(r, machine) },
+	"lima":     func(r exec.Runner, machine string) backend.Backend { return lima.New(r, machine) },
 }
 
 // Select builds the named backend for a jail machine. An empty name uses

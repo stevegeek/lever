@@ -30,6 +30,17 @@ var Candidates = []Candidate{
 		},
 		Note: "reference backend; macOS + Apple Silicon; the validated substrate today",
 	},
+	{
+		Name: "lima",
+		Profile: Profile{
+			Name:             "lima",
+			SeparateKernel:   true, // own Lima VM kernel, not shared with the host or other jails
+			FSBoundedBy:      "VM: no host files + project tree mounted at /lever",
+			EgressEnforcedAt: "jail netns iptables/ip6tables",
+			VersionFragile:   true, // depends on Lima's portForwards/mount behaviours
+		},
+		Note: "VM jail via Lima: macOS (vz) and Linux (QEMU/KVM); the non-OrbStack path",
+	},
 }
 
 // Lookup returns the candidate with the given name.

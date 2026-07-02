@@ -5,7 +5,7 @@ import "testing"
 // Candidates lists exactly the implemented backends — roadmap and rejected
 // backends are documentation (docs-site/_reference/backends.md), not code.
 func TestCandidatesAreExactlyTheImplemented(t *testing.T) {
-	want := []string{"orbstack"} // Task 10 appends "lima"
+	want := []string{"lima", "orbstack"} // sorted
 	got := Names()
 	if len(got) != len(want) {
 		t.Fatalf("Names() = %v, want %v", got, want)

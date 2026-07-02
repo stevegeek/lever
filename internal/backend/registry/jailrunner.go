@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/lever-to/lever/internal/backend"
+	"github.com/lever-to/lever/internal/backend/lima"
 	"github.com/lever-to/lever/internal/backend/orbstack"
 	"github.com/lever-to/lever/internal/exec"
 	"github.com/lever-to/lever/internal/jail"
@@ -23,6 +24,8 @@ func JailRunner(name string, host exec.Runner, machine, user, uid string) (exec.
 	switch name {
 	case "orbstack":
 		return jail.New(host, orbstack.JailPrefix(machine, user), uid), nil
+	case "lima":
+		return jail.New(host, lima.JailPrefix(machine), uid), nil
 	}
 	return nil, fmt.Errorf("unknown backend %q (valid: %s)", name, strings.Join(backend.Names(), ", "))
 }

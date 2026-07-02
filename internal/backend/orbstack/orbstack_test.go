@@ -54,6 +54,11 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
 	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
 	b := New(r, "lever-jail")
+	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
+	// live chain (existingClosedAlias never reads v6), so a re-apply that hits
+	// the skip must leave the previously-resolved v6 alias untouched rather
+	// than zeroing it.
+	b.aliasV6 = "fd07::fe"
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
@@ -67,6 +72,9 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	if b.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", b.HostAliasV4())
+	}
+	if b.aliasV6 != "fd07::fe" {
+		t.Fatalf("skip path must not clobber a prior aliasV6 (it cannot know v6 from the live chain); got %q", b.aliasV6)
 	}
 }
 

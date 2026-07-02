@@ -59,7 +59,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
 	g := orbGuest(r, "lever-jail")
 
-	v4, _, err := g.ApplyEgress(context.Background(), noopResolve(t), []int{8443}, true)
+	v4, _, rebuilt, err := g.ApplyEgress(context.Background(), noopResolve(t), []int{8443}, true)
 	if err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
@@ -74,6 +74,12 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	if v4 != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", v4)
 	}
+	// rebuilt=false tells the caller v6 is NOT authoritative here (the skip path
+	// parses only the v4 ACCEPT rule from the live chain) — it must not overwrite
+	// a previously-resolved v6 alias.
+	if rebuilt {
+		t.Fatal("rebuilt should be false on the I2 skip path")
+	}
 }
 
 func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
@@ -86,8 +92,10 @@ func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
 		f.Run(context.Background(), nil, "orb", "-m", "lever-jail", "getent", "ahosts", "host.orb.internal")
 		return "0.250.250.254", "fd07::fe", nil
 	}
-	if _, _, err := g.ApplyEgress(context.Background(), resolve, []int{8443}, true); err != nil {
+	if _, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
+	} else if !rebuilt {
+		t.Fatal("rebuilt should be true when the chain is not already closed")
 	}
 	flushIdx, getentIdx := -1, -1
 	for i, c := range f.Calls {
@@ -116,8 +124,10 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }
-	if _, _, err := g.ApplyEgress(context.Background(), resolve, []int{3305}, false); err != nil {
+	if _, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, []int{3305}, false); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
+	} else if !rebuilt {
+		t.Fatal("rebuilt should be true on a normal (open-posture) apply")
 	}
 	var sawAccept, sawDrop bool
 	for _, c := range f.Calls {

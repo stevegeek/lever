@@ -25,7 +25,13 @@ func (g Guest) rootRun(ctx context.Context, args ...string) (exec.Result, error)
 // is already live, it returns the alias parsed from the live chain and does NOT
 // flush. resolve returns the (v4, v6) host-alias addresses as seen from the
 // guest; it is only called when a rebuild happens (DNS is available then).
-func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v4, v6 string, err error), allowedPorts []int, closedInternet bool) (v4, v6 string, err error) {
+//
+// rebuilt reports whether a full reset+resolve+apply ran. On the I2 skip path
+// (rebuilt=false) v6 is always "" — existingClosedAlias parses only the v4
+// ACCEPT rule from the live chain, so it cannot recover v6 — and callers MUST
+// NOT treat that empty v6 as authoritative (e.g. must not use it to overwrite
+// a previously-resolved v6 alias). Only trust v6 when rebuilt is true.
+func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v4, v6 string, err error), allowedPorts []int, closedInternet bool) (v4, v6 string, rebuilt bool, err error) {
 	// I2 — never briefly open egress under a running closed instance. If the closed
 	// posture is ALREADY active (LEVER_EGRESS has the catch-all DROP), a running
 	// jailed agent depends on it; flushing+rebuilding would leave the chain empty
@@ -38,7 +44,7 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 	// requires `lever down` + `up`, not a re-apply.)
 	if closedInternet {
 		if alias, ok := g.existingClosedAlias(ctx); ok {
-			return alias, "", nil
+			return alias, "", false, nil
 		}
 	}
 	// Reset the dedicated chain FIRST: this makes re-apply idempotent (no rule
@@ -46,18 +52,18 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 	// catch-all DROP, restoring DNS so the host-alias re-resolve below works even
 	// when a previous closed-egress posture is still in place.
 	if err := g.resetEgressChain(ctx); err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	v4, v6, err = resolve(ctx)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	for _, rule := range egress.BuildRules(v4, v6, allowedPorts, closedInternet) {
 		if _, err := g.rootRun(ctx, append([]string{rule.Family.Binary()}, rule.Args...)...); err != nil {
-			return "", "", fmt.Errorf("apply %s: %w", rule.Render(), err)
+			return "", "", false, fmt.Errorf("apply %s: %w", rule.Render(), err)
 		}
 	}
-	return v4, v6, nil
+	return v4, v6, true, nil
 }
 
 // existingClosedAlias returns the v4 host alias already encoded in an ACTIVE

@@ -208,13 +208,19 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 }
 
 func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	v4, v6, err := o.guest().ApplyEgress(ctx,
+	v4, v6, rebuilt, err := o.guest().ApplyEgress(ctx,
 		func(ctx context.Context) (string, string, error) { return resolveHostAlias(ctx, o.r, o.machine) },
 		allowedPorts, closedInternet)
 	if err != nil {
 		return err
 	}
-	o.aliasV4, o.aliasV6 = v4, v6
+	if rebuilt {
+		o.aliasV4, o.aliasV6 = v4, v6
+	} else {
+		// I2 skip path: v6 is not authoritative here (existingClosedAlias only
+		// parses v4 from the live chain) — do not clobber a prior aliasV6.
+		o.aliasV4 = v4
+	}
 	return nil
 }
 

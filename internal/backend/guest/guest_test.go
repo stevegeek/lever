@@ -2,6 +2,8 @@ package guest
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -260,6 +262,63 @@ func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-vtest"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-vtest"}, Machine: "lever-vtest"}
 	if err := g.EnsureScion(context.Background(), "", "deadbeef"); err == nil {
 		t.Fatal("expected error when go mod download reports a bad revision")
+	}
+}
+
+// TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath proves destPath
+// (and its derived .tmp) are safe to interpolate even if a future caller
+// passes a metacharacter-laden value: InstallRootBinary's install script
+// embeds destPath inside a single-quoted argument nested inside an outer
+// `bash -c` script. An embedded `'` in destPath, substituted raw, closes that
+// quote early FROM THE OUTER BASH'S PERSPECTIVE (the inner single-quoted
+// segment is itself just text inside the outer script), letting anything
+// after it run as an extra, injected command on the HOST. This test uses the
+// REAL runner (not FakeRunner) with a harmless `env` RootPrefix stand-in (env
+// just execs its argv, mirroring "the guest prefix runs bash -c '<script>'"
+// exactly) so the actual composed shell script is genuinely parsed by bash,
+// not just string-matched.
+func TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "src-bin")
+	if err := os.WriteFile(local, []byte("bin-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The injected command's target is a bare, slash-free relative filename:
+	// it must not itself embed "/" into destPath, or a CORRECTLY quoted
+	// destPath (the fixed behaviour) would legitimately fail `mv` with ENOENT
+	// (an unrelated implied intermediate directory), muddying what this test
+	// checks. `go test` runs with the package directory as cwd, so a
+	// still-vulnerable injection lands the marker there; resolve + clean it up
+	// via os.Getwd regardless of outcome.
+	const marker = "PWNED-marker-should-not-exist-guest-test"
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(wd, marker)
+	defer os.Remove(sentinel)
+	// The embedded `'` is the injection; `; touch <marker> #` is the payload
+	// that runs as a separate command if the quote isn't neutralized.
+	dest := filepath.Join(dir, "dst") + "'; touch " + marker + " #"
+
+	g := Guest{Host: exec.RealRunner{}, RootPrefix: []string{"env"}, Machine: "test"}
+	if err := g.InstallRootBinary(context.Background(), local, dest); err != nil {
+		t.Fatalf("InstallRootBinary: %v", err)
+	}
+
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("destPath injection ran an extra command (sentinel file was created): shell injection via destPath")
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("expected the binary installed at the literal (quote-laden) destPath %q: %v", dest, err)
+	}
+	if string(data) != "bin-content" {
+		t.Fatalf("installed file content = %q, want %q", data, "bin-content")
+	}
+	fi, err := os.Stat(dest)
+	if err != nil || fi.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("installed file should be executable: mode=%v err=%v", fi.Mode(), err)
 	}
 }
 

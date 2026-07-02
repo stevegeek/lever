@@ -160,18 +160,24 @@ func (g Guest) EnsureScion(ctx context.Context, source, version string) error {
 // filesystem), so a mid-stream failure can't leave a truncated, executable
 // binary at destPath. `set -o pipefail` propagates a left-side (host `cat`)
 // failure instead of letting the successful right side mask it. bash (not sh)
-// is required for pipefail. destPath is a fixed, caller-controlled path (not
-// attacker input), so it is embedded literally; only the host source path,
-// which can contain a temp-dir name, is shell-quoted.
+// is required for pipefail. destPath is a fixed literal at every call site
+// today (not attacker input), but it — and its derived .tmp — are still
+// shell-quoted: the nested `bash -c '<inner script>'` argument is itself
+// embedded inside the OUTER install script, so a raw destPath containing a
+// single quote would close that quoting from the OUTER bash's perspective and
+// let anything after it run as an extra host-side command. Quoting closes
+// that off for any future caller with a dynamic destPath.
 func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string) error {
 	rootWords := make([]string, 0, len(g.RootPrefix))
 	for _, w := range g.RootPrefix {
 		rootWords = append(rootWords, shellSingleQuote(w))
 	}
 	tmp := destPath + ".tmp"
+	inner := fmt.Sprintf("cat > %s && chmod +x %s && mv %s %s",
+		shellSingleQuote(tmp), shellSingleQuote(tmp), shellSingleQuote(tmp), shellSingleQuote(destPath))
 	install := fmt.Sprintf(
-		`set -o pipefail; cat %s | %s bash -c 'cat > %s && chmod +x %s && mv %s %s'`,
-		shellSingleQuote(localPath), strings.Join(rootWords, " "), tmp, tmp, tmp, destPath)
+		`set -o pipefail; cat %s | %s bash -c %s`,
+		shellSingleQuote(localPath), strings.Join(rootWords, " "), shellSingleQuote(inner))
 	if _, err := g.Host.Run(ctx, nil, "bash", "-c", install); err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}

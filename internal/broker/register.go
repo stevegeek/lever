@@ -70,6 +70,13 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tool not configured", http.StatusForbidden)
 		return
 	}
+	if cfg.External {
+		// External tools are registered from config at boot and are fronted,
+		// not spawned — nothing legitimate self-registers under their name.
+		b.audit("register", req.Name, "deny", "external tool does not self-register")
+		http.Error(w, "external tool does not self-register", http.StatusForbidden)
+		return
+	}
 	// Rebuild ops from the CONFIG op set; attach the body's caveat_param.
 	bodyCP := make(map[string]map[string]string, len(req.Operations))
 	for _, o := range req.Operations {

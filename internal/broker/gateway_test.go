@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -290,5 +291,160 @@ func TestGatewayToolsListAugmentsSchema(t *testing.T) {
 	respBody := w.Body.String()
 	if !bytes.Contains([]byte(respBody), []byte("_capability")) {
 		t.Fatalf("_capability not injected into tools/list response schema: %s", respBody)
+	}
+}
+
+// regCoarseTool registers an external coarse tool the way BuildBroker does:
+// FirstParty=false, the synthetic wildcard op, Coarse+External set.
+func regCoarseTool(name, backend string) registry.Tool {
+	return registry.Tool{
+		Name: name, Backend: backend, External: true, Coarse: true,
+		Operations: map[string]registry.Operation{registry.WildcardOp: {Name: registry.WildcardOp}},
+	}
+}
+
+func mintOp(t *testing.T, b *Broker, agent, tool, op string) string {
+	t.Helper()
+	tok, err := token.Mint(b.keys.Private, token.Grant{
+		Agent: agent, Capability: token.Capability{Tool: tool, Operation: op},
+		Expiry: time.Now().Add(time.Hour), Epoch: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64urlNoPad(tok)
+}
+
+func TestGatewayCoarseToolAcceptsWildcardCapability(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regCoarseTool("things3", up.URL))
+
+	cap := mintOp(t, b, "worker", "things3", registry.WildcardOp)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add-todo","arguments":{"title":"x","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/things3/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, err := b.gatewayHandler("things3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !reached {
+		t.Fatal("backend should be reached: wildcard capability on a coarse tool")
+	}
+	if bytes.Contains([]byte(gotBody), []byte("_capability")) {
+		t.Fatalf("token leaked upstream: %s", gotBody)
+	}
+}
+
+func TestGatewayCoarseToolDeniesPerOpCapability(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regCoarseTool("things3", up.URL))
+
+	// A token naming the specific MCP tool must NOT satisfy a coarse tool: the
+	// gateway requires exactly {things3, "*"} there.
+	cap := mintOp(t, b, "worker", "things3", "add-todo")
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add-todo","arguments":{"_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/things3/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("things3")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	if reached {
+		t.Fatal("SECURITY: backend reached with a non-wildcard token on a coarse tool")
+	}
+}
+
+func TestGatewayFineToolDeniesWildcardCapability(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regTool("db", up.URL, "read")) // fine (Coarse=false)
+
+	// A wildcard token must NOT satisfy a fine tool: the gateway requires the
+	// real params.name there, and "db" has no "*" operation.
+	cap := mintOp(t, b, "worker", "db", registry.WildcardOp)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (wildcard must not widen a fine tool)", w.Code)
+	}
+	if reached {
+		t.Fatal("SECURITY: backend reached with a wildcard token on a fine tool")
+	}
+}
+
+func TestGatewayCoarseCapabilityIsIdentityBound(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regCoarseTool("things3", up.URL))
+
+	cap := mintOp(t, b, "worker", "things3", registry.WildcardOp) // bound to worker
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add-todo","arguments":{"_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/things3/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "analyst") // replay by a different agent
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("things3")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (coarse token replayed cross-agent)", w.Code)
+	}
+	if reached {
+		t.Fatal("SECURITY: backend reached on a cross-agent coarse replay")
+	}
+}
+
+func TestGatewayComposesBackendPath(t *testing.T) {
+	var gotPath string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)
+	}))
+	defer up.Close()
+	b := New(testConfig(t))
+	// qmd-style: the server mounts its MCP endpoint under /mcp; the config
+	// backend carries the path, scheme-less (host:port/path).
+	backend := strings.TrimPrefix(up.URL, "http://") + "/mcp"
+	_ = b.reg.Register(regCoarseTool("qmd", backend))
+
+	cap := mintOp(t, b, "worker", "qmd", registry.WildcardOp)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/qmd/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, err := b.gatewayHandler("qmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Serve exactly as JailHandler does: prefix-stripped.
+	http.StripPrefix("/mcp/qmd", h).ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if gotPath != "/mcp/" {
+		t.Fatalf("upstream path = %q, want %q (backend path must compose with the stripped prefix)", gotPath, "/mcp/")
 	}
 }

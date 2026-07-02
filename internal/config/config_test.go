@@ -668,3 +668,173 @@ func TestClosedInternetEgress(t *testing.T) {
 		t.Fatalf("default (open): closed=%v warn=%q want false/empty", closed, warn)
 	}
 }
+
+// extCfg is baseCfg plus a fine and a coarse external tool appended to its
+// broker.tools list (baseCfg ends inside that list, 4-space item indent).
+var extCfg = baseCfg + `    - name: devonthink
+      external: true
+      backend: 127.0.0.1:3302
+      operations:
+        - {name: search}
+      allowed_values: {database: [work, personal]}
+    - name: things3
+      external: true
+      backend: 127.0.0.1:3300
+      gate: coarse
+`
+
+func TestLoadAcceptsExternalTools(t *testing.T) {
+	app, err := Load(writeConfig(t, extCfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dt, th Tool
+	for _, tl := range app.Broker.Tools {
+		switch tl.Name {
+		case "devonthink":
+			dt = tl
+		case "things3":
+			th = tl
+		}
+	}
+	if !dt.External || dt.EffectiveGate() != GateFine {
+		t.Fatalf("devonthink = %+v; want external fine", dt)
+	}
+	if !th.External || th.EffectiveGate() != GateCoarse {
+		t.Fatalf("things3 = %+v; want external coarse", th)
+	}
+}
+
+func TestLoadAcceptsWildcardGrantOnCoarseTool(t *testing.T) {
+	cfg := replaceFirst(extCfg, "groves:\n  - {name: worker, dir: work, obtain: []}",
+		"groves:\n  - {name: worker, dir: work, obtain: [{tool: things3, op: \"*\"}]}")
+	if _, err := Load(writeConfig(t, cfg)); err != nil {
+		t.Fatalf("a wildcard grant on a coarse tool must load: %v", err)
+	}
+}
+
+func TestLoadRejectsWildcardGrantOnFineTool(t *testing.T) {
+	cfg := replaceFirst(extCfg, "groves:\n  - {name: worker, dir: work, obtain: []}",
+		"groves:\n  - {name: worker, dir: work, obtain: [{tool: devonthink, op: \"*\"}]}")
+	if _, err := Load(writeConfig(t, cfg)); err == nil {
+		t.Fatal("a wildcard grant on a fine tool must be rejected at load")
+	}
+}
+
+func TestLoadRejectsExternalToolShapeErrors(t *testing.T) {
+	cases := []struct{ name, find, repl string }{
+		{"command on external", "external: true\n      backend: 127.0.0.1:3302",
+			"external: true\n      command: [oops]\n      backend: 127.0.0.1:3302"},
+		{"missing backend", "backend: 127.0.0.1:3302\n", ""},
+		{"coarse with operations", "gate: coarse", "gate: coarse\n      operations:\n        - {name: x}"},
+		{"coarse with allowed_values", "gate: coarse", "gate: coarse\n      allowed_values: {a: [b]}"},
+		{"bad gate value", "gate: coarse", "gate: medium"},
+		{"non-loopback backend", "backend: 127.0.0.1:3300", "backend: 192.168.1.9:3300"},
+		{"hostname backend", "backend: 127.0.0.1:3300", "backend: localhost:3300"},
+		{"scheme in backend", "backend: 127.0.0.1:3300", "backend: http://127.0.0.1:3300"},
+		{"gate on supervised tool", "command: [lever-tool-db, -dsn, \"file:ref.db\"]",
+			"command: [lever-tool-db, -dsn, \"file:ref.db\"]\n      gate: coarse"},
+		{"reserved op name", "- {name: search}", "- {name: \"*\"}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, replaceFirst(extCfg, c.find, c.repl))); err == nil {
+				t.Fatalf("%s: must be rejected", c.name)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsFineExternalWithoutOperations(t *testing.T) {
+	cfg := replaceFirst(extCfg, "      operations:\n        - {name: search}\n      allowed_values: {database: [work, personal]}\n", "")
+	if _, err := Load(writeConfig(t, cfg)); err == nil {
+		t.Fatal("a fine external tool with no operations must be rejected")
+	}
+}
+
+func TestLoadRejectsSupervisedToolWithoutCommand(t *testing.T) {
+	cfg := replaceFirst(extCfg, "command: [lever-tool-db, -dsn, \"file:ref.db\"]\n      ", "")
+	if _, err := Load(writeConfig(t, cfg)); err == nil {
+		t.Fatal("a non-external tool with no command must be rejected")
+	}
+}
+
+func TestLoadAllowsNonLoopbackBackendWithOptIn(t *testing.T) {
+	cfg := replaceFirst(extCfg, "external: true\n      backend: 127.0.0.1:3300",
+		"external: true\n      allow_non_loopback: true\n      backend: 192.168.1.9:3300")
+	if _, err := Load(writeConfig(t, cfg)); err != nil {
+		t.Fatalf("allow_non_loopback must permit a LAN backend: %v", err)
+	}
+}
+
+func TestLoadAcceptsIPv6LoopbackBackend(t *testing.T) {
+	cfg := replaceFirst(extCfg, "backend: 127.0.0.1:3300", "backend: \"[::1]:3300\"")
+	if _, err := Load(writeConfig(t, cfg)); err != nil {
+		t.Fatalf("[::1] is loopback and must be accepted: %v", err)
+	}
+}
+
+func TestLoadAcceptsBackendWithPath(t *testing.T) {
+	cfg := replaceFirst(extCfg, "backend: 127.0.0.1:3300", "backend: 127.0.0.1:3101/mcp")
+	if _, err := Load(writeConfig(t, cfg)); err != nil {
+		t.Fatalf("a loopback backend with a path (qmd-style) must be accepted: %v", err)
+	}
+}
+
+// TestLoadRejectsNonExternalAllowNonLoopback: allow_non_loopback only makes
+// sense on an external (fronted) tool, mirroring the existing gate check — a
+// supervised tool setting it is a config mistake that should fail closed, not
+// be silently ignored.
+func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
+	cfg := replaceFirst(baseCfg, "command: [lever-tool-db, -dsn, \"file:ref.db\"]",
+		"command: [lever-tool-db, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true")
+	_, err := Load(writeConfig(t, cfg))
+	if err == nil {
+		t.Fatal("a non-external tool setting allow_non_loopback must be rejected")
+	}
+	if !strings.Contains(err.Error(), "allow_non_loopback") || !strings.Contains(err.Error(), "external") {
+		t.Errorf("error %q should mention allow_non_loopback and external", err)
+	}
+}
+
+// TestLoadRejectsIllegalToolNames: tool names flow into the broker's
+// /mcp/<name>/ gateway route and into `claude mcp add`, so they must be
+// constrained to a safe charset like instance/grove names. Both the tool
+// declaration AND the grant referencing it are renamed together, so the
+// failure is the charset check itself, not an unrelated "undeclared tool"
+// error from a stale grant reference.
+func TestLoadRejectsIllegalToolNames(t *testing.T) {
+	bad := []string{"bad/name", "Bad", "has space", "star*"}
+	for _, name := range bad {
+		t.Run(name, func(t *testing.T) {
+			cfg := replaceFirst(baseCfg, "name: db", "name: "+name)
+			cfg = replaceFirst(cfg, "tool: db, op: read", "tool: "+name+", op: read")
+			if _, err := Load(writeConfig(t, cfg)); err == nil {
+				t.Fatalf("tool name %q should be rejected", name)
+			}
+		})
+	}
+}
+
+// TestLoadAcceptsExistingValidToolNames pins the existing legitimate tool
+// names (which contain a digit, but no uppercase/space/slash/star) as staying
+// valid once the charset check lands.
+func TestLoadAcceptsExistingValidToolNames(t *testing.T) {
+	if _, err := Load(writeConfig(t, baseCfg)); err != nil {
+		t.Fatalf("tool name %q (db) should remain valid: %v", "db", err)
+	}
+	if _, err := Load(writeConfig(t, extCfg)); err != nil {
+		t.Fatalf("tool names devonthink/things3 should remain valid: %v", err)
+	}
+}
+
+// TestLoadRejectsEmptyOperationName: an operation with an empty name is a
+// config mistake — it can never be granted (checkCap compares op strings) and
+// would silently sink into the tool's op set undetected.
+func TestLoadRejectsEmptyOperationName(t *testing.T) {
+	cfg := replaceFirst(baseCfg, "{name: read, caveat_param: {table: table, filter: filter}}",
+		"{name: read, caveat_param: {table: table, filter: filter}}\n        - {name: \"\"}")
+	if _, err := Load(writeConfig(t, cfg)); err == nil {
+		t.Fatal("an operation with an empty name must be rejected")
+	}
+}

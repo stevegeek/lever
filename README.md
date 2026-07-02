@@ -128,8 +128,10 @@ assistant as the first instance (dogfooding). See [core vs instance](docs-site/_
   postures — `make test-lima-e2e`, proven 2026-07-02. Lima's **Linux** (QEMU/KVM) path is covered by
   unit tests; live validation there needs a KVM-capable host (CI runner / real Linux box) and is
   pending — it is not exercised by nesting inside another VM (no nested KVM).
-- **In progress:** tidier MCP wiring; per-step bring-up progress; load a grove image at apply time;
-  broader substrate support (Linux/Docker backend); packaging.
+- **In progress:** broker-fronted external MCP servers (host tools capability-gated
+  through the mTLS gateway — replaces per-port egress holes; instance migration
+  pending); per-step bring-up progress; load a grove image at apply time; broader
+  substrate support (Linux/Docker backend); packaging.
 - **Not yet:** a release/installer. Build from source (`make install`).
 - **You can today:** build the binaries (`make all`) and bring an app up with `lever apply` / `lever up`,
   then have the manager dispatch groves; read

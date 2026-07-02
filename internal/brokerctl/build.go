@@ -49,16 +49,28 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 
 	reg := registry.New()
 	for _, t := range app.Broker.Tools {
-		ops := make(map[string]registry.Operation, len(t.Operations))
+		ops := make(map[string]registry.Operation, len(t.Operations)+1)
 		for _, o := range t.Operations {
 			ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: copyStringMap(o.CaveatParam)}
+		}
+		coarse := t.External && t.EffectiveGate() == config.GateCoarse
+		if coarse {
+			// A coarse external tool's whole surface rides one wildcard
+			// capability; the synthetic op satisfies the registry's
+			// at-least-one-operation invariant and lets /request mint
+			// {tool, "*"} through the standard HasOperation gate.
+			ops[registry.WildcardOp] = registry.Operation{Name: registry.WildcardOp}
 		}
 		if err := reg.Register(registry.Tool{
 			Name:          t.Name,
 			Backend:       t.Backend,
 			Operations:    ops,
 			AllowedValues: copyStringSliceMap(t.AllowedValues),
-			FirstParty:    true,
+			// External servers are third-party: the gateway holds + enforces
+			// the rules and strips the token (they never see a capability).
+			FirstParty: !t.External,
+			External:   t.External,
+			Coarse:     coarse,
 		}); err != nil {
 			return broker.Config{}, fmt.Errorf("brokerctl: register tool %q: %w", t.Name, err)
 		}

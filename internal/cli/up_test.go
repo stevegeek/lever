@@ -5,17 +5,22 @@ import (
 	"testing"
 )
 
-// TestPhaseOrAbsent covers the fresh-machine fallback: a failed phase probe
-// whose error carries the hub-unreachable signature (the hub is only started
-// by apply's scion-server step, so on a fresh machine `scion list` gets
-// "is not responding" / "connection refused") must be treated as "manager
-// absent" so `up` falls through to upDecision -> "apply". ANY OTHER probe
-// error must propagate: `lever apply` is not fully idempotent (each run
-// leaves a duplicate scion project-configs entry), so a transient list
+// TestPhaseOrAbsent covers the definitive-absence fallback: a failed phase
+// probe whose error proves the manager cannot be running must be treated as
+// "manager absent" so `up` falls through to upDecision -> "apply". Two such
+// signatures: hub unreachable (fresh machine — the hub is only started by
+// apply's scion-server step: "is not responding" / "connection refused") and
+// hub-side project not found (hub up but the manager project never
+// hub-registered, e.g. partial bring-up where `scion init` ran but
+// `scion hub link` didn't: "Project not found (status: 404)"). ANY OTHER
+// probe error must propagate: `lever apply` is not fully idempotent (each
+// run leaves a duplicate scion project-configs entry), so a transient list
 // failure on an already-up instance must NOT force a re-apply.
 func TestPhaseOrAbsent(t *testing.T) {
 	// The live fresh-machine repro (both signature fragments present).
 	freshErr := errors.New(`scion list --format json -g /lever: Error: Hub at http://127.0.0.1:8080 is not responding: Get "http://127.0.0.1:8080/api/health": dial tcp 127.0.0.1:8080: connect: connection refused`)
+	// The live partial-bring-up repro: hub up, manager project not registered.
+	notFoundErr := errors.New(`scion list --format json -g /lever: Error: failed to list agents via Hub: not_found: Project not found (status: 404)`)
 	cases := []struct {
 		name    string
 		phase   string
@@ -29,6 +34,8 @@ func TestPhaseOrAbsent(t *testing.T) {
 		{"'is not responding' alone is treated as absent, case-insensitively", "", errors.New("Hub at http://127.0.0.1:8080 IS NOT RESPONDING"), "", false},
 		{"'connection refused' alone is treated as absent, case-insensitively", "", errors.New("dial tcp 127.0.0.1:8080: connect: Connection Refused"), "", false},
 		{"hub-unreachable overrides any stale phase value", "running", freshErr, "", false},
+		{"live project-not-found (404) error is treated as absent", "", notFoundErr, "", false},
+		{"'project not found' alone is treated as absent, case-insensitively", "running", errors.New("not_found: PROJECT NOT FOUND (status: 404)"), "", false},
 		{"any other error propagates (no forced re-apply)", "running", errors.New("could not parse scion JSON output: unexpected JSON"), "", true},
 		{"auth-ish error propagates", "", errors.New("scion list: 401 unauthorized"), "", true},
 	}

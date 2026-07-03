@@ -11,11 +11,9 @@ import (
 )
 
 // phaseOrAbsent treats a failed phase probe as "absent" (no manager found)
-// ONLY when the error carries the hub-unreachable signature — the
-// fresh-machine case: the hub is only started by apply's scion-server step,
-// so before the first apply `scion list` fails with "Hub at ... is not
-// responding: ... connection refused". That case must fall through to
-// upDecision (-> "apply"), not abort `up`.
+// ONLY when the error proves the manager cannot be running (see
+// managerDefinitelyAbsent). That case must fall through to upDecision
+// (-> "apply"), not abort `up`.
 //
 // Every other probe error propagates unchanged: `lever apply` is NOT fully
 // idempotent (each run leaves a duplicate scion project-configs entry), so a
@@ -27,18 +25,29 @@ func phaseOrAbsent(phase string, err error) (string, error) {
 	if err == nil {
 		return phase, nil
 	}
-	if hubUnreachable(err) {
+	if managerDefinitelyAbsent(err) {
 		return "", nil
 	}
 	return "", err
 }
 
-// hubUnreachable reports whether err matches the fresh-machine signature of
-// `scion list` probing a hub that was never started (case-insensitive).
-func hubUnreachable(err error) bool {
+// managerDefinitelyAbsent reports whether a `scion list` probe error proves
+// the manager isn't up (case-insensitive match), as opposed to a transient
+// failure that must propagate. Two signatures:
+//
+//   - hub unreachable ("is not responding" / "connection refused"): the fresh
+//     machine — the hub is only started by apply's scion-server step, so
+//     before the first apply nothing can be running;
+//   - hub-side "project not found" (404): the hub is up but the manager
+//     project was never hub-registered (e.g. a partial prior bring-up where
+//     local `scion init` ran but `scion hub link` didn't) — no manager can be
+//     running under a project the hub doesn't know, and apply's
+//     register-manager step (init + hub link) is exactly the repair.
+func managerDefinitelyAbsent(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "is not responding") ||
-		strings.Contains(msg, "connection refused")
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "project not found")
 }
 
 // upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
@@ -80,12 +89,13 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			phase, probeErr := managerPhase(cmd.Context(), sc, project, app.Name)
 			phase, err = phaseOrAbsent(phase, probeErr)
 			if err != nil {
-				return err // non-hub-unreachable probe failure: do NOT force apply
+				return err // possibly-transient probe failure: do NOT force apply
 			}
 			if probeErr != nil {
-				// Hub unreachable = fresh machine (apply's scion-server step starts
-				// the hub), so the failed probe means "not up" — fall through to
-				// apply rather than dying.
+				// The probe error proves the manager isn't up (hub down = fresh
+				// machine; project 404 = never hub-registered) — fall through to
+				// apply, which starts the hub / registers the manager, rather
+				// than dying.
 				cmd.Printf("manager phase probe failed (%v) — treating as not up, applying\n", probeErr)
 			}
 			switch upDecision(phase, fresh) {

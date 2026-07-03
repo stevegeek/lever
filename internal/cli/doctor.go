@@ -1,13 +1,25 @@
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+	"path/filepath"
+
+	"github.com/lever-to/lever/internal/brokerctl"
+	"github.com/lever-to/lever/internal/config"
+	"github.com/spf13/cobra"
+)
 
 func newDoctorCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag string
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Show the backend containment profile",
+		Short: "Diagnose the instance: backend profile, broker, external tool backends",
+		// A failed health check is a diagnosis, not a usage error — exit non-zero
+		// (scriptable) without dumping the command's usage text.
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Backend containment profile (informational header) — resolved from
+			// the flags/config exactly as before.
 			m, err := machineFromFlagOrConfig(machine)
 			if err != nil {
 				return err
@@ -17,6 +29,42 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				return err
 			}
 			cmd.Println(b.Profile().Summary())
+
+			// Health checks need the parsed config (broker port, external tools)
+			// and the state dir (broker.pid). When there's no config here, doctor
+			// is being used away from an instance root (profile-only, via
+			// --machine/--backend) — print the profile and stop, don't error. An
+			// invalid config that IS present is a real fault and surfaces.
+			path, err := resolveConfigPath("")
+			if err != nil {
+				cmd.Println("(no lever.yaml here — run doctor from an instance root for broker + external-tool checks)")
+				return nil
+			}
+			app, err := config.Load(path)
+			if err != nil {
+				return err
+			}
+			state := brokerctl.StateDir(filepath.Dir(path))
+
+			checks := []checkResult{
+				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
+				checkExternalBackends(app.Broker.Tools, tcpDial),
+			}
+			failed := 0
+			for _, c := range checks {
+				if c.ok {
+					cmd.Printf("✓ %s — %s\n", c.name, c.detail)
+					continue
+				}
+				failed++
+				cmd.Printf("✗ %s — %s\n", c.name, c.detail)
+				if c.fix != "" {
+					cmd.Printf("    fix: %s\n", c.fix)
+				}
+			}
+			if failed > 0 {
+				return fmt.Errorf("doctor: %d check(s) failed", failed)
+			}
 			return nil
 		},
 	}

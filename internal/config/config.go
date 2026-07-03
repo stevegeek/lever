@@ -209,6 +209,15 @@ const (
 	DefaultBrokerAdminPort = 8444
 )
 
+// Messaging is the broker's message-routing policy knobs. Routing policy, not
+// capability grants: identities come from mTLS; recipients from config.
+type Messaging struct {
+	// GroveToGrove permits grove→grove sends. nil/unset ⇒ true (allowed);
+	// pointer-bool so an explicit `false` is distinguishable for stricter
+	// hub-and-spoke models.
+	GroveToGrove *bool `yaml:"grove_to_grove"`
+}
+
 // Broker holds broker settings + first-party tool declarations.
 type Broker struct {
 	JailPort        int           `yaml:"jail_port"`
@@ -220,8 +229,9 @@ type Broker struct {
 	LLMAuth         LLMAuthMode   `yaml:"llm_auth"`
 	// LLMUpstream overrides the /llm proxy target (default https://api.anthropic.com).
 	// Set to a fake upstream for testing; never client-controlled. Empty = default.
-	LLMUpstream string `yaml:"llm_upstream"`
-	Tools       []Tool `yaml:"tools"`
+	LLMUpstream string    `yaml:"llm_upstream"`
+	Tools       []Tool    `yaml:"tools"`
+	Messaging   Messaging `yaml:"messaging"`
 }
 
 type Manager struct {
@@ -456,6 +466,9 @@ func (a *App) Validate() error {
 		}
 		if !nameRE.MatchString(g.Name) {
 			return fmt.Errorf("config: grove name %q must match %s", g.Name, nameRE)
+		}
+		if g.Name == a.ManagerCN() {
+			return fmt.Errorf("config: grove name %q collides with the manager identity — a grove must not share the manager's CN", g.Name)
 		}
 		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
 			return fmt.Errorf("config: grove dir %q must be relative and inside the tree", g.Dir)
@@ -756,4 +769,13 @@ func (a *App) ManagerPromptPath() string {
 		return ""
 	}
 	return filepath.Join(a.dir, a.Manager.PromptFile)
+}
+
+// GroveToGroveMessaging reports whether groves may message each other
+// (default true; broker.messaging.grove_to_grove: false disables).
+func (a *App) GroveToGroveMessaging() bool {
+	if v := a.Broker.Messaging.GroveToGrove; v != nil {
+		return *v
+	}
+	return true
 }

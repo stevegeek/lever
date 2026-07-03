@@ -1,12 +1,9 @@
 package cli
 
 import (
-	"os"
-
 	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/backend/registry"
 	"github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
 
@@ -15,19 +12,11 @@ const Version = "0.0.0-dev"
 // BackendFactory builds a named backend for a given machine name.
 type BackendFactory func(name, machine string) (backend.Backend, error)
 
-// ClientFactory builds a scion client.
-type ClientFactory func() *scion.Client
-
 // defaultFactory builds the named backend via the registry. Config validation
 // guarantees a config's name is valid; flag-driven commands (provision, down,
 // doctor with explicit --backend) surface registry errors directly.
 func defaultFactory(name, machine string) (backend.Backend, error) {
 	return registry.Select(name, exec.RealRunner{}, machine)
-}
-
-func defaultClientFactory() *scion.Client {
-	home, _ := os.UserHomeDir()
-	return scion.Default(exec.RealRunner{}, home)
 }
 
 func versionCmd() *cobra.Command {
@@ -48,11 +37,11 @@ func newHostRootWith(bf BackendFactory) *cobra.Command {
 }
 
 // NewManagerRoot builds the in-jail orchestration CLI (`lever-manager`).
-func NewManagerRoot() *cobra.Command { return newManagerRootWith(defaultClientFactory) }
+func NewManagerRoot() *cobra.Command { return newManagerRootWith() }
 
-func newManagerRootWith(cf ClientFactory) *cobra.Command {
+func newManagerRootWith() *cobra.Command {
 	root := &cobra.Command{Use: "lever-manager", Short: "In-jail grove orchestration"}
 	root.AddCommand(versionCmd())
-	root.AddCommand(newAgentCmd(), newMsgCmd(cf), newWatchCmd(cf))
+	root.AddCommand(newAgentCmd(), newMsgCmd(), newWatchCmd())
 	return root
 }

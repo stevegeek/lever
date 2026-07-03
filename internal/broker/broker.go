@@ -81,6 +81,12 @@ type Config struct {
 	Groves      []GroveSpec
 	BrokerCAPEM string
 	BrokerURL   string
+
+	// ManagerProject is the manager's own scion project (-g), used when a
+	// message is addressed to the manager's agent identity.
+	ManagerProject string
+	// GroveToGrove enables grove→grove messaging; default false (deny).
+	GroveToGrove bool
 }
 
 // Broker is the running capability authority + gateway.
@@ -104,6 +110,9 @@ type Broker struct {
 	groves      map[string]GroveSpec
 	brokerCAPEM string
 	brokerURL   string
+
+	managerProject string
+	groveToGrove   bool
 
 	mu           sync.Mutex
 	minEpoch     int
@@ -153,6 +162,7 @@ func New(c Config) *Broker {
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
 		runtime: c.Runtime, groves: groves, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		managerProject: c.ManagerProject, groveToGrove: c.GroveToGrove,
 	}
 }
 

@@ -31,6 +31,10 @@ type GroveRuntime interface {
 	Stop(ctx context.Context, grove, project string) error
 	Suspend(ctx context.Context, grove, project string) error
 	EnvSet(ctx context.Context, projectDir, key, value string) error
+	// Message and Inbox ride the same host-side scion client so container
+	// pinning/auth never applies.
+	Message(ctx context.Context, o scion.MsgOpts) error
+	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
 
 // GroveSpec is the config-derived, path-authoritative description of one grove.

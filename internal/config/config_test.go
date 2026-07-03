@@ -340,6 +340,37 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 	}
 }
 
+// A grove named the same as the manager identity would enrol with the manager's
+// CN and gain full manager messaging authority — config validation must reject
+// this as a CN-collision escalation.
+func TestValidateRejectsGroveNameCollidingWithManagerIdentity(t *testing.T) {
+	cases := []struct {
+		label  string
+		config string
+	}{
+		{
+			label:  "grove named manager (default manager identity)",
+			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: manager\n    dir: groves/manager\n",
+		},
+		{
+			label:  "grove named with custom manager identity",
+			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  manager_identity: custom-mgr\nmanager: {}\ngroves:\n  - name: custom-mgr\n    dir: groves/grove1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			p := writeTmp(t, tc.config)
+			_, err := Load(p)
+			if err == nil {
+				t.Fatal("grove name colliding with manager identity must be rejected")
+			}
+			if !strings.Contains(err.Error(), "collides with the manager identity") {
+				t.Errorf("error %q should mention 'collides with the manager identity'", err)
+			}
+		})
+	}
+}
+
 // manager.allow_ports opens host-loopback ports to the jailed agent — the
 // egress allowlist is the ONLY thing isolating the host-loopback admin API
 // (bootstrap/revoke/bump-epoch) from the guest, so listing the admin port
@@ -848,5 +879,28 @@ func TestLoadRejectsEmptyOperationName(t *testing.T) {
 		"{name: read, caveat_param: {table: table, filter: filter}}\n        - {name: \"\"}")
 	if _, err := Load(writeConfig(t, cfg)); err == nil {
 		t.Fatal("an operation with an empty name must be rejected")
+	}
+}
+
+func TestGroveToGroveMessagingDefaultsTrue(t *testing.T) {
+	tr := true
+	fa := false
+	cases := []struct {
+		name string
+		val  *bool
+		want bool
+	}{
+		{"unset defaults true", nil, true},
+		{"explicit true", &tr, true},
+		{"explicit false", &fa, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &App{}
+			a.Broker.Messaging.GroveToGrove = c.val
+			if got := a.GroveToGroveMessaging(); got != c.want {
+				t.Fatalf("GroveToGroveMessaging() = %v, want %v", got, c.want)
+			}
+		})
 	}
 }

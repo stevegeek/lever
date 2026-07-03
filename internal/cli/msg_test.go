@@ -2,44 +2,174 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/scion"
 )
 
-func clientWith(f *exec.FakeRunner) ClientFactory {
-	return func() *scion.Client {
-		return scion.New(f, scion.Options{Bin: "scion", HubEndpoint: "http://127.0.0.1:8080"})
+// withFakeMsgBroker points msgCallFn at a test broker for the duration of the
+// test, decoding each request body into a map so assertions can inspect it.
+func withFakeMsgBroker(t *testing.T, handle func(w http.ResponseWriter, gotPath string, gotBody map[string]any)) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		handle(w, r.URL.Path, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	oldCall := msgCallFn
+	msgCallFn = func(ctx context.Context, endpoint string, body any) (json.RawMessage, error) {
+		return postBroker[json.RawMessage](ctx, srv.Client(), srv.URL, endpoint, body)
 	}
+	t.Cleanup(func() { msgCallFn = oldCall })
 }
 
-func TestMsgSend(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
-	root := newManagerRootWith(clientWith(f))
-	root.SetArgs([]string{"msg", "send", "--to", "agent:appa", "--project", "/g/appa", "hello there"})
+func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	withFakeMsgBroker(t, func(w http.ResponseWriter, path string, body map[string]any) {
+		gotPath, gotBody = path, body
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
+
+	root := newManagerRootWith()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"msg", "send", "hello", "--to", "scratch", "--interrupt"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
-	if !strings.Contains(got, "message agent:appa hello there") || !strings.Contains(got, "-g /g/appa") {
-		t.Fatalf("argv=%q", got)
+	if gotPath != "/msg/send" {
+		t.Fatalf("path = %s, want /msg/send", gotPath)
+	}
+	want := map[string]any{"to": "scratch", "body": "hello", "interrupt": true}
+	for k, v := range want {
+		if gotBody[k] != v {
+			t.Fatalf("body[%s] = %v, want %v (body=%v)", k, gotBody[k], v, gotBody)
+		}
+	}
+	if !strings.Contains(out.String(), "Sent to scratch.") {
+		t.Fatalf("out=%q", out.String())
 	}
 }
 
-func TestMsgList(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion notifications --json", exec.Result{Stdout: `[{"id":"e1","status":"WAITING_FOR_INPUT","message":"poet needs input"}]`})
-	root := newManagerRootWith(clientWith(f))
+func TestMsgSend_bodyIsJoinedArgs(t *testing.T) {
+	var gotBody map[string]any
+	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, body map[string]any) {
+		gotBody = body
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
+
+	root := newManagerRootWith()
+	root.SetOut(&bytes.Buffer{})
+	root.SetArgs([]string{"msg", "send", "--to", "scratch", "hello", "there"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if gotBody["body"] != "hello there" {
+		t.Fatalf("body = %v, want %q", gotBody["body"], "hello there")
+	}
+	if gotBody["interrupt"] != false {
+		t.Fatalf("interrupt = %v, want false", gotBody["interrupt"])
+	}
+}
+
+func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	withFakeMsgBroker(t, func(w http.ResponseWriter, path string, body map[string]any) {
+		gotPath, gotBody = path, body
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"events": []map[string]any{
+				{"id": "e1", "status": "WAITING_FOR_INPUT", "message": "poet needs input"},
+			},
+		})
+	})
+
+	root := newManagerRootWith()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"msg", "list", "--grove", "scratch", "--all"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if gotPath != "/msg/list" {
+		t.Fatalf("path = %s, want /msg/list", gotPath)
+	}
+	want := map[string]any{"all": true, "grove": "scratch"}
+	for k, v := range want {
+		if gotBody[k] != v {
+			t.Fatalf("body[%s] = %v, want %v (body=%v)", k, gotBody[k], v, gotBody)
+		}
+	}
+	if !strings.Contains(out.String(), "[e1] WAITING_FOR_INPUT poet needs input") {
+		t.Fatalf("out=%q", out.String())
+	}
+}
+
+func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
+	var gotBody map[string]any
+	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, body map[string]any) {
+		gotBody = body
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
+	})
+
+	root := newManagerRootWith()
+	root.SetOut(&bytes.Buffer{})
+	root.SetArgs([]string{"msg", "list"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	want := map[string]any{"all": false, "grove": ""}
+	for k, v := range want {
+		if gotBody[k] != v {
+			t.Fatalf("body[%s] = %v, want %v (body=%v)", k, gotBody[k], v, gotBody)
+		}
+	}
+}
+
+func TestMsgList_malformedResponseIsAnError(t *testing.T) {
+	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+		// Valid JSON (passes the raw-message transport) but the wrong shape:
+		// "events" is a string, not an array. Must surface as an error, NOT
+		// render as "Inbox empty." (a silent-empty inbox hides broker faults).
+		_, _ = w.Write([]byte(`{"events": "not-an-array"}`))
+	})
+
+	root := newManagerRootWith()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"msg", "list"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected decode error, got nil (out=%q)", out.String())
+	}
+	if !strings.Contains(err.Error(), "decode /msg/list response") {
+		t.Fatalf("err = %v, want a decode /msg/list response error", err)
+	}
+	if strings.Contains(out.String(), "Inbox empty.") {
+		t.Fatalf("malformed response must not render as an empty inbox; out=%q", out.String())
+	}
+}
+
+func TestMsgList_emptyInboxPrintsFallback(t *testing.T) {
+	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
+	})
+
+	root := newManagerRootWith()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"msg", "list"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if !strings.Contains(out.String(), "WAITING_FOR_INPUT") {
+	if strings.TrimSpace(out.String()) != "Inbox empty." {
 		t.Fatalf("out=%q", out.String())
 	}
 }

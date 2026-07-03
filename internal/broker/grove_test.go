@@ -52,6 +52,10 @@ func (f *fakeRuntime) EnvSet(_ context.Context, _, _, _ string) error {
 	f.envSets = append(f.envSets, "set")
 	return nil
 }
+func (f *fakeRuntime) Message(_ context.Context, _ scion.MsgOpts) error { return nil }
+func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event, error) {
+	return nil, nil
+}
 
 func TestGroveSpecLookup(t *testing.T) {
 	b := New(Config{

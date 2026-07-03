@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/lever-to/lever/internal/scion"
@@ -20,15 +21,17 @@ func msgCall(ctx context.Context, endpoint string, body any) (json.RawMessage, e
 }
 
 // decodeMsgEvents unmarshals a /msg/list response body ({"events":[...]}) into
-// its events. A decode error yields an empty inbox rather than propagating,
-// matching the previous scion-client behavior of surfacing transport errors
-// only (msgCallFn already returns transport/HTTP errors separately).
-func decodeMsgEvents(raw json.RawMessage) []scion.Event {
+// its events. A malformed body is an error — swallowing it would make msg list
+// print "Inbox empty." and the watch bridge drop events forever, silently. An
+// absent/empty "events" key stays benign: it decodes to a nil slice (empty inbox).
+func decodeMsgEvents(raw json.RawMessage) ([]scion.Event, error) {
 	var res struct {
 		Events []scion.Event `json:"events"`
 	}
-	_ = json.Unmarshal(raw, &res)
-	return res.Events
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("decode /msg/list response: %w", err)
+	}
+	return res.Events, nil
 }
 
 func newMsgCmd() *cobra.Command {
@@ -65,7 +68,10 @@ func msgList() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			events := decodeMsgEvents(raw)
+			events, err := decodeMsgEvents(raw)
+			if err != nil {
+				return err
+			}
 			if len(events) == 0 {
 				cmd.Println("Inbox empty.")
 				return nil

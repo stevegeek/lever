@@ -132,6 +132,31 @@ func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 	}
 }
 
+func TestMsgList_malformedResponseIsAnError(t *testing.T) {
+	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+		// Valid JSON (passes the raw-message transport) but the wrong shape:
+		// "events" is a string, not an array. Must surface as an error, NOT
+		// render as "Inbox empty." (a silent-empty inbox hides broker faults).
+		_, _ = w.Write([]byte(`{"events": "not-an-array"}`))
+	})
+
+	root := newManagerRootWith()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"msg", "list"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected decode error, got nil (out=%q)", out.String())
+	}
+	if !strings.Contains(err.Error(), "decode /msg/list response") {
+		t.Fatalf("err = %v, want a decode /msg/list response error", err)
+	}
+	if strings.Contains(out.String(), "Inbox empty.") {
+		t.Fatalf("malformed response must not render as an empty inbox; out=%q", out.String())
+	}
+}
+
 func TestMsgList_emptyInboxPrintsFallback(t *testing.T) {
 	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})

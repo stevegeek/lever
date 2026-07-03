@@ -25,7 +25,7 @@ func (brokerInboxer) Inbox(ctx context.Context, unread bool, project string) ([]
 	if err != nil {
 		return nil, err
 	}
-	return decodeMsgEvents(raw), nil
+	return decodeMsgEvents(raw)
 }
 
 // compile-time proof brokerInboxer satisfies bridge.Inboxer.

@@ -69,6 +69,27 @@ func TestBrokerInboxer_unreadTrueRequestsAllFalse(t *testing.T) {
 	}
 }
 
+func TestBrokerInboxer_malformedResponseIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Valid JSON but the wrong shape ("events" not an array): the adapter
+		// must return the decode error so bridge.PollOnce fails loudly instead
+		// of treating a broken broker as "no new events" forever.
+		_, _ = w.Write([]byte(`{"events": 42}`))
+	}))
+	defer srv.Close()
+
+	oldCall := msgCallFn
+	msgCallFn = func(ctx context.Context, endpoint string, body any) (json.RawMessage, error) {
+		return postBroker[json.RawMessage](ctx, srv.Client(), srv.URL, endpoint, body)
+	}
+	defer func() { msgCallFn = oldCall }()
+
+	events, err := newBrokerInboxer().Inbox(context.Background(), false, "")
+	if err == nil {
+		t.Fatalf("expected decode error, got nil (events=%v)", events)
+	}
+}
+
 func TestWatchCmd_requiresEventsFile(t *testing.T) {
 	root := newManagerRootWith()
 	root.SetArgs([]string{"watch"})

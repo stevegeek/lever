@@ -14,8 +14,12 @@ import (
 	"github.com/lever-to/lever/internal/scion"
 )
 
+// msgBroker's fixture deliberately makes the manager cert CN ("manager") and
+// the manager scion agent SLUG ("assistant", the app name) DIFFER: a live bug
+// (scion: `Agent "manager" not found in project`) hid behind an earlier
+// fixture where CN == slug, so routing to agent:<CN> passed by coincidence.
 func msgBroker(g2g bool) *Broker {
-	b := New(Config{ManagerIdentity: "assistant", GroveToGrove: g2g, ManagerProject: "/lever",
+	b := New(Config{ManagerIdentity: "manager", ManagerSlug: "assistant", GroveToGrove: g2g, ManagerProject: "/lever",
 		Groves: []GroveSpec{{Name: "scratch", JailProject: "/lever/groves/scratch"},
 			{Name: "worker", JailProject: "/lever/groves/worker"}}})
 	return b
@@ -28,18 +32,23 @@ func TestResolveMsgTarget(t *testing.T) {
 		wantTo, wantProj string
 		wantErr          bool
 	}{
-		{"manager to grove bare", "assistant", "scratch", true, "agent:scratch", "/lever/groves/scratch", false},
-		{"manager to grove prefixed", "assistant", "agent:scratch", true, "agent:scratch", "/lever/groves/scratch", false},
-		{"manager to user alias", "assistant", "user:manager", true, "agent:assistant", "/lever", false},
-		{"manager to user CN", "assistant", "user:assistant", true, "agent:assistant", "/lever", false},
-		{"manager to user other", "assistant", "user:stephen", true, "", "", true},
-		{"manager to unknown grove", "assistant", "nope", true, "", "", true},
-		{"grove to manager agent", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false},
+		{"manager to grove bare", "manager", "scratch", true, "agent:scratch", "/lever/groves/scratch", false},
+		{"manager to grove prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever/groves/scratch", false},
+		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false},
+		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false},
+		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false},
+		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false},
+		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false},
+		{"manager to user other", "manager", "user:stephen", true, "", "", true},
+		{"manager to unknown grove", "manager", "nope", true, "", "", true},
+		{"grove to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false},
+		{"grove to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false},
 		{"grove to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false},
 		{"grove to grove allowed", "scratch", "worker", true, "agent:worker", "/lever/groves/worker", false},
 		{"grove to grove disabled", "scratch", "worker", false, "", "", true},
 		{"grove to itself", "scratch", "scratch", true, "agent:scratch", "/lever/groves/scratch", false},
 		{"unknown caller", "mallory", "assistant", true, "", "", true},
+		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true},
 		{"grove to unknown", "scratch", "nope", true, "", "", true},
 	}
 	for _, c := range cases {
@@ -61,9 +70,9 @@ func TestResolveListProject(t *testing.T) {
 		want                string
 		wantErr             bool
 	}{
-		{"manager own inbox", "assistant", "", "/lever", false},
-		{"manager reads grove", "assistant", "scratch", "/lever/groves/scratch", false},
-		{"manager unknown grove", "assistant", "nope", "", true},
+		{"manager own inbox", "manager", "", "/lever", false},
+		{"manager reads grove", "manager", "scratch", "/lever/groves/scratch", false},
+		{"manager unknown grove", "manager", "nope", "", true},
 		{"grove own inbox", "scratch", "", "/lever/groves/scratch", false},
 		{"grove may not target others", "scratch", "worker", "", true},
 		{"unknown caller", "mallory", "", "", true},
@@ -103,13 +112,15 @@ func (f *fakeMsgRuntime) Inbox(_ context.Context, _ bool, project string) ([]sci
 }
 
 // newMsgTestBroker builds a Broker wired with a fakeMsgRuntime for the
-// scratch/worker groves under manager identity "assistant", capturing audit
+// scratch/worker groves under manager cert CN "manager" and manager scion
+// slug "assistant" (deliberately distinct, see msgBroker), capturing audit
 // output to the returned buffer.
 func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
 	var buf bytes.Buffer
 	rt := &fakeMsgRuntime{GroveRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
 	b := New(Config{
-		ManagerIdentity: "assistant",
+		ManagerIdentity: "manager",
+		ManagerSlug:     "assistant",
 		ManagerProject:  "/lever",
 		GroveToGrove:    g2g,
 		Groves: []GroveSpec{
@@ -125,7 +136,7 @@ func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
 
 func TestMsgSend_managerToGrove(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
-	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go","interrupt":true}`, "assistant")
+	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go","interrupt":true}`, "manager")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -181,7 +192,7 @@ func TestMsgSend_unknownCaller(t *testing.T) {
 func TestMsgList_managerReadsGrove(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
 	rt.events = []scion.Event{{"id": "1", "type": "test"}}
-	rec := callGrove(t, b, "/msg/list", `{"grove":"scratch"}`, "assistant")
+	rec := callGrove(t, b, "/msg/list", `{"grove":"scratch"}`, "manager")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -239,7 +250,7 @@ func TestMsgBadBody_returns400(t *testing.T) {
 	for _, path := range []string{"/msg/send", "/msg/list"} {
 		t.Run(path, func(t *testing.T) {
 			b, rt, audit := newMsgTestBroker(true)
-			rec := callGrove(t, b, path, `{not json`, "assistant")
+			rec := callGrove(t, b, path, `{not json`, "manager")
 			if rec.Code != 400 {
 				t.Fatalf("%s status = %d, want 400", path, rec.Code)
 			}
@@ -261,7 +272,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 
 	b, rt, audit := newMsgTestBroker(true)
 	rt.sendErr = errors.New(secret)
-	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "assistant")
+	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "manager")
 	if rec.Code != 502 {
 		t.Fatalf("/msg/send status = %d, want 502", rec.Code)
 	}
@@ -274,7 +285,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 
 	b2, rt2, audit2 := newMsgTestBroker(true)
 	rt2.inboxErr = errors.New(secret)
-	rec2 := callGrove(t, b2, "/msg/list", `{"grove":"scratch"}`, "assistant")
+	rec2 := callGrove(t, b2, "/msg/list", `{"grove":"scratch"}`, "manager")
 	if rec2.Code != 502 {
 		t.Fatalf("/msg/list status = %d, want 502", rec2.Code)
 	}

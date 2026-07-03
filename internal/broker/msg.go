@@ -27,17 +27,22 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if !isManager && !isGrove {
 		return msgTarget{}, fmt.Errorf("caller %q is not the manager or a declared grove", caller)
 	}
+	// The manager target ALWAYS routes to agent:<slug> — scion knows the
+	// manager by its agent slug (the app name; apply dispatches it as
+	// Grove: app.Name), NOT by the cert CN used for authn: agent:<CN> fails
+	// live with `Agent "<CN>" not found in project`.
+	managerTarget := msgTarget{scionTo: "agent:" + b.managerSlug, project: b.managerProject}
 	// user:* is a legacy-shaped alias, not a real inbox: scion refuses
 	// user-addressed sends from outside an agent container ("SCION_AGENT_NAME
 	// not set"), and the broker's runtime scion always runs jail-side. In the
 	// broker-routed world "the manager" IS an agent, so the only user:* forms
 	// worth honoring are the ones that plainly mean "the manager" — the taught
-	// alias `user:manager` and the manager's own cert CN. Anything else is
-	// denied rather than silently 502ing at the scion CLI.
+	// alias `user:manager`, the manager's cert CN, and its scion slug. Anything
+	// else is denied rather than silently 502ing at the scion CLI.
 	if len(to) > 5 && to[:5] == "user:" {
 		who := to[5:]
-		if who == "manager" || who == b.manager {
-			return msgTarget{scionTo: "agent:" + b.manager, project: b.managerProject}, nil
+		if who == "manager" || who == b.manager || who == b.managerSlug {
+			return managerTarget, nil
 		}
 		return msgTarget{}, fmt.Errorf("user-addressed recipient %q is not broker-routable (scion supports user messaging only inside agent containers); message the manager agent instead", to)
 	}
@@ -45,8 +50,8 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if len(to) > 6 && to[:6] == "agent:" {
 		name = to[6:]
 	}
-	if name == b.manager {
-		return msgTarget{scionTo: "agent:" + name, project: b.managerProject}, nil
+	if name == b.manager || name == b.managerSlug {
+		return managerTarget, nil
 	}
 	spec, ok := b.groves[name]
 	if !ok {

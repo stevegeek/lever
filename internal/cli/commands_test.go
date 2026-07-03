@@ -9,7 +9,11 @@ import (
 	leverexec "github.com/lever-to/lever/internal/exec"
 )
 
-type stubBackend struct{ up, down bool }
+type stubBackend struct {
+	up, down   bool
+	scionState backend.ScionProjectState
+	scionErr   error
+}
 
 func (s *stubBackend) EnsureUp(context.Context, backend.Config) error { s.up = true; return nil }
 func (s *stubBackend) DockerHost() string                             { return "unix:///x" }
@@ -28,6 +32,9 @@ func (s *stubBackend) AttachArgv(inner []string) []string {
 }
 func (s *stubBackend) LoadImage(context.Context, string) error                  { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
+func (s *stubBackend) ReadScionProjectState(context.Context) (backend.ScionProjectState, error) {
+	return s.scionState, s.scionErr
+}
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {
 	sb := &stubBackend{}

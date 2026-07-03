@@ -19,14 +19,6 @@ install:
 	go build -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
 
-# Cross-compile the in-jail orchestration binary for the OrbStack arm64 VM.
-# Output goes to the instance tree, which is bind-mounted into the manager container.
-.PHONY: lever-manager-linux
-lever-manager-linux:
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -o $(LEVER_INSTANCE)/vendor/bin/lever-manager ./cmd/lever-manager
-	@file $(LEVER_INSTANCE)/vendor/bin/lever-manager
-
 # Cross-compile the in-jail agent helper for the OrbStack arm64 VM. Used by the
 # acceptance gate (run directly in the VM) and, baked into the
 # agent image.
@@ -57,9 +49,11 @@ lever-image-bins:
 	chmod +x $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	@file $(LEVER_IMAGE_CTX)/bin/lever-agent $(LEVER_IMAGE_CTX)/bin/lever-tool-db $(LEVER_IMAGE_CTX)/bin/lever-manager
 
-# Build + install both: host control plane (PATH) and the in-jail manager (instance tree).
+# Build + install the host control plane (PATH). The in-jail binaries
+# (lever-manager, lever-agent, lever-tool-db) ship baked into the agent image
+# via `make lever-image-bins` + the instance Dockerfile, not staged in the tree.
 .PHONY: all
-all: install lever-manager-linux
+all: install
 
 # Live api-key headline e2e (fake upstream; no real key). Rebuilds the host lever
 # + image bins, bakes the image, then runs the e2e script. Needs OrbStack + podman.

@@ -143,13 +143,12 @@ There are **two binaries** (one shared `internal/`):
 
 - **`lever`**, the host *control plane* (provisioning + lifecycle). Runs on your machine.
 - **`lever-manager`**, the in-jail *orchestrator* (`agent`/`msg`/`watch`). Cross-compiled for the
-  jail's linux/arm64 and staged into the instance tree, which is bind-mounted into the manager
-  container. The manager runs it to dispatch and steer groves.
+  jail's linux/arm64 by `make lever-image-bins` and baked into the agent image (your Dockerfile
+  `COPY`s it to `/usr/local/bin`). The manager runs it to dispatch and steer groves.
 
 ```bash
 make install              # build host `lever` → ~/.local/bin/lever (must be on PATH). Requires Go 1.26+
-make lever-manager-linux  # cross-compile `lever-manager` → $LEVER_INSTANCE/vendor/bin (set LEVER_INSTANCE)
-make all                  # both
+make all                  # same (the in-jail binaries ship in the agent image, via lever-image-bins)
 
 # Bring an application up (jail + scion + manager) and attach the manager TTY.
 # Run from the instance root (where lever.yaml lives, resolved from cwd, no walk-up):
@@ -163,7 +162,7 @@ lever apply
 lever apply --dry-run                     # print the bring-up plan only
 ```
 
-Overrides: `make install PREFIX=/some/bin`, `make lever-manager-linux LEVER_INSTANCE=/path/to/instance`.
+Overrides: `make install PREFIX=/some/bin`, `make lever-image-bins LEVER_IMAGE_CTX=/path/to/image-context`.
 
 An **application** is one config file describing the manager + its groves (image, project tree,
 scion source, credential, allowed host ports). The canonical filename is **`lever.yaml`** at the

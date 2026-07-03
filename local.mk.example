@@ -9,7 +9,8 @@
 # Then edit the values below.
 
 # The instance tree (config + prompt at the root; a `tree:` subdir is mounted into
-# the manager container). Build outputs (lever-manager, lever-agent) are staged here.
+# the manager container). The acceptance-gate lever-agent build (`make
+# lever-agent-linux`) is staged under it; the image binaries go to LEVER_IMAGE_CTX.
 # LEVER_INSTANCE := $(HOME)/ai/my-instance
 
 # Where the `lever-claude` image is built (build-lever-image.sh runs `docker build`

@@ -320,6 +320,25 @@ func (l *Lima) createVM(ctx context.Context, projectTree string) error {
 	return nil
 }
 
+// ResolveRunUser resolves the in-VM run user/uid WITHOUT provisioning: it
+// probes the VM's status via the same read-only `limactl list` check ensureVM
+// uses, and errors if the VM is absent or not running, rather than creating,
+// starting, or reconfiguring it. For passive verbs (attach) that need the
+// jail transport but must never bring the VM up.
+func (l *Lima) ResolveRunUser(ctx context.Context) error {
+	status, err := l.vmStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		return fmt.Errorf("lima VM %q does not exist", l.vm)
+	}
+	if status != "Running" {
+		return fmt.Errorf("lima VM %q is not running (status %q)", l.vm, status)
+	}
+	return l.resolveRunUser(ctx)
+}
+
 // resolveRunUser caches the in-VM run user and UID so the rootless Docker
 // socket path and the subid/linger script work for any Lima guest user, not a
 // hardcoded one. Called after ensureVM (the VM must be up) and before

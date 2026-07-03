@@ -51,13 +51,17 @@ type Config struct {
 // EnsureUp (constructors may return sensible defaults before).
 type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
-	DockerHost() string                 // endpoint the broker drives (valid after EnsureUp)
-	HostToolAlias() string              // how an agent reaches allowlisted host tools ("" if none)
-	HostAliasV4() string                // resolved IPv4 of HostToolAlias as seen from the jail ("" if unresolved)
-	MountDest() string                  // path inside the jail where the project tree is bind-mounted
-	MachineName() string                // the jail identifier this backend targets
-	RunUser() string                    // the in-jail run user
-	RunUID() string                     // the in-jail run user's uid
+	DockerHost() string    // endpoint the broker drives (valid after EnsureUp)
+	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
+	HostAliasV4() string   // resolved IPv4 of HostToolAlias as seen from the jail ("" if unresolved)
+	MountDest() string     // path inside the jail where the project tree is bind-mounted
+	MachineName() string   // the jail identifier this backend targets
+	RunUser() string       // the in-jail run user
+	RunUID() string        // the in-jail run user's uid
+	// ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning:
+	// it errors if the machine is not already up. For passive verbs (attach) that
+	// need the jail transport but must never create or configure the machine.
+	ResolveRunUser(ctx context.Context) error
 	JailRunner() exec.Runner            // command transport into the jail
 	AttachArgv(inner []string) []string // interactive TTY argv (lever up)
 	LoadImage(ctx context.Context, imageRef string) error

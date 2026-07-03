@@ -175,6 +175,69 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 	}
 }
 
+// --- ResolveRunUser: passive attach must resolve without provisioning. ---
+
+func TestResolveRunUserResolvesWhenMachineRunning(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
+	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
+	b := New(f, "lever-jail")
+
+	if err := b.ResolveRunUser(context.Background()); err != nil {
+		t.Fatalf("ResolveRunUser: %v", err)
+	}
+	if b.RunUser() != "leveruser" || b.RunUID() != "501" {
+		t.Fatalf("run user/uid not resolved: user=%q uid=%q", b.RunUser(), b.RunUID())
+	}
+	// No provisioning calls: only the read-only list + whoami/id -u probes.
+	for _, c := range f.Calls {
+		argv := strings.Join(append([]string{c.Name}, c.Args...), " ")
+		if strings.Contains(argv, "create") || strings.Contains(argv, "iptables") || strings.Contains(argv, "apt-get") {
+			t.Fatalf("ResolveRunUser must not provision anything; saw call: %s", argv)
+		}
+	}
+}
+
+func TestResolveRunUserErrorsWhenMachineAbsent(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
+	b := New(f, "lever-jail")
+
+	err := b.ResolveRunUser(context.Background())
+	if err == nil {
+		t.Fatal("expected error when the machine does not exist")
+	}
+	if !strings.Contains(err.Error(), "lever-jail") {
+		t.Fatalf("error should name the machine; got: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "orb" && len(c.Args) > 0 && c.Args[0] == "create" {
+			t.Fatalf("create must NOT be called by ResolveRunUser: %+v", c)
+		}
+	}
+}
+
+func TestResolveRunUserErrorsWhenMachineNotRunning(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	b := New(f, "lever-jail")
+
+	err := b.ResolveRunUser(context.Background())
+	if err == nil {
+		t.Fatal("expected error when the machine is not running")
+	}
+	if !strings.Contains(err.Error(), "lever-jail") {
+		t.Fatalf("error should name the machine; got: %v", err)
+	}
+	for _, c := range f.Calls {
+		argv := strings.Join(append([]string{c.Name}, c.Args...), " ")
+		if strings.Contains(argv, "whoami") || strings.Contains(argv, "id -u") {
+			t.Fatalf("must not attempt to resolve run user on a non-running machine: %s", argv)
+		}
+	}
+}
+
 func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	f := exec.NewFakeRunner()
 	orbVersionScript(f)

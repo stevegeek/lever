@@ -44,8 +44,10 @@ func execAttach(b backend.Backend, sc *scion.Client, slug, project string) error
 }
 
 // newAttachCmd is a debugging/eyes-on verb: it attaches to a RUNNING agent and
-// deliberately does no lifecycle work (bring things up with `lever up`). If the
-// target is not running, scion's own attach error surfaces.
+// deliberately does no lifecycle work (bring things up with `lever up`). It is
+// strictly passive: if the jail itself is not up, ResolveRunUser fails fast
+// rather than provisioning it. If the jail is up but the target agent/grove is
+// not running, scion's own attach error surfaces.
 func newAttachCmd(bf BackendFactory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "attach [NAME]",
@@ -60,10 +62,15 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, b, sc, err := buildApplyDeps(cmd.Context(), app, cfgPath, bf)
+			b, err := bf(app.Backend, machineName(app.Name))
 			if err != nil {
 				return err
 			}
+			// Passive: resolve the jail transport, never provision.
+			if err := b.ResolveRunUser(cmd.Context()); err != nil {
+				return fmt.Errorf("attach: jail not up (%v) — run `lever up` first", err)
+			}
+			sc := scion.New(b.JailRunner(), scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 			slug, project, err := attachTarget(app, b.MountDest(), argOrEmpty(args))
 			if err != nil {
 				return err

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -126,4 +127,27 @@ func backendHostPort(backend string) string {
 		return backend[:i]
 	}
 	return backend
+}
+
+// checkCredentialFile verifies the subscription credential apply's credential
+// step will read: present, non-empty, and not group/other-accessible. The
+// detail reports size and mode ONLY — never file contents. An unset path is a
+// pass: api-key instances have no credential_file.
+func checkCredentialFile(path string) checkResult {
+	const name = "manager credential"
+	const mint = "mint one with `claude setup-token`, save it to the configured path, then chmod 600 it"
+	if path == "" {
+		return checkResult{name, true, "no credential_file configured", ""}
+	}
+	fi, err := os.Stat(path)
+	switch {
+	case err != nil:
+		return checkResult{name, false, path + " is missing", mint}
+	case fi.Size() == 0:
+		return checkResult{name, false, path + " is empty", mint}
+	case fi.Mode().Perm()&0o077 != 0:
+		return checkResult{name, false, fmt.Sprintf("%s has mode %04o (group/other-accessible)", path, fi.Mode().Perm()), "chmod 600 " + path}
+	default:
+		return checkResult{name, true, fmt.Sprintf("%s (%d bytes, mode %04o)", path, fi.Size(), fi.Mode().Perm()), ""}
+	}
 }

@@ -10,9 +10,10 @@ import (
 )
 
 type stubBackend struct {
-	up, down   bool
-	scionState backend.ScionProjectState
-	scionErr   error
+	up, down          bool
+	scionState        backend.ScionProjectState
+	scionErr          error
+	resolveRunUserErr error // when set, ResolveRunUser returns it instead of nil
 }
 
 func (s *stubBackend) EnsureUp(context.Context, backend.Config) error { s.up = true; return nil }
@@ -26,6 +27,7 @@ func (s *stubBackend) HostAliasV4() string                            { return "
 func (s *stubBackend) MachineName() string                            { return "lever-stub" }
 func (s *stubBackend) RunUser() string                                { return "stub" }
 func (s *stubBackend) RunUID() string                                 { return "501" }
+func (s *stubBackend) ResolveRunUser(context.Context) error           { return s.resolveRunUserErr }
 func (s *stubBackend) JailRunner() leverexec.Runner                   { return leverexec.RealRunner{} }
 func (s *stubBackend) AttachArgv(inner []string) []string {
 	return append([]string{"stub-attach"}, inner...)

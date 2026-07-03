@@ -13,7 +13,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag string
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose the instance: backend profile, broker, external tool backends",
+		Short: "Diagnose the instance: backend profile, broker, external tool backends, credential, scion state",
 		// A failed health check is a diagnosis, not a usage error — exit non-zero
 		// (scriptable) without dumping the command's usage text.
 		SilenceUsage: true,
@@ -61,6 +61,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 			checks := []checkResult{
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
 				checkExternalBackends(app.Broker.Tools, tcpDial),
+				checkCredentialFile(app.Manager.CredentialFile),
 				scion,
 			}
 			failed := 0

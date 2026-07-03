@@ -159,6 +159,26 @@ func (o *OrbStack) resolveRunUser(ctx context.Context) error {
 	return nil
 }
 
+// ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning: it
+// probes the machine's existence/state via the same read-only `orb list` check
+// ensureMachine uses, and errors if the machine is absent or not running,
+// rather than creating, starting, or configuring it. For passive verbs
+// (attach) that need the jail transport but must never bring the machine up.
+func (o *OrbStack) ResolveRunUser(ctx context.Context) error {
+	res, err := o.r.Run(ctx, nil, "orb", "list")
+	if err != nil {
+		return fmt.Errorf("orb list: %w", err)
+	}
+	status, found := machineStatus(res.Stdout, o.machine)
+	if !found {
+		return fmt.Errorf("machine %q does not exist", o.machine)
+	}
+	if !strings.EqualFold(status, "running") {
+		return fmt.Errorf("machine %q is not running (status %q)", o.machine, status)
+	}
+	return o.resolveRunUser(ctx)
+}
+
 // ensureMachine creates the isolated OrbStack machine if it doesn't yet exist.
 // The project tree is mounted at /lever via `--mount <projectTree>:/lever`; this
 // is set at CREATE time only. Changing the tree on an existing machine requires
@@ -183,12 +203,25 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 }
 
 func machineListed(stdout, name string) bool {
+	_, found := machineStatus(stdout, name)
+	return found
+}
+
+// machineStatus returns the status field (second column) of `orb list` output
+// for name, and whether the machine was listed at all. Read-only: callers
+// parse output from a probe (`orb list`) they already issued.
+func machineStatus(stdout, name string) (status string, found bool) {
 	for _, line := range strings.Split(stdout, "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == name {
-			return true
+		f := strings.Fields(line)
+		if len(f) == 0 || f[0] != name {
+			continue
 		}
+		if len(f) > 1 {
+			return f[1], true
+		}
+		return "", true
 	}
-	return false
+	return "", false
 }
 
 // Teardown deletes the jail machine. Idempotent: a no-op if the machine is

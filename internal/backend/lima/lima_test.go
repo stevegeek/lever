@@ -255,6 +255,73 @@ func TestLimaVersionAtLeast(t *testing.T) {
 	}
 }
 
+// --- ResolveRunUser: passive attach must resolve without provisioning. ---
+
+func TestResolveRunUserResolvesWhenVMRunning(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
+	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
+	l := New(f, "lever-x")
+
+	if err := l.ResolveRunUser(context.Background()); err != nil {
+		t.Fatalf("ResolveRunUser: %v", err)
+	}
+	if l.RunUser() != "leveruser" || l.RunUID() != "501" {
+		t.Fatalf("run user/uid not resolved: user=%q uid=%q", l.RunUser(), l.RunUID())
+	}
+	// No provisioning calls: only the read-only list + whoami/id -u probes.
+	for _, c := range f.Calls {
+		if c.Name != "limactl" || len(c.Args) == 0 {
+			continue
+		}
+		if c.Args[0] == "create" || c.Args[0] == "start" {
+			t.Fatalf("ResolveRunUser must not provision anything; saw call: %+v", c)
+		}
+	}
+}
+
+func TestResolveRunUserErrorsWhenVMAbsent(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("limactl list --format", exec.Result{Stdout: ""}) // no VMs
+	l := New(f, "lever-x")
+
+	err := l.ResolveRunUser(context.Background())
+	if err == nil {
+		t.Fatal("expected error when the VM does not exist")
+	}
+	if !strings.Contains(err.Error(), "lever-x") {
+		t.Fatalf("error should name the VM; got: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "limactl" && len(c.Args) > 0 && c.Args[0] == "create" {
+			t.Fatalf("create must NOT be called by ResolveRunUser: %+v", c)
+		}
+	}
+}
+
+func TestResolveRunUserErrorsWhenVMStopped(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Stopped\n"})
+	l := New(f, "lever-x")
+
+	err := l.ResolveRunUser(context.Background())
+	if err == nil {
+		t.Fatal("expected error when the VM is not running")
+	}
+	if !strings.Contains(err.Error(), "lever-x") {
+		t.Fatalf("error should name the VM; got: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name != "limactl" || len(c.Args) == 0 {
+			continue
+		}
+		if c.Args[0] == "start" {
+			t.Fatalf("start must NOT be called by ResolveRunUser: %+v", c)
+		}
+	}
+}
+
 // --- Test 5: teardown. ---
 
 func TestTeardownDeletesVMWhenPresent(t *testing.T) {

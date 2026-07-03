@@ -1,0 +1,121 @@
+package cli
+
+import (
+	"errors"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/lever-to/lever/internal/brokerctl"
+	"github.com/lever-to/lever/internal/config"
+)
+
+func okDial(string) error   { return nil }
+func failDial(string) error { return errors.New("connection refused") }
+
+func writeBrokerPID(t *testing.T, st brokerctl.State, pid int) {
+	t.Helper()
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.PID(), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckBrokerAliveNotStarted(t *testing.T) {
+	r := checkBrokerAlive(brokerctl.StateDir(t.TempDir()), 8443, okDial)
+	if r.ok {
+		t.Fatal("no broker.pid must fail the check")
+	}
+	if !strings.Contains(r.fix, "lever apply") {
+		t.Fatalf("fix should point at lever apply/up: %q", r.fix)
+	}
+}
+
+func TestCheckBrokerAliveStalePID(t *testing.T) {
+	st := brokerctl.StateDir(t.TempDir())
+	writeBrokerPID(t, st, 2147483646) // no such process
+	r := checkBrokerAlive(st, 8443, okDial)
+	if r.ok {
+		t.Fatal("a stale pid (process gone) must fail even if a dial would succeed")
+	}
+	if !strings.Contains(r.detail, "gone") {
+		t.Fatalf("detail should say the process is gone: %q", r.detail)
+	}
+}
+
+func TestCheckBrokerAliveAliveButNotListening(t *testing.T) {
+	st := brokerctl.StateDir(t.TempDir())
+	writeBrokerPID(t, st, os.Getpid()) // alive
+	r := checkBrokerAlive(st, 8443, failDial)
+	if r.ok {
+		t.Fatal("alive process but nothing on the jail port must fail")
+	}
+	if !strings.Contains(r.detail, "listening") {
+		t.Fatalf("detail should mention nothing is listening: %q", r.detail)
+	}
+}
+
+func TestCheckBrokerAliveHealthy(t *testing.T) {
+	st := brokerctl.StateDir(t.TempDir())
+	writeBrokerPID(t, st, os.Getpid())
+	r := checkBrokerAlive(st, 8443, okDial)
+	if !r.ok {
+		t.Fatalf("alive process + listening port must pass; got %+v", r)
+	}
+}
+
+func TestCheckExternalBackendsNoneDeclared(t *testing.T) {
+	// A supervised (non-external) tool must not be probed — a down/absent probe
+	// for it would be a false alarm.
+	tools := []config.Tool{{Name: "db", Command: []string{"lever-tool-db"}, Backend: "127.0.0.1:3201"}}
+	r := checkExternalBackends(tools, failDial)
+	if !r.ok {
+		t.Fatalf("no external tools => pass (nothing to probe); got %+v", r)
+	}
+}
+
+func TestCheckExternalBackendsAllReachable(t *testing.T) {
+	tools := []config.Tool{
+		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
+		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
+	}
+	r := checkExternalBackends(tools, okDial)
+	if !r.ok {
+		t.Fatalf("all backends reachable => pass; got %+v", r)
+	}
+}
+
+func TestCheckExternalBackendsSomeDown(t *testing.T) {
+	var dialed []string
+	dial := func(addr string) error {
+		dialed = append(dialed, addr)
+		if addr == "127.0.0.1:3300" {
+			return errors.New("refused")
+		}
+		return nil
+	}
+	tools := []config.Tool{
+		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
+		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
+	}
+	r := checkExternalBackends(tools, dial)
+	if r.ok {
+		t.Fatal("a down backend must fail the check")
+	}
+	if !strings.Contains(r.detail, "things3") {
+		t.Fatalf("detail must name the down tool: %q", r.detail)
+	}
+	// qmd's path must be stripped before dialing (dial a host:port, not a URL path).
+	found := false
+	for _, a := range dialed {
+		if a == "127.0.0.1:3101" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("qmd backend path must be stripped for the dial; dialed=%v", dialed)
+	}
+}

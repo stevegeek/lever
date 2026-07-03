@@ -286,3 +286,29 @@ func TestRequestDeniesWildcardMintOnFineTool(t *testing.T) {
 		t.Fatalf("status = %d, want 403 (fine tool exposes no wildcard op)", w.Code)
 	}
 }
+
+func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
+	// The /request deny audit must include the requested tool, the original op
+	// (pre-coercion), and bound_to context so live denies can be debugged without
+	// tmux pane forensics.
+	cfg, audit := coarseConfig(t, false) // analyst has no wildcard grant
+	b := New(cfg)
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
+	}))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no wildcard grant)", w.Code)
+	}
+	auditStr := audit.String()
+	// The audit detail must include the tool name.
+	if !strings.Contains(auditStr, "tool=utilities") {
+		t.Fatalf("policy deny audit must include tool name, got: %s", auditStr)
+	}
+	// The audit detail must include the ORIGINAL op (pre-coercion).
+	if !strings.Contains(auditStr, "op=get_weather") {
+		t.Fatalf("policy deny audit must include original op, got: %s", auditStr)
+	}
+}

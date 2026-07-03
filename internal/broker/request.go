@@ -3,6 +3,7 @@ package broker
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -62,17 +63,41 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		req.Op = registry.WildcardOp
 	}
 	if !b.rules.MayObtain(caller, req.BoundTo, req.Tool, req.Op) {
-		b.audit("request", caller, "deny", "policy: may not obtain/delegate")
+		detail := fmt.Sprintf("policy: may not obtain/delegate (tool=%s op=%s", req.Tool, requestedOp)
+		if requestedOp != req.Op {
+			detail += fmt.Sprintf(" coerced_to=%s", req.Op)
+		}
+		if req.BoundTo != caller {
+			detail += fmt.Sprintf(" bound_to=%s", req.BoundTo)
+		}
+		detail += ")"
+		b.audit("request", caller, "deny", detail)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	if !b.reg.HasOperation(req.Tool, req.Op) {
-		b.audit("request", caller, "deny", "unregistered op")
+		detail := fmt.Sprintf("unregistered op (tool=%s op=%s", req.Tool, requestedOp)
+		if requestedOp != req.Op {
+			detail += fmt.Sprintf(" coerced_to=%s", req.Op)
+		}
+		if req.BoundTo != caller {
+			detail += fmt.Sprintf(" bound_to=%s", req.BoundTo)
+		}
+		detail += ")"
+		b.audit("request", caller, "deny", detail)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	if err := b.reg.ValidateConstraints(req.Tool, req.Constraints); err != nil {
-		b.audit("request", caller, "deny", err.Error())
+		detail := fmt.Sprintf("%s (tool=%s op=%s", err.Error(), req.Tool, requestedOp)
+		if requestedOp != req.Op {
+			detail += fmt.Sprintf(" coerced_to=%s", req.Op)
+		}
+		if req.BoundTo != caller {
+			detail += fmt.Sprintf(" bound_to=%s", req.BoundTo)
+		}
+		detail += ")"
+		b.audit("request", caller, "deny", detail)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

@@ -30,10 +30,12 @@ func TestResolveMsgTarget(t *testing.T) {
 	}{
 		{"manager to grove bare", "assistant", "scratch", true, "agent:scratch", "/lever/groves/scratch", false},
 		{"manager to grove prefixed", "assistant", "agent:scratch", true, "agent:scratch", "/lever/groves/scratch", false},
-		{"manager to user", "assistant", "user:stephen", true, "user:stephen", "", false},
+		{"manager to user alias", "assistant", "user:manager", true, "agent:assistant", "/lever", false},
+		{"manager to user CN", "assistant", "user:assistant", true, "agent:assistant", "/lever", false},
+		{"manager to user other", "assistant", "user:stephen", true, "", "", true},
 		{"manager to unknown grove", "assistant", "nope", true, "", "", true},
 		{"grove to manager agent", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false},
-		{"grove to user", "scratch", "user:manager", true, "user:manager", "", false},
+		{"grove to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false},
 		{"grove to grove allowed", "scratch", "worker", true, "agent:worker", "/lever/groves/worker", false},
 		{"grove to grove disabled", "scratch", "worker", false, "", "", true},
 		{"grove to itself", "scratch", "scratch", true, "agent:scratch", "/lever/groves/scratch", false},
@@ -59,7 +61,7 @@ func TestResolveListProject(t *testing.T) {
 		want                string
 		wantErr             bool
 	}{
-		{"manager own inbox", "assistant", "", "", false},
+		{"manager own inbox", "assistant", "", "/lever", false},
 		{"manager reads grove", "assistant", "scratch", "/lever/groves/scratch", false},
 		{"manager unknown grove", "assistant", "nope", "", true},
 		{"grove own inbox", "scratch", "", "/lever/groves/scratch", false},
@@ -146,7 +148,7 @@ func TestMsgSend_groveToUser(t *testing.T) {
 		t.Fatalf("Message calls = %d, want 1", len(rt.sent))
 	}
 	got := rt.sent[0]
-	if got.To != "user:manager" || got.Project != "" {
+	if got.To != "agent:assistant" || got.Project != "/lever" {
 		t.Fatalf("bad MsgOpts: %+v", got)
 	}
 }

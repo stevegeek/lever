@@ -10,8 +10,9 @@ import (
 )
 
 // msgTarget is a resolved, policy-approved message destination: the scion
-// recipient string and the project (-g) it must be sent under ("" = the
-// operator/user inbox, not project-scoped).
+// recipient string and the project (-g) it must be sent under. Every
+// resolved target is agent-addressed and project-scoped — scion has no
+// broker-routable user/operator inbox (see resolveMsgTarget).
 type msgTarget struct {
 	scionTo string
 	project string
@@ -26,10 +27,19 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if !isManager && !isGrove {
 		return msgTarget{}, fmt.Errorf("caller %q is not the manager or a declared grove", caller)
 	}
-	// user:* recipients are not project-scoped; any authenticated agent may
-	// message the user/operator inbox (that is how groves report to the manager).
+	// user:* is a legacy-shaped alias, not a real inbox: scion refuses
+	// user-addressed sends from outside an agent container ("SCION_AGENT_NAME
+	// not set"), and the broker's runtime scion always runs jail-side. In the
+	// broker-routed world "the manager" IS an agent, so the only user:* forms
+	// worth honoring are the ones that plainly mean "the manager" — the taught
+	// alias `user:manager` and the manager's own cert CN. Anything else is
+	// denied rather than silently 502ing at the scion CLI.
 	if len(to) > 5 && to[:5] == "user:" {
-		return msgTarget{scionTo: to, project: ""}, nil
+		who := to[5:]
+		if who == "manager" || who == b.manager {
+			return msgTarget{scionTo: "agent:" + b.manager, project: b.managerProject}, nil
+		}
+		return msgTarget{}, fmt.Errorf("user-addressed recipient %q is not broker-routable (scion supports user messaging only inside agent containers); message the manager agent instead", to)
 	}
 	name := to
 	if len(to) > 6 && to[:6] == "agent:" {
@@ -49,11 +59,13 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 }
 
 // resolveListProject resolves which project inbox caller may read. Manager:
-// its own/operator inbox ("" ) or any declared grove's. Grove: its own only.
+// its own agent inbox (empty grove — jail-side `scion notifications` requires
+// -g; the bare/operator form is container-only) or any declared grove's.
+// Grove: its own only.
 func (b *Broker) resolveListProject(caller, grove string) (string, error) {
 	if caller == b.manager {
 		if grove == "" {
-			return "", nil
+			return b.managerProject, nil
 		}
 		spec, ok := b.groves[grove]
 		if !ok {

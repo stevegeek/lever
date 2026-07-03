@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
@@ -86,15 +87,17 @@ type fakeMsgRuntime struct {
 	sent         []scion.MsgOpts
 	events       []scion.Event
 	inboxProject string
+	sendErr      error
+	inboxErr     error
 }
 
 func (f *fakeMsgRuntime) Message(_ context.Context, o scion.MsgOpts) error {
 	f.sent = append(f.sent, o)
-	return nil
+	return f.sendErr
 }
 func (f *fakeMsgRuntime) Inbox(_ context.Context, _ bool, project string) ([]scion.Event, error) {
 	f.inboxProject = project
-	return f.events, nil
+	return f.events, f.inboxErr
 }
 
 // newMsgTestBroker builds a Broker wired with a fakeMsgRuntime for the
@@ -225,5 +228,58 @@ func TestMsgNilRuntime_returns502(t *testing.T) {
 	b.JailHandler().ServeHTTP(w2, req2)
 	if w2.Code != 502 {
 		t.Fatalf("/msg/list nil-runtime: status = %d, want 502", w2.Code)
+	}
+}
+
+// TestMsgBadBody_returns400 posts invalid JSON to each handler through the real
+// mux: 400 on the wire, "bad body" in the audit log.
+func TestMsgBadBody_returns400(t *testing.T) {
+	for _, path := range []string{"/msg/send", "/msg/list"} {
+		t.Run(path, func(t *testing.T) {
+			b, rt, audit := newMsgTestBroker(true)
+			rec := callGrove(t, b, path, `{not json`, "assistant")
+			if rec.Code != 400 {
+				t.Fatalf("%s status = %d, want 400", path, rec.Code)
+			}
+			if !strings.Contains(audit.String(), "bad body") {
+				t.Fatalf("%s audit missing \"bad body\": %s", path, audit.String())
+			}
+			if len(rt.sent) != 0 || rt.inboxProject != "" {
+				t.Fatalf("%s runtime must not be called on decode failure", path)
+			}
+		})
+	}
+}
+
+// TestMsgRuntimeError_genericBody proves a runtime failure returns 502 with a
+// GENERIC body (package convention, grove.go): the scion error text — which can
+// echo the recipient/message body from argv — must appear only in the audit log.
+func TestMsgRuntimeError_genericBody(t *testing.T) {
+	secret := "scion: message secret-body failed"
+
+	b, rt, audit := newMsgTestBroker(true)
+	rt.sendErr = errors.New(secret)
+	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "assistant")
+	if rec.Code != 502 {
+		t.Fatalf("/msg/send status = %d, want 502", rec.Code)
+	}
+	if strings.TrimSpace(rec.Body.String()) != "runtime error" {
+		t.Fatalf("/msg/send body = %q, want generic \"runtime error\"", rec.Body.String())
+	}
+	if !strings.Contains(audit.String(), secret) {
+		t.Fatalf("/msg/send audit missing error detail: %s", audit.String())
+	}
+
+	b2, rt2, audit2 := newMsgTestBroker(true)
+	rt2.inboxErr = errors.New(secret)
+	rec2 := callGrove(t, b2, "/msg/list", `{"grove":"scratch"}`, "assistant")
+	if rec2.Code != 502 {
+		t.Fatalf("/msg/list status = %d, want 502", rec2.Code)
+	}
+	if strings.TrimSpace(rec2.Body.String()) != "runtime error" {
+		t.Fatalf("/msg/list body = %q, want generic \"runtime error\"", rec2.Body.String())
+	}
+	if !strings.Contains(audit2.String(), secret) {
+		t.Fatalf("/msg/list audit missing error detail: %s", audit2.String())
 	}
 }

@@ -112,7 +112,10 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 		To: tgt.scionTo, Body: req.Body, Interrupt: req.Interrupt, Project: tgt.project,
 	}); err != nil {
 		b.audit("msg", caller, "error", "send->"+req.To+": "+err.Error())
-		http.Error(w, "runtime error: "+err.Error(), http.StatusBadGateway)
+		// Generic wire body (package convention, see grove.go): the scion CLI
+		// error text can echo argv (recipient/message body) — detail stays in
+		// the audit log only.
+		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
 	b.audit("msg", caller, "allow", "send->"+tgt.scionTo)
@@ -144,7 +147,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	events, err := b.runtime.Inbox(r.Context(), !req.All, project)
 	if err != nil {
 		b.audit("msg", caller, "error", "list: "+err.Error())
-		http.Error(w, "runtime error: "+err.Error(), http.StatusBadGateway)
+		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
 	b.audit("msg", caller, "allow", "list "+req.Grove)

@@ -467,6 +467,9 @@ func (a *App) Validate() error {
 		if !nameRE.MatchString(g.Name) {
 			return fmt.Errorf("config: grove name %q must match %s", g.Name, nameRE)
 		}
+		if g.Name == a.ManagerCN() {
+			return fmt.Errorf("config: grove name %q collides with the manager identity — a grove must not share the manager's CN", g.Name)
+		}
 		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
 			return fmt.Errorf("config: grove dir %q must be relative and inside the tree", g.Dir)
 		}

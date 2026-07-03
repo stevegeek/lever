@@ -180,8 +180,28 @@ func mcpAddArgs(name string, argv []string) []string {
 	return append([]string{"mcp", "add", "--scope", "user", name}, argv...)
 }
 
+// mcpRemoveArgs builds the `claude mcp remove` argv for the same (user) scope
+// claudeMCPAdd writes to, so a re-registration first clears the prior entry.
+func mcpRemoveArgs(name string) []string {
+	return []string{"mcp", "remove", "--scope", "user", name}
+}
+
+// runCommand is the exec seam (overridden in tests) so claudeMCPAdd's
+// remove-then-add ordering and error handling are testable without a real
+// `claude` binary.
+var runCommand = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+// claudeMCPAdd registers an MCP server, idempotently. `claude mcp add` exits
+// non-zero if the server already exists, and the scion pre-start hook runs boot
+// under `set -eu` on every container start — so on a resume (same persistent
+// /home/scion), an unconditional add would fail the hook and block bring-up.
+// Removing first (ignoring "no such server", which also exits non-zero) makes it
+// a clean upsert regardless of prior state.
 func claudeMCPAdd(name string, argv ...string) error {
-	out, err := exec.Command("claude", mcpAddArgs(name, argv)...).CombinedOutput()
+	_, _ = runCommand("claude", mcpRemoveArgs(name)...) // ignore: absent is fine
+	out, err := runCommand("claude", mcpAddArgs(name, argv)...)
 	if err != nil {
 		return fmt.Errorf("claude mcp add %s: %w: %s", name, err, out)
 	}

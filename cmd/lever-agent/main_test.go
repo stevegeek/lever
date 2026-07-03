@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -352,5 +353,58 @@ func TestMCPAddArgsUsesUserScope(t *testing.T) {
 	}
 	if cap[4] != "lever-capability" {
 		t.Fatalf("scope must precede the server name, got %v", cap)
+	}
+}
+
+// TestMCPRemoveArgsUserScope pins the remove targets the same user scope as add.
+func TestMCPRemoveArgsUserScope(t *testing.T) {
+	got := mcpRemoveArgs("db")
+	want := []string{"mcp", "remove", "--scope", "user", "db"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("mcpRemoveArgs = %v, want %v", got, want)
+	}
+}
+
+// TestClaudeMCPAddIsIdempotent verifies claudeMCPAdd removes before adding and
+// ignores a failing remove (absent server), so a re-boot (scion resume) can't
+// fail the pre-start hook on "already exists".
+func TestClaudeMCPAddIsIdempotent(t *testing.T) {
+	var calls [][]string
+	orig := runCommand
+	defer func() { runCommand = orig }()
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		if len(args) > 1 && args[1] == "remove" {
+			return []byte("No MCP server named \"db\""), errors.New("exit status 1") // absent → non-zero
+		}
+		return nil, nil
+	}
+	if err := claudeMCPAdd("db", "--transport", "http", "https://broker/mcp/db/"); err != nil {
+		t.Fatalf("a failing remove must be ignored; claudeMCPAdd returned %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("want remove then add (2 calls), got %d: %v", len(calls), calls)
+	}
+	if calls[0][2] != "remove" || calls[1][2] != "add" {
+		t.Fatalf("must remove before add; got %v then %v", calls[0], calls[1])
+	}
+	// remove: [claude mcp remove --scope user db]; add: [claude mcp add --scope user db --transport …]
+	if calls[0][5] != "db" || calls[1][5] != "db" {
+		t.Fatalf("both must target the same server name; got %v / %v", calls[0], calls[1])
+	}
+}
+
+// TestClaudeMCPAddSurfacesAddError: a failing ADD (not remove) must surface.
+func TestClaudeMCPAddSurfacesAddError(t *testing.T) {
+	orig := runCommand
+	defer func() { runCommand = orig }()
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "add" {
+			return []byte("boom"), errors.New("exit status 1")
+		}
+		return nil, nil
+	}
+	if err := claudeMCPAdd("db", "--transport", "http", "u"); err == nil {
+		t.Fatal("a failing add must return an error")
 	}
 }

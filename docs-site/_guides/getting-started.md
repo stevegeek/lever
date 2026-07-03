@@ -26,7 +26,13 @@ the jail does and doesn't protect.
 
 - **macOS on Apple Silicon** with [OrbStack](https://orbstack.dev) running. (OrbStack is the
   validated backend today.)
-- **Go 1.26+** to build the binaries.
+- **Go 1.26+** — both to build the binaries and on `PATH` at runtime: `lever apply`/`lever up`
+  cross-compile the pinned Scion engine into the jail, so they shell out to `go`. If you manage Go
+  with a version manager (asdf, mise), make sure the **real toolchain** is resolvable, not just a
+  shim — a shim that isn't initialised in the non-interactive sub-process fails with
+  `resolve go toolchain (is go on PATH?): exit status 126`. The fix is to put the actual toolchain
+  bin on `PATH`, e.g. `export PATH="$HOME/.asdf/installs/golang/1.26.4/go/bin:$PATH"` (adjust the
+  version); `go version` should print from that path.
 - **A manager container image** on your host Docker, e.g. `scionlocal/lever-claude:latest`. `lever
   apply` loads this image into the jail; it can't be pulled from inside (egress is locked down).
   Confirm with `docker images | grep scionlocal/lever-claude`.

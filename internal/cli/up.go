@@ -2,10 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"os/exec"
-	"syscall"
 
 	"github.com/lever-to/lever/internal/apply"
 	"github.com/lever-to/lever/internal/config"
@@ -73,13 +69,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
 			}
-			inner := sc.AttachArgv(app.Name, project)
-			argv := b.AttachArgv(inner)
-			bin, err := exec.LookPath(argv[0])
-			if err != nil {
-				return fmt.Errorf("attach: %w", err)
-			}
-			return syscall.Exec(bin, argv, os.Environ()) // hand over the TTY
+			return execAttach(b, sc, app.Name, project)
 		},
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")

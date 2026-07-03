@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -179,5 +180,44 @@ func TestCheckScionProjectDuplicateRegistrations(t *testing.T) {
 	}
 	if !strings.Contains(r.detail, "duplicate") {
 		t.Fatalf("detail should say duplicate: %q", r.detail)
+	}
+}
+
+func TestCheckCredentialFile(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good")
+	if err := os.WriteFile(good, []byte("tok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loose := filepath.Join(dir, "loose")
+	if err := os.WriteFile(loose, []byte("tok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		ok   bool
+	}{
+		{"unset is a pass", "", true},
+		{"present 0600 non-empty", good, true},
+		{"missing file", filepath.Join(dir, "absent"), false},
+		{"empty file", empty, false},
+		{"group/other readable", loose, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkCredentialFile(tc.path)
+			if got.ok != tc.ok {
+				t.Fatalf("ok = %v (detail: %s), want %v", got.ok, got.detail, tc.ok)
+			}
+			if strings.Contains(got.detail, "tok") {
+				t.Fatalf("detail leaked file contents: %s", got.detail)
+			}
+		})
 	}
 }

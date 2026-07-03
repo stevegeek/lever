@@ -850,3 +850,26 @@ func TestLoadRejectsEmptyOperationName(t *testing.T) {
 		t.Fatal("an operation with an empty name must be rejected")
 	}
 }
+
+func TestGroveToGroveMessagingDefaultsTrue(t *testing.T) {
+	tr := true
+	fa := false
+	cases := []struct {
+		name string
+		val  *bool
+		want bool
+	}{
+		{"unset defaults true", nil, true},
+		{"explicit true", &tr, true},
+		{"explicit false", &fa, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &App{}
+			a.Broker.Messaging.GroveToGrove = c.val
+			if got := a.GroveToGroveMessaging(); got != c.want {
+				t.Fatalf("GroveToGroveMessaging() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

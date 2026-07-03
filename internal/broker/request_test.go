@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -166,6 +167,107 @@ func TestRequestDeniesUnregisteredOperation(t *testing.T) {
 	b.handleRequest(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (db.drop not a registered op)", w.Code)
+	}
+}
+
+// coarseConfig builds a broker with a single coarse, externally-fronted tool
+// "utilities" (registry has ONLY the synthetic WildcardOp, mirroring a real
+// gate:coarse tool). grantWildcard controls whether "analyst" holds the
+// {utilities, "*"} obtain grant. The returned buffer captures audit log
+// output so tests can assert on the op-coercion detail.
+func coarseConfig(t *testing.T, grantWildcard bool) (Config, *bytes.Buffer) {
+	t.Helper()
+	kp, err := token.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ca.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rl := rules.NewPolicy()
+	if grantWildcard {
+		rl.AllowObtain("analyst", "utilities", registry.WildcardOp)
+	}
+	reg := registry.New()
+	if err := reg.Register(registry.Tool{
+		Name: "utilities", Backend: "127.0.0.1:3103", External: true, Coarse: true,
+		Operations: map[string]registry.Operation{registry.WildcardOp: {Name: registry.WildcardOp}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	return Config{
+		Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
+		ManagerIdentity: "manager", Agents: []string{"manager", "analyst"},
+		GrantTTL: time.Hour, ServerName: "host.orb.internal",
+		Log: slog.New(slog.NewTextHandler(&buf, nil)),
+	}, &buf
+}
+
+func TestRequestCoarseToolCoercesFineShapedOpToWildcard(t *testing.T) {
+	// A dispatched agent cannot know a tool's gate, so a fine-shaped request
+	// (op "get_weather") against a coarse tool ("utilities", registry exposes
+	// only WildcardOp) must be coerced to "*" before the policy check, and the
+	// minted token must carry "*" (what the gateway's coarse path verifies).
+	cfg, audit := coarseConfig(t, true)
+	b := New(cfg)
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
+	}))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 (coarse tool + wildcard grant must mint)", w.Code, w.Body.String())
+	}
+	var resp CapResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	raw, _ := base64.RawURLEncoding.DecodeString(resp.Token)
+	// The minted token's op is "*", not "get_weather".
+	if err := token.Verify(b.keys.Public, raw, token.Request{
+		Caller: "analyst", Capability: token.Capability{Tool: "utilities", Operation: registry.WildcardOp},
+		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
+	}); err != nil {
+		t.Fatalf("minted token must verify against the wildcard op: %v", err)
+	}
+	if err := token.Verify(b.keys.Public, raw, token.Request{
+		Caller: "analyst", Capability: token.Capability{Tool: "utilities", Operation: "get_weather"},
+		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
+	}); err == nil {
+		t.Fatal("minted token must NOT verify against the originally requested fine op (op must be coerced, not preserved)")
+	}
+	if !strings.Contains(audit.String(), "get_weather -> *") {
+		t.Fatalf("audit log must record the op coercion, got: %s", audit.String())
+	}
+}
+
+func TestRequestCoarseToolDeniesFineShapedRequestWithoutWildcardGrant(t *testing.T) {
+	// Coercion must not widen the policy check: a caller without the exact
+	// {tool, "*"} grant is still denied, even though the tool is coarse.
+	cfg, _ := coarseConfig(t, false)
+	b := New(cfg)
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
+	}))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no wildcard grant; coercion must not widen access)", w.Code)
+	}
+}
+
+func TestRequestFineToolExactGrantExactOpStillMints(t *testing.T) {
+	// Fine tools are untouched by the coercion: an exact grant + exact op
+	// request still mints normally.
+	b := New(testConfig(t))
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{Tool: "db", Op: "read", BoundTo: "analyst"}))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 (fine tool, exact grant, exact op)", w.Code, w.Body.String())
 	}
 }
 

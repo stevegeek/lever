@@ -170,8 +170,18 @@ func requestLLMToken(ctx context.Context, brokerURL string, client *http.Client,
 	return cr.Token, nil // already base64url-encoded; return verbatim
 }
 
+// mcpAddArgs builds the `claude mcp add` argv. It forces --scope user (global,
+// not the default local scope which is keyed by the current working directory):
+// the pre-start hook runs boot from the agent HOME, but the claude session runs
+// in /workspace, so a CWD-scoped registration would be invisible to the session.
+// User scope makes every brokered tool + the stdio capability server reachable
+// regardless of where claude is launched. --scope precedes the server name.
+func mcpAddArgs(name string, argv []string) []string {
+	return append([]string{"mcp", "add", "--scope", "user", name}, argv...)
+}
+
 func claudeMCPAdd(name string, argv ...string) error {
-	out, err := exec.Command("claude", append([]string{"mcp", "add", name}, argv...)...).CombinedOutput()
+	out, err := exec.Command("claude", mcpAddArgs(name, argv)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("claude mcp add %s: %w: %s", name, err, out)
 	}

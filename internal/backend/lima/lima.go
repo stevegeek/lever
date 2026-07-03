@@ -423,4 +423,11 @@ func (l *Lima) InstallGuestBinary(ctx context.Context, localPath, destPath strin
 	return l.guest().InstallRootBinary(ctx, localPath, destPath)
 }
 
+// ReadScionProjectState reads scion's registration state from the VM for `lever
+// doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
+// machine-only guest prefix, so it needs no EnsureUp.
+func (l *Lima) ReadScionProjectState(ctx context.Context) (backend.ScionProjectState, error) {
+	return l.guest().ReadScionProjectState(ctx, mountDest)
+}
+
 var _ backend.Backend = (*Lima)(nil)

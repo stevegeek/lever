@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/brokerctl"
 	"github.com/lever-to/lever/internal/config"
 )
@@ -76,6 +77,45 @@ func checkExternalBackends(tools []config.Tool, dial dialFunc) checkResult {
 	default:
 		return checkResult{name, true, fmt.Sprintf("%d reachable", probed), ""}
 	}
+}
+
+// checkScionProject flags the bad-teardown corruption: scion has registered the
+// tree (a ~/.scion/project-configs entry whose workspace_path is the mount dest)
+// but the in-tree marker is gone, or there are duplicate registrations for it.
+// Either state makes `scion init` fail with "existing project marker is invalid",
+// blocking the manager from coming up. A pure function over the state the backend
+// read, so it is testable without a jail.
+func checkScionProject(st backend.ScionProjectState, mountDest string) checkResult {
+	const name = "scion project registration"
+	var reg []string
+	for _, e := range st.Entries {
+		if e.WorkspacePath == mountDest {
+			reg = append(reg, e.Name)
+		}
+	}
+	switch {
+	case len(reg) == 0:
+		return checkResult{name, true, "no stale registration for " + mountDest, ""}
+	case !st.MarkerPresent:
+		return checkResult{name, false,
+			fmt.Sprintf("scion is registered for %s (%s) but the in-tree %s/.scion marker is gone — the signature of a bad teardown (a bare container kill instead of scion suspend/down)", mountDest, strings.Join(reg, ", "), mountDest),
+			fmt.Sprintf("in the jail, remove the stale registration(s) ~/.scion/project-configs/%s then run `lever apply`", braceList(reg))}
+	case len(reg) > 1:
+		return checkResult{name, false,
+			fmt.Sprintf("scion has %d duplicate registrations for %s (%s)", len(reg), mountDest, strings.Join(reg, ", ")),
+			fmt.Sprintf("in the jail, keep one and remove the rest under ~/.scion/project-configs/%s then run `lever apply`", braceList(reg))}
+	default:
+		return checkResult{name, true, "consistent (" + reg[0] + ")", ""}
+	}
+}
+
+// braceList renders names as a shell brace-expansion hint ({a,b}) for the fix
+// text, or the bare name for a single entry.
+func braceList(names []string) string {
+	if len(names) == 1 {
+		return names[0]
+	}
+	return "{" + strings.Join(names, ",") + "}"
 }
 
 // backendHostPort strips an optional path from a "host:port[/path]" backend,

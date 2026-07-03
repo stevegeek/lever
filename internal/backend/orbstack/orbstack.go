@@ -269,4 +269,11 @@ func (o *OrbStack) InstallGuestBinary(ctx context.Context, localPath, destPath s
 	return o.guest().InstallRootBinary(ctx, localPath, destPath)
 }
 
+// ReadScionProjectState reads scion's registration state from the machine for
+// `lever doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
+// machine-only guest prefix, so it needs no EnsureUp.
+func (o *OrbStack) ReadScionProjectState(ctx context.Context) (backend.ScionProjectState, error) {
+	return o.guest().ReadScionProjectState(ctx, mountDest)
+}
+
 var _ backend.Backend = (*OrbStack)(nil)

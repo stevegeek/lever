@@ -46,9 +46,22 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 			}
 			state := brokerctl.StateDir(filepath.Dir(path))
 
+			// Scion project health needs a read into the jail (via the backend).
+			// A read error almost always means the jail machine isn't up — report
+			// that plainly rather than a marker verdict we can't actually make.
+			scion := checkResult{name: "scion project registration"}
+			if st, serr := b.ReadScionProjectState(cmd.Context()); serr != nil {
+				scion.ok = false
+				scion.detail = "could not read scion state from the jail (is the machine up?): " + serr.Error()
+				scion.fix = "bring the jail up with `lever apply`, then re-run doctor"
+			} else {
+				scion = checkScionProject(st, b.MountDest())
+			}
+
 			checks := []checkResult{
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
 				checkExternalBackends(app.Broker.Tools, tcpDial),
+				scion,
 			}
 			failed := 0
 			for _, c := range checks {

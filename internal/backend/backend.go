@@ -68,4 +68,9 @@ type Backend interface {
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	Profile() Profile
+	// ReadScionProjectState reads scion's project-registration state from the
+	// jail (the in-tree marker + ~/.scion/project-configs entries) for `lever
+	// doctor`. Read-only; uses the machine-only guest transport, so it works
+	// without EnsureUp as long as the jail machine is up.
+	ReadScionProjectState(ctx context.Context) (ScionProjectState, error)
 }

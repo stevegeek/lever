@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/brokerctl"
 	"github.com/lever-to/lever/internal/config"
 )
@@ -117,5 +118,66 @@ func TestCheckExternalBackendsSomeDown(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("qmd backend path must be stripped for the dial; dialed=%v", dialed)
+	}
+}
+
+func TestCheckScionProjectConsistent(t *testing.T) {
+	st := backend.ScionProjectState{
+		MarkerPresent: true,
+		Entries:       []backend.ScionProjectEntry{{Name: "lever__abc", WorkspacePath: "/lever"}},
+	}
+	if r := checkScionProject(st, "/lever"); !r.ok {
+		t.Fatalf("one registration + marker present => pass; got %+v", r)
+	}
+}
+
+func TestCheckScionProjectNoRegistration(t *testing.T) {
+	// A grove's registration for a different path must not implicate /lever.
+	st := backend.ScionProjectState{
+		MarkerPresent: false,
+		Entries:       []backend.ScionProjectEntry{{Name: "scratch__x", WorkspacePath: "/lever/groves/scratch"}},
+	}
+	if r := checkScionProject(st, "/lever"); !r.ok {
+		t.Fatalf("no registration for the tree => pass; got %+v", r)
+	}
+}
+
+func TestCheckScionProjectRegisteredButMarkerGone(t *testing.T) {
+	// The exact bad-teardown bug: registered for /lever, but the marker is gone.
+	st := backend.ScionProjectState{
+		MarkerPresent: false,
+		Entries: []backend.ScionProjectEntry{
+			{Name: "lever__abc", WorkspacePath: "/lever"},
+			{Name: "scratch__x", WorkspacePath: "/lever/groves/scratch"},
+		},
+	}
+	r := checkScionProject(st, "/lever")
+	if r.ok {
+		t.Fatal("registered for /lever but marker gone must fail")
+	}
+	if !strings.Contains(r.detail, "lever__abc") || !strings.Contains(r.detail, "marker") {
+		t.Fatalf("detail should name the entry + the missing marker: %q", r.detail)
+	}
+	if !strings.Contains(r.fix, "lever apply") {
+		t.Fatalf("fix should point at lever apply: %q", r.fix)
+	}
+}
+
+func TestCheckScionProjectDuplicateRegistrations(t *testing.T) {
+	// Two entries for /lever even with the marker present — a duplicate that
+	// scion init trips over.
+	st := backend.ScionProjectState{
+		MarkerPresent: true,
+		Entries: []backend.ScionProjectEntry{
+			{Name: "lever__old", WorkspacePath: "/lever"},
+			{Name: "lever__new", WorkspacePath: "/lever"},
+		},
+	}
+	r := checkScionProject(st, "/lever")
+	if r.ok {
+		t.Fatal("two registrations for /lever must fail (duplicate)")
+	}
+	if !strings.Contains(r.detail, "duplicate") {
+		t.Fatalf("detail should say duplicate: %q", r.detail)
 	}
 }

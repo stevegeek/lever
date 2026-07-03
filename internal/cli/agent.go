@@ -86,9 +86,3 @@ func agentList() *cobra.Command {
 		return nil
 	}}
 }
-
-// projectFlagVar binds a --project / -g flag to the given string pointer.
-// Used by both agent subcommands and msg subcommands.
-func projectFlagVar(cmd *cobra.Command, p *string) {
-	cmd.Flags().StringVarP(p, "project", "g", "", "grove project path (-g)")
-}

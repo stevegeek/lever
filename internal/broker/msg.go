@@ -1,6 +1,13 @@
 package broker
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+
+	"github.com/lever-to/lever/internal/cap/ca"
+	"github.com/lever-to/lever/internal/scion"
+)
 
 // msgTarget is a resolved, policy-approved message destination: the scion
 // recipient string and the project (-g) it must be sent under ("" = the
@@ -62,4 +69,84 @@ func (b *Broker) resolveListProject(caller, grove string) (string, error) {
 		return "", fmt.Errorf("a grove may only read its own inbox")
 	}
 	return spec.JailProject, nil
+}
+
+type msgSendRequest struct {
+	To        string `json:"to"`
+	Body      string `json:"body"`
+	Interrupt bool   `json:"interrupt"`
+}
+
+type msgListRequest struct {
+	All   bool   `json:"all"`
+	Grove string `json:"grove"`
+}
+
+type msgListResponse struct {
+	Events []scion.Event `json:"events"`
+}
+
+func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
+	caller, err := ca.RequireAgent(r)
+	if err != nil {
+		b.audit("msg", "", "deny", err.Error())
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req msgSendRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		b.audit("msg", caller, "deny", "bad body")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	tgt, rerr := b.resolveMsgTarget(caller, req.To)
+	if rerr != nil {
+		b.audit("msg", caller, "deny", "send->"+req.To+": "+rerr.Error())
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if !b.runtimeReady(w) {
+		return
+	}
+	if err := b.runtime.Message(r.Context(), scion.MsgOpts{
+		To: tgt.scionTo, Body: req.Body, Interrupt: req.Interrupt, Project: tgt.project,
+	}); err != nil {
+		b.audit("msg", caller, "error", "send->"+req.To+": "+err.Error())
+		http.Error(w, "runtime error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	b.audit("msg", caller, "allow", "send->"+tgt.scionTo)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
+	caller, err := ca.RequireAgent(r)
+	if err != nil {
+		b.audit("msg", "", "deny", err.Error())
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req msgListRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		b.audit("msg", caller, "deny", "bad body")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	project, rerr := b.resolveListProject(caller, req.Grove)
+	if rerr != nil {
+		b.audit("msg", caller, "deny", "list "+req.Grove+": "+rerr.Error())
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if !b.runtimeReady(w) {
+		return
+	}
+	events, err := b.runtime.Inbox(r.Context(), !req.All, project)
+	if err != nil {
+		b.audit("msg", caller, "error", "list: "+err.Error())
+		http.Error(w, "runtime error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	b.audit("msg", caller, "allow", "list "+req.Grove)
+	writeJSON(w, msgListResponse{Events: events})
 }

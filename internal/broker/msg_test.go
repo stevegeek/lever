@@ -1,6 +1,17 @@
 package broker
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/lever-to/lever/internal/broker/registry"
+	"github.com/lever-to/lever/internal/scion"
+)
 
 func msgBroker(g2g bool) *Broker {
 	b := New(Config{ManagerIdentity: "assistant", GroveToGrove: g2g, ManagerProject: "/lever",
@@ -64,5 +75,155 @@ func TestResolveListProject(t *testing.T) {
 				t.Fatalf("project = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// fakeMsgRuntime embeds the package's existing fakeRuntime (via the GroveRuntime
+// interface field) for lifecycle methods it never exercises, and overrides
+// Message/Inbox to capture what the msg handlers pass through.
+type fakeMsgRuntime struct {
+	GroveRuntime
+	sent         []scion.MsgOpts
+	events       []scion.Event
+	inboxProject string
+}
+
+func (f *fakeMsgRuntime) Message(_ context.Context, o scion.MsgOpts) error {
+	f.sent = append(f.sent, o)
+	return nil
+}
+func (f *fakeMsgRuntime) Inbox(_ context.Context, _ bool, project string) ([]scion.Event, error) {
+	f.inboxProject = project
+	return f.events, nil
+}
+
+// newMsgTestBroker builds a Broker wired with a fakeMsgRuntime for the
+// scratch/worker groves under manager identity "assistant", capturing audit
+// output to the returned buffer.
+func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
+	var buf bytes.Buffer
+	rt := &fakeMsgRuntime{GroveRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
+	b := New(Config{
+		ManagerIdentity: "assistant",
+		ManagerProject:  "/lever",
+		GroveToGrove:    g2g,
+		Groves: []GroveSpec{
+			{Name: "scratch", JailProject: "/lever/groves/scratch"},
+			{Name: "worker", JailProject: "/lever/groves/worker"},
+		},
+		Runtime:  rt,
+		Registry: registry.New(),
+		Log:      slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	return b, rt, &buf
+}
+
+func TestMsgSend_managerToGrove(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go","interrupt":true}`, "assistant")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 1 {
+		t.Fatalf("Message calls = %d, want 1", len(rt.sent))
+	}
+	got := rt.sent[0]
+	if got.To != "agent:scratch" || got.Project != "/lever/groves/scratch" || !got.Interrupt || got.Body != "go" {
+		t.Fatalf("bad MsgOpts: %+v", got)
+	}
+}
+
+func TestMsgSend_groveToUser(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	rec := callGrove(t, b, "/msg/send", `{"to":"user:manager"}`, "scratch")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 1 {
+		t.Fatalf("Message calls = %d, want 1", len(rt.sent))
+	}
+	got := rt.sent[0]
+	if got.To != "user:manager" || got.Project != "" {
+		t.Fatalf("bad MsgOpts: %+v", got)
+	}
+}
+
+func TestMsgSend_groveToGroveDisabled(t *testing.T) {
+	b, rt, audit := newMsgTestBroker(false)
+	rec := callGrove(t, b, "/msg/send", `{"to":"worker"}`, "scratch")
+	if rec.Code != 403 {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Fatalf("Message calls = %d, want 0 (denied before dispatch)", len(rt.sent))
+	}
+	if !strings.Contains(audit.String(), "deny") || !strings.Contains(audit.String(), "worker") {
+		t.Fatalf("deny audit line missing recipient: %s", audit.String())
+	}
+}
+
+func TestMsgSend_unknownCaller(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	rec := callGrove(t, b, "/msg/send", `{"to":"scratch"}`, "mallory")
+	if rec.Code != 403 {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Fatal("Message must not be called for an unknown caller")
+	}
+}
+
+func TestMsgList_managerReadsGrove(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	rt.events = []scion.Event{{"id": "1", "type": "test"}}
+	rec := callGrove(t, b, "/msg/list", `{"grove":"scratch"}`, "assistant")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if rt.inboxProject != "/lever/groves/scratch" {
+		t.Fatalf("inboxProject = %q, want /lever/groves/scratch", rt.inboxProject)
+	}
+	var out msgListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bad response JSON: %v", err)
+	}
+	if len(out.Events) != 1 || out.Events[0]["id"] != "1" {
+		t.Fatalf("events not round-tripped: %+v", out.Events)
+	}
+}
+
+func TestMsgList_groveForbiddenOtherGrove(t *testing.T) {
+	b, _, _ := newMsgTestBroker(true)
+	rec := callGrove(t, b, "/msg/list", `{"grove":"worker"}`, "scratch")
+	if rec.Code != 403 {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
+// TestMsgNilRuntime_returns502 proves both handlers return 502 (not a panic)
+// when the scion runtime is unwired, and only after authn/authz has run.
+func TestMsgNilRuntime_returns502(t *testing.T) {
+	b := New(Config{
+		ManagerIdentity: "assistant",
+		ManagerProject:  "/lever",
+		GroveToGrove:    true,
+		Groves: []GroveSpec{
+			{Name: "scratch", JailProject: "/lever/groves/scratch"},
+		},
+		Runtime:  nil,
+		Registry: registry.New(),
+	})
+
+	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "assistant")
+	if rec.Code != 502 {
+		t.Fatalf("/msg/send nil-runtime: status = %d, want 502", rec.Code)
+	}
+
+	req2 := httptest.NewRequest("POST", "/msg/list", strings.NewReader(`{"grove":"scratch"}`))
+	req2.TLS = fakeTLSWithCN("assistant")
+	w2 := httptest.NewRecorder()
+	b.JailHandler().ServeHTTP(w2, req2)
+	if w2.Code != 502 {
+		t.Fatalf("/msg/list nil-runtime: status = %d, want 502", w2.Code)
 	}
 }

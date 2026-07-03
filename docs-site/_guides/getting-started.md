@@ -41,20 +41,16 @@ cd /path/to/lever_to
 make all
 ```
 
-This builds two binaries:
+This builds the host binary:
 
 - **`lever`** (host control plane) → `~/.local/bin/lever` (make sure that's on your `PATH`).
-- **`lever-manager`** (in-jail orchestration) → `$LEVER_INSTANCE/vendor/bin/lever-manager`,
-  cross-compiled for the jail's linux/arm64. It must land **inside the bind-mounted `tree:`** so the
-  manager can run it in the container, so `LEVER_INSTANCE` points at the **tree directory** (the
-  `tree:` subdir), not the instance root.
 
-Set `LEVER_INSTANCE` to the bind-mounted tree (the default is a neutral placeholder). For a different
-instance, point it at that instance's tree:
-
-```sh
-make lever-manager-linux LEVER_INSTANCE=/path/to/your/instance/workspace
-```
+The in-jail orchestration binary, **`lever-manager`**, isn't built here, it's baked into your agent
+image. `make lever-image-bins` cross-compiles `lever-manager` (alongside `lever-agent` and
+`lever-tool-db`) into your image build context (`LEVER_IMAGE_CTX` in the Makefile), and your
+Dockerfile `COPY`s them to `/usr/local/bin`, so it's already on `PATH` inside the manager and grove
+containers when they boot. `examples/hello-grove` uses the pre-baked `scionlocal/lever-claude:latest`
+image, so there's nothing to build for this walkthrough.
 
 Verify: `lever version`.
 
@@ -68,7 +64,6 @@ hello-grove/             # instance root, run `lever` here; NOT mounted
 ├── lever.yaml           # the config
 ├── manager.md           # the manager's boot prompt (host-only)
 └── workspace/           # tree: the bind-mounted subdir (agents edit this)
-    ├── vendor/bin/      # staged lever-manager (must be inside the tree)
     └── groves/
         └── worker/      # the grove's workspace
 ```
@@ -102,12 +97,9 @@ contents are projected into the agent containers, so keep it `0600`.
 The config and prompt live at the root, *outside* the mount, so a compromised agent can't rewrite
 them. See [config-reference.md](/reference/config/) for every key.
 
-Stage the in-jail binary into the **tree** (`workspace/`) before bringing it up, so it lands inside
-the bind-mount the manager can see:
-
-```sh
-make lever-manager-linux LEVER_INSTANCE="$PWD/examples/hello-grove/workspace"
-```
+There's nothing to stage: `scionlocal/lever-claude:latest` already has `lever-manager` baked in at
+`/usr/local/bin` (see [step 1](#1-install-the-binaries)), so it's on `PATH` the moment the manager
+container boots.
 
 ## 3. Preview the bring-up plan (no side effects)
 
@@ -148,13 +140,21 @@ it's fast.
 `Ctrl-b d` (the manager is left suspended; the next `lever up` resumes the same conversation).
 `--fresh` starts a new manager thread; `--no-attach` brings up without taking your terminal.
 
+To reattach without re-provisioning, run `lever attach` from the instance root, in a separate
+terminal. It hands your TTY straight to the manager and is strictly passive: if the jail isn't up it
+fails fast with "run `lever up` first" rather than starting anything.
+
+If something looks wrong, `lever doctor` runs real health checks (broker alive, external tool
+backends reachable, the manager credential file's presence/size/mode, scion project-registration
+consistency) and prints a fix hint per failure.
+
 ## 5. Dispatch a grove (inside the manager session)
 
-You're now talking to the manager agent. It drives groves with the in-jail `lever-manager` binary.
-A dispatch looks like:
+You're now talking to the manager agent. It drives groves with the in-jail `lever-manager` binary
+(baked into the image, already on `PATH`). A dispatch looks like:
 
 ```sh
-vendor/bin/lever-manager agent start worker --task "Write a haiku to haiku.md"
+lever-manager agent start worker --task "Write a haiku to haiku.md"
 ```
 
 Notes:
@@ -168,11 +168,24 @@ Notes:
 Watch progress and relay events:
 
 ```sh
-vendor/bin/lever-manager watch --events-file events.jsonl &   # appends scion events to a file you can tail
-vendor/bin/lever-manager agent list        # phases of running agents
-vendor/bin/lever-manager msg list          # typed inbox (input-needed, completion, …)
-vendor/bin/lever-manager msg send "answer" --to worker
+lever-manager watch --events-file events.jsonl &   # appends scion events to a file you can tail
+lever-manager agent list        # phases of running agents
+lever-manager msg list          # typed inbox (input-needed, completion, …)
+lever-manager msg send "answer" --to worker
 ```
+
+`msg` and `watch` are thin mTLS clients of the broker (`/msg/send`, `/msg/list`), not of scion
+directly: a scion CLI call made inside a container is pinned to that container's own project, so
+the broker (host-side, operator identity) is what actually routes the message. `--to` takes
+`agent:<name>`, a bare `<name>`, or the alias `user:manager` (routes to the manager agent; scion's
+own user-messaging is container-only, so no other `user:*` form is broker-routable). Routing is
+identity-derived and default-deny: the manager may message any declared grove and read any inbox
+(`msg list --grove <name>`); a grove may message the manager and, by default, other groves too
+(disable grove→grove with `broker.messaging.grove_to_grove: false`).
+
+To eyeball a grove's session directly instead of polling events, run `lever attach worker` from your
+host (another terminal, instance root): it hands your TTY to that grove the same way `lever up`
+hands you the manager's; omit the name to attach to the manager.
 
 When `worker` finishes, the file it wrote (`groves/worker/haiku.md`) is there on your host, it was
 mounted in place.

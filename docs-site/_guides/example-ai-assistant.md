@@ -93,7 +93,7 @@ lever up
 Inside the manager session you dispatch a persona:
 
 ```sh
-vendor/bin/lever-manager agent start archivist \
+lever-manager agent start archivist \
   --task "Summarise this week's journal entries into reference/weekly.md"
 ```
 
@@ -117,7 +117,7 @@ Now consider `researcher`, fed a malicious web page that tells it to read your
 private notes:
 
 ```sh
-vendor/bin/lever-manager agent start researcher \
+lever-manager agent start researcher \
   --task "Research X and report back"
 ```
 

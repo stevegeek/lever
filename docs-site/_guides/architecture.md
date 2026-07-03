@@ -5,8 +5,9 @@ nav_order: 4
 # Architecture
 
 > **Mostly built.** Jail bring-up, the manager up/attach lifecycle, the capability broker, grove
-> dispatch (the manager calling the broker's `/grove/*` endpoints), and the `lever watch` bridge are
-> implemented and validated (see [security-model.md](/security-model/)). The notification contract in
+> dispatch (the manager calling the broker's `/grove/*` endpoints), broker-routed messaging
+> (`/msg/send`, `/msg/list`), and the `lever-manager watch` bridge are implemented and validated (see
+> [security-model.md](/security-model/)). The notification contract in
 > §4 (the `input-needed`/`completed` event names) is still being refined; treat those event names as
 > illustrative, not literal identifiers.
 
@@ -26,7 +27,7 @@ surface** (`lever`).
 graph TD
     subgraph host[macOS host]
         L[lever CLI, operator binary]
-        BK["Capability broker<br/>real credentials, capability minting,<br/>/llm proxy, grove dispatch, MCP gateway"]
+        BK["Capability broker<br/>real credentials, capability minting,<br/>/llm proxy, grove dispatch, MCP gateway,<br/>messaging (/msg/send, /msg/list)"]
         MCP[first-party tool servers<br/>bound to 127.0.0.1]
     end
     subgraph vm[OrbStack VM, the one hardware-virtualization boundary]
@@ -115,7 +116,7 @@ shared-worktree path is unreliable; the directory model sidesteps all of it.
 | `lever` (Go binary) | operator CLI + entry point; drives Scion; provisions the jail | **core** (runs on host) |
 | Scion server + Scion broker | container lifecycle, sessions, attach/resume, typed messaging | core (runs inside the jail) |
 | rootless dockerd | the container runtime the Scion broker drives (rootless, see security-model.md) | core (inside the jail) |
-| Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls | **core** (runs on host) |
+| Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls, and relays typed agent messaging (`/msg/send`, `/msg/list`) | **core** (runs on host) |
 | Manager **runtime/role** | the coordinator: a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
 | Manager **prompt / skills / tool (MCP) config** | what makes it *this* manager | **instance-supplied config** |
 | Grove agents | workers; one project each; isolated | core lifecycle; instance defines the groves |
@@ -145,16 +146,25 @@ sequenceDiagram
     Br->>Sc: start grove (operator identity, host-side)
     Sc->>Gv: launch container, deliver task
     Gv-->>Sc: event: input-needed ("which DB?")
-    Sc-->>Mg: typed event (via bridge)
+    Sc-->>Br: typed event (polled via POST /msg/list, mTLS)
+    Br-->>Mg: relayed via the watch bridge
     Mg->>Hu: relay question
     Hu->>Mg: answer
-    Mg->>Sc: message grove (answer)
+    Mg->>Br: message grove (POST /msg/send, mTLS)
+    Br->>Sc: relay message (operator identity, host-side)
     Sc->>Gv: deliver
     Gv-->>Sc: event: completed
-    Sc-->>Mg: typed event (echoes the correlation id)
+    Sc-->>Br: typed event (polled via POST /msg/list, mTLS)
+    Br-->>Mg: relayed via the watch bridge (echoes the correlation id)
     Mg->>Hu: report done
 ```
 {% endraw %}
+
+Messaging follows the same broker-mediated shape as dispatch above: `lever-manager msg send`/`msg
+list`/`watch` are thin mTLS clients of the broker's `/msg/send` and `/msg/list`, never scion
+directly, because a scion CLI call made *inside* a container is pinned to that container's own
+project and carries no cross-agent authentication, only the broker's host-side, operator-identity
+scion access can safely address an arbitrary agent's inbox.
 
 **The task ↔ agent contract.** The core knows nothing about an instance's task records. At dispatch
 the instance supplies an opaque **correlation id**; the core echoes that id on lifecycle events

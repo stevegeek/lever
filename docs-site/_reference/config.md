@@ -25,8 +25,11 @@ my-instance/             <- instance root: run `lever` here; NOT mounted
   prompt.md              <- boot prompt (host-only)
   workspace/             <- tree: the bind-mounted subdir (agents edit this)
     groves/...
-    vendor/bin/lever-manager
 ```
+
+`lever-manager`, the in-jail orchestration binary, isn't staged in the tree, it's baked into the
+agent image (`make lever-image-bins` + your Dockerfile's `COPY … /usr/local/bin/lever-manager`), so
+it's already on `PATH` when the manager container boots.
 
 ## Minimal config
 
@@ -172,6 +175,7 @@ CN-bound, short-lived capability tokens. See [security-model.md](/security-model
 | `ticket_ttl` | duration | no | (default) | Lifetime of a one-time enrolment ticket (the manager-bootstrap and agent-enrol tickets minted at apply). Short by design; only needs to outlive container boot. |
 | `manager_identity` | string | no | `manager` | The capability CN the manager enrols under (its certificate identity at the broker), distinct from its Scion agent slug (`name`). |
 | `tools` | list of `{name, command, backend, operations, allowed_values, external, gate, allow_non_loopback}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs; `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. With `external: true` the broker FRONTS an already-running host MCP server instead of spawning one: no `command`, `backend` is the server's own listen address (`host:port[/path]`, literal loopback IP unless `allow_non_loopback: true`), and the tool registers third-party — the gateway enforces the rules and strips the capability before proxying. |
+| `messaging` | object | no | `grove_to_grove: true` | Routing policy for broker-routed typed messaging (`/msg/send`, `/msg/list`; see [architecture.md](/architecture/)). `grove_to_grove` (bool) permits grove→grove sends; it's a pointer under the hood so unset ⇒ **allowed**, an explicit `false` denies it for a stricter hub-and-spoke model. Recipients themselves aren't a config key, they're resolved from the caller's mTLS identity: the manager may message any declared grove and read any inbox (`msg list --grove <name>`); a grove may always message the manager and read only its own inbox. |
 
 #### External MCP servers (`external: true`)
 

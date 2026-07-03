@@ -10,8 +10,9 @@ Lever is split so that the reusable framework and a particular person's setup ne
   manager *runtime/role*, the security jail, the project model, the `lever` binary, and the docs.
 - An **instance** is a private setup built *on top of* the core: a knowledge base, personal or
   domain-specific tools, the actual groves, and the configuration that makes the manager *this*
-  manager. An instance depends on the `lever` binary and does not fork it (it may vendor the
-  core-built in-jail binaries, e.g. `vendor/bin/`, but never forks the core itself).
+  manager. An instance depends on the `lever` binary and does not fork it (it may bake the
+  core-built in-jail binaries into its own agent image via `make lever-image-bins`, but never forks
+  the core itself).
 
 The framework authors run their own personal assistant as the first instance, dogfooding the core
 so the abstraction is proven by real use, not just asserted.

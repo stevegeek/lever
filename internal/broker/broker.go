@@ -85,6 +85,13 @@ type Config struct {
 	// ManagerProject is the manager's own scion project (-g), used when a
 	// message is addressed to the manager's agent identity.
 	ManagerProject string
+	// ManagerSlug is the manager's scion agent slug — the app name (apply's
+	// start-manager dispatches the manager as Grove: app.Name). It is DISTINCT
+	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
+	// only by its slug, so a message routed to agent:<CN> fails with
+	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
+	// (embedders/tests that never message the manager).
+	ManagerSlug string
 	// GroveToGrove enables grove→grove messaging; default false (deny).
 	GroveToGrove bool
 }
@@ -112,6 +119,7 @@ type Broker struct {
 	brokerURL   string
 
 	managerProject string
+	managerSlug    string // the manager's scion agent slug (app name), ≠ the cert CN
 	groveToGrove   bool
 
 	mu           sync.Mutex
@@ -153,6 +161,9 @@ func New(c Config) *Broker {
 	for _, g := range c.Groves {
 		groves[g.Name] = g
 	}
+	if c.ManagerSlug == "" {
+		c.ManagerSlug = c.ManagerIdentity
+	}
 	return &Broker{
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
 		manager: c.ManagerIdentity, agents: agents,
@@ -162,7 +173,7 @@ func New(c Config) *Broker {
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
 		runtime: c.Runtime, groves: groves, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
-		managerProject: c.ManagerProject, groveToGrove: c.GroveToGrove,
+		managerProject: c.ManagerProject, managerSlug: c.ManagerSlug, groveToGrove: c.GroveToGrove,
 	}
 }
 

@@ -371,6 +371,21 @@ func TestValidateRejectsGroveNameCollidingWithManagerIdentity(t *testing.T) {
 	}
 }
 
+// A grove named like the APP would collide with the manager's scion agent slug
+// (the manager is dispatched as Grove: app.Name): with slug matching in the
+// broker's resolveMsgTarget, messages addressed to that grove would silently
+// route to the manager instead. Config validation must reject the collision.
+func TestValidateRejectsGroveNameCollidingWithAppName(t *testing.T) {
+	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: demo\n    dir: groves/demo\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("grove name colliding with the app name must be rejected")
+	}
+	if !strings.Contains(err.Error(), "collides with the manager agent") {
+		t.Errorf("error %q should mention 'collides with the manager agent'", err)
+	}
+}
+
 // manager.allow_ports opens host-loopback ports to the jailed agent — the
 // egress allowlist is the ONLY thing isolating the host-loopback admin API
 // (bootstrap/revoke/bump-epoch) from the guest, so listing the admin port

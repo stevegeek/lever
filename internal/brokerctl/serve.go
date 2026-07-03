@@ -61,6 +61,9 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	cfg.Groves = GroveSpecs(app, jailMount)
 	cfg.ManagerProject = jailMount
+	// The manager's scion agent slug is the APP NAME (apply's start-manager
+	// dispatches the manager as Grove: app.Name), not the manager cert CN.
+	cfg.ManagerSlug = app.Name
 	cfg.GroveToGrove = app.GroveToGroveMessaging()
 	if caPEM, err := os.ReadFile(state.CACert()); err == nil {
 		cfg.BrokerCAPEM = string(caPEM)

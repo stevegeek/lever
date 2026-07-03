@@ -470,6 +470,13 @@ func (a *App) Validate() error {
 		if g.Name == a.ManagerCN() {
 			return fmt.Errorf("config: grove name %q collides with the manager identity — a grove must not share the manager's CN", g.Name)
 		}
+		if g.Name == a.Name {
+			// The manager's scion agent slug IS the app name (apply dispatches
+			// it as Grove: app.Name), and the broker routes manager-recipient
+			// matches by slug — a grove named like the app would be shadowed
+			// (messages to it silently route to the manager).
+			return fmt.Errorf("config: grove name %q collides with the manager agent (the app name) — rename the grove or the app", g.Name)
+		}
 		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
 			return fmt.Errorf("config: grove dir %q must be relative and inside the tree", g.Dir)
 		}

@@ -2,12 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/config"
+	leverexec "github.com/lever-to/lever/internal/exec"
 )
 
 // writeTmpConfig writes a minimal app.yaml with a real tree directory structure
@@ -84,6 +87,53 @@ func TestApplyDryRun(t *testing.T) {
 	}
 	if !strings.Contains(got, "start-manager") {
 		t.Errorf("dry-run output should contain 'start-manager'; got:\n%s", got)
+	}
+}
+
+// TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner verifies the argv that
+// Deps.RemoveJailFile sends through the jail runner: a `sh -c` guard that
+// removes a marker FILE (never a directory) at the given jail-absolute path,
+// invoked as `sh -c '<script>' _ <jailPath>` so the removal shares the jail's
+// own filesystem view with the `scion init` that follows it (see
+// internal/apply/run.go's register-manager/register-grove case for the
+// VirtioFS unlink/init race this closes).
+func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := leverexec.NewFakeRunner()
+	f.Script("sh", leverexec.Result{Stdout: "ok"})
+	sb := &stubBackend{runner: f}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if deps.RemoveJailFile == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.RemoveJailFile")
+	}
+	if err := deps.RemoveJailFile(context.Background(), "/lever/.scion"); err != nil {
+		t.Fatalf("RemoveJailFile: %v", err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("expected exactly one jail-runner call, got %+v", f.Calls)
+	}
+	call := f.Calls[0]
+	if call.Name != "sh" {
+		t.Fatalf("call.Name = %q, want %q", call.Name, "sh")
+	}
+	if len(call.Args) != 4 || call.Args[0] != "-c" {
+		t.Fatalf("call.Args = %+v, want [-c <script> _ /lever/.scion]", call.Args)
+	}
+	script := call.Args[1]
+	if !strings.Contains(script, `[ ! -d "$1" ]`) || !strings.Contains(script, `rm -f -- "$1"`) {
+		t.Fatalf("script %q does not guard directories / use $1 for the target", script)
+	}
+	if call.Args[2] != "_" || call.Args[3] != "/lever/.scion" {
+		t.Fatalf("call.Args tail = %+v, want [_ /lever/.scion] (positional $1 via `sh -c script _ path`)", call.Args[2:])
 	}
 }
 

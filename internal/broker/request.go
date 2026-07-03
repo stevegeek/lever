@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lever-to/lever/internal/broker/registry"
 	"github.com/lever-to/lever/internal/cap/ca"
 	"github.com/lever-to/lever/internal/cap/token"
 )
@@ -25,10 +26,13 @@ type CapResponse struct {
 }
 
 // handleRequest mints a capability token after checking, in order: the caller's
-// identity (mTLS), the request/delegation policy (rules.MayObtain), the
-// operation is registered (registry.HasOperation), and the requested constraint
-// values are permitted (registry.ValidateConstraints). The token is bound to
-// BoundTo. Fails closed at every gate.
+// identity (mTLS); normalizing the op to the wildcard when the tool is
+// coarse-gated (registry has WildcardOp registered); the request/delegation
+// policy (rules.MayObtain, checked against the normalized op — no grant
+// widening, the caller must hold the exact {tool, op} grant); the operation
+// is registered (registry.HasOperation); and the requested constraint values
+// are permitted (registry.ValidateConstraints). The token is bound to
+// BoundTo and carries the normalized op. Fails closed at every gate.
 func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	caller, err := ca.RequireAgent(r)
 	if err != nil {
@@ -44,6 +48,18 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.BoundTo == "" {
 		req.BoundTo = caller // default: self-obtain
+	}
+	// Agents cannot know a tool's gate, so a fine-shaped request (a real MCP
+	// op name, e.g. "get_weather") against a coarse tool must be normalized to
+	// the wildcard op BEFORE the policy check. A tool exposes WildcardOp in
+	// the registry only when it is coarse-gated (an existing reviewed
+	// invariant enforced at registration), so this branch never fires for a
+	// fine tool. Crucially this does NOT widen the grant: MayObtain below
+	// still requires the caller to hold the exact {tool, "*"} grant, and the
+	// original op is preserved (requestedOp) purely for the audit trail.
+	requestedOp := req.Op
+	if b.reg.HasOperation(req.Tool, registry.WildcardOp) {
+		req.Op = registry.WildcardOp
 	}
 	if !b.rules.MayObtain(caller, req.BoundTo, req.Tool, req.Op) {
 		b.audit("request", caller, "deny", "policy: may not obtain/delegate")
@@ -78,5 +94,9 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(CapResponse{Token: base64.RawURLEncoding.EncodeToString(tok)})
-	b.audit("request", caller, "allow", req.Tool+"."+req.Op+"->"+req.BoundTo)
+	detail := req.Tool + "." + req.Op + "->" + req.BoundTo
+	if requestedOp != req.Op {
+		detail += " (op coerced: " + requestedOp + " -> " + req.Op + ")"
+	}
+	b.audit("request", caller, "allow", detail)
 }

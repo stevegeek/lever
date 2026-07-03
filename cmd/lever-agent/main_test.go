@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -329,5 +330,27 @@ func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
 	// Only _capability should be present
 	if len(args) != 1 {
 		t.Errorf("expected 1 argument (only _capability), got %d: %v", len(args), args)
+	}
+}
+
+// TestMCPAddArgsUsesUserScope pins the fix for the grove/manager MCP-wiring gap:
+// the pre-start hook runs `claude mcp add` from the agent home, but the claude
+// session runs in /workspace. `claude mcp add`'s default (local) scope is
+// keyed by CWD, so servers registered from the home are invisible to the
+// session. --scope user makes them global (CWD-independent) — required for both
+// the http broker tools and the stdio capability server.
+func TestMCPAddArgsUsesUserScope(t *testing.T) {
+	got := mcpAddArgs("db", []string{"--transport", "http", "https://broker/mcp/db/"})
+	want := []string{"mcp", "add", "--scope", "user", "db", "--transport", "http", "https://broker/mcp/db/"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("http tool args = %v, want %v", got, want)
+	}
+	// The stdio capability server must also be user-scoped.
+	cap := mcpAddArgs("lever-capability", []string{"lever-agent", "serve-capability"})
+	if strings.Join(cap[:4], " ") != "mcp add --scope user" {
+		t.Fatalf("capability server args must lead with `mcp add --scope user`, got %v", cap)
+	}
+	if cap[4] != "lever-capability" {
+		t.Fatalf("scope must precede the server name, got %v", cap)
 	}
 }

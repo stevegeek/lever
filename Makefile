@@ -51,9 +51,11 @@ lever-image-bins:
 		go build -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+		go build -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(LEVER_IMAGE_CTX)/scionhook/pre-start
-	@file $(LEVER_IMAGE_CTX)/bin/lever-agent $(LEVER_IMAGE_CTX)/bin/lever-tool-db
+	@file $(LEVER_IMAGE_CTX)/bin/lever-agent $(LEVER_IMAGE_CTX)/bin/lever-tool-db $(LEVER_IMAGE_CTX)/bin/lever-manager
 
 # Build + install both: host control plane (PATH) and the in-jail manager (instance tree).
 .PHONY: all

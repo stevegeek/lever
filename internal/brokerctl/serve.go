@@ -60,6 +60,8 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 	}
 	cfg.Groves = GroveSpecs(app, jailMount)
+	cfg.ManagerProject = jailMount
+	cfg.GroveToGrove = app.GroveToGroveMessaging()
 	if caPEM, err := os.ReadFile(state.CACert()); err == nil {
 		cfg.BrokerCAPEM = string(caPEM)
 	} else {

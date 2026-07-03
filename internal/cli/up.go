@@ -2,12 +2,44 @@ package cli
 
 import (
 	"context"
+	"strings"
 
 	"github.com/lever-to/lever/internal/apply"
 	"github.com/lever-to/lever/internal/config"
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
+
+// phaseOrAbsent treats a failed phase probe as "absent" (no manager found)
+// ONLY when the error carries the hub-unreachable signature — the
+// fresh-machine case: the hub is only started by apply's scion-server step,
+// so before the first apply `scion list` fails with "Hub at ... is not
+// responding: ... connection refused". That case must fall through to
+// upDecision (-> "apply"), not abort `up`.
+//
+// Every other probe error propagates unchanged: `lever apply` is NOT fully
+// idempotent (each run leaves a duplicate scion project-configs entry), so a
+// transient list failure (auth blip, malformed output) on an already-up
+// instance must not force a re-apply. This scoping also fails safe — if
+// scion's wording ever changes, we regress to the OLD behavior (error out),
+// never to a harmful forced re-apply.
+func phaseOrAbsent(phase string, err error) (string, error) {
+	if err == nil {
+		return phase, nil
+	}
+	if hubUnreachable(err) {
+		return "", nil
+	}
+	return "", err
+}
+
+// hubUnreachable reports whether err matches the fresh-machine signature of
+// `scion list` probing a hub that was never started (case-insensitive).
+func hubUnreachable(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "is not responding") ||
+		strings.Contains(msg, "connection refused")
+}
 
 // upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
 func upDecision(phase string, fresh bool) string {
@@ -45,9 +77,16 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			project := b.MountDest() // in-jail project path == mount root
 
-			phase, err := managerPhase(cmd.Context(), sc, project, app.Name)
+			phase, probeErr := managerPhase(cmd.Context(), sc, project, app.Name)
+			phase, err = phaseOrAbsent(phase, probeErr)
 			if err != nil {
-				return err
+				return err // non-hub-unreachable probe failure: do NOT force apply
+			}
+			if probeErr != nil {
+				// Hub unreachable = fresh machine (apply's scion-server step starts
+				// the hub), so the failed probe means "not up" — fall through to
+				// apply rather than dying.
+				cmd.Printf("manager phase probe failed (%v) — treating as not up, applying\n", probeErr)
 			}
 			switch upDecision(phase, fresh) {
 			case "restart":

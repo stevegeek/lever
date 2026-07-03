@@ -78,6 +78,13 @@ type Deps struct {
 	// for the VM-level acceptance gate (which drives lever-agent directly and
 	// never invokes scion). Default false = full bring-up (unchanged).
 	BrokerOnly bool
+	// RemoveJailFile removes a regular file at a jail-absolute path, through the
+	// jail's own filesystem view. Used for the stale `.scion` marker so the
+	// removal and the subsequent in-jail `scion init` cannot race across the
+	// host/guest VirtioFS boundary (a host-side unlink is not promptly visible
+	// to the guest's directory cache). Must NOT remove directories. nil ⇒ fall
+	// back to a host-side remove (tests, broker-only VM gate).
+	RemoveJailFile func(ctx context.Context, jailPath string) error
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
@@ -131,12 +138,31 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		// and `scion init` writes workspace_path only on fresh-create — resolving
 		// a stale marker skips it, so the agent mounts an empty managed config-dir
 		// copy instead of the live tree (the in-place mount silently breaks).
-		// Removing it forces a fresh, correct init. s.Target is the host path and
-		// the tree is bind-mounted, so a host-side remove reaches the jail.
-		if err := removeStaleMarker(s.Target); err != nil {
+		// Removing it forces a fresh, correct init.
+		//
+		// The tree is a VirtioFS bind mount: the host and the jail do not share
+		// one filesystem view/cache, so a host-side unlink is not promptly
+		// visible to the guest. Live-reproduced: removing the marker on the HOST
+		// then immediately running `scion init` IN the jail failed with
+		// "failed to initialize project: existing project marker is invalid:
+		// open /lever/.scion: no such file or directory" — scion's guest-side
+		// directory scan still saw the just-deleted marker, then the open()
+		// raced the host unlink and lost. Running the identical `scion init`
+		// manually in the jail moments later succeeded (same view, no race).
+		// So the removal must go THROUGH the jail's own filesystem view — the
+		// same view the subsequent in-jail init uses — which is what
+		// d.RemoveJailFile does. It is nil in tests and the broker-only VM gate
+		// (no jail filesystem view to remove through there), so fall back to
+		// the host-side remove, which still reaches the jail via the bind mount
+		// (just without the same-view guarantee).
+		jp := jailPath(s.Target, app.Tree, d.JailMount)
+		if d.RemoveJailFile != nil {
+			if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
+				return err
+			}
+		} else if err := removeStaleMarker(s.Target); err != nil {
 			return err
 		}
-		jp := jailPath(s.Target, app.Tree, d.JailMount)
 		if err := d.Scion.InitProject(ctx, jp); err != nil {
 			return err
 		}

@@ -120,6 +120,21 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		Scion:     sc,
 		JailMount: b.MountDest(),
 
+		// RemoveJailFile removes a regular file at a jail-absolute path THROUGH
+		// the jail runner, so the removal shares the jail's own filesystem view
+		// with the `scion init` that follows it in the register step (see the
+		// comment at the register-manager/register-grove case in
+		// internal/apply/run.go for the VirtioFS unlink/init race this closes).
+		// The guard leaves directories untouched and is a no-op if the path is
+		// already absent, mirroring removeStaleMarker's host-side semantics.
+		RemoveJailFile: func(ctx context.Context, jailPath string) error {
+			const script = `if [ ! -d "$1" ] && [ -e "$1" ]; then rm -f -- "$1"; fi`
+			if _, err := jr.Run(ctx, nil, "sh", "-c", script, "_", jailPath); err != nil {
+				return fmt.Errorf("removing stale marker %s in jail: %w", jailPath, err)
+			}
+			return nil
+		},
+
 		// StartBroker spawns `lever broker serve <config>` detached from the
 		// current process group so it outlives the apply invocation.
 		StartBroker: func(ctx context.Context) error {

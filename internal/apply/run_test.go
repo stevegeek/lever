@@ -464,6 +464,81 @@ func TestRegisterRemovesStaleMarkerBeforeInit(t *testing.T) {
 	}
 }
 
+// TestRegisterRemovesMarkerThroughJailWhenProvided: when Deps.RemoveJailFile is
+// set, the register step must remove the stale marker THROUGH it (jail-
+// absolute path), NOT rely on the host-side removeStaleMarker fallback. We
+// prove "not relied on" by making the fake RemoveJailFile a no-op on the real
+// host file: if the code still worked correctly (init ran, no error) while the
+// host-side marker file is left physically in place, the host-side remove was
+// not part of the path taken.
+func TestRegisterRemovesMarkerThroughJailWhenProvided(t *testing.T) {
+	tree := t.TempDir()
+	marker := filepath.Join(tree, ".scion")
+	if err := os.WriteFile(marker, []byte("project-id: stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	var calls []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		RemoveJailFile: func(_ context.Context, jailPath string) error {
+			calls = append(calls, jailPath)
+			return nil // deliberately does NOT touch the host file
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(calls) != 1 || calls[0] != "/lever/.scion" {
+		t.Fatalf("RemoveJailFile calls = %+v, want exactly one call with \"/lever/.scion\"", calls)
+	}
+	// The host-side marker must still be there — proving the host-side
+	// removeStaleMarker fallback was NOT exercised alongside RemoveJailFile.
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("host marker should be untouched when RemoveJailFile handles removal, stat err=%v", err)
+	}
+}
+
+// TestRegisterHostFallbackWhenRemoveJailFileNil pins the pre-existing
+// host-side behavior (RemoveJailFile nil, e.g. tests / the broker-only VM
+// gate): removeStaleMarker(s.Target) still runs and the marker is gone by the
+// time `scion init` runs. This is a regression guard alongside the existing
+// TestRegisterRemovesStaleMarkerBeforeInit test.
+func TestRegisterHostFallbackWhenRemoveJailFileNil(t *testing.T) {
+	tree := t.TempDir()
+	marker := filepath.Join(tree, ".scion")
+	if err := os.WriteFile(marker, []byte("project-id: stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		// RemoveJailFile intentionally left nil.
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("host-side fallback should have removed the marker, stat err=%v", err)
+	}
+}
+
 func TestRegisterUsesJailPaths(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
 	f := exec.NewFakeRunner()

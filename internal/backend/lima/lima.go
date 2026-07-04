@@ -40,6 +40,7 @@ type Lima struct {
 	aliasV6 string
 	runUser string // resolved via `limactl shell <vm> whoami`
 	runUID  string // resolved via `limactl shell <vm> id -u`
+	created bool   // set by ensureVM: true only on the createVM path
 }
 
 func New(r exec.Runner, vm string) *Lima { return &Lima{r: r, vm: vm} }
@@ -167,7 +168,10 @@ func (l *Lima) ensureVM(ctx context.Context, projectTree string) error {
 		if err := l.createVM(ctx, projectTree); err != nil {
 			return err
 		}
+		l.created = true
 		status = "Stopped" // freshly created, not yet started
+	} else {
+		l.created = false
 	}
 	// Verify the REALIZED containment config on every path that reaches a
 	// live VM — a fresh create (belt-and-braces: a global lima config could
@@ -425,6 +429,10 @@ func (l *Lima) MountDest() string { return mountDest }
 
 // MachineName returns the jail VM name this backend targets.
 func (l *Lima) MachineName() string { return l.vm }
+
+// Created reports whether ensureVM took the createVM path this run
+// (backend.Backend.Created — see there for the full contract).
+func (l *Lima) Created() bool { return l.created }
 
 // RunUser returns the in-VM run user resolved by EnsureUp (valid after EnsureUp).
 func (l *Lima) RunUser() string { return l.runUser }

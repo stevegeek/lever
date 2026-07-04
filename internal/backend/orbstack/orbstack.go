@@ -50,6 +50,7 @@ type OrbStack struct {
 	aliasV6 string
 	runUser string // resolved via `orb -m <machine> whoami`
 	runUID  string // resolved via `orb -m <machine> id -u`
+	created bool   // set by ensureMachine: true only on the `orb create` path
 }
 
 func New(r exec.Runner, machine string) *OrbStack { return &OrbStack{r: r, machine: machine} }
@@ -201,6 +202,7 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 		return fmt.Errorf("orb list: %w", err)
 	}
 	if status, found := machineStatus(res.Stdout, o.machine); found {
+		o.created = false
 		if strings.EqualFold(status, "running") {
 			// Idempotent: already up (and we cannot alter the mount after
 			// creation, so no action is taken here). To change the project
@@ -219,6 +221,7 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 	if _, err := o.r.Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.machine); err != nil {
 		return fmt.Errorf("orb create: %w", err)
 	}
+	o.created = true
 	return nil
 }
 
@@ -320,6 +323,10 @@ func (o *OrbStack) MountDest() string { return mountDest }
 
 // MachineName returns the jail machine name this backend targets.
 func (o *OrbStack) MachineName() string { return o.machine }
+
+// Created reports whether ensureMachine took the `orb create` path this run
+// (backend.Backend.Created — see there for the full contract).
+func (o *OrbStack) Created() bool { return o.created }
 
 // RunUser returns the in-machine run user resolved by EnsureUp (valid after EnsureUp).
 func (o *OrbStack) RunUser() string { return o.runUser }

@@ -11,6 +11,7 @@ import (
 
 type stubBackend struct {
 	up, down, stopped bool
+	created           bool // settable; Created() reports it, default false
 	scionState        backend.ScionProjectState
 	scionErr          error
 	resolveRunUserErr error            // when set, ResolveRunUser returns it instead of nil
@@ -27,6 +28,7 @@ func (s *stubBackend) Stop(context.Context) error                     { s.stoppe
 func (s *stubBackend) Profile() backend.Profile                       { return backend.Profile{Name: "stub"} }
 func (s *stubBackend) HostAliasV4() string                            { return "" }
 func (s *stubBackend) MachineName() string                            { return "lever-stub" }
+func (s *stubBackend) Created() bool                                  { return s.created }
 func (s *stubBackend) RunUser() string                                { return "stub" }
 func (s *stubBackend) RunUID() string                                 { return "501" }
 func (s *stubBackend) ResolveRunUser(context.Context) error           { return s.resolveRunUserErr }

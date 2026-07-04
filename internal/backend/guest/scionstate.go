@@ -44,7 +44,22 @@ done
 // no-op when nothing matches. wp is a lever constant (/lever or
 // /lever/groves/<sanitized-name>), never user input.
 func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
-	script := `
+	args := append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", scionConfigRemoveScript(wp))
+	if _, err := g.Host.Run(ctx, nil, g.UserPrefix[0], args...); err != nil {
+		return fmt.Errorf("guest: remove scion project configs for %s: %w", wp, err)
+	}
+	return nil
+}
+
+// scionConfigRemoveScript is the exact bash body RemoveScionProjectConfigs
+// runs in the guest (shared with the real-bash test so the deletion logic is
+// exercised, not just string-matched). It globs every project-configs entry,
+// reads its workspace_path, and rm -rf's the entry dir (two levels up from
+// settings.yaml) when it matches wp. Entries without a workspace_path line, or
+// with a different one, are left untouched. Idempotent (a spent glob is a
+// no-op). wp is single-quoted; it is a lever constant, never user input.
+func scionConfigRemoveScript(wp string) string {
+	return `
 target=` + shellSingleQuote(wp) + `
 for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
   [ -e "$s" ] || continue
@@ -52,11 +67,6 @@ for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
   if [ "$cur" = "$target" ]; then rm -rf "$(dirname "$(dirname "$s")")"; fi
 done
 `
-	args := append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", script)
-	if _, err := g.Host.Run(ctx, nil, g.UserPrefix[0], args...); err != nil {
-		return fmt.Errorf("guest: remove scion project configs for %s: %w", wp, err)
-	}
-	return nil
 }
 
 // parseScionState turns the report lines into a ScionProjectState. Unknown or

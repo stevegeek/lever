@@ -2,10 +2,13 @@ package guest
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/exec"
+	leverexec "github.com/lever-to/lever/internal/exec"
 )
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {
@@ -61,8 +64,8 @@ func TestParseScionStateIgnoresJunk(t *testing.T) {
 func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 	for _, shape := range prefixShapes("lever-x") {
 		t.Run(shape.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " "), exec.Result{})
+			f := leverexec.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " "), leverexec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix}
 
 			if err := g.RemoveScionProjectConfigs(context.Background(), "/lever/groves/scratch"); err != nil {
@@ -94,10 +97,82 @@ func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 // swallows) a failure of the guest command itself, mirroring
 // ReadScionProjectState's error handling.
 func TestRemoveScionProjectConfigsErrorsOnGuestFailure(t *testing.T) {
-	f := exec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
+	f := leverexec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
 
 	if err := g.RemoveScionProjectConfigs(context.Background(), "/lever"); err == nil {
 		t.Fatal("expected an error when the guest command fails, got nil")
+	}
+}
+
+// writeProjectConfig creates $HOME/.scion/project-configs/<name>/.scion/settings.yaml
+// with the given workspace_path (empty ⇒ no workspace_path line at all).
+func writeProjectConfig(t *testing.T, home, name, workspacePath string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".scion", "project-configs", name, ".scion")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "project_id: " + name + "\n"
+	if workspacePath != "" {
+		body += "workspace_path: " + workspacePath + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(home, ".scion", "project-configs", name)
+}
+
+// TestScionConfigRemoveScriptDeletesOnlyMatches runs the ACTUAL bash body
+// (shared with prod via scionConfigRemoveScript) against a real temp
+// filesystem, because substring assertions can't prove a destructive `rm -rf`
+// deletes the right dirs and only those. It verifies exact-match scoping, the
+// glob-anchored dirname derivation, that no-workspace_path entries are spared,
+// and idempotency.
+func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	home := t.TempDir()
+
+	// Two entries claim /lever (the accumulation this fix targets), one claims
+	// the grove path, one has no workspace_path line at all.
+	mgr1 := writeProjectConfig(t, home, "lever__aaaa1111", "/lever")
+	mgr2 := writeProjectConfig(t, home, "lever__bbbb2222", "/lever")
+	grove := writeProjectConfig(t, home, "worker__cccc3333", "/lever/groves/worker")
+	noWP := writeProjectConfig(t, home, "legacy__dddd4444", "")
+
+	run := func() {
+		t.Helper()
+		cmd := exec.Command("bash", "-lc", scionConfigRemoveScript("/lever"))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("script failed: %v\n%s", err, out)
+		}
+	}
+
+	run()
+
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
+	if exists(mgr1) {
+		t.Errorf("mgr1 (%s) should have been removed", mgr1)
+	}
+	if exists(mgr2) {
+		t.Errorf("mgr2 (%s) should have been removed", mgr2)
+	}
+	if !exists(grove) {
+		t.Errorf("grove (%s, workspace_path /lever/groves/worker) must survive an exact-match /lever removal", grove)
+	}
+	if !exists(noWP) {
+		t.Errorf("no-workspace_path entry (%s) must survive", noWP)
+	}
+
+	// Idempotent: a second run removes nothing more and doesn't error.
+	run()
+	if exists(mgr1) || exists(mgr2) {
+		t.Error("second run should keep the /lever entries removed")
+	}
+	if !exists(grove) || !exists(noWP) {
+		t.Error("second run must not touch the surviving entries")
 	}
 }

@@ -131,7 +131,29 @@ You'll see the ordered plan:
   start-manager           hello-grove
 ```
 
-## 4. Bring it up
+## 4. Scaffold the operator skills (`lever init`)
+
+Lever ships SKILL.md files that teach your agents how to operate inside the
+jail — the capability flow (mint via `lever-capability`, attach the token as
+`_capability` on every gated call), messaging, and grove dispatch. Scaffold
+them into your instance tree:
+
+```sh
+lever init
+```
+
+This writes `.claude/skills/lever-operator/` at the tree root (the manager
+discovers it there), `.claude/skills/lever-agent/` inside each declared grove
+directory, and adds a marked reference block to your tree-root `CLAUDE.md`.
+The files are yours: they're plain markdown in your tree, stamped with the
+lever version they came from.
+
+Re-run `lever init` after upgrading lever or adding a grove — unmodified
+files are refreshed in place, while files you've edited are left alone with
+a warning (`--force` overwrites them). `lever init --check` reports staleness
+without writing, and `lever doctor` includes the same check.
+
+## 5. Bring it up
 
 ```sh
 lever up
@@ -154,7 +176,7 @@ If something looks wrong, `lever doctor` runs real health checks (broker alive, 
 backends reachable, the manager credential file's presence/size/mode, scion project-registration
 consistency) and prints a fix hint per failure.
 
-## 5. Dispatch a grove (inside the manager session)
+## 6. Dispatch a grove (inside the manager session)
 
 You're now talking to the manager agent. It drives groves with the in-jail `lever-manager` binary
 (baked into the image, already on `PATH`). A dispatch looks like:
@@ -196,7 +218,7 @@ hands you the manager's; omit the name to attach to the manager.
 When `worker` finishes, the file it wrote (`groves/worker/haiku.md`) is there on your host, it was
 mounted in place.
 
-## 6. Give an agent an MCP server (the various ways)
+## 7. Give an agent an MCP server (the various ways)
 
 Agents get real power from MCP (Model Context Protocol) servers — calendars, search, a database,
 your own tools. But an MCP server runs on your host, and the jail's whole point is that a
@@ -320,7 +342,7 @@ Start with **A** to get moving; move a server to **B** when you want it scoped p
 and off the ambient allowlist. See [config-reference.md](/reference/config/) for every key and
 [security-model.md](/security-model/) for what the gate does and doesn't protect.
 
-## 7. Detach, stop, or destroy
+## 8. Detach, stop, or destroy
 
 Three levels, from lightest to heaviest:
 

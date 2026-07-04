@@ -320,15 +320,34 @@ Start with **A** to get moving; move a server to **B** when you want it scoped p
 and off the ambient allowlist. See [config-reference.md](/reference/config/) for every key and
 [security-model.md](/security-model/) for what the gate does and doesn't protect.
 
-## 7. Tear down
+## 7. Detach, stop, or destroy
+
+Three levels, from lightest to heaviest:
+
+| | detach | `lever stop` | `lever destroy` |
+|---|---|---|---|
+| What happens | leave your TTY (`Ctrl-b d`) | power the jail machine off | delete the jail machine |
+| Manager state | suspended, in memory | suspended, then the VM halts | gone |
+| Disk (image, containers) | untouched | untouched | deleted |
+| Host broker | still running | stopped | stopped, staged state cleared |
+| Resume with | `lever up` / `lever attach` | `lever up` (powers the machine back on) | `lever up` (full re-provision) |
 
 ```sh
-lever down
+lever stop
 ```
 
-`down` removes the jail machine named `lever-<name>` (derived from the config, run it inside the
-instance, or pass `--machine`). Your tree on disk is untouched; only the jail goes away. The next
-`lever up` re-provisions it.
+`stop` best-effort suspends the manager (skipped if the jail isn't reachable — a halted machine is
+still stoppable), stops the host broker, then powers the jail machine off. The disk is preserved, so
+the next `lever up` resumes fast — no reinstall, no re-apply.
+
+```sh
+lever destroy
+```
+
+`destroy` removes the jail machine named `lever-<name>` (derived from the config, run it inside the
+instance, or pass `--machine`). Your tree on disk is untouched; only the jail goes away, along with
+its staged runtime state. The next `lever up` re-provisions it from scratch. (`lever down` still
+works as a deprecated alias of `destroy`.)
 
 ## Where to go next
 

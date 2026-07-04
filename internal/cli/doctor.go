@@ -62,6 +62,8 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
 				checkExternalBackends(app.Broker.Tools, tcpDial),
 				checkCredentialFile(app.Manager.CredentialFile),
+				checkMcpJsonInTree(app.Tree),
+				checkGoToolchain(app.Scion),
 				scion,
 			}
 			failed := 0

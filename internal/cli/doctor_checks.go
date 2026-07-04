@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -150,4 +154,71 @@ func checkCredentialFile(path string) checkResult {
 	default:
 		return checkResult{name, true, fmt.Sprintf("%s (%d bytes, mode %04o)", path, fi.Size(), fi.Mode().Perm()), ""}
 	}
+}
+
+// checkMcpJsonInTree flags any .mcp.json anywhere under the host tree.
+// Claude auto-loads a .mcp.json as PROJECT scope inside every jailed agent,
+// which collides with the brokered USER-scope tools lever-agent registers
+// (duplicate localhost:PORT endpoints vs the broker's) — a real bug hit in
+// production. Walks the whole tree (not just the top level); unreadable
+// directories are skipped rather than failing the check outright.
+func checkMcpJsonInTree(tree string) checkResult {
+	const name = "no stray .mcp.json in tree"
+	var found []string
+	_ = filepath.WalkDir(tree, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// Unreadable entry (permissions, race): skip it, don't abort the walk.
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() && d.Name() == ".mcp.json" {
+			found = append(found, path)
+		}
+		return nil
+	})
+	if len(found) > 0 {
+		return checkResult{name, false, "found: " + strings.Join(found, ", "),
+			"remove it — brokered MCP tools are registered at user scope by lever-agent; a .mcp.json in the tree re-adds ambient project-scope endpoints and conflicts"}
+	}
+	return checkResult{name, true, "none in tree", ""}
+}
+
+// goVersionProbe resolves and runs `go version` on the host PATH. It is a
+// package-level var so tests can inject a fake outcome (mirrors dialFunc).
+// The production implementation distinguishes "not on PATH at all" from "on
+// PATH but broken" (e.g. a dead asdf/mise shim, which typically fails with
+// exit status 126) by resolving via exec.LookPath first.
+var goVersionProbe = func() (string, error) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, goBin, "version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s version: %w", goBin, err)
+	}
+	return string(out), nil
+}
+
+// checkGoToolchain verifies a real, working Go toolchain is resolvable on
+// PATH when scion needs to be cross-compiled (source checkout or a pinned
+// module version) — `lever up`/`apply` shell out to `go` for that build. A
+// broken shim (e.g. asdf/mise without the version installed) fails with an
+// opaque "exit status 126" deep inside apply; this turns it into an
+// up-front, actionable diagnosis. No build requested => no go needed => pass.
+func checkGoToolchain(scion config.ScionConfig) checkResult {
+	const name = "go toolchain"
+	if scion.Source == "" && scion.Version == "" {
+		return checkResult{name, true, "scion build not required", ""}
+	}
+	out, err := goVersionProbe()
+	if err != nil {
+		return checkResult{name, false, "go toolchain not usable: " + err.Error(),
+			`put a REAL Go toolchain on PATH (not just an asdf/mise shim), e.g. export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"; ` + "`go version` should print"}
+	}
+	return checkResult{name, true, strings.TrimSpace(out), ""}
 }

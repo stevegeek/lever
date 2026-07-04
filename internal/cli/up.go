@@ -103,8 +103,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// The probe error proves the manager isn't up (hub down = fresh
 				// machine; project 404 = never hub-registered) — fall through to
 				// apply, which starts the hub / registers the manager, rather
-				// than dying.
-				cmd.Printf("manager phase probe failed (%v) — treating as not up, applying\n", probeErr)
+				// than dying. probeErr is scion's raw CLI error, which on a
+				// fresh machine includes scion's entire usage dump after the
+				// first line — keep only that first line so a normal fresh
+				// bring-up doesn't print a scary wall of text.
+				cmd.Printf("No running manager (%s) — bringing the application up.\n", firstLine(probeErr.Error()))
 			}
 			switch upDecision(phase, fresh) {
 			case "restart":
@@ -132,6 +135,16 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
 	return c
+}
+
+// firstLine returns the first line of s, trimmed of surrounding whitespace.
+// Used to keep scion's raw CLI errors — which can carry an entire usage dump
+// after the first line — down to one short, printable reason.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {

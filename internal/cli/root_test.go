@@ -17,12 +17,16 @@ func names(root *cobra.Command) map[string]bool {
 
 func TestHostRootHasProvisioningOnly(t *testing.T) {
 	n := names(NewHostRoot())
-	for _, want := range []string{"up", "apply", "down", "doctor", "provision", "version"} {
+	// msg is deliberately on BOTH roots: the host's is operator-authority,
+	// fire-and-forget, no-broker-hop (attachTarget + scion.Client.Message
+	// directly); the manager's is broker-routed send+list. Different trust
+	// models, same verb name.
+	for _, want := range []string{"up", "apply", "down", "doctor", "provision", "attach", "msg", "version"} {
 		if !n[want] {
 			t.Errorf("host root missing %q", want)
 		}
 	}
-	for _, unwanted := range []string{"agent", "msg", "watch"} {
+	for _, unwanted := range []string{"agent", "watch"} {
 		if n[unwanted] {
 			t.Errorf("host root should not have %q", unwanted)
 		}

@@ -69,6 +69,38 @@ type BootstrapMaterial struct {
 	AgentCN   string `json:"agent_cn"`
 }
 
+// bootTracker threads the manager's bootstrap material through Run's steps,
+// AND records whether THIS apply run actually minted fresh material (as
+// opposed to the mint-manager-bootstrap step tolerating an already-spent
+// latch — e.g. an idempotent re-apply against the same broker process; see
+// ErrBootstrapLatched). start-manager's create path needs exactly that
+// "did we mint fresh material this run" signal: relying on BootstrapMaterial's
+// zero value would work today (the tolerate-latch path never assigns it), but
+// that's an implicit contract worth making explicit rather than fragile.
+type bootTracker struct {
+	material BootstrapMaterial
+	minted   bool
+}
+
+// StageBootstrapMaterial writes m as the manager's one-time enrolment ticket
+// into treeDir/.lever/bootstrap.json (0600) — the path lever-agent boot reads
+// by convention (see start-manager's LEVER_BOOTSTRAP comment below). This is
+// the ONE staging code path, shared by the mint-manager-bootstrap step and
+// start-manager's create-path re-arm (Deps.RearmBootstrap, implemented by the
+// CLI, which stages directly into the tree since start-manager's Step.Target
+// is the manager's slug, not the tree dir — see jailPath/Plan).
+func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
+	dir := filepath.Join(treeDir, ".lever")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "bootstrap.json"), b, 0o600)
+}
+
 // Deps are the executor's collaborators, injected so Run is testable offline.
 // JailUp/LoadImage are host-side (backend.EnsureUp, docker-save|podman-load);
 // Scion runs IN the jail (built on a JailRunner).
@@ -81,6 +113,14 @@ type Deps struct {
 	StartBroker          func(ctx context.Context) error
 	BrokerHealthy        func(ctx context.Context) error
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
+	// RearmBootstrap restarts the broker (re-arming its single-use /bootstrap
+	// latch; broker CA + signing keys persist on disk so existing agent certs
+	// and capability tokens survive the restart), then mints AND STAGES fresh
+	// bootstrap material exactly like the mint-manager-bootstrap step. Called
+	// by start-manager's create path when no fresh material was minted this
+	// apply (the mint step tolerated a spent latch). nil => the create path
+	// proceeds without re-arm (tests; and resume paths never need it).
+	RearmBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 	// BrokerOnly reduces the bring-up to {jail-up, broker-up, mint-manager-bootstrap}
 	// for the VM-level acceptance gate (which drives lever-agent directly and
 	// never invokes scion). Default false = full bring-up (unchanged).
@@ -132,7 +172,7 @@ func logf(d Deps, format string, args ...any) {
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
 // rest run in the jail via Deps.Scion.
 func Run(ctx context.Context, app *config.App, d Deps) error {
-	var boot BootstrapMaterial
+	var boot bootTracker
 	for _, step := range Plan(app, PlanOpts{BrokerOnly: d.BrokerOnly}) {
 		if err := runStep(ctx, app, step, d, &boot); err != nil {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
@@ -141,7 +181,7 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 	return nil
 }
 
-func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *BootstrapMaterial) error {
+func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTracker) error {
 	switch s.Kind {
 	case "jail-up":
 		return d.JailUp(ctx, app)
@@ -262,17 +302,10 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			}
 			return err
 		}
-		*boot = m
+		boot.material = m
+		boot.minted = true
 		// Deposit it as a 0600 file in the mount (the lever-agent reads it).
-		dir := filepath.Join(s.Target, ".lever")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		b, err := json.Marshal(m)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filepath.Join(dir, "bootstrap.json"), b, 0o600)
+		return StageBootstrapMaterial(s.Target, m)
 	case "start-manager":
 		task := ""
 		if p := app.ManagerPromptPath(); p != "" {
@@ -344,7 +377,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		}
 		switch {
 		case rec == nil:
-			if err := startManagerCreate(ctx, d, opts); err != nil {
+			if err := startManagerCreate(ctx, d, boot, opts); err != nil {
 				return err
 			}
 		case rec.Phase == "running":
@@ -369,7 +402,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 				if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
 					return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
 				}
-				if err := startManagerCreate(ctx, d, opts); err != nil {
+				if err := startManagerCreate(ctx, d, boot, opts); err != nil {
 					return err
 				}
 			}
@@ -390,7 +423,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
 				return fmt.Errorf("start-manager: manager in phase %q and delete failed: %w", rec.Phase, derr)
 			}
-			if err := startManagerCreate(ctx, d, opts); err != nil {
+			if err := startManagerCreate(ctx, d, boot, opts); err != nil {
 				return err
 			}
 		}
@@ -432,8 +465,24 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 // Evidence base). Shared by the absent-record branch and the post-delete
 // recovery branches above (a failed resume, or an unresumable phase, falls
 // back to exactly this same create path), so all three take the identical
-// retry behavior.
-func startManagerCreate(ctx context.Context, d Deps, opts scion.StartOpts) error {
+// retry behavior — including the bootstrap re-arm below, which is why it
+// lives HERE rather than duplicated at each of the three call sites.
+//
+// A freshly-created scion agent record has no agent home to reuse (unlike
+// resume, which restores an existing one — see the resume-reconciliation
+// plan's Evidence base), so lever-agent boot ALWAYS re-enrols after a create.
+// If the broker's single-use /bootstrap latch was already consumed by an
+// earlier apply against this same broker process (mint-manager-bootstrap
+// tolerated ErrBootstrapLatched — see its doc — leaving boot.minted false),
+// a plain create is guaranteed to 403 and the container exits 1. So: before
+// Start, ensure this apply run has fresh, enrolable material — either it was
+// already minted earlier in this same run (boot.minted, e.g.
+// mint-manager-bootstrap succeeded outright, or an earlier create in this
+// same Run already re-armed), or d.RearmBootstrap mints one now.
+func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts scion.StartOpts) error {
+	if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+		return err
+	}
 	return retryOnBrokerUnavailable(ctx, func() error {
 		startErr := d.Scion.Start(ctx, opts)
 		// Idempotent: a manager already running/existing (re-apply, or a
@@ -443,6 +492,31 @@ func startManagerCreate(ctx context.Context, d Deps, opts scion.StartOpts) error
 		}
 		return startErr
 	})
+}
+
+// ensureFreshBootstrap guarantees fresh, enrolable bootstrap material exists
+// before a create-path Start. If this apply run already minted fresh
+// material (boot.minted), it's a no-op. Otherwise, when d.RearmBootstrap is
+// set, it re-arms the broker's spent latch and mints+stages fresh material
+// (recording it into *boot so a SECOND create in the same Run — e.g. a
+// failed-resume recovery that immediately re-creates — does not re-arm
+// twice). d.RearmBootstrap == nil is tolerated (tests, and the broker-only VM
+// acceptance gate, which never reaches start-manager at all): the create path
+// proceeds unguarded, matching pre-fix behavior. A non-nil RearmBootstrap that
+// itself fails is a hard error — a create without enrolable bootstrap is
+// guaranteed to 403, so failing loudly now is strictly better than booting a
+// manager doomed to crash-loop.
+func ensureFreshBootstrap(ctx context.Context, d Deps, boot *bootTracker) error {
+	if boot.minted || d.RearmBootstrap == nil {
+		return nil
+	}
+	m, err := d.RearmBootstrap(ctx)
+	if err != nil {
+		return fmt.Errorf("start-manager: re-arming the broker's spent bootstrap latch: %w", err)
+	}
+	boot.material = m
+	boot.minted = true
+	return nil
 }
 
 // managerLiveAttempts/managerLiveInterval bound waitManagerLive's post-start

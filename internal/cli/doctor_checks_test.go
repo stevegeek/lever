@@ -273,3 +273,48 @@ func TestCheckMcpJsonInTreeNested(t *testing.T) {
 		t.Fatalf("detail must name the nested offending path: %q", r.detail)
 	}
 }
+
+// TestCheckGoToolchain covers the real pain point Stephen hit: `lever
+// up`/`apply` cross-compile scion and shell out to `go`, and an asdf shim on
+// PATH that isn't actually resolvable blows up as "exit status 126" deep
+// inside apply instead of an up-front, actionable diagnosis.
+func TestCheckGoToolchainBuildNotRequired(t *testing.T) {
+	r := checkGoToolchain(config.ScionConfig{})
+	if !r.ok {
+		t.Fatalf("no source and no version pinned => no build => pass; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "not required") {
+		t.Fatalf("detail should say a build isn't required: %q", r.detail)
+	}
+}
+
+func TestCheckGoToolchainProbeOK(t *testing.T) {
+	orig := goVersionProbe
+	defer func() { goVersionProbe = orig }()
+	goVersionProbe = func() (string, error) { return "go version go1.26.4 darwin/arm64\n", nil }
+
+	r := checkGoToolchain(config.ScionConfig{Version: "666333f9"})
+	if !r.ok {
+		t.Fatalf("a working go on PATH must pass; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "go1.26.4") {
+		t.Fatalf("detail should report the go version: %q", r.detail)
+	}
+}
+
+func TestCheckGoToolchainProbeError(t *testing.T) {
+	orig := goVersionProbe
+	defer func() { goVersionProbe = orig }()
+	goVersionProbe = func() (string, error) { return "", errors.New("exit status 126") }
+
+	r := checkGoToolchain(config.ScionConfig{Source: "/Users/stephen/ai/scion"})
+	if r.ok {
+		t.Fatal("a broken go (e.g. a dead asdf shim) must fail the check")
+	}
+	if !strings.Contains(r.detail, "126") {
+		t.Fatalf("detail should name the underlying error: %q", r.detail)
+	}
+	if !strings.Contains(r.fix, "PATH") {
+		t.Fatalf("fix should point at PATH: %q", r.fix)
+	}
+}

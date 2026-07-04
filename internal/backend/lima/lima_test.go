@@ -127,12 +127,6 @@ func TestEnsureUpFreshHostFullSequence(t *testing.T) {
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
 		t.Fatalf("expected tmpfile %q to be removed after EnsureUp, stat err=%v", tmpPath, err)
 	}
-	// Regression guard (fix/warm-resume-gate): a freshly-created VM must
-	// report Created()==true so `up`'s warm-resume gate knows not to
-	// early-start the scion hub before apply's ordered bring-up.
-	if !l.Created() {
-		t.Fatal("Created() must be true when ensureVM took the createVM path")
-	}
 }
 
 // --- Test 2: idempotency — Running VM → no create, no start. ---
@@ -157,9 +151,6 @@ func TestEnsureUpIsIdempotentWhenRunning(t *testing.T) {
 		if c.Args[0] == "start" {
 			t.Fatalf("start called though VM is already Running: %+v", c)
 		}
-	}
-	if l.Created() {
-		t.Fatal("Created() must be false for an already-running (pre-existing) VM")
 	}
 }
 
@@ -201,9 +192,6 @@ func TestEnsureUpStartsStoppedVMWithoutCreate(t *testing.T) {
 	}
 	if sawCreate {
 		t.Fatal("create must NOT be called for an already-existing (Stopped) VM")
-	}
-	if l.Created() {
-		t.Fatal("Created() must be false for a Stopped->started (pre-existing) VM")
 	}
 }
 

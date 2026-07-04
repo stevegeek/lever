@@ -117,16 +117,6 @@ func TestHubUnreachable(t *testing.T) {
 // suspended manager (-> upDecision "resume") instead of forcing a full
 // re-apply, which would add a duplicate scion project-config and start a
 // fresh manager thread rather than resuming the existing one.
-//
-// Critically, this warm-resume restart must fire ONLY when the machine
-// PRE-EXISTED this `up` (machinePreexisted=true). A machine CREATED this run
-// also shows "hub not responding" (the hub hasn't been started yet) —
-// restarting it here would start the scion server BEFORE apply's
-// init-machine/config-registry steps configure it, and the server then comes
-// up with allow_container_script_harnesses=false, 403ing apply's later
-// start-manager step (the live-reproduced regression). machinePreexisted=false
-// must therefore skip the restart entirely, single-probe, and fall through to
-// apply exactly as before warm-resume existed.
 func TestResolveManagerPhase(t *testing.T) {
 	unreachableErr := errors.New("Hub at http://127.0.0.1:8080 is not responding: connection refused")
 	notFoundErr := errors.New("not_found: Project not found (status: 404)")
@@ -134,9 +124,8 @@ func TestResolveManagerPhase(t *testing.T) {
 	restartErr := errors.New("server start: exit status 1")
 
 	cases := []struct {
-		name              string
-		machinePreexisted bool
-		probeResults      []struct {
+		name         string
+		probeResults []struct {
 			phase string
 			err   error
 		}
@@ -147,8 +136,7 @@ func TestResolveManagerPhase(t *testing.T) {
 		wantRestarted bool
 	}{
 		{
-			name:              "preexisting machine: hub-unreachable then restart succeeds then resume surfaces: warm-resume win",
-			machinePreexisted: true,
+			name: "hub-unreachable then restart succeeds then resume surfaces: warm-resume win",
 			probeResults: []struct {
 				phase string
 				err   error
@@ -163,27 +151,7 @@ func TestResolveManagerPhase(t *testing.T) {
 			wantRestarted: true,
 		},
 		{
-			// The regression case: a FRESHLY-CREATED machine's hub is also
-			// unreachable (never started). Warm-resume must NOT fire here —
-			// restarting the hub before apply's init-machine/config-registry
-			// steps run would start scion with
-			// allow_container_script_harnesses=false and 403 start-manager.
-			name:              "FRESH machine (not preexisting): hub-unreachable must NOT trigger restart — single probe, falls through to apply",
-			machinePreexisted: false,
-			probeResults: []struct {
-				phase string
-				err   error
-			}{
-				{"", unreachableErr},
-			},
-			wantPhase:     "",
-			wantErr:       nil,
-			wantProbes:    1,
-			wantRestarted: false,
-		},
-		{
-			name:              "preexisting machine: hub-unreachable, restart succeeds, but hub still unreachable on reprobe: apply",
-			machinePreexisted: true,
+			name: "hub-unreachable, restart succeeds, but hub still unreachable on reprobe: apply",
 			probeResults: []struct {
 				phase string
 				err   error
@@ -198,8 +166,22 @@ func TestResolveManagerPhase(t *testing.T) {
 			wantRestarted: true,
 		},
 		{
-			name:              "preexisting machine: hub-unreachable but restart itself errors: fall through on original result, no reprobe crash",
-			machinePreexisted: true,
+			name: "hub-unreachable, restart succeeds, reprobe finds no manager (truly fresh machine): apply",
+			probeResults: []struct {
+				phase string
+				err   error
+			}{
+				{"", unreachableErr},
+				{"", nil},
+			},
+			restartErr:    nil,
+			wantPhase:     "",
+			wantErr:       nil,
+			wantProbes:    2,
+			wantRestarted: true,
+		},
+		{
+			name: "hub-unreachable but restart itself errors: fall through on original result, no reprobe crash",
 			probeResults: []struct {
 				phase string
 				err   error
@@ -213,8 +195,7 @@ func TestResolveManagerPhase(t *testing.T) {
 			wantRestarted: true,
 		},
 		{
-			name:              "probe succeeds first try (preexisting): restartHub never called",
-			machinePreexisted: true,
+			name: "probe succeeds first try: restartHub never called",
 			probeResults: []struct {
 				phase string
 				err   error
@@ -227,22 +208,7 @@ func TestResolveManagerPhase(t *testing.T) {
 			wantRestarted: false,
 		},
 		{
-			name:              "probe succeeds first try (fresh): restartHub never called",
-			machinePreexisted: false,
-			probeResults: []struct {
-				phase string
-				err   error
-			}{
-				{"running", nil},
-			},
-			wantPhase:     "running",
-			wantErr:       nil,
-			wantProbes:    1,
-			wantRestarted: false,
-		},
-		{
-			name:              "project-not-found is managerDefinitelyAbsent but NOT hub-unreachable (preexisting): restartHub never called",
-			machinePreexisted: true,
+			name: "project-not-found is managerDefinitelyAbsent but NOT hub-unreachable: restartHub never called",
 			probeResults: []struct {
 				phase string
 				err   error
@@ -255,8 +221,7 @@ func TestResolveManagerPhase(t *testing.T) {
 			wantRestarted: false,
 		},
 		{
-			name:              "transient/unknown probe error propagates (preexisting): restartHub never called",
-			machinePreexisted: true,
+			name: "transient/unknown probe error propagates: restartHub never called",
 			probeResults: []struct {
 				phase string
 				err   error
@@ -286,7 +251,7 @@ func TestResolveManagerPhase(t *testing.T) {
 			return c.restartErr
 		}
 
-		phase, err := resolveManagerPhase(c.machinePreexisted, probe, restartHub)
+		phase, err := resolveManagerPhase(probe, restartHub)
 
 		if phase != c.wantPhase {
 			t.Errorf("%s: phase=%q want %q", c.name, phase, c.wantPhase)

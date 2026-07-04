@@ -25,6 +25,7 @@ func (s State) BrokerPub() string  { return filepath.Join(s.Dir, "broker.pub") }
 func (s State) Revocation() string { return filepath.Join(s.Dir, "revocation.json") }
 func (s State) PID() string        { return filepath.Join(s.Dir, "broker.pid") }
 func (s State) Log() string        { return filepath.Join(s.Dir, "broker.log") }
+func (s State) OutLog() string     { return filepath.Join(s.Dir, "broker.out.log") }
 
 // EnsureKeys loads the CA + capability-signing root keypair from the state dir, generating
 // and persisting them (0600 secrets) on first use. Reused across restarts so

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,6 +19,35 @@ import (
 	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
 )
+
+// brokerServeCmd builds the detached `lever broker serve` command: its OWN
+// session (Setsid — survives the parent terminal/session, no controlling TTY),
+// stdout+stderr appended to outLog (so a bind failure or panic is inspectable,
+// not discarded), and the env the broker needs to issue its cert + reach the
+// jail. The pid file is written by the serve process itself (Task 1), not here.
+func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (*exec.Cmd, *os.File, error) {
+	// On a fresh apply the state dir (.lever-state) does not exist yet — it's
+	// created by EnsureKeys inside the spawned child, too late for this open —
+	// so create the log's parent here or the whole bring-up hard-fails at
+	// broker-up before the broker is ever spawned.
+	if err := os.MkdirAll(filepath.Dir(outLog), 0o700); err != nil {
+		return nil, nil, fmt.Errorf("broker out log dir: %w", err)
+	}
+	f, err := os.OpenFile(outLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("broker out log: %w", err)
+	}
+	cmd := exec.Command(self, "broker", "serve", configPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Env = append(os.Environ(),
+		"LEVER_HOST_ALIAS_IP="+aliasV4,
+		"LEVER_JAIL_USER="+runUser,
+		"LEVER_JAIL_UID="+runUID,
+	)
+	cmd.Stdout = f
+	cmd.Stderr = f
+	return cmd, f, nil
+}
 
 func newApplyCmd(bf BackendFactory) *cobra.Command {
 	var dryRun bool
@@ -135,8 +163,8 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return nil
 		},
 
-		// StartBroker spawns `lever broker serve <config>` detached from the
-		// current process group so it outlives the apply invocation.
+		// StartBroker spawns `lever broker serve <config>` as a daemonized child
+		// (its own session, via brokerServeCmd) so it outlives the apply invocation.
 		StartBroker: func(ctx context.Context) error {
 			// Idempotent (M2): if a broker is already serving (re-apply), don't spawn
 			// a duplicate — it would fail to bind the ports, die, and clobber
@@ -152,24 +180,14 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 					}
 				}
 			}
-			cmd := exec.Command(os.Args[0], "broker", "serve", configPath)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			// Pass the resolved host-alias IP so the broker mints its server cert
-			// with that IP as a SAN (agents dial it by IP under closed egress).
-			cmd.Env = append(os.Environ(),
-				"LEVER_HOST_ALIAS_IP="+aliasV4,
-				"LEVER_JAIL_USER="+b.RunUser(),
-				"LEVER_JAIL_UID="+b.RunUID(),
-			)
-			cmd.Stdout = io.Discard
-			cmd.Stderr = io.Discard
+			cmd, logf, err := brokerServeCmd(os.Args[0], configPath, state.OutLog(), aliasV4, b.RunUser(), b.RunUID())
+			if err != nil {
+				return err
+			}
+			// Keep the log fd owned by the child; close our copy after Start.
+			defer logf.Close()
 			if err := cmd.Start(); err != nil {
 				return fmt.Errorf("lever broker serve: %w", err)
-			}
-			// Record PID so the broker can be stopped later.
-			pidFile := state.PID()
-			if err := os.MkdirAll(filepath.Dir(pidFile), 0o700); err == nil {
-				_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600)
 			}
 			return nil
 		},

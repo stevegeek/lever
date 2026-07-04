@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/backend/guest"
@@ -31,6 +32,16 @@ const (
 
 // orbVersionRe matches "Version: 2.2.1 (2020100)" lines from `orb version`.
 var orbVersionRe = regexp.MustCompile(`Version:\s*(\d+)\.(\d+)\.(\d+)`)
+
+// orbStartProbeAttempts/orbStartProbeInterval bound the readiness wait after
+// `orb start` resumes a machine that was powered off (e.g. by `lever stop`):
+// OrbStack takes a moment before the guest is reachable, so ensureMachine
+// cannot assume instant readiness before EnsureUp proceeds to
+// resolveRunUser/guest provisioning. Package vars so tests run fast.
+var (
+	orbStartProbeAttempts = 30
+	orbStartProbeInterval = 500 * time.Millisecond
+)
 
 type OrbStack struct {
 	r       exec.Runner
@@ -189,17 +200,46 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 	if err != nil {
 		return fmt.Errorf("orb list: %w", err)
 	}
-	if machineListed(res.Stdout, o.machine) {
-		// Idempotent: machine already exists; we cannot alter the mount after
-		// creation, so no action is taken here. To change the project tree,
-		// call Teardown() first, then EnsureUp() again.
-		return nil
+	if status, found := machineStatus(res.Stdout, o.machine); found {
+		if strings.EqualFold(status, "running") {
+			// Idempotent: already up (and we cannot alter the mount after
+			// creation, so no action is taken here). To change the project
+			// tree, call Teardown() first, then EnsureUp() again.
+			return nil
+		}
+		// Machine exists but is powered off (e.g. after `lever stop`) — power
+		// it back on so `up` resumes a halted machine rather than silently
+		// no-op'ing into an unreachable jail.
+		if _, err := o.r.Run(ctx, nil, "orb", "start", o.machine); err != nil {
+			return fmt.Errorf("orb start: %w", err)
+		}
+		return o.waitMachineReachable(ctx)
 	}
 	mountArg := projectTree + ":" + mountDest
 	if _, err := o.r.Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.machine); err != nil {
 		return fmt.Errorf("orb create: %w", err)
 	}
 	return nil
+}
+
+// waitMachineReachable polls a lightweight in-machine command after `orb
+// start` resumes a stopped machine, since the guest is not necessarily
+// reachable the instant `orb start` returns.
+func (o *OrbStack) waitMachineReachable(ctx context.Context) error {
+	var lastErr error
+	for attempt := 0; attempt < orbStartProbeAttempts; attempt++ {
+		_, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "true")
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(orbStartProbeInterval):
+		}
+	}
+	return fmt.Errorf("machine %q not reachable after orb start: %w", o.machine, lastErr)
 }
 
 func machineListed(stdout, name string) bool {
@@ -236,6 +276,24 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 	}
 	if _, err := o.r.Run(ctx, nil, "orb", "delete", o.machine); err != nil {
 		return fmt.Errorf("orb delete: %w", err)
+	}
+	return nil
+}
+
+// Stop powers the machine off but keeps its disk intact — a strictly less
+// destructive operation than Teardown (which deletes the machine). Idempotent:
+// a no-op if the machine is already absent; orb tolerates stopping an
+// already-stopped machine, so no separate guard is needed for that case.
+func (o *OrbStack) Stop(ctx context.Context) error {
+	res, err := o.r.Run(ctx, nil, "orb", "list")
+	if err != nil {
+		return fmt.Errorf("orb list: %w", err)
+	}
+	if !machineListed(res.Stdout, o.machine) {
+		return nil // already gone; nothing to stop
+	}
+	if _, err := o.r.Run(ctx, nil, "orb", "stop", o.machine); err != nil {
+		return fmt.Errorf("orb stop: %w", err)
 	}
 	return nil
 }

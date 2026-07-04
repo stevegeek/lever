@@ -181,8 +181,10 @@ the root, or pass an explicit path). See `examples/` for runnable configs and
 | `lever up [config]` | Bring the application up *if needed* (create jail, provision scion, start the manager) **and attach** the manager's TTY. Reads `./lever.yaml` from cwd when omitted (no walk-up). `--fresh` starts a new manager thread; `--no-attach` brings up without attaching. The everyday entry point. |
 | `lever apply [config]` | Headless bring-up, runs the full plan (jail → images → scion init/config/server → credential → register manager + groves → mint bootstrap → start manager). No attach. `--dry-run` prints the plan and exits. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress). `--machine`, `--tree`, `--allow-port`. Rarely needed directly. |
-| `lever down` | Tear the jail down (removes the isolated machine and everything in it). Targets `lever-<name>` from the discovered config; override with `--machine`. |
-| `lever doctor` | Diagnose the setup (machine up, image registry, hub health, a credential available); each failing check prints the fix. Targets `lever-<name>` from config; override with `--machine`. |
+| `lever attach [name]` | Attach your TTY to the manager (default) or a named grove. Strictly passive: fails fast with "run `lever up` first" if the jail isn't up. |
+| `lever stop` | Power the jail off but **keep its disk** (`orb stop`) — the daily "done for the day". Suspends the manager, stops the host broker; a later `lever up` powers it back on and resumes. Everything (installed runtimes, scion state) persists. |
+| `lever destroy` | Full teardown: delete the isolated machine and everything in it (`orb delete`). Targets `lever-<name>` from config; override with `--machine`. `lever down` is a deprecated alias. |
+| `lever doctor` | Diagnose the setup (broker alive, external tool backends reachable, credential file, scion registration, `.mcp.json`-in-tree, Go toolchain); each failing check prints the fix. Targets `lever-<name>` from config; override with `--machine`. |
 | `lever version` | Print the version. |
 
 **In-jail `lever-manager` (orchestration, run by the manager inside the container):**

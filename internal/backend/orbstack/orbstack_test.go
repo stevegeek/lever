@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lever-to/lever/internal/backend"
 	"github.com/lever-to/lever/internal/exec"
@@ -298,6 +299,111 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	}
 	if !sawAccept || !sawDrop {
 		t.Fatalf("accept=%t drop=%t", sawAccept, sawDrop)
+	}
+}
+
+// --- Stop: power off, keep disk (distinct from Teardown). ---
+
+func TestStopStopsMachineWhenListed(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
+	f.Script("orb stop lever-jail", exec.Result{})
+	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	if last.Name != "orb" || len(last.Args) == 0 || last.Args[0] != "stop" {
+		t.Fatalf("expected last call orb stop lever-jail; got %+v", f.Calls)
+	}
+}
+
+func TestStopIsNoopWhenAbsent(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
+	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
+		t.Fatalf("Stop should be a no-op, got: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "orb" && len(c.Args) > 0 && c.Args[0] == "stop" {
+			t.Fatalf("stop must NOT be called when machine absent: %+v", f.Calls)
+		}
+	}
+}
+
+func TestStopOnAlreadyStoppedMachineIsHarmless(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	f.Script("orb stop lever-jail", exec.Result{})
+	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
+		t.Fatalf("Stop on an already-stopped machine should be harmless, got: %v", err)
+	}
+}
+
+// --- ensureMachine: a stopped machine is STARTED (so `up` resumes it), not
+// treated as a no-op. ---
+
+func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	f.Script("orb start lever-jail", exec.Result{})
+	f.Script("orb -m lever-jail true", exec.Result{})
+	b := New(f, "lever-jail")
+
+	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
+		t.Fatalf("ensureMachine: %v", err)
+	}
+	var sawStart, sawCreate bool
+	for _, c := range f.Calls {
+		if c.Name == "orb" && len(c.Args) > 0 {
+			if c.Args[0] == "start" {
+				sawStart = true
+			}
+			if c.Args[0] == "create" {
+				sawCreate = true
+			}
+		}
+	}
+	if !sawStart {
+		t.Fatal("expected `orb start` for a stopped machine")
+	}
+	if sawCreate {
+		t.Fatal("create must NOT be called for an already-existing (stopped) machine")
+	}
+}
+
+func TestEnsureMachineRunningIsNoop(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
+	b := New(f, "lever-jail")
+
+	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
+		t.Fatalf("ensureMachine: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "orb" && len(c.Args) > 0 && (c.Args[0] == "start" || c.Args[0] == "create") {
+			t.Fatalf("neither start nor create should be called for an already-running machine: %+v", f.Calls)
+		}
+	}
+}
+
+func TestEnsureMachineStartTimesOutWhenUnreachable(t *testing.T) {
+	origAttempts, origInterval := orbStartProbeAttempts, orbStartProbeInterval
+	orbStartProbeAttempts, orbStartProbeInterval = 2, time.Millisecond
+	defer func() { orbStartProbeAttempts, orbStartProbeInterval = origAttempts, origInterval }()
+
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	f.Script("orb start lever-jail", exec.Result{})
+	// "orb -m lever-jail true" is deliberately unscripted: FakeRunner errors on
+	// every unscripted call, simulating a machine that never becomes reachable.
+	b := New(f, "lever-jail")
+
+	err := b.ensureMachine(context.Background(), "/Users/x/tree")
+	if err == nil {
+		t.Fatal("expected an error when the machine never becomes reachable after start")
+	}
+	if !strings.Contains(err.Error(), "lever-jail") {
+		t.Fatalf("error should name the machine; got: %v", err)
 	}
 }
 

@@ -9,11 +9,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newDownCmd(factory BackendFactory) *cobra.Command {
+func newDestroyCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag string
 	cmd := &cobra.Command{
-		Use:   "down",
-		Short: "Tear down the jail",
+		Use:     "destroy",
+		Aliases: []string{"down"},
+		Short:   "Destroy the jail (delete the machine — full teardown)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// When tearing down the current instance (no explicit --machine), also
 			// stop the host-side broker and clear staged runtime state. Otherwise the
@@ -30,7 +31,7 @@ func newDownCmd(factory BackendFactory) *cobra.Command {
 					}
 				}
 			} else {
-				cmd.PrintErrln("note: --machine given; the broker is not stopped and staged state is not cleared (run `lever down` from the instance root to do that).")
+				cmd.PrintErrln("note: --machine given; the broker is not stopped and staged state is not cleared (run `lever destroy` from the instance root to do that).")
 			}
 
 			m, err := machineFromFlagOrConfig(machine)
@@ -44,7 +45,7 @@ func newDownCmd(factory BackendFactory) *cobra.Command {
 			if err := b.Teardown(cmd.Context()); err != nil {
 				return err
 			}
-			cmd.Printf("jail %q down\n", m)
+			cmd.Printf("jail %q destroyed\n", m)
 			return nil
 		},
 	}

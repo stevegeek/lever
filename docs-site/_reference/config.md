@@ -237,8 +237,9 @@ calls return 502.
   only, **no walk-up** (run `lever` from the root, or pass an explicit path).
 - **Root is not mounted:** the instance root holds the config + boot prompt and stays host-only;
   only the `tree:` subdir is bind-mounted.
-- **Machine name:** `lever-<name>`. `up`/`apply`/`down`/`doctor` all agree on this, derived from the
-  config (override on `down`/`doctor` with `--machine`).
+- **Machine name:** `lever-<name>`. `up`/`apply`/`stop`/`destroy`/`doctor` all agree on this, derived
+  from the config (override on `stop`/`destroy`/`doctor` with `--machine`). `lever down` is a
+  deprecated alias of `destroy`.
 - **Grove image inheritance:** a grove with no `image:` runs on `manager.image`. The bring-up plan
   loads every distinct image once (deduped). At dispatch the capability broker reads the config
   directly and supplies each grove's resolved image, so `agent start NAME` needs no `--image` (an

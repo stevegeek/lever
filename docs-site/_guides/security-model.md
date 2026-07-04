@@ -175,10 +175,13 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
   this surface reaches VM root, not the host, consistent with the §7 "containing daemon authority
   inside the jail" stance (in-jail privilege escalation is accepted; the jail's own bound is not).
-- **The jail VM survives host reboots.** It is destroyed only by `lever down` (`limactl delete
-  --force`); there is no `lever stop` or reboot-triggered teardown. "Throwaway guest" therefore means
-  per-`lever down`, not per-boot — a long-lived instance keeps the same guest state (and any in-guest
-  compromise) across host restarts until explicitly torn down.
+- **The jail VM survives host reboots, and also `lever stop`.** It is destroyed only by `lever
+  destroy` (`limactl delete --force`; `lever down` is a deprecated alias); there is no
+  reboot-triggered teardown. `lever stop` (`limactl stop`) merely powers the VM off — its disk is
+  preserved, and the next `lever up` resumes it. "Throwaway guest" therefore means per-`lever
+  destroy`, not per-boot and not per-`lever stop` — a long-lived instance keeps the same guest state
+  (and any in-guest compromise) across host restarts and stop/resume cycles until explicitly
+  destroyed.
 - **The egress allowlist (§2.2) depends on the VM/rootless boundary above it.** Every no-reopen /
   allowlist property in this document assumes the agent lacks `CAP_NET_ADMIN` in the VM's *init*
   network namespace — enforcement lives in that namespace, not the agent's container namespace (§2.2).

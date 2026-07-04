@@ -71,6 +71,11 @@ type Backend interface {
 	InstallGuestBinary(ctx context.Context, localPath, destPath string) error
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
+	// Stop powers the machine off but keeps its disk intact — distinct from
+	// Teardown, which deletes the machine. Idempotent: a no-op if the machine
+	// is already absent, and harmless if it is already stopped. A stopped
+	// machine is resumed (not recreated) by a subsequent EnsureUp.
+	Stop(ctx context.Context) error
 	Profile() Profile
 	// ReadScionProjectState reads scion's project-registration state from the
 	// jail (the in-tree marker + ~/.scion/project-configs entries) for `lever

@@ -18,25 +18,6 @@ func AlreadyRunning(err error) bool {
 	return strings.Contains(s, "already running") || strings.Contains(s, "already exists")
 }
 
-// StaleAgent reports whether err is scion refusing to RESUME a suspended agent
-// whose container no longer exists — the case left behind by `lever stop`
-// powering off the VM out from under a `suspended` hub.db record (a fresh VM
-// boot has no such container; scion's own crash/restart can leave the same
-// symptom). `scion start` on a stale suspended record 500s with wording like
-// "Failed to resume suspended agent 'assistant': cannot resume agent
-// 'assistant': agent does not exist. Use 'scion start' to create a new agent".
-// Recognizing it lets start-manager clear the record (Stop) and retry Start
-// fresh, instead of surfacing the 500 and failing `lever up`.
-func StaleAgent(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "cannot resume") ||
-		strings.Contains(s, "agent does not exist") ||
-		strings.Contains(s, "failed to resume suspended agent")
-}
-
 // hubReadyAttempts/hubReadyInterval are package vars so tests can shrink them.
 var hubReadyAttempts = 30
 var hubReadyInterval = 1 * time.Second

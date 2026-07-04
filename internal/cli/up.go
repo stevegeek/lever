@@ -88,7 +88,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			deps, b, sc, err := buildApplyDeps(cmd.Context(), app, path, bf)
+			deps, b, sc, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
 			if err != nil {
 				return err
 			}

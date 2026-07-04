@@ -104,6 +104,22 @@ type Deps struct {
 	// (fail-open — an observe failure must never turn into a hard apply
 	// failure, and zero/duplicate/torn registrations legitimately need it).
 	ScionProjectRegistered func(ctx context.Context, jailWorkspacePath string) (bool, error)
+	// Log surfaces a loud, user-facing progress/warning line during apply —
+	// currently just start-manager's resume-failed recovery notice ("resume
+	// failed … starting FRESH, previous session lost"), which MUST reach the
+	// user rather than vanish into a swallowed return value. nil ⇒ no-op
+	// (tests, and any caller that doesn't need it). buildApplyDeps wires this
+	// to the invoking cobra command's PrintErrf, mirroring how other user-
+	// facing warnings already surface (see cli/stop.go, cli/down.go).
+	Log func(format string, args ...any)
+}
+
+// logf calls d.Log if set, else no-ops. Small seam so call sites don't need a
+// nil-check of their own for the (optional) Deps.Log field.
+func logf(d Deps, format string, args ...any) {
+	if d.Log != nil {
+		d.Log(format, args...)
+	}
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
@@ -299,43 +315,126 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			// secret set above); the real credential arrives in-container.
 			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
 		}
-		// Retry past the runtime-broker registration race (see brokerStartAttempts).
-		// recovered guards the StaleAgent recovery below to at most one attempt
-		// per apply (see its comment).
-		var startErr error
-		recovered := false
-		for attempt := 0; attempt < brokerStartAttempts; attempt++ {
-			startErr = d.Scion.Start(ctx, opts)
-			// Idempotent: a manager already running (re-apply) is success, not error.
-			if startErr != nil && scion.AlreadyRunning(startErr) {
-				return nil
-			}
-			// Belt-and-suspenders for `lever stop`'s power-off path (which itself
-			// now cleanly Stops the manager instead of Suspending it — see
-			// cli/stop.go): if a manager was somehow left `suspended` with its
-			// container already gone (a crash, or Stop's best-effort call failing),
-			// `scion start` tries to RESUME it and 500s. Clear the stale record with
-			// Stop and retry Start ONCE, which then creates a fresh agent. Capped at
-			// one recovery: a second StaleAgent right after a Stop means something
-			// else is wrong, so surface it rather than looping forever.
-			if startErr != nil && scion.StaleAgent(startErr) && !recovered {
-				recovered = true
-				_ = d.Scion.Stop(ctx, app.Name, jp)
-				continue
-			}
-			if startErr == nil || !isBrokerUnavailable(startErr) {
-				return startErr
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(brokerStartInterval):
+		// Observe, then act on the delta — scion's verbs are state-specific:
+		// start CREATES (409 "already exists" over any existing record — and
+		// the CLI exits 0 on that 409, so a blind start false-succeeds); resume
+		// covers suspended AND stopped records, relaunching with
+		// `claude --continue` (conversation restored). Live evidence
+		// 2026-07-04 (see the resume-reconciliation plan's Evidence base). The
+		// hub is already up by this point in Plan() (scion-server runs before
+		// start-manager), so a List error here is real, not a "hub not ready
+		// yet" race — surface it as a hard step error.
+		agents, lerr := d.Scion.List(ctx, jp)
+		if lerr != nil {
+			return fmt.Errorf("start-manager: observing agents: %w", lerr)
+		}
+		var rec *scion.Agent
+		for i := range agents {
+			if agents[i].Slug == app.Name {
+				rec = &agents[i]
+				break
 			}
 		}
-		return startErr
+		switch {
+		case rec == nil:
+			if err := startManagerCreate(ctx, d, opts); err != nil {
+				return err
+			}
+		case rec.Phase == "running":
+			// No-op — fall through to the liveness verify below, which still
+			// confirms the container is actually up: a running RECORD with a
+			// dead container must fail loudly, not silently pass.
+		case rec.Phase == "suspended" || rec.Phase == "stopped":
+			if rerr := d.Scion.Resume(ctx, app.Name, jp); rerr != nil {
+				// LOUD recovery: the conversation could not be restored. This MUST
+				// reach the user — resume failing means the durable session (the
+				// whole point of suspending, not stopping, at power-off; see
+				// cli/stop.go) is about to be discarded.
+				logf(d, "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
+				if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+					return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
+				}
+				if err := startManagerCreate(ctx, d, opts); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("start-manager: manager %q in unexpected phase %q", app.Name, rec.Phase)
+		}
+		return waitManagerLive(ctx, d, jp, app.Name)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// startManagerCreate runs the create-manager retry loop: `scion start` races
+// the runtime-broker registration (see brokerStartAttempts) and treats an
+// "already running"/"already exists" 409 as success (idempotent re-apply, or a
+// create-race against a record the observe step just missed — scion's own
+// lazy hub-sync can transiently read a live record as absent; see the plan's
+// Evidence base). Shared by the absent-record branch and the post-delete
+// recovery branch above (a failed resume falls back to exactly this same
+// create path), so both take the identical retry behavior.
+func startManagerCreate(ctx context.Context, d Deps, opts scion.StartOpts) error {
+	var startErr error
+	for attempt := 0; attempt < brokerStartAttempts; attempt++ {
+		startErr = d.Scion.Start(ctx, opts)
+		// Idempotent: a manager already running/existing (re-apply, or a
+		// create-race the observe step missed) is success, not error.
+		if startErr != nil && scion.AlreadyRunning(startErr) {
+			return nil
+		}
+		if startErr == nil || !isBrokerUnavailable(startErr) {
+			return startErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(brokerStartInterval):
+		}
+	}
+	return startErr
+}
+
+// managerLiveAttempts/managerLiveInterval bound waitManagerLive's post-start
+// poll. Package vars so tests shrink them.
+var (
+	managerLiveAttempts = 15
+	managerLiveInterval = 1 * time.Second
+)
+
+// waitManagerLive polls d.Scion.List until slug's record shows BOTH
+// Phase=="running" AND ContainerStatus=="running", or attempts run out. This
+// is the backstop for both false-success classes scion's own CLI can report
+// (see the plan's Evidence base): a blind `scion start` exits 0 on a 409
+// "already exists" even when nothing changed, and `scion resume`/`scion
+// start` can report success ("resumed") for a container that dies moments
+// later. Trusting the observed record — not the CLI's own exit code/wording —
+// is what makes start-manager's success meaningful.
+func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
+	var lastPhase, lastContainer string
+	for attempt := 0; attempt < managerLiveAttempts; attempt++ {
+		agents, err := d.Scion.List(ctx, jp)
+		if err != nil {
+			return fmt.Errorf("start-manager: liveness check: observing agents: %w", err)
+		}
+		lastPhase, lastContainer = "", ""
+		for _, a := range agents {
+			if a.Slug == slug {
+				lastPhase, lastContainer = a.Phase, a.ContainerStatus
+				break
+			}
+		}
+		if lastPhase == "running" && lastContainer == "running" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(managerLiveInterval):
+		}
+	}
+	return fmt.Errorf("start-manager: manager %q did not come up (last phase %q, container %q) — scion reported success but the harness is not live", slug, lastPhase, lastContainer)
 }
 
 // removeStaleMarker removes a `.scion` MARKER FILE at dir (left by a prior

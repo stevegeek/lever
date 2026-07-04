@@ -100,7 +100,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    scion/container/registration steps (incl. init-machine, which needs a
 	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
 	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
-	deps, b, _, err := buildApplyDeps(ctx, app, configPath, bf)
+	deps, b, _, err := buildApplyDeps(ctx, app, configPath, bf, cmd)
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}

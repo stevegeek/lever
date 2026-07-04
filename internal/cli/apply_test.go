@@ -108,7 +108,7 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf)
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf)
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	sb := &stubBackend{registeredResult: true}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf)
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}

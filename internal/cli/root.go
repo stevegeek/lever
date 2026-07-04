@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const Version = "0.0.0-dev"
+const Version = "0.2.0"
 
 // BackendFactory builds a named backend for a given machine name.
 type BackendFactory func(name, machine string) (backend.Backend, error)

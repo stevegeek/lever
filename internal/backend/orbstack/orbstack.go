@@ -367,4 +367,10 @@ func (o *OrbStack) ReadScionProjectState(ctx context.Context) (backend.ScionProj
 	return o.guest().ReadScionProjectState(ctx, mountDest)
 }
 
+// RemoveScionProjectConfigs removes stale scion project-config registrations
+// for wp from the machine, via the machine-only guest prefix.
+func (o *OrbStack) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
+	return o.guest().RemoveScionProjectConfigs(ctx, wp)
+}
+
 var _ backend.Backend = (*OrbStack)(nil)

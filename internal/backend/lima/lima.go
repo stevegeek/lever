@@ -467,4 +467,10 @@ func (l *Lima) ReadScionProjectState(ctx context.Context) (backend.ScionProjectS
 	return l.guest().ReadScionProjectState(ctx, mountDest)
 }
 
+// RemoveScionProjectConfigs removes stale scion project-config registrations
+// for wp from the VM, via the machine-only guest prefix.
+func (l *Lima) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
+	return l.guest().RemoveScionProjectConfigs(ctx, wp)
+}
+
 var _ backend.Backend = (*Lima)(nil)

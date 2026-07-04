@@ -480,6 +480,15 @@ func (a *App) Validate() error {
 		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
 			return fmt.Errorf("config: grove dir %q must be relative and inside the tree", g.Dir)
 		}
+		if filepath.Clean(g.Dir) == "." {
+			// A "." dir makes GroveDir(g) == a.Tree, so the grove's jail path
+			// collides with the manager's mount root (/lever). Then the grove's
+			// register step (scion-project-config removal + .scion marker removal)
+			// would be scoped to the MANAGER's registration/marker instead of its
+			// own. confinedRel already rejects "." for `tree` for the same
+			// root-is-the-mount reason; grove dirs must be a strict subdir.
+			return fmt.Errorf("config: grove %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
+		}
 		if g.Image != "" {
 			if err := a.Security.validateImage(fmt.Sprintf("grove %q image", g.Name), g.Image); err != nil {
 				return err

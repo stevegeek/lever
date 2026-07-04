@@ -171,6 +171,29 @@ func TestValidateRejectsGroveOutsideTree(t *testing.T) {
 	}
 }
 
+// A grove with dir "." makes GroveDir(g) == a.Tree, so its jail path collides
+// with the manager's mount root (/lever) — then the grove's register-step
+// removal (scion project-configs + .scion marker) would target the MANAGER's
+// state. Reject it at config time, mirroring confinedRel's "." rejection for
+// `tree`.
+func TestValidateRejectsGroveDirDot(t *testing.T) {
+	for _, dir := range []string{".", "./"} {
+		p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: bad\n    dir: "+dir+"\n")
+		_, err := Load(p)
+		if err == nil {
+			t.Fatalf("dir %q: expected error for grove dir collapsing to the tree root", dir)
+		}
+		if !strings.Contains(err.Error(), "collides with the manager's mount root") {
+			t.Errorf("dir %q: error %q should explain the mount-root collision", dir, err)
+		}
+	}
+	// A normal subdir must still pass.
+	ok := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: good\n    dir: groves/good\n")
+	if _, err := Load(ok); err != nil {
+		t.Fatalf("a normal grove dir (groves/good) must pass, got %v", err)
+	}
+}
+
 func TestValidateRejectsScionSourceAndVersionTogether(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: ./scion-src\n  version: abc123\n")
 	if _, err := Load(p); err == nil {

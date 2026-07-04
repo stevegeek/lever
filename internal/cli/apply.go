@@ -163,6 +163,14 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return nil
 		},
 
+		// RemoveScionProjectConfigs clears any stale ~/.scion/project-configs
+		// registration(s) for a workspace path before the register step re-inits
+		// (see internal/apply/run.go's register-manager/register-grove case) —
+		// keeps apply from accumulating a duplicate registration every run.
+		RemoveScionProjectConfigs: func(ctx context.Context, wp string) error {
+			return b.RemoveScionProjectConfigs(ctx, wp)
+		},
+
 		// StartBroker spawns `lever broker serve <config>` as a daemonized child
 		// (its own session, via brokerServeCmd) so it outlives the apply invocation.
 		StartBroker: func(ctx context.Context) error {

@@ -137,6 +137,35 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	}
 }
 
+// TestBuildApplyDepsWiresRemoveScionProjectConfigs verifies buildApplyDeps
+// wires Deps.RemoveScionProjectConfigs straight through to the backend method
+// (which itself reaches the guest — see internal/backend/guest/scionstate.go),
+// so the register-manager/register-grove step in internal/apply/run.go can
+// clear stale ~/.scion/project-configs registrations before `scion init`.
+func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := &stubBackend{}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if deps.RemoveScionProjectConfigs == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.RemoveScionProjectConfigs")
+	}
+	if err := deps.RemoveScionProjectConfigs(context.Background(), "/lever/groves/worker"); err != nil {
+		t.Fatalf("RemoveScionProjectConfigs: %v", err)
+	}
+	if len(sb.removeScionCalls) != 1 || sb.removeScionCalls[0] != "/lever/groves/worker" {
+		t.Fatalf("backend.RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever/groves/worker\"", sb.removeScionCalls)
+	}
+}
+
 func TestApplyDryRunDiscoversConfig(t *testing.T) {
 	dir := instanceDir(t, "demo")
 	t.Chdir(dir)

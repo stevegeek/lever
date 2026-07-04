@@ -37,6 +37,38 @@ done
 	return parseScionState(res.Stdout), nil
 }
 
+// RemoveScionProjectConfigs removes every ~/.scion/project-configs/<name>
+// registration whose workspace_path == wp, through the machine-only UserPrefix.
+// Called before `scion init` in register-* so each apply leaves exactly ONE
+// registration per workspace instead of accumulating a duplicate every run. A
+// no-op when nothing matches. wp is a lever constant (/lever or
+// /lever/groves/<sanitized-name>), never user input.
+func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
+	args := append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", scionConfigRemoveScript(wp))
+	if _, err := g.Host.Run(ctx, nil, g.UserPrefix[0], args...); err != nil {
+		return fmt.Errorf("guest: remove scion project configs for %s: %w", wp, err)
+	}
+	return nil
+}
+
+// scionConfigRemoveScript is the exact bash body RemoveScionProjectConfigs
+// runs in the guest (shared with the real-bash test so the deletion logic is
+// exercised, not just string-matched). It globs every project-configs entry,
+// reads its workspace_path, and rm -rf's the entry dir (two levels up from
+// settings.yaml) when it matches wp. Entries without a workspace_path line, or
+// with a different one, are left untouched. Idempotent (a spent glob is a
+// no-op). wp is single-quoted; it is a lever constant, never user input.
+func scionConfigRemoveScript(wp string) string {
+	return `
+target=` + shellSingleQuote(wp) + `
+for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+  [ -e "$s" ] || continue
+  cur=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  if [ "$cur" = "$target" ]; then rm -rf "$(dirname "$(dirname "$s")")"; fi
+done
+`
+}
+
 // parseScionState turns the report lines into a ScionProjectState. Unknown or
 // malformed lines are ignored (fail-safe: a check reading this treats "no
 // entries" as "nothing stale").

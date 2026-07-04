@@ -82,4 +82,12 @@ type Backend interface {
 	// doctor`. Read-only; uses the machine-only guest transport, so it works
 	// without EnsureUp as long as the jail machine is up.
 	ReadScionProjectState(ctx context.Context) (ScionProjectState, error)
+	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
+	// registration(s) whose workspace_path == workspacePath, through the
+	// machine-only guest transport. A no-op when none match. Called before
+	// `scion init` in the register-manager/register-grove apply steps so each
+	// apply leaves exactly one registration per workspace instead of
+	// accumulating a duplicate every run (the `lever doctor` "duplicate
+	// registrations" finding).
+	RemoveScionProjectConfigs(ctx context.Context, workspacePath string) error
 }

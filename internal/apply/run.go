@@ -85,6 +85,14 @@ type Deps struct {
 	// to the guest's directory cache). Must NOT remove directories. nil ⇒ fall
 	// back to a host-side remove (tests, broker-only VM gate).
 	RemoveJailFile func(ctx context.Context, jailPath string) error
+	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
+	// registration(s) whose workspace_path == jailWorkspacePath, BEFORE the
+	// register-manager/register-grove step re-inits. Without this, every apply
+	// mints a fresh registration via `scion init` and the old ones accumulate
+	// (the `lever doctor` "duplicate registrations" finding) — this is the
+	// removal counterpart to RemoveJailFile's marker-race fix above. nil ⇒
+	// no-op (tests, broker-only VM gate).
+	RemoveScionProjectConfigs func(ctx context.Context, jailWorkspacePath string) error
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
@@ -162,6 +170,14 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			}
 		} else if err := removeStaleMarker(s.Target); err != nil {
 			return err
+		}
+		// Clear any stale project-config registration(s) for this workspace path
+		// before re-init, so `scion init` mints exactly ONE registration per
+		// workspace instead of leaving the previous apply's dir behind.
+		if d.RemoveScionProjectConfigs != nil {
+			if err := d.RemoveScionProjectConfigs(ctx, jp); err != nil {
+				return err
+			}
 		}
 		if err := d.Scion.InitProject(ctx, jp); err != nil {
 			return err

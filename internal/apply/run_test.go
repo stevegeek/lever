@@ -160,6 +160,12 @@ type agentLifecycleRunner struct {
 	liveWhenPhase, liveWhenContainer string
 
 	resumeErr, deleteErr, startErr error
+	// resumeFailsThenSucceed, when > 0, makes resume fail (with resumeErr) for
+	// exactly this many calls, then succeed from the next call onward — models
+	// a transient broker-unavailable race resolving mid-retry. Zero (the
+	// default) preserves the original all-tests-so-far behavior: if resumeErr
+	// is set, resume fails EVERY call (no eventual success).
+	resumeFailsThenSucceed int
 
 	phase, containerStatus string
 	inited                 bool
@@ -234,7 +240,7 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	case "resume":
 		r.resumeCalls++
 		r.record(dir, env, name, args)
-		if r.resumeErr != nil {
+		if r.resumeErr != nil && (r.resumeFailsThenSucceed == 0 || r.resumeCalls <= r.resumeFailsThenSucceed) {
 			return exec.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
 		}
 		r.goLive()
@@ -386,7 +392,11 @@ func TestStartManagerRunningRecordButDeadContainerFailsLoud(t *testing.T) {
 // TestStartManagerResumeFailsRecoversFresh: when Resume cannot restore the
 // conversation, start-manager must log the loss LOUDLY (Deps.Log), then
 // Delete the orphaned record and create a fresh manager — never fail the
-// whole apply just because the OLD session is unrecoverable.
+// whole apply just because the OLD session is unrecoverable. The failure here
+// is NON-transient ("agent does not exist" — not the broker-unavailable
+// wording), so this also pins C1's other half: a non-transient resume error
+// must recover immediately (resumeCalls == 1), never burning the broker-race
+// retry budget on an error retrying could never fix.
 func TestStartManagerResumeFailsRecoversFresh(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
@@ -452,6 +462,90 @@ func TestStartManagerResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
 	}
 }
 
+// TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds proves the
+// CRITICAL fix (resume-branch-review.md C1): `scion resume` shares Start's
+// runtime-broker-registration race, so a resume that fails with the
+// broker-unavailable wording must be RETRIED (same brokerStartAttempts/
+// brokerStartInterval budget as Start) before any loud recovery — a transient
+// blip must never destroy a resumable conversation.
+func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) {
+	origAtt, origInt := brokerStartAttempts, brokerStartInterval
+	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
+	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
+
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "suspended", initContainerStatus: "stopped",
+		// scion resume's own transient wording (singular "broker" — see
+		// isBrokerUnavailable's doc), failing the first 2 calls then resolving.
+		resumeErr:              fmt.Errorf("cannot resume agent: no runtime broker available"),
+		resumeFailsThenSucceed: 2,
+	}
+	var logged []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		Log: func(format string, args ...any) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run should succeed once the broker race resolves within the retry budget: %v", err)
+	}
+	if r.resumeCalls != 3 {
+		t.Fatalf("resumeCalls = %d, want 3 (2 transient failures + 1 success)", r.resumeCalls)
+	}
+	if r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 — a resume that eventually succeeds must NOT delete/recreate (conversation preserved)", r.deleteCalls, r.startCalls)
+	}
+	if len(logged) != 0 {
+		t.Errorf("no loud recovery log expected when resume eventually succeeds, got %+v", logged)
+	}
+}
+
+// TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers is C1's
+// complement: if the broker-unavailable race NEVER resolves within the retry
+// budget, start-manager must still fall back to the loud delete+fresh
+// recovery — the retry absorbs a transient blip, it does not turn a
+// permanently-unavailable broker into an infinite hang.
+func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testing.T) {
+	origAtt, origInt := brokerStartAttempts, brokerStartInterval
+	brokerStartAttempts, brokerStartInterval = 3, time.Millisecond
+	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
+
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "suspended", initContainerStatus: "stopped",
+		resumeErr: fmt.Errorf("cannot resume agent: no runtime broker available"),
+		// resumeFailsThenSucceed left 0: resume fails on EVERY call, exercising
+		// full budget exhaustion.
+	}
+	var logged []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		Log: func(format string, args ...any) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("an exhausted-but-transient resume must still recover fresh, not fail the apply: %v", err)
+	}
+	if r.resumeCalls != 3 {
+		t.Fatalf("resumeCalls = %d, want 3 (the full retry budget burned)", r.resumeCalls)
+	}
+	if r.deleteCalls != 1 || r.startCalls != 1 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (loud recovery only AFTER the retry budget exhausts)", r.deleteCalls, r.startCalls)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "resume failed") || !strings.Contains(logged[0], "FRESH") {
+		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged)
+	}
+}
+
 // TestStartManagerLivenessNeverGreenAfterCreate: `scion start` reports success
 // but the container never actually comes up (scion's own false-success — see
 // the plan's Evidence base). The liveness verify must exhaust its attempts and
@@ -484,25 +578,66 @@ func TestStartManagerLivenessNeverGreenAfterCreate(t *testing.T) {
 	}
 }
 
-// TestStartManagerUnexpectedPhaseFailsLoud: an unrecognized phase string must
-// fail loudly rather than silently guessing an action.
-func TestStartManagerUnexpectedPhaseFailsLoud(t *testing.T) {
+// TestStartManagerUnexpectedPhaseRecoversFresh proves the IMPORTANT fix
+// (resume-branch-review.md I1): an unhandled-but-real scion phase (here
+// "error" — a crashed manager, e.g. an OOM/harness crash) must NOT hard-fail
+// (brick) `lever up` with no path forward but `lever destroy`. It takes the
+// SAME loud delete+fresh recovery as a failed resume, so `up` converges.
+func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
 	app, f := newObserveFirstApp(t)
-	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "errored", initContainerStatus: "stopped"}
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "error", initContainerStatus: "stopped"}
+	var logged []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		Log: func(format string, args ...any) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("an unexpected/error phase must recover fresh, not hard-fail the apply: %v", err)
+	}
+	if r.resumeCalls != 0 {
+		t.Errorf("resumeCalls = %d, want 0 (an error phase is not resumable — resume is only for suspended/stopped)", r.resumeCalls)
+	}
+	if r.deleteCalls != 1 || r.startCalls != 1 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (delete the unrecoverable record, then fresh create)", r.deleteCalls, r.startCalls)
+	}
+	if len(logged) != 1 {
+		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged)
+	}
+	if !strings.Contains(logged[0], `phase "error"`) || !strings.Contains(logged[0], "FRESH") || !strings.Contains(logged[0], "previous session lost") {
+		t.Fatalf("recovery log line missing expected wording, got %q", logged[0])
+	}
+}
+
+// TestStartManagerStartingPhaseRecoversFresh covers the OTHER unhandled-phase
+// shape: a "starting" record left behind by a `lever up` that was interrupted
+// mid-`scion start` on a prior run. WHY this also takes the loud
+// delete+fresh path rather than something smarter: `scion resume` is
+// documented for suspended/stopped records only (there is no verb to "finish
+// starting" or safely probe whether a half-started record is salvageable),
+// and `scion list --format json`'s phase field is the canonical state we
+// observe — we cannot be cleverer without scion exposing more verbs. So a
+// half-started record gets the same safe-floor recovery as any other
+// unhandled phase, converging `up` instead of bricking it.
+func TestStartManagerStartingPhaseRecoversFresh(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: ""}
 	deps := Deps{
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("an unexpected phase must be a hard error, not a guessed action")
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("a half-started (\"starting\") record must recover fresh, not hard-fail: %v", err)
 	}
-	if !strings.Contains(err.Error(), `unexpected phase "errored"`) {
-		t.Fatalf("error should name the unexpected phase, got: %v", err)
+	if r.deleteCalls != 1 || r.startCalls != 1 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1", r.deleteCalls, r.startCalls)
 	}
-	if r.startCalls != 0 || r.resumeCalls != 0 || r.deleteCalls != 0 {
-		t.Errorf("no action should be taken on an unexpected phase; start=%d resume=%d delete=%d", r.startCalls, r.resumeCalls, r.deleteCalls)
+	if r.resumeCalls != 0 {
+		t.Errorf("resumeCalls = %d, want 0 (a starting record is not resumable)", r.resumeCalls)
 	}
 }
 
@@ -557,6 +692,63 @@ func (r *firstListErrRunner) RunIn(ctx context.Context, dir string, env map[stri
 
 func (r *firstListErrRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// failNListsRunner fails a WINDOW of "scion list" (observe-first shape) calls
+// with a transient error — specifically the calls numbered 2..1+failCount
+// (call 1, the very first observe-first List, is left untouched so the
+// pre-action observe still succeeds normally) — then defers every other call
+// to inner. Used to prove waitManagerLive's post-action liveness poll
+// tolerates a mid-poll List blip: it must consume the failed attempt and keep
+// polling within the remaining budget, not abort the whole apply immediately.
+type failNListsRunner struct {
+	inner     *agentLifecycleRunner
+	failCount int
+	listSeen  int
+}
+
+func (r *failNListsRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" && isObserveList(args) {
+		r.listSeen++
+		if r.listSeen > 1 && r.listSeen <= 1+r.failCount {
+			return exec.Result{Code: 1, Stderr: "hub: transient blip"}, fmt.Errorf("exit status 1")
+		}
+	}
+	return r.inner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *failNListsRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestWaitManagerLiveToleratesMidPollListErrors proves the MINOR fix
+// (resume-branch-review.md M1): two transient List errors during the
+// post-action liveness poll must not abort the apply — they are consumed
+// within the existing retry budget, and the poll succeeds as soon as a List
+// call reports the manager running/running.
+func TestWaitManagerLiveToleratesMidPollListErrors(t *testing.T) {
+	origAtt, origInt := managerLiveAttempts, managerLiveInterval
+	managerLiveAttempts, managerLiveInterval = 5, time.Millisecond
+	defer func() { managerLiveAttempts, managerLiveInterval = origAtt, origInt }()
+
+	app, f := newObserveFirstApp(t)
+	// Already running/live — the no-op branch — so start-manager's OWN observe
+	// (list call 1) must succeed; failNListsRunner then fails exactly the next
+	// two list calls (2 and 3, both inside waitManagerLive's poll) before
+	// deferring back to a live running/running record on call 4.
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "running"}
+	fe := &failNListsRunner{inner: r, failCount: 2}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(fe, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("two transient List blips within the liveness poll's budget must not fail apply: %v", err)
+	}
+	if r.startCalls != 0 || r.resumeCalls != 0 {
+		t.Errorf("the no-op branch must not start/resume; start=%d resume=%d", r.startCalls, r.resumeCalls)
+	}
 }
 
 func TestRunIdempotentReapply(t *testing.T) {

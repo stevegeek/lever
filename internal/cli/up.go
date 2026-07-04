@@ -111,7 +111,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			switch upDecision(phase, fresh) {
 			case "restart":
-				_ = sc.Stop(cmd.Context(), app.Name, project)
+				_ = restartManagerFresh(cmd.Context(), sc, app.Name, project)
 				if err := apply.Run(cmd.Context(), app, deps); err != nil {
 					return err
 				}
@@ -145,6 +145,18 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// restartManagerFresh discards the existing manager record entirely (`scion
+// delete`) for the "restart" (`--fresh` over a running/suspended manager)
+// decision, so the following apply's observe-first start-manager step
+// (internal/apply/run.go) sees the record ABSENT and takes the CREATE path.
+// It must NOT be `scion stop`: stop leaves a stopped record behind, and
+// start-manager treats a stopped record as resumable — it would RESUME the
+// old conversation with `claude --continue`, defeating the entire point of
+// `--fresh` (see resume-branch-review.md finding I2).
+func restartManagerFresh(ctx context.Context, sc *scion.Client, name, project string) error {
+	return sc.Delete(ctx, name, project)
 }
 
 func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {

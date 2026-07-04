@@ -36,14 +36,21 @@ var (
 )
 
 // isBrokerUnavailable reports whether err is the transient "runtime broker not
-// yet registered" error from `scion start` (the registration race), as opposed
-// to a real failure.
+// yet registered" error from `scion start`/`scion resume` (the registration
+// race), as opposed to a real failure. `scion resume` hits the SAME race as
+// `scion start` (confirmed in scion source,
+// pkg/hub/handlers_agent_create_helpers.go:354,408) but emits the singular
+// "no runtime broker available" — distinct wording from start's plural "No
+// runtime brokers available" — so both must be matched or a resume retry
+// would never see its own transient error as retryable.
 func isBrokerUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := err.Error()
-	return strings.Contains(s, "no_runtime_broker") || strings.Contains(s, "No runtime brokers available")
+	return strings.Contains(s, "no_runtime_broker") ||
+		strings.Contains(s, "No runtime brokers available") ||
+		strings.Contains(s, "no runtime broker available")
 }
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
@@ -345,7 +352,15 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			// confirms the container is actually up: a running RECORD with a
 			// dead container must fail loudly, not silently pass.
 		case rec.Phase == "suspended" || rec.Phase == "stopped":
-			if rerr := d.Scion.Resume(ctx, app.Name, jp); rerr != nil {
+			// Resume rides the SAME runtime-broker-race retry as a create Start
+			// (see isBrokerUnavailable's doc): on a cold VM the runtime broker may
+			// not have re-registered with the hub yet, and resume hits that
+			// identical transient window. Only once the retry budget is exhausted
+			// (or the error is not the transient one at all) is the session
+			// declared unrecoverable.
+			if rerr := retryOnBrokerUnavailable(ctx, func() error {
+				return d.Scion.Resume(ctx, app.Name, jp)
+			}); rerr != nil {
 				// LOUD recovery: the conversation could not be restored. This MUST
 				// reach the user — resume failing means the durable session (the
 				// whole point of suspending, not stopping, at power-off; see
@@ -359,12 +374,54 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 				}
 			}
 		default:
-			return fmt.Errorf("start-manager: manager %q in unexpected phase %q", app.Name, rec.Phase)
+			// Any other phase — scion's full enum also has created,
+			// provisioning, cloning, starting, stopping, and error (see
+			// pkg/agent/state/state.go) — is not resumable: `scion resume` is
+			// documented for suspended/stopped records only, and `scion list`'s
+			// JSON phase field is the canonical (and only) signal we have, so we
+			// cannot be cleverer here without more scion verbs (e.g. there is no
+			// "wait for starting to settle" verb to poll instead). A crashed
+			// manager (phase "error") or one caught mid-transition by an
+			// interrupted prior `lever up` (phase "starting"/"created"/…) must
+			// still let `up` converge, so this takes the SAME loud delete+fresh
+			// recovery as a failed resume, rather than hard-failing (bricking)
+			// the apply with no path forward but a hard `lever destroy`.
+			logf(d, "start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", app.Name, rec.Phase)
+			if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+				return fmt.Errorf("start-manager: manager in phase %q and delete failed: %w", rec.Phase, derr)
+			}
+			if err := startManagerCreate(ctx, d, opts); err != nil {
+				return err
+			}
 		}
 		return waitManagerLive(ctx, d, jp, app.Name)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// retryOnBrokerUnavailable runs action up to brokerStartAttempts times,
+// waiting brokerStartInterval between attempts, for as long as each failure is
+// the transient runtime-broker-unavailable race (isBrokerUnavailable). A nil
+// result, or any non-transient error, returns immediately — the retry budget
+// exists purely to absorb the registration race, not to mask real failures.
+// Shared by startManagerCreate's Start retry and start-manager's Resume retry:
+// `scion resume` hits the identical runtime-broker race as `scion start` (see
+// isBrokerUnavailable's doc), so both need the same absorbing retry.
+func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
+	var err error
+	for attempt := 0; attempt < brokerStartAttempts; attempt++ {
+		err = action()
+		if err == nil || !isBrokerUnavailable(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(brokerStartInterval):
+		}
+	}
+	return err
 }
 
 // startManagerCreate runs the create-manager retry loop: `scion start` races
@@ -373,27 +430,19 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 // create-race against a record the observe step just missed — scion's own
 // lazy hub-sync can transiently read a live record as absent; see the plan's
 // Evidence base). Shared by the absent-record branch and the post-delete
-// recovery branch above (a failed resume falls back to exactly this same
-// create path), so both take the identical retry behavior.
+// recovery branches above (a failed resume, or an unresumable phase, falls
+// back to exactly this same create path), so all three take the identical
+// retry behavior.
 func startManagerCreate(ctx context.Context, d Deps, opts scion.StartOpts) error {
-	var startErr error
-	for attempt := 0; attempt < brokerStartAttempts; attempt++ {
-		startErr = d.Scion.Start(ctx, opts)
+	return retryOnBrokerUnavailable(ctx, func() error {
+		startErr := d.Scion.Start(ctx, opts)
 		// Idempotent: a manager already running/existing (re-apply, or a
 		// create-race the observe step missed) is success, not error.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
 			return nil
 		}
-		if startErr == nil || !isBrokerUnavailable(startErr) {
-			return startErr
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(brokerStartInterval):
-		}
-	}
-	return startErr
+		return startErr
+	})
 }
 
 // managerLiveAttempts/managerLiveInterval bound waitManagerLive's post-start
@@ -413,11 +462,26 @@ var (
 // is what makes start-manager's success meaningful.
 func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
 	var lastPhase, lastContainer string
+	var lastErr error
 	for attempt := 0; attempt < managerLiveAttempts; attempt++ {
 		agents, err := d.Scion.List(ctx, jp)
 		if err != nil {
-			return fmt.Errorf("start-manager: liveness check: observing agents: %w", err)
+			// A mid-poll List blip does NOT mean the manager isn't live: by this
+			// point the observe-first List already succeeded and the create/
+			// resume action itself already succeeded, so the hub is demonstrably
+			// up — a single error here is far more likely a transient hiccup than
+			// a real failure. Consume this attempt (within the SAME overall
+			// budget, not an extra one) and keep polling; only surface the error
+			// if the whole budget exhausts without ever observing a live record.
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(managerLiveInterval):
+			}
+			continue
 		}
+		lastErr = nil
 		lastPhase, lastContainer = "", ""
 		for _, a := range agents {
 			if a.Slug == slug {
@@ -433,6 +497,9 @@ func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
 			return ctx.Err()
 		case <-time.After(managerLiveInterval):
 		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("start-manager: manager %q did not come up (last error observing agents: %w)", slug, lastErr)
 	}
 	return fmt.Errorf("start-manager: manager %q did not come up (last phase %q, container %q) — scion reported success but the harness is not live", slug, lastPhase, lastContainer)
 }

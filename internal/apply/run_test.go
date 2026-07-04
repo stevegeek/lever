@@ -347,7 +347,10 @@ func TestStartManagerObserveFirstResumesStopped(t *testing.T) {
 // green on the very first poll.
 func TestStartManagerObserveFirstNoOpWhenRunning(t *testing.T) {
 	app, f := newObserveFirstApp(t)
-	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "running"}
+	// containerStatus carries podman's live status TEXT ("Up 6 seconds"), not
+	// a canonical "running" — the real-world shape (live-observed 2026-07-04);
+	// this fixture pins that the liveness gate accepts it.
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 6 seconds"}
 	deps := Deps{
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(context.Context, string) error { return nil },
@@ -1816,5 +1819,26 @@ func TestDefaultReadCredRejectsWorldReadable(t *testing.T) {
 	}
 	if _, err := defaultReadCred(bad); err == nil {
 		t.Fatal("world-readable credential should be rejected")
+	}
+}
+
+// TestContainerLive pins the accepted containerStatus shapes: podman's live
+// status text ("Up …") and the canonical "running"; everything else — incl.
+// exited/stopped — is not live.
+func TestContainerLive(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   bool
+	}{
+		{"running", true},
+		{"Up 6 seconds", true},
+		{"Up About a minute", true},
+		{"stopped", false},
+		{"Exited (1) 4 minutes ago", false},
+		{"", false},
+	} {
+		if got := containerLive(tc.status); got != tc.want {
+			t.Errorf("containerLive(%q) = %v, want %v", tc.status, got, tc.want)
+		}
 	}
 }

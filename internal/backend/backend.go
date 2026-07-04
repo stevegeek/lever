@@ -82,4 +82,11 @@ type Backend interface {
 	// doctor`. Read-only; uses the machine-only guest transport, so it works
 	// without EnsureUp as long as the jail machine is up.
 	ReadScionProjectState(ctx context.Context) (ScionProjectState, error)
+	// Created reports whether EnsureUp CREATED the machine this run (true) vs
+	// found/started a pre-existing one (false, including a stopped machine
+	// that EnsureUp powered back on). Valid after EnsureUp; before EnsureUp is
+	// called, implementations report false (safe default — callers that gate
+	// behavior on Created also require a post-EnsureUp signal, e.g. a hub
+	// probe, so the zero value never fires spuriously).
+	Created() bool
 }

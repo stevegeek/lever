@@ -369,6 +369,12 @@ func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
 	if sawCreate {
 		t.Fatal("create must NOT be called for an already-existing (stopped) machine")
 	}
+	// Regression guard (fix/warm-resume-gate): a stopped->started machine is
+	// pre-existing, NOT created this run — `up`'s warm-resume gate reads this
+	// to decide whether restarting the hub on a probe failure is safe.
+	if b.Created() {
+		t.Fatal("Created() must be false for a stopped->started (pre-existing) machine")
+	}
 }
 
 func TestEnsureMachineRunningIsNoop(t *testing.T) {
@@ -383,6 +389,28 @@ func TestEnsureMachineRunningIsNoop(t *testing.T) {
 		if c.Name == "orb" && len(c.Args) > 0 && (c.Args[0] == "start" || c.Args[0] == "create") {
 			t.Fatalf("neither start nor create should be called for an already-running machine: %+v", f.Calls)
 		}
+	}
+	if b.Created() {
+		t.Fatal("Created() must be false for an already-running (pre-existing) machine")
+	}
+}
+
+// TestEnsureMachineCreateSetsCreated covers the other half of the
+// created-vs-preexisting signal: a machine that did not exist at all (`orb
+// list` shows nothing for it) takes the `orb create` path, and Created()
+// must report true so `up`'s warm-resume gate (fix/warm-resume-gate) knows
+// NOT to early-start the scion hub before apply's ordered bring-up.
+func TestEnsureMachineCreateSetsCreated(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb list", exec.Result{Stdout: ""}) // machine not listed at all
+	f.Script("orb create --isolated --mount /Users/x/tree:/lever ubuntu lever-jail", exec.Result{})
+	b := New(f, "lever-jail")
+
+	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
+		t.Fatalf("ensureMachine: %v", err)
+	}
+	if !b.Created() {
+		t.Fatal("Created() must be true when ensureMachine took the `orb create` path")
 	}
 }
 

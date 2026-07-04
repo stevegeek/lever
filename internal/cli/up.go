@@ -75,25 +75,34 @@ func hubUnreachable(err error) bool {
 		strings.Contains(msg, "connection refused")
 }
 
-// resolveManagerPhase runs probe once, and — ONLY when the failure proves the
-// hub process itself is unreachable (hubUnreachable) — restarts the hub
+// resolveManagerPhase runs probe once, and — ONLY when the machine
+// PRE-EXISTED this `up` (machinePreexisted) AND the failure proves the hub
+// process itself is unreachable (hubUnreachable) — restarts the hub
 // (idempotent: ServerStart tolerates an already-running server) and probes
 // exactly once more before classifying via phaseOrAbsent. This is the
 // stop->up warm-resume path: a restart turns "hub not responding" on a real
 // stop->up into a successful re-probe that surfaces the persisted, suspended
 // manager (-> upDecision "resume"), instead of falling through to a full
 // re-apply (which would add a duplicate scion project-config and start a
-// FRESH manager thread rather than resuming the existing one). On a truly
-// fresh machine the restarted hub is empty, so the re-probe still shows no
-// manager and `up` falls through to apply exactly as before. A restartHub
-// error is ignored — restarting is a best-effort upgrade, not a
+// FRESH manager thread rather than resuming the existing one).
+//
+// machinePreexisted MUST be false for a machine CREATED this run (backend
+// Created()==true): a fresh machine's hub is ALSO unreachable (it hasn't been
+// started yet), and restarting it here would start the scion server BEFORE
+// apply's init-machine/config-registry steps configure it — the server then
+// comes up with allow_container_script_harnesses=false, and apply's later
+// start-manager step 403s. Gating on machinePreexisted keeps the fresh path
+// exactly as it was before warm-resume existed: apply owns the ordered
+// bring-up (init-machine -> config-registry -> scion-server -> ...).
+//
+// A restartHub error is ignored — restarting is a best-effort upgrade, not a
 // requirement — and we fall through classifying the ORIGINAL probe result.
 // Only hubUnreachable (not the wider managerDefinitelyAbsent) triggers a
 // restart: "project not found" / "no git origin" mean the hub is UP but
 // nothing is registered, where restarting cannot help.
-func resolveManagerPhase(probe func() (string, error), restartHub func() error) (string, error) {
+func resolveManagerPhase(machinePreexisted bool, probe func() (string, error), restartHub func() error) (string, error) {
 	phase, err := probe()
-	if err != nil && hubUnreachable(err) {
+	if machinePreexisted && err != nil && hubUnreachable(err) {
 		if restartHub() == nil {
 			phase, err = probe()
 		}
@@ -138,6 +147,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			project := b.MountDest() // in-jail project path == mount root
 
 			phase, err := resolveManagerPhase(
+				!b.Created(),
 				func() (string, error) { return managerPhase(cmd.Context(), sc, project, app.Name) },
 				func() error { return sc.ServerStart(cmd.Context()) },
 			)

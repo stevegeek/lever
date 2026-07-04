@@ -81,3 +81,28 @@ func TestUpDecision(t *testing.T) {
 		}
 	}
 }
+
+// TestFirstLine covers the extraction used to keep the fresh-bring-up probe
+// message to one short line: scion's error includes its entire usage dump
+// after the first line, which must never reach the user's terminal.
+func TestFirstLine(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			"multi-line input keeps only the first line",
+			"Error: Hub at http://127.0.0.1:8080 is not responding: dial tcp: connect: connection refused\n\nUsage:\n  scion list [flags]\n\nFlags:\n  -h, --help   help for list\n",
+			"Error: Hub at http://127.0.0.1:8080 is not responding: dial tcp: connect: connection refused",
+		},
+		{"single line input is unchanged", "no git origin remote found for this project.", "no git origin remote found for this project."},
+		{"empty input stays empty", "", ""},
+		{"leading/trailing whitespace on the first line is trimmed", "  Error: project not found (status: 404)  \nUsage:\n  scion list\n", "Error: project not found (status: 404)"},
+	}
+	for _, c := range cases {
+		if got := firstLine(c.input); got != c.want {
+			t.Errorf("%s: firstLine(%q)=%q want %q", c.name, c.input, got, c.want)
+		}
+	}
+}

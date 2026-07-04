@@ -221,3 +221,55 @@ func TestCheckCredentialFile(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckMcpJsonInTree covers the real bug Stephen hit: a .mcp.json
+// anywhere under the instance tree is auto-loaded by Claude as PROJECT
+// scope inside every jailed agent, colliding with the brokered USER-scope
+// tools lever-agent registers (duplicate localhost:PORT endpoints).
+func TestCheckMcpJsonInTreeNone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := checkMcpJsonInTree(dir)
+	if !r.ok {
+		t.Fatalf("no .mcp.json anywhere in the tree => pass; got %+v", r)
+	}
+}
+
+func TestCheckMcpJsonInTreeAtRoot(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".mcp.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := checkMcpJsonInTree(dir)
+	if r.ok {
+		t.Fatal(".mcp.json at the tree root must fail the check")
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Fatalf("detail must name the offending path: %q", r.detail)
+	}
+	if !strings.Contains(r.fix, "user scope") {
+		t.Fatalf("fix should explain the user-scope collision: %q", r.fix)
+	}
+}
+
+func TestCheckMcpJsonInTreeNested(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "workspace", "assistant")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(sub, ".mcp.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := checkMcpJsonInTree(dir)
+	if r.ok {
+		t.Fatal("a nested .mcp.json must fail the check (walk, not just top-level)")
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Fatalf("detail must name the nested offending path: %q", r.detail)
+	}
+}

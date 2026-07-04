@@ -2,8 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -150,4 +152,33 @@ func checkCredentialFile(path string) checkResult {
 	default:
 		return checkResult{name, true, fmt.Sprintf("%s (%d bytes, mode %04o)", path, fi.Size(), fi.Mode().Perm()), ""}
 	}
+}
+
+// checkMcpJsonInTree flags any .mcp.json anywhere under the host tree.
+// Claude auto-loads a .mcp.json as PROJECT scope inside every jailed agent,
+// which collides with the brokered USER-scope tools lever-agent registers
+// (duplicate localhost:PORT endpoints vs the broker's) — a real bug hit in
+// production. Walks the whole tree (not just the top level); unreadable
+// directories are skipped rather than failing the check outright.
+func checkMcpJsonInTree(tree string) checkResult {
+	const name = "no stray .mcp.json in tree"
+	var found []string
+	_ = filepath.WalkDir(tree, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// Unreadable entry (permissions, race): skip it, don't abort the walk.
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() && d.Name() == ".mcp.json" {
+			found = append(found, path)
+		}
+		return nil
+	})
+	if len(found) > 0 {
+		return checkResult{name, false, "found: " + strings.Join(found, ", "),
+			"remove it — brokered MCP tools are registered at user scope by lever-agent; a .mcp.json in the tree re-adds ambient project-scope endpoints and conflicts"}
+	}
+	return checkResult{name, true, "none in tree", ""}
 }

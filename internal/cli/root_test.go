@@ -21,7 +21,7 @@ func TestHostRootHasProvisioningOnly(t *testing.T) {
 	// fire-and-forget, no-broker-hop (attachTarget + scion.Client.Message
 	// directly); the manager's is broker-routed send+list. Different trust
 	// models, same verb name.
-	for _, want := range []string{"up", "apply", "down", "doctor", "provision", "attach", "msg", "version"} {
+	for _, want := range []string{"up", "apply", "destroy", "stop", "doctor", "provision", "attach", "msg", "version"} {
 		if !n[want] {
 			t.Errorf("host root missing %q", want)
 		}
@@ -30,6 +30,14 @@ func TestHostRootHasProvisioningOnly(t *testing.T) {
 		if n[unwanted] {
 			t.Errorf("host root should not have %q", unwanted)
 		}
+	}
+	// "down" is a deprecated alias of "destroy", not its own top-level Name().
+	if n["down"] {
+		t.Error(`host root should not list "down" as a command name (it's an alias of "destroy")`)
+	}
+	destroy, _, err := NewHostRoot().Find([]string{"down"})
+	if err != nil || destroy.Name() != "destroy" {
+		t.Fatalf(`"down" must resolve to the "destroy" command via cobra Aliases; got %v, err %v`, destroy, err)
 	}
 }
 

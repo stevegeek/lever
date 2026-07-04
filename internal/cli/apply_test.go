@@ -153,3 +153,33 @@ func TestApplyDryRunDiscoversConfig(t *testing.T) {
 		t.Errorf("dry-run via discovery produced:\n%s", got)
 	}
 }
+
+func TestBrokerServeCmdIsDetachedAndLogged(t *testing.T) {
+	dir := t.TempDir()
+	// A non-existent .lever-state subdir mirrors a fresh apply: brokerServeCmd
+	// must MkdirAll the log's parent, or the open (and the whole bring-up) fails.
+	out := filepath.Join(dir, ".lever-state", "broker.out.log")
+	cmd, f, err := brokerServeCmd("/usr/local/bin/lever", "/x/lever.yaml", out, "198.51.100.7", "stephen", "501")
+	if err != nil {
+		t.Fatalf("brokerServeCmd: %v", err)
+	}
+	defer f.Close()
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("broker child must be Setsid (own session)")
+	}
+	if cmd.SysProcAttr.Setpgid {
+		t.Fatal("Setpgid should be replaced by Setsid, not both")
+	}
+	if cmd.Args[len(cmd.Args)-3] != "broker" || cmd.Args[len(cmd.Args)-2] != "serve" {
+		t.Fatalf("argv = %v, want ...broker serve <config>", cmd.Args)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("out log not created: %v", err)
+	}
+	joined := strings.Join(cmd.Env, "\n")
+	for _, want := range []string{"LEVER_HOST_ALIAS_IP=198.51.100.7", "LEVER_JAIL_USER=stephen", "LEVER_JAIL_UID=501"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("env missing %q", want)
+		}
+	}
+}

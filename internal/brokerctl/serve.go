@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 
 	"github.com/lever-to/lever/internal/backend/registry"
 	"github.com/lever-to/lever/internal/broker"
@@ -14,6 +15,30 @@ import (
 	leverexec "github.com/lever-to/lever/internal/exec"
 	"github.com/lever-to/lever/internal/scion"
 )
+
+// writePIDFile records the running broker's pid at state.PID() (0600), after
+// its listeners have bound — so a broker.pid on disk means a broker is (or was)
+// actually serving, never a failed-bind ghost. Returns an error: a pid file we
+// cannot write is a doctor blind spot, so callers treat it as fatal.
+func writePIDFile(state State) error {
+	pidFile := state.PID()
+	if err := os.MkdirAll(filepath.Dir(pidFile), 0o700); err != nil {
+		return fmt.Errorf("brokerctl: pid dir: %w", err)
+	}
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		return fmt.Errorf("brokerctl: write pid: %w", err)
+	}
+	return nil
+}
+
+// removePIDFile deletes the pid file on shutdown. A removal failure is a
+// warning, not fatal (the process is exiting anyway); an already-absent file
+// is fine.
+func removePIDFile(state State) {
+	if err := os.Remove(state.PID()); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "lever: warning: could not remove %s: %v\n", state.PID(), err)
+	}
+}
 
 // Serve runs the host-side broker for app until ctx is cancelled: ensure keys +
 // revocation state, build the broker, pre-bind both loopback listeners (learning
@@ -99,6 +124,17 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		return fmt.Errorf("brokerctl: bind admin listener: %w", err)
 	}
 	adminURL := "http://" + adminLn.Addr().String()
+
+	// The serve process owns its pid file: written now that both listeners are
+	// bound (a pid on disk ⇒ a broker actually serving, not a failed-bind ghost),
+	// removed when we stop. This also makes a manual `lever broker serve`
+	// doctor-visible, which a parent-written pid never was.
+	if err := writePIDFile(state); err != nil {
+		_ = jailLn.Close()
+		_ = adminLn.Close()
+		return err
+	}
+	defer removePIDFile(state)
 
 	// Issue the broker server cert. Always include the selected backend's host
 	// alias (cfg.ServerName, e.g. host.orb.internal) as a DNS SAN; additionally

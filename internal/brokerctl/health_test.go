@@ -6,7 +6,10 @@ import (
 	"testing"
 )
 
-func writePIDFile(t *testing.T, s State, body string) {
+// writeTestPIDFile writes an arbitrary pid-file body directly (bypassing the
+// real writePIDFile in serve.go) so these tests can exercise BrokerPIDStatus
+// against live/stale/garbage contents without spawning a process.
+func writeTestPIDFile(t *testing.T, s State, body string) {
 	t.Helper()
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -25,7 +28,7 @@ func TestBrokerPIDStatusNoFile(t *testing.T) {
 
 func TestBrokerPIDStatusLiveSelf(t *testing.T) {
 	s := StateDir(t.TempDir())
-	writePIDFile(t, s, strconv.Itoa(os.Getpid())+"\n")
+	writeTestPIDFile(t, s, strconv.Itoa(os.Getpid())+"\n")
 	pid, found, alive := s.BrokerPIDStatus()
 	if !found || !alive || pid != os.Getpid() {
 		t.Fatalf("own pid is alive; got pid=%d found=%v alive=%v", pid, found, alive)
@@ -34,7 +37,7 @@ func TestBrokerPIDStatusLiveSelf(t *testing.T) {
 
 func TestBrokerPIDStatusStale(t *testing.T) {
 	s := StateDir(t.TempDir())
-	writePIDFile(t, s, "2147483646\n") // implausibly high pid => no such process
+	writeTestPIDFile(t, s, "2147483646\n") // implausibly high pid => no such process
 	pid, found, alive := s.BrokerPIDStatus()
 	if !found || alive {
 		t.Fatalf("stale pid => found=true alive=false; got pid=%d found=%v alive=%v", pid, found, alive)
@@ -43,7 +46,7 @@ func TestBrokerPIDStatusStale(t *testing.T) {
 
 func TestBrokerPIDStatusGarbage(t *testing.T) {
 	s := StateDir(t.TempDir())
-	writePIDFile(t, s, "not-a-pid\n")
+	writeTestPIDFile(t, s, "not-a-pid\n")
 	_, found, alive := s.BrokerPIDStatus()
 	if !found || alive {
 		t.Fatalf("garbage pid file => found=true alive=false; got found=%v alive=%v", found, alive)

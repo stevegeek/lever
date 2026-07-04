@@ -539,6 +539,116 @@ func TestRegisterHostFallbackWhenRemoveJailFileNil(t *testing.T) {
 	}
 }
 
+// TestRegisterRemovesStaleScionProjectConfigsBeforeInit proves that both
+// register-manager and register-grove call Deps.RemoveScionProjectConfigs
+// with the target's JAIL workspace path BEFORE `scion init` runs — the
+// removal counterpart to the marker-removal race fix above. Without this,
+// every apply mints a fresh ~/.scion/project-configs/<uuid> registration and
+// the old ones accumulate (the `lever doctor` "duplicate registrations"
+// finding).
+func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
+	tree := t.TempDir()
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+	}
+	var removeCalls []string
+	var initCalls []string
+	// Ordering proof: at the moment each RemoveScionProjectConfigs call fires,
+	// count how many `scion init --non-interactive` calls the SAME fake runner
+	// has already recorded. Since FakeRunner appends to f.Calls synchronously
+	// in call order, a count of 0 for the manager's remove call proves it ran
+	// before manager init, and a count of 1 for the grove's remove call proves
+	// it ran after manager init but before grove init.
+	var initCountAtRemove []int
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		RemoveScionProjectConfigs: func(_ context.Context, jailWorkspacePath string) error {
+			removeCalls = append(removeCalls, jailWorkspacePath)
+			n := 0
+			for _, c := range f.Calls {
+				if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
+					n++
+				}
+			}
+			initCountAtRemove = append(initCountAtRemove, n)
+			return nil
+		},
+	}
+
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(removeCalls) != 2 {
+		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly 2 (manager + grove)", removeCalls)
+	}
+	if removeCalls[0] != "/lever" {
+		t.Errorf("manager remove call path = %q, want /lever", removeCalls[0])
+	}
+	if removeCalls[1] != "/lever/groves/worker" {
+		t.Errorf("grove remove call path = %q, want /lever/groves/worker", removeCalls[1])
+	}
+	// Manager's remove call must precede ANY init (count 0); the grove's remove
+	// call runs after the manager's own init (which already ran, since
+	// register-manager completes as one step before register-grove starts) but
+	// still before the grove's OWN init (count exactly 1, not 2).
+	wantCounts := []int{0, 1}
+	for i, n := range initCountAtRemove {
+		if n != wantCounts[i] {
+			t.Errorf("remove call %d (%s): %d init call(s) had already fired, want %d — it must run before its OWN init", i, removeCalls[i], n, wantCounts[i])
+		}
+	}
+
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "init --non-interactive") {
+			initCalls = append(initCalls, c.Dir)
+		}
+	}
+	if len(initCalls) != 2 {
+		t.Fatalf("init calls = %+v, want exactly 2", initCalls)
+	}
+}
+
+// TestRegisterToleratesNilRemoveScionProjectConfigs proves the Deps field is
+// optional: leaving it nil (as every pre-existing Deps literal in this file
+// does) must not crash Run, and `scion init` still runs.
+func TestRegisterToleratesNilRemoveScionProjectConfigs(t *testing.T) {
+	tree := t.TempDir()
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		// RemoveScionProjectConfigs intentionally left nil.
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sawInit bool
+	for _, c := range f.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
+			sawInit = true
+		}
+	}
+	if !sawInit {
+		t.Fatal("scion init should still run when RemoveScionProjectConfigs is nil")
+	}
+}
+
 func TestRegisterUsesJailPaths(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
 	f := exec.NewFakeRunner()

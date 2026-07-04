@@ -1,6 +1,12 @@
 package guest
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/lever-to/lever/internal/exec"
+)
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {
 	out := "MARKER 1\nENTRY lever__c857bb16 /lever\nENTRY scratch__b3b56fb7 /lever/groves/scratch\n"
@@ -45,5 +51,53 @@ func TestParseScionStateIgnoresJunk(t *testing.T) {
 	}
 	if st.MarkerPresent {
 		t.Fatal("a bare MARKER line (no value) must not read as present")
+	}
+}
+
+// TestRemoveScionProjectConfigsIssuesThroughUserPrefix proves the removal
+// script is emitted through the machine-only UserPrefix (mirroring
+// ReadScionProjectState's transport) and that the script's rm loop targets the
+// given workspace path.
+func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
+	for _, shape := range prefixShapes("lever-x") {
+		t.Run(shape.name, func(t *testing.T) {
+			f := exec.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " "), exec.Result{})
+			g := Guest{Host: f, UserPrefix: shape.userPrefix}
+
+			if err := g.RemoveScionProjectConfigs(context.Background(), "/lever/groves/scratch"); err != nil {
+				t.Fatalf("RemoveScionProjectConfigs: %v", err)
+			}
+			if len(f.Calls) != 1 {
+				t.Fatalf("expected 1 call, got %d: %+v", len(f.Calls), f.Calls)
+			}
+			call := f.Calls[0]
+			wantPrefix := append(append([]string{}, shape.userPrefix[1:]...), "bash", "-lc")
+			if call.Name != shape.userPrefix[0] || !equalPrefix(call.Args, wantPrefix) {
+				t.Fatalf("call = %+v, want name %q then prefix %v", call, shape.userPrefix[0], wantPrefix)
+			}
+			script := call.Args[len(call.Args)-1]
+			if !strings.Contains(script, "'/lever/groves/scratch'") {
+				t.Errorf("script missing quoted target workspace path: %q", script)
+			}
+			if !strings.Contains(script, "project-configs") || !strings.Contains(script, "workspace_path:") {
+				t.Errorf("script missing project-configs glob or workspace_path grep: %q", script)
+			}
+			if !strings.Contains(script, "rm -rf") {
+				t.Errorf("script missing the rm -rf removal: %q", script)
+			}
+		})
+	}
+}
+
+// TestRemoveScionProjectConfigsErrorsOnGuestFailure proves it surfaces (not
+// swallows) a failure of the guest command itself, mirroring
+// ReadScionProjectState's error handling.
+func TestRemoveScionProjectConfigsErrorsOnGuestFailure(t *testing.T) {
+	f := exec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
+	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
+
+	if err := g.RemoveScionProjectConfigs(context.Background(), "/lever"); err == nil {
+		t.Fatal("expected an error when the guest command fails, got nil")
 	}
 }

@@ -37,6 +37,28 @@ done
 	return parseScionState(res.Stdout), nil
 }
 
+// RemoveScionProjectConfigs removes every ~/.scion/project-configs/<name>
+// registration whose workspace_path == wp, through the machine-only UserPrefix.
+// Called before `scion init` in register-* so each apply leaves exactly ONE
+// registration per workspace instead of accumulating a duplicate every run. A
+// no-op when nothing matches. wp is a lever constant (/lever or
+// /lever/groves/<sanitized-name>), never user input.
+func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
+	script := `
+target=` + shellSingleQuote(wp) + `
+for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+  [ -e "$s" ] || continue
+  cur=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  if [ "$cur" = "$target" ]; then rm -rf "$(dirname "$(dirname "$s")")"; fi
+done
+`
+	args := append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", script)
+	if _, err := g.Host.Run(ctx, nil, g.UserPrefix[0], args...); err != nil {
+		return fmt.Errorf("guest: remove scion project configs for %s: %w", wp, err)
+	}
+	return nil
+}
+
 // parseScionState turns the report lines into a ScionProjectState. Unknown or
 // malformed lines are ignored (fail-safe: a check reading this treats "no
 // entries" as "nothing stale").

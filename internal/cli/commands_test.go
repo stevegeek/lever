@@ -15,6 +15,8 @@ type stubBackend struct {
 	scionErr          error
 	resolveRunUserErr error            // when set, ResolveRunUser returns it instead of nil
 	runner            leverexec.Runner // JailRunner override; nil ⇒ leverexec.RealRunner{}
+	removeScionCalls  []string         // workspace paths passed to RemoveScionProjectConfigs
+	removeScionErr    error
 }
 
 func (s *stubBackend) EnsureUp(context.Context, backend.Config) error { s.up = true; return nil }
@@ -43,6 +45,10 @@ func (s *stubBackend) LoadImage(context.Context, string) error                  
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
 func (s *stubBackend) ReadScionProjectState(context.Context) (backend.ScionProjectState, error) {
 	return s.scionState, s.scionErr
+}
+func (s *stubBackend) RemoveScionProjectConfigs(_ context.Context, workspacePath string) error {
+	s.removeScionCalls = append(s.removeScionCalls, workspacePath)
+	return s.removeScionErr
 }
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {

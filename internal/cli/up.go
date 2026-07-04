@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/lever-to/lever/internal/apply"
@@ -111,7 +112,13 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			switch upDecision(phase, fresh) {
 			case "restart":
-				_ = restartManagerFresh(cmd.Context(), sc, app.Name, project)
+				// A failed delete must be VISIBLE: with the record still
+				// present, the following apply's observe-first start-manager
+				// would RESUME the old conversation — silently defeating
+				// --fresh (re-review residual on finding I2).
+				if err := restartManagerFresh(cmd.Context(), sc, app.Name, project); err != nil {
+					return fmt.Errorf("--fresh: deleting the existing manager record: %w (without this the old session would be resumed)", err)
+				}
 				if err := apply.Run(cmd.Context(), app, deps); err != nil {
 					return err
 				}

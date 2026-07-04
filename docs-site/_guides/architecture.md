@@ -188,7 +188,8 @@ authority on *what* and *whether done*.
 
 Three lifecycle verbs, at increasing cost: **detach** (`Ctrl-b d`, leave the TTY, manager suspended
 in memory, jail machine keeps running) < **`lever stop`** (suspend the manager best-effort, stop the
-host broker, power the jail machine off — disk preserved, `lever up` resumes fast) < **`lever
+host broker, power the jail machine off — disk and session preserved; `lever up` powers back on and
+resumes the same manager conversation) < **`lever
 destroy`** (delete the jail machine and clear staged runtime state — `lever up` fully re-provisions;
 `lever down` is a deprecated alias, kept for compatibility).
 

@@ -330,15 +330,17 @@ Three levels, from lightest to heaviest:
 | Manager state | suspended, in memory | suspended, then the VM halts | gone |
 | Disk (image, containers) | untouched | untouched | deleted |
 | Host broker | still running | stopped | stopped, staged state cleared |
-| Resume with | `lever up` / `lever attach` | `lever up` (powers the machine back on) | `lever up` (full re-provision) |
+| Resume with | `lever up` / `lever attach` | `lever up` (powers back on, **same conversation**) | `lever up` (full re-provision) |
 
 ```sh
 lever stop
 ```
 
 `stop` best-effort suspends the manager (skipped if the jail isn't reachable — a halted machine is
-still stoppable), stops the host broker, then powers the jail machine off. The disk is preserved, so
-the next `lever up` resumes fast — no reinstall, no re-apply.
+still stoppable), stops the host broker, then powers the jail machine off. The disk — including the
+manager's session — is preserved: the next `lever up` powers the machine back on, re-arms the broker,
+and **resumes the same manager conversation** (the suspended agent record survives the power-off and
+scion relaunches the session from the persistent agent home). No reinstall, no re-registration.
 
 ```sh
 lever destroy

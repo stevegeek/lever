@@ -12,13 +12,15 @@ import (
 	leverexec "github.com/lever-to/lever/internal/exec"
 )
 
-// TestStopCallsBackendStop verifies the happy path: with a reachable jail,
-// `lever stop` cleanly STOPS the manager (best-effort, via scion) before
-// powering the machine off. It must be `scion stop`, not `scion suspend`: the
-// VM power-off kills the manager's container regardless (an in-memory
-// conversation cannot survive that), so suspending it would only leave a
-// suspended-agent record that the next `lever up` can never resume.
-func TestStopCallsBackendStop(t *testing.T) {
+// TestStopSuspendsManager verifies the happy path: with a reachable jail,
+// `lever stop` SUSPENDS the manager (best-effort, via scion) before powering
+// the machine off. It must be `scion suspend`, not `scion stop`: the
+// conversation is durable (the agent home is a persistent bind-mount, and
+// scion resume relaunches the harness with `claude --continue`, restoring
+// the session — live-proven 2026-07-04), so suspend keeps the record
+// resumable for the next `lever up`, while `scion stop` would REMOVE the
+// container and discard the session.
+func TestStopSuspendsManager(t *testing.T) {
 	dir := instanceDir(t, "demo")
 	t.Chdir(dir)
 
@@ -38,11 +40,11 @@ func TestStopCallsBackendStop(t *testing.T) {
 		t.Fatal("stop must call Backend.Stop")
 	}
 	if len(f.Calls) != 1 {
-		t.Fatalf("expected exactly one scion call (stop), got %+v", f.Calls)
+		t.Fatalf("expected exactly one scion call (suspend), got %+v", f.Calls)
 	}
 	call := f.Calls[0]
-	if call.Name != "scion" || len(call.Args) == 0 || call.Args[0] != "stop" {
-		t.Fatalf("expected `scion stop ...`, got %+v", call)
+	if call.Name != "scion" || len(call.Args) == 0 || call.Args[0] != "suspend" {
+		t.Fatalf("expected `scion suspend ...`, got %+v", call)
 	}
 }
 

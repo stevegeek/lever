@@ -141,6 +141,106 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		brokerHost = aliasV4 // …but prefer the resolved IP (no DNS needed)
 	}
 
+	// startBroker spawns `lever broker serve <config>` as a daemonized child
+	// (its own session, via brokerServeCmd) so it outlives the apply
+	// invocation. Named (rather than inlined in the Deps literal below) so
+	// RearmBootstrap can reuse it verbatim instead of duplicating the
+	// broker-start logic.
+	startBroker := func(ctx context.Context) error {
+		// Idempotent (M2): if a broker is already serving (re-apply), don't spawn
+		// a duplicate — it would fail to bind the ports, die, and clobber
+		// broker.pid with a dead PID. A fast single-shot probe (no listener =>
+		// instant connection-refused, so no penalty on a fresh apply).
+		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if req, err := http.NewRequestWithContext(probeCtx, "GET", adminURL+"/epoch", nil); err == nil {
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return nil // already serving; keep the existing process + PID
+				}
+			}
+		}
+		cmd, logf, err := brokerServeCmd(os.Args[0], configPath, state.OutLog(), aliasV4, b.RunUser(), b.RunUID())
+		if err != nil {
+			return err
+		}
+		// Keep the log fd owned by the child; close our copy after Start.
+		defer logf.Close()
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("lever broker serve: %w", err)
+		}
+		return nil
+	}
+
+	// brokerHealthy polls GET /epoch until 200 or a ~10s timeout. Named (see
+	// startBroker's comment) so RearmBootstrap can reuse it.
+	brokerHealthy := func(ctx context.Context) error {
+		deadline := time.Now().Add(10 * time.Second)
+		epochURL := adminURL + "/epoch"
+		for {
+			req, err := http.NewRequestWithContext(ctx, "GET", epochURL, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return nil
+				}
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("broker did not become healthy within 10s (last err: %v)", err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}
+
+	// mintManagerBootstrap POSTs /bootstrap to obtain the one-time manager
+	// enrolment ticket, reads the CA PEM from the state dir, and returns the
+	// full BootstrapMaterial. Named (see startBroker's comment) so
+	// RearmBootstrap can reuse it instead of duplicating the mint logic.
+	mintManagerBootstrap := func(ctx context.Context) (apply.BootstrapMaterial, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", adminURL+"/bootstrap", bytes.NewReader(nil))
+		if err != nil {
+			return apply.BootstrapMaterial{}, err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusForbidden {
+			// Single-use latch already consumed — signal the mint step to tolerate
+			// it (idempotent re-apply against the same broker process).
+			return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
+		}
+		if resp.StatusCode != http.StatusOK {
+			return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap returned %d", resp.StatusCode)
+		}
+		var result struct {
+			Ticket string `json:"ticket"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap decode: %w", err)
+		}
+		caPEM, err := os.ReadFile(state.CACert())
+		if err != nil {
+			return apply.BootstrapMaterial{}, fmt.Errorf("reading broker CA cert: %w", err)
+		}
+		return apply.BootstrapMaterial{
+			Ticket:    result.Ticket,
+			BrokerCA:  string(caPEM),
+			BrokerURL: fmt.Sprintf("https://%s:%d", brokerHost, app.EffectiveJailPort()),
+			AgentCN:   app.ManagerCN(),
+		}, nil
+	}
+
 	return apply.Deps{
 		// JailUp is a no-op: buildApplyDeps already brought the jail up
 		// (idempotent; resolves user/uid). The apply executor's jail-up step
@@ -185,99 +285,47 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return b.ScionProjectRegistered(ctx, wp)
 		},
 
-		// StartBroker spawns `lever broker serve <config>` as a daemonized child
-		// (its own session, via brokerServeCmd) so it outlives the apply invocation.
-		StartBroker: func(ctx context.Context) error {
-			// Idempotent (M2): if a broker is already serving (re-apply), don't spawn
-			// a duplicate — it would fail to bind the ports, die, and clobber
-			// broker.pid with a dead PID. A fast single-shot probe (no listener =>
-			// instant connection-refused, so no penalty on a fresh apply).
-			probeCtx, cancel := context.WithTimeout(ctx, time.Second)
-			defer cancel()
-			if req, err := http.NewRequestWithContext(probeCtx, "GET", adminURL+"/epoch", nil); err == nil {
-				if resp, err := http.DefaultClient.Do(req); err == nil {
-					_ = resp.Body.Close()
-					if resp.StatusCode == http.StatusOK {
-						return nil // already serving; keep the existing process + PID
-					}
-				}
-			}
-			cmd, logf, err := brokerServeCmd(os.Args[0], configPath, state.OutLog(), aliasV4, b.RunUser(), b.RunUID())
-			if err != nil {
-				return err
-			}
-			// Keep the log fd owned by the child; close our copy after Start.
-			defer logf.Close()
-			if err := cmd.Start(); err != nil {
-				return fmt.Errorf("lever broker serve: %w", err)
-			}
-			return nil
-		},
+		StartBroker:          startBroker,
+		BrokerHealthy:        brokerHealthy,
+		MintManagerBootstrap: mintManagerBootstrap,
 
-		// BrokerHealthy polls GET /epoch until 200 or a ~10s timeout.
-		BrokerHealthy: func(ctx context.Context) error {
-			deadline := time.Now().Add(10 * time.Second)
-			epochURL := adminURL + "/epoch"
-			for {
-				req, err := http.NewRequestWithContext(ctx, "GET", epochURL, nil)
-				if err != nil {
-					return err
-				}
-				resp, err := http.DefaultClient.Do(req)
-				if err == nil {
-					_ = resp.Body.Close()
-					if resp.StatusCode == http.StatusOK {
-						return nil
-					}
-				}
-				if time.Now().After(deadline) {
-					return fmt.Errorf("broker did not become healthy within 10s (last err: %v)", err)
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(200 * time.Millisecond):
-				}
+		// RearmBootstrap backs Deps.RearmBootstrap (see its doc in
+		// internal/apply/run.go): start-manager's create path calls this when
+		// no fresh bootstrap material was minted this apply (mint-manager-
+		// bootstrap tolerated a spent latch), because a freshly-created scion
+		// agent record has no agent home to reuse and so ALWAYS re-enrols —
+		// against a spent latch that would 403.
+		//
+		// Reuses the exact same broker-start/health/mint closures as the
+		// broker-up and mint-manager-bootstrap steps (no duplicated broker-
+		// start logic): stop the (possibly still-running) broker so its next
+		// start re-arms the single-use latch — the CA and signing keys live on
+		// disk in the state dir and are untouched by a process restart, so
+		// existing agent certs and capability tokens keep working — then start
+		// it fresh, wait for it to become healthy, mint, and stage the result
+		// into app.Tree/.lever/bootstrap.json via the same StageBootstrapMaterial
+		// helper the mint-manager-bootstrap step itself uses (one staging code
+		// path). Staging happens HERE (not in apply/run.go) because start-
+		// manager's Step.Target is the manager's slug, not the tree dir — this
+		// closure is the only place that has app.Tree in scope.
+		RearmBootstrap: func(ctx context.Context) (apply.BootstrapMaterial, error) {
+			if err := state.StopBroker(); err != nil {
+				return apply.BootstrapMaterial{}, fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
 			}
-		},
-
-		// MintManagerBootstrap POSTs /bootstrap to obtain the one-time manager
-		// enrolment ticket, reads the CA PEM from the state dir, and returns
-		// the full BootstrapMaterial.
-		MintManagerBootstrap: func(ctx context.Context) (apply.BootstrapMaterial, error) {
-			req, err := http.NewRequestWithContext(ctx, "POST", adminURL+"/bootstrap", bytes.NewReader(nil))
+			if err := startBroker(ctx); err != nil {
+				return apply.BootstrapMaterial{}, fmt.Errorf("restarting the broker to re-arm its bootstrap latch: %w", err)
+			}
+			if err := brokerHealthy(ctx); err != nil {
+				return apply.BootstrapMaterial{}, fmt.Errorf("waiting for the re-armed broker to become healthy: %w", err)
+			}
+			m, err := mintManagerBootstrap(ctx)
 			if err != nil {
-				return apply.BootstrapMaterial{}, err
+				return apply.BootstrapMaterial{}, fmt.Errorf("minting bootstrap material from the re-armed broker: %w", err)
 			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
+			if err := apply.StageBootstrapMaterial(app.Tree, m); err != nil {
+				return apply.BootstrapMaterial{}, fmt.Errorf("staging re-armed bootstrap material: %w", err)
 			}
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusForbidden {
-				// Single-use latch already consumed — signal the mint step to tolerate
-				// it (idempotent re-apply against the same broker process).
-				return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
-			}
-			if resp.StatusCode != http.StatusOK {
-				return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap returned %d", resp.StatusCode)
-			}
-			var result struct {
-				Ticket string `json:"ticket"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap decode: %w", err)
-			}
-			caPEM, err := os.ReadFile(state.CACert())
-			if err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("reading broker CA cert: %w", err)
-			}
-			return apply.BootstrapMaterial{
-				Ticket:    result.Ticket,
-				BrokerCA:  string(caPEM),
-				BrokerURL: fmt.Sprintf("https://%s:%d", brokerHost, app.EffectiveJailPort()),
-				AgentCN:   app.ManagerCN(),
-			}, nil
+			return m, nil
 		},
 
 		// Log surfaces start-manager's loud resume-failed recovery notice (see

@@ -198,6 +198,31 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	}
 }
 
+// TestBuildApplyDepsWiresRearmBootstrap verifies buildApplyDeps wires
+// Deps.RearmBootstrap (fix/rearm-bootstrap-on-create — see its doc in
+// internal/apply/run.go). RearmBootstrap's real implementation stops+restarts
+// the broker and hits its live HTTP admin API, which is not something a unit
+// test should exercise (no live broker here — see this branch's CODE-ONLY
+// constraint), so this only pins that buildApplyDeps wires a non-nil func;
+// the behavior itself is covered by internal/apply's fake-deps tests.
+func TestBuildApplyDepsWiresRearmBootstrap(t *testing.T) {
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := &stubBackend{}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if deps.RearmBootstrap == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.RearmBootstrap")
+	}
+}
+
 func TestApplyDryRunDiscoversConfig(t *testing.T) {
 	dir := instanceDir(t, "demo")
 	t.Chdir(dir)

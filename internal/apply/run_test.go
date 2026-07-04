@@ -641,6 +641,209 @@ func TestStartManagerStartingPhaseRecoversFresh(t *testing.T) {
 	}
 }
 
+// --- RearmBootstrap (fix/rearm-bootstrap-on-create) ---
+//
+// A freshly-created scion agent record has no agent home to reuse (unlike
+// resume, which restores the existing one), so lever-agent boot ALWAYS
+// re-enrols after a create. If mint-manager-bootstrap tolerated a spent
+// /bootstrap latch (idempotent re-apply against the same broker process — see
+// ErrBootstrapLatched), a create-path Start is guaranteed to 403. The tests
+// below pin start-manager's fix: the shared create helper re-arms (restarts
+// the broker, re-mints, re-stages) whenever no fresh material was minted
+// earlier in THIS apply run, across every path that can reach a create (the
+// absent-record branch, and both post-delete recovery branches), and never
+// re-arms when it isn't needed (a fresh mint already happened this run, or
+// the branch taken is resume/no-op, which never creates at all).
+
+// TestStartManagerCreateRearmsSpentLatchWhenNoFreshMintThisRun: the plain
+// absent-record create path, with no MintManagerBootstrap wired (so boot is
+// untouched/"empty" exactly as it would be after a tolerated spent latch),
+// must call RearmBootstrap exactly once and then proceed with Start.
+func TestStartManagerCreateRearmsSpentLatchWhenNoFreshMintThisRun(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // initPhase "" == absent -> create path
+	rearmCalls := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			rearmCalls++
+			return BootstrapMaterial{Ticket: "fresh-ticket"}, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rearmCalls != 1 {
+		t.Errorf("RearmBootstrap calls = %d, want 1 (a create with no fresh mint this run must re-arm)", rearmCalls)
+	}
+	if r.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1 (Start must proceed once the re-arm succeeds)", r.startCalls)
+	}
+}
+
+// TestStartManagerCreateSkipsRearmWhenFreshMintAlreadyHappened: when
+// mint-manager-bootstrap actually minted fresh material this run (no latch
+// to tolerate), the create path already has enrolable material — RearmBootstrap
+// must NOT be called even though it's wired.
+func TestStartManagerCreateSkipsRearmWhenFreshMintAlreadyHappened(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent -> create path
+	rearmCalls := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, no latch
+		},
+		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			rearmCalls++
+			return BootstrapMaterial{}, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rearmCalls != 0 {
+		t.Errorf("RearmBootstrap calls = %d, want 0 (a fresh mint this run already has enrolable material)", rearmCalls)
+	}
+	if r.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1", r.startCalls)
+	}
+}
+
+// TestStartManagerRecoveryRearmsBeforeFreshCreate: the post-recovery-delete
+// create path (a non-transient resume failure -> delete -> fresh create) must
+// ALSO re-arm before its Start — it takes the identical startManagerCreate
+// helper as the absent-record branch, so it must get the identical guarantee.
+func TestStartManagerRecoveryRearmsBeforeFreshCreate(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "suspended", initContainerStatus: "stopped",
+		resumeErr: fmt.Errorf("cannot resume agent 'hello': agent does not exist"),
+	}
+	rearmCalls := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		Log:       func(string, ...any) {},
+		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			rearmCalls++
+			return BootstrapMaterial{Ticket: "fresh-after-recovery"}, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rearmCalls != 1 {
+		t.Errorf("RearmBootstrap calls = %d, want 1 (the post-recovery-delete create must re-arm too)", rearmCalls)
+	}
+	if r.deleteCalls != 1 || r.startCalls != 1 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1", r.deleteCalls, r.startCalls)
+	}
+}
+
+// TestStartManagerResumeNeverRearms: a record that resumes successfully never
+// reaches the create path at all — its agent home (and thus its enrol cert)
+// already exists, so re-arming would be pointless (and would needlessly
+// bounce the broker).
+func TestStartManagerResumeNeverRearms(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	rearmCalls := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			rearmCalls++
+			return BootstrapMaterial{}, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rearmCalls != 0 {
+		t.Errorf("RearmBootstrap calls = %d, want 0 (a successful resume never creates, so it never re-arms)", rearmCalls)
+	}
+}
+
+// TestStartManagerNoOpRunningNeverRearms: an already-running, actually-live
+// record is a pure no-op — it never reaches the create path, so
+// RearmBootstrap must never be called.
+func TestStartManagerNoOpRunningNeverRearms(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "running"}
+	rearmCalls := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			rearmCalls++
+			return BootstrapMaterial{}, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rearmCalls != 0 {
+		t.Errorf("RearmBootstrap calls = %d, want 0 (an already-running manager never creates, so it never re-arms)", rearmCalls)
+	}
+}
+
+// TestStartManagerCreateFailsLoudlyWhenRearmFails: a create without enrolable
+// bootstrap material is guaranteed to 403 (crash-loop the container), so a
+// RearmBootstrap failure must hard-fail the step — naming bootstrap/latch —
+// rather than let Start run anyway.
+func TestStartManagerCreateFailsLoudlyWhenRearmFails(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent -> create path
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			return BootstrapMaterial{}, fmt.Errorf("broker restart failed: connection refused")
+		},
+	}
+	err := Run(context.Background(), app, deps)
+	if err == nil {
+		t.Fatal("a failed re-arm must fail the apply — a create over a spent latch is guaranteed to 403")
+	}
+	if !strings.Contains(err.Error(), "bootstrap") || !strings.Contains(err.Error(), "latch") {
+		t.Fatalf("error should mention bootstrap/latch, got: %v", err)
+	}
+	if r.startCalls != 0 {
+		t.Errorf("startCalls = %d, want 0 (Start must never be attempted without enrolable bootstrap material)", r.startCalls)
+	}
+}
+
+// TestStartManagerCreateProceedsWithoutRearmWhenNilBackCompat: nil
+// RearmBootstrap (every pre-fix test, and the broker-only acceptance gate,
+// which never reaches start-manager at all) must leave the create path
+// exactly as it behaved before this fix — Start proceeds unguarded.
+func TestStartManagerCreateProceedsWithoutRearmWhenNilBackCompat(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent -> create path
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		// RearmBootstrap intentionally left nil.
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1 (nil RearmBootstrap must not block the create path)", r.startCalls)
+	}
+}
+
 // TestStartManagerObserveListErrorIsHardFailure: the hub is already up by the
 // time start-manager runs (scion-server precedes it in Plan()), so a List
 // error observing agents is real, not a "hub not ready yet" race — it must

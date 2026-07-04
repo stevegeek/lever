@@ -93,6 +93,17 @@ type Deps struct {
 	// removal counterpart to RemoveJailFile's marker-race fix above. nil ⇒
 	// no-op (tests, broker-only VM gate).
 	RemoveScionProjectConfigs func(ctx context.Context, jailWorkspacePath string) error
+	// ScionProjectRegistered observes whether jailWorkspacePath already has
+	// exactly one valid scion registration (one project-configs entry + the
+	// in-tree marker present) BEFORE the register-manager/register-grove step
+	// decides whether to run its destructive clean+init path at all. true →
+	// skip marker removal, RemoveScionProjectConfigs, and `scion init`/`hub
+	// link` entirely, so a re-apply does not tear down (and orphan) a
+	// resumable scion agent record just to re-mint an identical registration.
+	// nil, or a query error, falls through to the destructive path unchanged
+	// (fail-open — an observe failure must never turn into a hard apply
+	// failure, and zero/duplicate/torn registrations legitimately need it).
+	ScionProjectRegistered func(ctx context.Context, jailWorkspacePath string) (bool, error)
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
@@ -141,6 +152,26 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		}
 		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 	case "register-manager", "register-grove":
+		jp := jailPath(s.Target, app.Tree, d.JailMount)
+
+		// Idempotent register: observe BEFORE doing anything destructive. A
+		// suspended manager (or grove) agent record survives a `lever stop` +
+		// `lever up` cycle (its project linkage lives in this same
+		// project-configs registration) — the marker-removal +
+		// RemoveScionProjectConfigs + re-init below unconditionally tore that
+		// linkage down on every apply, orphaning the record and breaking
+		// `scion resume`. When the registration is already sound (exactly one
+		// project-configs entry for jp AND the in-tree marker present), there
+		// is nothing to fix, so skip the whole destructive path. A query
+		// error, or an unsound registration (zero, duplicate, or torn), falls
+		// through unchanged to the existing destructive path below — fail
+		// open, never a hard apply failure over an observe read.
+		if d.ScionProjectRegistered != nil {
+			if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
+				return nil
+			}
+		}
+
 		// Remove a stale `.scion` marker FILE left in the tree by a previous
 		// bring-up. It survives `orb delete` (it lives in the bind-mounted tree),
 		// and `scion init` writes workspace_path only on fresh-create — resolving
@@ -163,7 +194,6 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		// (no jail filesystem view to remove through there), so fall back to
 		// the host-side remove, which still reaches the jail via the bind mount
 		// (just without the same-view guarantee).
-		jp := jailPath(s.Target, app.Tree, d.JailMount)
 		if d.RemoveJailFile != nil {
 			if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
 				return err

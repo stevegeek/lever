@@ -17,6 +17,9 @@ type stubBackend struct {
 	runner            leverexec.Runner // JailRunner override; nil ⇒ leverexec.RealRunner{}
 	removeScionCalls  []string         // workspace paths passed to RemoveScionProjectConfigs
 	removeScionErr    error
+	registeredResult  bool // ScionProjectRegistered return value
+	registeredErr     error
+	registeredCalls   []string // workspace paths passed to ScionProjectRegistered
 }
 
 func (s *stubBackend) EnsureUp(context.Context, backend.Config) error { s.up = true; return nil }
@@ -49,6 +52,10 @@ func (s *stubBackend) ReadScionProjectState(context.Context) (backend.ScionProje
 func (s *stubBackend) RemoveScionProjectConfigs(_ context.Context, workspacePath string) error {
 	s.removeScionCalls = append(s.removeScionCalls, workspacePath)
 	return s.removeScionErr
+}
+func (s *stubBackend) ScionProjectRegistered(_ context.Context, workspacePath string) (bool, error) {
+	s.registeredCalls = append(s.registeredCalls, workspacePath)
+	return s.registeredResult, s.registeredErr
 }
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {

@@ -69,6 +69,42 @@ done
 `
 }
 
+// ScionProjectRegistered reports whether workspacePath already has EXACTLY ONE
+// valid scion registration: precisely one ~/.scion/project-configs entry whose
+// workspace_path == workspacePath, AND the in-tree marker
+// (workspacePath/.scion) present. Anything else — zero entries, duplicate
+// entries, or an entry with the marker gone (the bad-teardown signature) — is
+// NOT a valid registration and resolves false, routing the register-manager/
+// register-grove apply step (internal/apply/run.go) to its existing
+// destructive clean+init path instead of skipping it. Reuses
+// ReadScionProjectState's script (same read-only, no-EnsureUp transport; see
+// its doc for the VirtioFS/marker rationale) rather than duplicating it — a
+// query error is returned unchanged so the caller can fail OPEN to the
+// destructive path rather than treating a read failure as "safe to skip".
+func (g Guest) ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error) {
+	st, err := g.ReadScionProjectState(ctx, workspacePath)
+	if err != nil {
+		return false, fmt.Errorf("guest: check scion project registration for %s: %w", workspacePath, err)
+	}
+	return scionProjectRegistered(st, workspacePath), nil
+}
+
+// scionProjectRegistered is the pure exactly-one-valid-registration predicate,
+// factored out so it is unit-testable without a fake runner (mirrors how
+// internal/cli's checkScionProject is a pure function over the same
+// backend.ScionProjectState shape, just with the opposite polarity: that one
+// flags corruption for `lever doctor`, this one gates a destructive apply
+// step).
+func scionProjectRegistered(st backend.ScionProjectState, workspacePath string) bool {
+	n := 0
+	for _, e := range st.Entries {
+		if e.WorkspacePath == workspacePath {
+			n++
+		}
+	}
+	return n == 1 && st.MarkerPresent
+}
+
 // parseScionState turns the report lines into a ScionProjectState. Unknown or
 // malformed lines are ignored (fail-safe: a check reading this treats "no
 // entries" as "nothing stale").

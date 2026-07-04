@@ -171,6 +171,16 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return b.RemoveScionProjectConfigs(ctx, wp)
 		},
 
+		// ScionProjectRegistered observes whether the register-manager/register-
+		// grove apply step (internal/apply/run.go) even needs to run its
+		// destructive clean+init path — see RemoveScionProjectConfigs's comment
+		// above for why that path exists; this is the idempotency gate that
+		// decides whether to run it at all, so a re-apply stops orphaning a
+		// resumable scion agent record.
+		ScionProjectRegistered: func(ctx context.Context, wp string) (bool, error) {
+			return b.ScionProjectRegistered(ctx, wp)
+		},
+
 		// StartBroker spawns `lever broker serve <config>` as a daemonized child
 		// (its own session, via brokerServeCmd) so it outlives the apply invocation.
 		StartBroker: func(ctx context.Context) error {

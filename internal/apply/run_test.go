@@ -765,6 +765,200 @@ func TestRegisterToleratesNilRemoveScionProjectConfigs(t *testing.T) {
 	}
 }
 
+// TestRegisterSkipsDestructivePathWhenAlreadyRegistered proves the idempotent-
+// register gate: when Deps.ScionProjectRegistered reports the workspace is
+// already validly registered, register-manager/register-grove must skip its
+// destructive clean+init path ENTIRELY — no marker removal, no
+// RemoveScionProjectConfigs, no `scion init`/`hub link`. This is the fix for
+// the resume-orphaning bug: a suspended manager (or grove) agent record's
+// project linkage must survive a re-apply when nothing is actually wrong with
+// the registration.
+func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
+	tree := t.TempDir()
+	marker := filepath.Join(tree, ".scion")
+	if err := os.WriteFile(marker, []byte("project-id: real\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+	}
+	var removeJailCalls, removeConfigCalls, registeredCalls []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		RemoveJailFile: func(_ context.Context, jailPath string) error {
+			removeJailCalls = append(removeJailCalls, jailPath)
+			return nil
+		},
+		RemoveScionProjectConfigs: func(_ context.Context, wp string) error {
+			removeConfigCalls = append(removeConfigCalls, wp)
+			return nil
+		},
+		ScionProjectRegistered: func(_ context.Context, wp string) (bool, error) {
+			registeredCalls = append(registeredCalls, wp)
+			return true, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(registeredCalls) != 2 || registeredCalls[0] != "/lever" || registeredCalls[1] != "/lever/groves/worker" {
+		t.Fatalf("ScionProjectRegistered calls = %+v, want [/lever /lever/groves/worker]", registeredCalls)
+	}
+	if len(removeJailCalls) != 0 {
+		t.Errorf("RemoveJailFile should not be called when already registered; got %+v", removeJailCalls)
+	}
+	if len(removeConfigCalls) != 0 {
+		t.Errorf("RemoveScionProjectConfigs should not be called when already registered; got %+v", removeConfigCalls)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("real marker must survive when already registered, stat err=%v", err)
+	}
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "init --non-interactive") || strings.Contains(j, "hub link") {
+			t.Errorf("scion init/hub-link must not run when already registered; call=%+v", c)
+		}
+	}
+}
+
+// TestRegisterRunsDestructivePathWhenNotRegistered pins the complement: when
+// Deps.ScionProjectRegistered reports false, the full existing destructive
+// path (marker removal, RemoveScionProjectConfigs, init, hub link) still runs
+// exactly as it does today.
+func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
+	tree := t.TempDir()
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	var removeJailCalls, removeConfigCalls []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		RemoveJailFile: func(_ context.Context, jailPath string) error {
+			removeJailCalls = append(removeJailCalls, jailPath)
+			return nil
+		},
+		RemoveScionProjectConfigs: func(_ context.Context, wp string) error {
+			removeConfigCalls = append(removeConfigCalls, wp)
+			return nil
+		},
+		ScionProjectRegistered: func(_ context.Context, wp string) (bool, error) {
+			return false, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(removeJailCalls) != 1 || removeJailCalls[0] != "/lever/.scion" {
+		t.Fatalf("RemoveJailFile calls = %+v, want exactly one call with \"/lever/.scion\"", removeJailCalls)
+	}
+	if len(removeConfigCalls) != 1 || removeConfigCalls[0] != "/lever" {
+		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever\"", removeConfigCalls)
+	}
+	var sawInit, sawHubLink bool
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "init --non-interactive") {
+			sawInit = true
+		}
+		if strings.Contains(j, "hub link") {
+			sawHubLink = true
+		}
+	}
+	if !sawInit || !sawHubLink {
+		t.Fatalf("scion init and hub link must both run when not registered; init=%v hublink=%v", sawInit, sawHubLink)
+	}
+}
+
+// TestRegisterFallsThroughToDestructivePathOnObserveError proves the fail-open
+// contract: an error from Deps.ScionProjectRegistered must NOT become a hard
+// apply failure — it falls through to the existing destructive path exactly
+// like a `false` result would.
+func TestRegisterFallsThroughToDestructivePathOnObserveError(t *testing.T) {
+	tree := t.TempDir()
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	var removeConfigCalls []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		RemoveScionProjectConfigs: func(_ context.Context, wp string) error {
+			removeConfigCalls = append(removeConfigCalls, wp)
+			return nil
+		},
+		// Deliberately returns ok=true ALONGSIDE an error, to prove the error
+		// (not the ok value) governs the fall-through.
+		ScionProjectRegistered: func(_ context.Context, wp string) (bool, error) {
+			return true, fmt.Errorf("boom: guest unreachable")
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v (an observe error must fail OPEN to the destructive path, not fail the apply)", err)
+	}
+	if len(removeConfigCalls) != 1 {
+		t.Fatalf("observe error must fall through to the destructive path; RemoveScionProjectConfigs calls = %+v", removeConfigCalls)
+	}
+	var sawInit bool
+	for _, c := range f.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
+			sawInit = true
+		}
+	}
+	if !sawInit {
+		t.Fatal("scion init should still run when the observe read errors")
+	}
+}
+
+// TestRegisterToleratesNilScionProjectRegistered proves the Deps field is
+// optional: leaving it nil (as every pre-existing Deps literal in this file
+// does, before this task) must not crash Run, and `scion init` still runs.
+func TestRegisterToleratesNilScionProjectRegistered(t *testing.T) {
+	tree := t.TempDir()
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(f, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		// ScionProjectRegistered intentionally left nil.
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sawInit bool
+	for _, c := range f.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
+			sawInit = true
+		}
+	}
+	if !sawInit {
+		t.Fatal("scion init should still run when ScionProjectRegistered is nil")
+	}
+}
+
 func TestRegisterUsesJailPaths(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
 	f := exec.NewFakeRunner()

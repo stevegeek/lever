@@ -356,8 +356,10 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
 		}
 		// Observe, then act on the delta — scion's verbs are state-specific:
-		// start CREATES (409 "already exists" over any existing record — and
-		// the CLI exits 0 on that 409, so a blind start false-succeeds); resume
+		// start CREATES (409 "already exists" over a stopped record; the 409
+		// error TEXT matches AlreadyRunning, so a blind start false-succeeds
+		// through that idempotency check — scion's own exit code is correctly
+		// non-zero, verified upstream 2026-07-04); resume
 		// covers suspended AND stopped records, relaunching with
 		// `claude --continue` (conversation restored). Live evidence
 		// 2026-07-04 (see the resume-reconciliation plan's Evidence base). The
@@ -527,13 +529,15 @@ var (
 )
 
 // waitManagerLive polls d.Scion.List until slug's record shows BOTH
-// Phase=="running" AND ContainerStatus=="running", or attempts run out. This
-// is the backstop for both false-success classes scion's own CLI can report
-// (see the plan's Evidence base): a blind `scion start` exits 0 on a 409
-// "already exists" even when nothing changed, and `scion resume`/`scion
-// start` can report success ("resumed") for a container that dies moments
-// later. Trusting the observed record — not the CLI's own exit code/wording —
-// is what makes start-manager's success meaningful.
+// Phase=="running" AND a live container, or attempts run out. This is the
+// backstop for both false-success classes above this layer: a blind `scion
+// start`'s 409 "already exists" error text matches the AlreadyRunning
+// idempotency predicate (false success in OUR retry loop — scion's exit code
+// itself is correctly non-zero), and `scion resume`/`scion start` report
+// success ("resumed") for a container that dies moments later (a real scion
+// race: its liveness check is a single immediate poll). Trusting the observed
+// record — not CLI exit codes or error wording — is what makes start-manager's
+// success meaningful.
 // containerLive reports whether a scion `list --format json` containerStatus
 // value describes a LIVE container. For a running container scion passes
 // through the podman status TEXT ("Up 6 seconds", "Up About a minute"), not a

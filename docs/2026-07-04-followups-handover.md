@@ -12,41 +12,33 @@ re-arm). Full arc record: `.superpowers/sdd/progress.md` (ledger),
 
 ## Part 1 — Upstream Scion issue candidates
 
-All three were live-diagnosed on 2026-07-04 against the pinned Scion build
+All were live-diagnosed on 2026-07-04 against the pinned Scion build
 (instance `scion.version: 666333f9`, cross-compiled per `lever.yaml`). None are
 blockers for Lever — we shipped workarounds — but each is a genuine upstream
 defect or sharp edge worth reporting. Ordered by severity.
 
-### Issue 1 — CLI exits 0 on a 409 "agent already exists" error
+### Issue 1 — RETRACTED (measurement error), replaced by a real start-vs-stopped bug
 
-**Severity:** high for any scripted consumer (silent false success).
+**Original claim:** "CLI exits 0 on a 409 agent-already-exists error." **WRONG —
+retracted 2026-07-04 evening.** The live capture piped scion through `head`
+(`scion … | head -6; echo RC=$?`), so RC measured `head`, not scion. An upstream
+investigation at HEAD `4a9c8767` proved the 409 propagates through every layer
+(cmd/common.go:1122 → :828 wrapHubError → RunAgent :418 → cmd/root.go:214
+unconditional `os.Exit(1)`) and reproduced the exact reported output with a
+mocked 409 — scion exits 1. Lever's historical false-success came from OUR
+`AlreadyRunning` predicate matching the 409's "already exists" error TEXT in
+the retry loop; the `waitManagerLive` liveness verify guards that class either
+way. Lever code comments carrying the false claim were corrected same day.
 
-**Repro** (exact, performed live):
-1. Have an agent record in phase `stopped` for a project (e.g. after `scion stop <agent>`,
-   which removes the container but keeps the record).
-2. `scion -g <project> start <agent> "task" --harness claude --harness-auth oauth-token \
-   --workspace <path> --image <image>`
-
-**Observed:**
-```
-Using hub: http://127.0.0.1:8080
-Starting agent 'assistant'...
-Error: failed to start agent via Hub: conflict: agent "assistant" already exists in this project (status: 409)
-To use local-only mode, run: scion hub disable
-RC=0        <-- shell exit code is ZERO
-```
-The error is printed to the terminal, but the process exit code is 0. Every
-scripted orchestrator (Lever's apply executor included) sees success.
-
-**Impact on Lever (historical):** this was one half of the "false `application up`"
-failure — apply ran `scion start`, got rc=0, and reported the manager up while no
-container existed. Lever now defends with `waitManagerLive` (post-start liveness
-polling of `list --format json`), so the workaround is durable — but the CLI
-should exit non-zero on any Hub error.
-
-**Suggested report:** "CLI exit code is 0 when the Hub returns 409 conflict on
-`start`" — likely a missing error propagation in the start command's Hub-error
-branch (other Hub errors, e.g. the 500 resume failure, DO exit 1).
+**The REAL upstream bug the investigation surfaced instead:**
+`scion start <agent>` auto-RESUMES a *suspended* agent (CLI sets `Resume=true`,
+cmd/common.go:809) but hard-409s a *stopped* one — even though the server
+supports stopped-restart when `Resume=true`
+(pkg/hub/handlers_agent_create_helpers.go:420) and `scion resume` handles
+stopped agents fine. The CLI asymmetry (suspended→resume, stopped→409) is the
+actual trigger of the confusing conflict, and the fix is to treat stopped like
+suspended in start's resume-detection. Fix + test developed on the fork
+(branch `fix/start-resumes-stopped`, see Part 1 status below).
 
 ### Issue 2 — `start`/resume reports success without verifying the harness survives
 

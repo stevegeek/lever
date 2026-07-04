@@ -318,3 +318,42 @@ func TestCheckGoToolchainProbeError(t *testing.T) {
 		t.Fatalf("fix should point at PATH: %q", r.fix)
 	}
 }
+
+func TestCheckOperatorSkills(t *testing.T) {
+	root := t.TempDir()
+	tree := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(filepath.Join(tree, "groves", "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	app := &config.App{Tree: tree, Groves: []config.Grove{{Name: "scratch", Dir: "groves/scratch"}}}
+	stateDir := filepath.Join(root, ".lever-state")
+
+	// Unscaffolded → fail with `lever init` hint.
+	res := checkOperatorSkills(app, stateDir)
+	if res.ok {
+		t.Fatalf("unscaffolded must fail: %+v", res)
+	}
+	if !strings.Contains(res.fix, "lever init") {
+		t.Fatalf("fix must mention lever init: %+v", res)
+	}
+
+	// Scaffold → pass.
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureClaudeMDBlock(tree, false); err != nil {
+		t.Fatal(err)
+	}
+	if res = checkOperatorSkills(app, stateDir); !res.ok {
+		t.Fatalf("scaffolded must pass: %+v", res)
+	}
+
+	// Owner edit → fail, informational wording (mentions --force).
+	op := filepath.Join(tree, ".claude", "skills", "lever-operator", "SKILL.md")
+	if err := os.WriteFile(op, []byte("edited"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res = checkOperatorSkills(app, stateDir); res.ok || !strings.Contains(res.fix, "--force") {
+		t.Fatalf("owner-edit must fail with --force hint: %+v", res)
+	}
+}

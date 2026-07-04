@@ -373,6 +373,24 @@ func (l *Lima) Teardown(ctx context.Context) error {
 	return nil
 }
 
+// Stop powers the VM off but keeps its disk intact — a strictly less
+// destructive operation than Teardown (which deletes the VM). Idempotent: a
+// no-op if the VM is already absent; limactl tolerates stopping an
+// already-stopped VM, so no separate guard is needed for that case.
+func (l *Lima) Stop(ctx context.Context) error {
+	status, err := l.vmStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		return nil // already gone; nothing to stop
+	}
+	if _, err := l.r.Run(ctx, nil, "limactl", "stop", l.vm); err != nil {
+		return fmt.Errorf("limactl stop: %w", err)
+	}
+	return nil
+}
+
 // resolveHostAlias returns the IPv4 and IPv6 addresses host.lima.internal
 // resolves to FROM INSIDE the VM (both forward to the host's 127.0.0.1).
 func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) {

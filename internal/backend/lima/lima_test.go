@@ -350,6 +350,43 @@ func TestTeardownIsNoopWhenAbsent(t *testing.T) {
 	}
 }
 
+// --- Stop: power off, keep disk (distinct from Teardown). ---
+
+func TestStopStopsVMWhenListed(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl stop lever-x", exec.Result{})
+	if err := New(f, "lever-x").Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	if last.Name != "limactl" || len(last.Args) == 0 || last.Args[0] != "stop" {
+		t.Fatalf("expected last call limactl stop lever-x; got %+v", f.Calls)
+	}
+}
+
+func TestStopIsNoopWhenVMAbsent(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("limactl list --format", exec.Result{Stdout: ""}) // no VMs
+	if err := New(f, "lever-x").Stop(context.Background()); err != nil {
+		t.Fatalf("Stop should be a no-op, got: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "limactl" && len(c.Args) > 0 && c.Args[0] == "stop" {
+			t.Fatalf("stop must NOT be called when VM absent: %+v", f.Calls)
+		}
+	}
+}
+
+func TestStopOnAlreadyStoppedVMIsHarmless(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Stopped\n"})
+	f.Script("limactl stop lever-x", exec.Result{})
+	if err := New(f, "lever-x").Stop(context.Background()); err != nil {
+		t.Fatalf("Stop on an already-stopped VM should be harmless, got: %v", err)
+	}
+}
+
 // --- Test 6: DockerHost — default before EnsureUp, resolved uid after. ---
 
 func TestDockerHostDefaultBeforeEnsureUp(t *testing.T) {

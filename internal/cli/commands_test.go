@@ -10,7 +10,7 @@ import (
 )
 
 type stubBackend struct {
-	up, down          bool
+	up, down, stopped bool
 	scionState        backend.ScionProjectState
 	scionErr          error
 	resolveRunUserErr error            // when set, ResolveRunUser returns it instead of nil
@@ -23,6 +23,7 @@ func (s *stubBackend) HostToolAlias() string                          { return "
 func (s *stubBackend) MountDest() string                              { return "/lever" }
 func (s *stubBackend) ApplyEgress(context.Context, []int, bool) error { return nil }
 func (s *stubBackend) Teardown(context.Context) error                 { s.down = true; return nil }
+func (s *stubBackend) Stop(context.Context) error                     { s.stopped = true; return nil }
 func (s *stubBackend) Profile() backend.Profile                       { return backend.Profile{Name: "stub"} }
 func (s *stubBackend) HostAliasV4() string                            { return "" }
 func (s *stubBackend) MachineName() string                            { return "lever-stub" }

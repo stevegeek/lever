@@ -52,53 +52,10 @@ func phaseOrAbsent(phase string, err error) (string, error) {
 //     and apply's register-manager is the repair.
 func managerDefinitelyAbsent(err error) bool {
 	msg := strings.ToLower(err.Error())
-	return hubUnreachable(err) ||
+	return strings.Contains(msg, "is not responding") ||
+		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "project not found") ||
 		strings.Contains(msg, "no git origin remote found")
-}
-
-// hubUnreachable reports whether err proves the scion HUB PROCESS itself is
-// down, as opposed to the hub being up but the manager project unregistered
-// (project-not-found / no-git-origin — restarting the hub can't fix those).
-// This is the subset of managerDefinitelyAbsent worth retrying after an
-// idempotent hub restart: a truly fresh machine (hub never started) and a
-// `lever stop` -> `up` cycle (OrbStack disk — and scion's hub.db, with the
-// suspended manager still registered — persists across power-off, but the
-// hub PROCESS does not survive it) look IDENTICAL from here, both surfacing
-// as "hub not responding". See resolveManagerPhase.
-func hubUnreachable(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "is not responding") ||
-		strings.Contains(msg, "connection refused")
-}
-
-// resolveManagerPhase runs probe once, and — ONLY when the failure proves the
-// hub process itself is unreachable (hubUnreachable) — restarts the hub
-// (idempotent: ServerStart tolerates an already-running server) and probes
-// exactly once more before classifying via phaseOrAbsent. This is the
-// stop->up warm-resume path: a restart turns "hub not responding" on a real
-// stop->up into a successful re-probe that surfaces the persisted, suspended
-// manager (-> upDecision "resume"), instead of falling through to a full
-// re-apply (which would add a duplicate scion project-config and start a
-// FRESH manager thread rather than resuming the existing one). On a truly
-// fresh machine the restarted hub is empty, so the re-probe still shows no
-// manager and `up` falls through to apply exactly as before. A restartHub
-// error is ignored — restarting is a best-effort upgrade, not a
-// requirement — and we fall through classifying the ORIGINAL probe result.
-// Only hubUnreachable (not the wider managerDefinitelyAbsent) triggers a
-// restart: "project not found" / "no git origin" mean the hub is UP but
-// nothing is registered, where restarting cannot help.
-func resolveManagerPhase(probe func() (string, error), restartHub func() error) (string, error) {
-	phase, err := probe()
-	if err != nil && hubUnreachable(err) {
-		if restartHub() == nil {
-			phase, err = probe()
-		}
-	}
-	return phaseOrAbsent(phase, err)
 }
 
 // upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
@@ -137,28 +94,22 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			project := b.MountDest() // in-jail project path == mount root
 
-			phase, err := resolveManagerPhase(
-				func() (string, error) { return managerPhase(cmd.Context(), sc, project, app.Name) },
-				func() error { return sc.ServerStart(cmd.Context()) },
-			)
+			phase, probeErr := managerPhase(cmd.Context(), sc, project, app.Name)
+			phase, err = phaseOrAbsent(phase, probeErr)
 			if err != nil {
 				return err // possibly-transient probe failure: do NOT force apply
 			}
-			decision := upDecision(phase, fresh)
-			switch {
-			case phase == "":
-				// Absent after resolveManagerPhase's classification (fresh
-				// machine, never-registered project, or a stop->up whose
-				// warm-resume restart-and-reprobe still found nothing) —
-				// fall through to apply, which starts the hub / registers
-				// the manager, rather than dying.
-				cmd.Printf("No running manager — bringing the application up.\n")
-			case decision == "resume":
-				// The warm-resume win: a stop->up whose restart-and-reprobe
-				// surfaced the persisted, suspended manager.
-				cmd.Printf("Resuming the suspended manager.\n")
+			if probeErr != nil {
+				// The probe error proves the manager isn't up (hub down = fresh
+				// machine; project 404 = never hub-registered) — fall through to
+				// apply, which starts the hub / registers the manager, rather
+				// than dying. probeErr is scion's raw CLI error, which on a
+				// fresh machine includes scion's entire usage dump after the
+				// first line — keep only that first line so a normal fresh
+				// bring-up doesn't print a scary wall of text.
+				cmd.Printf("No running manager (%s) — bringing the application up.\n", firstLine(probeErr.Error()))
 			}
-			switch decision {
+			switch upDecision(phase, fresh) {
 			case "restart":
 				_ = sc.Stop(cmd.Context(), app.Name, project)
 				if err := apply.Run(cmd.Context(), app, deps); err != nil {

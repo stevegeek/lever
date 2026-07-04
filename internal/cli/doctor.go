@@ -64,6 +64,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				checkCredentialFile(app.Manager.CredentialFile),
 				checkMcpJsonInTree(app.Tree),
 				checkGoToolchain(app.Scion),
+				checkOperatorSkills(app, state.Dir),
 				scion,
 			}
 			failed := 0

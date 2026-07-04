@@ -222,3 +222,39 @@ func checkGoToolchain(scion config.ScionConfig) checkResult {
 	}
 	return checkResult{name, true, strings.TrimSpace(out), ""}
 }
+
+// checkOperatorSkills verifies the framework skills scaffolded by `lever init`
+// are present, current for this lever version, unmodified, and referenced from
+// the tree-root CLAUDE.md. Runs the scaffold engine in check (read-only) mode.
+func checkOperatorSkills(app *config.App, stateDir string) checkResult {
+	const name = "operator skills"
+	results, err := syncSkills(app, stateDir, false, true)
+	if err != nil {
+		return checkResult{name, false, "could not inspect skill scaffolds: " + err.Error(), "run `lever init`"}
+	}
+	blockAct, err := ensureClaudeMDBlock(app.Tree, true)
+	if err != nil {
+		return checkResult{name, false, "could not inspect CLAUDE.md: " + err.Error(), "run `lever init`"}
+	}
+	if skillsUpToDate(results, blockAct) {
+		return checkResult{name, true, fmt.Sprintf("%d scaffold(s) current (lever-operator + groves), CLAUDE.md block present", len(results)), ""}
+	}
+	var bad []string
+	modified := false
+	for _, r := range results {
+		if r.Action != skillUnchanged {
+			bad = append(bad, fmt.Sprintf("%s: %s", r.RelPath, r.Action))
+			if r.Action == skillSkipped {
+				modified = true
+			}
+		}
+	}
+	if blockAct != skillUnchanged {
+		bad = append(bad, fmt.Sprintf("CLAUDE.md lever:skills block: %s", blockAct))
+	}
+	fix := "run `lever init`"
+	if modified {
+		fix = "locally-modified scaffold(s): review, then `lever init --force` to overwrite (or keep your edits — this check stays informational)"
+	}
+	return checkResult{name, false, strings.Join(bad, "; "), fix}
+}

@@ -6,6 +6,11 @@ type Agent struct {
 	Slug     string `json:"slug"`
 	Phase    string `json:"phase"`
 	Activity string `json:"activity"`
+	// ContainerStatus backstops apply's post-start liveness verification:
+	// scion's own "resumed"/exit-0 can lie (live-proven 2026-07-04 — CLI exits
+	// 0 on a 409 "already exists"; reports "resumed" on a container whose
+	// harness dies moments later), so Phase alone is not trusted.
+	ContainerStatus string `json:"containerStatus"`
 }
 
 type StartOpts struct {
@@ -35,8 +40,15 @@ type StartOpts struct {
 	APIKey bool
 }
 
+// List lists the agents in project (directory-project `-g` scope), parsing
+// the `scion list --format json` array. --non-interactive (implies --yes) so
+// the lazy hub-sync prompt can never wedge a non-tty run (the sync itself is
+// benign for observers: it only removes container-less stale records, which
+// correctly read as absent). Empty/whitespace stdout parses as an empty
+// slice, not an error (parseJSON no-ops on an empty body).
 func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	args := append([]string{"list", "--format", "json"}, projectFlag(project)...)
+	args = append(args, "--non-interactive")
 	out, err := c.run(ctx, "", args...)
 	if err != nil {
 		return nil, err
@@ -46,6 +58,17 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 		return nil, err
 	}
 	return agents, nil
+}
+
+// Delete removes an agent's record entirely (scion alias `rm`) — "containers
+// and their associated files and worktrees" per scion's own help text. Used by
+// start-manager's loud recovery path when Resume fails and the conversation
+// cannot be restored, to clear the way for a fresh Start.
+func (c *Client) Delete(ctx context.Context, grove, project string) error {
+	args := append([]string{"delete", grove}, projectFlag(project)...)
+	args = append(args, "--non-interactive")
+	_, err := c.run(ctx, "", args...)
+	return err
 }
 
 func (c *Client) Start(ctx context.Context, o StartOpts) error {

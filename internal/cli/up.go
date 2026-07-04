@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/lever-to/lever/internal/apply"
@@ -88,7 +89,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			deps, b, sc, err := buildApplyDeps(cmd.Context(), app, path, bf)
+			deps, b, sc, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
 			if err != nil {
 				return err
 			}
@@ -111,7 +112,13 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			switch upDecision(phase, fresh) {
 			case "restart":
-				_ = sc.Stop(cmd.Context(), app.Name, project)
+				// A failed delete must be VISIBLE: with the record still
+				// present, the following apply's observe-first start-manager
+				// would RESUME the old conversation — silently defeating
+				// --fresh (re-review residual on finding I2).
+				if err := restartManagerFresh(cmd.Context(), sc, app.Name, project); err != nil {
+					return fmt.Errorf("--fresh: deleting the existing manager record: %w (without this the old session would be resumed)", err)
+				}
 				if err := apply.Run(cmd.Context(), app, deps); err != nil {
 					return err
 				}
@@ -145,6 +152,18 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// restartManagerFresh discards the existing manager record entirely (`scion
+// delete`) for the "restart" (`--fresh` over a running/suspended manager)
+// decision, so the following apply's observe-first start-manager step
+// (internal/apply/run.go) sees the record ABSENT and takes the CREATE path.
+// It must NOT be `scion stop`: stop leaves a stopped record behind, and
+// start-manager treats a stopped record as resumable — it would RESUME the
+// old conversation with `claude --continue`, defeating the entire point of
+// `--fresh` (see resume-branch-review.md finding I2).
+func restartManagerFresh(ctx context.Context, sc *scion.Client, name, project string) error {
+	return sc.Delete(ctx, name, project)
 }
 
 func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {

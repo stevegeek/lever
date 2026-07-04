@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"path/filepath"
+	"time"
 
 	"github.com/lever-to/lever/internal/brokerctl"
 	"github.com/lever-to/lever/internal/config"
@@ -48,26 +50,23 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 				return err
 			}
 
-			// Best-effort clean stop: STOP (not suspend) the manager first, but
-			// only when the jail is actually reachable — a halted (or never-up)
-			// machine must still be stoppable, so a ResolveRunUser failure just
-			// skips this step rather than failing the command. The manager's
-			// conversation cannot survive the VM power-off below regardless — an
-			// in-memory process is simply gone once the VM is off — so suspending
-			// it would only persist an un-resumable "suspended" hub.db record: the
-			// next `lever up` would try to RESUME that record via `scion start`
-			// and fail with scion's 500 "cannot resume ... agent does not exist".
-			// Stopping instead discards the session cleanly, so the next `up`
-			// starts a fresh manager rather than trying (and failing) to resume a
-			// dead one. Any Stop error itself is ignored: the VM is about to power
-			// off anyway. NOTE this does NOT affect DETACH->up resume: `lever
-			// detach` suspends via scion-attach's own path with the VM still UP
-			// (a real, resumable suspend); this best-effort call only covers the
-			// power-off path (`lever stop`).
+			// Best-effort checkpoint: SUSPEND the manager before power-off. The
+			// conversation is durable — it lives in the agent home (persistent
+			// bind-mount), and scion resume relaunches the harness with
+			// `claude --continue`, restoring the session (live-proven 2026-07-04)
+			// — so suspend is the verb that keeps the record resumable for the
+			// next `lever up`. (`scion stop` would REMOVE the container and leave
+			// a `stopped` record instead.) Gated on ResolveRunUser so a halted or
+			// never-provisioned machine is still stoppable; the suspend error is
+			// ignored (the VM powers off regardless, and apply's observe-first
+			// start-manager copes with whatever state results). The timeout stops
+			// a hung scion from blocking power-off.
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
+					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					sc := scion.New(b.JailRunner(), scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
-					_ = sc.Stop(cmd.Context(), appName, b.MountDest())
+					_ = sc.Suspend(sctx, appName, b.MountDest())
+					cancel()
 				}
 			}
 

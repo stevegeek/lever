@@ -36,14 +36,21 @@ var (
 )
 
 // isBrokerUnavailable reports whether err is the transient "runtime broker not
-// yet registered" error from `scion start` (the registration race), as opposed
-// to a real failure.
+// yet registered" error from `scion start`/`scion resume` (the registration
+// race), as opposed to a real failure. `scion resume` hits the SAME race as
+// `scion start` (confirmed in scion source,
+// pkg/hub/handlers_agent_create_helpers.go:354,408) but emits the singular
+// "no runtime broker available" — distinct wording from start's plural "No
+// runtime brokers available" — so both must be matched or a resume retry
+// would never see its own transient error as retryable.
 func isBrokerUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := err.Error()
-	return strings.Contains(s, "no_runtime_broker") || strings.Contains(s, "No runtime brokers available")
+	return strings.Contains(s, "no_runtime_broker") ||
+		strings.Contains(s, "No runtime brokers available") ||
+		strings.Contains(s, "no runtime broker available")
 }
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
@@ -93,6 +100,33 @@ type Deps struct {
 	// removal counterpart to RemoveJailFile's marker-race fix above. nil ⇒
 	// no-op (tests, broker-only VM gate).
 	RemoveScionProjectConfigs func(ctx context.Context, jailWorkspacePath string) error
+	// ScionProjectRegistered observes whether jailWorkspacePath already has
+	// exactly one valid scion registration (one project-configs entry + the
+	// in-tree marker present) BEFORE the register-manager/register-grove step
+	// decides whether to run its destructive clean+init path at all. true →
+	// skip marker removal, RemoveScionProjectConfigs, and `scion init`/`hub
+	// link` entirely, so a re-apply does not tear down (and orphan) a
+	// resumable scion agent record just to re-mint an identical registration.
+	// nil, or a query error, falls through to the destructive path unchanged
+	// (fail-open — an observe failure must never turn into a hard apply
+	// failure, and zero/duplicate/torn registrations legitimately need it).
+	ScionProjectRegistered func(ctx context.Context, jailWorkspacePath string) (bool, error)
+	// Log surfaces a loud, user-facing progress/warning line during apply —
+	// currently just start-manager's resume-failed recovery notice ("resume
+	// failed … starting FRESH, previous session lost"), which MUST reach the
+	// user rather than vanish into a swallowed return value. nil ⇒ no-op
+	// (tests, and any caller that doesn't need it). buildApplyDeps wires this
+	// to the invoking cobra command's PrintErrf, mirroring how other user-
+	// facing warnings already surface (see cli/stop.go, cli/down.go).
+	Log func(format string, args ...any)
+}
+
+// logf calls d.Log if set, else no-ops. Small seam so call sites don't need a
+// nil-check of their own for the (optional) Deps.Log field.
+func logf(d Deps, format string, args ...any) {
+	if d.Log != nil {
+		d.Log(format, args...)
+	}
 }
 
 // Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
@@ -141,6 +175,26 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		}
 		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 	case "register-manager", "register-grove":
+		jp := jailPath(s.Target, app.Tree, d.JailMount)
+
+		// Idempotent register: observe BEFORE doing anything destructive. A
+		// suspended manager (or grove) agent record survives a `lever stop` +
+		// `lever up` cycle (its project linkage lives in this same
+		// project-configs registration) — the marker-removal +
+		// RemoveScionProjectConfigs + re-init below unconditionally tore that
+		// linkage down on every apply, orphaning the record and breaking
+		// `scion resume`. When the registration is already sound (exactly one
+		// project-configs entry for jp AND the in-tree marker present), there
+		// is nothing to fix, so skip the whole destructive path. A query
+		// error, or an unsound registration (zero, duplicate, or torn), falls
+		// through unchanged to the existing destructive path below — fail
+		// open, never a hard apply failure over an observe read.
+		if d.ScionProjectRegistered != nil {
+			if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
+				return nil
+			}
+		}
+
 		// Remove a stale `.scion` marker FILE left in the tree by a previous
 		// bring-up. It survives `orb delete` (it lives in the bind-mounted tree),
 		// and `scion init` writes workspace_path only on fresh-create — resolving
@@ -163,7 +217,6 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 		// (no jail filesystem view to remove through there), so fall back to
 		// the host-side remove, which still reaches the jail via the bind mount
 		// (just without the same-view guarantee).
-		jp := jailPath(s.Target, app.Tree, d.JailMount)
 		if d.RemoveJailFile != nil {
 			if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
 				return err
@@ -269,43 +322,186 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			// secret set above); the real credential arrives in-container.
 			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
 		}
-		// Retry past the runtime-broker registration race (see brokerStartAttempts).
-		// recovered guards the StaleAgent recovery below to at most one attempt
-		// per apply (see its comment).
-		var startErr error
-		recovered := false
-		for attempt := 0; attempt < brokerStartAttempts; attempt++ {
-			startErr = d.Scion.Start(ctx, opts)
-			// Idempotent: a manager already running (re-apply) is success, not error.
-			if startErr != nil && scion.AlreadyRunning(startErr) {
-				return nil
-			}
-			// Belt-and-suspenders for `lever stop`'s power-off path (which itself
-			// now cleanly Stops the manager instead of Suspending it — see
-			// cli/stop.go): if a manager was somehow left `suspended` with its
-			// container already gone (a crash, or Stop's best-effort call failing),
-			// `scion start` tries to RESUME it and 500s. Clear the stale record with
-			// Stop and retry Start ONCE, which then creates a fresh agent. Capped at
-			// one recovery: a second StaleAgent right after a Stop means something
-			// else is wrong, so surface it rather than looping forever.
-			if startErr != nil && scion.StaleAgent(startErr) && !recovered {
-				recovered = true
-				_ = d.Scion.Stop(ctx, app.Name, jp)
-				continue
-			}
-			if startErr == nil || !isBrokerUnavailable(startErr) {
-				return startErr
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(brokerStartInterval):
+		// Observe, then act on the delta — scion's verbs are state-specific:
+		// start CREATES (409 "already exists" over any existing record — and
+		// the CLI exits 0 on that 409, so a blind start false-succeeds); resume
+		// covers suspended AND stopped records, relaunching with
+		// `claude --continue` (conversation restored). Live evidence
+		// 2026-07-04 (see the resume-reconciliation plan's Evidence base). The
+		// hub is already up by this point in Plan() (scion-server runs before
+		// start-manager), so a List error here is real, not a "hub not ready
+		// yet" race — surface it as a hard step error.
+		agents, lerr := d.Scion.List(ctx, jp)
+		if lerr != nil {
+			return fmt.Errorf("start-manager: observing agents: %w", lerr)
+		}
+		var rec *scion.Agent
+		for i := range agents {
+			if agents[i].Slug == app.Name {
+				rec = &agents[i]
+				break
 			}
 		}
-		return startErr
+		switch {
+		case rec == nil:
+			if err := startManagerCreate(ctx, d, opts); err != nil {
+				return err
+			}
+		case rec.Phase == "running":
+			// No-op — fall through to the liveness verify below, which still
+			// confirms the container is actually up: a running RECORD with a
+			// dead container must fail loudly, not silently pass.
+		case rec.Phase == "suspended" || rec.Phase == "stopped":
+			// Resume rides the SAME runtime-broker-race retry as a create Start
+			// (see isBrokerUnavailable's doc): on a cold VM the runtime broker may
+			// not have re-registered with the hub yet, and resume hits that
+			// identical transient window. Only once the retry budget is exhausted
+			// (or the error is not the transient one at all) is the session
+			// declared unrecoverable.
+			if rerr := retryOnBrokerUnavailable(ctx, func() error {
+				return d.Scion.Resume(ctx, app.Name, jp)
+			}); rerr != nil {
+				// LOUD recovery: the conversation could not be restored. This MUST
+				// reach the user — resume failing means the durable session (the
+				// whole point of suspending, not stopping, at power-off; see
+				// cli/stop.go) is about to be discarded.
+				logf(d, "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
+				if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+					return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
+				}
+				if err := startManagerCreate(ctx, d, opts); err != nil {
+					return err
+				}
+			}
+		default:
+			// Any other phase — scion's full enum also has created,
+			// provisioning, cloning, starting, stopping, and error (see
+			// pkg/agent/state/state.go) — is not resumable: `scion resume` is
+			// documented for suspended/stopped records only, and `scion list`'s
+			// JSON phase field is the canonical (and only) signal we have, so we
+			// cannot be cleverer here without more scion verbs (e.g. there is no
+			// "wait for starting to settle" verb to poll instead). A crashed
+			// manager (phase "error") or one caught mid-transition by an
+			// interrupted prior `lever up` (phase "starting"/"created"/…) must
+			// still let `up` converge, so this takes the SAME loud delete+fresh
+			// recovery as a failed resume, rather than hard-failing (bricking)
+			// the apply with no path forward but a hard `lever destroy`.
+			logf(d, "start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", app.Name, rec.Phase)
+			if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+				return fmt.Errorf("start-manager: manager in phase %q and delete failed: %w", rec.Phase, derr)
+			}
+			if err := startManagerCreate(ctx, d, opts); err != nil {
+				return err
+			}
+		}
+		return waitManagerLive(ctx, d, jp, app.Name)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// retryOnBrokerUnavailable runs action up to brokerStartAttempts times,
+// waiting brokerStartInterval between attempts, for as long as each failure is
+// the transient runtime-broker-unavailable race (isBrokerUnavailable). A nil
+// result, or any non-transient error, returns immediately — the retry budget
+// exists purely to absorb the registration race, not to mask real failures.
+// Shared by startManagerCreate's Start retry and start-manager's Resume retry:
+// `scion resume` hits the identical runtime-broker race as `scion start` (see
+// isBrokerUnavailable's doc), so both need the same absorbing retry.
+func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
+	var err error
+	for attempt := 0; attempt < brokerStartAttempts; attempt++ {
+		err = action()
+		if err == nil || !isBrokerUnavailable(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(brokerStartInterval):
+		}
+	}
+	return err
+}
+
+// startManagerCreate runs the create-manager retry loop: `scion start` races
+// the runtime-broker registration (see brokerStartAttempts) and treats an
+// "already running"/"already exists" 409 as success (idempotent re-apply, or a
+// create-race against a record the observe step just missed — scion's own
+// lazy hub-sync can transiently read a live record as absent; see the plan's
+// Evidence base). Shared by the absent-record branch and the post-delete
+// recovery branches above (a failed resume, or an unresumable phase, falls
+// back to exactly this same create path), so all three take the identical
+// retry behavior.
+func startManagerCreate(ctx context.Context, d Deps, opts scion.StartOpts) error {
+	return retryOnBrokerUnavailable(ctx, func() error {
+		startErr := d.Scion.Start(ctx, opts)
+		// Idempotent: a manager already running/existing (re-apply, or a
+		// create-race the observe step missed) is success, not error.
+		if startErr != nil && scion.AlreadyRunning(startErr) {
+			return nil
+		}
+		return startErr
+	})
+}
+
+// managerLiveAttempts/managerLiveInterval bound waitManagerLive's post-start
+// poll. Package vars so tests shrink them.
+var (
+	managerLiveAttempts = 15
+	managerLiveInterval = 1 * time.Second
+)
+
+// waitManagerLive polls d.Scion.List until slug's record shows BOTH
+// Phase=="running" AND ContainerStatus=="running", or attempts run out. This
+// is the backstop for both false-success classes scion's own CLI can report
+// (see the plan's Evidence base): a blind `scion start` exits 0 on a 409
+// "already exists" even when nothing changed, and `scion resume`/`scion
+// start` can report success ("resumed") for a container that dies moments
+// later. Trusting the observed record — not the CLI's own exit code/wording —
+// is what makes start-manager's success meaningful.
+func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
+	var lastPhase, lastContainer string
+	var lastErr error
+	for attempt := 0; attempt < managerLiveAttempts; attempt++ {
+		agents, err := d.Scion.List(ctx, jp)
+		if err != nil {
+			// A mid-poll List blip does NOT mean the manager isn't live: by this
+			// point the observe-first List already succeeded and the create/
+			// resume action itself already succeeded, so the hub is demonstrably
+			// up — a single error here is far more likely a transient hiccup than
+			// a real failure. Consume this attempt (within the SAME overall
+			// budget, not an extra one) and keep polling; only surface the error
+			// if the whole budget exhausts without ever observing a live record.
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(managerLiveInterval):
+			}
+			continue
+		}
+		lastErr = nil
+		lastPhase, lastContainer = "", ""
+		for _, a := range agents {
+			if a.Slug == slug {
+				lastPhase, lastContainer = a.Phase, a.ContainerStatus
+				break
+			}
+		}
+		if lastPhase == "running" && lastContainer == "running" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(managerLiveInterval):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("start-manager: manager %q did not come up (last error observing agents: %w)", slug, lastErr)
+	}
+	return fmt.Errorf("start-manager: manager %q did not come up (last phase %q, container %q) — scion reported success but the harness is not live", slug, lastPhase, lastContainer)
 }
 
 // removeStaleMarker removes a `.scion` MARKER FILE at dir (left by a prior

@@ -108,7 +108,7 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf)
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf)
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -163,6 +163,38 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	}
 	if len(sb.removeScionCalls) != 1 || sb.removeScionCalls[0] != "/lever/groves/worker" {
 		t.Fatalf("backend.RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever/groves/worker\"", sb.removeScionCalls)
+	}
+}
+
+// TestBuildApplyDepsWiresScionProjectRegistered verifies buildApplyDeps wires
+// Deps.ScionProjectRegistered straight through to the backend method, so the
+// register-manager/register-grove step (internal/apply/run.go) can observe
+// whether its destructive clean+init path is even necessary before running it.
+func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := &stubBackend{registeredResult: true}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if deps.ScionProjectRegistered == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.ScionProjectRegistered")
+	}
+	ok, err := deps.ScionProjectRegistered(context.Background(), "/lever/groves/worker")
+	if err != nil {
+		t.Fatalf("ScionProjectRegistered: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected the stubbed true result to pass through")
+	}
+	if len(sb.registeredCalls) != 1 || sb.registeredCalls[0] != "/lever/groves/worker" {
+		t.Fatalf("backend.ScionProjectRegistered calls = %+v, want exactly one call with \"/lever/groves/worker\"", sb.registeredCalls)
 	}
 }
 

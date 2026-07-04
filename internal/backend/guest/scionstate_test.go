@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lever-to/lever/internal/backend"
 	leverexec "github.com/lever-to/lever/internal/exec"
 )
 
@@ -174,5 +175,121 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	}
 	if !exists(grove) || !exists(noWP) {
 		t.Error("second run must not touch the surviving entries")
+	}
+}
+
+// The four scenarios below pin scionProjectRegistered's exactly-one-valid-
+// registration predicate: registered requires BOTH exactly one matching entry
+// AND the in-tree marker. Pure-Go over backend.ScionProjectState (mirroring
+// how internal/cli's checkScionProject is tested), since the underlying
+// marker+entries read is already covered by TestParseScionState* above and by
+// ReadScionProjectState's real production use — nothing new is parsed here.
+
+func TestScionProjectRegisteredOneMatchingEntryPlusMarker(t *testing.T) {
+	st := backend.ScionProjectState{
+		MarkerPresent: true,
+		Entries:       []backend.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
+	}
+	if !scionProjectRegistered(st, "/lever") {
+		t.Fatal("exactly one matching entry + marker present must be registered")
+	}
+}
+
+func TestScionProjectRegisteredZeroEntries(t *testing.T) {
+	st := backend.ScionProjectState{MarkerPresent: true}
+	if scionProjectRegistered(st, "/lever") {
+		t.Fatal("zero entries must not be registered")
+	}
+}
+
+func TestScionProjectRegisteredDuplicateEntries(t *testing.T) {
+	st := backend.ScionProjectState{
+		MarkerPresent: true,
+		Entries: []backend.ScionProjectEntry{
+			{Name: "lever__aaaa1111", WorkspacePath: "/lever"},
+			{Name: "lever__bbbb2222", WorkspacePath: "/lever"},
+		},
+	}
+	if scionProjectRegistered(st, "/lever") {
+		t.Fatal("two entries claiming the same workspace path must not be registered")
+	}
+}
+
+func TestScionProjectRegisteredEntryWithoutMarker(t *testing.T) {
+	// The bad-teardown signature: one entry claims the workspace, but the
+	// in-tree marker is gone.
+	st := backend.ScionProjectState{
+		MarkerPresent: false,
+		Entries:       []backend.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
+	}
+	if scionProjectRegistered(st, "/lever") {
+		t.Fatal("an entry without the in-tree marker must not be registered")
+	}
+}
+
+// TestScionProjectRegisteredIgnoresOtherWorkspacePaths proves an entry for a
+// DIFFERENT workspace (e.g. a grove's registration) doesn't count toward this
+// workspace's check.
+func TestScionProjectRegisteredIgnoresOtherWorkspacePaths(t *testing.T) {
+	st := backend.ScionProjectState{
+		MarkerPresent: true, // this workspace's own marker
+		Entries:       []backend.ScionProjectEntry{{Name: "worker__cccc3333", WorkspacePath: "/lever/groves/worker"}},
+	}
+	if scionProjectRegistered(st, "/lever") {
+		t.Fatal("an entry for a different workspace path must not count as this one's registration")
+	}
+}
+
+// TestScionProjectRegisteredIssuesThroughUserPrefix proves ScionProjectRegistered
+// reuses ReadScionProjectState's transport (same script, same UserPrefix, one
+// call) rather than duplicating it, and resolves the predicate correctly over
+// a live (fake) report.
+func TestScionProjectRegisteredIssuesThroughUserPrefix(t *testing.T) {
+	for _, shape := range prefixShapes("lever-x") {
+		t.Run(shape.name, func(t *testing.T) {
+			f := leverexec.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " "), leverexec.Result{Stdout: "MARKER 1\nENTRY lever__aaaa1111 /lever\n"})
+			g := Guest{Host: f, UserPrefix: shape.userPrefix}
+
+			ok, err := g.ScionProjectRegistered(context.Background(), "/lever")
+			if err != nil {
+				t.Fatalf("ScionProjectRegistered: %v", err)
+			}
+			if !ok {
+				t.Fatal("expected registered=true for one matching entry + marker present")
+			}
+			if len(f.Calls) != 1 {
+				t.Fatalf("expected 1 call (shared transport with ReadScionProjectState), got %d: %+v", len(f.Calls), f.Calls)
+			}
+		})
+	}
+}
+
+// TestScionProjectRegisteredNotRegisteredOverTransport is the same transport
+// proof for the negative case (no entries at all).
+func TestScionProjectRegisteredNotRegisteredOverTransport(t *testing.T) {
+	f := leverexec.NewFakeRunner()
+	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
+	f.Script(strings.Join(g.UserPrefix, " "), leverexec.Result{Stdout: "MARKER 1\n"})
+
+	ok, err := g.ScionProjectRegistered(context.Background(), "/lever")
+	if err != nil {
+		t.Fatalf("ScionProjectRegistered: %v", err)
+	}
+	if ok {
+		t.Fatal("expected registered=false with zero entries")
+	}
+}
+
+// TestScionProjectRegisteredErrorsOnGuestFailure proves it surfaces (not
+// swallows) a failure of the guest command itself, mirroring
+// ReadScionProjectState's error handling — the register apply step relies on
+// seeing a non-nil error to fail OPEN to the destructive path.
+func TestScionProjectRegisteredErrorsOnGuestFailure(t *testing.T) {
+	f := leverexec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
+	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
+
+	if _, err := g.ScionProjectRegistered(context.Background(), "/lever"); err == nil {
+		t.Fatal("expected an error when the guest command fails, got nil")
 	}
 }

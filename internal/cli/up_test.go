@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	leverexec "github.com/lever-to/lever/internal/exec"
+	"github.com/lever-to/lever/internal/scion"
 )
 
 // TestPhaseOrAbsent covers the definitive-absence fallback: a failed phase
@@ -79,6 +84,30 @@ func TestUpDecision(t *testing.T) {
 		if got := upDecision(c.phase, c.fresh); got != c.want {
 			t.Errorf("upDecision(%q,%v)=%q want %q", c.phase, c.fresh, got, c.want)
 		}
+	}
+}
+
+// TestRestartManagerFreshIssuesDelete pins the "restart" decision's action:
+// `--fresh` over a running/suspended manager must discard the record with
+// `scion delete`, NOT `scion stop`. `scion stop` would leave a stopped record
+// that start-manager's observe-first switch (internal/apply/run.go) treats as
+// resumable — resuming it with `claude --continue` would restore the very
+// conversation `--fresh` asked to discard (resume-branch-review.md I2).
+func TestRestartManagerFreshIssuesDelete(t *testing.T) {
+	f := leverexec.NewFakeRunner()
+	f.Script("scion", leverexec.Result{Stdout: "ok"})
+	sc := scion.New(f, scion.Options{})
+
+	if err := restartManagerFresh(context.Background(), sc, "hello", "/lever"); err != nil {
+		t.Fatalf("restartManagerFresh: %v", err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("expected exactly one scion call, got %+v", f.Calls)
+	}
+	call := f.Calls[0]
+	if len(call.Args) == 0 || call.Args[0] != "delete" {
+		got := strings.Join(call.Args, " ")
+		t.Fatalf("restart must issue `scion delete`, not `scion stop`; got argv %q", got)
 	}
 }
 

@@ -90,4 +90,14 @@ type Backend interface {
 	// accumulating a duplicate every run (the `lever doctor` "duplicate
 	// registrations" finding).
 	RemoveScionProjectConfigs(ctx context.Context, workspacePath string) error
+	// ScionProjectRegistered reports whether workspacePath already has EXACTLY
+	// ONE valid scion registration: one ~/.scion/project-configs entry whose
+	// workspace_path == workspacePath AND the in-tree marker
+	// (workspacePath/.scion) present. Read-only, machine-only guest transport
+	// (no EnsureUp needed) — same pattern as ReadScionProjectState. The
+	// register-manager/register-grove apply step uses this to skip its
+	// destructive clean+init path when the registration is already sound, so a
+	// re-apply no longer tears down a resumable scion agent record just to
+	// re-mint an identical registration.
+	ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error)
 }

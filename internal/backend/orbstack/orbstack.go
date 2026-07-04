@@ -373,4 +373,11 @@ func (o *OrbStack) RemoveScionProjectConfigs(ctx context.Context, wp string) err
 	return o.guest().RemoveScionProjectConfigs(ctx, wp)
 }
 
+// ScionProjectRegistered reports whether workspacePath already has exactly one
+// valid scion registration, via the machine-only guest prefix. Read-only, no
+// EnsureUp.
+func (o *OrbStack) ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error) {
+	return o.guest().ScionProjectRegistered(ctx, workspacePath)
+}
+
 var _ backend.Backend = (*OrbStack)(nil)

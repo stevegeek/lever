@@ -473,4 +473,11 @@ func (l *Lima) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
 	return l.guest().RemoveScionProjectConfigs(ctx, wp)
 }
 
+// ScionProjectRegistered reports whether workspacePath already has exactly one
+// valid scion registration, via the machine-only guest prefix. Read-only, no
+// EnsureUp.
+func (l *Lima) ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error) {
+	return l.guest().ScionProjectRegistered(ctx, workspacePath)
+}
+
 var _ backend.Backend = (*Lima)(nil)

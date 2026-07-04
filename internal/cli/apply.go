@@ -75,7 +75,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			deps, _, _, err := buildApplyDeps(cmd.Context(), app, path, bf)
+			deps, _, _, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
 			if err != nil {
 				return err
 			}
@@ -97,7 +97,11 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 // confirmed up and the user/uid are known.
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
-func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory) (apply.Deps, backend.Backend, *scion.Client, error) {
+// cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
+// user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
+// that never exercise a Log-emitting path), in which case Log falls back to
+// stderr.
+func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
 	machine := "lever-" + app.Name
 	b, err := bf(app.Backend, machine)
 	if err != nil {
@@ -169,6 +173,16 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// keeps apply from accumulating a duplicate registration every run.
 		RemoveScionProjectConfigs: func(ctx context.Context, wp string) error {
 			return b.RemoveScionProjectConfigs(ctx, wp)
+		},
+
+		// ScionProjectRegistered observes whether the register-manager/register-
+		// grove apply step (internal/apply/run.go) even needs to run its
+		// destructive clean+init path — see RemoveScionProjectConfigs's comment
+		// above for why that path exists; this is the idempotency gate that
+		// decides whether to run it at all, so a re-apply stops orphaning a
+		// resumable scion agent record.
+		ScionProjectRegistered: func(ctx context.Context, wp string) (bool, error) {
+			return b.ScionProjectRegistered(ctx, wp)
 		},
 
 		// StartBroker spawns `lever broker serve <config>` as a daemonized child
@@ -264,6 +278,20 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 				BrokerURL: fmt.Sprintf("https://%s:%d", brokerHost, app.EffectiveJailPort()),
 				AgentCN:   app.ManagerCN(),
 			}, nil
+		},
+
+		// Log surfaces start-manager's loud resume-failed recovery notice (see
+		// apply.Deps.Log) on the invoking command's stderr, mirroring how other
+		// user-facing warnings already surface (cmd.PrintErrf; see cli/stop.go,
+		// cli/down.go). A nil cmd (defence in depth for any caller that doesn't
+		// have one, e.g. a future direct test) falls back to os.Stderr so the
+		// line is never silently lost.
+		Log: func(format string, args ...any) {
+			if cmd != nil {
+				cmd.PrintErrf(format+"\n", args...)
+				return
+			}
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
 		},
 	}, b, sc, nil
 }

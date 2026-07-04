@@ -2,11 +2,37 @@ package scion
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/lever-to/lever/internal/exec"
 )
+
+func TestStaleAgent(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"cannot resume", errors.New("cannot resume agent 'assistant'"), true},
+		{"cannot resume uppercase", errors.New("CANNOT RESUME agent 'assistant'"), true},
+		{"agent does not exist", errors.New("agent does not exist"), true},
+		{"agent does not exist mixed case", errors.New("Agent Does Not Exist"), true},
+		{"failed to resume suspended agent", errors.New("Failed to resume suspended agent 'assistant': boom"), true},
+		{"failed to resume suspended agent lowercase", errors.New("failed to resume suspended agent"), true},
+		{"unrelated error", errors.New("no_runtime_broker: No runtime brokers available"), false},
+		{"already running", errors.New("Error: agent already running"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StaleAgent(tc.err); got != tc.want {
+				t.Errorf("StaleAgent(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestEnvSetArgvAndProjectScope(t *testing.T) {
 	f := exec.NewFakeRunner()

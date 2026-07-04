@@ -270,12 +270,28 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *Bootstr
 			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
 		}
 		// Retry past the runtime-broker registration race (see brokerStartAttempts).
+		// recovered guards the StaleAgent recovery below to at most one attempt
+		// per apply (see its comment).
 		var startErr error
+		recovered := false
 		for attempt := 0; attempt < brokerStartAttempts; attempt++ {
 			startErr = d.Scion.Start(ctx, opts)
 			// Idempotent: a manager already running (re-apply) is success, not error.
 			if startErr != nil && scion.AlreadyRunning(startErr) {
 				return nil
+			}
+			// Belt-and-suspenders for `lever stop`'s power-off path (which itself
+			// now cleanly Stops the manager instead of Suspending it — see
+			// cli/stop.go): if a manager was somehow left `suspended` with its
+			// container already gone (a crash, or Stop's best-effort call failing),
+			// `scion start` tries to RESUME it and 500s. Clear the stale record with
+			// Stop and retry Start ONCE, which then creates a fresh agent. Capped at
+			// one recovery: a second StaleAgent right after a Stop means something
+			// else is wrong, so surface it rather than looping forever.
+			if startErr != nil && scion.StaleAgent(startErr) && !recovered {
+				recovered = true
+				_ = d.Scion.Stop(ctx, app.Name, jp)
+				continue
 			}
 			if startErr == nil || !isBrokerUnavailable(startErr) {
 				return startErr

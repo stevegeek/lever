@@ -50,6 +50,52 @@ func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name 
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
+// staleAgentRunner simulates the `lever stop` power-off aftermath: a manager
+// suspended in hub.db whose container is gone, so `scion start` tries to
+// RESUME it and 500s with scion's "cannot resume ... agent does not exist"
+// wording. staleFails bounds how many consecutive agent `start` calls return
+// that error before succeeding — 1 proves start-manager recovers (Stop, then
+// a fresh Start) and returns nil; a higher value (>1) proves recovery is
+// capped at one attempt, so a second StaleAgent surfaces as a real error
+// instead of looping forever.
+type staleAgentRunner struct {
+	*exec.FakeRunner
+	staleFails int
+	startCalls int
+	stopCalls  int
+}
+
+func (r *staleAgentRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" {
+		hasStart, hasStop, hasServer := false, false, false
+		for _, a := range args {
+			switch a {
+			case "start":
+				hasStart = true
+			case "stop":
+				hasStop = true
+			case "server":
+				hasServer = true
+			}
+		}
+		if hasStart && !hasServer { // agent start, not `scion server start`
+			r.startCalls++
+			if r.startCalls <= r.staleFails {
+				return exec.Result{Code: 1, Stderr: "Failed to resume suspended agent 'hello': cannot resume agent 'hello': agent does not exist. Use 'scion start' to create a new agent"}, fmt.Errorf("exit status 1")
+			}
+		}
+		if hasStop && !hasServer { // agent stop, not `scion server stop`
+			r.stopCalls++
+			return exec.Result{Stdout: "ok"}, nil
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *staleAgentRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
 // alreadyUpRunner simulates a fully-up instance on re-apply: `scion server
 // start` and agent `start` return "already running"; everything else succeeds.
 type alreadyUpRunner struct{ *exec.FakeRunner }
@@ -196,6 +242,76 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	}
 	if r.startCalls != 3 {
 		t.Fatalf("start attempted %d times, want 3 (2 transient failures + 1 success)", r.startCalls)
+	}
+}
+
+// TestStartManagerRecoversFromStaleAgentOnce covers the `lever stop` power-off
+// aftermath belt-and-suspenders: a first `scion start` fails trying to RESUME
+// a suspended-but-gone manager record (StaleAgent); start-manager must clear
+// the record with Stop and retry Start once, succeeding fresh.
+func TestStartManagerRecoversFromStaleAgentOnce(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &staleAgentRunner{FakeRunner: exec.NewFakeRunner(), staleFails: 1}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run should recover from a single stale-agent failure: %v", err)
+	}
+	if r.startCalls != 2 {
+		t.Fatalf("start attempted %d times, want 2 (1 stale failure + 1 fresh success)", r.startCalls)
+	}
+	if r.stopCalls != 1 {
+		t.Fatalf("stop called %d times, want 1 (clearing the stale record before the retry)", r.stopCalls)
+	}
+}
+
+// TestStartManagerStaleAgentTwiceFails proves recovery is capped at one
+// attempt: a second StaleAgent failure (after the recovery Stop+retry) means
+// something else is wrong, so start-manager must return the error rather than
+// looping forever.
+func TestStartManagerStaleAgentTwiceFails(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &staleAgentRunner{FakeRunner: exec.NewFakeRunner(), staleFails: 2}
+	r.Script("scion", exec.Result{Stdout: "ok"})
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+	}
+	err = Run(context.Background(), app, deps)
+	if err == nil {
+		t.Fatal("Run must fail when the agent is stale AGAIN after the one recovery attempt")
+	}
+	if !scion.StaleAgent(err) {
+		t.Fatalf("expected a StaleAgent error surfaced, got: %v", err)
+	}
+	if r.startCalls != 2 {
+		t.Fatalf("start attempted %d times, want 2 (no infinite loop; capped at one recovery)", r.startCalls)
+	}
+	if r.stopCalls != 1 {
+		t.Fatalf("stop called %d times, want 1 (recovery attempted exactly once)", r.stopCalls)
 	}
 }
 

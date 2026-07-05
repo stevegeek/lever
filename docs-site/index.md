@@ -3,7 +3,7 @@ layout: home
 title: Lever
 hero:
   name: Lever
-  text: Coding agents in a sealed jail.
+  text: Autonomous AI agents in a sealed jail.
   image:
     src: /assets/logo.png
     alt: Lever

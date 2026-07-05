@@ -227,6 +227,13 @@ func (b *Broker) handleGroveList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// A revoked manager cannot enumerate the fleet either (recon that helps a
+	// compromised-then-revoked manager) — consistent with /msg/list.
+	if b.isRevoked(caller) {
+		b.audit("grove", caller, "deny", "list: revoked")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	// Runtime check is after the manager-CN check — authz precedes so an
 	// unauthenticated caller still gets 403, not 502.
 	if !b.runtimeReady(w) {

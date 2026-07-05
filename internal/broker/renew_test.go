@@ -45,3 +45,17 @@ func TestRenewRejectsNoCert(t *testing.T) {
 		t.Fatalf("status = %d, want 403", w.Code)
 	}
 }
+
+func TestRenewDeniesRevokedCaller(t *testing.T) {
+	b := New(testConfig(t))
+	b.Revoke("worker")
+	csr := makeCSRForCN(t, "worker")
+	body, _ := json.Marshal(RenewRequest{CSR: string(csr)})
+	r := httptest.NewRequest("POST", "/renew", bytes.NewReader(body))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	b.handleRenew(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("revoked renew: status = %d, want 403 (revocation must be terminal — no fresh cert)", w.Code)
+	}
+}

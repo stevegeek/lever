@@ -16,8 +16,16 @@ func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, err := ca.RequireAgent(r); err != nil {
+	caller, err := ca.RequireAgent(r)
+	if err != nil {
 		b.audit("tools", "", "deny", err.Error())
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// A revoked agent cannot enumerate the tool catalog (the last read-only
+	// path — completes "revocation denies every acting/observing path").
+	if b.isRevoked(caller) {
+		b.audit("tools", caller, "deny", "revoked")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

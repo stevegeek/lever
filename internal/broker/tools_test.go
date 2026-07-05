@@ -144,3 +144,23 @@ func TestToolsRejectsUnauthenticatedClient(t *testing.T) {
 		t.Fatalf("GET /tools (no cert) status = %d, want 403", resp.StatusCode)
 	}
 }
+
+func TestToolsDeniesRevokedAgent(t *testing.T) {
+	b := toolsBroker(t)
+	if err := b.reg.Register(regTool("db", "http://127.0.0.1:3201", "read")); err != nil {
+		t.Fatal(err)
+	}
+	b.Revoke("worker")
+	srv := jailServer(t, b)
+	defer srv.Close()
+
+	client := agentClient(t, b, signedCert(t, b, "worker"))
+	resp, err := client.Get(srv.URL + "/tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("revoked /tools status = %d, want 403", resp.StatusCode)
+	}
+}

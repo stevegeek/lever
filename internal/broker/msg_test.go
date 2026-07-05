@@ -311,3 +311,21 @@ func TestMsgSend_deniesRevokedCaller(t *testing.T) {
 		t.Fatalf("deny must audit 'revoked', got: %s", audit.String())
 	}
 }
+
+func TestMsgList_deniesRevokedCaller(t *testing.T) {
+	b, _, _ := newMsgTestBroker(true)
+	b.Revoke("manager")
+	rec := callGrove(t, b, "/msg/list", `{"all":false}`, "manager")
+	if rec.Code != 403 {
+		t.Fatalf("revoked msg list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGroveList_deniesRevokedManager(t *testing.T) {
+	b, _, _ := newMsgTestBroker(true)
+	b.Revoke("manager")
+	rec := callGrove(t, b, "/grove/list", `{}`, "manager")
+	if rec.Code != 403 {
+		t.Fatalf("revoked grove list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+}

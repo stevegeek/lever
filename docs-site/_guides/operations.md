@@ -32,6 +32,14 @@ reload validates the edited config *before* it stops the broker, so a config typ
 old broker still serving. If a later step fails (backend, image load), the broker can be briefly
 down until you re-run `lever up` — the same recoverable window as a `stop`+`up` that fails midway.
 
+> **reload adds and changes; it does not remove.** reload re-reads the config and re-registers the
+> groves in it, but it does not tear down a grove you *deleted* from the config. That grove's
+> container keeps running with its already-minted capability tokens (valid until `broker.grant_ttl`,
+> default 24h) even though the new broker no longer knows it — new mints and messaging to it are
+> denied, but held tokens still work. To actually cut off a removed grove, stop it and revoke it
+> before or after the reload: `lever-manager agent stop <grove>` (from the manager) and
+> `lever revoke <grove>`, or `lever broker bump-epoch` to kill every outstanding token at once.
+
 ## Adding a grove to a running instance
 
 1. Create the directory under your tree: `mkdir -p workspace/groves/newgrove` (the dir must exist;

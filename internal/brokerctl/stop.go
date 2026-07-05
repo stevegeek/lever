@@ -54,6 +54,17 @@ func (s State) StopBroker() error {
 		time.Sleep(50 * time.Millisecond)
 	}
 	_ = proc.Signal(syscall.SIGKILL) // graceless fallback
+	// Confirm the process actually died before returning: a caller that
+	// immediately re-spawns the broker (e.g. `lever reload`) would otherwise race
+	// the SIGKILLed process's release of the listen port and hit EADDRINUSE. Poll
+	// briefly for the pid to disappear.
+	killDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(killDeadline) {
+		if proc.Signal(syscall.Signal(0)) != nil {
+			break // gone
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	_ = os.Remove(pidPath)
 	return nil
 }

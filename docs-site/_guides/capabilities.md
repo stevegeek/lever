@@ -114,10 +114,13 @@ Three independent handles, all host-side:
   session-scale on purpose, because the per-call revocation check below is the real cut).
 - **`lever revoke <agent>`** — cuts that agent off immediately (persisted, survives broker
   restarts). Enforcement is by **caller identity at use time**, on every path a revoked agent could
-  act through: tool calls (gateway + `/llm` proxy), minting *and* delegating (it can't hand a fresh
-  token to a still-valid agent), messaging, grove dispatch/teardown and enrolment tickets (for the
-  manager), and cert renewal — renew is refused, so the agent's existing cert simply expires and
-  revocation is terminal. A revoked agent gains nothing by re-minting, re-messaging, or reconnecting.
+  act through *or observe from*: tool calls (gateway + `/llm` proxy), minting *and* delegating (it
+  can't hand a fresh token to a still-valid agent), messaging (send + inbox list), grove
+  dispatch/teardown/list and enrolment tickets (for the manager), tool-catalog listing, and cert
+  renewal — renew is refused, so the agent's existing cert simply expires and revocation is
+  terminal. A revoked agent gains nothing by re-minting, re-messaging, reconnecting, or enumerating.
+  (Removing a grove from the config is *not* revocation — see the
+  [operations guide](/operations/#changing-config-on-a-running-instance) for cutting off a removed grove.)
 - **`lever broker bump-epoch`** — raise the epoch floor and every outstanding token dies at once.
 
 ## Teaching agents the flow

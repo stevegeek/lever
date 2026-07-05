@@ -80,3 +80,16 @@ func TestProvisionRejectsNoCert(t *testing.T) {
 		t.Fatalf("status = %d, want 403 (no client cert)", w.Code)
 	}
 }
+
+func TestProvisionDeniesRevokedManager(t *testing.T) {
+	b := New(testConfig(t))
+	b.Revoke("manager")
+	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
+	r.TLS = leafFor(t, b, "manager")
+	w := httptest.NewRecorder()
+	b.handleProvision(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("revoked manager provision: status = %d, want 403", w.Code)
+	}
+}

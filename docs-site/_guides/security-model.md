@@ -11,7 +11,7 @@ design goal is not "prevent compromise" but **bound the blast radius of a compro
 directory subtree and a curated set of network endpoints, enforced by the OS, not by the agent
 behaving.**
 
-> **Validation status.** *Shipped and validated:* the containment primitives (§8); the capability
+> **Validation status.** *Shipped and validated:* the containment primitives (§9); the capability
 > broker, mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance` gate,
 > and the **api-key `/llm` strip-and-inject path end-to-end** (broker verifies the capability token,
 > strips it, injects the real Console key host-side), guarded by `make test-apikey-e2e`; container boot
@@ -28,7 +28,7 @@ Scion's **broker** (its host-side component that creates containers and applies 
 *confused deputy*: it asks the **Docker daemon** to bind-mount host paths and to join networks, and
 the daemon obliges. Concretely, the escape that motivated this design works because Scion's **hub
 performs no path validation**, any caller can register a project provider with an arbitrary host
-path, and the broker will then mount it (see §8).
+path, and the broker will then mount it (see §9).
 
 The key realisation: **the real boundary is the Docker daemon the runtime drives, plus the
 environment that daemon runs in, not the runtime's code.** Constrain the daemon's filesystem and
@@ -81,7 +81,7 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 
 - **`egress: open` (default):** `OUTPUT` default-ACCEPT; `LEVER_EGRESS` ACCEPTs the allowlisted host
   `host:port`s on the alias, DROPs the rest of the host alias and the private ranges above. **Public
-  internet stays open** (for the model API and package installs). See the exfiltration caveat in §7.
+  internet stays open** (for the model API and package installs). See the exfiltration caveat in §8.
 - **`egress: closed`:** additionally a **catch-all DROP** for both families at the end of the chain,
   with loopback (`-o lo`) ACCEPTed *first* so the in-machine scion hub (127.0.0.1:8080) and host-alias
   tools keep working. The jail can then reach **only** the already-ACCEPTed broker port; arbitrary
@@ -96,7 +96,7 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 
 **Enforcement** lives in the jail's network namespace, for both postures. A **non-privileged** agent
 container is in a separate namespace from the rules and cannot flush them; reaching the rules would
-require a container/namespace escape (which reduces to the kernel/runtime caveats in §7).
+require a container/namespace escape (which reduces to the kernel/runtime caveats in §8).
 
 ### 2.3 Rootless Docker (required)
 
@@ -158,7 +158,7 @@ Full mechanism detail, the roadmap entry, and rejected backends live on the
   VPS) remains a possible future direction, never a silent substitute for a VM backend.
 - **`apple-container` (roadmap) is a different topology.** It runs each agent in its own micro-VM (a
   kernel per agent — the strongest isolation of any Mac option, satisfying guarantee 0 *per agent*
-  rather than per jail, turning the shared-kernel trade in §7 into a non-issue), but there is no
+  rather than per jail, turning the shared-kernel trade in §8 into a non-issue), but there is no
   single jail to hang one egress chokepoint on, and its networking is young (full support needs
   macOS 26).
 
@@ -173,7 +173,7 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
   guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
   the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
-  this surface reaches VM root, not the host, consistent with the §7 "containing daemon authority
+  this surface reaches VM root, not the host, consistent with the §8 "containing daemon authority
   inside the jail" stance (in-jail privilege escalation is accepted; the jail's own bound is not).
 - **The jail VM survives host reboots, and also `lever stop`.** It is destroyed only by `lever
   destroy` (`limactl delete --force`; `lever down` is a deprecated alias); there is no
@@ -187,7 +187,7 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   network namespace — enforcement lives in that namespace, not the agent's container namespace (§2.2).
   A container→VM-root escape would let the agent rewrite `LEVER_EGRESS` directly, bypassing the
   allowlist rather than merely being contained by it; that escape reduces to the kernel/runtime
-  caveats in §7.
+  caveats in §8.
 - **A global lima config can widen the containment surface beyond what the lever template
   requests.** `~/.lima/_config/{default,override}.yaml`, if present on the host, is merged into every
   lima instance's *realized* config, including this one — an operator's own global lima settings could
@@ -208,7 +208,7 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   global-scope v6 today, to catch this drifting silently in the future.
 
 The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
-all groves — see §7; `lima` carries the same trade one level up (its own kernel is separate from the
+all groves — see §8; `lima` carries the same trade one level up (its own kernel is separate from the
 host, but still one kernel shared *within* the jail by the manager and every grove). That trade is a
 property of the *backend*, not of Lever, and the table above is how you see it before you choose.
 Run `lever backends` for the live matrix; set the backend with the `backend:` key
@@ -224,11 +224,11 @@ Run `lever backends` for the live matrix; set the backend with the `backend:` ke
 | host LAN / business network | full reach via host networking | **unreachable** (OrbStack routing; firewall to back it) |
 | host loopback (local tools) | n/a | only allowlisted `host:port`s; rest dropped |
 | real LLM credential in every container | ambient, shared, long-lived OAuth token in every agent | **api-key mode:** no real key in any container, only a CN-bound, short-lived `capability(llm)` token; the broker injects the Console key host-side (§6.1) |
-| exfiltration of in-tree data | n/a | **not bounded** in subscription mode; narrowed (not eliminated) under api-key closed egress, see §7 |
+| exfiltration of in-tree data | n/a | **not bounded** in subscription mode; narrowed (not eliminated) under api-key closed egress, see §8 |
 
 **Result:** an injected manager or grove can reach neither host secrets nor the LAN; its blast
 radius is the project subtree it was given, *plus* whatever it can send over allowed internet
-egress (§7).
+egress (§8).
 
 ## 4. A second, inner layer (defence in depth)
 
@@ -324,7 +324,7 @@ configuration, there is no in-jail config file for a compromised manager to tamp
 Image **registry allowlist** and **digest pinning** are now available as opt-in `security:` policy
 (§5.3), enable them to bound *which* registry an image comes from and to require vetted, immutable
 images. Still open: redaction by secret-key-name rather than argv shape (L1 in the backlog). The
-dominant in-jail risks are §6 (the projected credential) and §7 (open-egress exfiltration): **closed
+dominant in-jail risks are §6 (the projected credential) and §8 (open-egress exfiltration): **closed
 in api-key mode** (the default) by the built capability broker (§6.1) plus `egress: closed`, and
 still present under the subscription opt-in.
 
@@ -344,7 +344,7 @@ still present under the subscription opt-in.
 scion **resolves and injects it into every agent container's environment** at start (user/owner
 scope, single jail = single tenant). So **every grove holds the real, long-lived OAuth token** in
 `$CLAUDE_CODE_OAUTH_TOKEN` (or a token file in its home). Combined with §4 (development auth lets any
-in-jail agent drive the broker) and §7 (open internet egress for the model API), a single
+in-jail agent drive the broker) and §8 (open internet egress for the model API), a single
 prompt-injected grove can read the token and exfiltrate it, **impersonating the operator's account
 beyond the jail.** The token is *ambient, shared, and long-lived*, the worst combination, and the
 highest-value secret in the system.
@@ -446,7 +446,46 @@ sees a capability), and replaces the old ambient pattern (per-server `allow_port
   process can still hit the server's `127.0.0.1` port directly — host processes are already
   inside the host trust boundary; the broker does not claim to sandbox them from each other.
 
-## 7. What this model does *not* claim
+## 7. If an agent is compromised: what it can and can't do
+
+Prompt injection, a poisoned dependency, a malicious tool description — assume any agent *can* be
+turned. This section is the honest accounting of what a compromised agent achieves in each
+scenario, and what it does not.
+
+**What containment holds (the same in every posture):**
+
+- It cannot read your host filesystem, your `~/.ssh`, your other projects — only its own mounted
+  tree. The host home is not mounted (§2.1).
+- It cannot reach your LAN or other machines; egress is allowlisted (§2.2).
+- It cannot obtain the real model key: in api-key mode the key is injected host-side and never
+  enters the container (§6). (In subscription mode the projected OAuth token *is* exposed — see
+  below.)
+- Capability tokens it holds or mints are CN-bound and revocable: leaked token text is inert
+  elsewhere, and `lever revoke <agent>` cuts it off at use time (see [capabilities](/capabilities/)).
+- Other agents' trees and tokens are not reachable — cross-agent authority goes through the broker,
+  default-deny.
+
+**What it can do, and you must assume it did:**
+
+- **Anything within its own bind-mounted tree is now suspect.** A compromised agent can rewrite any
+  file it can reach: its `CLAUDE.md` (which the harness auto-loads on every future boot), the
+  scaffolded skills, source files, and it can plant scripts, hooks, or data that a later run — or
+  a *human* — might execute or trust. The tree is inside its blast radius by design.
+- **Use whatever tools it was granted, as itself.** Compromise doesn't widen grants (the broker
+  still gates every call), but it can misuse what you *did* grant — so grant least-privilege, and
+  in subscription mode treat the projected OAuth token as exposed.
+- **Exfiltrate in-tree data over its allowed egress.** See §8 — this is not bounded in
+  subscription mode, and only narrowed (not eliminated) in api-key mode.
+
+> **Operator warning — treat a compromised agent's tree as contaminated.** Restarting the agent,
+> even with `lever up --fresh`, gives a fresh *conversation*, not a fresh *tree*: a modified
+> `CLAUDE.md`, a planted script, or tampered working files persist and will contaminate the next
+> run. Before you re-run that agent, dispatch a new one onto the same tree, or attach that tree to
+> any other system, **the human operator must audit the tree and confirm it is clean** (or restore
+> it from a known-good state / discard it). Containment limits the blast radius to that tree; it
+> does not clean the tree for you.
+
+## 8. What this model does *not* claim
 
 - **Data-exfiltration protection.** The bound is on host-secret and LAN reach, **not** on
   exfiltrating in-tree data. This differs by posture (§2.2):
@@ -488,7 +527,7 @@ sees a capability), and replaces the old ambient pattern (per-server `allow_port
   be re-validated on upgrades**; provisioning resolves the host alias dynamically rather than
   hardcoding it.
 
-## 8. Validation evidence
+## 9. Validation evidence
 
 Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 
@@ -513,7 +552,7 @@ rootless Docker, the manager's MCP reachability in practice, and the §4 inner a
 > Validation was performed by checking reachability and file presence by size/permission, never by
 > printing secret contents.
 
-## 9. Reporting a vulnerability
+## 10. Reporting a vulnerability
 
 Pre-release; a security contact will be published with the first release. If you find a containment
 hole in the meantime, please open a minimal-detail issue and request a private channel.

@@ -41,6 +41,16 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// A revoked agent cannot mint OR delegate. The gateway already denies a
+	// revoked caller's tool calls at use time, but without this check a revoked
+	// agent could still delegate a fresh token bound to a non-revoked agent
+	// within its configured delegate grants — a channel that would survive
+	// revocation. Fail closed here so `lever revoke` cuts minting too.
+	if b.isRevoked(caller) {
+		b.audit("request", caller, "deny", "revoked")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req CapRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("request", caller, "deny", "bad body")

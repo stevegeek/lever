@@ -110,6 +110,14 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// A revoked agent loses its messaging channel too — otherwise a
+	// compromised-then-revoked agent could keep steering other agents via
+	// messages. Fail closed at use time (identity-keyed, like the gateway).
+	if b.isRevoked(caller) {
+		b.audit("msg", caller, "deny", "revoked")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req msgSendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")

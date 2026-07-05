@@ -296,3 +296,18 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 		t.Fatalf("/msg/list audit missing error detail: %s", audit2.String())
 	}
 }
+
+func TestMsgSend_deniesRevokedCaller(t *testing.T) {
+	b, rt, audit := newMsgTestBroker(true)
+	b.Revoke("scratch")
+	rec := callGrove(t, b, "/msg/send", `{"to":"user:manager","body":"steer"}`, "scratch")
+	if rec.Code != 403 {
+		t.Fatalf("revoked sender: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 0 {
+		t.Fatalf("revoked sender must not deliver: sent = %d", len(rt.sent))
+	}
+	if !strings.Contains(audit.String(), "revoked") {
+		t.Fatalf("deny must audit 'revoked', got: %s", audit.String())
+	}
+}

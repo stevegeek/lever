@@ -113,12 +113,11 @@ Three independent handles, all host-side:
 - **Expiry** — the backstop: tokens die on their own after `broker.grant_ttl` (default `24h` —
   session-scale on purpose, because the per-call revocation check below is the real cut).
 - **`lever revoke <agent>`** — cuts that agent off immediately (persisted, survives broker
-  restarts). Enforcement is by **caller identity at use time**: the gateway and the `/llm` proxy
-  check the revocation list on every call, so a revoked agent gains nothing by re-minting — its
-  calls are denied regardless of how fresh its token is. (Known sharp edge in the current
-  version: the mint endpoint itself doesn't check revocation, so a revoked agent can still
-  *delegate* a token bound to a non-revoked agent within its configured `delegate:` list —
-  a narrow channel, being closed.)
+  restarts). Enforcement is by **caller identity at use time**, checked on every path a revoked
+  agent could act through: the gateway and the `/llm` proxy deny its tool calls, the mint endpoint
+  denies it minting *and* delegating (so it can't hand a fresh token to a still-valid agent), and
+  the messaging endpoint denies it steering other agents. A revoked agent gains nothing by
+  re-minting or re-messaging, regardless of how fresh its token is.
 - **`lever broker bump-epoch`** — raise the epoch floor and every outstanding token dies at once.
 
 ## Teaching agents the flow

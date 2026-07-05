@@ -312,3 +312,24 @@ func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
 		t.Fatalf("policy deny audit must include original op, got: %s", auditStr)
 	}
 }
+
+func TestRequestDeniesRevokedCallerMintingAndDelegation(t *testing.T) {
+	b := New(testConfig(t))
+	b.Revoke("manager")
+	// A revoked manager may not self-obtain...
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{Tool: "db", Op: "read", BoundTo: "manager"}))
+	r.TLS = leafFor(t, b, "manager")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("revoked self-obtain: status = %d, want 403", w.Code)
+	}
+	// ...nor delegate a token bound to a still-valid agent (the channel this closes).
+	r2 := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{Tool: "db", Op: "read", BoundTo: "worker"}))
+	r2.TLS = leafFor(t, b, "manager")
+	w2 := httptest.NewRecorder()
+	b.handleRequest(w2, r2)
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("revoked delegation: status = %d, want 403", w2.Code)
+	}
+}

@@ -34,6 +34,10 @@ RUN chmod 0755 /etc/scion/hooks/pre-start.d/10-lever-agent-boot
 # the broker's /mcp/<tool>/ gateway over mutual TLS. Real Claude Code env vars; a
 # client cert is sent only when the server requests one, so these are inert for
 # the Anthropic API connection itself.
+# (Docker's SecretsUsedInArgOrEnv linter flags CLAUDE_CODE_CLIENT_KEY on the
+# "KEY" name — a false positive: these values are FILE PATHS, not secrets. The
+# key material is generated in the container at boot and never baked in. Don't
+# "fix" the warning by removing these; the harness needs the paths.)
 ENV CLAUDE_CODE_CLIENT_CERT=/home/scion/.lever-id/agent.crt
 ENV CLAUDE_CODE_CLIENT_KEY=/home/scion/.lever-id/agent.key
 ENV NODE_EXTRA_CA_CERTS=/home/scion/.lever-id/ca.crt

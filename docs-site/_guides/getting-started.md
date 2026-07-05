@@ -85,17 +85,22 @@ stock Claude harness image. Build it once from a scion checkout:
 
 ```sh
 git clone https://github.com/GoogleCloudPlatform/scion
-cd scion && image-build/scripts/build-images.sh scion-claude
+cd scion && image-build/scripts/build-images.sh --target harnesses
 ```
 
-That leaves `scion-claude:latest` in your local Docker store; `make lever-image` picks it up. (The
-build script tells you this if the base is missing.)
+`--target harnesses` builds `scion-claude` (among the harness images); if you're starting from
+nothing, `--target all` builds the whole base chain first. That leaves `scion-claude:latest` in your
+local Docker store; `make lever-image` picks it up. (The build script tells you this if the base is
+missing.) See scion's `image-build/` for the full story — scion owns this step.
 
 **Extending the image for your instance.** The generic image is deliberately minimal — scion's
 harness plus lever's binaries and boot hook, nothing else. If your agents need a language toolchain
-or a project CLI, write a small instance Dockerfile `FROM lever-claude:latest` that adds it, and
-point `manager.image` (and any grove `image:`) at your tag. Keep instance-specific tooling there,
-not in the framework image.
+or a project CLI, write a small instance Dockerfile `FROM lever-claude:latest` that adds it, point
+`manager.image` (and any grove `image:`) at your tag, and — importantly — if your added layer does
+root-level work under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and
+`USER scion`. The jail runs rootless Docker, where a root-owned home is unwritable by the agent and
+silently breaks its boot hook. Keep instance-specific tooling in that layer, not in the framework
+image.
 
 ## 2. Look at the instance
 

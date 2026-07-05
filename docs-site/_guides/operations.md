@@ -15,14 +15,18 @@ changed grants) and re-applying **silently changes nothing at the broker layer**
 correct-looking config plus unexplained denials ("unknown recipient", 403s for a grant you can see
 in the file).
 
-Until a dedicated reload verb ships, the recipe is a full cycle:
+Use `lever reload`:
 
 ```sh
-lever stop     # suspends the manager (conversation preserved), stops the broker
-lever up       # restarts broker (fresh config), powers up, resumes the same conversation
+lever reload   # stops the broker, re-runs apply on the current config, spawns a fresh broker
 ```
 
-This is safe: CA, keys, enrolments, and the manager's conversation all persist across it.
+It restarts the broker onto the edited config, re-registers groves, and re-applies egress — but
+leaves the running manager container alone (apply's start-manager sees it already running), so the
+**manager's conversation is preserved** and your TTY is not taken. It's the broker half of a
+`lever stop` + `lever up` without the VM power cycle or the re-attach. CA, keys, and enrolments all
+persist. (A full `lever stop && lever up` still works and additionally power-cycles the VM if you
+want that.)
 
 ## Adding a grove to a running instance
 
@@ -36,7 +40,7 @@ This is safe: CA, keys, enrolments, and the manager's conversation all persist a
    ```
    Add `obtain:` grants if it needs brokered tools (see [capabilities](/capabilities/)).
 3. `lever init` — scaffolds the grove's `lever-agent` skill into the new dir.
-4. `lever stop && lever up` — the broker must restart to learn the new grove (see above).
+4. `lever reload` — the broker must restart to learn the new grove (see above).
 5. Verify: `lever doctor` (skills check covers the new dir), then dispatch it from the manager
    (`lever-manager agent start newgrove --task "…"`) or message it from the host
    (`lever msg send "…" --to newgrove`).
@@ -61,7 +65,7 @@ command whenever anything looks wrong — every check prints a specific fix hint
 |---|---|---|
 | Tool call denied `missing capability` | agent didn't mint/attach | the agent should follow its `lever-operator` skill (mint via `lever-capability`, pass `_capability`); if the skill is missing, run `lever init` |
 | Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then stop+up |
-| "unknown recipient" / new grove invisible | broker still running on the old config | `lever stop && lever up` |
+| "unknown recipient" / new grove invisible | broker still running on the old config | `lever reload` |
 | Gateway 502 on an external tool | the host-side server isn't listening | `lever doctor` (external-backends check), start your server |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/) — `--fresh` resets the conversation, not the tree |
@@ -72,5 +76,6 @@ command whenever anything looks wrong — every check prints a specific fix hint
    changed, `make lever-image-bins` + rebuild your agent image, then `lever apply` to load it.
 2. `lever init` — refreshes the scaffolded skills (your edited copies are left alone; `--check`
    to preview). `CHANGELOG.md` in the repo notes anything that needs more than this.
-3. `lever stop && lever up` — restart onto the new binaries/config.
+3. `lever reload` (or `lever stop && lever up` to also power-cycle the VM) — restart onto the new
+   binaries/config.
 4. `lever doctor` — every check green means the upgrade landed.

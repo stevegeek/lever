@@ -15,14 +15,18 @@ Lever is the **orchestration and interface layer**; [Scion](https://github.com/G
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool, `lever`, and it drives Scion for you.
 
-> **Status: working, builds from source; not yet packaged/released.** Two binaries build from
-> source, host `lever` (control plane) + in-jail `lever-manager` (orchestration), and bring a
-> manager up end-to-end in the jail, then let it **dispatch grove agents**, all **live-validated on
+> **Status (v0.2.0): working, builds from source; not yet packaged/released.** The host `lever`
+> control plane brings a manager up end-to-end in the jail and lets it **dispatch grove agents**, with
+> the **capability broker** gating every tool, credential, and message — all **live-validated on
 > macOS + OrbStack** (Apple Silicon): isolated machine + rootless podman + egress allowlist, the
-> manager editing a bind-mounted project tree in place with hub state-tracking, dispatching a sibling
-> grove, relaying its question back, and closing a task on completion. There is no release/install
-> yet (you build it, `make install`), and some polish (tidier MCP wiring, per-step progress) is in
-> progress. See [Where this is today](#where-this-is-today).
+> manager editing a bind-mounted project tree in place, dispatching a sibling grove, minting
+> capability tokens through the mTLS gateway, and reaching first-party + external MCP tools with the
+> real credentials never entering a container. `lever stop`/`lever up` power the jail down and back up
+> **preserving the manager's conversation**. A second example, [`examples/assistant-demo`](examples/assistant-demo),
+> runs a mini assistant (weather + a todo grove) and was proven end-to-end in the jail. There is no
+> release/installer yet (you build from source: `make all`, then `make lever-image`). Linux support is
+> being proven (the Lima backend passes its e2e on macOS; live Linux validation is pending). See
+> [Where this is today](#where-this-is-today).
 
 ## Why
 
@@ -120,22 +124,34 @@ assistant as the first instance (dogfooding). See [core vs instance](docs-site/_
 ## Where this is today
 
 - **Done:** architecture + security model; containment primitives validated by hand; the host `lever`
-  + in-jail `lever-manager` binaries; `lever apply` (config-driven bring-up) and `lever up` (bring-up +
-  attach); live end-to-end validation on macOS + OrbStack, a manager boots in the jail, edits a
-  bind-mounted tree **in place**, the hub tracks it (heartbeats, attach), and **the manager dispatches
-  a grove agent, relays its question back, and closes a task on completion** (proven 2026-06-17).
-  The second backend, **Lima**, passes the §19 acceptance gate on macOS (vz) under both egress
-  postures — `make test-lima-e2e`, proven 2026-07-02. Lima's **Linux** (QEMU/KVM) path is covered by
-  unit tests; live validation there needs a KVM-capable host (CI runner / real Linux box) and is
-  pending — it is not exercised by nesting inside another VM (no nested KVM).
-- **In progress:** broker-fronted external MCP servers (host tools capability-gated
-  through the mTLS gateway — replaces per-port egress holes; instance migration
-  pending); per-step bring-up progress; load a grove image at apply time; broader
-  substrate support (Linux/Docker backend); packaging.
-- **Not yet:** a release/installer. Build from source (`make install`).
-- **You can today:** build the binaries (`make all`) and bring an app up with `lever apply` / `lever up`,
-  then have the manager dispatch groves; read
-  the [architecture](docs-site/_guides/architecture.md) and [security model](docs-site/_guides/security-model.md).
+  + in-jail `lever-manager` binaries; `lever apply` / `lever up` (config-driven bring-up + attach);
+  the manager boots in the jail, edits a bind-mounted tree **in place**, and **dispatches a grove
+  agent, relays its question back, and closes a task on completion** (proven 2026-06-17).
+  - **Capability broker** (mTLS gateway): agents hold no ambient authority — they mint short-lived,
+    identity-bound, revocable capability tokens for every tool, credential, and message. First-party
+    tools (the broker supervises) and **external MCP servers** (the broker fronts + proxies, replacing
+    per-port egress holes) are both capability-gated. In api-key mode the real model key is injected
+    host-side and **never enters a container**; `lever revoke` is **terminal** (mint, delegate,
+    message, dispatch, and cert-renew all fail closed).
+  - **`lever init`** scaffolds operator skills into an instance so agents know the capability flow;
+    **`lever reload`** applies config changes without a VM power cycle; **`lever doctor`** runs real
+    health checks; **`lever stop`/`up`** preserve the manager's conversation across a power-off.
+  - **`make lever-image`** builds the agent image from source; [`examples/hello-grove`](examples/hello-grove)
+    and [`examples/assistant-demo`](examples/assistant-demo) (a mini weather + todo-grove assistant)
+    both run end-to-end — the demo was **live-proven in the jail 2026-07-05** (weather through the
+    gateway, a grove reading a CSV via a first-party tool, per-agent grants).
+  - The second backend, **Lima**, passes the §19 acceptance gate on macOS (vz) under both egress
+    postures (`make test-lima-e2e`, 2026-07-02).
+- **Being proven:** **Linux** support. Lima's Linux (QEMU/KVM) path is unit-tested; live validation
+  needs a KVM-capable host (real Linux box / CI runner) and is in progress — it is not exercised by
+  nesting inside another VM (no nested KVM).
+- **Not yet:** a release/installer (build from source: `make all` + `make lever-image`); an asciinema
+  walkthrough; broader substrate support; deeper `lever doctor` probes.
+- **You can today:** build (`make all`, `make lever-image`), bring an app up (`lever apply` / `lever up`),
+  have the manager dispatch groves and use capability-gated tools; run the two examples; read the
+  [getting-started guide](docs-site/_guides/getting-started.md), [capabilities](docs-site/_guides/capabilities.md),
+  [operations](docs-site/_guides/operations.md), [CLI reference](docs-site/_reference/cli.md),
+  [architecture](docs-site/_guides/architecture.md), and [security model](docs-site/_guides/security-model.md).
 
 ## Build & run
 

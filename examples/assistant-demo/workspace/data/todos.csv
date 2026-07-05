@@ -1,0 +1,6 @@
+id,task,due,priority,done
+1,Finish the lever demo write-up,2026-07-06,high,false
+2,Reply to the design review thread,2026-07-05,high,false
+3,Water the office plants,2026-07-05,normal,true
+4,Book flights for the conference,2026-07-10,normal,false
+5,Renew the domain,2026-07-08,low,false

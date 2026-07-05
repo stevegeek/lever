@@ -1,0 +1,53 @@
+# A tiny personal-assistant instance, built to show off lever's two tool models
+# and grove dispatch in one runnable example. Run `lever` from THIS directory.
+#
+#   manager  — runs a morning standup; holds the WEATHER tool (external, proxied)
+#   todo     — a grove that holds the TODO tool (first-party, broker-supervised)
+#
+# Two brokered tools, one of each kind:
+#   - todo    FIRST-PARTY: the broker spawns `lever-tool-todo` (built from
+#             tools/lever-tool-todo) and capability-gates it. It reads the CSV.
+#   - weather EXTERNAL: an MCP server YOU start (tools/weather-stub); the broker
+#             only fronts + gates + proxies it, and strips the token before
+#             forwarding. `external: true`, coarse-gated (any op).
+#
+# Grants scope each tool to exactly one agent: the manager may obtain weather,
+# the todo grove may obtain todo. Neither can reach the other's tool — that's the
+# per-agent capability boundary, visible in one config.
+name: assistant-demo
+backend: orbstack
+tree: workspace              # only workspace/ is mounted; this file + manager.md stay host-side
+
+scion:
+  version: 666333f9          # pin a scion commit; fetched + cross-compiled into the jail
+
+broker:
+  llm_auth: subscription     # personal setup: your Claude OAuth token (see manager.credential_file)
+  tools:
+    # FIRST-PARTY: the broker launches this subprocess and injects -backend/-admin.
+    # `data/todos.csv` is relative to the broker's working dir (the instance root),
+    # so it reads workspace/data/todos.csv via the tree.
+    - name: todo
+      command: ["lever-tool-todo", "-csv", "workspace/data/todos.csv"]
+      backend: 127.0.0.1:3210
+      operations:
+        - name: list
+    # EXTERNAL: you run tools/weather-stub yourself; the broker fronts it.
+    - name: weather
+      external: true
+      gate: coarse            # one capability covers the whole tool
+      backend: 127.0.0.1:3211/mcp
+
+manager:
+  image: scionlocal/lever-claude:latest
+  prompt_file: manager.md
+  credential_file: ~/.scion/oauth-token   # YOU supply this: your Claude OAuth token (0600)
+  allow_ports: []
+  obtain:
+    - { tool: weather, op: "*" }          # the manager may mint a weather capability
+
+groves:
+  - name: todo
+    dir: groves/todo
+    obtain:
+      - { tool: todo, op: list }          # the todo grove may mint a todo/list capability

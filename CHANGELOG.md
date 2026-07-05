@@ -15,6 +15,11 @@ version bump moves the block under the new version heading.
   (`scionlocal/lever-claude:latest`) in-repo — scion's stock harness plus the
   lever binaries and boot hook. Instances extend it `FROM lever-claude:latest`.
   The examples are now buildable from a clean checkout.
+- `examples/assistant-demo`: a runnable mini personal-assistant instance (a
+  morning-standup manager + a todo grove) that demonstrates both tool models in
+  one place — a first-party capability tool (`lever-tool-todo`, reads a CSV) the
+  broker supervises, and an external MCP (`weather-stub`, canned data) the broker
+  only proxies — plus grove dispatch and per-agent grants. Offline, no API key.
 
 ### Fixed
 - Revocation now fails closed on every acting path. Previously only a revoked

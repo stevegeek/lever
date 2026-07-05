@@ -86,3 +86,20 @@ built — `make lever-image`; see the [getting-started guide](../../docs-site/_g
 - **Swap in real tools** — replace `weather-stub` with a real weather MCP (point
   `broker.tools[weather].backend` at it, keep `external: true`), and grow
   `todos.csv` or replace `lever-tool-todo` with your own first-party tool.
+
+## Record a demo cast
+
+Once the demo runs, capture it as an [asciinema](https://asciinema.org) cast with
+the bundled harness (needs `asciinema` on PATH and `weather-stub` already
+running):
+
+```sh
+./record-demo.sh          # writes demo.cast in this directory
+asciinema play demo.cast  # preview
+```
+
+It records the deterministic setup (`lever version`, `apply --dry-run`,
+`lever init`) automatically, then drops you into a live `lever up` so the morning
+standup is a real recorded conversation. Detach with `Ctrl-b d` to end the cast.
+Upload with `asciinema upload demo.cast`, or render a GIF with
+[`agg`](https://github.com/asciinema/agg): `agg demo.cast demo.gif`.

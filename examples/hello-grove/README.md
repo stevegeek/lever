@@ -30,5 +30,5 @@ lever apply --dry-run   # preview the bring-up plan only
 ```
 
 The manager will dispatch a task to `worker`, wait for the completion event, and
-report the result. See [../../docs/getting-started.md](../../docs/getting-started.md)
+report the result. See [../../docs-site/_guides/getting-started.md](../../docs-site/_guides/getting-started.md)
 for the full worked example.

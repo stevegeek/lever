@@ -6,7 +6,7 @@ nav_order: 6
 
 Lever's inner security layer is a **capability model**: agents hold no ambient authority — no API
 keys in the environment, no open ports to host services. Everything an agent may do outside its
-own workspace is represented by a short-lived, identity-bound **capability token** minted by the
+own workspace is represented by a revocable, identity-bound **capability token** minted by the
 host-side **broker**, and every use of one is checked, audited, and revocable.
 
 This page describes the model end to end. For the *why* (threat model, what containment alone
@@ -31,11 +31,13 @@ works anywhere else: the key is container-local and the identity is pinned.
 
 ## Tokens: minting
 
-A capability token is a short-lived signed structure (Ed25519, verified offline by the gateway
-and re-verifiable by first-party tools) naming: the **tool**, the **operation**, the agent it is
+A capability token is a signed structure (Ed25519, verified offline by the gateway and
+re-verifiable by first-party tools) naming: the **tool**, the **operation**, the agent it is
 **bound to**, optional **constraints**, and the issue **epoch**. It is not a bearer secret that
-works forever or for anyone — it expires quickly and only works over the mTLS session of the
-agent it names.
+works for anyone: it only works over the mTLS session of the agent it names, so leaked token
+text is useless without that container's private key. Its lifetime (`broker.grant_ttl`, default
+`24h`) is a backstop, not the real control — every call re-checks the epoch and revocation
+state, so revocation cuts access immediately regardless of TTL.
 
 Agents mint through the **`lever-capability`** MCP tool (available in every agent container):
 
@@ -69,8 +71,8 @@ tool call (the gateway advertises this argument in every tool schema). The gatew
 4. writes a `broker.decision` line (allow or deny, with the reason) to `.lever-state/broker.log`.
 
 A denial reads `missing capability` (no token attached — mint one and attach it) or names the
-policy reason (not granted, expired, wrong binding). Tokens are short-lived by design: agents
-re-mint on expiry rather than holding long-lived credentials.
+policy reason (not granted, expired, wrong binding). Agents simply re-mint on an expiry-shaped
+denial — tokens are cheap and the grant policy, not the token, is the durable thing.
 
 ## The LLM as a capability (api-key mode)
 
@@ -86,7 +88,8 @@ to agents directly.)
 
 Three independent handles, all host-side:
 
-- **Expiry** — the default: tokens die on their own within minutes.
+- **Expiry** — the backstop: tokens die on their own after `broker.grant_ttl` (default `24h` —
+  session-scale on purpose, because the per-call revocation check below is the real cut).
 - **`lever revoke <agent>`** — one agent's tokens stop verifying immediately (persisted, survives
   broker restarts).
 - **`lever broker bump-epoch`** — raise the epoch floor and every outstanding token dies at once.

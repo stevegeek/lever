@@ -90,6 +90,15 @@ func (b *Broker) requireManagerGrove(w http.ResponseWriter, r *http.Request, gro
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return GroveSpec{}, false
 	}
+	// A revoked manager cannot dispatch or tear down groves. Dispatching a grove
+	// is a stronger steering primitive than messaging (it spawns a fresh,
+	// fully-capable agent), so revocation must cut it too — otherwise revoke
+	// leaves the loudest channel open.
+	if b.isRevoked(caller) {
+		b.audit("grove", caller, "deny", "revoked")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return GroveSpec{}, false
+	}
 	spec, ok := b.groveSpec(grove)
 	if !ok {
 		b.audit("grove", caller, "deny", "unknown grove: "+grove)

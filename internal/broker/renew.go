@@ -49,6 +49,15 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// Deny a revoked caller a fresh cert: with renew closed its existing cert
+	// simply expires, fully cutting the identity off rather than letting it
+	// refresh indefinitely (every use-time gate is already CN-keyed, so the
+	// live cert authorizes nothing — but denying renew makes revocation terminal).
+	if b.isRevoked(caller) {
+		b.audit("renew", caller, "deny", "revoked")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req RenewRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("renew", caller, "deny", "bad body")

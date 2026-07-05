@@ -351,3 +351,21 @@ func TestGroveLifecycleVerbs(t *testing.T) {
 		t.Fatalf("undeclared stop = %d, want 403", rec.Code)
 	}
 }
+
+func TestGroveStart_deniesRevokedManager(t *testing.T) {
+	dir := t.TempDir()
+	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker",
+		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+	b := newTestBroker(t, rt, spec)
+	b.Revoke("test-manager")
+
+	rec := callGrove(t, b, "/grove/start", `{"grove":"worker","task":"do it"}`, "test-manager")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("revoked manager dispatch: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+	// No bootstrap staged, no start attempted.
+	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
+		t.Fatal("revoked dispatch must not stage bootstrap")
+	}
+}

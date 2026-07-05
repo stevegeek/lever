@@ -154,6 +154,11 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	if b.isRevoked(caller) {
+		b.audit("msg", caller, "deny", "revoked")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req msgListRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")

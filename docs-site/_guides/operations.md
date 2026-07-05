@@ -28,6 +28,10 @@ leaves the running manager container alone (apply's start-manager sees it alread
 persist. (A full `lever stop && lever up` still works and additionally power-cycles the VM if you
 want that.)
 
+reload validates the edited config *before* it stops the broker, so a config typo fails with the
+old broker still serving. If a later step fails (backend, image load), the broker can be briefly
+down until you re-run `lever up` — the same recoverable window as a `stop`+`up` that fails midway.
+
 ## Adding a grove to a running instance
 
 1. Create the directory under your tree: `mkdir -p workspace/groves/newgrove` (the dir must exist;

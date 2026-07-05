@@ -37,6 +37,13 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// A revoked manager cannot issue new enrolment tickets (spawning fresh
+	// agents is a steering channel — see requireManagerGrove).
+	if b.isRevoked(caller) {
+		b.audit("provision", caller, "deny", "revoked")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req ProvisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("provision", caller, "deny", "bad body")

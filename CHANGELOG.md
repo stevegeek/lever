@@ -17,10 +17,12 @@ version bump moves the block under the new version heading.
   The examples are now buildable from a clean checkout.
 
 ### Fixed
-- Revocation now fails closed on every path: a revoked agent can no longer mint
-  or delegate capability tokens (previously only its tool calls were denied at
-  the gateway, so it could still delegate a token bound to a non-revoked agent)
-  nor message other agents.
+- Revocation now fails closed on every acting path. Previously only a revoked
+  agent's tool calls were denied (at the gateway/`/llm`), so it could still mint
+  or delegate tokens, message other agents, dispatch/tear-down groves (as the
+  manager), issue enrolment tickets, or renew its cert. `lever revoke <agent>`
+  now denies all of these; the agent's existing cert simply expires (renew is
+  refused), making revocation terminal.
 
 ### Docs
 - New "Capabilities" and "Operations & recipes" guides; a "CLI" reference page;

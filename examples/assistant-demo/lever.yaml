@@ -24,9 +24,11 @@ scion:
 broker:
   llm_auth: subscription     # personal setup: your Claude OAuth token (see manager.credential_file)
   tools:
-    # FIRST-PARTY: the broker launches this subprocess and injects -backend/-admin.
-    # `data/todos.csv` is relative to the broker's working dir (the instance root),
-    # so it reads workspace/data/todos.csv via the tree.
+    # FIRST-PARTY: the broker launches this subprocess (host-side) and injects
+    # -backend/-admin. `-csv` is relative to the broker's working dir (the instance
+    # root, where you run `lever up`), so it reads the host file at
+    # workspace/data/todos.csv directly — the same file that's bind-mounted into
+    # the jail, but the tool reads the host copy, not through the mount.
     - name: todo
       command: ["lever-tool-todo", "-csv", "workspace/data/todos.csv"]
       backend: 127.0.0.1:3210

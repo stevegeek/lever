@@ -36,14 +36,22 @@ assistant-demo/
 From a checkout of lever (`lever` on your PATH — `make all` — and the agent image
 built — `make lever-image`; see the [getting-started guide](../../docs-site/_guides/getting-started.md)):
 
-1. **Build the two demo tools onto your PATH** (the broker spawns `lever-tool-todo`;
-   you run `weather-stub` yourself):
+1. **Build the two demo tools onto your PATH** (the broker spawns `lever-tool-todo`
+   by name, so it must be on the PATH `lever` inherits; you run `weather-stub`
+   yourself):
 
    ```sh
    cd examples/assistant-demo
    go build -o ~/.local/bin/lever-tool-todo ./tools/lever-tool-todo
    go build -o ~/.local/bin/weather-stub    ./tools/weather-stub
    ```
+
+   These go next to the `lever` binary (`~/.local/bin`). That directory **must be
+   on your `PATH`** — the broker resolves `lever-tool-todo` by name from the
+   environment `lever up` inherits, and you invoke `weather-stub` by name. If
+   `command -v lever` works in the shell you'll run `lever up` from, you're set;
+   otherwise `export PATH="$HOME/.local/bin:$PATH"` (a different `--prefix`? build
+   the tools into that same dir).
 
 2. **Provide a Claude OAuth token** at `~/.scion/oauth-token` (0600), as in the
    getting-started guide (this demo uses `subscription` mode).
@@ -77,8 +85,9 @@ built — `make lever-image`; see the [getting-started guide](../../docs-site/_g
 
 ## What to look at
 
-- **`lever doctor`** — the `weather` external-backend check confirms `weather-stub`
-  is listening; the operator-skills check confirms `lever init` ran.
+- **`lever doctor`** — the `weather` external-backend check confirms `weather-stub`'s
+  port is listening (a TCP probe; it doesn't exercise the MCP path); the
+  operator-skills check confirms `lever init` ran.
 - **`.lever-state/broker.log`** — every capability decision. You'll see the
   manager's `weather` mint + call, and the todo grove's `todo/list` mint + call,
   each `allow`ed against its grant, and a `deny` if you ask an agent for the tool

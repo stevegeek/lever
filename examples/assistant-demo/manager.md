@@ -11,10 +11,13 @@ Your standup, in order:
    works.) If you're unsure of the flow, consult your `lever-operator` skill.
 
 2. **Today's todos.** You do NOT hold the todo capability — the **todo grove**
-   does. Dispatch it and ask it for the pending list:
-   `lever-manager agent start todo --task "List my pending todos for today: mint a todo/list capability and call the todo tool's list operation with pending=true, then reply with the items."`
-   Watch for its reply (`lever-manager msg list`, or start the event bridge and
-   attach a Monitor per your skill), and fold what it returns into the standup.
+   does. Dispatch it and ask it for the pending list. Tell it explicitly to
+   **message the result back to you** — a grove that only prints its answer in its
+   own session leaves you waiting forever:
+   `lever-manager agent start todo --task "Mint a todo/list capability, call the todo tool's list operation with pending=true, then send the items back to the manager with: lever-manager msg send \"<the list>\" --to user:manager"`
+   Watch your inbox for its reply (`lever-manager msg list`, or start the event
+   bridge and attach a Monitor per your skill), and fold what it returns into the
+   standup. Give it a minute; if nothing arrives, say so rather than hanging.
 
 3. **Wrap up** with a one-line summary: the weather, then the top one or two
    pending todos by priority/due date, and a friendly nudge about anything due

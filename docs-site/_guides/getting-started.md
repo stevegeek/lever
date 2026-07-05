@@ -33,9 +33,16 @@ the jail does and doesn't protect.
   `resolve go toolchain (is go on PATH?): exit status 126`. The fix is to put the actual toolchain
   bin on `PATH`, e.g. `export PATH="$HOME/.asdf/installs/golang/1.26.4/go/bin:$PATH"` (adjust the
   version); `go version` should print from that path.
-- **A manager container image** on your host Docker, e.g. `scionlocal/lever-claude:latest`. `lever
-  apply` loads this image into the jail; it can't be pulled from inside (egress is locked down).
-  Confirm with `docker images | grep scionlocal/lever-claude`.
+- **The agent image** `scionlocal/lever-claude:latest` on your host Docker. `lever apply` loads it
+  into the jail; it can't be pulled from inside (egress is locked down). If you don't have it yet,
+  build it — one command once you have scion's base image:
+
+      make lever-image
+
+  This cross-compiles the in-jail binaries and builds `scionlocal/lever-claude:latest` FROM scion's
+  stock `scion-claude:latest`. See [building the agent image](#1a-build-the-agent-image) for the
+  scion-base prerequisite and how instances extend the image. Confirm with
+  `docker images | grep scionlocal/lever-claude`.
 - **A Claude OAuth token** in a file (mint with `claude setup-token`) for this subscription demo.
   Point `manager.credential_file` at it. Use a least-privilege token; in subscription mode it is
   projected into the agent containers (see the security doc).
@@ -55,10 +62,40 @@ The in-jail orchestration binary, **`lever-manager`**, isn't built here, it's ba
 image. `make lever-image-bins` cross-compiles `lever-manager` (alongside `lever-agent` and
 `lever-tool-db`) into your image build context (`LEVER_IMAGE_CTX` in the Makefile), and your
 Dockerfile `COPY`s them to `/usr/local/bin`, so it's already on `PATH` inside the manager and grove
-containers when they boot. `examples/hello-grove` uses the pre-baked `scionlocal/lever-claude:latest`
-image, so there's nothing to build for this walkthrough.
+containers when they boot.
 
 Verify: `lever version`.
+
+## 1a. Build the agent image
+
+`examples/hello-grove` (and every instance) runs the agent image
+`scionlocal/lever-claude:latest`. Build the generic one in a single command:
+
+```sh
+make lever-image
+```
+
+This cross-compiles the in-jail binaries into `image/lever-claude/`, syncs the pre-start hook, and
+runs `docker build` to produce `scionlocal/lever-claude:latest` (the local `scionlocal/` registry
+prefix is what scion loads without a pull). Override the jail arch with `LEVER_IMAGE_ARCH=amd64` if
+needed.
+
+**One prerequisite: scion's base image.** lever-claude builds `FROM scion-claude:latest`, scion's
+stock Claude harness image. Build it once from a scion checkout:
+
+```sh
+git clone https://github.com/GoogleCloudPlatform/scion
+cd scion && image-build/scripts/build-images.sh scion-claude
+```
+
+That leaves `scion-claude:latest` in your local Docker store; `make lever-image` picks it up. (The
+build script tells you this if the base is missing.)
+
+**Extending the image for your instance.** The generic image is deliberately minimal — scion's
+harness plus lever's binaries and boot hook, nothing else. If your agents need a language toolchain
+or a project CLI, write a small instance Dockerfile `FROM lever-claude:latest` that adds it, and
+point `manager.image` (and any grove `image:`) at your tag. Keep instance-specific tooling there,
+not in the framework image.
 
 ## 2. Look at the instance
 
@@ -103,9 +140,9 @@ contents are projected into the agent containers, so keep it `0600`.
 The config and prompt live at the root, *outside* the mount, so a compromised agent can't rewrite
 them. See [config-reference.md](/reference/config/) for every key.
 
-There's nothing to stage: `scionlocal/lever-claude:latest` already has `lever-manager` baked in at
-`/usr/local/bin` (see [step 1](#1-install-the-binaries)), so it's on `PATH` the moment the manager
-container boots.
+There's nothing more to stage: the image you built in [step 1a](#1a-build-the-agent-image) already
+has `lever-manager` baked in at `/usr/local/bin`, so it's on `PATH` the moment the manager container
+boots.
 
 ## 3. Preview the bring-up plan (no side effects)
 

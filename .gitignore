@@ -25,3 +25,7 @@ examples/*/workspace/vendor/
 
 # Machine-specific Makefile overrides (LEVER_INSTANCE etc.) — copy from local.mk.example
 local.mk
+
+# Generic agent-image build artifacts (staged by `make lever-image`).
+image/lever-claude/bin/
+image/lever-claude/scionhook/

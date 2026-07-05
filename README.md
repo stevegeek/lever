@@ -162,7 +162,14 @@ lever apply
 lever apply --dry-run                     # print the bring-up plan only
 ```
 
-Overrides: `make install PREFIX=/some/bin`, `make lever-image-bins LEVER_IMAGE_CTX=/path/to/image-context`.
+Build the agent image (`scionlocal/lever-claude:latest`, loaded into the jail) with `make
+lever-image` — it cross-compiles the in-jail binaries and builds `FROM` scion's stock
+`scion-claude:latest` (build that once from a [scion](https://github.com/GoogleCloudPlatform/scion)
+checkout: `image-build/scripts/build-images.sh scion-claude`). Instances that need extra tooling
+extend the image with their own Dockerfile `FROM lever-claude:latest`.
+
+Overrides: `make install PREFIX=/some/bin`, `make lever-image LEVER_IMAGE_ARCH=amd64`,
+`make lever-image-bins LEVER_IMAGE_CTX=/path/to/image-context` (stage bins into an instance dir).
 
 An **application** is one config file describing the manager + its groves (image, project tree,
 scion source, credential, allowed host ports). The canonical filename is **`lever.yaml`** at the

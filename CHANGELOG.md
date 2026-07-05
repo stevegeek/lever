@@ -11,6 +11,10 @@ version bump moves the block under the new version heading.
 - `lever reload`: apply config changes (new grove, tool, or grant) to a running
   instance without a VM power cycle — restarts the broker on the current config
   while leaving the manager container (and its conversation) running.
+- `make lever-image`: build the generic, instance-agnostic agent image
+  (`scionlocal/lever-claude:latest`) in-repo — scion's stock harness plus the
+  lever binaries and boot hook. Instances extend it `FROM lever-claude:latest`.
+  The examples are now buildable from a clean checkout.
 
 ### Fixed
 - Revocation now fails closed on every path: a revoked agent can no longer mint

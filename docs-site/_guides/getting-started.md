@@ -174,7 +174,8 @@ fails fast with "run `lever up` first" rather than starting anything.
 
 If something looks wrong, `lever doctor` runs real health checks (broker alive, external tool
 backends reachable, the manager credential file's presence/size/mode, scion project-registration
-consistency) and prints a fix hint per failure.
+consistency, and the operator-skills scaffold from `lever init` being present and current) and
+prints a fix hint per failure.
 
 ## 6. Dispatch a grove (inside the manager session)
 
@@ -214,6 +215,11 @@ identity-derived and default-deny: the manager may message any declared grove an
 To eyeball a grove's session directly instead of polling events, run `lever attach worker` from your
 host (another terminal, instance root): it hands your TTY to that grove the same way `lever up`
 hands you the manager's; omit the name to attach to the manager.
+
+You can also message an agent from the host without attaching at all: `lever msg send "…" --to
+worker` (or `--to hello-grove` for the manager) is fire-and-forget — the note lands in the agent's
+session as its next user turn, it acts on it unattended, and the exchange is waiting in the
+scrollback the next time you attach. `--interrupt` injects it ahead of the agent's next turn.
 
 When `worker` finishes, the file it wrote (`groves/worker/haiku.md`) is there on your host, it was
 mounted in place.

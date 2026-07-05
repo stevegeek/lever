@@ -182,9 +182,11 @@ the root, or pass an explicit path). See `examples/` for runnable configs and
 | `lever apply [config]` | Headless bring-up, runs the full plan (jail → images → scion init/config/server → credential → register manager + groves → mint bootstrap → start manager). No attach. `--dry-run` prints the plan and exits. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress). `--machine`, `--tree`, `--allow-port`. Rarely needed directly. |
 | `lever attach [name]` | Attach your TTY to the manager (default) or a named grove. Strictly passive: fails fast with "run `lever up` first" if the jail isn't up. |
+| `lever msg send "…" --to NAME` | Host-side fire-and-forget note to the manager (app name) or a declared grove — no attach needed; the agent picks it up as its next user turn. `--interrupt` injects it ahead of the agent's next turn. Strictly passive like `attach`. |
+| `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each grove dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: your edited copies are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing. Re-run after upgrading lever or adding a grove. |
 | `lever stop` | Power the jail off but **keep its disk** (`orb stop`) — the daily "done for the day". Suspends the manager, stops the host broker; a later `lever up` powers it back on and resumes. Everything (installed runtimes, scion state) persists. |
 | `lever destroy` | Full teardown: delete the isolated machine and everything in it (`orb delete`). Targets `lever-<name>` from config; override with `--machine`. `lever down` is a deprecated alias. |
-| `lever doctor` | Diagnose the setup (broker alive, external tool backends reachable, credential file, scion registration, `.mcp.json`-in-tree, Go toolchain); each failing check prints the fix. Targets `lever-<name>` from config; override with `--machine`. |
+| `lever doctor` | Diagnose the setup (broker alive, external tool backends reachable, credential file, scion registration, `.mcp.json`-in-tree, Go toolchain, operator-skills scaffold current); each failing check prints the fix. Targets `lever-<name>` from config; override with `--machine`. |
 | `lever version` | Print the version. |
 
 **In-jail `lever-manager` (orchestration, run by the manager inside the container):**

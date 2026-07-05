@@ -269,6 +269,19 @@ host trusts on the next `lever apply`**, an in-jail-compromise → host-escalati
 channel (point it at `credential_file: ~/.ssh/id_rsa`, `tree: /`, an attacker image, etc.). Keeping
 the root unmounted removes that channel: agents can't see or edit what the host re-reads.
 
+**The boundary this draws — and what deliberately sits on the other side of it.** Operator-owned
+boot material (`lever.yaml`, `prompt_file`) is host-side and tamper-proof from inside the jail.
+Tree-resident material — `CLAUDE.md`, the skills scaffolded by `lever init`, the working files
+themselves — is *inside the mount* and therefore inside the agent's own blast radius: a
+compromised agent can rewrite its own `CLAUDE.md`, and Claude Code will auto-load the modified
+version in every later session. This is not a containment failure (the file is within what the
+agent already controls, and CLAUDE.md-loading is how the harness works — an agent could always
+create one), but it has one consequence worth knowing: **tree-resident instructions persist across
+restarts**. `lever up --fresh` gives you a fresh conversation, not a fresh tree — if you suspect
+an agent was prompt-injected, audit what it wrote to the tree (CLAUDE.md included), don't just
+restart the thread. When you need boot instructions an agent cannot alter, `prompt_file` is the
+mechanism; `lever init`'s scaffolds are working material, not a trust anchor.
+
 ### 5.2 No walk-up discovery (no planted-parent config)
 
 Config is resolved from the **current directory only**, there is deliberately **no walk-up**. A

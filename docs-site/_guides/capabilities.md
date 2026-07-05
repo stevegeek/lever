@@ -74,6 +74,14 @@ A denial reads `missing capability` (no token attached — mint one and attach i
 policy reason (not granted, expired, wrong binding). Agents simply re-mint on an expiry-shaped
 denial — tokens are cheap and the grant policy, not the token, is the durable thing.
 
+**The token deliberately rides through the LLM.** Because `_capability` is a tool-call argument,
+the token text passes through the model's context window, transcripts, and logs. This is a
+conscious design choice, and it is safe for a specific reason: tokens are **CN-bound** — the
+gateway only accepts one over the mTLS session of the agent it names. Token text that leaks
+through a transcript, a log file, or a prompt-injection exfiltration is inert without that
+container's private key, which never leaves the container. What a leaked token does reveal is
+metadata (which tool/op an agent was granted), not authority.
+
 ## The LLM as a capability (api-key mode)
 
 With `llm_auth: api-key`, even the agent's own model access is a capability: the agent holds only
@@ -84,14 +92,33 @@ container bytes, and jail egress to the public internet closes. A renewal sideca
 token before expiry. (`subscription` mode trades this for simplicity: the OAuth token is projected
 to agents directly.)
 
+### Choosing `llm_auth`: subscription vs api-key
+
+The shipped examples default to `subscription` because it's the friction-free personal setup —
+but be explicit about what each mode means before you scale up. **The instance must be uniform**
+(mixing modes across manager/groves is rejected at config load):
+
+| | `subscription` | `api-key` |
+|---|---|---|
+| Credential in containers | your Claude OAuth token, projected to **every** agent | none — only a revocable `capability(llm)` token |
+| If an agent is compromised | the OAuth token is exposed (mint it least-privilege, rotate it) | nothing reusable leaks; revoke the agent |
+| Jail egress | must stay open to the public internet for `api.anthropic.com` | closes to the broker alone |
+| Cost model | your Claude subscription (agents share your session limits) | Console API billing, pay per token, per-agent attribution via the broker |
+| Right for | one operator's personal/dev instance | anything you'd call a deployment, or many agents |
+
 ## Revocation
 
 Three independent handles, all host-side:
 
 - **Expiry** — the backstop: tokens die on their own after `broker.grant_ttl` (default `24h` —
   session-scale on purpose, because the per-call revocation check below is the real cut).
-- **`lever revoke <agent>`** — one agent's tokens stop verifying immediately (persisted, survives
-  broker restarts).
+- **`lever revoke <agent>`** — cuts that agent off immediately (persisted, survives broker
+  restarts). Enforcement is by **caller identity at use time**: the gateway and the `/llm` proxy
+  check the revocation list on every call, so a revoked agent gains nothing by re-minting — its
+  calls are denied regardless of how fresh its token is. (Known sharp edge in the current
+  version: the mint endpoint itself doesn't check revocation, so a revoked agent can still
+  *delegate* a token bound to a non-revoked agent within its configured `delegate:` list —
+  a narrow channel, being closed.)
 - **`lever broker bump-epoch`** — raise the epoch floor and every outstanding token dies at once.
 
 ## Teaching agents the flow

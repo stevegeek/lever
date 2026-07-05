@@ -42,3 +42,9 @@ Scion runs the agents; Lever keeps your real model key out of every container an
 seals the jail off from your host and LAN, so you can point autonomous coding
 agents at real work without handing them your secrets. Close egress to the broker
 alone when you want nothing else reachable.
+
+**Platforms today:** macOS on Apple Silicon with [OrbStack](https://orbstack.dev)
+is the validated path. A Lima backend (targeting Linux and non-OrbStack macOS) is
+built and passing its end-to-end suite, with live Linux validation in progress —
+treat Linux support as *being proven*, not proven. Building from source needs Go
+1.26+; there are no binary releases yet.

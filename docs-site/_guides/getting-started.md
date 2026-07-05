@@ -260,7 +260,8 @@ capability token the broker mints**, bound to that agent's identity. No `allow_p
 hand-authored `.mcp.json` — `lever-agent boot` (baked into the image) discovers registered tools via
 the broker's `/tools` and runs `claude mcp add /mcp/<name>/` for each. You get per-agent scoping and
 an audit trail, and closing the ambient hole means a compromised agent can't reach the port at all
-except through a capability it was granted.
+except through a capability it was granted. (The full model — enrolment, tokens, delegation,
+revocation — is described in [capabilities.md](/capabilities/).)
 
 There are **two kinds** of broker tool:
 

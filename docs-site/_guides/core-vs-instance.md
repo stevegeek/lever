@@ -1,6 +1,6 @@
 ---
 title: Core vs instance
-nav_order: 6
+nav_order: 7
 ---
 # Core vs instance
 

@@ -2,12 +2,22 @@
 
 All notable changes to lever are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Process: every merge
-to `main` that changes behavior adds an entry under `## [Unreleased]`; a
+to `main` that changes behavior adds an entry under `## [0.3.0] - 2026-07-06`; a
 version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
 ### Added
+- Audit mint ledger: every capability token now carries a random 128-bit id
+  inside the signed payload. The broker's `/request` allow line records the
+  id, the matched policy rule (`obtain:<agent>:<tool>.<op>` /
+  `delegate:<agent>-><recipient>:<tool>.<op>`), expiry, epoch, and the baked
+  constraints (JSON); gateway and `/llm` lines carry the same id on allows AND
+  on every post-decode deny (revoked replay included), so any use of a token
+  — permitted or refused — greps back to its mint: `grep id=<id>
+  .lever-state/broker.log`. Token bytes are never logged; deny-line ids are
+  the token's claimed id (signature not necessarily valid). Tokens minted by
+  earlier builds verify but log an empty id until they expire.
 - `lever reload`: apply config changes (new grove, tool, or grant) to a running
   instance without a VM power cycle — restarts the broker on the current config
   while leaving the manager container (and its conversation) running.

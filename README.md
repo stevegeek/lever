@@ -15,7 +15,7 @@ Lever is the **orchestration and interface layer**; [Scion](https://github.com/G
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool, `lever`, and it drives Scion for you.
 
-> **Status (v0.2.0): working, builds from source; not yet packaged/released.** A manager boots in the
+> **Status (v0.3.0): working, builds from source; not yet packaged/released.** A manager boots in the
 > jail, edits a bind-mounted tree in place, dispatches grove agents, and reaches capability-gated
 > tools through the broker's mTLS gateway — real credentials never enter a container — all
 > **live-validated on macOS + OrbStack**. `lever stop`/`up` preserve the manager's conversation across

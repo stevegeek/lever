@@ -155,7 +155,7 @@ check `MayObtain` before listing.
 
 ### B3 — Assistant CLAUDE.md stale Ruby section (instance repo, not lever_to)
 
-`~/ai/lever/workspace/assistant/CLAUDE.md` still instructs "ensure Ruby is
+`~/ai/assistant/workspace/assistant/CLAUDE.md` still instructs "ensure Ruby is
 present for asst / install on demand with rv; no Ruby in the image". WRONG since
 2026-07-04: the lever-claude image BAKES Ruby 4.0.1 at `/opt/lever/mise`
 (shadow-proof, symlinked into `/usr/local/bin` — see assistant repo commit

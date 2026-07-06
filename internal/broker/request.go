@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/lever-to/lever/internal/broker/registry"
@@ -72,7 +74,8 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if b.reg.HasOperation(req.Tool, registry.WildcardOp) {
 		req.Op = registry.WildcardOp
 	}
-	if !b.rules.MayObtain(caller, req.BoundTo, req.Tool, req.Op) {
+	rule, allowed := b.rules.MayObtainRule(caller, req.BoundTo, req.Tool, req.Op)
+	if !allowed {
 		detail := fmt.Sprintf("policy: may not obtain/delegate (tool=%s op=%s", req.Tool, requestedOp)
 		if requestedOp != req.Op {
 			detail += fmt.Sprintf(" coerced_to=%s", req.Op)
@@ -115,12 +118,14 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.Constraints {
 		cons = append(cons, token.Constraint{Key: k, Value: v})
 	}
+	expiry := time.Now().Add(b.grantTTL)
+	epoch := b.MinEpoch()
 	tok, err := token.Mint(b.keys.Private, token.Grant{
 		Agent:       req.BoundTo,
 		Capability:  token.Capability{Tool: req.Tool, Operation: req.Op},
 		Constraints: cons,
-		Expiry:      time.Now().Add(b.grantTTL),
-		Epoch:       b.MinEpoch(),
+		Expiry:      expiry,
+		Epoch:       epoch,
 	})
 	if err != nil {
 		b.audit("request", caller, "error", err.Error())
@@ -133,5 +138,26 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if requestedOp != req.Op {
 		detail += " (op coerced: " + requestedOp + " -> " + req.Op + ")"
 	}
-	b.audit("request", caller, "allow", detail)
+	// The allow line is the mint ledger: token id (correlates this mint with
+	// later gateway/llm use lines), the matched policy rule, and the minted
+	// claims. The token itself is never logged.
+	kvs := []any{
+		"id", token.ID(tok),
+		"rule", rule,
+		"exp", expiry.UTC().Format(time.RFC3339),
+		"epoch", epoch,
+	}
+	if len(req.Constraints) > 0 {
+		keys := make([]string, 0, len(req.Constraints))
+		for k := range req.Constraints {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, len(keys))
+		for i, k := range keys {
+			parts[i] = k + "=" + req.Constraints[k]
+		}
+		kvs = append(kvs, "constraints", strings.Join(parts, ","))
+	}
+	b.audit("request", caller, "allow", detail, kvs...)
 }

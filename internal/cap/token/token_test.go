@@ -1,6 +1,7 @@
 package token
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -247,4 +248,82 @@ func TestMintMultipleConstraintsAllMustMatch(t *testing.T) {
 	if err := Verify(kp.Public, tok, r2); err == nil {
 		t.Fatal("expected denial: second constraint filter==Y not satisfied")
 	}
+}
+
+func TestMintEmbedsUniqueTokenID(t *testing.T) {
+	kp, tok := mintFixture(t)
+	id := ID(tok)
+	if len(id) != 16 {
+		t.Fatalf("ID(minted token) = %q, want a 16-char hex token id", id)
+	}
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			t.Fatalf("ID(minted token) = %q, want lowercase hex", id)
+		}
+	}
+	// The ID rides inside the signed payload, so the token must still verify.
+	if err := Verify(kp.Public, tok, baseReq()); err != nil {
+		t.Fatalf("token with embedded id must verify: %v", err)
+	}
+	tok2, err := Mint(kp.Private, sampleGrant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ID(tok2) == id {
+		t.Fatalf("two mints produced the same token id %q; ids must be unique per mint", id)
+	}
+}
+
+func TestIDEmptyForGarbageAndLegacyTokens(t *testing.T) {
+	if got := ID([]byte("not a token")); got != "" {
+		t.Fatalf("ID(garbage) = %q, want empty", got)
+	}
+	if got := ID(nil); got != "" {
+		t.Fatalf("ID(nil) = %q, want empty", got)
+	}
+}
+
+func TestIDRejectsMalformedIDShape(t *testing.T) {
+	// ID is a best-effort parse for audit lines: on paths where the signature
+	// has not (yet) been verified the embedded id is attacker-controlled, so
+	// anything that is not exactly 16 lowercase hex chars must come back "".
+	kp, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := sampleGrant()
+	tok, err := Mint(kp.Private, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild the envelope with a junk id in the payload (signature invalid —
+	// irrelevant, ID never checks signatures).
+	forged := forgeTokenWithID(t, tok, "x\nid=evil decision=allow")
+	if got := ID(forged); got != "" {
+		t.Fatalf("ID(forged junk id) = %q, want empty (shape-checked)", got)
+	}
+}
+
+// forgeTokenWithID re-wraps tok's payload with the given id, leaving the (now
+// stale) signature in place — ID() must not care.
+func forgeTokenWithID(t *testing.T, tok []byte, id string) []byte {
+	t.Helper()
+	var env envelope
+	if err := json.Unmarshal(tok, &env); err != nil {
+		t.Fatal(err)
+	}
+	var pl map[string]any
+	if err := json.Unmarshal(env.Payload, &pl); err != nil {
+		t.Fatal(err)
+	}
+	pl["i"] = id
+	plBytes, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(envelope{Payload: plBytes, Sig: env.Sig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }

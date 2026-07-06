@@ -12,6 +12,8 @@ package token
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -44,6 +46,7 @@ type Grant struct {
 // the signature covers and what Verify re-reads; field tags are short and
 // stable.
 type payload struct {
+	ID          string       `json:"i,omitempty"`
 	Agent       string       `json:"a"`
 	Tool        string       `json:"t"`
 	Op          string       `json:"o"`
@@ -74,7 +77,12 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 			return nil, fmt.Errorf("token: constraint %d has empty key", i)
 		}
 	}
+	var idb [8]byte
+	if _, err := rand.Read(idb[:]); err != nil {
+		return nil, fmt.Errorf("token: mint id: %w", err)
+	}
 	plBytes, err := json.Marshal(payload{
+		ID:          hex.EncodeToString(idb[:]),
 		Agent:       g.Agent,
 		Tool:        g.Capability.Tool,
 		Op:          g.Capability.Operation,
@@ -90,6 +98,31 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 		return nil, fmt.Errorf("token: marshal envelope: %w", err)
 	}
 	return tok, nil
+}
+
+// ID returns the token's mint-time id for audit correlation, or "" if the
+// token cannot be parsed or the embedded id is not exactly 16 lowercase hex
+// chars. It deliberately does NOT verify the signature — audit code calls it
+// on deny paths too, where the id is a claimed (attacker-controlled) value;
+// the shape check keeps arbitrary bytes out of the audit log.
+func ID(tok []byte) string {
+	var env envelope
+	if err := json.Unmarshal(tok, &env); err != nil {
+		return ""
+	}
+	var pl payload
+	if err := json.Unmarshal(env.Payload, &pl); err != nil {
+		return ""
+	}
+	if len(pl.ID) != 16 {
+		return ""
+	}
+	for _, c := range pl.ID {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return ""
+		}
+	}
+	return pl.ID
 }
 
 // Request is the context the broker checks a token against, per exercise.

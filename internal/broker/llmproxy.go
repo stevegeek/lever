@@ -64,17 +64,19 @@ func (b *Broker) llmProxyHandler() http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		// Token id for mint↔use correlation (best-effort parse; never the token bytes).
+		tokID := token.ID(raw)
 		if err := token.Verify(b.keys.Public, raw, token.Request{
 			Caller:     caller,
 			Capability: token.Capability{Tool: ReservedLLMTool, Operation: ReservedLLMOp},
 			Now:        time.Now(),
 			MinEpoch:   b.MinEpoch(),
 		}); err != nil {
-			b.audit("llm", caller, "deny", "token: "+err.Error())
+			b.audit("llm", caller, "deny", "token: "+err.Error(), "id", tokID)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		b.audit("llm", caller, "allow", "")
+		b.audit("llm", caller, "allow", "", "id", tokID)
 		rp.ServeHTTP(w, r)
 	})
 }

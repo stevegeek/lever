@@ -65,19 +65,32 @@ func (p *Policy) AllowDelegate(agent, tool, op string, to ...string) {
 // set); otherwise it is a delegation (checked against the delegate set and its
 // recipient list). Fails closed.
 func (p *Policy) MayObtain(requester, boundTo, tool, op string) bool {
+	_, ok := p.MayObtainRule(requester, boundTo, tool, op)
+	return ok
+}
+
+// MayObtainRule is MayObtain plus, on allow, a stable identifier of the
+// matched policy rule ("obtain:<agent>:<tool>.<op>" or
+// "delegate:<agent>-><recipient>:<tool>.<op>") for the audit trail. Denied
+// requests return ("", false).
+func (p *Policy) MayObtainRule(requester, boundTo, tool, op string) (string, bool) {
 	ap, ok := p.agents[requester]
 	if !ok {
-		return false
+		return "", false
 	}
 	k := capKey{tool, op}
 	if requester == boundTo {
-		_, ok := ap.obtain[k]
-		return ok
+		if _, ok := ap.obtain[k]; !ok {
+			return "", false
+		}
+		return "obtain:" + requester + ":" + tool + "." + op, true
 	}
 	recips, ok := ap.delegate[k]
 	if !ok {
-		return false
+		return "", false
 	}
-	_, ok = recips[boundTo]
-	return ok
+	if _, ok := recips[boundTo]; !ok {
+		return "", false
+	}
+	return "delegate:" + requester + "->" + boundTo + ":" + tool + "." + op, true
 }

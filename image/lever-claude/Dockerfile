@@ -42,6 +42,18 @@ ENV CLAUDE_CODE_CLIENT_CERT=/home/scion/.lever-id/agent.crt
 ENV CLAUDE_CODE_CLIENT_KEY=/home/scion/.lever-id/agent.key
 ENV NODE_EXTRA_CA_CERTS=/home/scion/.lever-id/ca.crt
 
+# Claude Code is baked at an EXPLICIT version. The scion-claude base installs
+# it UNPINNED, so its copy is whatever was latest when the base was last
+# rebuilt — silently stale. Bump this ARG deliberately (or pass
+# --build-arg CLAUDE_CODE_VERSION=...), rebuild, `lever apply`; running
+# containers pick it up when next recreated (manager: `lever stop && lever up`).
+# The in-container auto-updater stays disabled (DISABLE_AUTOUPDATER below):
+# updates happen by image rebuild, never at runtime.
+ARG CLAUDE_CODE_VERSION=2.1.201
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+  && npm cache clean --force \
+  && claude --version
+
 # Claude is baked in and its global dir is root-owned, so the scion user can't
 # self-update it; the auto-updater would only fail noisily every session.
 ENV DISABLE_AUTOUPDATER=1

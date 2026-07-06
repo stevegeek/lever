@@ -77,7 +77,17 @@ make lever-image
 
 This cross-compiles the in-jail binaries into `image/lever-claude/`, syncs the pre-start hook, and
 runs `docker build` to produce `scionlocal/lever-claude:latest` (the local `scionlocal/` registry
-prefix is what scion loads without a pull). Override the jail arch with `LEVER_IMAGE_ARCH=amd64` if
+prefix is what scion loads without a pull).
+
+**Claude Code version:** the image bakes Claude Code at an explicit pin (`ARG
+CLAUDE_CODE_VERSION` in the Dockerfile) and disables the in-container auto-updater — agents never
+self-update; upgrades happen by rebuild. To bump: edit the ARG (or pass `--build-arg
+CLAUDE_CODE_VERSION=X.Y.Z`), rebuild the image, `lever apply`, and power-cycle the manager
+(`lever stop && lever up` — the conversation is preserved on OrbStack). Don't rely on the scion
+base image's copy: it installs claude unpinned, so it's whatever was current when that base was
+last rebuilt.
+
+Override the jail arch with `LEVER_IMAGE_ARCH=amd64` if
 needed.
 
 **One prerequisite: scion's base image.** lever-claude builds `FROM scion-claude:latest`, scion's

@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lever-to/lever/internal/backend/registry"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/backend/registry"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // resolveConfigPath returns an explicit config path when given, otherwise the

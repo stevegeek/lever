@@ -6,8 +6,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/lever-to/lever/internal/egress"
-	"github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/egress"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 // rootRun executes args inside the guest as root via RootPrefix, e.g.

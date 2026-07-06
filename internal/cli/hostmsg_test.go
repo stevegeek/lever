@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/config"
-	leverexec "github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/config"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
 // hostMsgInstanceDir writes a canonical lever.yaml declaring a "scratch" grove

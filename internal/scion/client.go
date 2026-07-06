@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 type Options struct {

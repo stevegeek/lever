@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/skills"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/skills"
 )
 
 func scaffoldFixture(t *testing.T) (*config.App, string, string) {

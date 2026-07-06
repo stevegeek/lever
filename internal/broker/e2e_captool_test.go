@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/captool"
-	registry "github.com/lever-to/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/captool"
+	registry "github.com/stevegeek/lever/internal/broker/registry"
 )
 
 // dbRow is one row in the in-memory store the captool handler reads from.

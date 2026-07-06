@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // allowDelegate adds a delegation rule to the broker's policy: agent may delegate

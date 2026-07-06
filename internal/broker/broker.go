@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/broker/rules"
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/broker/rules"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 const (

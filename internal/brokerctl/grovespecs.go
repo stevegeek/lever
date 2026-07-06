@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/lever-to/lever/internal/broker"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // GroveSpecs derives the path-authoritative grove descriptions the broker needs

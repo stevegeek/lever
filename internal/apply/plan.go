@@ -3,7 +3,7 @@
 // without a live stack.
 package apply
 
-import "github.com/lever-to/lever/internal/config"
+import "github.com/stevegeek/lever/internal/config"
 
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
 // carry operands (a dir to register, the manager image, etc.).

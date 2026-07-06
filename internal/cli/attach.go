@@ -8,10 +8,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // attachTarget resolves NAME ("" = manager) to the scion slug + jail project

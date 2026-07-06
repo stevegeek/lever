@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/lever-to/lever/internal/brokerctl"
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // newStopCmd powers the jail machine off while keeping its disk, so a

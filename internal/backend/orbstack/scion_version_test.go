@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 // ensureScion in version mode must resolve the real go binary, `go mod download`

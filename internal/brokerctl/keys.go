@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lever-to/lever/internal/broker"
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // State is the host-side broker state directory (keys, revocation, pid, log).

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	registry "github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/cap/token"
+	registry "github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 func TestRegisterAddsTool(t *testing.T) {

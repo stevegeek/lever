@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // Supervisor launches + tears down the configured first-party tool subprocesses; external tools (broker-fronted, not spawned) are skipped.

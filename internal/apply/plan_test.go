@@ -3,7 +3,7 @@ package apply
 import (
 	"testing"
 
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // planStepNames extracts the Kind from each Step.

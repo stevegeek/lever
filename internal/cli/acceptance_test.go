@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/config"
-	leverexec "github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/config"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
 // TestClassifyCurlResult asserts the pure egress-classification helper correctly

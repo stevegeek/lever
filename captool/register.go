@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 type registerOp struct {

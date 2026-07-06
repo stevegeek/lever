@@ -43,10 +43,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/broker"
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/cap/token"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // csrWithKey returns a PEM CSR for cn plus the matching EC private key PEM, so the

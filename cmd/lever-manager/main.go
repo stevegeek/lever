@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/lever-to/lever/internal/cli"
+	"github.com/stevegeek/lever/internal/cli"
 )
 
 func main() {

@@ -5,6 +5,14 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
+## [0.3.1] - 2026-07-06
+
+### Changed
+- Module path is now `github.com/stevegeek/lever`, matching the repository —
+  `go install github.com/stevegeek/lever/cmd/lever@latest` works. (The old
+  declared path `github.com/lever-to/lever` never resolved: no such repo, so
+  v0.3.0 and earlier were build-from-clone only.)
+
 ## [0.3.0] - 2026-07-06
 
 ### Added

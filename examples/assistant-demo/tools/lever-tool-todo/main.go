@@ -16,7 +16,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/lever-to/lever/captool"
+	"github.com/stevegeek/lever/captool"
 )
 
 func buildServer(store *Store, name, backend, adminURL string) (*captool.Server, error) {

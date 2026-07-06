@@ -5,8 +5,8 @@ import (
 	"maps"
 	"net/http"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // OperationSpec is one operation in a registration request.

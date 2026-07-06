@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // ErrBootstrapLatched is returned by MintManagerBootstrap when the broker's

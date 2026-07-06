@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // Inboxer is the slice of the scion client the bridge needs (so it's testable

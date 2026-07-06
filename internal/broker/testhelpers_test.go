@@ -10,7 +10,7 @@ import (
 	"encoding/pem"
 	"testing"
 
-	"github.com/lever-to/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/broker/registry"
 )
 
 // makeCSRForCN builds a PEM CSR for cn and discards the private key (the broker

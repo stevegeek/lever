@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/broker/registry"
 	"gopkg.in/yaml.v3"
 )
 

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 // orbShaped and limaShaped are two argv-prefix shapes exercised by every test

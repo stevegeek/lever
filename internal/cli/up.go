@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lever-to/lever/internal/apply"
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // phaseOrAbsent treats a failed phase probe as "absent" (no manager found)

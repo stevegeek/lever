@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/lever-to/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // handleTools returns the broker's registered tool names to an authenticated

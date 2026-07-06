@@ -5,8 +5,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	leverexec "github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
 type stubBackend struct {

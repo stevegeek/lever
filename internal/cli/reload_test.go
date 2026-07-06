@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 )
 
 // reload must stop the running broker BEFORE it does anything else, so the

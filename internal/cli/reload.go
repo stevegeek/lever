@@ -3,10 +3,10 @@ package cli
 import (
 	"path/filepath"
 
-	"github.com/lever-to/lever/internal/apply"
-	"github.com/lever-to/lever/internal/brokerctl"
-	"github.com/lever-to/lever/internal/config"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // newReloadCmd applies config changes to an ALREADY-RUNNING instance without a

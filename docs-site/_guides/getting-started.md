@@ -6,7 +6,7 @@ nav_order: 2
 
 This walks you from nothing to a running lever application, a **manager** agent that dispatches
 work to a **grove** (project agent), all inside a jail that contains the whole stack. We use the
-bundled [`examples/hello-grove`](https://github.com/lever-to/lever/tree/main/examples/hello-grove) as the worked example.
+bundled [`examples/hello-grove`](https://github.com/stevegeek/lever/tree/main/examples/hello-grove) as the worked example.
 
 ## What you'll end up with
 

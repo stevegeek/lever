@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 func attachApp() *config.App {

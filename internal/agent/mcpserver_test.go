@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // rpcText drives a tools/call and returns the result token text, failing if the

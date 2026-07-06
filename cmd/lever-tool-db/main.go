@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/lever-to/lever/captool"
+	"github.com/stevegeek/lever/captool"
 )
 
 // readBackstop enforces the tool's hard invariants regardless of the token:

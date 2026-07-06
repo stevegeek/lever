@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/lever-to/lever/internal/brokerctl"
-	"github.com/lever-to/lever/internal/config"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 func newBrokerCmd() *cobra.Command {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // Uses /bin/sh indirectly? No — no shell. We launch a real, simple command that

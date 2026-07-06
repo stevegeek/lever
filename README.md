@@ -15,11 +15,12 @@ Lever is the **orchestration and interface layer**; [Scion](https://github.com/G
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool, `lever`, and it drives Scion for you.
 
-> **Status (v0.3.0): working, builds from source; not yet packaged/released.** A manager boots in the
+> **Status (v0.3.1): working; installable with `go install`.** A manager boots in the
 > jail, edits a bind-mounted tree in place, dispatches grove agents, and reaches capability-gated
 > tools through the broker's mTLS gateway — real credentials never enter a container — all
 > **live-validated on macOS + OrbStack**. `lever stop`/`up` preserve the manager's conversation across
-> a power-off. No installer yet (build from source: `make all` + `make lever-image`); **Linux is being
+> a power-off. Install the CLI with `go install github.com/stevegeek/lever/cmd/lever@latest`
+> (the agent image is still built locally: `make lever-image`); **Linux is being
 > proven** (Lima passes its macOS e2e). See [Where this is today](#where-this-is-today).
 
 ## Why
@@ -143,6 +144,8 @@ There are **two binaries** (one shared `internal/`):
   `COPY`s it to `/usr/local/bin`). The manager runs it to dispatch and steer groves.
 
 ```bash
+go install github.com/stevegeek/lever/cmd/lever@latest   # host `lever` onto your GOBIN/PATH
+# — or from a clone:
 make install              # build host `lever` → ~/.local/bin/lever (must be on PATH). Requires Go 1.26+
 make all                  # same (the in-jail binaries ship in the agent image, via lever-image-bins)
 

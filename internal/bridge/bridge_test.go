@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 type errInbox struct{}

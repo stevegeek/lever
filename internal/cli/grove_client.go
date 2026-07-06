@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/lever-to/lever/internal/agent"
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/agent"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 type groveResult struct {

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // upstreamMCP records whether it was reached and with what body.

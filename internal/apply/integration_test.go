@@ -102,7 +102,7 @@ groves:
 
 	// Drive the real CLI so the full buildApplyDeps wiring is exercised.
 	apply := exec.CommandContext(ctx, "go", "run",
-		"github.com/lever-to/lever/cmd/lever", "apply", filepath.Join(tree, "lever.yaml"))
+		"github.com/stevegeek/lever/cmd/lever", "apply", filepath.Join(tree, "lever.yaml"))
 	apply.Env = append(os.Environ(), "DOCKER_HOST=") // don't leak a host docker socket into the run
 	if out, err := apply.CombinedOutput(); err != nil {
 		t.Fatalf("lever apply failed: %v\n%s", err, out)

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // msgTarget is a resolved, policy-approved message destination: the scion

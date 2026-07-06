@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/brokerctl"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // checkResult is one diagnostic outcome. detail is shown in both the pass and

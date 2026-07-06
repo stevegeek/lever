@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/lever-to/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // ProvisionRequest is the body of POST /provision (manager only).

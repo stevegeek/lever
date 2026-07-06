@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/lever-to/lever/captool"
+	"github.com/stevegeek/lever/captool"
 )
 
 func TestReadBackstopRejectsForbiddenTableAndWrites(t *testing.T) {

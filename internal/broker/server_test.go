@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	registry "github.com/lever-to/lever/internal/broker/registry"
+	registry "github.com/stevegeek/lever/internal/broker/registry"
 )
 
 // TestJailHandlerGatewayDeniesNoCert verifies that a tools/call request to the

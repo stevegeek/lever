@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/brokerctl"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 func okDial(string) error   { return nil }

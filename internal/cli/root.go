@@ -1,13 +1,13 @@
 package cli
 
 import (
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/backend/registry"
-	"github.com/lever-to/lever/internal/exec"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/registry"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 // BackendFactory builds a named backend for a given machine name.
 type BackendFactory func(name, machine string) (backend.Backend, error)

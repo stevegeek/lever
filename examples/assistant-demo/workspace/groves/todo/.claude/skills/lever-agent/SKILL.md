@@ -1,7 +1,7 @@
 ---
 name: lever-agent
 description: Use when calling any brokered MCP tool, minting capabilities, or messaging the manager — how to operate as a lever grove agent.
-lever-version: 0.3.0
+lever-version: 0.3.1
 ---
 
 # Operating inside Lever (grove agent)

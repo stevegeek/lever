@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 func TestJailRunnerWrapsWithOrbEnv(t *testing.T) {

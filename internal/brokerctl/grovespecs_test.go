@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 func TestGroveSpecs(t *testing.T) {

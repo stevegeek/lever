@@ -1,4 +1,4 @@
-module github.com/lever-to/lever
+module github.com/stevegeek/lever
 
 go 1.26.4
 

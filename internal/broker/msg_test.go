@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // msgBroker's fixture deliberately makes the manager cert CN ("manager") and

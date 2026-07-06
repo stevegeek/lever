@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // isObserveList reports whether args is scion.Client.List's shape (`list

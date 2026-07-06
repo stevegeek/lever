@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // serverBoundTo builds a captool Server whose pubKey is kp.Public and records

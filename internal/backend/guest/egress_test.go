@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 // closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for `iptables -S`

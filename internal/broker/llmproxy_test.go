@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // fakeAnthropic records what the proxy forwarded and replies with an SSE body.

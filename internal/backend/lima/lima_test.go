@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 // TestProfileIsSingleSourced guards against re-hardcoding the profile: Lima's

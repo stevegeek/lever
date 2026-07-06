@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/config"
-	leverexec "github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/config"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
 // writeTmpConfig writes a minimal app.yaml with a real tree directory structure

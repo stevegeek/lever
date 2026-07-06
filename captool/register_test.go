@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 func fakeBroker(t *testing.T, epoch *int64) *httptest.Server {

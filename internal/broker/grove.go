@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // groveBootstrap is a broker-local mirror of the bootstrap envelope written to

@@ -3,7 +3,7 @@ package brokerctl
 import (
 	"testing"
 
-	"github.com/lever-to/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/broker"
 )
 
 func TestEnsureKeysGeneratesThenReloads(t *testing.T) {

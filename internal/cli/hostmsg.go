@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // newHostMsgCmd is the operator's fire-and-forget note sender: `lever msg send

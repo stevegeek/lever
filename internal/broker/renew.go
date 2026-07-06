@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/lever-to/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // RenewRequest carries a fresh CSR (new keypair). Its CN is IGNORED; the renewed

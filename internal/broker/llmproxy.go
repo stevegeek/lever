@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // llmProxyHandler verifies an llm capability token, strips it, injects the real

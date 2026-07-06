@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // fakeRuntime records calls and returns scripted results; satisfies GroveRuntime.

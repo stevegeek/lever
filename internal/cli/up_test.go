@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	leverexec "github.com/lever-to/lever/internal/exec"
-	"github.com/lever-to/lever/internal/scion"
+	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // TestPhaseOrAbsent covers the definitive-absence fallback: a failed phase

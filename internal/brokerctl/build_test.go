@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/broker/registry"
-	"github.com/lever-to/lever/internal/cap/ca"
-	"github.com/lever-to/lever/internal/cap/token"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 func sampleApp() *config.App {

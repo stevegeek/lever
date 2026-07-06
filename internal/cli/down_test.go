@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 func TestClearStagedRuntimeState(t *testing.T) {

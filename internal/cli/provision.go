@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"github.com/lever-to/lever/internal/backend"
-	"github.com/lever-to/lever/internal/backend/registry"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/registry"
 )
 
 func newProvisionCmd(factory BackendFactory) *cobra.Command {

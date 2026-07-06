@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lever-to/lever/internal/config"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // instanceDir creates a temp dir containing a canonical lever.yaml for the given

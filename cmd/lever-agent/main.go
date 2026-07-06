@@ -25,7 +25,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lever-to/lever/internal/agent"
+	"github.com/stevegeek/lever/internal/agent"
 	"gopkg.in/yaml.v3"
 )
 

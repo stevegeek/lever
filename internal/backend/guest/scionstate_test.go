@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lever-to/lever/internal/backend"
-	leverexec "github.com/lever-to/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {

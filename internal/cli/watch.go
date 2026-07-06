@@ -5,9 +5,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/lever-to/lever/internal/bridge"
-	"github.com/lever-to/lever/internal/scion"
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/bridge"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 var errMissingEventsFile = errors.New("watch: --events-file is required")

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/lever-to/lever/internal/config"
-	"github.com/lever-to/lever/internal/skills"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/skills"
 )
 
 // The scaffold engine behind `lever init` and doctor's skills check: writes

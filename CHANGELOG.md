@@ -2,10 +2,10 @@
 
 All notable changes to lever are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Process: every merge
-to `main` that changes behavior adds an entry under `## [0.3.0] - 2026-07-06`; a
+to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
-## [Unreleased]
+## [0.3.0] - 2026-07-06
 
 ### Added
 - Audit mint ledger: every capability token now carries a random 128-bit id

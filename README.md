@@ -20,8 +20,10 @@ to one tool, `lever`, and it drives Scion for you.
 > tools through the broker's mTLS gateway — real credentials never enter a container — all
 > **live-validated on macOS + OrbStack**. `lever stop`/`up` preserve the manager's conversation across
 > a power-off. Install the CLI with `go install github.com/stevegeek/lever/cmd/lever@latest`
-> (the agent image is still built locally: `make lever-image`); **Linux is being
-> proven** (Lima passes its macOS e2e). See [Where this is today](#where-this-is-today).
+> (the agent image is still built locally: `make lever-image`); **Linux is validated live**
+> (Lima/QEMU-KVM on a remote server, 2026-07-06 — full flow: jail, brokered LLM, grove dispatch,
+> default-deny, suspend/resume; known gaps: [#3](https://github.com/stevegeek/lever/issues/3),
+> [#5](https://github.com/stevegeek/lever/issues/5)). See [Where this is today](#where-this-is-today).
 
 ## Why
 
@@ -126,7 +128,12 @@ assistant as the first instance (dogfooding). See [core vs instance](docs-site/_
   `make lever-image`; two runnable examples — [hello-grove](examples/hello-grove) and
   [assistant-demo](examples/assistant-demo) (live-proven in the jail 2026-07-05). The **Lima** backend
   passes its macOS acceptance gate.
-- **Being proven:** Linux (Lima's QEMU/KVM path — needs a real KVM-capable host).
+- **Proven on Linux (2026-07-06):** Lima's QEMU/KVM path validated end-to-end on a remote Linux
+  server — jail bring-up, capability-brokered LLM (strip-and-inject, no credential in any
+  container), host→manager messaging, manager-dispatched groves, default-deny observed live, and
+  suspend→resume continuity. Known gaps: manager-conversation loss on Lima stop→apply
+  ([#3](https://github.com/stevegeek/lever/issues/3)) and a first-boot hub race
+  ([#5](https://github.com/stevegeek/lever/issues/5)).
 - **Not yet:** a release/installer; an asciinema walkthrough; deeper `lever doctor` probes.
 - **You can today:** `make all` + `make lever-image`, `lever apply`/`up`, dispatch groves with
   capability-gated tools, run the examples. Docs:

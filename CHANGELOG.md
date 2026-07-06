@@ -5,6 +5,14 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Changed
+- The agent image (`image/lever-claude`) pins Claude Code explicitly (`ARG
+  CLAUDE_CODE_VERSION`) instead of inheriting whatever the scion base image
+  baked. Bump the ARG + rebuild + `lever apply` to upgrade; the in-container
+  auto-updater remains disabled (updates by rebuild, never at runtime).
+
 ## [0.3.1] - 2026-07-06
 
 ### Changed

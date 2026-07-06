@@ -238,3 +238,28 @@ func TestLLMProxyAuditCorrelatesTokenID(t *testing.T) {
 		t.Fatalf("llm allow audit must carry the token id %q, got: %s", id, buf.String())
 	}
 }
+
+func TestLLMProxyRevokedDenyAuditCarriesTokenID(t *testing.T) {
+	var gotKey, gotAuth string
+	up := fakeAnthropic(t, &gotKey, &gotAuth)
+	defer up.Close()
+	b, caller := newTestBrokerForLLM(t, []byte("sk-REAL-KEY"), up.URL)
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	tok := mintLLM(t, b.keys.Private, caller, b.MinEpoch())
+	raw, _ := base64.RawURLEncoding.DecodeString(tok)
+	id := token.ID(raw)
+	b.Revoke(caller)
+
+	rec := httptest.NewRecorder()
+	req := newMTLSRequest(t, b, caller, http.MethodPost, "/llm/v1/messages", strings.NewReader(`{"model":"x"}`))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	b.JailHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (revoked)", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "detail=revoked") || !strings.Contains(out, "id="+id) {
+		t.Fatalf("revoked llm deny must carry the token id %q, got: %s", id, out)
+	}
+}

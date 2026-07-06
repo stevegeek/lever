@@ -63,7 +63,7 @@ All host-side state lives in `.lever-state/` at the instance root:
 
 | File | What's in it | When to read it |
 |---|---|---|
-| `broker.log` | every capability decision — `allow`/`deny` with caller, tool, op, and the deny reason. Mint allows are a ledger line: the token `id`, the matched policy `rule` (`obtain:…`/`delegate:…`), `exp`, `epoch`, and any baked `constraints`. Gateway and LLM lines carry the same `id`, so a mint correlates with every later use — and denied use — of that token: `grep id=<id> .lever-state/broker.log` | **first stop for any 403**: it names the difference between "no token attached", "not granted", and "revoked" |
+| `broker.log` | every capability decision — `allow`/`deny` with caller, tool, op, and the deny reason. Mint allows are a ledger line: the token `id`, the matched policy `rule` (`obtain:…`/`delegate:…`), `exp`, `epoch`, and any baked `constraints`. Gateway and LLM lines carry the same `id`, so a mint correlates with every later use — and denied use — of that token: `grep id=<id> .lever-state/broker.log`. (On deny lines the id is the token's *claimed* id — the signature was not necessarily valid.) | **first stop for any 403**: it names the difference between "no token attached", "not granted", and "revoked" |
 | `broker.out.log` | the broker process's own stderr (startup, proxy errors) | broker won't start, or gateway 502s (backend refused) |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 

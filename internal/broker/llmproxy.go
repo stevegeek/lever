@@ -59,13 +59,16 @@ func (b *Broker) llmProxyHandler() http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Token id for mint↔use correlation (best-effort parse; never the
+		// token bytes). Parsed before the revoked check so a post-revocation
+		// replay still correlates with its mint; on deny paths it is the
+		// token's CLAIMED id — the signature has not been checked yet.
+		tokID := token.ID(raw)
 		if b.isRevoked(caller) {
-			b.audit("llm", caller, "deny", "revoked")
+			b.audit("llm", caller, "deny", "revoked", "id", tokID)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		// Token id for mint↔use correlation (best-effort parse; never the token bytes).
-		tokID := token.ID(raw)
 		if err := token.Verify(b.keys.Public, raw, token.Request{
 			Caller:     caller,
 			Capability: token.Capability{Tool: ReservedLLMTool, Operation: ReservedLLMOp},

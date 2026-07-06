@@ -520,3 +520,35 @@ func TestGatewayVerifyDenyAuditCarriesClaimedID(t *testing.T) {
 		t.Fatalf("verify-deny audit must carry the claimed token id %q, got: %s", id, out)
 	}
 }
+
+func TestGatewayRevokedDenyAuditCarriesTokenID(t *testing.T) {
+	// The post-revocation replay is exactly the denied use an operator greps
+	// for after `lever revoke` — the deny line must still carry the token id.
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	cfg := testConfig(t)
+	var buf bytes.Buffer
+	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	b := New(cfg)
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	cap := mintFor(t, b, "worker", nil)
+	raw, _ := base64.RawURLEncoding.DecodeString(cap)
+	id := token.ID(raw)
+	b.Revoke("worker")
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (revoked)", w.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "detail=revoked") || !strings.Contains(out, "id="+id) {
+		t.Fatalf("revoked deny must carry the token id %q, got: %s", id, out)
+	}
+}

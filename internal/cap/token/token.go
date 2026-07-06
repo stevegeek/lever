@@ -77,7 +77,7 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 			return nil, fmt.Errorf("token: constraint %d has empty key", i)
 		}
 	}
-	var idb [8]byte
+	var idb [16]byte
 	if _, err := rand.Read(idb[:]); err != nil {
 		return nil, fmt.Errorf("token: mint id: %w", err)
 	}
@@ -100,21 +100,32 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	return tok, nil
 }
 
+// parse splits a serialized token into its envelope and payload without any
+// signature or claim checks. Both ID and Verify go through it so the wire
+// shape has exactly one reader.
+func parse(tok []byte) (envelope, payload, error) {
+	var env envelope
+	if err := json.Unmarshal(tok, &env); err != nil {
+		return envelope{}, payload{}, fmt.Errorf("token: unmarshal: %w", err)
+	}
+	var pl payload
+	if err := json.Unmarshal(env.Payload, &pl); err != nil {
+		return envelope{}, payload{}, fmt.Errorf("token: unmarshal payload: %w", err)
+	}
+	return env, pl, nil
+}
+
 // ID returns the token's mint-time id for audit correlation, or "" if the
-// token cannot be parsed or the embedded id is not exactly 16 lowercase hex
+// token cannot be parsed or the embedded id is not exactly 32 lowercase hex
 // chars. It deliberately does NOT verify the signature — audit code calls it
 // on deny paths too, where the id is a claimed (attacker-controlled) value;
 // the shape check keeps arbitrary bytes out of the audit log.
 func ID(tok []byte) string {
-	var env envelope
-	if err := json.Unmarshal(tok, &env); err != nil {
+	_, pl, err := parse(tok)
+	if err != nil {
 		return ""
 	}
-	var pl payload
-	if err := json.Unmarshal(env.Payload, &pl); err != nil {
-		return ""
-	}
-	if len(pl.ID) != 16 {
+	if len(pl.ID) != 32 {
 		return ""
 	}
 	for _, c := range pl.ID {
@@ -148,16 +159,12 @@ func Verify(pub ed25519.PublicKey, tok []byte, r Request) error {
 	if len(pub) != ed25519.PublicKeySize {
 		return fmt.Errorf("token: bad public key")
 	}
-	var env envelope
-	if err := json.Unmarshal(tok, &env); err != nil {
-		return fmt.Errorf("token: unmarshal: %w", err)
+	env, pl, err := parse(tok)
+	if err != nil {
+		return err
 	}
 	if !ed25519.Verify(pub, env.Payload, env.Sig) {
 		return fmt.Errorf("token: signature")
-	}
-	var pl payload
-	if err := json.Unmarshal(env.Payload, &pl); err != nil {
-		return fmt.Errorf("token: unmarshal payload: %w", err)
 	}
 	if r.Caller != pl.Agent {
 		return fmt.Errorf("token: denied: caller %q != bound_agent %q", r.Caller, pl.Agent)

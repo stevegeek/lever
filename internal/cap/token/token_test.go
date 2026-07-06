@@ -253,8 +253,8 @@ func TestMintMultipleConstraintsAllMustMatch(t *testing.T) {
 func TestMintEmbedsUniqueTokenID(t *testing.T) {
 	kp, tok := mintFixture(t)
 	id := ID(tok)
-	if len(id) != 16 {
-		t.Fatalf("ID(minted token) = %q, want a 16-char hex token id", id)
+	if len(id) != 32 {
+		t.Fatalf("ID(minted token) = %q, want a 32-char hex token id", id)
 	}
 	for _, c := range id {
 		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
@@ -286,7 +286,7 @@ func TestIDEmptyForGarbageAndLegacyTokens(t *testing.T) {
 func TestIDRejectsMalformedIDShape(t *testing.T) {
 	// ID is a best-effort parse for audit lines: on paths where the signature
 	// has not (yet) been verified the embedded id is attacker-controlled, so
-	// anything that is not exactly 16 lowercase hex chars must come back "".
+	// anything that is not exactly 32 lowercase hex chars must come back "".
 	kp, err := Generate()
 	if err != nil {
 		t.Fatal(err)

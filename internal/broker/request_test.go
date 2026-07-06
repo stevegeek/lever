@@ -363,7 +363,7 @@ func TestRequestAllowAuditCarriesMintLedger(t *testing.T) {
 		"id=" + id,
 		"rule=obtain:analyst:db.read",
 		"epoch=0",
-		`constraints="table=A"`,
+		`constraints="{\"table\":\"A\"}"`,
 		"exp=",
 	} {
 		if !strings.Contains(audit, want) {

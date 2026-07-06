@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/lever-to/lever/internal/broker/registry"
@@ -132,15 +130,16 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(CapResponse{Token: base64.RawURLEncoding.EncodeToString(tok)})
 	detail := req.Tool + "." + req.Op + "->" + req.BoundTo
 	if requestedOp != req.Op {
 		detail += " (op coerced: " + requestedOp + " -> " + req.Op + ")"
 	}
 	// The allow line is the mint ledger: token id (correlates this mint with
 	// later gateway/llm use lines), the matched policy rule, and the minted
-	// claims. The token itself is never logged.
+	// claims. The token itself is never logged, and the ledger is written
+	// BEFORE the token leaves the broker so no handed-out token can lack a
+	// mint line. Constraints are JSON (sorted keys) so values containing
+	// '='/',' stay unambiguous.
 	kvs := []any{
 		"id", token.ID(tok),
 		"rule", rule,
@@ -148,16 +147,15 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		"epoch", epoch,
 	}
 	if len(req.Constraints) > 0 {
-		keys := make([]string, 0, len(req.Constraints))
-		for k := range req.Constraints {
-			keys = append(keys, k)
+		cj, err := json.Marshal(req.Constraints)
+		if err != nil {
+			b.audit("request", caller, "error", "marshal constraints: "+err.Error())
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
 		}
-		sort.Strings(keys)
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			parts[i] = k + "=" + req.Constraints[k]
-		}
-		kvs = append(kvs, "constraints", strings.Join(parts, ","))
+		kvs = append(kvs, "constraints", string(cj))
 	}
 	b.audit("request", caller, "allow", detail, kvs...)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(CapResponse{Token: base64.RawURLEncoding.EncodeToString(tok)})
 }

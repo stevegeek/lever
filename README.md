@@ -15,15 +15,10 @@ Lever is the **orchestration and interface layer**; [Scion](https://github.com/G
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool, `lever`, and it drives Scion for you.
 
-> **Status (v0.3.1): working; installable with `go install`.** A manager boots in the
-> jail, edits a bind-mounted tree in place, dispatches grove agents, and reaches capability-gated
-> tools through the broker's mTLS gateway — real credentials never enter a container — all
-> **live-validated on macOS + OrbStack**. `lever stop`/`up` preserve the manager's conversation across
-> a power-off. Install the CLI with `go install github.com/stevegeek/lever/cmd/lever@latest`
-> (the agent image is still built locally: `make lever-image`); **Linux is validated live**
-> (Lima/QEMU-KVM on a remote server, 2026-07-06 — full flow: jail, brokered LLM, grove dispatch,
-> default-deny, suspend/resume; known gaps: [#3](https://github.com/stevegeek/lever/issues/3),
-> [#5](https://github.com/stevegeek/lever/issues/5)). See [Where this is today](#where-this-is-today).
+> **Status (v0.3.1):** working end-to-end on **macOS (OrbStack)** and **Linux (Lima/QEMU-KVM)**.
+> Install with `go install github.com/stevegeek/lever/cmd/lever@latest`; the agent image is built
+> locally (`make lever-image`). Gaps to know about before you rely on it are listed in
+> [Where this is today](#where-this-is-today).
 
 ## Why
 
@@ -120,26 +115,25 @@ assistant as the first instance (dogfooding). See [core vs instance](docs-site/_
 
 ## Where this is today
 
-- **Done:** the jail (isolated machine + rootless podman + egress allowlist); host `lever` + in-jail
-  `lever-manager`; `lever apply`/`up`, with the manager editing a bind-mounted tree in place and
-  dispatching groves. The **capability broker** (mTLS gateway, short-lived identity-bound tokens;
-  first-party + external MCP tools gated; api-key mode keeps the real key out of every container;
-  `lever revoke` is terminal). `lever init`/`reload`/`doctor`; `stop`/`up` preserve the conversation.
-  `make lever-image`; two runnable examples — [hello-grove](examples/hello-grove) and
-  [assistant-demo](examples/assistant-demo) (live-proven in the jail 2026-07-05). The **Lima** backend
-  passes its macOS acceptance gate.
-- **Proven on Linux (2026-07-06):** Lima's QEMU/KVM path validated end-to-end on a remote Linux
-  server — jail bring-up, capability-brokered LLM (strip-and-inject, no credential in any
-  container), host→manager messaging, manager-dispatched groves, default-deny observed live, and
-  suspend→resume continuity. Known gaps: manager-conversation loss on Lima stop→apply
-  ([#3](https://github.com/stevegeek/lever/issues/3)) and a first-boot hub race
-  ([#5](https://github.com/stevegeek/lever/issues/5)).
-- **Not yet:** a release/installer; an asciinema walkthrough; deeper `lever doctor` probes.
-- **You can today:** `make all` + `make lever-image`, `lever apply`/`up`, dispatch groves with
-  capability-gated tools, run the examples. Docs:
-  [getting-started](docs-site/_guides/getting-started.md), [capabilities](docs-site/_guides/capabilities.md),
-  [operations](docs-site/_guides/operations.md), [CLI](docs-site/_reference/cli.md),
-  [architecture](docs-site/_guides/architecture.md), [security model](docs-site/_guides/security-model.md).
+Everything this README describes runs today, on macOS (OrbStack) and on Linux (Lima/QEMU-KVM,
+validated end-to-end on a remote server). Two runnable examples ship in-repo:
+[hello-grove](examples/hello-grove) and [assistant-demo](examples/assistant-demo).
+
+The honest gaps — things you should know before relying on it:
+
+- **On the Lima backend, `lever stop` → `up` currently comes back with a fresh manager
+  conversation** ([#3](https://github.com/stevegeek/lever/issues/3)). OrbStack preserves the
+  conversation across a power-off; Lima doesn't yet.
+- **The first `lever up` after a cold VM boot can fail once** with a hub timeout; rerunning it
+  heals ([#5](https://github.com/stevegeek/lever/issues/5)).
+- **No prebuilt binaries or Homebrew yet** ([#1](https://github.com/stevegeek/lever/issues/1),
+  [#2](https://github.com/stevegeek/lever/issues/2)) — install via `go install` or a clone. A Go
+  toolchain is also required at *runtime* (Scion is compiled at apply time), and the agent image
+  is built locally with Docker.
+
+Docs: [getting-started](docs-site/_guides/getting-started.md), [capabilities](docs-site/_guides/capabilities.md),
+[operations](docs-site/_guides/operations.md), [CLI](docs-site/_reference/cli.md),
+[architecture](docs-site/_guides/architecture.md), [security model](docs-site/_guides/security-model.md).
 
 ## Build & run
 

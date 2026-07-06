@@ -111,14 +111,20 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			if coarse {
 				requiredOp = registry.WildcardOp
 			}
+			// The token id (best-effort parse; shape-checked) correlates this
+			// use with the /request mint line — logged on every post-decode
+			// deny too, so a denied attempt (revoked replay included) still
+			// ties back to its mint. On deny paths it is the token's CLAIMED
+			// id: the signature has not been checked yet.
+			tokID := token.ID(rawTok)
 			params, err := b.reg.MapParams(toolName, requiredOp, args)
 			if err != nil {
-				b.audit(toolName, caller, "deny", err.Error())
+				b.audit(toolName, caller, "deny", err.Error(), "id", tokID)
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			if b.isRevoked(caller) {
-				b.audit(toolName, caller, "deny", "revoked")
+				b.audit(toolName, caller, "deny", "revoked", "id", tokID)
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -126,7 +132,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 				Caller: caller, Capability: token.Capability{Tool: toolName, Operation: requiredOp},
 				Params: params, Now: time.Now(), MinEpoch: b.MinEpoch(),
 			}); err != nil {
-				b.audit(toolName, caller, "deny", err.Error())
+				b.audit(toolName, caller, "deny", err.Error(), "id", tokID)
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -145,7 +151,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			}
 			r.Header.Set("X-Lever-Method", "tools/call")
 			// audit the real MCP tool name, even on the coarse path
-			b.audit(toolName, caller, "allow", op)
+			b.audit(toolName, caller, "allow", op, "id", tokID)
 		case "initialize", "tools/list", "notifications/initialized", "ping":
 			// Allowlisted non-capability methods — forward unchanged.
 			r.Body = io.NopCloser(bytes.NewReader(body))

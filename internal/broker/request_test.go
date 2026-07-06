@@ -333,3 +333,61 @@ func TestRequestDeniesRevokedCallerMintingAndDelegation(t *testing.T) {
 		t.Fatalf("revoked delegation: status = %d, want 403", w2.Code)
 	}
 }
+
+func TestRequestAllowAuditCarriesMintLedger(t *testing.T) {
+	// The allow line is the mint ledger: it must carry the token id (for
+	// correlation with later gateway/llm use), the matched policy rule (the
+	// "why"), and the minted claims (expiry, epoch, baked constraints).
+	cfg := restrictedConfig(t)
+	var buf bytes.Buffer
+	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	b := New(cfg)
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+		Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "A"},
+	}))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp CapResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	raw, _ := base64.RawURLEncoding.DecodeString(resp.Token)
+	id := token.ID(raw)
+	if id == "" {
+		t.Fatal("minted token must carry a token id")
+	}
+	audit := buf.String()
+	for _, want := range []string{
+		"id=" + id,
+		"rule=obtain:analyst:db.read",
+		"epoch=0",
+		`constraints="{\"table\":\"A\"}"`,
+		"exp=",
+	} {
+		if !strings.Contains(audit, want) {
+			t.Fatalf("mint allow audit missing %q, got: %s", want, audit)
+		}
+	}
+}
+
+func TestRequestDelegationAuditNamesDelegateRule(t *testing.T) {
+	cfg := restrictedConfig(t)
+	cfg.Rules.AllowDelegate("manager", "db", "read", "analyst")
+	var buf bytes.Buffer
+	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	b := New(cfg)
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+		Tool: "db", Op: "read", BoundTo: "analyst",
+	}))
+	r.TLS = leafFor(t, b, "manager")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(buf.String(), "rule=delegate:manager->analyst:db.read") {
+		t.Fatalf("delegation allow audit must name the delegate rule, got: %s", buf.String())
+	}
+}

@@ -238,7 +238,9 @@ func (b *Broker) isAgent(name string) bool {
 	return ok
 }
 
-// audit logs a decision; detail is "" for plain allows.
-func (b *Broker) audit(op, caller, decision, detail string) {
-	b.log.Info("broker.decision", "op", op, "caller", caller, "decision", decision, "detail", detail)
+// audit logs a decision; detail is "" for plain allows. kvs are optional
+// extra slog key/value pairs (token id, matched rule, minted claims).
+func (b *Broker) audit(op, caller, decision, detail string, kvs ...any) {
+	args := append([]any{"op", op, "caller", caller, "decision", decision, "detail", detail}, kvs...)
+	b.log.Info("broker.decision", args...)
 }

@@ -95,3 +95,32 @@ func TestSelfDelegateEntryDoesNotEnableSelfObtain(t *testing.T) {
 		t.Fatal("a self-targeted delegate entry must not satisfy a self-obtain (self-actions route through obtain)")
 	}
 }
+
+func TestMayObtainRuleNamesTheMatchedGrant(t *testing.T) {
+	p := NewPolicy()
+	p.AllowObtain("analyst", "db", "read")
+	p.AllowDelegate("manager", "utilities", "*", "scratch")
+
+	rule, ok := p.MayObtainRule("analyst", "analyst", "db", "read")
+	if !ok || rule != "obtain:analyst:db.read" {
+		t.Fatalf("self-obtain rule = %q, ok=%v; want obtain:analyst:db.read, true", rule, ok)
+	}
+	rule, ok = p.MayObtainRule("manager", "scratch", "utilities", "*")
+	if !ok || rule != "delegate:manager->scratch:utilities.*" {
+		t.Fatalf("delegate rule = %q, ok=%v; want delegate:manager->scratch:utilities.*, true", rule, ok)
+	}
+}
+
+func TestMayObtainRuleFailsClosed(t *testing.T) {
+	p := NewPolicy()
+	p.AllowObtain("analyst", "db", "read")
+	if rule, ok := p.MayObtainRule("analyst", "analyst", "db", "write"); ok || rule != "" {
+		t.Fatalf("ungranted op: rule=%q ok=%v, want empty+false", rule, ok)
+	}
+	if rule, ok := p.MayObtainRule("analyst", "other", "db", "read"); ok || rule != "" {
+		t.Fatalf("obtain grant must not authorize delegation: rule=%q ok=%v, want empty+false", rule, ok)
+	}
+	if rule, ok := p.MayObtainRule("nobody", "nobody", "db", "read"); ok || rule != "" {
+		t.Fatalf("unknown agent: rule=%q ok=%v, want empty+false", rule, ok)
+	}
+}

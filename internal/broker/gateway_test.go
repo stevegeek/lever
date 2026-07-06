@@ -2,7 +2,9 @@ package broker
 
 import (
 	"bytes"
+	"encoding/base64"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -446,5 +448,107 @@ func TestGatewayComposesBackendPath(t *testing.T) {
 	}
 	if gotPath != "/mcp/" {
 		t.Fatalf("upstream path = %q, want %q (backend path must compose with the stripped prefix)", gotPath, "/mcp/")
+	}
+}
+
+func TestGatewayAuditCorrelatesTokenID(t *testing.T) {
+	// The use-time allow line must carry the same token id the mint ledger
+	// recorded, so a /request line can be tied to its later gateway use.
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	cfg := testConfig(t)
+	var buf bytes.Buffer
+	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	b := New(cfg)
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	cap := mintFor(t, b, "worker", nil)
+	raw, err := base64.RawURLEncoding.DecodeString(cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := token.ID(raw)
+	if id == "" {
+		t.Fatal("minted token must carry an id")
+	}
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, err := b.gatewayHandler("db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(buf.String(), "id="+id) {
+		t.Fatalf("gateway allow audit must carry the token id %q, got: %s", id, buf.String())
+	}
+}
+
+func TestGatewayVerifyDenyAuditCarriesClaimedID(t *testing.T) {
+	// A verify failure (here: caller != bound_agent) should still log the
+	// token's claimed id so the denied attempt correlates with its mint.
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	cfg := testConfig(t)
+	var buf bytes.Buffer
+	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	b := New(cfg)
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	cap := mintFor(t, b, "worker", nil) // bound to worker
+	raw, _ := base64.RawURLEncoding.DecodeString(cap)
+	id := token.ID(raw)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "decision=deny") || !strings.Contains(out, "id="+id) {
+		t.Fatalf("verify-deny audit must carry the claimed token id %q, got: %s", id, out)
+	}
+}
+
+func TestGatewayRevokedDenyAuditCarriesTokenID(t *testing.T) {
+	// The post-revocation replay is exactly the denied use an operator greps
+	// for after `lever revoke` — the deny line must still carry the token id.
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	cfg := testConfig(t)
+	var buf bytes.Buffer
+	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	b := New(cfg)
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	cap := mintFor(t, b, "worker", nil)
+	raw, _ := base64.RawURLEncoding.DecodeString(cap)
+	id := token.ID(raw)
+	b.Revoke("worker")
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (revoked)", w.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "detail=revoked") || !strings.Contains(out, "id="+id) {
+		t.Fatalf("revoked deny must carry the token id %q, got: %s", id, out)
 	}
 }

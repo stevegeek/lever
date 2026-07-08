@@ -105,13 +105,21 @@ func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 // JailUp/LoadImage are host-side (backend.EnsureUp, docker-save|podman-load);
 // Scion runs IN the jail (built on a JailRunner).
 type Deps struct {
-	JailUp               func(ctx context.Context, app *config.App) error
-	LoadImage            func(ctx context.Context, imageRef string) error
-	Scion                *scion.Client
-	ReadCred             func(path string) (string, error) // nil ⇒ defaultReadCred
-	JailMount            string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
-	StartBroker          func(ctx context.Context) error
-	BrokerHealthy        func(ctx context.Context) error
+	JailUp        func(ctx context.Context, app *config.App) error
+	LoadImage     func(ctx context.Context, imageRef string) error
+	Scion         *scion.Client
+	ReadCred      func(path string) (string, error) // nil ⇒ defaultReadCred
+	JailMount     string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
+	StartBroker   func(ctx context.Context) error
+	BrokerHealthy func(ctx context.Context) error
+	// EnsureControllerPAT runs the bootstrap-token step: the whole controller-PAT
+	// mint window as one injected op, keeping this package scion-agnostic (the
+	// CLI wires the real throwaway-hub → mint → persist → kill → delete-dev-token
+	// logic — see plan.go's bootstrap-token Step doc). It MUST be idempotent: if
+	// a valid PAT is already persisted, no-op. nil ⇒ skip (dev-auth-open mode —
+	// unit tests / legacy — the scion-server step still runs, just without a
+	// pre-minted SCION_HUB_TOKEN to lock the real hub against).
+	EnsureControllerPAT  func(ctx context.Context) error
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 	// RearmBootstrap restarts the broker (re-arming its single-use /bootstrap
 	// latch; broker CA + signing keys persist on disk so existing agent certs
@@ -202,6 +210,11 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		return d.Scion.InitMachine(ctx)
 	case "config-registry":
 		return d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
+	case "bootstrap-token":
+		if d.EnsureControllerPAT == nil {
+			return nil // dev-auth-open mode (unit tests / legacy) — skip
+		}
+		return d.EnsureControllerPAT(ctx)
 	case "scion-server":
 		return d.Scion.ServerStart(ctx, scion.ServerOpts{Port: 8080, DevAuth: false})
 	case "credential":

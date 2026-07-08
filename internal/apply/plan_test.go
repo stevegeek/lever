@@ -44,7 +44,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 	}
 	// Scion/container/registration steps must NOT appear (the fresh machine has no
 	// scion binary; init-machine would fail).
-	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-project", "write-manifest", "start-manager", "config-registry", "credential"} {
+	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-project", "write-manifest", "start-manager", "config-registry", "credential", "bootstrap-token"} {
 		if contains(got, banned) {
 			t.Fatalf("broker-only plan must omit %q: %v", banned, got)
 		}
@@ -73,7 +73,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-project", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -84,9 +84,40 @@ func TestPlanOrder(t *testing.T) {
 	}
 	// register-project targets the instance tree — ONE registration regardless
 	// of worker count (workers no longer register their own scion projects).
-	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-project 7:mint-manager-bootstrap 8:start-manager)
-	if steps[6].Target != "/t" {
-		t.Fatalf("register-project target=%q", steps[6].Target)
+	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:bootstrap-token 6:scion-server 7:register-project 8:mint-manager-bootstrap 9:start-manager)
+	if steps[7].Target != "/t" {
+		t.Fatalf("register-project target=%q", steps[7].Target)
+	}
+}
+
+// TestPlanIncludesBootstrapTokenOnceBeforeScionServer pins the bootstrap-token
+// step's presence and position directly: it mints (or reuses) the controller
+// PAT that scion-server's dev-auth-off hub will require, so it must run
+// exactly once and strictly before scion-server.
+func TestPlanIncludesBootstrapTokenOnceBeforeScionServer(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+	}
+	kinds := planStepNames(Plan(app, PlanOpts{}))
+	btIdx, scionIdx, count := -1, -1, 0
+	for i, k := range kinds {
+		if k == "bootstrap-token" {
+			count++
+			btIdx = i
+		}
+		if k == "scion-server" {
+			scionIdx = i
+		}
+	}
+	if count != 1 {
+		t.Fatalf("bootstrap-token appears %d times, want exactly 1 (kinds=%v)", count, kinds)
+	}
+	if scionIdx < 0 {
+		t.Fatalf("no scion-server step; kinds=%v", kinds)
+	}
+	if !(btIdx < scionIdx) {
+		t.Fatalf("bootstrap-token (idx %d) must come before scion-server (idx %d); kinds=%v", btIdx, scionIdx, kinds)
 	}
 }
 

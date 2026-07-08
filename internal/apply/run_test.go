@@ -1147,6 +1147,130 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 	}
 }
 
+// serverStartOrderRunner wraps an agentLifecycleRunner (so `scion list`
+// keeps reporting a real, eventually-live manager record — required for
+// start-manager's liveness verify to converge) and appends "server-start" to
+// *order the moment it sees a `scion server start` call — used alongside a
+// Deps.EnsureControllerPAT closure that appends "bootstrap-token" to the same
+// slice, so a test can assert relative ordering between an injected Deps func
+// (which has no argv of its own to scan for) and a real scion call.
+type serverStartOrderRunner struct {
+	*agentLifecycleRunner
+	order *[]string
+}
+
+func (r *serverStartOrderRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" {
+		hasServer, hasStart := false, false
+		for _, a := range args {
+			if a == "server" {
+				hasServer = true
+			}
+			if a == "start" {
+				hasStart = true
+			}
+		}
+		if hasServer && hasStart {
+			*r.order = append(*r.order, "server-start")
+		}
+	}
+	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *serverStartOrderRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestRunBootstrapTokenRunsOnceBeforeScionServer pins the bootstrap-token
+// step's executor wiring (Task 4): a fake EnsureControllerPAT must be invoked
+// exactly once, and strictly before the `scion server start` call — the
+// controller PAT must exist before the real, dev-auth-off hub locks down.
+func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+	}
+	var order []string
+	alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
+	sr := &serverStartOrderRunner{agentLifecycleRunner: alr, order: &order}
+	ensureCalls := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(sr, scion.Options{}),
+		EnsureControllerPAT: func(context.Context) error {
+			ensureCalls++
+			order = append(order, "bootstrap-token")
+			return nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if ensureCalls != 1 {
+		t.Fatalf("EnsureControllerPAT calls = %d, want 1", ensureCalls)
+	}
+	btIdx, serverIdx := -1, -1
+	for i, v := range order {
+		if v == "bootstrap-token" && btIdx < 0 {
+			btIdx = i
+		}
+		if v == "server-start" && serverIdx < 0 {
+			serverIdx = i
+		}
+	}
+	if btIdx < 0 || serverIdx < 0 {
+		t.Fatalf("expected both bootstrap-token and server-start recorded; order=%v", order)
+	}
+	if !(btIdx < serverIdx) {
+		t.Fatalf("bootstrap-token must run before scion-server; order=%v", order)
+	}
+}
+
+// TestRunBootstrapTokenSkipsCleanlyWhenNil proves the dev-auth-open/legacy
+// fallback: a nil Deps.EnsureControllerPAT (every pre-Task-4 test, and any
+// caller that doesn't wire the mint window) must not error and must not
+// block the rest of Run — the scion-server step still runs unguarded.
+func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+		// EnsureControllerPAT intentionally left nil.
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sawServerStart bool
+	for _, c := range f.Calls {
+		if c.Name == "scion" {
+			hasServer, hasStart := false, false
+			for _, a := range c.Args {
+				if a == "server" {
+					hasServer = true
+				}
+				if a == "start" {
+					hasStart = true
+				}
+			}
+			if hasServer && hasStart {
+				sawServerStart = true
+			}
+		}
+	}
+	if !sawServerStart {
+		t.Fatalf("scion-server must still run when EnsureControllerPAT is nil; calls=%+v", f.Calls)
+	}
+}
+
 func TestRunCredentialStep(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})

@@ -23,7 +23,7 @@ Every agent container proves who it is before it can ask for anything:
 2. It enrols with the broker using a **one-shot bootstrap ticket** the host staged for exactly
    this agent (single-latch: spent on first use, re-armed only by the host).
 3. The broker issues an mTLS client certificate whose **CN is the agent's identity** — `manager`
-   for the manager, the grove name for a grove.
+   for the manager, the worker name for a worker.
 
 From then on, every request the agent makes to the broker — minting, tool calls through the
 gateway, messaging — is authenticated by that certificate. There is nothing to steal that
@@ -92,11 +92,18 @@ container bytes, and jail egress to the public internet closes. A renewal sideca
 token before expiry. (`subscription` mode trades this for simplicity: the OAuth token is projected
 to agents directly.)
 
+By default that fixed upstream is `https://api.anthropic.com`; set `broker.llm_upstream` to point
+`/llm` at an LLM gateway or proxy that speaks the Anthropic Messages API instead (logging, caching,
+a compliance boundary, etc). The security properties are unchanged: the broker still injects the
+real Console key host-side and strips the capability token before forwarding, `llm_upstream` is a
+host-side config value the agent can never influence, and the jail still only ever talks to the
+broker.
+
 ### Choosing `llm_auth`: subscription vs api-key
 
 The shipped examples default to `subscription` because it's the friction-free personal setup —
 but be explicit about what each mode means before you scale up. **The instance must be uniform**
-(mixing modes across manager/groves is rejected at config load):
+(mixing modes across manager/workers is rejected at config load):
 
 | | `subscription` | `api-key` |
 |---|---|---|
@@ -115,17 +122,17 @@ Three independent handles, all host-side:
 - **`lever revoke <agent>`** — cuts that agent off immediately (persisted, survives broker
   restarts). Enforcement is by **caller identity at use time**, on every path a revoked agent could
   act through *or observe from*: tool calls (gateway + `/llm` proxy), minting *and* delegating (it
-  can't hand a fresh token to a still-valid agent), messaging (send + inbox list), grove
+  can't hand a fresh token to a still-valid agent), messaging (send + inbox list), worker
   dispatch/teardown/list and enrolment tickets (for the manager), tool-catalog listing, and cert
   renewal — renew is refused, so the agent's existing cert simply expires and revocation is
   terminal. A revoked agent gains nothing by re-minting, re-messaging, reconnecting, or enumerating.
-  (Removing a grove from the config is *not* revocation — see the
-  [operations guide](/operations/#changing-config-on-a-running-instance) for cutting off a removed grove.)
+  (Removing a worker from the config is *not* revocation — see the
+  [operations guide](/operations/#changing-config-on-a-running-instance) for cutting off a removed worker.)
 - **`lever broker bump-epoch`** — raise the epoch floor and every outstanding token dies at once.
 
 ## Teaching agents the flow
 
 Agents don't know any of this innately. `lever init` scaffolds **operator skills** into your
-instance tree — SKILL.md files that teach the manager (and each grove) the mint-then-attach flow,
+instance tree — SKILL.md files that teach the manager (and each worker) the mint-then-attach flow,
 how to read denials, and when to stop and ask the operator. Run it once per instance and re-run
 after upgrades; see [getting started §4](/getting-started/#4-scaffold-the-operator-skills-lever-init).

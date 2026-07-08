@@ -8,6 +8,7 @@ version bump moves the block under the new version heading.
 ## [Unreleased]
 
 ### Changed
+- Renamed the `grove` concept to `worker` throughout: config keys `groves:`→`workers:` and `grove_to_grove:`→`worker_to_worker:`, the `--grove`/`-grove` CLI flags → `--worker`/`-worker`, broker routes `/grove/*`→`/worker/*`, and the `groves/<name>` workspace convention → `workers/<name>`. Prerelease clean break — no migration. (P1 of the single-project re-architecture.)
 - The agent image (`image/lever-claude`) pins Claude Code explicitly (`ARG
   CLAUDE_CODE_VERSION`) instead of inheriting whatever the scion base image
   baked. Bump the ARG + rebuild + `lever apply` to upgrade; the in-container

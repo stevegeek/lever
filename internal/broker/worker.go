@@ -22,7 +22,7 @@ type workerBootstrap struct {
 	AgentCN   string `json:"agent_cn"`
 }
 
-// WorkerRuntime is the subset of scion.Client the broker uses to drive grove
+// WorkerRuntime is the subset of scion.Client the broker uses to drive worker
 // agents host-side. *scion.Client satisfies it; tests inject a fake.
 type WorkerRuntime interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
@@ -37,14 +37,14 @@ type WorkerRuntime interface {
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
 
-// WorkerSpec is the config-derived, path-authoritative description of one grove.
+// WorkerSpec is the config-derived, path-authoritative description of one worker.
 // The broker never accepts any of these from the manager; they come from config.
 type WorkerSpec struct {
-	Name         string // grove identity (== scion agent slug + project name)
-	JailProject  string // jail-absolute -g/--workspace, e.g. /lever/groves/worker
+	Name         string // worker identity (== scion agent slug + project name)
+	JailProject  string // jail-absolute -g/--workspace, e.g. /lever/workers/worker
 	BootstrapDir string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
 	Image        string // effective agent image
-	APIKey       bool   // true ⇒ api-key LLM mode for this grove
+	APIKey       bool   // true ⇒ api-key LLM mode for this worker
 }
 
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
@@ -69,39 +69,39 @@ type workerResponse struct {
 // post-authn) and unauthenticated callers must receive 403, not 502.
 func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 	if b.runtime == nil {
-		b.audit("grove", b.manager, "error", "runtime not wired")
-		http.Error(w, "grove dispatch unavailable", http.StatusBadGateway)
+		b.audit("worker", b.manager, "error", "runtime not wired")
+		http.Error(w, "worker dispatch unavailable", http.StatusBadGateway)
 		return false
 	}
 	return true
 }
 
 // requireManagerWorker authenticates the caller as the manager and authorizes the
-// requested grove against config. Returns the resolved spec, or writes 403/502.
+// requested worker against config. Returns the resolved spec, or writes 403/502.
 func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, worker string) (WorkerSpec, bool) {
 	caller, err := ca.RequireAgent(r)
 	if err != nil {
-		b.audit("grove", "", "deny", err.Error())
+		b.audit("worker", "", "deny", err.Error())
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
 	if caller != b.manager {
-		b.audit("grove", caller, "deny", "not the manager identity")
+		b.audit("worker", caller, "deny", "not the manager identity")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
-	// A revoked manager cannot dispatch or tear down groves. Dispatching a grove
+	// A revoked manager cannot dispatch or tear down workers. Dispatching a worker
 	// is a stronger steering primitive than messaging (it spawns a fresh,
 	// fully-capable agent), so revocation must cut it too — otherwise revoke
 	// leaves the loudest channel open.
 	if b.isRevoked(caller) {
-		b.audit("grove", caller, "deny", "revoked")
+		b.audit("worker", caller, "deny", "revoked")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
 	spec, ok := b.workerSpec(worker)
 	if !ok {
-		b.audit("grove", caller, "deny", "unknown grove: "+worker)
+		b.audit("worker", caller, "deny", "unknown worker: "+worker)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
@@ -139,7 +139,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	phase, err := b.phaseOf(ctx, spec)
 	if err != nil {
-		b.audit("grove", b.manager, "error", "phase: "+err.Error())
+		b.audit("worker", b.manager, "error", "phase: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
@@ -153,11 +153,11 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "runtime error", http.StatusBadGateway)
 			return
 		}
-		b.audit("grove", b.manager, "allow", "resume "+spec.Name)
+		b.audit("worker", b.manager, "allow", "resume "+spec.Name)
 		writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
 		return
 	}
-	// phase == "" → absent: mint a one-use ticket, stage the grove's OWN bootstrap, start.
+	// phase == "" → absent: mint a one-use ticket, stage the worker's OWN bootstrap, start.
 	ticket, err := b.tickets.Issue(spec.Name, b.ticketTTL)
 	if err != nil {
 		http.Error(w, "ticket error", http.StatusInternalServerError)
@@ -182,7 +182,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	b.audit("grove", b.manager, "allow", "start "+spec.Name)
+	b.audit("worker", b.manager, "allow", "start "+spec.Name)
 	writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
 }
 
@@ -206,7 +206,7 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 	if perr != nil {
 		phase = "unknown"
 	}
-	b.audit("grove", b.manager, "allow", r.URL.Path+" "+spec.Name)
+	b.audit("worker", b.manager, "allow", r.URL.Path+" "+spec.Name)
 	writeJSON(w, workerResponse{Worker: spec.Name, Phase: phase})
 }
 
@@ -223,14 +223,14 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 	caller, err := ca.RequireAgent(r)
 	if err != nil || caller != b.manager {
-		b.audit("grove", caller, "deny", "list: not the manager identity")
+		b.audit("worker", caller, "deny", "list: not the manager identity")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	// A revoked manager cannot enumerate the fleet either (recon that helps a
 	// compromised-then-revoked manager) — consistent with /msg/list.
 	if b.isRevoked(caller) {
-		b.audit("grove", caller, "deny", "list: revoked")
+		b.audit("worker", caller, "deny", "list: revoked")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

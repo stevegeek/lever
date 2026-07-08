@@ -498,7 +498,7 @@ func cmdRenew(args []string) error {
 	}
 }
 
-// cmdProvision mints a one-use enrolment ticket for a grove via the broker's
+// cmdProvision mints a one-use enrolment ticket for a worker via the broker's
 // /provision endpoint (manager-CN-gated). The resulting Bootstrap JSON is written
 // to -out (0600) so the acceptance harness can drop it in the jail for boot.
 func cmdProvision(args []string) error {

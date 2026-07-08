@@ -18,7 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// fakeRuntime records calls and returns scripted results; satisfies GroveRuntime.
+// fakeRuntime records calls and returns scripted results; satisfies WorkerRuntime.
 type fakeRuntime struct {
 	agents   map[string][]scion.Agent // project -> agents (for List)
 	started  []scion.StartOpts
@@ -87,7 +87,7 @@ func caTicketStore(_ *testing.T) *ca.TicketStore {
 }
 
 // newTestBroker builds a Broker with a fake runtime, a real ticket store, and a
-// temp bootstrap dir for the given single grove.
+// temp bootstrap dir for the given single worker.
 func newTestBroker(t *testing.T, rt WorkerRuntime, spec WorkerSpec) *Broker {
 	t.Helper()
 	return New(Config{
@@ -123,7 +123,7 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
-	// bootstrap staged 0600 with the broker CA/URL and the grove CN
+	// bootstrap staged 0600 with the broker CA/URL and the worker CN
 	raw, err := os.ReadFile(filepath.Join(spec.BootstrapDir, "bootstrap.json"))
 	if err != nil {
 		t.Fatalf("bootstrap not staged: %v", err)
@@ -170,7 +170,7 @@ func TestWorkerStart_running_isNoop(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	if len(rt.started) != 0 || len(rt.resumed) != 0 {
-		t.Fatal("running grove must be a no-op")
+		t.Fatal("running worker must be a no-op")
 	}
 }
 
@@ -228,9 +228,9 @@ func TestWorkerStart_authz(t *testing.T) {
 	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
 		t.Fatalf("wrong-CN status = %d, want 403", rec.Code)
 	}
-	// undeclared grove
+	// undeclared worker
 	if rec := callWorker(t, b, "/worker/start", `{"worker":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
-		t.Fatalf("undeclared grove status = %d, want 403", rec.Code)
+		t.Fatalf("undeclared worker status = %d, want 403", rec.Code)
 	}
 }
 
@@ -265,7 +265,7 @@ func TestWorkerList(t *testing.T) {
 }
 
 // TestWorkerNilRuntime_returns502 proves that when the scion runtime is unwired
-// (nil) the grove handlers return 502, not a panic from a nil-interface call.
+// (nil) the worker handlers return 502, not a panic from a nil-interface call.
 func TestWorkerNilRuntime_returns502(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
@@ -279,13 +279,13 @@ func TestWorkerNilRuntime_returns502(t *testing.T) {
 		ManagerIdentity: "test-manager",
 	})
 
-	// /grove/start with manager CN must return 502, not panic.
+	// /worker/start with manager CN must return 502, not panic.
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"go"}`, "test-manager")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("/worker/start nil-runtime: status = %d, want 502", rec.Code)
 	}
 
-	// /grove/list with manager CN must also return 502, not panic.
+	// /worker/list with manager CN must also return 502, not panic.
 	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec2 := httptest.NewRecorder()
@@ -309,13 +309,13 @@ func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 		ManagerIdentity: "test-manager",
 	})
 
-	// Non-manager CN on /grove/start must get 403, not 502.
+	// Non-manager CN on /worker/start must get 403, not 502.
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("/worker/start intruder nil-runtime: status = %d, want 403", rec.Code)
 	}
 
-	// Non-manager CN on /grove/list must get 403, not 502.
+	// Non-manager CN on /worker/list must get 403, not 502.
 	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()

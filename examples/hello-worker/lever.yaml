@@ -1,4 +1,4 @@
-# hello-grove: the smallest agent-manager application, a manager + one grove.
+# hello-worker: the smallest agent-manager application, a manager + one worker.
 name: hello-worker
 backend: orbstack
 tree: workspace

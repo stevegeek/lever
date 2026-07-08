@@ -41,7 +41,7 @@ func TestEnrolRejectsCNMismatchAndPreservesTicket(t *testing.T) {
 	w := httptest.NewRecorder()
 	b.handleEnrol(w, enrolReq(tk, evil))
 	if w.Code == http.StatusOK {
-		t.Fatal("SECURITY: enrol must reject a CSR whose CN != ticket grove")
+		t.Fatal("SECURITY: enrol must reject a CSR whose CN != ticket worker")
 	}
 	// The ticket must still be usable by the legitimate worker.
 	good := makeCSRForCN(t, "worker")

@@ -25,11 +25,11 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	isManager := caller == b.manager
 	_, isWorker := b.workers[caller]
 	if !isManager && !isWorker {
-		return msgTarget{}, fmt.Errorf("caller %q is not the manager or a declared grove", caller)
+		return msgTarget{}, fmt.Errorf("caller %q is not the manager or a declared worker", caller)
 	}
 	// The manager target ALWAYS routes to agent:<slug> — scion knows the
 	// manager by its agent slug (the app name; apply dispatches it as
-	// Grove: app.Name), NOT by the cert CN used for authn: agent:<CN> fails
+	// Worker: app.Name), NOT by the cert CN used for authn: agent:<CN> fails
 	// live with `Agent "<CN>" not found in project`.
 	managerTarget := msgTarget{scionTo: "agent:" + b.managerSlug, project: b.managerProject}
 	// user:* is a legacy-shaped alias, not a real inbox: scion refuses
@@ -58,15 +58,15 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 		return msgTarget{}, fmt.Errorf("unknown recipient %q", to)
 	}
 	if !isManager && caller != name && !b.workerToWorker {
-		return msgTarget{}, fmt.Errorf("grove→grove messaging is disabled")
+		return msgTarget{}, fmt.Errorf("worker→worker messaging is disabled")
 	}
 	return msgTarget{scionTo: "agent:" + spec.Name, project: spec.JailProject}, nil
 }
 
 // resolveListProject resolves which project inbox caller may read. Manager:
-// its own agent inbox (empty grove — jail-side `scion notifications` requires
-// -g; the bare/operator form is container-only) or any declared grove's.
-// Grove: its own only.
+// its own agent inbox (empty worker — jail-side `scion notifications` requires
+// -g; the bare/operator form is container-only) or any declared worker's.
+// Worker: its own only.
 func (b *Broker) resolveListProject(caller, worker string) (string, error) {
 	if caller == b.manager {
 		if worker == "" {
@@ -74,16 +74,16 @@ func (b *Broker) resolveListProject(caller, worker string) (string, error) {
 		}
 		spec, ok := b.workers[worker]
 		if !ok {
-			return "", fmt.Errorf("unknown grove %q", worker)
+			return "", fmt.Errorf("unknown worker %q", worker)
 		}
 		return spec.JailProject, nil
 	}
 	spec, ok := b.workers[caller]
 	if !ok {
-		return "", fmt.Errorf("caller %q is not the manager or a declared grove", caller)
+		return "", fmt.Errorf("caller %q is not the manager or a declared worker", caller)
 	}
 	if worker != "" {
-		return "", fmt.Errorf("a grove may only read its own inbox")
+		return "", fmt.Errorf("a worker may only read its own inbox")
 	}
 	return spec.JailProject, nil
 }
@@ -137,7 +137,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 		To: tgt.scionTo, Body: req.Body, Interrupt: req.Interrupt, Project: tgt.project,
 	}); err != nil {
 		b.audit("msg", caller, "error", "send->"+req.To+": "+err.Error())
-		// Generic wire body (package convention, see grove.go): the scion CLI
+		// Generic wire body (package convention, see worker.go): the scion CLI
 		// error text can echo argv (recipient/message body) — detail stays in
 		// the audit log only.
 		http.Error(w, "runtime error", http.StatusBadGateway)

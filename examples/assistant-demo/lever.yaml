@@ -1,8 +1,8 @@
 # A tiny personal-assistant instance, built to show off lever's two tool models
-# and grove dispatch in one runnable example. Run `lever` from THIS directory.
+# and worker dispatch in one runnable example. Run `lever` from THIS directory.
 #
 #   manager  — runs a morning standup; holds the WEATHER tool (external, proxied)
-#   todo     — a grove that holds the TODO tool (first-party, broker-supervised)
+#   todo     — a worker that holds the TODO tool (first-party, broker-supervised)
 #
 # Two brokered tools, one of each kind:
 #   - todo    FIRST-PARTY: the broker spawns `lever-tool-todo` (built from
@@ -12,7 +12,7 @@
 #             forwarding. `external: true`, coarse-gated (any op).
 #
 # Grants scope each tool to exactly one agent: the manager may obtain weather,
-# the todo grove may obtain todo. Neither can reach the other's tool — that's the
+# the todo worker may obtain todo. Neither can reach the other's tool — that's the
 # per-agent capability boundary, visible in one config.
 name: assistant-demo
 backend: orbstack
@@ -52,4 +52,4 @@ workers:
   - name: todo
     dir: workers/todo
     obtain:
-      - { tool: todo, op: list }          # the todo grove may mint a todo/list capability
+      - { tool: todo, op: list }          # the todo worker may mint a todo/list capability

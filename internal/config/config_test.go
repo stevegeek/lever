@@ -171,8 +171,8 @@ func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
 	}
 }
 
-// A grove with dir "." makes GroveDir(g) == a.Tree, so its jail path collides
-// with the manager's mount root (/lever) — then the grove's register-step
+// A worker with dir "." makes WorkerDir(g) == a.Tree, so its jail path collides
+// with the manager's mount root (/lever) — then the worker's register-step
 // removal (scion project-configs + .scion marker) would target the MANAGER's
 // state. Reject it at config time, mirroring confinedRel's "." rejection for
 // `tree`.
@@ -363,7 +363,7 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 	}
 }
 
-// A grove named the same as the manager identity would enrol with the manager's
+// A worker named the same as the manager identity would enrol with the manager's
 // CN and gain full manager messaging authority — config validation must reject
 // this as a CN-collision escalation.
 func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
@@ -377,7 +377,7 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 		},
 		{
 			label:  "worker named with custom manager identity",
-			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  manager_identity: custom-mgr\nmanager: {}\nworkers:\n  - name: custom-mgr\n    dir: workers/grove1\n",
+			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  manager_identity: custom-mgr\nmanager: {}\nworkers:\n  - name: custom-mgr\n    dir: workers/worker1\n",
 		},
 	}
 	for _, tc := range cases {
@@ -394,9 +394,9 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 	}
 }
 
-// A grove named like the APP would collide with the manager's scion agent slug
-// (the manager is dispatched as Grove: app.Name): with slug matching in the
-// broker's resolveMsgTarget, messages addressed to that grove would silently
+// A worker named like the APP would collide with the manager's scion agent slug
+// (the manager is dispatched as Worker: app.Name): with slug matching in the
+// broker's resolveMsgTarget, messages addressed to that worker would silently
 // route to the manager instead. Config validation must reject the collision.
 func TestValidateRejectsWorkerNameCollidingWithAppName(t *testing.T) {
 	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: demo\n    dir: workers/demo\n")
@@ -606,7 +606,7 @@ func indexOf(s, sub string) int {
 // api-key agents' containers, defeating their key isolation. See
 // security-model.md §6.1.
 func TestRejectsMixedLLMAuthInstance(t *testing.T) {
-	// Broker default api-key ⇒ manager is api-key; grove overrides to subscription.
+	// Broker default api-key ⇒ manager is api-key; worker overrides to subscription.
 	a := &App{
 		Name: "demo", Backend: "orbstack", Tree: "/x",
 		Broker:  Broker{LLMAuth: LLMAuthAPIKey},
@@ -676,11 +676,11 @@ func TestEffectiveLLMAuthWorkerOverride(t *testing.T) {
 	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {
 		t.Fatalf("manager: got %q want api-key", got)
 	}
-	// grove inherits broker default when unset
+	// worker inherits broker default when unset
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthAPIKey {
 		t.Fatalf("worker inherit: got %q want api-key", got)
 	}
-	// grove override wins
+	// worker override wins
 	a.Workers[0].LLMAuth = LLMAuthSubscription
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthSubscription {
 		t.Fatalf("worker override: got %q want subscription", got)
@@ -868,7 +868,7 @@ func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
 
 // TestLoadRejectsIllegalToolNames: tool names flow into the broker's
 // /mcp/<name>/ gateway route and into `claude mcp add`, so they must be
-// constrained to a safe charset like instance/grove names. Both the tool
+// constrained to a safe charset like instance/worker names. Both the tool
 // declaration AND the grant referencing it are renamed together, so the
 // failure is the charset check itself, not an unrelated "undeclared tool"
 // error from a stale grant reference.

@@ -1,4 +1,4 @@
-# acceptance fixture: manager + executor grove `worker` + the `db` tool.
+# acceptance fixture: manager + executor worker `worker` + the `db` tool.
 # The manager delegates db.read → worker; worker has an empty obtain (a pure
 # executor with no ambient authority). `lever acceptance` brings this up on a
 # real jail (OrbStack) and drives the six acceptance capability checks.

@@ -9,8 +9,8 @@ runnable example, the two ways an agent gets a tool and how lever gates them:
 | `todo` | **first-party** | the **broker** spawns it (`lever-tool-todo`) | capability-aware: the tool itself verifies the `todo/list` token (via captool) |
 | `weather` | **external** | **you** run it (`weather-stub`) | the broker fronts + proxies it, strips the token before forwarding; coarse-gated |
 
-…plus **grove dispatch** (the manager delegates the todo lookup to a `todo`
-grove) and **per-agent grants** (the manager may only obtain `weather`, the grove
+…plus **worker dispatch** (the manager delegates the todo lookup to a `todo`
+worker) and **per-agent grants** (the manager may only obtain `weather`, the worker
 may only obtain `todo` — neither can reach the other's tool).
 
 Everything is deterministic and offline: `weather-stub` returns canned data (no
@@ -20,7 +20,7 @@ API key), and the todos are a CSV. Swap either for the real thing later.
 
 ```
 assistant-demo/
-├── lever.yaml                     # manager + todo grove + the two brokered tools
+├── lever.yaml                     # manager + todo worker + the two brokered tools
 ├── manager.md                     # the standup boot prompt (host-side, not mounted)
 ├── tools/
 │   ├── lever-tool-todo/           # FIRST-PARTY capability tool (reads the CSV)
@@ -28,7 +28,7 @@ assistant-demo/
 └── workspace/                     # the bind-mounted tree
     ├── CLAUDE.md
     ├── data/todos.csv             # your todos
-    └── groves/todo/               # the todo grove's workspace
+    └── workers/todo/               # the todo worker's workspace
 ```
 
 ## Run it
@@ -75,7 +75,7 @@ built — `make lever-image`; see the [getting-started guide](../../docs-site/_g
    ```
 
    In the manager session, type **`morning`**. The manager will mint a `weather`
-   capability and fetch the forecast, dispatch the `todo` grove to read your
+   capability and fetch the forecast, dispatch the `todo` worker to read your
    pending todos, and give you a short standup. You can also send it from the
    host without attaching:
 
@@ -89,7 +89,7 @@ built — `make lever-image`; see the [getting-started guide](../../docs-site/_g
   port is listening (a TCP probe; it doesn't exercise the MCP path); the
   operator-skills check confirms `lever init` ran.
 - **`.lever-state/broker.log`** — every capability decision. You'll see the
-  manager's `weather` mint + call, and the todo grove's `todo/list` mint + call,
+  manager's `weather` mint + call, and the todo worker's `todo/list` mint + call,
   each `allow`ed against its grant, and a `deny` if you ask an agent for the tool
   it wasn't granted.
 - **Swap in real tools** — replace `weather-stub` with a real weather MCP (point

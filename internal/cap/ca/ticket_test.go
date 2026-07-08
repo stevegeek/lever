@@ -26,11 +26,11 @@ func TestTicketRejectsWrongWorker(t *testing.T) {
 	s := NewTicketStore()
 	tk, _ := s.Issue("scratch", time.Hour)
 	if err := s.Redeem(tk, "other", time.Now()); err == nil {
-		t.Fatal("redeem must fail for a different grove")
+		t.Fatal("redeem must fail for a different worker")
 	}
 	// And the ticket must NOT be burned by a failed mismatched attempt.
 	if err := s.Redeem(tk, "scratch", time.Now()); err != nil {
-		t.Fatalf("correct grove should still redeem: %v", err)
+		t.Fatalf("correct worker should still redeem: %v", err)
 	}
 }
 

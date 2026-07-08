@@ -8,7 +8,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// WorkerSpecs derives the path-authoritative grove descriptions the broker needs
+// WorkerSpecs derives the path-authoritative worker descriptions the broker needs
 // from config. jailMount is the in-jail mount dest (e.g. /lever). The manager
 // never supplies any of these; they are config-authoritative.
 func WorkerSpecs(app *config.App, jailMount string) []broker.WorkerSpec {

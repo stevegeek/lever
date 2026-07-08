@@ -7,7 +7,7 @@
 Homepage: **[lever.to](https://lever.to)**
 
 **Containerised, jailed multi-agent orchestration.** Lever lets a single *manager* agent (the
-coordinator) drive a fleet of *grove* agents that do real work, each in its own isolated container,
+coordinator) drive a fleet of *worker* agents that do real work, each in its own isolated container,
 while the whole stack runs inside a **jail** designed so that a compromised or prompt-injected agent
 cannot read host secrets or reach your local network.
 
@@ -37,9 +37,9 @@ cover, e.g. data exfiltration over allowed internet egress, is spelled out in th
 
 A **project is just a directory.** You register a directory with Lever and every agent working on
 it gets that directory bind-mounted, live, in place, no clones, no sync. One special project is
-the **manager**, whose workspace is the whole tree; every other project is a **grove** (a project
+the **manager**, whose workspace is the whole tree; every other project is a **worker** (a project
 directory an agent works in), isolated from the manager and from its siblings. The manager
-dispatches work to groves, watches a typed event stream for progress and questions, and is the
+dispatches work to workers, watches a typed event stream for progress and questions, and is the
 single thing a human talks to.
 
 ```mermaid
@@ -48,7 +48,7 @@ graph TB
 
     subgraph host["Host (macOS) — outside the jail"]
         CLI[lever CLI]
-        BK["Capability broker<br/>holds real credentials<br/>capabilities · /llm · /grove/* · MCP gateway"]
+        BK["Capability broker<br/>holds real credentials<br/>capabilities · /llm · /worker/* · MCP gateway"]
         TOOLS[first-party tools<br/>host subprocesses]
         TREE[("project tree<br/>on host disk")]
     end
@@ -58,8 +58,8 @@ graph TB
         FW{{egress allowlist<br/>in the jail's netns}}
         subgraph cons["Agent containers"]
             CO["Coordinator<br/>whole-tree workspace"]
-            GA["Grove A → groves/a/"]
-            GB["Grove B → groves/b/"]
+            GA["Worker A → workers/a/"]
+            GB["Worker B → workers/b/"]
         end
     end
 
@@ -70,13 +70,13 @@ graph TB
     GB -->|capabilities · LLM · tools| FW
     FW -->|"allowlisted: broker + model API"| BK
     BK --- TOOLS
-    BK -->|"/grove/start → Scion (operator)"| HUB
+    BK -->|"/worker/start → Scion (operator)"| HUB
     HUB --> CO
     HUB --> GA
     HUB --> GB
     TREE -.->|"bind-mount: whole tree"| CO
-    TREE -.->|"bind-mount: groves/a only"| GA
-    TREE -.->|"bind-mount: groves/b only"| GB
+    TREE -.->|"bind-mount: workers/a only"| GA
+    TREE -.->|"bind-mount: workers/b only"| GB
 ```
 
 ## How it stays contained
@@ -109,7 +109,7 @@ explored and rejected on the mirror-image ground (no VM at all) — see the back
 
 `lever.to` ships the **generic core**: the orchestration engine, the manager *runtime/role*, the
 jail provisioning, the project model, and these docs. Your own setup is an **instance** built on
-top, your own knowledge base, your own tools, your own groves, and the manager's prompt/skills/tool
+top, your own knowledge base, your own tools, your own workers, and the manager's prompt/skills/tool
 config, consuming the `lever` binary as a dependency. The framework authors run their personal
 assistant as the first instance (dogfooding). See [core vs instance](docs-site/_guides/core-vs-instance.md).
 
@@ -117,7 +117,7 @@ assistant as the first instance (dogfooding). See [core vs instance](docs-site/_
 
 Everything this README describes runs today, on macOS (OrbStack) and on Linux (Lima/QEMU-KVM,
 validated end-to-end on a remote server). Two runnable examples ship in-repo:
-[hello-grove](examples/hello-grove) and [assistant-demo](examples/assistant-demo).
+[hello-worker](examples/hello-worker) and [assistant-demo](examples/assistant-demo).
 
 The honest gaps — things you should know before relying on it:
 
@@ -142,7 +142,7 @@ There are **two binaries** (one shared `internal/`):
 - **`lever`**, the host *control plane* (provisioning + lifecycle). Runs on your machine.
 - **`lever-manager`**, the in-jail *orchestrator* (`agent`/`msg`/`watch`). Cross-compiled for the
   jail's linux/arm64 by `make lever-image-bins` and baked into the agent image (your Dockerfile
-  `COPY`s it to `/usr/local/bin`). The manager runs it to dispatch and steer groves.
+  `COPY`s it to `/usr/local/bin`). The manager runs it to dispatch and steer workers.
 
 ```bash
 go install github.com/stevegeek/lever/cmd/lever@latest   # host `lever` onto your GOBIN/PATH
@@ -171,7 +171,7 @@ tooling extend the image with their own Dockerfile `FROM lever-claude:latest`.
 Overrides: `make install PREFIX=/some/bin`, `make lever-image LEVER_IMAGE_ARCH=amd64`,
 `make lever-image-bins LEVER_IMAGE_CTX=/path/to/image-context` (stage bins into an instance dir).
 
-An **application** is one config file describing the manager + its groves (image, project tree,
+An **application** is one config file describing the manager + its workers (image, project tree,
 scion source, credential, allowed host ports). The canonical filename is **`lever.yaml`** at the
 instance **root**, which is *not* mounted, only the `tree:` subdirectory is bind-mounted into the
 jail (so the config and boot prompt stay out of the agent-writable mount). Commands with no config
@@ -186,12 +186,12 @@ the root, or pass an explicit path). See `examples/` for runnable configs and
 | Command | What it does |
 |---|---|
 | `lever up [config]` | Bring the application up *if needed* (create jail, provision scion, start the manager) **and attach** the manager's TTY. Reads `./lever.yaml` from cwd when omitted (no walk-up). `--fresh` starts a new manager thread; `--no-attach` brings up without attaching. The everyday entry point. |
-| `lever apply [config]` | Headless bring-up, runs the full plan (jail → images → scion init/config/server → credential → register manager + groves → mint bootstrap → start manager). No attach. `--dry-run` prints the plan and exits. |
+| `lever apply [config]` | Headless bring-up, runs the full plan (jail → images → scion init/config/server → credential → register manager + workers → mint bootstrap → start manager). No attach. `--dry-run` prints the plan and exits. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress). `--machine`, `--tree`, `--allow-port`. Rarely needed directly. |
-| `lever reload [config]` | Apply config changes to a **running** instance without a VM power cycle: restarts the broker on the current config (re-registers groves, re-applies egress) while leaving the manager container running, so its conversation is preserved. Needed because the broker reads `lever.yaml` only at startup. |
-| `lever attach [name]` | Attach your TTY to the manager (default) or a named grove. Strictly passive: fails fast with "run `lever up` first" if the jail isn't up. |
-| `lever msg send "…" --to NAME` | Host-side fire-and-forget note to the manager (app name) or a declared grove — no attach needed; the agent picks it up as its next user turn. `--interrupt` injects it ahead of the agent's next turn. Strictly passive like `attach`. |
-| `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each grove dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: your edited copies are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing. Re-run after upgrading lever or adding a grove. |
+| `lever reload [config]` | Apply config changes to a **running** instance without a VM power cycle: restarts the broker on the current config (re-registers workers, re-applies egress) while leaving the manager container running, so its conversation is preserved. Needed because the broker reads `lever.yaml` only at startup. |
+| `lever attach [name]` | Attach your TTY to the manager (default) or a named worker. Strictly passive: fails fast with "run `lever up` first" if the jail isn't up. |
+| `lever msg send "…" --to NAME` | Host-side fire-and-forget note to the manager (app name) or a declared worker — no attach needed; the agent picks it up as its next user turn. `--interrupt` injects it ahead of the agent's next turn. Strictly passive like `attach`. |
+| `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each worker dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: your edited copies are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing. Re-run after upgrading lever or adding a worker. |
 | `lever stop` | Power the jail off but **keep its disk** (`orb stop`) — the daily "done for the day". Suspends the manager, stops the host broker; a later `lever up` powers it back on and resumes. Everything (installed runtimes, scion state) persists. |
 | `lever destroy` | Full teardown: delete the isolated machine and everything in it (`orb delete`). Targets `lever-<name>` from config; override with `--machine`. `lever down` is a deprecated alias. |
 | `lever doctor` | Diagnose the setup (broker alive, external tool backends reachable, credential file, scion registration, `.mcp.json`-in-tree, Go toolchain, operator-skills scaffold current); each failing check prints the fix. Targets `lever-<name>` from config; override with `--machine`. |
@@ -201,8 +201,8 @@ the root, or pass an explicit path). See `examples/` for runnable configs and
 
 | Command | What it does |
 |---|---|
-| `lever-manager agent <list\|start\|stop\|suspend\|resume> NAME` | Grove lifecycle, routed through the capability broker. Dispatch a grove with `agent start NAME --task "…"`, where NAME is a grove declared in the config; the broker authenticates the call, validates the name, and resolves the grove's image and workspace from the config before starting it (`--image` overrides). |
-| `lever-manager msg send --to GROVE "…"` / `lever-manager msg list` | Send a message to a running agent / read the typed agent-event inbox (`scion notifications`). |
+| `lever-manager agent <list\|start\|stop\|suspend\|resume> NAME` | Worker lifecycle, routed through the capability broker. Dispatch a worker with `agent start NAME --task "…"`, where NAME is a worker declared in the config; the broker authenticates the call, validates the name, and resolves the worker's image and workspace from the config before starting it (`--image` overrides). |
+| `lever-manager msg send --to WORKER "…"` / `lever-manager msg list` | Send a message to a running agent / read the typed agent-event inbox (`scion notifications`). |
 | `lever-manager watch` | Stream scion events to a file the manager `Monitor`s (the notification bridge). |
 | `lever-manager version` | Print the version. |
 

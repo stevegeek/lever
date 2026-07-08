@@ -261,7 +261,7 @@ func TestAcceptanceFixtureLoads(t *testing.T) {
 		}
 	}
 	if worker == nil {
-		t.Fatal("fixture must declare grove `worker`")
+		t.Fatal("fixture must declare worker `worker`")
 	}
 	if len(worker.Obtain) != 0 {
 		t.Fatalf("worker must have an empty obtain (pure executor), got %+v", worker.Obtain)

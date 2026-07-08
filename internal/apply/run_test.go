@@ -1177,7 +1177,7 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace", "workers", "worker"), 0o755)
 	// prompt lives at the instance ROOT (host-only), NOT under the mounted tree.
-	if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Dispatch the worker grove to create HELLO."), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Dispatch the worker to create HELLO."), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, config.CanonicalName)
@@ -1201,7 +1201,7 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	var sawPrompt bool
 	for _, c := range f.Calls {
 		j := strings.Join(c.Args, " ")
-		if strings.Contains(j, "start hello") && strings.Contains(j, "Dispatch the worker grove to create HELLO.") {
+		if strings.Contains(j, "start hello") && strings.Contains(j, "Dispatch the worker to create HELLO.") {
 			sawPrompt = true
 		}
 	}
@@ -1454,7 +1454,7 @@ func TestRegisterHostFallbackWhenRemoveJailFileNil(t *testing.T) {
 }
 
 // TestRegisterRemovesStaleScionProjectConfigsBeforeInit proves that both
-// register-manager and register-grove call Deps.RemoveScionProjectConfigs
+// register-manager and register-worker call Deps.RemoveScionProjectConfigs
 // with the target's JAIL workspace path BEFORE `scion init` runs — the
 // removal counterpart to the marker-removal race fix above. Without this,
 // every apply mints a fresh ~/.scion/project-configs/<uuid> registration and
@@ -1475,8 +1475,8 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	// count how many `scion init --non-interactive` calls the SAME fake runner
 	// has already recorded. Since FakeRunner appends to f.Calls synchronously
 	// in call order, a count of 0 for the manager's remove call proves it ran
-	// before manager init, and a count of 1 for the grove's remove call proves
-	// it ran after manager init but before grove init.
+	// before manager init, and a count of 1 for the worker's remove call proves
+	// it ran after manager init but before worker init.
 	var initCountAtRemove []int
 	deps := Deps{
 		JailUp:    func(context.Context, *config.App) error { return nil },
@@ -1501,18 +1501,18 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	}
 
 	if len(removeCalls) != 2 {
-		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly 2 (manager + grove)", removeCalls)
+		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly 2 (manager + worker)", removeCalls)
 	}
 	if removeCalls[0] != "/lever" {
 		t.Errorf("manager remove call path = %q, want /lever", removeCalls[0])
 	}
 	if removeCalls[1] != "/lever/workers/worker" {
-		t.Errorf("grove remove call path = %q, want /lever/workers/worker", removeCalls[1])
+		t.Errorf("worker remove call path = %q, want /lever/workers/worker", removeCalls[1])
 	}
-	// Manager's remove call must precede ANY init (count 0); the grove's remove
+	// Manager's remove call must precede ANY init (count 0); the worker's remove
 	// call runs after the manager's own init (which already ran, since
-	// register-manager completes as one step before register-grove starts) but
-	// still before the grove's OWN init (count exactly 1, not 2).
+	// register-manager completes as one step before register-worker starts) but
+	// still before the worker's OWN init (count exactly 1, not 2).
 	wantCounts := []int{0, 1}
 	for i, n := range initCountAtRemove {
 		if n != wantCounts[i] {
@@ -1565,10 +1565,10 @@ func TestRegisterToleratesNilRemoveScionProjectConfigs(t *testing.T) {
 
 // TestRegisterSkipsDestructivePathWhenAlreadyRegistered proves the idempotent-
 // register gate: when Deps.ScionProjectRegistered reports the workspace is
-// already validly registered, register-manager/register-grove must skip its
+// already validly registered, register-manager/register-worker must skip its
 // destructive clean+init path ENTIRELY — no marker removal, no
 // RemoveScionProjectConfigs, no `scion init`/`hub link`. This is the fix for
-// the resume-orphaning bug: a suspended manager (or grove) agent record's
+// the resume-orphaning bug: a suspended manager (or worker) agent record's
 // project linkage must survive a re-apply when nothing is actually wrong with
 // the registration.
 func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
@@ -1798,7 +1798,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 		t.Errorf("manager init not run with dir /lever")
 	}
 	if !workerInit {
-		t.Errorf("grove init not run with dir /lever/workers/worker")
+		t.Errorf("worker init not run with dir /lever/workers/worker")
 	}
 }
 

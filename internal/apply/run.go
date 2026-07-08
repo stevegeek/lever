@@ -29,7 +29,7 @@ var ErrBootstrapLatched = errors.New("broker /bootstrap latch already consumed")
 // start-manager that runs too soon gets "no runtime brokers available". The hub
 // itself is up (the scion-server health check passed), so this is purely a
 // timing window — retry until the broker comes online. Package vars so tests run
-// fast. (Only the first start races; groves start later when the broker is ready.)
+// fast. (Only the first start races; workers start later when the broker is ready.)
 var (
 	brokerStartAttempts = 30
 	brokerStartInterval = 1 * time.Second
@@ -134,7 +134,7 @@ type Deps struct {
 	RemoveJailFile func(ctx context.Context, jailPath string) error
 	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
 	// registration(s) whose workspace_path == jailWorkspacePath, BEFORE the
-	// register-manager/register-grove step re-inits. Without this, every apply
+	// register-manager/register-worker step re-inits. Without this, every apply
 	// mints a fresh registration via `scion init` and the old ones accumulate
 	// (the `lever doctor` "duplicate registrations" finding) — this is the
 	// removal counterpart to RemoveJailFile's marker-race fix above. nil ⇒
@@ -142,7 +142,7 @@ type Deps struct {
 	RemoveScionProjectConfigs func(ctx context.Context, jailWorkspacePath string) error
 	// ScionProjectRegistered observes whether jailWorkspacePath already has
 	// exactly one valid scion registration (one project-configs entry + the
-	// in-tree marker present) BEFORE the register-manager/register-grove step
+	// in-tree marker present) BEFORE the register-manager/register-worker step
 	// decides whether to run its destructive clean+init path at all. true →
 	// skip marker removal, RemoveScionProjectConfigs, and `scion init`/`hub
 	// link` entirely, so a re-apply does not tear down (and orphan) a
@@ -218,7 +218,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		jp := jailPath(s.Target, app.Tree, d.JailMount)
 
 		// Idempotent register: observe BEFORE doing anything destructive. A
-		// suspended manager (or grove) agent record survives a `lever stop` +
+		// suspended manager (or worker) agent record survives a `lever stop` +
 		// `lever up` cycle (its project linkage lives in this same
 		// project-configs registration) — the marker-removal +
 		// RemoveScionProjectConfigs + re-init below unconditionally tore that
@@ -332,7 +332,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			// the broker /llm overwrites this placeholder x-api-key with the real key.
 			// Without it scion's env-gather/auth-resolution refuses to launch the
 			// container (and thus lever-agent boot, which writes the real token). Set
-			// once here; later-started groves inherit the same Hub secret.
+			// once here; later-started workers inherit the same Hub secret.
 			if err := d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
 				return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
 			}

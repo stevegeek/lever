@@ -255,7 +255,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// RemoveJailFile removes a regular file at a jail-absolute path THROUGH
 		// the jail runner, so the removal shares the jail's own filesystem view
 		// with the `scion init` that follows it in the register step (see the
-		// comment at the register-manager/register-grove case in
+		// comment at the register-manager/register-worker case in
 		// internal/apply/run.go for the VirtioFS unlink/init race this closes).
 		// The guard leaves directories untouched and is a no-op if the path is
 		// already absent, mirroring removeStaleMarker's host-side semantics.
@@ -269,14 +269,14 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 
 		// RemoveScionProjectConfigs clears any stale ~/.scion/project-configs
 		// registration(s) for a workspace path before the register step re-inits
-		// (see internal/apply/run.go's register-manager/register-grove case) —
+		// (see internal/apply/run.go's register-manager/register-worker case) —
 		// keeps apply from accumulating a duplicate registration every run.
 		RemoveScionProjectConfigs: func(ctx context.Context, wp string) error {
 			return b.RemoveScionProjectConfigs(ctx, wp)
 		},
 
 		// ScionProjectRegistered observes whether the register-manager/register-
-		// grove apply step (internal/apply/run.go) even needs to run its
+		// worker apply step (internal/apply/run.go) even needs to run its
 		// destructive clean+init path — see RemoveScionProjectConfigs's comment
 		// above for why that path exists; this is the idempotency gate that
 		// decides whether to run it at all, so a re-apply stops orphaning a

@@ -13,7 +13,7 @@ import (
 	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
-// hostMsgInstanceDir writes a canonical lever.yaml declaring a "scratch" grove
+// hostMsgInstanceDir writes a canonical lever.yaml declaring a "scratch" worker
 // alongside the manager, so --to can resolve both branches of attachTarget.
 func hostMsgInstanceDir(t *testing.T, name string) string {
 	t.Helper()

@@ -334,7 +334,7 @@ func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
 	}
 }
 
-// TestMCPAddArgsUsesUserScope pins the fix for the grove/manager MCP-wiring gap:
+// TestMCPAddArgsUsesUserScope pins the fix for the worker/manager MCP-wiring gap:
 // the pre-start hook runs `claude mcp add` from the agent home, but the claude
 // session runs in /workspace. `claude mcp add`'s default (local) scope is
 // keyed by CWD, so servers registered from the home are invisible to the

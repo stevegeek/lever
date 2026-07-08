@@ -137,7 +137,7 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	home := t.TempDir()
 
 	// Two entries claim /lever (the accumulation this fix targets), one claims
-	// the grove path, one has no workspace_path line at all.
+	// the worker path, one has no workspace_path line at all.
 	mgr1 := writeProjectConfig(t, home, "lever__aaaa1111", "/lever")
 	mgr2 := writeProjectConfig(t, home, "lever__bbbb2222", "/lever")
 	worker := writeProjectConfig(t, home, "worker__cccc3333", "/lever/workers/worker")
@@ -162,7 +162,7 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 		t.Errorf("mgr2 (%s) should have been removed", mgr2)
 	}
 	if !exists(worker) {
-		t.Errorf("grove (%s, workspace_path /lever/workers/worker) must survive an exact-match /lever removal", worker)
+		t.Errorf("worker (%s, workspace_path /lever/workers/worker) must survive an exact-match /lever removal", worker)
 	}
 	if !exists(noWP) {
 		t.Errorf("no-workspace_path entry (%s) must survive", noWP)
@@ -228,7 +228,7 @@ func TestScionProjectRegisteredEntryWithoutMarker(t *testing.T) {
 }
 
 // TestScionProjectRegisteredIgnoresOtherWorkspacePaths proves an entry for a
-// DIFFERENT workspace (e.g. a grove's registration) doesn't count toward this
+// DIFFERENT workspace (e.g. a worker's registration) doesn't count toward this
 // workspace's check.
 func TestScionProjectRegisteredIgnoresOtherWorkspacePaths(t *testing.T) {
 	st := backend.ScionProjectState{

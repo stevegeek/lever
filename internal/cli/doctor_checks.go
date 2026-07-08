@@ -238,7 +238,7 @@ func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 		return checkResult{name, false, "could not inspect CLAUDE.md: " + err.Error(), "run `lever init`"}
 	}
 	if skillsUpToDate(results, blockAct) {
-		return checkResult{name, true, fmt.Sprintf("%d scaffold(s) current (lever-operator + groves), CLAUDE.md block present", len(results)), ""}
+		return checkResult{name, true, fmt.Sprintf("%d scaffold(s) current (lever-operator + workers), CLAUDE.md block present", len(results)), ""}
 	}
 	var bad []string
 	modified := false

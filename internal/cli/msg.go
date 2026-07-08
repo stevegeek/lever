@@ -10,11 +10,11 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// msgCallFn is the active broker caller (seam for tests), mirroring groveCallFn.
+// msgCallFn is the active broker caller (seam for tests), mirroring workerCallFn.
 var msgCallFn = msgCall
 
 // msgCall is brokerCall specialized to the raw msg-endpoint response body: it
-// loads bootstrap+identity exactly as groveCall does and posts JSON, returning
+// loads bootstrap+identity exactly as workerCall does and posts JSON, returning
 // the undecoded response so msg/watch can decode {"events":[...]} themselves.
 func msgCall(ctx context.Context, endpoint string, body any) (json.RawMessage, error) {
 	return brokerCall[json.RawMessage](ctx, endpoint, body)

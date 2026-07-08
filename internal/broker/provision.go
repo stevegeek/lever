@@ -17,11 +17,11 @@ type ProvisionResponse struct {
 	Ticket string `json:"ticket"`
 }
 
-// handleProvision issues a single-use enrolment ticket for a grove. Only the
-// configured manager identity may call it, and only for a configured grove. No
-// key material is returned (the grove self-generates its keypair and enrols).
+// handleProvision issues a single-use enrolment ticket for a worker. Only the
+// configured manager identity may call it, and only for a configured worker. No
+// key material is returned (the worker self-generates its keypair and enrols).
 //
-// gating: caller == manager && grove ∈ configured agents.
+// gating: caller == manager && worker ∈ configured agents.
 // Possible future refinement: make provisioning itself a rules-governed
 // delegated capability, so "the manager is just an agent with a wider policy"
 // holds for spawning too (rather than a special-cased manager identity here).
@@ -38,7 +38,7 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A revoked manager cannot issue new enrolment tickets (spawning fresh
-	// agents is a steering channel — see requireManagerGrove).
+	// agents is a steering channel — see requireManagerWorker).
 	if b.isRevoked(caller) {
 		b.audit("provision", caller, "deny", "revoked")
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -51,7 +51,7 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !b.isAgent(req.Worker) {
-		b.audit("provision", caller, "deny", "unknown grove: "+req.Worker)
+		b.audit("provision", caller, "deny", "unknown worker: "+req.Worker)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

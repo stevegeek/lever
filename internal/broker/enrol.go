@@ -12,7 +12,7 @@ import (
 // EnrolRequest is the body of POST /enrol (no client cert; ticket-authorised).
 type EnrolRequest struct {
 	Ticket string `json:"ticket"`
-	CSR    string `json:"csr"` // PEM CSR; CN must equal the ticket's grove
+	CSR    string `json:"csr"` // PEM CSR; CN must equal the ticket's worker
 }
 
 // EnrolResponse carries the signed client cert PEM.
@@ -41,9 +41,9 @@ func csrCommonName(csrPEM []byte) (string, error) {
 }
 
 // handleEnrol signs the CSR into a client cert IFF the request carries a valid,
-// unexpired, single-use ticket whose grove EQUALS the CSR's CN. The CN==grove
+// unexpired, single-use ticket whose worker EQUALS the CSR's CN. The CN==worker
 // binding is what prevents any ticket from minting a cert for another identity.
-// Redeem is called with the CSR's CN as the grove, so a mismatch fails and does
+// Redeem is called with the CSR's CN as the worker, so a mismatch fails and does
 // NOT burn the ticket.
 func (b *Broker) handleEnrol(w http.ResponseWriter, r *http.Request) {
 	var req EnrolRequest
@@ -60,7 +60,7 @@ func (b *Broker) handleEnrol(w http.ResponseWriter, r *http.Request) {
 	}
 	// Bind: the ticket must have been minted for exactly this CN. A mismatch
 	// returns an error and leaves the ticket intact (TicketStore.Redeem only
-	// burns on a successful grove match).
+	// burns on a successful worker match).
 	if err := b.tickets.Redeem(req.Ticket, cn, time.Now()); err != nil {
 		b.audit("enrol", cn, "deny", err.Error())
 		http.Error(w, "forbidden", http.StatusForbidden)

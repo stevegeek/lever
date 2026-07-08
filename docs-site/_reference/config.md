@@ -5,7 +5,7 @@ nav_order: 1
 # Config reference, `lever.yaml`
 
 A **lever application** is described by a single config file. It declares the manager agent and
-the groves (project agents) it orchestrates, plus how the jail is built around them.
+the workers (project agents) it orchestrates, plus how the jail is built around them.
 
 The canonical filename is **`lever.yaml`**, placed at the **instance root**. The root holds the
 config and the boot prompt and is **NOT** mounted; only a `tree:` **subdirectory** is bind-mounted
@@ -24,7 +24,7 @@ my-instance/             <- instance root: run `lever` here; NOT mounted
   lever.yaml             <- the config
   prompt.md              <- boot prompt (host-only)
   workspace/             <- tree: the bind-mounted subdir (agents edit this)
-    groves/...
+    workers/...
 ```
 
 `lever-manager`, the in-jail orchestration binary, isn't staged in the tree, it's baked into the
@@ -84,12 +84,12 @@ broker:
         - { name: read }
       allowed_values:
         table: [users, orders]       # a db capability may only be pinned to these tables
-groves:
+workers:
   - name: scratch
-    dir: groves/scratch              # relative to tree (i.e. workspace/groves/scratch)
+    dir: workers/scratch              # relative to tree (i.e. workspace/workers/scratch)
     # image: <ref>                   # optional; defaults to manager.image
     obtain:
-      - { tool: db, op: read }       # this grove may obtain db/read capabilities
+      - { tool: db, op: read }       # this worker may obtain db/read capabilities
 security:                            # optional image policy (both default off)
   allowed_image_registries: [scionlocal]   # only run images from these registries/namespaces
   require_image_digest: false              # true -> every image must be @sha256:-pinned
@@ -109,7 +109,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `tree` | path | **yes** | - | A **confined relative subdirectory** of the instance root, bind-mounted **in place** into the jail (agents edit these real files live). Must not be `.` (the root itself is never mounted), absolute, or contain `..`. |
 | `scion` | object | no | - | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | - | The manager agent (see below). |
-| `groves` | list | no | `[]` | Project agents the manager orchestrates (see below). |
+| `workers` | list | no | `[]` | Project agents the manager orchestrates (see below). |
 | `egress` | enum | no | `open` | Jail outbound network posture (`open` \| `closed`), applied jail-wide and **independent of `llm_auth`**. `open`: LAN and non-allowlisted host ports dropped, public internet reachable. `closed`: catch-all DROP so the jail reaches **only** the broker port; requires a uniformly `api-key` instance. See [security-model.md](/security-model/) §2.2. |
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
@@ -127,36 +127,36 @@ Provide **at most one** of `version` or `source` (they are mutually exclusive). 
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `image` | string | **in practice** | - | Container image for the manager agent. Also the default image for groves that don't set their own (see `groves[].image`). `lever apply` loads this image into the jail's container runtime. Validated for safe ref characters. Without it, agents can't start. |
+| `image` | string | **in practice** | - | Container image for the manager agent. Also the default image for workers that don't set their own (see `workers[].image`). `lever apply` loads this image into the jail's container runtime. Validated for safe ref characters. Without it, agents can't start. |
 | `prompt_file` | path | no | - | A file whose contents become the manager's boot task. Resolved at the instance **root** (host-only, **outside** the mount, so an agent can't rewrite its own next boot prompt). Must be a confined relative path (no `..`, not absolute). Omit to start with scion's default task. |
 | `credential_file` | path | no | - | A file whose contents are set as the `CLAUDE_CODE_OAUTH_TOKEN` Hub secret and **projected into agent containers**. Relative paths resolve against the config file's directory; `~/` is expanded. Read at apply time with a **permission check (rejected if world-readable) and size cap**. **Its contents reach every agent, point it only at a real, least-privilege, `0600` credential.** See [security-model.md](/security-model/). |
 | `allow_ports` | list of int | no | `[]` | Host tool ports the jail may reach over the host alias (`host.orb.internal`). **This opens a host-loopback port to the jailed agent** — the egress allowlist is the only thing standing between the guest and whatever is listening there, so list only ports you intend the agent to reach (host-side MCP servers, etc). The broker's admin port (`broker.admin_port`, default `8444`) is rejected at config load if listed here — it is unauthenticated and meant to be reachable only from the host loopback, never from the jail. |
-| `llm_auth` | enum | no | inherits `broker.llm_auth` (or `api-key`) | `api-key` (this agent holds only a `capability(llm)` token; the broker injects the real key) or `subscription` (the OAuth token is projected to this agent). **The whole instance must be uniform**: mixing `api-key` and `subscription` across manager/groves is rejected at config load (see [security-model.md](/security-model/) §6.1). |
+| `llm_auth` | enum | no | inherits `broker.llm_auth` (or `api-key`) | `api-key` (this agent holds only a `capability(llm)` token; the broker injects the real key) or `subscription` (the OAuth token is projected to this agent). **The whole instance must be uniform**: mixing `api-key` and `subscription` across manager/workers is rejected at config load (see [security-model.md](/security-model/) §6.1). |
 | `obtain` | list of `{tool, op}` | no | `[]` | Capabilities this agent may self-obtain from the broker. `api-key` agents are auto-granted `obtain: [{tool: llm, op: generate}]`. |
 | `delegate` | list of `{tool, op, to: [...]}` | no | `[]` | Capabilities this agent may mint *bound to another agent* (`to`) to hand off. A delegated token is strictly narrower than what the delegator holds. |
 
-### `groves[]`
+### `workers[]`
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `name` | string | **yes** | - | Grove identity (its agent slug / hub project name). |
-| `dir` | path | **yes** | - | Grove directory, **relative to `tree`** and inside it. Mounted in place, so files the grove writes appear on the host. Must not be absolute or escape the tree (`..`). |
-| `image` | string | no | `manager.image` | Container image for this grove. Set it to give a grove a different toolchain; omit to inherit the manager image (the common single-image case). `lever apply` loads **each distinct** image into the jail. |
-| `llm_auth` | enum | no | inherits `broker.llm_auth` | Same as `manager.llm_auth`, per grove, but the instance-uniform rule still applies. |
+| `name` | string | **yes** | - | Worker identity (its agent slug / hub project name). |
+| `dir` | path | **yes** | - | Worker directory, **relative to `tree`** and inside it. Mounted in place, so files the worker writes appear on the host. Must not be absolute or escape the tree (`..`). |
+| `image` | string | no | `manager.image` | Container image for this worker. Set it to give a worker a different toolchain; omit to inherit the manager image (the common single-image case). `lever apply` loads **each distinct** image into the jail. |
+| `llm_auth` | enum | no | inherits `broker.llm_auth` | Same as `manager.llm_auth`, per worker, but the instance-uniform rule still applies. |
 | `obtain` / `delegate` | list | no | `[]` | Same shape and meaning as `manager.obtain` / `manager.delegate`. |
 
 ### `security`
 
-Opt-in image policy applied to `manager.image` and every grove image. Both default off, so existing
+Opt-in image policy applied to `manager.image` and every worker image. Both default off, so existing
 configs are unaffected until you turn them on.
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `allowed_image_registries` | list of string | no | `[]` (off) | An image is allowed only if it equals, or is prefixed by `<entry>/`, one of these entries, a registry host and/or namespace prefix (e.g. `scionlocal`, `ghcr.io/myorg`). Matched on whole path components (`scionlocal` allows `scionlocal/x` but not `scionlocalevil/x`). Empty ⇒ any registry. Stops a config from running an image from an untrusted source (the image is the code that runs as the manager/grove, with the projected credential). |
+| `allowed_image_registries` | list of string | no | `[]` (off) | An image is allowed only if it equals, or is prefixed by `<entry>/`, one of these entries, a registry host and/or namespace prefix (e.g. `scionlocal`, `ghcr.io/myorg`). Matched on whole path components (`scionlocal` allows `scionlocal/x` but not `scionlocalevil/x`). Empty ⇒ any registry. Stops a config from running an image from an untrusted source (the image is the code that runs as the manager/worker, with the projected credential). |
 | `require_image_digest` | bool | no | `false` | When `true`, every image must be pinned by **content digest** (`…@sha256:<hex>`) rather than a mutable tag like `:latest`. Guarantees you run exactly the bytes you vetted (a tag can be re-pointed to different content later). |
 
 > **Note:** these are enforced at config-load (host side), so they bound what `lever apply` loads and
-> what the manager/groves declare. An explicit `--image` passed to `lever-manager agent start` is a
+> what the manager/workers declare. An explicit `--image` passed to `lever-manager agent start` is a
 > runtime override and isn't policy-checked, but it can only run an image already loaded into the
 > jail (which came from the validated config).
 
@@ -167,7 +167,7 @@ CN-bound, short-lived capability tokens. See [security-model.md](/security-model
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `llm_auth` | enum | no | `api-key` | Instance-wide default LLM-auth mode (`api-key` \| `subscription`), inherited by manager/groves that don't set their own. `api-key` keeps the real key host-side (the broker injects it); `subscription` projects the OAuth token into the agents. **The effective set must be uniform**, a mixed instance is a hard config error. Egress is a **separate** knob (top-level `egress:`), not implied by this mode. |
+| `llm_auth` | enum | no | `api-key` | Instance-wide default LLM-auth mode (`api-key` \| `subscription`), inherited by manager/workers that don't set their own. `api-key` keeps the real key host-side (the broker injects it); `subscription` projects the OAuth token into the agents. **The effective set must be uniform**, a mixed instance is a hard config error. Egress is a **separate** knob (top-level `egress:`), not implied by this mode. |
 | `api_key_file` | path | **yes for `api-key`** | - | A file holding the real Anthropic Console key. Read host-side by the broker `/llm` proxy and injected into the upstream request; **never enters a container.** Must be **`0600`** (rejected otherwise), mirroring `credential_file`. |
 | `jail_port` | int | no | `8443` | mTLS port the in-jail agents reach the broker on (allowlisted in the egress rules). Defaults to 8443; set an explicit port only to run several instances' brokers on one host at once. |
 | `admin_port` | int | no | `8444` | **Loopback-only** unauthenticated admin port (`/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`); bind is rejected if non-loopback. Defaults to 8444. |
@@ -175,7 +175,7 @@ CN-bound, short-lived capability tokens. See [security-model.md](/security-model
 | `ticket_ttl` | duration | no | (default) | Lifetime of a one-time enrolment ticket (the manager-bootstrap and agent-enrol tickets minted at apply). Short by design; only needs to outlive container boot. |
 | `manager_identity` | string | no | `manager` | The capability CN the manager enrols under (its certificate identity at the broker), distinct from its Scion agent slug (`name`). |
 | `tools` | list of `{name, command, backend, operations, allowed_values, external, gate, allow_non_loopback}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs; `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. With `external: true` the broker FRONTS an already-running host MCP server instead of spawning one: no `command`, `backend` is the server's own listen address (`host:port[/path]`, literal loopback IP unless `allow_non_loopback: true`), and the tool registers third-party — the gateway enforces the rules and strips the capability before proxying. |
-| `messaging` | object | no | `grove_to_grove: true` | Routing policy for broker-routed typed messaging (`/msg/send`, `/msg/list`; see [architecture.md](/architecture/)). `grove_to_grove` (bool) permits grove→grove sends; it's a pointer under the hood so unset ⇒ **allowed**, an explicit `false` denies it for a stricter hub-and-spoke model. Recipients themselves aren't a config key, they're resolved from the caller's mTLS identity: the manager may message any declared grove and read any inbox (`msg list --grove <name>`); a grove may always message the manager and read only its own inbox. |
+| `messaging` | object | no | `worker_to_worker: true` | Routing policy for broker-routed typed messaging (`/msg/send`, `/msg/list`; see [architecture.md](/architecture/)). `worker_to_worker` (bool) permits worker→worker sends; it's a pointer under the hood so unset ⇒ **allowed**, an explicit `false` denies it for a stricter hub-and-spoke model. Recipients themselves aren't a config key, they're resolved from the caller's mTLS identity: the manager may message any declared worker and read any inbox (`msg list --worker <name>`); a worker may always message the manager and read only its own inbox. |
 
 #### External MCP servers (`external: true`)
 
@@ -213,9 +213,9 @@ broker:
       external: true
       backend: 127.0.0.1:3101/mcp
       gate: coarse
-groves:
+workers:
   - name: agent-y
-    dir: groves/agent-y
+    dir: workers/agent-y
     obtain:
       - {tool: devonthink, op: search}   # Y: devonthink search ONLY
 manager:
@@ -240,12 +240,12 @@ calls return 502.
 - **Machine name:** `lever-<name>`. `up`/`apply`/`stop`/`destroy`/`doctor` all agree on this, derived
   from the config (override on `stop`/`destroy`/`doctor` with `--machine`). `lever down` is a
   deprecated alias of `destroy`.
-- **Grove image inheritance:** a grove with no `image:` runs on `manager.image`. The bring-up plan
+- **Worker image inheritance:** a worker with no `image:` runs on `manager.image`. The bring-up plan
   loads every distinct image once (deduped). At dispatch the capability broker reads the config
-  directly and supplies each grove's resolved image, so `agent start NAME` needs no `--image` (an
+  directly and supplies each worker's resolved image, so `agent start NAME` needs no `--image` (an
   explicit `--image` still overrides). The manager never handles host paths or credentials: it names
-  a configured grove and the broker resolves everything host-side.
-- **In-place mounts:** the `tree` subdir (and each `groves[].dir` within it) is bind-mounted into the
+  a configured worker and the broker resolves everything host-side.
+- **In-place mounts:** the `tree` subdir (and each `workers[].dir` within it) is bind-mounted into the
   jail so agents edit the real host files. There is no copy/sync step.
 - **Path resolution base:** relative `tree`/`prompt_file`/`scion.source`/`credential_file` resolve
   against the **config file's directory**, never the shell's current directory.

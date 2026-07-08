@@ -20,7 +20,7 @@ var agentSrc string
 // Operator returns the rendered manager skill (lever-operator).
 func Operator(version string) []byte { return render(operatorSrc, version) }
 
-// Agent returns the rendered grove skill (lever-agent).
+// Agent returns the rendered worker skill (lever-agent).
 func Agent(version string) []byte { return render(agentSrc, version) }
 
 func render(src, version string) []byte {

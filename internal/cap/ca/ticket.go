@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// ticket is a single-use enrolment grant bound to a grove.
+// ticket is a single-use enrolment grant bound to a worker.
 type ticket struct {
 	worker  string
 	expires time.Time
@@ -26,10 +26,10 @@ func NewTicketStore() *TicketStore {
 	return &TicketStore{tickets: map[string]ticket{}}
 }
 
-// Issue mints a random opaque ticket bound to grove, valid for ttl.
+// Issue mints a random opaque ticket bound to worker, valid for ttl.
 func (s *TicketStore) Issue(worker string, ttl time.Duration) (string, error) {
 	if worker == "" {
-		return "", fmt.Errorf("ca: ticket for empty grove")
+		return "", fmt.Errorf("ca: ticket for empty worker")
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -48,8 +48,8 @@ func (s *TicketStore) Issue(worker string, ttl time.Duration) (string, error) {
 	return tk, nil
 }
 
-// Redeem consumes a ticket: it must exist, be unexpired, and match grove. On
-// success the ticket is burned. A grove or expiry mismatch leaves it intact so
+// Redeem consumes a ticket: it must exist, be unexpired, and match worker. On
+// success the ticket is burned. A worker or expiry mismatch leaves it intact so
 // a legitimate holder can still redeem; only a successful match burns it.
 func (s *TicketStore) Redeem(tk, worker string, now time.Time) error {
 	s.mu.Lock()
@@ -63,7 +63,7 @@ func (s *TicketStore) Redeem(tk, worker string, now time.Time) error {
 		return fmt.Errorf("ca: ticket expired")
 	}
 	if t.worker != worker {
-		return fmt.Errorf("ca: ticket grove mismatch")
+		return fmt.Errorf("ca: ticket worker mismatch")
 	}
 	delete(s.tickets, tk)
 	return nil

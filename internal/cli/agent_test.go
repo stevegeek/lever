@@ -13,7 +13,7 @@ import (
 // the jail-level /lever path. Inside the manager container, scion mounts the
 // tree at /workspace; /lever does not exist. A wrong root causes LoadBootstrap
 // to silently return an empty Bootstrap (file absent → nil error), leaving
-// every dispatched grove unable to enrol — with no error surfaced to the operator.
+// every dispatched worker unable to enrol — with no error surfaced to the operator.
 func TestManagerBootstrapPathIsContainerWorkspace(t *testing.T) {
 	if !strings.HasPrefix(managerBootstrapPath, "/workspace/") {
 		t.Fatalf("managerBootstrapPath = %q; must be under the container /workspace mount, not the jail-level /lever", managerBootstrapPath)

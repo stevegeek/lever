@@ -46,7 +46,7 @@ macOS on Apple Silicon with [OrbStack](https://orbstack.dev). The runtime, the S
 rootless Docker, and every agent run inside one OrbStack **isolated machine** that shares no host
 files and has its own network namespace. This is the validated substrate today and the reference the
 other backends are measured against. Its trade: a **single kernel** shared across the manager and all
-groves (a kernel-level container escape reaches the whole jail — see [security model §7](/security-model/)).
+workers (a kernel-level container escape reaches the whole jail — see [security model §7](/security-model/)).
 
 ### `lima` — the non-OrbStack path
 

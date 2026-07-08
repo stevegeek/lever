@@ -6,7 +6,7 @@
 # Lima >= 2.0 (`brew install lima`).
 #
 # This is the lima arc's merge gate. It deliberately does NOT run a full `lever
-# apply` (manager image + grove dispatch) — that is instance-specific and out of
+# apply` (manager image + worker dispatch) — that is instance-specific and out of
 # scope here; `lever acceptance` does its own broker-only bring-up (jail up +
 # egress + host broker + tools + manager/worker enrol) with no container image.
 #
@@ -79,14 +79,14 @@ mkdir -p "$BIN"
 export LEVER_AGENT_BIN="$BIN/lever-agent"
 
 # --- instance fixtures -----------------------------------------------------------
-# Mirror the acceptance fixture (manager + executor grove `worker` + `db` tool)
+# Mirror the acceptance fixture (manager + executor worker `worker` + `db` tool)
 # but on backend: lima, with an absolute tool path and a dummy 0600 api-key file
 # for the closed (api-key) posture. The db tool auto-seeds ref.db (tables A/B/C).
 say "build instance $INST"
 mkdir -p "$INST/workspace" "$INST/workers/worker"
 touch "$INST/workspace/.gitkeep" "$INST/workers/worker/.gitkeep"
 cat > "$INST/manager.md" <<'EOF'
-Manager: bring up the worker grove and delegate db.read to it for the acceptance run.
+Manager: bring up the worker and delegate db.read to it for the acceptance run.
 EOF
 # Dummy key (never used — acceptance routes no LLM); satisfies api-key validation.
 printf 'sk-ant-FAKE-lima-e2e-%s' "$$" > "$INST/console-api-key"

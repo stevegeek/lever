@@ -83,7 +83,7 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 }
 
 // runAcceptance is the live acceptance gate. It brings a REAL jail up (manager +
-// executor grove `worker` + the `db` tool; manager delegate db.read → worker;
+// executor worker `worker` + the `db` tool; manager delegate db.read → worker;
 // worker empty obtain), drives the six checks inside the running jail, writes a
 // dated note to docs/acceptance/<date>-acceptance.md, and returns a non-nil error if
 // ANY check fails (so the command exits non-zero — the gate).

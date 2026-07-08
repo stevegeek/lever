@@ -82,8 +82,8 @@ func TestPlanOrder(t *testing.T) {
 			t.Fatalf("step %d = %q want %q (all=%v)", i, kinds[i], want[i], kinds)
 		}
 	}
-	// register-grove targets: first grove is at index 7, second at index 8
-	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-grove 8:register-grove 9:mint-manager-bootstrap 10:start-manager)
+	// register-worker targets: first worker is at index 7, second at index 8
+	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-worker 8:register-worker 9:mint-manager-bootstrap 10:start-manager)
 	if steps[7].Target != "/t/workers/appa" {
 		t.Fatalf("register-worker[0] target=%q", steps[7].Target)
 	}

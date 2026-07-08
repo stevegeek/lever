@@ -133,7 +133,7 @@ func TestCheckScionProjectConsistent(t *testing.T) {
 }
 
 func TestCheckScionProjectNoRegistration(t *testing.T) {
-	// A grove's registration for a different path must not implicate /lever.
+	// A worker's registration for a different path must not implicate /lever.
 	st := backend.ScionProjectState{
 		MarkerPresent: false,
 		Entries:       []backend.ScionProjectEntry{{Name: "scratch__x", WorkspacePath: "/lever/workers/scratch"}},

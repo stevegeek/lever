@@ -95,7 +95,7 @@ func TestApplyDryRun(t *testing.T) {
 // removes a marker FILE (never a directory) at the given jail-absolute path,
 // invoked as `sh -c '<script>' _ <jailPath>` so the removal shares the jail's
 // own filesystem view with the `scion init` that follows it (see
-// internal/apply/run.go's register-manager/register-grove case for the
+// internal/apply/run.go's register-manager/register-worker case for the
 // VirtioFS unlink/init race this closes).
 func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	p := writeTmpConfig(t)
@@ -140,7 +140,7 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 // TestBuildApplyDepsWiresRemoveScionProjectConfigs verifies buildApplyDeps
 // wires Deps.RemoveScionProjectConfigs straight through to the backend method
 // (which itself reaches the guest — see internal/backend/guest/scionstate.go),
-// so the register-manager/register-grove step in internal/apply/run.go can
+// so the register-manager/register-worker step in internal/apply/run.go can
 // clear stale ~/.scion/project-configs registrations before `scion init`.
 func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	p := writeTmpConfig(t)
@@ -168,7 +168,7 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 
 // TestBuildApplyDepsWiresScionProjectRegistered verifies buildApplyDeps wires
 // Deps.ScionProjectRegistered straight through to the backend method, so the
-// register-manager/register-grove step (internal/apply/run.go) can observe
+// register-manager/register-worker step (internal/apply/run.go) can observe
 // whether its destructive clean+init path is even necessary before running it.
 func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	p := writeTmpConfig(t)

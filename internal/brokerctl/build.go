@@ -26,7 +26,7 @@ const serverName = "host.orb.internal"
 const llmSentinelBackend = "lever:llm-proxy"
 
 // BuildBroker assembles a broker.Config from the parsed app config: the
-// request/delegation policy (from manager+grove grants), the pre-loaded tool
+// request/delegation policy (from manager+worker grants), the pre-loaded tool
 // registry (config-authoritative envelopes; caveat_param is the config-declared
 // guard, the tool re-supplies it at /register), the agent list, and TTLs. The
 // caller supplies the keys/CA/tickets (EnsureKeys, Task 3).

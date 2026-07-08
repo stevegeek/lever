@@ -32,24 +32,24 @@ func TestResolveMsgTarget(t *testing.T) {
 		wantTo, wantProj string
 		wantErr          bool
 	}{
-		{"manager to grove bare", "manager", "scratch", true, "agent:scratch", "/lever/workers/scratch", false},
-		{"manager to grove prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever/workers/scratch", false},
+		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever/workers/scratch", false},
+		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever/workers/scratch", false},
 		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false},
 		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false},
 		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false},
 		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false},
 		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false},
 		{"manager to user other", "manager", "user:stephen", true, "", "", true},
-		{"manager to unknown grove", "manager", "nope", true, "", "", true},
-		{"grove to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false},
-		{"grove to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false},
-		{"grove to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false},
-		{"grove to grove allowed", "scratch", "worker", true, "agent:worker", "/lever/workers/worker", false},
-		{"grove to grove disabled", "scratch", "worker", false, "", "", true},
-		{"grove to itself", "scratch", "scratch", true, "agent:scratch", "/lever/workers/scratch", false},
+		{"manager to unknown worker", "manager", "nope", true, "", "", true},
+		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false},
+		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false},
+		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false},
+		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever/workers/worker", false},
+		{"worker to worker disabled", "scratch", "worker", false, "", "", true},
+		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever/workers/scratch", false},
 		{"unknown caller", "mallory", "assistant", true, "", "", true},
 		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true},
-		{"grove to unknown", "scratch", "nope", true, "", "", true},
+		{"worker to unknown", "scratch", "nope", true, "", "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -71,10 +71,10 @@ func TestResolveListProject(t *testing.T) {
 		wantErr              bool
 	}{
 		{"manager own inbox", "manager", "", "/lever", false},
-		{"manager reads grove", "manager", "scratch", "/lever/workers/scratch", false},
-		{"manager unknown grove", "manager", "nope", "", true},
-		{"grove own inbox", "scratch", "", "/lever/workers/scratch", false},
-		{"grove may not target others", "scratch", "worker", "", true},
+		{"manager reads worker", "manager", "scratch", "/lever/workers/scratch", false},
+		{"manager unknown worker", "manager", "nope", "", true},
+		{"worker own inbox", "scratch", "", "/lever/workers/scratch", false},
+		{"worker may not target others", "scratch", "worker", "", true},
 		{"unknown caller", "mallory", "", "", true},
 	}
 	for _, c := range cases {
@@ -90,7 +90,7 @@ func TestResolveListProject(t *testing.T) {
 	}
 }
 
-// fakeMsgRuntime embeds the package's existing fakeRuntime (via the GroveRuntime
+// fakeMsgRuntime embeds the package's existing fakeRuntime (via the WorkerRuntime
 // interface field) for lifecycle methods it never exercises, and overrides
 // Message/Inbox to capture what the msg handlers pass through.
 type fakeMsgRuntime struct {
@@ -112,7 +112,7 @@ func (f *fakeMsgRuntime) Inbox(_ context.Context, _ bool, project string) ([]sci
 }
 
 // newMsgTestBroker builds a Broker wired with a fakeMsgRuntime for the
-// scratch/worker groves under manager cert CN "manager" and manager scion
+// scratch/worker workers under manager cert CN "manager" and manager scion
 // slug "assistant" (deliberately distinct, see msgBroker), capturing audit
 // output to the returned buffer.
 func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
@@ -265,7 +265,7 @@ func TestMsgBadBody_returns400(t *testing.T) {
 }
 
 // TestMsgRuntimeError_genericBody proves a runtime failure returns 502 with a
-// GENERIC body (package convention, grove.go): the scion error text — which can
+// GENERIC body (package convention, worker.go): the scion error text — which can
 // echo the recipient/message body from argv — must appear only in the audit log.
 func TestMsgRuntimeError_genericBody(t *testing.T) {
 	secret := "scion: message secret-body failed"
@@ -326,6 +326,6 @@ func TestWorkerList_deniesRevokedManager(t *testing.T) {
 	b.Revoke("manager")
 	rec := callWorker(t, b, "/worker/list", `{}`, "manager")
 	if rec.Code != 403 {
-		t.Fatalf("revoked grove list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+		t.Fatalf("revoked worker list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
 }

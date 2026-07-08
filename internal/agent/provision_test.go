@@ -19,7 +19,7 @@ func TestProvisionMintsWorkerTicket(t *testing.T) {
 	if ticket == "" {
 		t.Fatal("provision returned an empty ticket")
 	}
-	// The minted ticket must enrol a worker identity (CN==grove enforced by the broker).
+	// The minted ticket must enrol a worker identity (CN==worker enforced by the broker).
 	bs := BootstrapFor("worker", ticket, string(env.CA.CertPEM()), env.Server.URL)
 	id, err := Enrol(context.Background(), bs.BrokerURL, []byte(bs.BrokerCA), bs.Ticket, bs.AgentCN)
 	if err != nil {

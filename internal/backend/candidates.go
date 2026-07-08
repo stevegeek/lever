@@ -23,7 +23,7 @@ var Candidates = []Candidate{
 		Name: "orbstack",
 		Profile: Profile{
 			Name:             "orbstack",
-			SeparateKernel:   false, // shares the one OrbStack VM kernel across manager+groves
+			SeparateKernel:   false, // shares the one OrbStack VM kernel across manager+workers
 			FSBoundedBy:      "isolated machine: no host files + project tree mounted at /lever",
 			EgressEnforcedAt: "jail netns iptables/ip6tables",
 			VersionFragile:   true, // depends on OrbStack --isolated behaviours

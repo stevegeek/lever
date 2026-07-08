@@ -3,8 +3,8 @@
 # launches. Runs as root in the pre-start phase; lever-agent writes 0600 key
 # files which sciontool then chowns to the agent user.
 #
-# Bootstrap-path alignment: Task 6 (internal/cli/agent.go stageGroveBootstrap)
-# writes the bootstrap to <groveProject>/.lever/bootstrap.json, and the
+# Bootstrap-path alignment: Task 6 (internal/cli/agent.go stageWorkerBootstrap)
+# writes the bootstrap to <workerProject>/.lever/bootstrap.json, and the
 # container's scion workspace CWD is /workspace. Therefore ./.lever/bootstrap.json
 # (lever-agent boot's canonical default) resolves correctly — no override needed.
 # We let the default take effect rather than hardcoding $HOME/workspace/... which

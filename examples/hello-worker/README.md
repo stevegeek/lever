@@ -1,21 +1,21 @@
-# hello-grove
+# hello-worker
 
-The minimal lever example: a manager agent plus one worker grove.
+The minimal lever example: a manager agent plus one worker.
 
 ## What it demonstrates
 
 - Loading a `lever.yaml` config
-- Dispatching a simple task from the manager to a single grove
+- Dispatching a simple task from the manager to a single worker
 - Relaying progress and surfacing a completion event back to the manager
 
 ## Structure
 
 ```
-hello-grove/
+hello-worker/
 ├── lever.yaml          # Application config
 ├── manager.md          # Manager system prompt
-└── groves/
-    └── worker/         # The single grove (agent workspace)
+└── workers/
+    └── worker/         # The single worker (agent workspace)
 ```
 
 ## How to run

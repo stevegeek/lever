@@ -66,7 +66,7 @@ func TestProvisionRejectsUnknownWorker(t *testing.T) {
 	w := httptest.NewRecorder()
 	b.handleProvision(w, r)
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 for grove not in config", w.Code)
+		t.Fatalf("status = %d, want 403 for worker not in config", w.Code)
 	}
 }
 

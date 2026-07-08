@@ -1,11 +1,11 @@
 # two-agents-comms
 
-A lever example with two groves that exchange a message, coordinated by the manager.
+A lever example with two workers that exchange a message, coordinated by the manager.
 
 ## What it demonstrates
 
 - Agent-to-agent messaging routed through the manager
-- The manager acting as a message broker between isolated groves
+- The manager acting as a message broker between isolated workers
 - The notification loop: manager waits for producer output, then feeds it to consumer
 
 ## Structure
@@ -14,7 +14,7 @@ A lever example with two groves that exchange a message, coordinated by the mana
 two-agents-comms/
 ├── lever.yaml          # Application config
 ├── manager.md          # Manager system prompt
-└── groves/
+└── workers/
     ├── producer/       # Produces a value
     └── consumer/       # Consumes the value
 ```

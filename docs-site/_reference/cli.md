@@ -19,9 +19,9 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 | Command | What it does |
 |---|---|
 | `lever up [config]` | Bring the application up *if needed* (create jail, provision scion, start the manager) **and attach** the manager's TTY. Idempotent: re-running resumes a suspended manager and re-attaches — same conversation, even across a `lever stop` or host reboot. `--fresh` starts a new manager thread (deletes the old record); `--no-attach` brings up without taking your terminal. The everyday entry point. |
-| `lever attach [name]` | Attach your TTY to the manager (default) or a named grove. Strictly passive: fails fast with "run `lever up` first" if the jail isn't up — it never provisions. Detach with `Ctrl-b d`. |
-| `lever msg send "…" --to NAME` | Host-side fire-and-forget note to the manager (use the app name) or a declared grove — no attach needed. The note lands as the agent's next user turn; it acts on it unattended and the exchange waits in the scrollback for your next attach. `--interrupt` injects it ahead of the agent's next turn. Strictly passive like `attach`. |
-| `lever reload [config]` | Apply config changes (new grove, tool, or grant) to a **running** instance without a VM power cycle: stops the broker, re-runs the idempotent apply on the current config, spawns a fresh broker. The manager container keeps running, so its conversation is preserved and your TTY isn't taken. Needed because the broker reads `lever.yaml` only at startup — a plain re-`apply` keeps the old broker. |
+| `lever attach [name]` | Attach your TTY to the manager (default) or a named worker. Strictly passive: fails fast with "run `lever up` first" if the jail isn't up — it never provisions. Detach with `Ctrl-b d`. |
+| `lever msg send "…" --to NAME` | Host-side fire-and-forget note to the manager (use the app name) or a declared worker — no attach needed. The note lands as the agent's next user turn; it acts on it unattended and the exchange waits in the scrollback for your next attach. `--interrupt` injects it ahead of the agent's next turn. Strictly passive like `attach`. |
+| `lever reload [config]` | Apply config changes (new worker, tool, or grant) to a **running** instance without a VM power cycle: stops the broker, re-runs the idempotent apply on the current config, spawns a fresh broker. The manager container keeps running, so its conversation is preserved and your TTY isn't taken. Needed because the broker reads `lever.yaml` only at startup — a plain re-`apply` keeps the old broker. |
 | `lever stop` | Power the jail off but **keep its disk** — the daily "done for the day". Suspends the manager (conversation preserved), stops the host broker; a later `lever up` powers it back on and resumes the same session. Installed runtimes and scion state persist. |
 | `lever destroy` | Full teardown: delete the isolated machine and everything in it. Targets `lever-<name>` from config; override with `--machine`. `lever down` is a deprecated alias. |
 
@@ -29,9 +29,9 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 
 | Command | What it does |
 |---|---|
-| `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each declared grove dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: files you've edited are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing (non-zero exit). Re-run after upgrading lever or adding a grove. |
+| `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each declared worker dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: files you've edited are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing (non-zero exit). Re-run after upgrading lever or adding a worker. |
 | `lever doctor` | Run real health checks — broker alive and serving, external tool backends reachable, manager credential file presence/size/mode, no stray `.mcp.json` in the tree, usable Go toolchain, scion project-registration consistency, operator-skills scaffold current — each failure printing a specific fix hint. Exits non-zero on any failure. `--machine`/`--backend` run the profile away from an instance root. |
-| `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → scion init/config/server → credential → register manager + groves → mint bootstrap → start manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
+| `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → scion init/config/server → credential → register manager + workers → mint bootstrap → start manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress rules). `--machine`, `--tree`, `--allow-port`. Idempotent; rarely needed directly — `up`/`apply` call it for you. |
 | `lever backends` | List the containment backends (orbstack, lima) and the guarantees each declares — the matrix config validation checks your `backend:` choice against. |
 
@@ -49,16 +49,16 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 
 Run by the manager agent inside its container (baked into the agent image, on `PATH`). Every call
 is authenticated by the broker over mTLS and validated against the instance config — the manager
-can only reach groves the operator declared.
+can only reach workers the operator declared.
 
 | Command | What it does |
 |---|---|
-| `lever-manager agent start NAME --task "…"` | Dispatch a declared grove with a task. The broker resolves the grove's image and workspace from the config host-side; `--task` is the only routine flag. Starting an existing suspended/stopped grove resumes it. |
-| `lever-manager agent list` | List grove agents and their phases. |
-| `lever-manager agent stop NAME` / `suspend NAME` / `resume NAME` | Grove lifecycle, broker-routed. Suspend keeps the container (cheap resume); stop removes it but keeps the record. |
-| `lever-manager msg send "…" --to NAME` | Message a running agent. `NAME` is a grove name, or `user:manager` to reach the manager (the form taught to groves). Routing is identity-derived and default-deny. |
-| `lever-manager msg list` | Read the typed agent-event inbox; `--grove <name>` reads a grove's inbox (manager only). |
-| `lever-manager watch --events-file PATH` | Bridge scion agent events (state changes, `input-needed`) into a file, appending as they arrive (`--interval` seconds between polls, default 5). The manager tails this to get live grove notifications. |
+| `lever-manager agent start NAME --task "…"` | Dispatch a declared worker with a task. The broker resolves the worker's image and workspace from the config host-side; `--task` is the only routine flag. Starting an existing suspended/stopped worker resumes it. |
+| `lever-manager agent list` | List worker agents and their phases. |
+| `lever-manager agent stop NAME` / `suspend NAME` / `resume NAME` | Worker lifecycle, broker-routed. Suspend keeps the container (cheap resume); stop removes it but keeps the record. |
+| `lever-manager msg send "…" --to NAME` | Message a running agent. `NAME` is a worker name, or `user:manager` to reach the manager (the form taught to workers). Routing is identity-derived and default-deny. |
+| `lever-manager msg list` | Read the typed agent-event inbox; `--worker <name>` reads a worker's inbox (manager only). |
+| `lever-manager watch --events-file PATH` | Bridge scion agent events (state changes, `input-needed`) into a file, appending as they arrive (`--interval` seconds between polls, default 5). The manager tails this to get live worker notifications. |
 | `lever-manager version` | Print the version. |
 
 ## Inside agent containers

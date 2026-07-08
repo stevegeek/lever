@@ -54,10 +54,10 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		return err
 	}
 
-	// Grove dispatch runs host-side with operator identity (jail runner). apply
+	// Worker dispatch runs host-side with operator identity (jail runner). apply
 	// passes the resolved run-user/uid via env (LEVER_JAIL_USER/UID); the mount
 	// dest is a backend constant. Without the env (manual `broker serve` with no
-	// prior apply) cfg.Runtime stays nil; the grove handlers detect this via
+	// prior apply) cfg.Runtime stays nil; the worker handlers detect this via
 	// runtimeReady and return 502 — they do not panic. apply is the real path.
 	machine := "lever-" + app.Name
 	// app.Backend was validated selectable at config.Load, so this cannot pick a
@@ -87,7 +87,7 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	cfg.Workers = WorkerSpecs(app, jailMount)
 	cfg.ManagerProject = jailMount
 	// The manager's scion agent slug is the APP NAME (apply's start-manager
-	// dispatches the manager as Grove: app.Name), not the manager cert CN.
+	// dispatches the manager as Worker: app.Name), not the manager cert CN.
 	cfg.ManagerSlug = app.Name
 	cfg.WorkerToWorker = app.WorkerToWorkerMessaging()
 	if caPEM, err := os.ReadFile(state.CACert()); err == nil {
@@ -103,7 +103,7 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 
 	// Persist the broker's audit decisions (provision/enrol/request/revoke …) to
 	// the state-dir log. Without this the broker defaults to a discard logger, so
-	// every allow/deny — the first thing you need when a grove can't enrol — is
+	// every allow/deny — the first thing you need when a worker can't enrol — is
 	// lost. Opened before broker.New so cfg.Log is set; reused by the supervisor.
 	logf, err := os.OpenFile(state.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

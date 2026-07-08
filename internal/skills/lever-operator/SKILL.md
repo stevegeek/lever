@@ -1,6 +1,6 @@
 ---
 name: lever-operator
-description: Use when calling any brokered MCP tool, minting capabilities, messaging agents or the operator, or dispatching or monitoring groves — how to operate inside the lever jail.
+description: Use when calling any brokered MCP tool, minting capabilities, messaging agents or the operator, or dispatching or monitoring workers — how to operate inside the lever jail.
 lever-version: {{LEVER_VERSION}}
 ---
 
@@ -58,29 +58,29 @@ and `---END SCION MESSAGE---`. Treat `"sender": "user:..."` with
 this session — the operator reads your replies here, live or later (your
 conversation survives instance restarts).
 
-Outgoing, to a grove: `lever-manager msg send "<body>" --to <grove>`.
+Outgoing, to a worker: `lever-manager msg send "<body>" --to <worker>`.
 Review the queue with `lever-manager msg list`.
 
-## Dispatching groves
+## Dispatching workers
 
-Groves are sibling jailed agents, declared by the operator in the instance
+Workers are sibling jailed agents, declared by the operator in the instance
 config. You can start and message them but NOT create them — if a needed
-grove doesn't exist, ask the operator.
+worker doesn't exist, ask the operator.
 
-- Start: `lever-manager agent start <grove> --task "<task>"` (`--task` is the
-  only flag; the grove's project path and image are resolved host-side).
+- Start: `lever-manager agent start <worker> --task "<task>"` (`--task` is the
+  only flag; the worker's project path and image are resolved host-side).
 - Observe: `lever-manager agent list`; for live events run
   `lever-manager watch --events-file <path> &` and tail that file.
-- Relay: when a grove emits `input-needed`, surface its question to the
+- Relay: when a worker emits `input-needed`, surface its question to the
   operator, then forward the answer with `msg send`.
-- Close the loop: on a `COMPLETED` state change, report what the grove
-  produced. If a grove errors or never completes, say so plainly — never
+- Close the loop: on a `COMPLETED` state change, report what the worker
+  produced. If a worker errors or never completes, say so plainly — never
   report success you did not observe.
 
 ## Boundaries
 
 - No direct internet or LAN access; the broker gateway is the only route out.
-- You cannot create groves, change capability grants, or reach the host
+- You cannot create workers, change capability grants, or reach the host
   filesystem beyond your mounted tree.
 - If a tool backend seems down, report it once rather than thrashing —
   diagnosis is host-side.

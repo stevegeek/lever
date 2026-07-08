@@ -11,7 +11,7 @@ func TestWorkerSpecs(t *testing.T) {
 	app := &config.App{
 		Tree:    "/host/tree",
 		Manager: config.Manager{Image: "mgr:img"},
-		// Explicit subscription: api-key is the default post-7d86f73; this makes the helper grove assert APIKey:false.
+		// Explicit subscription: api-key is the default post-7d86f73; this makes the helper worker assert APIKey:false.
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},

@@ -28,9 +28,9 @@ package apply_test
 // the "agent workspace is a copy+sync" investigation task.
 //
 // It does NOT exercise manager→worker dispatch: the stock agent image carries no
-// scion/lever tooling, so the manager cannot orchestrate the worker grove. The
-// prompt therefore has the manager do the task directly; the worker grove is
-// still registered (exercising the register-grove + path-translation path).
+// scion/lever tooling, so the manager cannot orchestrate the worker. The
+// prompt therefore has the manager do the task directly; the worker is
+// still registered (exercising the register-worker + path-translation path).
 
 import (
 	"context"

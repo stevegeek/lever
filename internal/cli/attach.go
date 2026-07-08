@@ -15,7 +15,7 @@ import (
 )
 
 // attachTarget resolves NAME ("" = manager) to the scion slug + jail project
-// path to attach. Grove projects are jail-absolute: <mountDest>/<grove dir>.
+// path to attach. Worker projects are jail-absolute: <mountDest>/<worker dir>.
 // Unknown names error with the full list of valid targets.
 func attachTarget(app *config.App, mountDest, name string) (slug, project string, err error) {
 	if name == "" || name == app.Name {
@@ -46,13 +46,13 @@ func execAttach(b backend.Backend, sc *scion.Client, slug, project string) error
 // newAttachCmd is a debugging/eyes-on verb: it attaches to a RUNNING agent and
 // deliberately does no lifecycle work (bring things up with `lever up`). It is
 // strictly passive: if the jail itself is not up, ResolveRunUser fails fast
-// rather than provisioning it. If the jail is up but the target agent/grove is
+// rather than provisioning it. If the jail is up but the target agent/worker is
 // not running, scion's own attach error surfaces.
 func newAttachCmd(bf BackendFactory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "attach [NAME]",
 		Args:  cobra.MaximumNArgs(1),
-		Short: "Attach your TTY to the manager (default) or a named grove agent",
+		Short: "Attach your TTY to the manager (default) or a named worker agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, err := resolveConfigPath("")
 			if err != nil {

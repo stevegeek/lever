@@ -1,11 +1,11 @@
 # multi-project
 
-A lever example with three independent groves running in parallel under one manager.
+A lever example with three independent workers running in parallel under one manager.
 
 ## What it demonstrates
 
-- Dispatching work to multiple isolated groves simultaneously
-- Grove isolation: each grove has its own workspace and cannot see the others
+- Dispatching work to multiple isolated workers simultaneously
+- Worker isolation: each worker has its own workspace and cannot see the others
 - Parallel orchestration: manager collects completion events from all three before reporting
 
 ## Structure
@@ -14,10 +14,10 @@ A lever example with three independent groves running in parallel under one mana
 multi-project/
 ├── lever.yaml          # Application config
 ├── manager.md          # Manager system prompt
-└── groves/
-    ├── svc-a/          # Independent grove
-    ├── svc-b/          # Independent grove
-    └── svc-c/          # Independent grove
+└── workers/
+    ├── svc-a/          # Independent worker
+    ├── svc-b/          # Independent worker
+    └── svc-c/          # Independent worker
 ```
 
 ## How to run

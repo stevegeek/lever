@@ -12,9 +12,9 @@ import (
 // newReloadCmd applies config changes to an ALREADY-RUNNING instance without a
 // full VM power cycle. The broker reads lever.yaml once, at its own startup, and
 // a plain re-apply deliberately keeps a healthy broker alive — so an edited
-// config (new grove, tool, or grant) otherwise takes no effect until the broker
+// config (new worker, tool, or grant) otherwise takes no effect until the broker
 // restarts. reload forces exactly that: it stops the broker, then runs the same
-// idempotent apply plan, which re-reads the config, re-registers groves,
+// idempotent apply plan, which re-reads the config, re-registers workers,
 // re-applies egress, and spawns a fresh broker. The VM stays up and apply's
 // observe-first start-manager sees the manager still running (no-op), so the
 // manager's conversation is preserved — this is the broker half of a

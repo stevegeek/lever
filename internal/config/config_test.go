@@ -33,7 +33,7 @@ tree: ./tree
 manager:
   image: scionlocal/lever-claude:latest
   allow_ports: [3305]
-groves:
+workers:
   - name: appa
     dir: groves/appa
 `)
@@ -45,7 +45,7 @@ groves:
 		t.Fatalf("app=%+v", app)
 	}
 	if len(app.Workers) != 1 || app.Workers[0].Name != "appa" {
-		t.Fatalf("groves=%+v", app.Workers)
+		t.Fatalf("workers=%+v", app.Workers)
 	}
 	if app.Manager.Image == "" || len(app.Manager.AllowPorts) != 1 {
 		t.Fatalf("manager=%+v", app.Manager)
@@ -165,9 +165,9 @@ func TestValidateRequiresBackend(t *testing.T) {
 }
 
 func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\ngroves:\n  - name: bad\n    dir: ../escape\n")
+	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: bad\n    dir: ../escape\n")
 	if _, err := Load(p); err == nil {
-		t.Fatal("expected error for grove dir outside tree")
+		t.Fatal("expected error for worker dir outside tree")
 	}
 }
 
@@ -178,19 +178,19 @@ func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
 // `tree`.
 func TestValidateRejectsWorkerDirDot(t *testing.T) {
 	for _, dir := range []string{".", "./"} {
-		p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: bad\n    dir: "+dir+"\n")
+		p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: bad\n    dir: "+dir+"\n")
 		_, err := Load(p)
 		if err == nil {
-			t.Fatalf("dir %q: expected error for grove dir collapsing to the tree root", dir)
+			t.Fatalf("dir %q: expected error for worker dir collapsing to the tree root", dir)
 		}
 		if !strings.Contains(err.Error(), "collides with the manager's mount root") {
 			t.Errorf("dir %q: error %q should explain the mount-root collision", dir, err)
 		}
 	}
 	// A normal subdir must still pass.
-	ok := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: good\n    dir: groves/good\n")
+	ok := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: good\n    dir: groves/good\n")
 	if _, err := Load(ok); err != nil {
-		t.Fatalf("a normal grove dir (groves/good) must pass, got %v", err)
+		t.Fatalf("a normal worker dir (groves/good) must pass, got %v", err)
 	}
 }
 
@@ -284,14 +284,14 @@ func TestWorkerImageFallsBackToManagerImage(t *testing.T) {
 	}
 	g0, _ := app.WorkerByName("plain")
 	if got := app.WorkerImage(g0); got != "scionlocal/lever-claude:latest" {
-		t.Fatalf("plain grove image = %q, want manager image", got)
+		t.Fatalf("plain worker image = %q, want manager image", got)
 	}
 	g1, _ := app.WorkerByName("custom")
 	if got := app.WorkerImage(g1); got != "scionlocal/lever-rust:latest" {
-		t.Fatalf("custom grove image = %q, want override", got)
+		t.Fatalf("custom worker image = %q, want override", got)
 	}
 	if _, ok := app.WorkerByName("missing"); ok {
-		t.Fatal("GroveByName(missing) should be false")
+		t.Fatal("WorkerByName(missing) should be false")
 	}
 }
 
@@ -301,7 +301,7 @@ backend: orbstack
 tree: ./tree
 manager:
   image: scionlocal/lever-claude:latest
-groves:
+workers:
   - name: appa
     dir: groves/appa
     image: scionlocal/lever-rust:latest
@@ -311,7 +311,7 @@ groves:
 		t.Fatalf("Load: %v", err)
 	}
 	if app.Workers[0].Image != "scionlocal/lever-rust:latest" {
-		t.Fatalf("grove image = %q", app.Workers[0].Image)
+		t.Fatalf("worker image = %q", app.Workers[0].Image)
 	}
 }
 
@@ -353,7 +353,7 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 		"bad name":         "name: Bad_Name\nbackend: orbstack\ntree: ws\nmanager: {}\n",
 		"bad image":        "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  image: \"bad image;rm\"\n",
 		"prompt traversal": "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  prompt_file: ../../etc/shadow\n",
-		"bad grove name":   "name: demo\nbackend: orbstack\ntree: ws\ngroves:\n  - name: Bad\n    dir: groves/x\n",
+		"bad worker name":  "name: demo\nbackend: orbstack\ntree: ws\nworkers:\n  - name: Bad\n    dir: groves/x\n",
 	}
 	for label, body := range cases {
 		p := writeTmp(t, body)
@@ -372,12 +372,12 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 		config string
 	}{
 		{
-			label:  "grove named manager (default manager identity)",
-			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: manager\n    dir: groves/manager\n",
+			label:  "worker named manager (default manager identity)",
+			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: manager\n    dir: groves/manager\n",
 		},
 		{
-			label:  "grove named with custom manager identity",
-			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  manager_identity: custom-mgr\nmanager: {}\ngroves:\n  - name: custom-mgr\n    dir: groves/grove1\n",
+			label:  "worker named with custom manager identity",
+			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  manager_identity: custom-mgr\nmanager: {}\nworkers:\n  - name: custom-mgr\n    dir: groves/grove1\n",
 		},
 	}
 	for _, tc := range cases {
@@ -385,7 +385,7 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 			p := writeTmp(t, tc.config)
 			_, err := Load(p)
 			if err == nil {
-				t.Fatal("grove name colliding with manager identity must be rejected")
+				t.Fatal("worker name colliding with manager identity must be rejected")
 			}
 			if !strings.Contains(err.Error(), "collides with the manager identity") {
 				t.Errorf("error %q should mention 'collides with the manager identity'", err)
@@ -399,10 +399,10 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 // broker's resolveMsgTarget, messages addressed to that grove would silently
 // route to the manager instead. Config validation must reject the collision.
 func TestValidateRejectsWorkerNameCollidingWithAppName(t *testing.T) {
-	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: demo\n    dir: groves/demo\n")
+	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: demo\n    dir: groves/demo\n")
 	_, err := Load(p)
 	if err == nil {
-		t.Fatal("grove name colliding with the app name must be rejected")
+		t.Fatal("worker name colliding with the app name must be rejected")
 	}
 	if !strings.Contains(err.Error(), "collides with the manager agent") {
 		t.Errorf("error %q should mention 'collides with the manager agent'", err)
@@ -499,9 +499,9 @@ func TestSecurityImagePolicyAppliesToWorkers(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\n" +
 		"security:\n  allowed_image_registries: [scionlocal]\n" +
 		"manager:\n  image: scionlocal/mgr:latest\n" +
-		"groves:\n  - name: g\n    dir: groves/g\n    image: ghcr.io/who/x:latest\n"
+		"workers:\n  - name: g\n    dir: groves/g\n    image: ghcr.io/who/x:latest\n"
 	if _, err := Load(writeTmp(t, body)); err == nil {
-		t.Fatal("grove image outside the allowlist should be rejected")
+		t.Fatal("worker image outside the allowlist should be rejected")
 	}
 }
 
@@ -526,7 +526,7 @@ manager:
   image: scionlocal/mgr
   delegate:
     - {tool: db, op: read, to: [worker]}
-groves:
+workers:
   - {name: worker, dir: work, obtain: []}
 broker:
   llm_auth: subscription
@@ -678,12 +678,12 @@ func TestEffectiveLLMAuthWorkerOverride(t *testing.T) {
 	}
 	// grove inherits broker default when unset
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthAPIKey {
-		t.Fatalf("grove inherit: got %q want api-key", got)
+		t.Fatalf("worker inherit: got %q want api-key", got)
 	}
 	// grove override wins
 	a.Workers[0].LLMAuth = LLMAuthSubscription
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthSubscription {
-		t.Fatalf("grove override: got %q want subscription", got)
+		t.Fatalf("worker override: got %q want subscription", got)
 	}
 }
 
@@ -775,16 +775,16 @@ func TestLoadAcceptsExternalTools(t *testing.T) {
 }
 
 func TestLoadAcceptsWildcardGrantOnCoarseTool(t *testing.T) {
-	cfg := replaceFirst(extCfg, "groves:\n  - {name: worker, dir: work, obtain: []}",
-		"groves:\n  - {name: worker, dir: work, obtain: [{tool: things3, op: \"*\"}]}")
+	cfg := replaceFirst(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
+		"workers:\n  - {name: worker, dir: work, obtain: [{tool: things3, op: \"*\"}]}")
 	if _, err := Load(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("a wildcard grant on a coarse tool must load: %v", err)
 	}
 }
 
 func TestLoadRejectsWildcardGrantOnFineTool(t *testing.T) {
-	cfg := replaceFirst(extCfg, "groves:\n  - {name: worker, dir: work, obtain: []}",
-		"groves:\n  - {name: worker, dir: work, obtain: [{tool: devonthink, op: \"*\"}]}")
+	cfg := replaceFirst(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
+		"workers:\n  - {name: worker, dir: work, obtain: [{tool: devonthink, op: \"*\"}]}")
 	if _, err := Load(writeConfig(t, cfg)); err == nil {
 		t.Fatal("a wildcard grant on a fine tool must be rejected at load")
 	}
@@ -937,7 +937,7 @@ func TestWorkerToWorkerMessagingDefaultsTrue(t *testing.T) {
 			a := &App{}
 			a.Broker.Messaging.WorkerToWorker = c.val
 			if got := a.WorkerToWorkerMessaging(); got != c.want {
-				t.Fatalf("GroveToGroveMessaging() = %v, want %v", got, c.want)
+				t.Fatalf("WorkerToWorkerMessaging() = %v, want %v", got, c.want)
 			}
 		})
 	}

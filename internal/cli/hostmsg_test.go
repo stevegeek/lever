@@ -25,7 +25,7 @@ broker:
   llm_auth: subscription
 manager:
   image: img:1
-groves:
+workers:
   - name: scratch
     dir: groves/scratch
 `

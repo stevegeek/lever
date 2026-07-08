@@ -86,7 +86,7 @@ manager:
   prompt_file: manager.md
   credential_file: %s
   allow_ports: []
-groves:
+workers:
   - name: worker
     dir: groves/worker
 `, name, scionSrc, image, cred))

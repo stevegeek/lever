@@ -215,7 +215,7 @@ type Messaging struct {
 	// WorkerToWorker permits grove→grove sends. nil/unset ⇒ true (allowed);
 	// pointer-bool so an explicit `false` is distinguishable for stricter
 	// hub-and-spoke models.
-	WorkerToWorker *bool `yaml:"grove_to_grove"`
+	WorkerToWorker *bool `yaml:"worker_to_worker"`
 }
 
 // Broker holds broker settings + first-party tool declarations.
@@ -284,7 +284,7 @@ type App struct {
 	Tree     string      `yaml:"tree"`
 	Manager  Manager     `yaml:"manager"`
 	Scion    ScionConfig `yaml:"scion"`
-	Workers  []Worker    `yaml:"groves"`
+	Workers  []Worker    `yaml:"workers"`
 	Security Security    `yaml:"security"`
 	Broker   Broker      `yaml:"broker"`
 
@@ -462,23 +462,23 @@ func (a *App) Validate() error {
 	}
 	for _, g := range a.Workers {
 		if g.Name == "" || g.Dir == "" {
-			return fmt.Errorf("config: grove needs name + dir (got %+v)", g)
+			return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
 		}
 		if !nameRE.MatchString(g.Name) {
-			return fmt.Errorf("config: grove name %q must match %s", g.Name, nameRE)
+			return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
 		}
 		if g.Name == a.ManagerCN() {
-			return fmt.Errorf("config: grove name %q collides with the manager identity — a grove must not share the manager's CN", g.Name)
+			return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
 		}
 		if g.Name == a.Name {
 			// The manager's scion agent slug IS the app name (apply dispatches
 			// it as Grove: app.Name), and the broker routes manager-recipient
 			// matches by slug — a grove named like the app would be shadowed
 			// (messages to it silently route to the manager).
-			return fmt.Errorf("config: grove name %q collides with the manager agent (the app name) — rename the grove or the app", g.Name)
+			return fmt.Errorf("config: worker name %q collides with the manager agent (the app name) — rename the worker or the app", g.Name)
 		}
 		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
-			return fmt.Errorf("config: grove dir %q must be relative and inside the tree", g.Dir)
+			return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
 		}
 		if filepath.Clean(g.Dir) == "." {
 			// A "." dir makes GroveDir(g) == a.Tree, so the grove's jail path
@@ -487,10 +487,10 @@ func (a *App) Validate() error {
 			// would be scoped to the MANAGER's registration/marker instead of its
 			// own. confinedRel already rejects "." for `tree` for the same
 			// root-is-the-mount reason; grove dirs must be a strict subdir.
-			return fmt.Errorf("config: grove %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
+			return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
 		}
 		if g.Image != "" {
-			if err := a.Security.validateImage(fmt.Sprintf("grove %q image", g.Name), g.Image); err != nil {
+			if err := a.Security.validateImage(fmt.Sprintf("worker %q image", g.Name), g.Image); err != nil {
 				return err
 			}
 		}
@@ -518,7 +518,7 @@ func (a *App) validateBroker() error {
 	}
 	for _, g := range a.Workers {
 		if !validMode(g.LLMAuth) {
-			return fmt.Errorf("config: grove %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
+			return fmt.Errorf("config: worker %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
 	}
 	// Mixed instances are UNSUPPORTED: the OAuth credential is a single jail-wide
@@ -682,7 +682,7 @@ func (a *App) validateBrokerGrants() error {
 		return err
 	}
 	for _, g := range a.Workers {
-		if err := validate("grove "+g.Name, g.Obtain, g.Delegate); err != nil {
+		if err := validate("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
 			return err
 		}
 	}
@@ -788,7 +788,7 @@ func (a *App) ManagerPromptPath() string {
 }
 
 // WorkerToWorkerMessaging reports whether groves may message each other
-// (default true; broker.messaging.grove_to_grove: false disables).
+// (default true; broker.messaging.worker_to_worker: false disables).
 func (a *App) WorkerToWorkerMessaging() bool {
 	if v := a.Broker.Messaging.WorkerToWorker; v != nil {
 		return *v

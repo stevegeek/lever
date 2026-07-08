@@ -15,7 +15,7 @@ manager:
     - tool: db
       op: read
       to: [worker]
-groves:
+workers:
   - name: worker
     dir: groves/worker
     # Empty obtain: the worker holds NO self-mint authority. It can only exercise

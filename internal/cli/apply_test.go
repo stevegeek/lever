@@ -30,7 +30,7 @@ broker:
 manager:
   image: scionlocal/lever-claude:latest
   allow_ports: [3305]
-groves:
+workers:
   - name: worker
     dir: groves/worker
 `

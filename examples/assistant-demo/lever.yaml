@@ -48,7 +48,7 @@ manager:
   obtain:
     - { tool: weather, op: "*" }          # the manager may mint a weather capability
 
-groves:
+workers:
   - name: todo
     dir: groves/todo
     obtain:

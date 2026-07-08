@@ -13,6 +13,6 @@ manager:
   prompt_file: manager.md
   credential_file: ~/.scion/oauth-token  # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []
-groves:
+workers:
   - name: worker
     dir: groves/worker

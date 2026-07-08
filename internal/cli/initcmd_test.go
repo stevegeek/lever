@@ -19,7 +19,7 @@ func initFixture(t *testing.T) string {
 	// llm_auth defaults to api-key (which requires broker.api_key_file to
 	// exist at 0600); force subscription mode so the fixture needs no key
 	// file. tree + groves are kept exactly as given in the brief.
-	yaml := "name: testapp\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\ngroves:\n  - name: scratch\n    dir: groves/scratch\n"
+	yaml := "name: testapp\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nworkers:\n  - name: scratch\n    dir: groves/scratch\n"
 	if err := os.WriteFile(filepath.Join(root, "lever.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}

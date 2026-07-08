@@ -11,7 +11,7 @@ manager:
   image: scionlocal/lever-claude:latest
   prompt_file: manager.md
   allow_ports: []
-groves:
+workers:
   - name: producer
     dir: groves/producer
   - name: consumer

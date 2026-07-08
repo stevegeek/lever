@@ -19,7 +19,7 @@ func writeTmpConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	tree := filepath.Join(dir, "tree")
-	if err := os.MkdirAll(filepath.Join(tree, "groves", "worker"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tree, "workers", "worker"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := `name: demo
@@ -32,7 +32,7 @@ manager:
   allow_ports: [3305]
 workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker
 `
 	p := filepath.Join(dir, "app.yaml")
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
@@ -158,11 +158,11 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	if deps.RemoveScionProjectConfigs == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.RemoveScionProjectConfigs")
 	}
-	if err := deps.RemoveScionProjectConfigs(context.Background(), "/lever/groves/worker"); err != nil {
+	if err := deps.RemoveScionProjectConfigs(context.Background(), "/lever/workers/worker"); err != nil {
 		t.Fatalf("RemoveScionProjectConfigs: %v", err)
 	}
-	if len(sb.removeScionCalls) != 1 || sb.removeScionCalls[0] != "/lever/groves/worker" {
-		t.Fatalf("backend.RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever/groves/worker\"", sb.removeScionCalls)
+	if len(sb.removeScionCalls) != 1 || sb.removeScionCalls[0] != "/lever/workers/worker" {
+		t.Fatalf("backend.RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever/workers/worker\"", sb.removeScionCalls)
 	}
 }
 
@@ -186,15 +186,15 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	if deps.ScionProjectRegistered == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.ScionProjectRegistered")
 	}
-	ok, err := deps.ScionProjectRegistered(context.Background(), "/lever/groves/worker")
+	ok, err := deps.ScionProjectRegistered(context.Background(), "/lever/workers/worker")
 	if err != nil {
 		t.Fatalf("ScionProjectRegistered: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected the stubbed true result to pass through")
 	}
-	if len(sb.registeredCalls) != 1 || sb.registeredCalls[0] != "/lever/groves/worker" {
-		t.Fatalf("backend.ScionProjectRegistered calls = %+v, want exactly one call with \"/lever/groves/worker\"", sb.registeredCalls)
+	if len(sb.registeredCalls) != 1 || sb.registeredCalls[0] != "/lever/workers/worker" {
+		t.Fatalf("backend.ScionProjectRegistered calls = %+v, want exactly one call with \"/lever/workers/worker\"", sb.registeredCalls)
 	}
 }
 

@@ -13,13 +13,13 @@ func initFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	tree := filepath.Join(root, "workspace")
-	if err := os.MkdirAll(filepath.Join(tree, "groves", "scratch"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tree, "workers", "scratch"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// llm_auth defaults to api-key (which requires broker.api_key_file to
 	// exist at 0600); force subscription mode so the fixture needs no key
 	// file. tree + groves are kept exactly as given in the brief.
-	yaml := "name: testapp\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nworkers:\n  - name: scratch\n    dir: groves/scratch\n"
+	yaml := "name: testapp\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nworkers:\n  - name: scratch\n    dir: workers/scratch\n"
 	if err := os.WriteFile(filepath.Join(root, "lever.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestInitScaffoldsAndIsIdempotent(t *testing.T) {
 	}
 	for _, p := range []string{
 		filepath.Join(root, "workspace", ".claude", "skills", "lever-operator", "SKILL.md"),
-		filepath.Join(root, "workspace", "groves", "scratch", ".claude", "skills", "lever-agent", "SKILL.md"),
+		filepath.Join(root, "workspace", "workers", "scratch", ".claude", "skills", "lever-agent", "SKILL.md"),
 		filepath.Join(root, "workspace", "CLAUDE.md"),
 		filepath.Join(root, ".lever-state", "skills.json"),
 	} {

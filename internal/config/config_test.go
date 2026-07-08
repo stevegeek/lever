@@ -18,7 +18,7 @@ func writeTmp(t *testing.T, body string) string {
 	}
 	dir := t.TempDir()
 	tree := filepath.Join(dir, "tree")
-	_ = os.MkdirAll(filepath.Join(tree, "groves", "appa"), 0o755)
+	_ = os.MkdirAll(filepath.Join(tree, "workers", "appa"), 0o755)
 	p := filepath.Join(dir, "app.yaml")
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ manager:
   allow_ports: [3305]
 workers:
   - name: appa
-    dir: groves/appa
+    dir: workers/appa
 `)
 	app, err := Load(p)
 	if err != nil {
@@ -188,9 +188,9 @@ func TestValidateRejectsWorkerDirDot(t *testing.T) {
 		}
 	}
 	// A normal subdir must still pass.
-	ok := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: good\n    dir: groves/good\n")
+	ok := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: good\n    dir: workers/good\n")
 	if _, err := Load(ok); err != nil {
-		t.Fatalf("a normal worker dir (groves/good) must pass, got %v", err)
+		t.Fatalf("a normal worker dir (workers/good) must pass, got %v", err)
 	}
 }
 
@@ -278,8 +278,8 @@ func TestWorkerImageFallsBackToManagerImage(t *testing.T) {
 	app := &App{
 		Manager: Manager{Image: "scionlocal/lever-claude:latest"},
 		Workers: []Worker{
-			{Name: "plain", Dir: "groves/plain"},
-			{Name: "custom", Dir: "groves/custom", Image: "scionlocal/lever-rust:latest"},
+			{Name: "plain", Dir: "workers/plain"},
+			{Name: "custom", Dir: "workers/custom", Image: "scionlocal/lever-rust:latest"},
 		},
 	}
 	g0, _ := app.WorkerByName("plain")
@@ -303,7 +303,7 @@ manager:
   image: scionlocal/lever-claude:latest
 workers:
   - name: appa
-    dir: groves/appa
+    dir: workers/appa
     image: scionlocal/lever-rust:latest
 `)
 	app, err := Load(p)
@@ -353,7 +353,7 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 		"bad name":         "name: Bad_Name\nbackend: orbstack\ntree: ws\nmanager: {}\n",
 		"bad image":        "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  image: \"bad image;rm\"\n",
 		"prompt traversal": "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  prompt_file: ../../etc/shadow\n",
-		"bad worker name":  "name: demo\nbackend: orbstack\ntree: ws\nworkers:\n  - name: Bad\n    dir: groves/x\n",
+		"bad worker name":  "name: demo\nbackend: orbstack\ntree: ws\nworkers:\n  - name: Bad\n    dir: workers/x\n",
 	}
 	for label, body := range cases {
 		p := writeTmp(t, body)
@@ -373,11 +373,11 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 	}{
 		{
 			label:  "worker named manager (default manager identity)",
-			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: manager\n    dir: groves/manager\n",
+			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: manager\n    dir: workers/manager\n",
 		},
 		{
 			label:  "worker named with custom manager identity",
-			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  manager_identity: custom-mgr\nmanager: {}\nworkers:\n  - name: custom-mgr\n    dir: groves/grove1\n",
+			config: "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  manager_identity: custom-mgr\nmanager: {}\nworkers:\n  - name: custom-mgr\n    dir: workers/grove1\n",
 		},
 	}
 	for _, tc := range cases {
@@ -399,7 +399,7 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 // broker's resolveMsgTarget, messages addressed to that grove would silently
 // route to the manager instead. Config validation must reject the collision.
 func TestValidateRejectsWorkerNameCollidingWithAppName(t *testing.T) {
-	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: demo\n    dir: groves/demo\n")
+	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: demo\n    dir: workers/demo\n")
 	_, err := Load(p)
 	if err == nil {
 		t.Fatal("worker name colliding with the app name must be rejected")
@@ -499,7 +499,7 @@ func TestSecurityImagePolicyAppliesToWorkers(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\n" +
 		"security:\n  allowed_image_registries: [scionlocal]\n" +
 		"manager:\n  image: scionlocal/mgr:latest\n" +
-		"workers:\n  - name: g\n    dir: groves/g\n    image: ghcr.io/who/x:latest\n"
+		"workers:\n  - name: g\n    dir: workers/g\n    image: ghcr.io/who/x:latest\n"
 	if _, err := Load(writeTmp(t, body)); err == nil {
 		t.Fatal("worker image outside the allowlist should be rejected")
 	}

@@ -35,8 +35,8 @@ func TestProjectFlag(t *testing.T) {
 	if got := projectFlag(""); len(got) != 0 {
 		t.Fatalf("empty project should yield no flag, got %v", got)
 	}
-	got := projectFlag("/x/groves/a")
-	if len(got) != 2 || got[0] != "-g" || got[1] != "/x/groves/a" {
+	got := projectFlag("/x/workers/a")
+	if len(got) != 2 || got[0] != "-g" || got[1] != "/x/workers/a" {
 		t.Fatalf("got %v", got)
 	}
 }

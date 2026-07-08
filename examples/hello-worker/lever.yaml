@@ -1,5 +1,5 @@
 # hello-grove: the smallest agent-manager application, a manager + one grove.
-name: hello-grove
+name: hello-worker
 backend: orbstack
 tree: workspace
 scion:
@@ -15,4 +15,4 @@ manager:
   allow_ports: []
 workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker

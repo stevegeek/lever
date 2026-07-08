@@ -18,7 +18,7 @@ func repoRoot(t *testing.T) string {
 
 func TestShippedExamplesLoadAndValidate(t *testing.T) {
 	root := repoRoot(t)
-	for _, name := range []string{"hello-grove", "two-agents-comms", "multi-project"} {
+	for _, name := range []string{"hello-worker", "two-agents-comms", "multi-project"} {
 		p := filepath.Join(root, "examples", name, "lever.yaml")
 		app, err := Load(p)
 		if err != nil {

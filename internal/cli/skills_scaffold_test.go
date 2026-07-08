@@ -15,12 +15,12 @@ func scaffoldFixture(t *testing.T) (*config.App, string, string) {
 	t.Helper()
 	root := t.TempDir()
 	tree := filepath.Join(root, "workspace")
-	for _, d := range []string{filepath.Join(tree, "groves", "scratch"), filepath.Join(root, ".lever-state")} {
+	for _, d := range []string{filepath.Join(tree, "workers", "scratch"), filepath.Join(root, ".lever-state")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "groves/scratch"}}}
+	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}}
 	return app, tree, filepath.Join(root, ".lever-state")
 }
 
@@ -52,7 +52,7 @@ func TestSyncSkillsFreshCreatesAllAndRecordsHashes(t *testing.T) {
 		}
 	}
 	op := filepath.Join(tree, ".claude", "skills", "lever-operator", "SKILL.md")
-	ag := filepath.Join(tree, "groves", "scratch", ".claude", "skills", "lever-agent", "SKILL.md")
+	ag := filepath.Join(tree, "workers", "scratch", ".claude", "skills", "lever-agent", "SKILL.md")
 	for _, p := range []string{op, ag} {
 		b, err := os.ReadFile(p)
 		if err != nil {

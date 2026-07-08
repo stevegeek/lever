@@ -13,6 +13,6 @@ manager:
   allow_ports: []
 workers:
   - name: producer
-    dir: groves/producer
+    dir: workers/producer
   - name: consumer
-    dir: groves/consumer
+    dir: workers/consumer

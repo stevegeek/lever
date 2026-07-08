@@ -50,6 +50,6 @@ manager:
 
 workers:
   - name: todo
-    dir: groves/todo
+    dir: workers/todo
     obtain:
       - { tool: todo, op: list }          # the todo grove may mint a todo/list capability

@@ -27,7 +27,7 @@ manager:
   image: img:1
 workers:
   - name: scratch
-    dir: groves/scratch
+    dir: workers/scratch
 `
 	if err := os.WriteFile(filepath.Join(dir, config.CanonicalName), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 		t.Fatalf("want exactly 1 scion call, got %d: %+v", len(fr.Calls), fr.Calls)
 	}
 	got := strings.Join(fr.Calls[0].Args, " ")
-	for _, want := range []string{"agent:scratch", "--interrupt", "-g /lever/groves/scratch"} {
+	for _, want := range []string{"agent:scratch", "--interrupt", "-g /lever/workers/scratch"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
 		}

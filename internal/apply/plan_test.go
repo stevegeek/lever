@@ -66,7 +66,7 @@ func TestPlanOrder(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img", AllowPorts: []int{3305}},
-		Workers: []config.Worker{{Name: "appa", Dir: "groves/appa"}, {Name: "appb", Dir: "groves/appb"}},
+		Workers: []config.Worker{{Name: "appa", Dir: "workers/appa"}, {Name: "appb", Dir: "workers/appb"}},
 	}
 	steps := Plan(app, PlanOpts{})
 	var kinds []string
@@ -84,10 +84,10 @@ func TestPlanOrder(t *testing.T) {
 	}
 	// register-grove targets: first grove is at index 7, second at index 8
 	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-grove 8:register-grove 9:mint-manager-bootstrap 10:start-manager)
-	if steps[7].Target != "/t/groves/appa" {
+	if steps[7].Target != "/t/workers/appa" {
 		t.Fatalf("register-worker[0] target=%q", steps[7].Target)
 	}
-	if steps[8].Target != "/t/groves/appb" {
+	if steps[8].Target != "/t/workers/appb" {
 		t.Fatalf("register-worker[1] target=%q", steps[8].Target)
 	}
 }
@@ -154,7 +154,7 @@ func TestApplyPlan_noWriteManifest(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img"},
-		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	for _, s := range Plan(app, PlanOpts{}) {
 		if s.Kind == "write-manifest" {
@@ -168,9 +168,9 @@ func TestPlanLoadsDistinctWorkerImages(t *testing.T) {
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "mgr:1"},
 		Workers: []config.Worker{
-			{Name: "a", Dir: "groves/a"},                 // inherits mgr:1
-			{Name: "b", Dir: "groves/b", Image: "alt:1"}, // override
-			{Name: "c", Dir: "groves/c", Image: "alt:1"}, // dup override
+			{Name: "a", Dir: "workers/a"},                 // inherits mgr:1
+			{Name: "b", Dir: "workers/b", Image: "alt:1"}, // override
+			{Name: "c", Dir: "workers/c", Image: "alt:1"}, // dup override
 		},
 	}
 	var loads []string

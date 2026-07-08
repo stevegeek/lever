@@ -13,7 +13,7 @@ import (
 )
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {
-	out := "MARKER 1\nENTRY lever__c857bb16 /lever\nENTRY scratch__b3b56fb7 /lever/groves/scratch\n"
+	out := "MARKER 1\nENTRY lever__c857bb16 /lever\nENTRY scratch__b3b56fb7 /lever/workers/scratch\n"
 	st := parseScionState(out)
 	if !st.MarkerPresent {
 		t.Fatal("MARKER 1 must parse as present")
@@ -24,7 +24,7 @@ func TestParseScionStateMarkerAndEntries(t *testing.T) {
 	if st.Entries[0].Name != "lever__c857bb16" || st.Entries[0].WorkspacePath != "/lever" {
 		t.Fatalf("entry 0 wrong: %+v", st.Entries[0])
 	}
-	if st.Entries[1].WorkspacePath != "/lever/groves/scratch" {
+	if st.Entries[1].WorkspacePath != "/lever/workers/scratch" {
 		t.Fatalf("entry 1 workspace wrong: %+v", st.Entries[1])
 	}
 }
@@ -69,7 +69,7 @@ func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 			f.Script(strings.Join(shape.userPrefix, " "), leverexec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix}
 
-			if err := g.RemoveScionProjectConfigs(context.Background(), "/lever/groves/scratch"); err != nil {
+			if err := g.RemoveScionProjectConfigs(context.Background(), "/lever/workers/scratch"); err != nil {
 				t.Fatalf("RemoveScionProjectConfigs: %v", err)
 			}
 			if len(f.Calls) != 1 {
@@ -81,7 +81,7 @@ func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 				t.Fatalf("call = %+v, want name %q then prefix %v", call, shape.userPrefix[0], wantPrefix)
 			}
 			script := call.Args[len(call.Args)-1]
-			if !strings.Contains(script, "'/lever/groves/scratch'") {
+			if !strings.Contains(script, "'/lever/workers/scratch'") {
 				t.Errorf("script missing quoted target workspace path: %q", script)
 			}
 			if !strings.Contains(script, "project-configs") || !strings.Contains(script, "workspace_path:") {
@@ -140,7 +140,7 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	// the grove path, one has no workspace_path line at all.
 	mgr1 := writeProjectConfig(t, home, "lever__aaaa1111", "/lever")
 	mgr2 := writeProjectConfig(t, home, "lever__bbbb2222", "/lever")
-	worker := writeProjectConfig(t, home, "worker__cccc3333", "/lever/groves/worker")
+	worker := writeProjectConfig(t, home, "worker__cccc3333", "/lever/workers/worker")
 	noWP := writeProjectConfig(t, home, "legacy__dddd4444", "")
 
 	run := func() {
@@ -162,7 +162,7 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 		t.Errorf("mgr2 (%s) should have been removed", mgr2)
 	}
 	if !exists(worker) {
-		t.Errorf("grove (%s, workspace_path /lever/groves/worker) must survive an exact-match /lever removal", worker)
+		t.Errorf("grove (%s, workspace_path /lever/workers/worker) must survive an exact-match /lever removal", worker)
 	}
 	if !exists(noWP) {
 		t.Errorf("no-workspace_path entry (%s) must survive", noWP)
@@ -233,7 +233,7 @@ func TestScionProjectRegisteredEntryWithoutMarker(t *testing.T) {
 func TestScionProjectRegisteredIgnoresOtherWorkspacePaths(t *testing.T) {
 	st := backend.ScionProjectState{
 		MarkerPresent: true, // this workspace's own marker
-		Entries:       []backend.ScionProjectEntry{{Name: "worker__cccc3333", WorkspacePath: "/lever/groves/worker"}},
+		Entries:       []backend.ScionProjectEntry{{Name: "worker__cccc3333", WorkspacePath: "/lever/workers/worker"}},
 	}
 	if scionProjectRegistered(st, "/lever") {
 		t.Fatal("an entry for a different workspace path must not count as this one's registration")

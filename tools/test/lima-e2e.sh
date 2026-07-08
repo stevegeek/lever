@@ -83,8 +83,8 @@ export LEVER_AGENT_BIN="$BIN/lever-agent"
 # but on backend: lima, with an absolute tool path and a dummy 0600 api-key file
 # for the closed (api-key) posture. The db tool auto-seeds ref.db (tables A/B/C).
 say "build instance $INST"
-mkdir -p "$INST/workspace" "$INST/groves/worker"
-touch "$INST/workspace/.gitkeep" "$INST/groves/worker/.gitkeep"
+mkdir -p "$INST/workspace" "$INST/workers/worker"
+touch "$INST/workspace/.gitkeep" "$INST/workers/worker/.gitkeep"
 cat > "$INST/manager.md" <<'EOF'
 Manager: bring up the worker grove and delegate db.read to it for the acceptance run.
 EOF
@@ -119,9 +119,9 @@ manager:
     - tool: db
       op: read
       to: [worker]
-groves:
+workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker
     obtain: []
 broker:
   jail_port: $JAIL_PORT

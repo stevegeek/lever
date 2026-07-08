@@ -1119,7 +1119,7 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
-		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	var jailUp, loadImg bool
 	deps := Deps{
@@ -1175,7 +1175,7 @@ func TestRunCredentialStep(t *testing.T) {
 
 func TestStartManagerPassesPrompt(t *testing.T) {
 	dir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(dir, "workspace", "groves", "worker"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "workspace", "workers", "worker"), 0o755)
 	// prompt lives at the instance ROOT (host-only), NOT under the mounted tree.
 	if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Dispatch the worker grove to create HELLO."), 0o644); err != nil {
 		t.Fatal(err)
@@ -1305,7 +1305,7 @@ func TestJailPathTranslation(t *testing.T) {
 		host, tree, mount, want string
 	}{
 		{"/tmp/foo", "/tmp/foo", "/lever", "/lever"},
-		{"/tmp/foo/groves/worker", "/tmp/foo", "/lever", "/lever/groves/worker"},
+		{"/tmp/foo/workers/worker", "/tmp/foo", "/lever", "/lever/workers/worker"},
 		{"/tmp/foo", "/tmp/foo", "", "/tmp/foo"},
 		{"/elsewhere", "/tmp/foo", "/lever", "/elsewhere"},
 	}
@@ -1467,7 +1467,7 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
-		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	var removeCalls []string
 	var initCalls []string
@@ -1506,8 +1506,8 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	if removeCalls[0] != "/lever" {
 		t.Errorf("manager remove call path = %q, want /lever", removeCalls[0])
 	}
-	if removeCalls[1] != "/lever/groves/worker" {
-		t.Errorf("grove remove call path = %q, want /lever/groves/worker", removeCalls[1])
+	if removeCalls[1] != "/lever/workers/worker" {
+		t.Errorf("grove remove call path = %q, want /lever/workers/worker", removeCalls[1])
 	}
 	// Manager's remove call must precede ANY init (count 0); the grove's remove
 	// call runs after the manager's own init (which already ran, since
@@ -1582,7 +1582,7 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
-		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	var removeJailCalls, removeConfigCalls, registeredCalls []string
 	deps := Deps{
@@ -1606,8 +1606,8 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(registeredCalls) != 2 || registeredCalls[0] != "/lever" || registeredCalls[1] != "/lever/groves/worker" {
-		t.Fatalf("ScionProjectRegistered calls = %+v, want [/lever /lever/groves/worker]", registeredCalls)
+	if len(registeredCalls) != 2 || registeredCalls[0] != "/lever" || registeredCalls[1] != "/lever/workers/worker" {
+		t.Fatalf("ScionProjectRegistered calls = %+v, want [/lever /lever/workers/worker]", registeredCalls)
 	}
 	if len(removeJailCalls) != 0 {
 		t.Errorf("RemoveJailFile should not be called when already registered; got %+v", removeJailCalls)
@@ -1764,7 +1764,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
-		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	deps := Deps{
 		JailUp:    func(context.Context, *config.App) error { return nil },
@@ -1782,14 +1782,14 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 			switch c.Dir {
 			case "/lever":
 				managerInit = true
-			case "/lever/groves/worker":
+			case "/lever/workers/worker":
 				workerInit = true
 			default:
 				t.Errorf("init call used host dir %q, want jail path", c.Dir)
 			}
 		}
 		if strings.Contains(j, "hub link") {
-			if c.Dir != "/lever" && c.Dir != "/lever/groves/worker" {
+			if c.Dir != "/lever" && c.Dir != "/lever/workers/worker" {
 				t.Errorf("hub link call used host dir %q, want jail path", c.Dir)
 			}
 		}
@@ -1798,7 +1798,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 		t.Errorf("manager init not run with dir /lever")
 	}
 	if !workerInit {
-		t.Errorf("grove init not run with dir /lever/groves/worker")
+		t.Errorf("grove init not run with dir /lever/workers/worker")
 	}
 }
 

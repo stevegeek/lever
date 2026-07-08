@@ -70,10 +70,10 @@ func TestApplyLiveHelloWorker(t *testing.T) {
 	mustWrite(t, filepath.Join(tree, "manager.md"),
 		"Create a file named HELLO in your current working directory. Its contents must be\n"+
 			"exactly:\n\n"+wantHello+"\n\nThen you are done — do not do anything else.\n")
-	if err := os.MkdirAll(filepath.Join(tree, "groves", "worker"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tree, "workers", "worker"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mustWrite(t, filepath.Join(tree, "groves", "worker", ".keep"), "")
+	mustWrite(t, filepath.Join(tree, "workers", "worker", ".keep"), "")
 
 	const name = "leverit"
 	mustWrite(t, filepath.Join(tree, "lever.yaml"), fmt.Sprintf(`name: %s
@@ -88,7 +88,7 @@ manager:
   allow_ports: []
 workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker
 `, name, scionSrc, image, cred))
 
 	machine := "lever-" + name

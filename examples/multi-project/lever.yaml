@@ -13,8 +13,8 @@ manager:
   allow_ports: []
 workers:
   - name: svc-a
-    dir: groves/svc-a
+    dir: workers/svc-a
   - name: svc-b
-    dir: groves/svc-b
+    dir: workers/svc-b
   - name: svc-c
-    dir: groves/svc-c
+    dir: workers/svc-c

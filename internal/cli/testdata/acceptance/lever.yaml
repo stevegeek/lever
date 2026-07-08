@@ -17,7 +17,7 @@ manager:
       to: [worker]
 workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker
     # Empty obtain: the worker holds NO self-mint authority. It can only exercise
     # capabilities the manager delegated to it. This is the no-self-path invariant.
     obtain: []

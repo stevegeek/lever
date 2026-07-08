@@ -14,8 +14,8 @@ func attachApp() *config.App {
 	return &config.App{
 		Name: "assistant",
 		Workers: []config.Worker{
-			{Name: "scratch", Dir: "groves/scratch"},
-			{Name: "worker", Dir: "groves/worker"},
+			{Name: "scratch", Dir: "workers/scratch"},
+			{Name: "worker", Dir: "workers/worker"},
 		},
 	}
 }
@@ -45,8 +45,8 @@ func TestAttachTargetWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attachTarget: %v", err)
 	}
-	if slug != "scratch" || project != "/lever/groves/scratch" {
-		t.Fatalf("got (%q, %q), want (scratch, /lever/groves/scratch)", slug, project)
+	if slug != "scratch" || project != "/lever/workers/scratch" {
+		t.Fatalf("got (%q, %q), want (scratch, /lever/workers/scratch)", slug, project)
 	}
 }
 

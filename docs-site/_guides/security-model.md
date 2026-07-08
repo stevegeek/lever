@@ -282,8 +282,8 @@ authenticated with a **controller PAT**: a Scion hub token scoped to exactly
 alone 403s on `start`, since scion gates every interactive verb, including `start`, on
 `agent:attach`). It is:
 
-- **Minted through a throwaway, host-only hub.** Before any agent container exists, bring-up starts
-  a temporary `scion server --dev-auth=true` on a random port no agent ever learns, initializes the
+- **Minted through a throwaway, jail-local hub.** Before any agent container exists, bring-up starts
+  a temporary `scion server --dev-auth=true` on a fixed private port (48080) no agent ever learns, initializes the
   instance's single project against it, mints the PAT, then kills that throwaway server (removing
   the dev-auth token file it left behind) and starts the real `--dev-auth=false` hub agents actually
   run against.

@@ -187,7 +187,7 @@ You'll see the ordered plan:
 ```
 
 `bootstrap-token` mints the controller PAT that drives every later scion verb: a **throwaway**
-dev-auth-on hub, host-only on a random port no agent ever learns, registers the instance project,
+dev-auth-on hub on a fixed jail-internal port (48080) no agent ever learns, registers the instance project,
 mints a token scoped to exactly `agent:manage,agent:attach,project:read`, persists it `0600` under
 `.lever-state/`, then is killed. `scion-server` then starts the **real** hub with `--dev-auth=false`
 — agents never see an admin-open hub. `credential` (shown here because this example sets
@@ -270,8 +270,9 @@ lever-manager msg send "answer" --to worker
 ```
 
 `msg` and `watch` are thin mTLS clients of the broker (`/msg/send`, `/msg/list`), not of scion
-directly: a scion CLI call made inside a container is pinned to that container's own project, so
-the broker (host-side, operator identity) is what actually routes the message. `--to` takes
+directly: an in-container scion CLI call has no hub credential to authenticate with in the first
+place (dev-auth is off and no agent holds the controller PAT), so the broker (host-side, operator
+identity) is what actually routes the message. `--to` takes
 `agent:<name>`, a bare `<name>`, or the alias `user:manager` (routes to the manager agent; scion's
 own user-messaging is container-only, so no other `user:*` form is broker-routable). Routing is
 identity-derived and default-deny: the manager may message any declared worker and read any inbox

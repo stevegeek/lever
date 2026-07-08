@@ -23,7 +23,8 @@ func TestWorkerSpecs(t *testing.T) {
 		t.Fatalf("specs = %d, want 2", len(specs))
 	}
 	w := specs[0]
-	if w.Name != "worker" || w.JailProject != "/lever/workers/worker" ||
+	if w.Name != "worker" || w.Workspace != "/lever/workers/worker" ||
+		w.HostWorkspace != filepath.Join("/host/tree", "workers/worker") ||
 		w.BootstrapDir != filepath.Join("/host/tree", "workers/worker", ".lever") ||
 		w.Image != "mgr:img" /* inherits manager */ || !w.APIKey {
 		t.Fatalf("bad worker spec: %+v", w)

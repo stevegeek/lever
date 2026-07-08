@@ -82,9 +82,11 @@ type Config struct {
 	BrokerCAPEM string
 	BrokerURL   string
 
-	// ManagerProject is the manager's own scion project (-g), used when a
-	// message is addressed to the manager's agent identity.
-	ManagerProject string
+	// InstanceProject is the single Scion project (-g) that the manager and
+	// all workers are agents in; = the jail mount root. Used when a message
+	// is addressed to the manager's agent identity, and as the constant -g
+	// for every worker dispatch/lifecycle/list call.
+	InstanceProject string
 	// ManagerSlug is the manager's scion agent slug — the app name (apply's
 	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
 	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
@@ -118,9 +120,9 @@ type Broker struct {
 	brokerCAPEM string
 	brokerURL   string
 
-	managerProject string
-	managerSlug    string // the manager's scion agent slug (app name), ≠ the cert CN
-	workerToWorker bool
+	instanceProject string
+	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
+	workerToWorker  bool
 
 	mu           sync.Mutex
 	minEpoch     int
@@ -173,7 +175,7 @@ func New(c Config) *Broker {
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
 		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
-		managerProject: c.ManagerProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
+		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 	}
 }
 

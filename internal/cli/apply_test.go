@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 )
@@ -198,6 +199,50 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	}
 }
 
+// TestBuildApplyDepsWiresEnsureControllerPAT verifies buildApplyDeps wires
+// Deps.EnsureControllerPAT to the real ensureControllerPAT (see its doc in
+// apply.go), threading through the jail runner, a state dir derived from the
+// config path, app.Tree, and the stub backend's MountDest — exercising the
+// same mint window as TestEnsureControllerPATMintsThenNoOps, but through the
+// buildApplyDeps wiring rather than calling ensureControllerPAT directly.
+func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := leverexec.NewFakeRunner()
+	f.Script("scion server start", leverexec.Result{})
+	f.Script("scion list", leverexec.Result{})
+	f.Script("scion init", leverexec.Result{})
+	f.Script("scion hub link", leverexec.Result{})
+	f.Script("scion hub token create", leverexec.Result{Stdout: "pat-wired-abc\n"})
+	f.Script("scion server stop", leverexec.Result{})
+	f.Script("sh", leverexec.Result{})
+	sb := &stubBackend{runner: f}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if deps.EnsureControllerPAT == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.EnsureControllerPAT")
+	}
+	if err := deps.EnsureControllerPAT(context.Background()); err != nil {
+		t.Fatalf("EnsureControllerPAT: %v", err)
+	}
+
+	state := brokerctl.StateDir(filepath.Dir(p))
+	tok, err := state.LoadControllerPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "pat-wired-abc" {
+		t.Fatalf("persisted PAT = %q, want %q (buildApplyDeps' state dir must derive from configPath)", tok, "pat-wired-abc")
+	}
+}
+
 // TestBuildApplyDepsWiresRearmBootstrap verifies buildApplyDeps wires
 // Deps.RearmBootstrap (fix/rearm-bootstrap-on-create — see its doc in
 // internal/apply/run.go). RearmBootstrap's real implementation stops+restarts
@@ -267,5 +312,117 @@ func TestBrokerServeCmdIsDetachedAndLogged(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("env missing %q", want)
 		}
+	}
+}
+
+// callIndex returns the index of the first call in calls satisfying pred, or
+// -1 if none matches. Helper for the ordered-call assertions below.
+func callIndex(calls []leverexec.Call, pred func(leverexec.Call) bool) int {
+	for i, c := range calls {
+		if pred(c) {
+			return i
+		}
+	}
+	return -1
+}
+
+func callHasPrefix(c leverexec.Call, prefix string) bool {
+	full := strings.TrimSpace(c.Name + " " + strings.Join(c.Args, " "))
+	return strings.HasPrefix(full, prefix)
+}
+
+// TestEnsureControllerPATMintsThenNoOps drives the whole mint window (see
+// ensureControllerPAT's doc in apply.go) against a fake runner: the first call
+// must run the throwaway server start → init → hub link → hub token create
+// (exact scopes, no agent:message) → persist 0600 → stop → best-effort
+// dev-token removal, IN THAT ORDER; a second call, with the PAT now
+// persisted, must be a complete no-op (no new runner calls at all — in
+// particular no second throwaway server start).
+func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
+	tree := t.TempDir()
+	state := brokerctl.StateDir(t.TempDir())
+	const jailMount = "/lever"
+
+	f := leverexec.NewFakeRunner()
+	f.Script("scion server start", leverexec.Result{})
+	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll, run inside ServerStart
+	f.Script("scion init", leverexec.Result{})
+	f.Script("scion hub link", leverexec.Result{})
+	f.Script("scion hub token create", leverexec.Result{Stdout: "pat-mint-xyz\n"})
+	f.Script("scion server stop", leverexec.Result{})
+	f.Script("sh", leverexec.Result{})
+
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount); err != nil {
+		t.Fatalf("ensureControllerPAT: %v", err)
+	}
+
+	// Persisted 0600 with the minted token.
+	fi, err := os.Stat(state.ControllerPAT())
+	if err != nil {
+		t.Fatalf("controller.pat not written: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("controller.pat perm = %#o, want 0600", perm)
+	}
+	tok, err := state.LoadControllerPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "pat-mint-xyz" {
+		t.Fatalf("persisted PAT = %q, want %q", tok, "pat-mint-xyz")
+	}
+
+	iStart := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server start") })
+	iInit := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion init") })
+	iLink := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub link") })
+	iToken := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") })
+	iStop := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server stop") })
+	iRm := callIndex(f.Calls, func(c leverexec.Call) bool { return c.Name == "sh" })
+	if iStart < 0 || iInit < 0 || iLink < 0 || iToken < 0 || iStop < 0 || iRm < 0 {
+		t.Fatalf("missing expected call(s); calls=%+v", f.Calls)
+	}
+	if !(iStart < iInit && iInit < iLink && iLink < iToken && iToken < iStop) {
+		t.Fatalf("calls out of order: start=%d init=%d link=%d token=%d stop=%d", iStart, iInit, iLink, iToken, iStop)
+	}
+
+	// Fixed throwaway port, distinct from the real hub's 8080; dev-auth ON.
+	startArgs := strings.Join(f.Calls[iStart].Args, " ")
+	if !strings.Contains(startArgs, "--port 48080") || !strings.Contains(startArgs, "--dev-auth=true") {
+		t.Fatalf("throwaway server start args = %q, want --port 48080 --dev-auth=true", startArgs)
+	}
+
+	// init/hub-link run inside the jail project dir (the tree root).
+	if f.Calls[iInit].Dir != jailMount {
+		t.Fatalf("init dir = %q, want %q", f.Calls[iInit].Dir, jailMount)
+	}
+	if f.Calls[iLink].Dir != jailMount {
+		t.Fatalf("hub link dir = %q, want %q", f.Calls[iLink].Dir, jailMount)
+	}
+
+	// Exact scopes string — no agent:message (every interactive verb,
+	// message included, gates on agent:attach; see the P3 plan).
+	tokenArgs := strings.Join(f.Calls[iToken].Args, " ")
+	if !strings.Contains(tokenArgs, "--scopes agent:manage,agent:attach,project:read") {
+		t.Fatalf("hub token create args = %q, want --scopes agent:manage,agent:attach,project:read", tokenArgs)
+	}
+
+	// Best-effort dev-token removal ran through the SAME jail runner as an
+	// `sh -c` guard (mirrors Deps.RemoveJailFile's script — see
+	// removeJailFileScript).
+	rm := f.Calls[iRm]
+	if len(rm.Args) != 4 || rm.Args[0] != "-c" || rm.Args[2] != "_" || rm.Args[3] != "/home/scion/.scion/dev-token" {
+		t.Fatalf("dev-token removal args = %+v, want [-c <script> _ /home/scion/.scion/dev-token]", rm.Args)
+	}
+
+	callsAfterFirst := len(f.Calls)
+
+	// Second call: PAT already persisted → no-op. In particular, no second
+	// throwaway server start (the agent-free mint window opens at most once).
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount); err != nil {
+		t.Fatalf("second ensureControllerPAT: %v", err)
+	}
+	if len(f.Calls) != callsAfterFirst {
+		t.Fatalf("second call made %d new runner call(s), want 0 (must be a no-op): %+v",
+			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
 	}
 }

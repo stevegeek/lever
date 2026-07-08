@@ -2,9 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/scion"
 )
@@ -47,7 +49,14 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 			if err := b.ResolveRunUser(cmd.Context()); err != nil {
 				return fmt.Errorf("msg: jail not up (%v) — run `lever up` first", err)
 			}
-			sc := scion.New(b.JailRunner(), scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
+			// state gives this client the controller PAT (minted by a prior
+			// `lever apply`'s bootstrap-token step) via HubTokenSource, so `msg
+			// send` authenticates against the real, dev-auth-off hub.
+			state := brokerctl.StateDir(filepath.Dir(cfgPath))
+			sc := scion.New(b.JailRunner(), scion.Options{
+				HubEndpoint:    "http://127.0.0.1:8080",
+				HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
+			})
 			if err := sc.Message(cmd.Context(), scion.MsgOpts{
 				To: "agent:" + slug, Body: strings.Join(args, " "), Interrupt: interrupt, Project: project,
 			}); err != nil {

@@ -8,7 +8,7 @@ import "github.com/stevegeek/lever/internal/config"
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
 // carry operands (a dir to register, the manager image, etc.).
 type Step struct {
-	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | scion-server | credential | register-manager | register-worker | mint-manager-bootstrap | start-manager
+	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | scion-server | credential | register-project | mint-manager-bootstrap | start-manager
 	Target string
 	Detail string
 }
@@ -65,10 +65,7 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	if a.Manager.CredentialFile != "" {
 		steps = append(steps, Step{Kind: "credential", Target: a.Manager.CredentialFile})
 	}
-	steps = append(steps, Step{Kind: "register-manager", Target: a.Tree})
-	for _, g := range a.Workers {
-		steps = append(steps, Step{Kind: "register-worker", Target: a.WorkerDir(g)})
-	}
+	steps = append(steps, Step{Kind: "register-project", Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})
 	steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.Manager.Image})

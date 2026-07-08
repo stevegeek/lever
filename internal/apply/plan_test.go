@@ -44,7 +44,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 	}
 	// Scion/container/registration steps must NOT appear (the fresh machine has no
 	// scion binary; init-machine would fail).
-	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-manager", "register-worker", "write-manifest", "start-manager", "config-registry", "credential"} {
+	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-project", "write-manifest", "start-manager", "config-registry", "credential"} {
 		if contains(got, banned) {
 			t.Fatalf("broker-only plan must omit %q: %v", banned, got)
 		}
@@ -73,7 +73,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-worker", "register-worker", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-project", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -82,13 +82,11 @@ func TestPlanOrder(t *testing.T) {
 			t.Fatalf("step %d = %q want %q (all=%v)", i, kinds[i], want[i], kinds)
 		}
 	}
-	// register-worker targets: first worker is at index 7, second at index 8
-	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-worker 8:register-worker 9:mint-manager-bootstrap 10:start-manager)
-	if steps[7].Target != "/t/workers/appa" {
-		t.Fatalf("register-worker[0] target=%q", steps[7].Target)
-	}
-	if steps[8].Target != "/t/workers/appb" {
-		t.Fatalf("register-worker[1] target=%q", steps[8].Target)
+	// register-project targets the instance tree — ONE registration regardless
+	// of worker count (workers no longer register their own scion projects).
+	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-project 7:mint-manager-bootstrap 8:start-manager)
+	if steps[6].Target != "/t" {
+		t.Fatalf("register-project target=%q", steps[6].Target)
 	}
 }
 
@@ -102,7 +100,7 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	// credential must appear AFTER scion-server and BEFORE register-manager
+	// credential must appear AFTER scion-server and BEFORE register-project
 	credIdx, scionIdx, regIdx := -1, -1, -1
 	for i, k := range kinds {
 		switch k {
@@ -110,7 +108,7 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 			credIdx = i
 		case "scion-server":
 			scionIdx = i
-		case "register-manager":
+		case "register-project":
 			regIdx = i
 		}
 	}
@@ -118,7 +116,7 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 		t.Fatalf("no credential step; kinds=%v", kinds)
 	}
 	if !(scionIdx < credIdx && credIdx < regIdx) {
-		t.Fatalf("credential must be between scion-server and register-manager; scion=%d cred=%d reg=%d", scionIdx, credIdx, regIdx)
+		t.Fatalf("credential must be between scion-server and register-project; scion=%d cred=%d reg=%d", scionIdx, credIdx, regIdx)
 	}
 	if steps[credIdx].Target != "/home/x/.scion/oauth-token" {
 		t.Fatalf("credential target=%q", steps[credIdx].Target)

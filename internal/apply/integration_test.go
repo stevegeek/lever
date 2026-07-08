@@ -29,8 +29,10 @@ package apply_test
 //
 // It does NOT exercise manager→worker dispatch: the stock agent image carries no
 // scion/lever tooling, so the manager cannot orchestrate the worker. The
-// prompt therefore has the manager do the task directly; the worker is
-// still registered (exercising the register-worker + path-translation path).
+// prompt therefore has the manager do the task directly; a worker is still
+// configured (exercising load-image dedup + the worker dir's presence in the
+// tree) even though workers no longer get their own scion registration —
+// register-project registers only the instance tree once.
 
 import (
 	"context"

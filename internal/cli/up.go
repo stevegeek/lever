@@ -43,14 +43,14 @@ func phaseOrAbsent(phase string, err error) (string, error) {
 //     project was never hub-registered (e.g. a partial prior bring-up where
 //     local `scion init` ran but `scion hub link` didn't) — no manager can be
 //     running under a project the hub doesn't know, and apply's
-//     register-manager step (init + hub link) is exactly the repair;
+//     register-project step (init + hub link) is exactly the repair;
 //   - "no git origin remote found": scion's documented fallback when the path
 //     isn't a locally registered project at all (no ~/.scion/project-configs
 //     entry — forced project resolution falls back to git; see the
 //     internal/scion/bringup.go waitHubReady comment documenting this exact
 //     string). Lever projects are directory projects, never git-resolved, so
 //     for us this can only mean "not registered" — again definitively absent,
-//     and apply's register-manager is the repair.
+//     and apply's register-project is the repair.
 func managerDefinitelyAbsent(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "is not responding") ||

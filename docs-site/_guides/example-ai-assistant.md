@@ -61,21 +61,21 @@ broker:
       operations:
         - { name: search }
 
-groves:
+workers:
   - name: archivist                       # trusted: read + write notes
-    dir: groves/archivist
+    dir: workers/archivist
     obtain:
       - { tool: notes, op: read }
       - { tool: notes, op: write }
   - name: researcher                      # less trusted: web search only
-    dir: groves/researcher
+    dir: workers/researcher
     obtain:
       - { tool: web, op: search }
 ```
 
 Every field here is in the [configuration reference](/reference/config/). The
 two things doing the security work are **`broker`** (the credential boundary) and
-the per-grove **`obtain`** grants (the capability boundary).
+the per-worker **`obtain`** grants (the capability boundary).
 
 Each `tools` entry is a host-side subprocess the broker supervises: `command`
 launches it and `backend` is the loopback address it listens on (injected as

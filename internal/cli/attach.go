@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -16,9 +15,11 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// attachTarget resolves NAME ("" = manager) to the scion slug + jail project
-// path to attach. Worker projects are jail-absolute: <mountDest>/<worker dir>.
-// Unknown names error with the full list of valid targets.
+// attachTarget resolves NAME ("" = manager) to the scion slug + jail project to
+// attach. Under the single-project model the manager and every worker are agents
+// in the ONE instance project (the jail mount root), distinguished by slug — so
+// both resolve to mountDest as the project; only the slug differs. Unknown names
+// error with the full list of valid targets.
 func attachTarget(app *config.App, mountDest, name string) (slug, project string, err error) {
 	if name == "" || name == app.Name {
 		return app.Name, mountDest, nil
@@ -26,7 +27,7 @@ func attachTarget(app *config.App, mountDest, name string) (slug, project string
 	names := []string{app.Name}
 	for _, g := range app.Workers {
 		if g.Name == name {
-			return g.Name, path.Join(mountDest, g.Dir), nil
+			return g.Name, mountDest, nil
 		}
 		names = append(names, g.Name)
 	}

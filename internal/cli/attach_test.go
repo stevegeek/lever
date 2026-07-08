@@ -45,8 +45,10 @@ func TestAttachTargetWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attachTarget: %v", err)
 	}
-	if slug != "scratch" || project != "/lever/workers/scratch" {
-		t.Fatalf("got (%q, %q), want (scratch, /lever/workers/scratch)", slug, project)
+	// Single-project model: the worker's agent record lives in the instance
+	// project (the jail mount root), NOT a per-worker /lever/workers/<name>.
+	if slug != "scratch" || project != "/lever" {
+		t.Fatalf("got (%q, %q), want (scratch, /lever)", slug, project)
 	}
 }
 

@@ -88,7 +88,9 @@ func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 		t.Fatalf("want exactly 1 scion call, got %d: %+v", len(fr.Calls), fr.Calls)
 	}
 	got := strings.Join(fr.Calls[0].Args, " ")
-	for _, want := range []string{"agent:scratch", "--interrupt", "-g /lever/workers/scratch"} {
+	// Single-project model: the worker is an agent in the instance project
+	// (/lever), addressed by slug — not a per-worker /lever/workers/<name> project.
+	for _, want := range []string{"agent:scratch", "--interrupt", "-g /lever"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
 		}

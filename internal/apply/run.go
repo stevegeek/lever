@@ -387,6 +387,25 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			// confirms the container is actually up: a running RECORD with a
 			// dead container must fail loudly, not silently pass.
 		case rec.Phase == "suspended" || rec.Phase == "stopped":
+			// Self-heal an expired mTLS leaf BEFORE resuming. A manager whose
+			// short-lived agent leaf expired while the instance was down (the
+			// in-container renew sidecar cannot run while stopped, so downtime
+			// longer than the leaf lifetime guarantees expiry) must be able to
+			// re-enrol on boot. lever-agent's boot re-enrols an expired leaf
+			// (ValidCert → false), but ONLY if a fresh, unspent enrolment ticket
+			// is staged — and the resume path used to stage none, so the leaf
+			// stayed dead and every brokered call failed the mTLS handshake until
+			// a full `lever destroy`. ensureFreshBootstrap fixes that without a
+			// teardown: it is a no-op when this run already minted fresh material
+			// (the normal stop→up path, where broker-up reopened the /bootstrap
+			// latch and mint-manager-bootstrap already staged a ticket), and
+			// re-arms + stages a fresh ticket only when the broker outlived a
+			// spent latch across the manager's downtime — exactly the expired-leaf
+			// case. The unspent ticket is harmless when the leaf is still valid
+			// (boot's ValidCert passes and skips enrol, leaving it unredeemed).
+			if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+				return err
+			}
 			// Resume rides the SAME runtime-broker-race retry as a create Start
 			// (see isBrokerUnavailable's doc): on a cold VM the runtime broker may
 			// not have re-registered with the hub yet, and resume hits that
@@ -497,7 +516,7 @@ func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts sci
 }
 
 // ensureFreshBootstrap guarantees fresh, enrolable bootstrap material exists
-// before a create-path Start. If this apply run already minted fresh
+// before a manager Start OR Resume. If this apply run already minted fresh
 // material (boot.minted), it's a no-op. Otherwise, when d.RearmBootstrap is
 // set, it re-arms the broker's spent latch and mints+stages fresh material
 // (recording it into *boot so a SECOND create in the same Run — e.g. a

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
@@ -60,6 +61,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 
 			checks := []checkResult{
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
+				checkAgentCert(state, time.Now()),
 				checkExternalBackends(app.Broker.Tools, tcpDial),
 				checkCredentialFile(app.Manager.CredentialFile),
 				checkMcpJsonInTree(app.Tree),

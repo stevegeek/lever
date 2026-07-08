@@ -750,11 +750,14 @@ func TestStartManagerRecoveryRearmsBeforeFreshCreate(t *testing.T) {
 	}
 }
 
-// TestStartManagerResumeNeverRearms: a record that resumes successfully never
-// reaches the create path at all — its agent home (and thus its enrol cert)
-// already exists, so re-arming would be pointless (and would needlessly
-// bounce the broker).
-func TestStartManagerResumeNeverRearms(t *testing.T) {
+// TestStartManagerResumeRearmsWhenNoFreshMaterial: resume must self-heal a
+// possibly-expired leaf. When this run has NOT minted fresh bootstrap material
+// (no open latch — the broker outlived a spent latch across the manager's
+// downtime, the expired-leaf scenario), the resume path re-arms and stages a
+// fresh enrolment ticket so lever-agent boot can re-enrol the dead leaf. An
+// existing agent home is NOT proof the leaf is still valid — an expired leaf is
+// exactly the outage this closes.
+func TestStartManagerResumeRearmsWhenNoFreshMaterial(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
 	rearmCalls := 0
@@ -762,6 +765,40 @@ func TestStartManagerResumeNeverRearms(t *testing.T) {
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
+		// No MintManagerBootstrap -> no fresh material minted this run
+		// (boot.minted stays false), modelling the persisted-broker/spent-latch
+		// state in which an expired leaf would otherwise stay dead.
+		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			rearmCalls++
+			return BootstrapMaterial{Ticket: "fresh-for-resume"}, nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rearmCalls != 1 {
+		t.Errorf("RearmBootstrap calls = %d, want 1 (resume must stage a fresh ticket so an expired leaf can re-enrol)", rearmCalls)
+	}
+	if r.resumeCalls != 1 || r.startCalls != 0 {
+		t.Errorf("resumeCalls=%d startCalls=%d, want 1/0 (heal-then-resume, no fresh create)", r.resumeCalls, r.startCalls)
+	}
+}
+
+// TestStartManagerResumeSkipsRearmWhenAlreadyMinted: the normal stop→up path
+// (broker-up reopened the latch, mint-manager-bootstrap already staged a fresh
+// ticket this run) must NOT re-arm again on resume — no needless second broker
+// bounce. ensureFreshBootstrap is a no-op once boot.minted is set.
+func TestStartManagerResumeSkipsRearmWhenAlreadyMinted(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	rearmCalls := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, latch was open
+		},
 		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			rearmCalls++
 			return BootstrapMaterial{}, nil
@@ -771,7 +808,10 @@ func TestStartManagerResumeNeverRearms(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 0 {
-		t.Errorf("RearmBootstrap calls = %d, want 0 (a successful resume never creates, so it never re-arms)", rearmCalls)
+		t.Errorf("RearmBootstrap calls = %d, want 0 (fresh material already staged this run -> no second bounce)", rearmCalls)
+	}
+	if r.resumeCalls != 1 {
+		t.Errorf("resumeCalls = %d, want 1", r.resumeCalls)
 	}
 }
 

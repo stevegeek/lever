@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -257,4 +258,92 @@ func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 		fix = "locally-modified scaffold(s): review, then `lever init --force` to overwrite (or keep your edits — this check stays informational)"
 	}
 	return checkResult{name, false, strings.Join(bad, "; "), fix}
+}
+
+// certRejectWindow bounds how recently the broker must have rejected an expired
+// leaf for checkAgentCert to treat it as an ACTIVE failure. Wider than the
+// agent's handshake-retry cadence (seconds) so an ongoing outage always lands a
+// match inside it, yet narrow enough that once a re-enrol heals the leaf the
+// old log lines age out and the check self-clears.
+const certRejectWindow = 15 * time.Minute
+
+// brokerLogTailBytes caps how much of broker.out.log checkAgentCert reads (from
+// the end): enough to cover a current outage, bounded so a long-lived log never
+// costs a full read.
+const brokerLogTailBytes = 64 << 10
+
+// checkAgentCert reports whether the broker is CURRENTLY rejecting an agent's
+// mTLS leaf as expired. The failure that motivates it — a short-lived agent leaf
+// that lapses while the instance is down (the in-container renew sidecar can't
+// run while stopped) — shows up ONLY as a TLS handshake error in the broker's
+// own log; a host-side CA check reads green throughout it (the CA is long-lived,
+// it's the leaf that died). So this scans broker.out.log for the exact
+// fingerprint rather than inspecting any cert file.
+func checkAgentCert(st brokerctl.State, now time.Time) checkResult {
+	const name = "agent certificate"
+	latest, found, err := scanBrokerLogCertExpiry(st.OutLog())
+	switch {
+	case err != nil:
+		// No readable broker log (never started, or cleanly removed). A missing
+		// broker is checkBrokerAlive's job; here there's nothing to diagnose.
+		return checkResult{name, true, "no broker log to scan", ""}
+	case !found:
+		return checkResult{name, true, "no expired-leaf rejections in the broker log", ""}
+	case now.Sub(latest) <= certRejectWindow:
+		return checkResult{name, false,
+			fmt.Sprintf("broker is rejecting an agent's mTLS leaf as expired (last at %s) — brokered tools are down", latest.Format("2006-01-02 15:04:05")),
+			"run `lever up`: it stages a fresh enrolment ticket so the agent renews its expired leaf on boot (no teardown needed). If it persists, `lever destroy && lever up`"}
+	default:
+		return checkResult{name, true,
+			fmt.Sprintf("last expired-leaf rejection at %s (stale, not currently failing)", latest.Format("2006-01-02 15:04:05")), ""}
+	}
+}
+
+// scanBrokerLogCertExpiry returns the timestamp of the most recent expired- /
+// bad-certificate TLS handshake error in the tail of the broker log at path.
+// Lines are Go-stdlog-prefixed ("2006/01/02 15:04:05 …"); the prefix is parsed
+// in local time (the broker logs local time). Lines without the fingerprint or
+// without a parseable timestamp are ignored.
+func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
+	data, err := readFileTail(path, brokerLogTailBytes)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	var latest time.Time
+	found := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.Contains(line, "certificate has expired") && !strings.Contains(line, "tls: bad certificate") {
+			continue
+		}
+		if len(line) < 19 {
+			continue
+		}
+		ts, perr := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local)
+		if perr != nil {
+			continue
+		}
+		if !found || ts.After(latest) {
+			latest, found = ts, true
+		}
+	}
+	return latest, found, nil
+}
+
+// readFileTail returns up to the last max bytes of the file at path.
+func readFileTail(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if off := fi.Size() - max; off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return io.ReadAll(f)
 }

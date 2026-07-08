@@ -161,3 +161,31 @@ func TestAttachArgvNotRun(t *testing.T) {
 		t.Fatalf("AttachArgv must NOT execute anything")
 	}
 }
+
+// TestAttachArgvEmbedsHubTokenWhenPresent: the attach/TTY path bypasses
+// Client.env() (it's exec()'d directly, never through the runner), so the
+// controller PAT must be embedded into the returned argv itself — mirroring
+// how the jail env is embedded for attach (internal/jail/attach.go).
+func TestAttachArgvEmbedsHubTokenWhenPresent(t *testing.T) {
+	f := exec.NewFakeRunner()
+	c := New(f, Options{Bin: "scion", HubToken: "pat123"})
+	argv := c.AttachArgv("a", "/g/a")
+	want := []string{"env", "SCION_HUB_TOKEN=pat123", "scion", "attach", "a", "-g", "/g/a"}
+	if strings.Join(argv, " ") != strings.Join(want, " ") {
+		t.Fatalf("argv=%v, want=%v", argv, want)
+	}
+}
+
+// TestAttachArgvOmitsHubTokenWhenEmpty: no token means no env prefix at all —
+// exact argv shape preserved (see TestAttachArgvNotRun) so subscription-mode
+// attach is unaffected.
+func TestAttachArgvOmitsHubTokenWhenEmpty(t *testing.T) {
+	f := exec.NewFakeRunner()
+	c := New(f, Options{Bin: "scion"})
+	argv := c.AttachArgv("a", "/g/a")
+	for _, tok := range argv {
+		if strings.HasPrefix(tok, "SCION_HUB_TOKEN=") || tok == "env" {
+			t.Fatalf("argv=%v should not contain an env/SCION_HUB_TOKEN prefix when no token set", argv)
+		}
+	}
+}

@@ -31,6 +31,44 @@ func TestEnvAlwaysEnablesHub(t *testing.T) {
 	}
 }
 
+// TestEnvEmitsStaticHubToken: a client built with a static Options.HubToken
+// emits SCION_HUB_TOKEN in env() (the controller PAT, P3).
+func TestEnvEmitsStaticHubToken(t *testing.T) {
+	f := exec.NewFakeRunner()
+	c := New(f, Options{HubToken: "pat123"})
+	if got := c.env()["SCION_HUB_TOKEN"]; got != "pat123" {
+		t.Fatalf("expected SCION_HUB_TOKEN=pat123, got %q", got)
+	}
+}
+
+// TestEnvEmitsLazyHubTokenSource: HubTokenSource is read at call time and wins
+// over a static HubToken (the mint-mid-apply case, where the token isn't known
+// at New() time).
+func TestEnvEmitsLazyHubTokenSource(t *testing.T) {
+	f := exec.NewFakeRunner()
+	c := New(f, Options{HubToken: "stale", HubTokenSource: func() string { return "dyn" }})
+	if got := c.env()["SCION_HUB_TOKEN"]; got != "dyn" {
+		t.Fatalf("expected SCION_HUB_TOKEN=dyn (source wins), got %q", got)
+	}
+	if got := c.HubToken(); got != "dyn" {
+		t.Fatalf("HubToken() accessor = %q, want dyn", got)
+	}
+}
+
+// TestEnvOmitsHubTokenWhenUnset: no HubToken/HubTokenSource means no
+// SCION_HUB_TOKEN key at all (not even empty string) — keeps subscription-mode
+// (no controller PAT) env untouched.
+func TestEnvOmitsHubTokenWhenUnset(t *testing.T) {
+	f := exec.NewFakeRunner()
+	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
+	if _, ok := c.env()["SCION_HUB_TOKEN"]; ok {
+		t.Fatalf("expected no SCION_HUB_TOKEN key, got %q", c.env()["SCION_HUB_TOKEN"])
+	}
+	if got := c.HubToken(); got != "" {
+		t.Fatalf("HubToken() = %q, want empty", got)
+	}
+}
+
 func TestProjectFlag(t *testing.T) {
 	if got := projectFlag(""); len(got) != 0 {
 		t.Fatalf("empty project should yield no flag, got %v", got)

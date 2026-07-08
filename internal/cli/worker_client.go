@@ -11,8 +11,8 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-type groveResult struct {
-	Grove  string        `json:"grove"`
+type workerResult struct {
+	Worker string        `json:"grove"`
 	Phase  string        `json:"phase"`
 	Agents []scion.Agent `json:"agents"`
 }
@@ -46,11 +46,11 @@ func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoi
 	return res, nil
 }
 
-// postGrove is postBroker specialized to the grove-command response shape.
+// postWorker is postBroker specialized to the grove-command response shape.
 // Kept as a named function (rather than inlining postBroker[groveResult] at
 // call sites) so existing callers/tests are unaffected.
-func postGrove(ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (groveResult, error) {
-	return postBroker[groveResult](ctx, client, baseURL, endpoint, body)
+func postWorker(ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (workerResult, error) {
+	return postBroker[workerResult](ctx, client, baseURL, endpoint, body)
 }
 
 // brokerCall builds the manager's mTLS client from its bootstrap + identity and
@@ -81,8 +81,8 @@ func brokerCall[T any](ctx context.Context, endpoint string, body any) (T, error
 	return postBroker[T](ctx, client, bs.BrokerURL, endpoint, body)
 }
 
-// groveCall is brokerCall specialized to the grove-command response shape.
+// workerCall is brokerCall specialized to the grove-command response shape.
 // This is the production entry the agent subcommands use (via groveCallFn).
-func groveCall(ctx context.Context, endpoint string, body any) (groveResult, error) {
-	return brokerCall[groveResult](ctx, endpoint, body)
+func workerCall(ctx context.Context, endpoint string, body any) (workerResult, error) {
+	return brokerCall[workerResult](ctx, endpoint, body)
 }

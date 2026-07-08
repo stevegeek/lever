@@ -44,8 +44,8 @@ groves:
 	if app.Name != "demo" || app.Backend != "orbstack" {
 		t.Fatalf("app=%+v", app)
 	}
-	if len(app.Groves) != 1 || app.Groves[0].Name != "appa" {
-		t.Fatalf("groves=%+v", app.Groves)
+	if len(app.Workers) != 1 || app.Workers[0].Name != "appa" {
+		t.Fatalf("groves=%+v", app.Workers)
 	}
 	if app.Manager.Image == "" || len(app.Manager.AllowPorts) != 1 {
 		t.Fatalf("manager=%+v", app.Manager)
@@ -164,7 +164,7 @@ func TestValidateRequiresBackend(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsGroveOutsideTree(t *testing.T) {
+func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\ngroves:\n  - name: bad\n    dir: ../escape\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("expected error for grove dir outside tree")
@@ -176,7 +176,7 @@ func TestValidateRejectsGroveOutsideTree(t *testing.T) {
 // removal (scion project-configs + .scion marker) would target the MANAGER's
 // state. Reject it at config time, mirroring confinedRel's "." rejection for
 // `tree`.
-func TestValidateRejectsGroveDirDot(t *testing.T) {
+func TestValidateRejectsWorkerDirDot(t *testing.T) {
 	for _, dir := range []string{".", "./"} {
 		p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: bad\n    dir: "+dir+"\n")
 		_, err := Load(p)
@@ -274,28 +274,28 @@ func TestAPIKeyEgressClosedLoads(t *testing.T) {
 	}
 }
 
-func TestGroveImageFallsBackToManagerImage(t *testing.T) {
+func TestWorkerImageFallsBackToManagerImage(t *testing.T) {
 	app := &App{
 		Manager: Manager{Image: "scionlocal/lever-claude:latest"},
-		Groves: []Grove{
+		Workers: []Worker{
 			{Name: "plain", Dir: "groves/plain"},
 			{Name: "custom", Dir: "groves/custom", Image: "scionlocal/lever-rust:latest"},
 		},
 	}
-	g0, _ := app.GroveByName("plain")
-	if got := app.GroveImage(g0); got != "scionlocal/lever-claude:latest" {
+	g0, _ := app.WorkerByName("plain")
+	if got := app.WorkerImage(g0); got != "scionlocal/lever-claude:latest" {
 		t.Fatalf("plain grove image = %q, want manager image", got)
 	}
-	g1, _ := app.GroveByName("custom")
-	if got := app.GroveImage(g1); got != "scionlocal/lever-rust:latest" {
+	g1, _ := app.WorkerByName("custom")
+	if got := app.WorkerImage(g1); got != "scionlocal/lever-rust:latest" {
 		t.Fatalf("custom grove image = %q, want override", got)
 	}
-	if _, ok := app.GroveByName("missing"); ok {
+	if _, ok := app.WorkerByName("missing"); ok {
 		t.Fatal("GroveByName(missing) should be false")
 	}
 }
 
-func TestLoadParsesGroveImage(t *testing.T) {
+func TestLoadParsesWorkerImage(t *testing.T) {
 	p := writeTmp(t, `name: demo
 backend: orbstack
 tree: ./tree
@@ -310,8 +310,8 @@ groves:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if app.Groves[0].Image != "scionlocal/lever-rust:latest" {
-		t.Fatalf("grove image = %q", app.Groves[0].Image)
+	if app.Workers[0].Image != "scionlocal/lever-rust:latest" {
+		t.Fatalf("grove image = %q", app.Workers[0].Image)
 	}
 }
 
@@ -366,7 +366,7 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 // A grove named the same as the manager identity would enrol with the manager's
 // CN and gain full manager messaging authority — config validation must reject
 // this as a CN-collision escalation.
-func TestValidateRejectsGroveNameCollidingWithManagerIdentity(t *testing.T) {
+func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 	cases := []struct {
 		label  string
 		config string
@@ -398,7 +398,7 @@ func TestValidateRejectsGroveNameCollidingWithManagerIdentity(t *testing.T) {
 // (the manager is dispatched as Grove: app.Name): with slug matching in the
 // broker's resolveMsgTarget, messages addressed to that grove would silently
 // route to the manager instead. Config validation must reject the collision.
-func TestValidateRejectsGroveNameCollidingWithAppName(t *testing.T) {
+func TestValidateRejectsWorkerNameCollidingWithAppName(t *testing.T) {
 	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\ngroves:\n  - name: demo\n    dir: groves/demo\n")
 	_, err := Load(p)
 	if err == nil {
@@ -495,7 +495,7 @@ func TestSecurityImagePolicy(t *testing.T) {
 	}
 }
 
-func TestSecurityImagePolicyAppliesToGroves(t *testing.T) {
+func TestSecurityImagePolicyAppliesToWorkers(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\n" +
 		"security:\n  allowed_image_registries: [scionlocal]\n" +
 		"manager:\n  image: scionlocal/mgr:latest\n" +
@@ -609,8 +609,8 @@ func TestRejectsMixedLLMAuthInstance(t *testing.T) {
 	// Broker default api-key ⇒ manager is api-key; grove overrides to subscription.
 	a := &App{
 		Name: "demo", Backend: "orbstack", Tree: "/x",
-		Broker: Broker{LLMAuth: LLMAuthAPIKey},
-		Groves: []Grove{{Name: "worker", Dir: "w", LLMAuth: LLMAuthSubscription}},
+		Broker:  Broker{LLMAuth: LLMAuthAPIKey},
+		Workers: []Worker{{Name: "worker", Dir: "w", LLMAuth: LLMAuthSubscription}},
 	}
 	err := a.Validate()
 	if err == nil || !strings.Contains(err.Error(), "mixed") {
@@ -628,16 +628,16 @@ func TestUniformInstancesValidate(t *testing.T) {
 	}
 	subscription := &App{
 		Name: "demo", Backend: "orbstack", Tree: "/x",
-		Broker: Broker{LLMAuth: LLMAuthSubscription},
-		Groves: []Grove{{Name: "worker", Dir: "w"}}, // both subscription (explicit opt-in)
+		Broker:  Broker{LLMAuth: LLMAuthSubscription},
+		Workers: []Worker{{Name: "worker", Dir: "w"}}, // both subscription (explicit opt-in)
 	}
 	if err := subscription.Validate(); err != nil {
 		t.Fatalf("uniform subscription should validate: %v", err)
 	}
 	apikey := &App{
 		Name: "demo", Backend: "orbstack", Tree: "/x",
-		Broker: Broker{LLMAuth: LLMAuthAPIKey, APIKeyFile: keyPath},
-		Groves: []Grove{{Name: "worker", Dir: "w"}}, // both inherit api-key
+		Broker:  Broker{LLMAuth: LLMAuthAPIKey, APIKeyFile: keyPath},
+		Workers: []Worker{{Name: "worker", Dir: "w"}}, // both inherit api-key
 	}
 	if err := apikey.Validate(); err != nil {
 		t.Fatalf("uniform api-key should validate: %v", err)
@@ -651,14 +651,14 @@ func TestUniformInstancesValidate(t *testing.T) {
 func TestInjectsLLMGrantPerAgentMode(t *testing.T) {
 	a := &App{
 		Manager: Manager{LLMAuth: LLMAuthAPIKey},
-		Groves:  []Grove{{Name: "worker", LLMAuth: LLMAuthSubscription}},
+		Workers: []Worker{{Name: "worker", LLMAuth: LLMAuthSubscription}},
 	}
 	a.injectLLMGrants()
 	if !hasGrant(a.Manager.Obtain, "llm", "generate") {
 		t.Errorf("manager (api-key) missing injected llm grant: %+v", a.Manager.Obtain)
 	}
-	if hasGrant(a.Groves[0].Obtain, "llm", "generate") {
-		t.Errorf("subscription agent must NOT get an llm grant: %+v", a.Groves[0].Obtain)
+	if hasGrant(a.Workers[0].Obtain, "llm", "generate") {
+		t.Errorf("subscription agent must NOT get an llm grant: %+v", a.Workers[0].Obtain)
 	}
 }
 
@@ -671,18 +671,18 @@ func hasGrant(gs []Grant, tool, op string) bool {
 	return false
 }
 
-func TestEffectiveLLMAuthGroveOverride(t *testing.T) {
-	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+func TestEffectiveLLMAuthWorkerOverride(t *testing.T) {
+	a := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
 	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {
 		t.Fatalf("manager: got %q want api-key", got)
 	}
 	// grove inherits broker default when unset
-	if got := a.EffectiveGroveLLMAuth(a.Groves[0]); got != LLMAuthAPIKey {
+	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthAPIKey {
 		t.Fatalf("grove inherit: got %q want api-key", got)
 	}
 	// grove override wins
-	a.Groves[0].LLMAuth = LLMAuthSubscription
-	if got := a.EffectiveGroveLLMAuth(a.Groves[0]); got != LLMAuthSubscription {
+	a.Workers[0].LLMAuth = LLMAuthSubscription
+	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthSubscription {
 		t.Fatalf("grove override: got %q want subscription", got)
 	}
 }
@@ -724,15 +724,15 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 
 func TestClosedInternetEgress(t *testing.T) {
 	// Explicit knob, decoupled from llm_auth: egress: closed ⇒ closed; unset ⇒ open.
-	closedApp := &App{Egress: EgressClosed, Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	closedApp := &App{Egress: EgressClosed, Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
 	if closed, warn := closedApp.ClosedInternetEgress(); !closed || warn != "" {
 		t.Fatalf("egress: closed ⇒ closed=%v warn=%q want true/empty", closed, warn)
 	}
-	openAPIKey := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Groves: []Grove{{Name: "w"}}}
+	openAPIKey := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
 	if closed, _ := openAPIKey.ClosedInternetEgress(); closed {
 		t.Fatal("api-key without egress: closed must leave egress open (decoupled)")
 	}
-	openSub := &App{Broker: Broker{LLMAuth: LLMAuthSubscription}, Groves: []Grove{{Name: "w"}}}
+	openSub := &App{Broker: Broker{LLMAuth: LLMAuthSubscription}, Workers: []Worker{{Name: "w"}}}
 	if closed, warn := openSub.ClosedInternetEgress(); closed || warn != "" {
 		t.Fatalf("default (open): closed=%v warn=%q want false/empty", closed, warn)
 	}
@@ -920,7 +920,7 @@ func TestLoadRejectsEmptyOperationName(t *testing.T) {
 	}
 }
 
-func TestGroveToGroveMessagingDefaultsTrue(t *testing.T) {
+func TestWorkerToWorkerMessagingDefaultsTrue(t *testing.T) {
 	tr := true
 	fa := false
 	cases := []struct {
@@ -935,8 +935,8 @@ func TestGroveToGroveMessagingDefaultsTrue(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			a := &App{}
-			a.Broker.Messaging.GroveToGrove = c.val
-			if got := a.GroveToGroveMessaging(); got != c.want {
+			a.Broker.Messaging.WorkerToWorker = c.val
+			if got := a.WorkerToWorkerMessaging(); got != c.want {
 				t.Fatalf("GroveToGroveMessaging() = %v, want %v", got, c.want)
 			}
 		})

@@ -12,24 +12,24 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// groveBootstrap is a broker-local mirror of the bootstrap envelope written to
+// workerBootstrap is a broker-local mirror of the bootstrap envelope written to
 // <bootstrapDir>/bootstrap.json. JSON tags MUST remain byte-for-byte identical
 // to agent.Bootstrap so the agent package's LoadBootstrap can decode it.
-type groveBootstrap struct {
+type workerBootstrap struct {
 	Ticket    string `json:"ticket"`
 	BrokerCA  string `json:"broker_ca"`
 	BrokerURL string `json:"broker_url"`
 	AgentCN   string `json:"agent_cn"`
 }
 
-// GroveRuntime is the subset of scion.Client the broker uses to drive grove
+// WorkerRuntime is the subset of scion.Client the broker uses to drive grove
 // agents host-side. *scion.Client satisfies it; tests inject a fake.
-type GroveRuntime interface {
+type WorkerRuntime interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 	Start(ctx context.Context, o scion.StartOpts) error
-	Resume(ctx context.Context, grove, project string) error
-	Stop(ctx context.Context, grove, project string) error
-	Suspend(ctx context.Context, grove, project string) error
+	Resume(ctx context.Context, worker, project string) error
+	Stop(ctx context.Context, worker, project string) error
+	Suspend(ctx context.Context, worker, project string) error
 	EnvSet(ctx context.Context, projectDir, key, value string) error
 	// Message and Inbox ride the same host-side scion client so container
 	// pinning/auth never applies.
@@ -37,9 +37,9 @@ type GroveRuntime interface {
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
 
-// GroveSpec is the config-derived, path-authoritative description of one grove.
+// WorkerSpec is the config-derived, path-authoritative description of one grove.
 // The broker never accepts any of these from the manager; they come from config.
-type GroveSpec struct {
+type WorkerSpec struct {
 	Name         string // grove identity (== scion agent slug + project name)
 	JailProject  string // jail-absolute -g/--workspace, e.g. /lever/groves/worker
 	BootstrapDir string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
@@ -47,19 +47,19 @@ type GroveSpec struct {
 	APIKey       bool   // true ⇒ api-key LLM mode for this grove
 }
 
-func (b *Broker) groveSpec(name string) (GroveSpec, bool) {
-	s, ok := b.groves[name]
+func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
+	s, ok := b.workers[name]
 	return s, ok
 }
 
-type groveStartRequest struct {
-	Grove string `json:"grove"`
-	Task  string `json:"task"`
+type workerStartRequest struct {
+	Worker string `json:"grove"`
+	Task   string `json:"task"`
 }
 
-type groveResponse struct {
-	Grove string `json:"grove"`
-	Phase string `json:"phase"`
+type workerResponse struct {
+	Worker string `json:"grove"`
+	Phase  string `json:"phase"`
 }
 
 // runtimeReady returns true when the scion runtime is wired. When the runtime
@@ -76,19 +76,19 @@ func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 	return true
 }
 
-// requireManagerGrove authenticates the caller as the manager and authorizes the
+// requireManagerWorker authenticates the caller as the manager and authorizes the
 // requested grove against config. Returns the resolved spec, or writes 403/502.
-func (b *Broker) requireManagerGrove(w http.ResponseWriter, r *http.Request, grove string) (GroveSpec, bool) {
+func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, worker string) (WorkerSpec, bool) {
 	caller, err := ca.RequireAgent(r)
 	if err != nil {
 		b.audit("grove", "", "deny", err.Error())
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return GroveSpec{}, false
+		return WorkerSpec{}, false
 	}
 	if caller != b.manager {
 		b.audit("grove", caller, "deny", "not the manager identity")
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return GroveSpec{}, false
+		return WorkerSpec{}, false
 	}
 	// A revoked manager cannot dispatch or tear down groves. Dispatching a grove
 	// is a stronger steering primitive than messaging (it spawns a fresh,
@@ -97,23 +97,23 @@ func (b *Broker) requireManagerGrove(w http.ResponseWriter, r *http.Request, gro
 	if b.isRevoked(caller) {
 		b.audit("grove", caller, "deny", "revoked")
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return GroveSpec{}, false
+		return WorkerSpec{}, false
 	}
-	spec, ok := b.groveSpec(grove)
+	spec, ok := b.workerSpec(worker)
 	if !ok {
-		b.audit("grove", caller, "deny", "unknown grove: "+grove)
+		b.audit("grove", caller, "deny", "unknown grove: "+worker)
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return GroveSpec{}, false
+		return WorkerSpec{}, false
 	}
 	// Runtime check is last — authn/authz above must fire first so an
 	// unauthenticated caller gets 403, not 502.
 	if !b.runtimeReady(w) {
-		return GroveSpec{}, false
+		return WorkerSpec{}, false
 	}
 	return spec, true
 }
 
-func (b *Broker) phaseOf(ctx context.Context, spec GroveSpec) (string, error) {
+func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	agents, err := b.runtime.List(ctx, spec.JailProject)
 	if err != nil {
 		return "", err
@@ -126,13 +126,13 @@ func (b *Broker) phaseOf(ctx context.Context, spec GroveSpec) (string, error) {
 	return "", nil
 }
 
-func (b *Broker) handleGroveStart(w http.ResponseWriter, r *http.Request) {
-	var req groveStartRequest
+func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
+	var req workerStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	spec, ok := b.requireManagerGrove(w, r, req.Grove)
+	spec, ok := b.requireManagerWorker(w, r, req.Worker)
 	if !ok {
 		return
 	}
@@ -144,7 +144,7 @@ func (b *Broker) handleGroveStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if phase == "running" {
-		writeJSON(w, groveResponse{Grove: spec.Name, Phase: "running"})
+		writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
 		return
 	}
 	if phase != "" {
@@ -154,7 +154,7 @@ func (b *Broker) handleGroveStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		b.audit("grove", b.manager, "allow", "resume "+spec.Name)
-		writeJSON(w, groveResponse{Grove: spec.Name, Phase: "running"})
+		writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
 		return
 	}
 	// phase == "" → absent: mint a one-use ticket, stage the grove's OWN bootstrap, start.
@@ -163,7 +163,7 @@ func (b *Broker) handleGroveStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ticket error", http.StatusInternalServerError)
 		return
 	}
-	bs := groveBootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: spec.Name}
+	bs := workerBootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: spec.Name}
 	if err := stageBootstrap(spec.BootstrapDir, bs); err != nil {
 		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
@@ -175,7 +175,7 @@ func (b *Broker) handleGroveStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := b.runtime.Start(ctx, scion.StartOpts{
-		Grove: spec.Name, Task: req.Task, Harness: "claude",
+		Worker: spec.Name, Task: req.Task, Harness: "claude",
 		Project: spec.JailProject, Workspace: spec.JailProject,
 		Image: spec.Image, APIKey: spec.APIKey,
 	}); err != nil {
@@ -183,18 +183,18 @@ func (b *Broker) handleGroveStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("grove", b.manager, "allow", "start "+spec.Name)
-	writeJSON(w, groveResponse{Grove: spec.Name, Phase: "running"})
+	writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
 }
 
-func (b *Broker) groveVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec GroveSpec) error) {
+func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {
 	var req struct {
-		Grove string `json:"grove"`
+		Worker string `json:"grove"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	spec, ok := b.requireManagerGrove(w, r, req.Grove)
+	spec, ok := b.requireManagerWorker(w, r, req.Worker)
 	if !ok {
 		return
 	}
@@ -207,20 +207,20 @@ func (b *Broker) groveVerb(w http.ResponseWriter, r *http.Request, do func(ctx c
 		phase = "unknown"
 	}
 	b.audit("grove", b.manager, "allow", r.URL.Path+" "+spec.Name)
-	writeJSON(w, groveResponse{Grove: spec.Name, Phase: phase})
+	writeJSON(w, workerResponse{Worker: spec.Name, Phase: phase})
 }
 
-func (b *Broker) handleGroveStop(w http.ResponseWriter, r *http.Request) {
-	b.groveVerb(w, r, func(ctx context.Context, s GroveSpec) error { return b.runtime.Stop(ctx, s.Name, s.JailProject) })
+func (b *Broker) handleWorkerStop(w http.ResponseWriter, r *http.Request) {
+	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Stop(ctx, s.Name, s.JailProject) })
 }
-func (b *Broker) handleGroveSuspend(w http.ResponseWriter, r *http.Request) {
-	b.groveVerb(w, r, func(ctx context.Context, s GroveSpec) error { return b.runtime.Suspend(ctx, s.Name, s.JailProject) })
+func (b *Broker) handleWorkerSuspend(w http.ResponseWriter, r *http.Request) {
+	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Suspend(ctx, s.Name, s.JailProject) })
 }
-func (b *Broker) handleGroveResume(w http.ResponseWriter, r *http.Request) {
-	b.groveVerb(w, r, func(ctx context.Context, s GroveSpec) error { return b.runtime.Resume(ctx, s.Name, s.JailProject) })
+func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
+	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Resume(ctx, s.Name, s.JailProject) })
 }
 
-func (b *Broker) handleGroveList(w http.ResponseWriter, r *http.Request) {
+func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 	caller, err := ca.RequireAgent(r)
 	if err != nil || caller != b.manager {
 		b.audit("grove", caller, "deny", "list: not the manager identity")
@@ -240,7 +240,7 @@ func (b *Broker) handleGroveList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	all := []scion.Agent{}
-	for _, spec := range b.groves {
+	for _, spec := range b.workers {
 		agents, err := b.runtime.List(r.Context(), spec.JailProject)
 		if err != nil {
 			http.Error(w, "runtime error", http.StatusBadGateway)
@@ -254,7 +254,7 @@ func (b *Broker) handleGroveList(w http.ResponseWriter, r *http.Request) {
 }
 
 // stageBootstrap writes bs to <dir>/bootstrap.json (dir 0700, file 0600).
-func stageBootstrap(dir string, bs groveBootstrap) error {
+func stageBootstrap(dir string, bs workerBootstrap) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("stage bootstrap: mkdir: %w", err)
 	}

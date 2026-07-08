@@ -84,12 +84,12 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		}
 		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 	}
-	cfg.Groves = GroveSpecs(app, jailMount)
+	cfg.Workers = WorkerSpecs(app, jailMount)
 	cfg.ManagerProject = jailMount
 	// The manager's scion agent slug is the APP NAME (apply's start-manager
 	// dispatches the manager as Grove: app.Name), not the manager cert CN.
 	cfg.ManagerSlug = app.Name
-	cfg.GroveToGrove = app.GroveToGroveMessaging()
+	cfg.WorkerToWorker = app.WorkerToWorkerMessaging()
 	if caPEM, err := os.ReadFile(state.CACert()); err == nil {
 		cfg.BrokerCAPEM = string(caPEM)
 	} else {
@@ -99,7 +99,7 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	if host == "" {
 		host = cfg.ServerName
 	}
-	cfg.BrokerURL = groveBrokerURL(host, app.EffectiveJailPort())
+	cfg.BrokerURL = workerBrokerURL(host, app.EffectiveJailPort())
 
 	// Persist the broker's audit decisions (provision/enrol/request/revoke …) to
 	// the state-dir log. Without this the broker defaults to a discard logger, so

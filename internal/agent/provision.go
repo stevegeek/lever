@@ -12,8 +12,8 @@ import (
 // Provision mints a one-use enrolment ticket for a grove via the broker's
 // /provision endpoint over the caller's mTLS identity. /provision is
 // manager-CN-gated by the broker, so client must present the manager identity.
-func Provision(ctx context.Context, brokerURL string, client *http.Client, grove string) (string, error) {
-	body, err := json.Marshal(map[string]string{"grove": grove})
+func Provision(ctx context.Context, brokerURL string, client *http.Client, worker string) (string, error) {
+	body, err := json.Marshal(map[string]string{"grove": worker})
 	if err != nil {
 		return "", fmt.Errorf("agent: marshal provision: %w", err)
 	}
@@ -41,6 +41,6 @@ func Provision(ctx context.Context, brokerURL string, client *http.Client, grove
 }
 
 // BootstrapFor composes the grove Bootstrap a freshly-provisioned grove enrols with.
-func BootstrapFor(grove, ticket, brokerCA, brokerURL string) Bootstrap {
-	return Bootstrap{Ticket: ticket, BrokerCA: brokerCA, BrokerURL: brokerURL, AgentCN: grove}
+func BootstrapFor(worker, ticket, brokerCA, brokerURL string) Bootstrap {
+	return Bootstrap{Ticket: ticket, BrokerCA: brokerCA, BrokerURL: brokerURL, AgentCN: worker}
 }

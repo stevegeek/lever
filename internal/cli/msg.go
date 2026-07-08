@@ -60,11 +60,11 @@ func msgSend() *cobra.Command {
 }
 
 func msgList() *cobra.Command {
-	var grove string
+	var worker string
 	var all bool
 	c := &cobra.Command{Use: "list", Short: "Read the typed event inbox",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			raw, err := msgCallFn(cmd.Context(), "/msg/list", map[string]any{"all": all, "grove": grove})
+			raw, err := msgCallFn(cmd.Context(), "/msg/list", map[string]any{"all": all, "grove": worker})
 			if err != nil {
 				return err
 			}
@@ -83,7 +83,7 @@ func msgList() *cobra.Command {
 			}
 			return nil
 		}}
-	c.Flags().StringVar(&grove, "grove", "", "manager only: read this grove's project inbox")
+	c.Flags().StringVar(&worker, "grove", "", "manager only: read this grove's project inbox")
 	c.Flags().BoolVar(&all, "all", false, "include already-read events")
 	return c
 }

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestTicketRedeemsOnceForItsGrove(t *testing.T) {
+func TestTicketRedeemsOnceForItsWorker(t *testing.T) {
 	s := NewTicketStore()
 	tk, err := s.Issue("scratch", time.Hour)
 	if err != nil {
@@ -22,7 +22,7 @@ func TestTicketRedeemsOnceForItsGrove(t *testing.T) {
 	}
 }
 
-func TestTicketRejectsWrongGrove(t *testing.T) {
+func TestTicketRejectsWrongWorker(t *testing.T) {
 	s := NewTicketStore()
 	tk, _ := s.Issue("scratch", time.Hour)
 	if err := s.Redeem(tk, "other", time.Now()); err == nil {

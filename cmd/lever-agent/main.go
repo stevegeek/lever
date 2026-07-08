@@ -505,14 +505,14 @@ func cmdProvision(args []string) error {
 	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
 	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the manager identity (cert+key+ca)")
-	grove := fs.String("grove", "", "grove name to provision a ticket for")
+	worker := fs.String("grove", "", "grove name to provision a ticket for")
 	out := fs.String("out", "", "path to write the grove bootstrap JSON (0600)")
 	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL if -broker-url not set)")
 	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *grove == "" {
+	if *worker == "" {
 		return fmt.Errorf("provision: -grove is required")
 	}
 	if *out == "" {
@@ -541,12 +541,12 @@ func cmdProvision(args []string) error {
 		return fmt.Errorf("provision: build mTLS client: %w", err)
 	}
 
-	ticket, err := agent.Provision(context.Background(), bURL, client, *grove)
+	ticket, err := agent.Provision(context.Background(), bURL, client, *worker)
 	if err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
 
-	bs := agent.BootstrapFor(*grove, ticket, caPEM, bURL)
+	bs := agent.BootstrapFor(*worker, ticket, caPEM, bURL)
 	data, err := json.Marshal(bs)
 	if err != nil {
 		return fmt.Errorf("provision: marshal bootstrap: %w", err)

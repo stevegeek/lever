@@ -325,7 +325,7 @@ func TestCheckOperatorSkills(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(tree, "groves", "scratch"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	app := &config.App{Tree: tree, Groves: []config.Grove{{Name: "scratch", Dir: "groves/scratch"}}}
+	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "groves/scratch"}}}
 	stateDir := filepath.Join(root, ".lever-state")
 
 	// Unscaffolded → fail with `lever init` hint.

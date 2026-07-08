@@ -1119,7 +1119,7 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
-		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
 	}
 	var jailUp, loadImg bool
 	deps := Deps{
@@ -1467,7 +1467,7 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
-		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
 	}
 	var removeCalls []string
 	var initCalls []string
@@ -1582,7 +1582,7 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
-		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
 	}
 	var removeJailCalls, removeConfigCalls, registeredCalls []string
 	deps := Deps{
@@ -1764,7 +1764,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
-		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
 	}
 	deps := Deps{
 		JailUp:    func(context.Context, *config.App) error { return nil },
@@ -1775,7 +1775,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var managerInit, groveInit bool
+	var managerInit, workerInit bool
 	for _, c := range f.Calls {
 		j := strings.Join(c.Args, " ")
 		if strings.Contains(j, "init --non-interactive") {
@@ -1783,7 +1783,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 			case "/lever":
 				managerInit = true
 			case "/lever/groves/worker":
-				groveInit = true
+				workerInit = true
 			default:
 				t.Errorf("init call used host dir %q, want jail path", c.Dir)
 			}
@@ -1797,7 +1797,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 	if !managerInit {
 		t.Errorf("manager init not run with dir /lever")
 	}
-	if !groveInit {
+	if !workerInit {
 		t.Errorf("grove init not run with dir /lever/groves/worker")
 	}
 }

@@ -27,7 +27,7 @@ func TestShippedExamplesLoadAndValidate(t *testing.T) {
 		if app.Name != name {
 			t.Errorf("example %s: name=%q", name, app.Name)
 		}
-		if len(app.Groves) == 0 {
+		if len(app.Workers) == 0 {
 			t.Errorf("example %s: no groves", name)
 		}
 	}

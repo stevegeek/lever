@@ -9,7 +9,7 @@ import (
 
 // ProvisionRequest is the body of POST /provision (manager only).
 type ProvisionRequest struct {
-	Grove string `json:"grove"`
+	Worker string `json:"grove"`
 }
 
 // ProvisionResponse carries the one-time enrolment ticket.
@@ -50,12 +50,12 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if !b.isAgent(req.Grove) {
-		b.audit("provision", caller, "deny", "unknown grove: "+req.Grove)
+	if !b.isAgent(req.Worker) {
+		b.audit("provision", caller, "deny", "unknown grove: "+req.Worker)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	tk, err := b.tickets.Issue(req.Grove, b.ticketTTL)
+	tk, err := b.tickets.Issue(req.Worker, b.ticketTTL)
 	if err != nil {
 		b.audit("provision", caller, "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -63,5 +63,5 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ProvisionResponse{Ticket: tk})
-	b.audit("provision", caller, "allow", req.Grove)
+	b.audit("provision", caller, "allow", req.Worker)
 }

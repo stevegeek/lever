@@ -7,8 +7,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// groveCallFn is the active broker caller (seam for tests).
-var groveCallFn = groveCall
+// workerCallFn is the active broker caller (seam for tests).
+var workerCallFn = workerCall
 
 // managerBootstrapPath is where the manager's own bootstrap.json is readable
 // from inside the manager CONTAINER, where scion mounts the tree at /workspace
@@ -34,12 +34,12 @@ func agentStart() *cobra.Command {
 	var task string
 	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume) a grove agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := groveCallFn(cmd.Context(), "/grove/start",
+			res, err := workerCallFn(cmd.Context(), "/grove/start",
 				map[string]string{"grove": args[0], "task": task})
 			if err != nil {
 				return err
 			}
-			cmd.Printf("%s: %s\n", res.Grove, res.Phase)
+			cmd.Printf("%s: %s\n", res.Worker, res.Phase)
 			return nil
 		}}
 	c.Flags().StringVar(&task, "task", "Read your context, then begin.", "task/boot prompt")
@@ -49,11 +49,11 @@ func agentStart() *cobra.Command {
 func agentVerb(use, short, endpoint string) *cobra.Command {
 	return &cobra.Command{Use: use + " NAME", Args: cobra.ExactArgs(1), Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := groveCallFn(cmd.Context(), endpoint, map[string]string{"grove": args[0]})
+			res, err := workerCallFn(cmd.Context(), endpoint, map[string]string{"grove": args[0]})
 			if err != nil {
 				return err
 			}
-			cmd.Printf("%s: %s\n", res.Grove, res.Phase)
+			cmd.Printf("%s: %s\n", res.Worker, res.Phase)
 			return nil
 		}}
 }
@@ -68,7 +68,7 @@ func agentResume() *cobra.Command {
 
 func agentList() *cobra.Command {
 	return &cobra.Command{Use: "list", Short: "List grove agents", RunE: func(cmd *cobra.Command, _ []string) error {
-		res, err := groveCallFn(cmd.Context(), "/grove/list", map[string]string{})
+		res, err := workerCallFn(cmd.Context(), "/grove/list", map[string]string{})
 		if err != nil {
 			return err
 		}

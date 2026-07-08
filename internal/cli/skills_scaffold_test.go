@@ -20,7 +20,7 @@ func scaffoldFixture(t *testing.T) (*config.App, string, string) {
 			t.Fatal(err)
 		}
 	}
-	app := &config.App{Tree: tree, Groves: []config.Grove{{Name: "scratch", Dir: "groves/scratch"}}}
+	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "groves/scratch"}}}
 	return app, tree, filepath.Join(root, ".lever-state")
 }
 

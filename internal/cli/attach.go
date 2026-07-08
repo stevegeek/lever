@@ -22,7 +22,7 @@ func attachTarget(app *config.App, mountDest, name string) (slug, project string
 		return app.Name, mountDest, nil
 	}
 	names := []string{app.Name}
-	for _, g := range app.Groves {
+	for _, g := range app.Workers {
 		if g.Name == name {
 			return g.Name, path.Join(mountDest, g.Dir), nil
 		}

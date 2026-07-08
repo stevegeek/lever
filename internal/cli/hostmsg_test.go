@@ -67,7 +67,7 @@ func TestHostMsgSendToManager(t *testing.T) {
 	}
 }
 
-func TestHostMsgSendToGroveWithInterrupt(t *testing.T) {
+func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 	dir := hostMsgInstanceDir(t, "assistant")
 	t.Chdir(dir)
 

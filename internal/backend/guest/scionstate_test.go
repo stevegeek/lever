@@ -140,7 +140,7 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	// the grove path, one has no workspace_path line at all.
 	mgr1 := writeProjectConfig(t, home, "lever__aaaa1111", "/lever")
 	mgr2 := writeProjectConfig(t, home, "lever__bbbb2222", "/lever")
-	grove := writeProjectConfig(t, home, "worker__cccc3333", "/lever/groves/worker")
+	worker := writeProjectConfig(t, home, "worker__cccc3333", "/lever/groves/worker")
 	noWP := writeProjectConfig(t, home, "legacy__dddd4444", "")
 
 	run := func() {
@@ -161,8 +161,8 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	if exists(mgr2) {
 		t.Errorf("mgr2 (%s) should have been removed", mgr2)
 	}
-	if !exists(grove) {
-		t.Errorf("grove (%s, workspace_path /lever/groves/worker) must survive an exact-match /lever removal", grove)
+	if !exists(worker) {
+		t.Errorf("grove (%s, workspace_path /lever/groves/worker) must survive an exact-match /lever removal", worker)
 	}
 	if !exists(noWP) {
 		t.Errorf("no-workspace_path entry (%s) must survive", noWP)
@@ -173,7 +173,7 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	if exists(mgr1) || exists(mgr2) {
 		t.Error("second run should keep the /lever entries removed")
 	}
-	if !exists(grove) || !exists(noWP) {
+	if !exists(worker) || !exists(noWP) {
 		t.Error("second run must not touch the surviving entries")
 	}
 }

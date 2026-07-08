@@ -100,7 +100,7 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 	// ─────────────────────────────────────────────────────────────────────────
 	// Step 1: provision — manager POSTs /provision {grove:"worker"} → ticket.
 	// ─────────────────────────────────────────────────────────────────────────
-	provBody, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	provBody, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
 	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
 	if err != nil {
 		t.Fatalf("provision: %v", err)

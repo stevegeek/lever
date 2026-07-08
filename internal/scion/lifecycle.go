@@ -14,7 +14,7 @@ type Agent struct {
 }
 
 type StartOpts struct {
-	Grove   string
+	Worker  string
 	Task    string
 	Harness string // default "claude"
 	Project string
@@ -64,8 +64,8 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 // and their associated files and worktrees" per scion's own help text. Used by
 // start-manager's loud recovery path when Resume fails and the conversation
 // cannot be restored, to clear the way for a fresh Start.
-func (c *Client) Delete(ctx context.Context, grove, project string) error {
-	args := append([]string{"delete", grove}, projectFlag(project)...)
+func (c *Client) Delete(ctx context.Context, worker, project string) error {
+	args := append([]string{"delete", worker}, projectFlag(project)...)
 	args = append(args, "--non-interactive")
 	_, err := c.run(ctx, "", args...)
 	return err
@@ -77,7 +77,7 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 		harness = "claude"
 	}
 	args := projectFlag(o.Project)
-	args = append(args, "start", o.Grove, o.Task, "--harness", harness)
+	args = append(args, "start", o.Worker, o.Task, "--harness", harness)
 	if o.APIKey {
 		// api-key: satisfy scion's start gate with the placeholder ANTHROPIC_API_KEY
 		// (set as a Hub secret host-side); the real credential is the in-container
@@ -96,21 +96,21 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	return err
 }
 
-func (c *Client) Resume(ctx context.Context, grove, project string) error {
-	_, err := c.run(ctx, "", append([]string{"resume", grove}, projectFlag(project)...)...)
+func (c *Client) Resume(ctx context.Context, worker, project string) error {
+	_, err := c.run(ctx, "", append([]string{"resume", worker}, projectFlag(project)...)...)
 	return err
 }
-func (c *Client) Stop(ctx context.Context, grove, project string) error {
-	_, err := c.run(ctx, "", append([]string{"stop", grove}, projectFlag(project)...)...)
+func (c *Client) Stop(ctx context.Context, worker, project string) error {
+	_, err := c.run(ctx, "", append([]string{"stop", worker}, projectFlag(project)...)...)
 	return err
 }
-func (c *Client) Suspend(ctx context.Context, grove, project string) error {
-	_, err := c.run(ctx, "", append([]string{"suspend", grove}, projectFlag(project)...)...)
+func (c *Client) Suspend(ctx context.Context, worker, project string) error {
+	_, err := c.run(ctx, "", append([]string{"suspend", worker}, projectFlag(project)...)...)
 	return err
 }
 
 // AttachArgv returns the argv to attach interactively. The caller exec()s it to
 // hand over the TTY — it never goes through the runner.
-func (c *Client) AttachArgv(grove, project string) []string {
-	return append([]string{c.bin, "attach", grove}, projectFlag(project)...)
+func (c *Client) AttachArgv(worker, project string) []string {
+	return append([]string{c.bin, "attach", worker}, projectFlag(project)...)
 }

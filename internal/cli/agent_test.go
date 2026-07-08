@@ -31,11 +31,11 @@ func TestAgentStart_callsBroker(t *testing.T) {
 
 	// Seed a manager bootstrap + identity that resolve to srv.URL with srv.Client().
 	// Override the two package seams for the test:
-	oldCall := groveCallFn
-	groveCallFn = func(ctx context.Context, endpoint string, body any) (groveResult, error) {
-		return postGrove(ctx, srv.Client(), srv.URL, endpoint, body)
+	oldCall := workerCallFn
+	workerCallFn = func(ctx context.Context, endpoint string, body any) (workerResult, error) {
+		return postWorker(ctx, srv.Client(), srv.URL, endpoint, body)
 	}
-	defer func() { groveCallFn = oldCall }()
+	defer func() { workerCallFn = oldCall }()
 
 	cmd := newAgentCmd()
 	cmd.SetArgs([]string{"start", "worker", "--task", "go"})

@@ -13,7 +13,7 @@ func enrolReq(ticket string, csrPEM []byte) *http.Request {
 	return httptest.NewRequest("POST", "/enrol", bytes.NewReader(body)) // no client cert
 }
 
-func TestEnrolSignsCertForMatchingGrove(t *testing.T) {
+func TestEnrolSignsCertForMatchingWorker(t *testing.T) {
 	b := New(testConfig(t))
 	tk, _ := b.tickets.Issue("worker", b.ticketTTL)
 	csr := makeCSRForCN(t, "worker")

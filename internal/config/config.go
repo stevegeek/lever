@@ -212,10 +212,10 @@ const (
 // Messaging is the broker's message-routing policy knobs. Routing policy, not
 // capability grants: identities come from mTLS; recipients from config.
 type Messaging struct {
-	// GroveToGrove permits grove→grove sends. nil/unset ⇒ true (allowed);
+	// WorkerToWorker permits grove→grove sends. nil/unset ⇒ true (allowed);
 	// pointer-bool so an explicit `false` is distinguishable for stricter
 	// hub-and-spoke models.
-	GroveToGrove *bool `yaml:"grove_to_grove"`
+	WorkerToWorker *bool `yaml:"grove_to_grove"`
 }
 
 // Broker holds broker settings + first-party tool declarations.
@@ -244,7 +244,7 @@ type Manager struct {
 	Delegate       []DelegateGrant `yaml:"delegate"`
 }
 
-type Grove struct {
+type Worker struct {
 	Name     string          `yaml:"name"`
 	Dir      string          `yaml:"dir"`
 	Image    string          `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
@@ -284,7 +284,7 @@ type App struct {
 	Tree     string      `yaml:"tree"`
 	Manager  Manager     `yaml:"manager"`
 	Scion    ScionConfig `yaml:"scion"`
-	Groves   []Grove     `yaml:"groves"`
+	Workers  []Worker    `yaml:"groves"`
 	Security Security    `yaml:"security"`
 	Broker   Broker      `yaml:"broker"`
 
@@ -460,7 +460,7 @@ func (a *App) Validate() error {
 	if a.Manager.PromptFile != "" && !confinedRel(a.Manager.PromptFile) {
 		return fmt.Errorf("config: manager.prompt_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.PromptFile)
 	}
-	for _, g := range a.Groves {
+	for _, g := range a.Workers {
 		if g.Name == "" || g.Dir == "" {
 			return fmt.Errorf("config: grove needs name + dir (got %+v)", g)
 		}
@@ -516,7 +516,7 @@ func (a *App) validateBroker() error {
 	if !validMode(a.Manager.LLMAuth) {
 		return fmt.Errorf("config: manager.llm_auth %q invalid (want subscription|api-key)", a.Manager.LLMAuth)
 	}
-	for _, g := range a.Groves {
+	for _, g := range a.Workers {
 		if !validMode(g.LLMAuth) {
 			return fmt.Errorf("config: grove %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
@@ -571,8 +571,8 @@ func (a *App) llmAuthModes() (anyAPIKey, anySubscription bool) {
 		}
 	}
 	mark(a.EffectiveManagerLLMAuth())
-	for _, g := range a.Groves {
-		mark(a.EffectiveGroveLLMAuth(g))
+	for _, g := range a.Workers {
+		mark(a.EffectiveWorkerLLMAuth(g))
 	}
 	return
 }
@@ -606,9 +606,9 @@ func (a *App) injectLLMGrants() {
 	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
 		add(&a.Manager.Obtain)
 	}
-	for i := range a.Groves {
-		if a.EffectiveGroveLLMAuth(a.Groves[i]) == LLMAuthAPIKey {
-			add(&a.Groves[i].Obtain)
+	for i := range a.Workers {
+		if a.EffectiveWorkerLLMAuth(a.Workers[i]) == LLMAuthAPIKey {
+			add(&a.Workers[i].Obtain)
 		}
 	}
 }
@@ -644,7 +644,7 @@ func (a *App) validateBrokerGrants() error {
 	}
 	// Known agent identities: the manager CN + every grove name.
 	agents := map[string]bool{a.ManagerCN(): true}
-	for _, g := range a.Groves {
+	for _, g := range a.Workers {
 		agents[g.Name] = true
 	}
 	checkCap := func(who, tool, op string) error {
@@ -681,7 +681,7 @@ func (a *App) validateBrokerGrants() error {
 	if err := validate("manager", a.Manager.Obtain, a.Manager.Delegate); err != nil {
 		return err
 	}
-	for _, g := range a.Groves {
+	for _, g := range a.Workers {
 		if err := validate("grove "+g.Name, g.Obtain, g.Delegate); err != nil {
 			return err
 		}
@@ -689,8 +689,8 @@ func (a *App) validateBrokerGrants() error {
 	return nil
 }
 
-// GroveDir returns the absolute path of a grove dir (tree + relative dir).
-func (a *App) GroveDir(g Grove) string { return filepath.Join(a.Tree, g.Dir) }
+// WorkerDir returns the absolute path of a grove dir (tree + relative dir).
+func (a *App) WorkerDir(g Worker) string { return filepath.Join(a.Tree, g.Dir) }
 
 // EffectiveManagerLLMAuth resolves the manager's LLM-auth mode: the broker
 // default (subscription when unset).
@@ -701,9 +701,9 @@ func (a *App) EffectiveManagerLLMAuth() LLMAuthMode {
 	return a.brokerLLMAuthDefault()
 }
 
-// EffectiveGroveLLMAuth resolves a grove's LLM-auth mode: its own override else
+// EffectiveWorkerLLMAuth resolves a grove's LLM-auth mode: its own override else
 // the broker default.
-func (a *App) EffectiveGroveLLMAuth(g Grove) LLMAuthMode {
+func (a *App) EffectiveWorkerLLMAuth(g Worker) LLMAuthMode {
 	if g.LLMAuth != "" {
 		return g.LLMAuth
 	}
@@ -745,26 +745,26 @@ func (a *App) ClosedInternetEgress() (closed bool, warning string) {
 	return a.Egress == EgressClosed, ""
 }
 
-// GroveImage returns the container image a grove should run on: its own
+// WorkerImage returns the container image a grove should run on: its own
 // `image:` if set, else the manager image (the common single-image case, and
 // the image apply already loads into the jail). The manager dispatches groves
 // later, so this is the single source of truth both apply (what to load) and
 // lever-manager (what to pass to `scion start`) resolve against.
-func (a *App) GroveImage(g Grove) string {
+func (a *App) WorkerImage(g Worker) string {
 	if g.Image != "" {
 		return g.Image
 	}
 	return a.Manager.Image
 }
 
-// GroveByName returns the configured grove with the given name, or false.
-func (a *App) GroveByName(name string) (Grove, bool) {
-	for _, g := range a.Groves {
+// WorkerByName returns the configured grove with the given name, or false.
+func (a *App) WorkerByName(name string) (Worker, bool) {
+	for _, g := range a.Workers {
 		if g.Name == name {
 			return g, true
 		}
 	}
-	return Grove{}, false
+	return Worker{}, false
 }
 
 // ManagerCN returns the manager's cert CN (broker.manager_identity, default "manager").
@@ -787,10 +787,10 @@ func (a *App) ManagerPromptPath() string {
 	return filepath.Join(a.dir, a.Manager.PromptFile)
 }
 
-// GroveToGroveMessaging reports whether groves may message each other
+// WorkerToWorkerMessaging reports whether groves may message each other
 // (default true; broker.messaging.grove_to_grove: false disables).
-func (a *App) GroveToGroveMessaging() bool {
-	if v := a.Broker.Messaging.GroveToGrove; v != nil {
+func (a *App) WorkerToWorkerMessaging() bool {
+	if v := a.Broker.Messaging.WorkerToWorker; v != nil {
 		return *v
 	}
 	return true

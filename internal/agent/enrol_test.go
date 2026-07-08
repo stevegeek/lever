@@ -83,7 +83,7 @@ func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 
 // provisionAs signs a manager client cert with the CA, builds an mTLS client,
 // POSTs /provision {grove}, and returns the ticket string.
-func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *ca.CA, grove string) string {
+func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *ca.CA, worker string) string {
 	t.Helper()
 
 	// Build a manager cert signed by the broker CA (mirrors signedCert in broker e2e_test).
@@ -105,7 +105,7 @@ func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *c
 		Certificates: []tls.Certificate{managerCert},
 	}}}
 
-	body, _ := json.Marshal(map[string]string{"grove": grove})
+	body, _ := json.Marshal(map[string]string{"grove": worker})
 	resp, err := client.Post(srv.URL+"/provision", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("provisionAs: POST /provision: %v", err)

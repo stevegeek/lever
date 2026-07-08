@@ -23,8 +23,8 @@ type msgTarget struct {
 // text is the deny reason (audited alongside the recipient by the handler).
 func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	isManager := caller == b.manager
-	_, isGrove := b.groves[caller]
-	if !isManager && !isGrove {
+	_, isWorker := b.workers[caller]
+	if !isManager && !isWorker {
 		return msgTarget{}, fmt.Errorf("caller %q is not the manager or a declared grove", caller)
 	}
 	// The manager target ALWAYS routes to agent:<slug> — scion knows the
@@ -53,11 +53,11 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if name == b.manager || name == b.managerSlug {
 		return managerTarget, nil
 	}
-	spec, ok := b.groves[name]
+	spec, ok := b.workers[name]
 	if !ok {
 		return msgTarget{}, fmt.Errorf("unknown recipient %q", to)
 	}
-	if !isManager && caller != name && !b.groveToGrove {
+	if !isManager && caller != name && !b.workerToWorker {
 		return msgTarget{}, fmt.Errorf("grove→grove messaging is disabled")
 	}
 	return msgTarget{scionTo: "agent:" + spec.Name, project: spec.JailProject}, nil
@@ -67,22 +67,22 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 // its own agent inbox (empty grove — jail-side `scion notifications` requires
 // -g; the bare/operator form is container-only) or any declared grove's.
 // Grove: its own only.
-func (b *Broker) resolveListProject(caller, grove string) (string, error) {
+func (b *Broker) resolveListProject(caller, worker string) (string, error) {
 	if caller == b.manager {
-		if grove == "" {
+		if worker == "" {
 			return b.managerProject, nil
 		}
-		spec, ok := b.groves[grove]
+		spec, ok := b.workers[worker]
 		if !ok {
-			return "", fmt.Errorf("unknown grove %q", grove)
+			return "", fmt.Errorf("unknown grove %q", worker)
 		}
 		return spec.JailProject, nil
 	}
-	spec, ok := b.groves[caller]
+	spec, ok := b.workers[caller]
 	if !ok {
 		return "", fmt.Errorf("caller %q is not the manager or a declared grove", caller)
 	}
-	if grove != "" {
+	if worker != "" {
 		return "", fmt.Errorf("a grove may only read its own inbox")
 	}
 	return spec.JailProject, nil
@@ -95,8 +95,8 @@ type msgSendRequest struct {
 }
 
 type msgListRequest struct {
-	All   bool   `json:"all"`
-	Grove string `json:"grove"`
+	All    bool   `json:"all"`
+	Worker string `json:"grove"`
 }
 
 type msgListResponse struct {
@@ -165,9 +165,9 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	project, rerr := b.resolveListProject(caller, req.Grove)
+	project, rerr := b.resolveListProject(caller, req.Worker)
 	if rerr != nil {
-		b.audit("msg", caller, "deny", "list "+req.Grove+": "+rerr.Error())
+		b.audit("msg", caller, "deny", "list "+req.Worker+": "+rerr.Error())
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -180,6 +180,6 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	b.audit("msg", caller, "allow", "list "+req.Grove)
+	b.audit("msg", caller, "allow", "list "+req.Worker)
 	writeJSON(w, msgListResponse{Events: events})
 }

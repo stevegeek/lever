@@ -254,10 +254,10 @@ func TestAcceptanceFixtureLoads(t *testing.T) {
 	if len(app.Manager.Delegate) != 1 || app.Manager.Delegate[0].Tool != "db" || app.Manager.Delegate[0].To[0] != "worker" {
 		t.Fatalf("fixture must delegate db.read → worker, got %+v", app.Manager.Delegate)
 	}
-	var worker *config.Grove
-	for i := range app.Groves {
-		if app.Groves[i].Name == "worker" {
-			worker = &app.Groves[i]
+	var worker *config.Worker
+	for i := range app.Workers {
+		if app.Workers[i].Name == "worker" {
+			worker = &app.Workers[i]
 		}
 	}
 	if worker == nil {

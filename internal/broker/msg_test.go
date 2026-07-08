@@ -19,8 +19,8 @@ import (
 // (scion: `Agent "manager" not found in project`) hid behind an earlier
 // fixture where CN == slug, so routing to agent:<CN> passed by coincidence.
 func msgBroker(g2g bool) *Broker {
-	b := New(Config{ManagerIdentity: "manager", ManagerSlug: "assistant", GroveToGrove: g2g, ManagerProject: "/lever",
-		Groves: []GroveSpec{{Name: "scratch", JailProject: "/lever/groves/scratch"},
+	b := New(Config{ManagerIdentity: "manager", ManagerSlug: "assistant", WorkerToWorker: g2g, ManagerProject: "/lever",
+		Workers: []WorkerSpec{{Name: "scratch", JailProject: "/lever/groves/scratch"},
 			{Name: "worker", JailProject: "/lever/groves/worker"}}})
 	return b
 }
@@ -66,9 +66,9 @@ func TestResolveMsgTarget(t *testing.T) {
 
 func TestResolveListProject(t *testing.T) {
 	cases := []struct {
-		name, caller, grove string
-		want                string
-		wantErr             bool
+		name, caller, worker string
+		want                 string
+		wantErr              bool
 	}{
 		{"manager own inbox", "manager", "", "/lever", false},
 		{"manager reads grove", "manager", "scratch", "/lever/groves/scratch", false},
@@ -79,7 +79,7 @@ func TestResolveListProject(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := msgBroker(true).resolveListProject(c.caller, c.grove)
+			got, err := msgBroker(true).resolveListProject(c.caller, c.worker)
 			if c.wantErr != (err != nil) {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}
@@ -94,7 +94,7 @@ func TestResolveListProject(t *testing.T) {
 // interface field) for lifecycle methods it never exercises, and overrides
 // Message/Inbox to capture what the msg handlers pass through.
 type fakeMsgRuntime struct {
-	GroveRuntime
+	WorkerRuntime
 	sent         []scion.MsgOpts
 	events       []scion.Event
 	inboxProject string
@@ -117,13 +117,13 @@ func (f *fakeMsgRuntime) Inbox(_ context.Context, _ bool, project string) ([]sci
 // output to the returned buffer.
 func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
 	var buf bytes.Buffer
-	rt := &fakeMsgRuntime{GroveRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
+	rt := &fakeMsgRuntime{WorkerRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
 	b := New(Config{
 		ManagerIdentity: "manager",
 		ManagerSlug:     "assistant",
 		ManagerProject:  "/lever",
-		GroveToGrove:    g2g,
-		Groves: []GroveSpec{
+		WorkerToWorker:  g2g,
+		Workers: []WorkerSpec{
 			{Name: "scratch", JailProject: "/lever/groves/scratch"},
 			{Name: "worker", JailProject: "/lever/groves/worker"},
 		},
@@ -134,9 +134,9 @@ func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
 	return b, rt, &buf
 }
 
-func TestMsgSend_managerToGrove(t *testing.T) {
+func TestMsgSend_managerToWorker(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
-	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go","interrupt":true}`, "manager")
+	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go","interrupt":true}`, "manager")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -149,9 +149,9 @@ func TestMsgSend_managerToGrove(t *testing.T) {
 	}
 }
 
-func TestMsgSend_groveToUser(t *testing.T) {
+func TestMsgSend_workerToUser(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
-	rec := callGrove(t, b, "/msg/send", `{"to":"user:manager"}`, "scratch")
+	rec := callWorker(t, b, "/msg/send", `{"to":"user:manager"}`, "scratch")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -164,9 +164,9 @@ func TestMsgSend_groveToUser(t *testing.T) {
 	}
 }
 
-func TestMsgSend_groveToGroveDisabled(t *testing.T) {
+func TestMsgSend_workerToWorkerDisabled(t *testing.T) {
 	b, rt, audit := newMsgTestBroker(false)
-	rec := callGrove(t, b, "/msg/send", `{"to":"worker"}`, "scratch")
+	rec := callWorker(t, b, "/msg/send", `{"to":"worker"}`, "scratch")
 	if rec.Code != 403 {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
@@ -180,7 +180,7 @@ func TestMsgSend_groveToGroveDisabled(t *testing.T) {
 
 func TestMsgSend_unknownCaller(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
-	rec := callGrove(t, b, "/msg/send", `{"to":"scratch"}`, "mallory")
+	rec := callWorker(t, b, "/msg/send", `{"to":"scratch"}`, "mallory")
 	if rec.Code != 403 {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
@@ -189,10 +189,10 @@ func TestMsgSend_unknownCaller(t *testing.T) {
 	}
 }
 
-func TestMsgList_managerReadsGrove(t *testing.T) {
+func TestMsgList_managerReadsWorker(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
 	rt.events = []scion.Event{{"id": "1", "type": "test"}}
-	rec := callGrove(t, b, "/msg/list", `{"grove":"scratch"}`, "manager")
+	rec := callWorker(t, b, "/msg/list", `{"grove":"scratch"}`, "manager")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -208,9 +208,9 @@ func TestMsgList_managerReadsGrove(t *testing.T) {
 	}
 }
 
-func TestMsgList_groveForbiddenOtherGrove(t *testing.T) {
+func TestMsgList_workerForbiddenOtherWorker(t *testing.T) {
 	b, _, _ := newMsgTestBroker(true)
-	rec := callGrove(t, b, "/msg/list", `{"grove":"worker"}`, "scratch")
+	rec := callWorker(t, b, "/msg/list", `{"grove":"worker"}`, "scratch")
 	if rec.Code != 403 {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
@@ -222,15 +222,15 @@ func TestMsgNilRuntime_returns502(t *testing.T) {
 	b := New(Config{
 		ManagerIdentity: "assistant",
 		ManagerProject:  "/lever",
-		GroveToGrove:    true,
-		Groves: []GroveSpec{
+		WorkerToWorker:  true,
+		Workers: []WorkerSpec{
 			{Name: "scratch", JailProject: "/lever/groves/scratch"},
 		},
 		Runtime:  nil,
 		Registry: registry.New(),
 	})
 
-	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "assistant")
+	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "assistant")
 	if rec.Code != 502 {
 		t.Fatalf("/msg/send nil-runtime: status = %d, want 502", rec.Code)
 	}
@@ -250,7 +250,7 @@ func TestMsgBadBody_returns400(t *testing.T) {
 	for _, path := range []string{"/msg/send", "/msg/list"} {
 		t.Run(path, func(t *testing.T) {
 			b, rt, audit := newMsgTestBroker(true)
-			rec := callGrove(t, b, path, `{not json`, "manager")
+			rec := callWorker(t, b, path, `{not json`, "manager")
 			if rec.Code != 400 {
 				t.Fatalf("%s status = %d, want 400", path, rec.Code)
 			}
@@ -272,7 +272,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 
 	b, rt, audit := newMsgTestBroker(true)
 	rt.sendErr = errors.New(secret)
-	rec := callGrove(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "manager")
+	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "manager")
 	if rec.Code != 502 {
 		t.Fatalf("/msg/send status = %d, want 502", rec.Code)
 	}
@@ -285,7 +285,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 
 	b2, rt2, audit2 := newMsgTestBroker(true)
 	rt2.inboxErr = errors.New(secret)
-	rec2 := callGrove(t, b2, "/msg/list", `{"grove":"scratch"}`, "manager")
+	rec2 := callWorker(t, b2, "/msg/list", `{"grove":"scratch"}`, "manager")
 	if rec2.Code != 502 {
 		t.Fatalf("/msg/list status = %d, want 502", rec2.Code)
 	}
@@ -300,7 +300,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 func TestMsgSend_deniesRevokedCaller(t *testing.T) {
 	b, rt, audit := newMsgTestBroker(true)
 	b.Revoke("scratch")
-	rec := callGrove(t, b, "/msg/send", `{"to":"user:manager","body":"steer"}`, "scratch")
+	rec := callWorker(t, b, "/msg/send", `{"to":"user:manager","body":"steer"}`, "scratch")
 	if rec.Code != 403 {
 		t.Fatalf("revoked sender: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
@@ -315,16 +315,16 @@ func TestMsgSend_deniesRevokedCaller(t *testing.T) {
 func TestMsgList_deniesRevokedCaller(t *testing.T) {
 	b, _, _ := newMsgTestBroker(true)
 	b.Revoke("manager")
-	rec := callGrove(t, b, "/msg/list", `{"all":false}`, "manager")
+	rec := callWorker(t, b, "/msg/list", `{"all":false}`, "manager")
 	if rec.Code != 403 {
 		t.Fatalf("revoked msg list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
 }
 
-func TestGroveList_deniesRevokedManager(t *testing.T) {
+func TestWorkerList_deniesRevokedManager(t *testing.T) {
 	b, _, _ := newMsgTestBroker(true)
 	b.Revoke("manager")
-	rec := callGrove(t, b, "/grove/list", `{}`, "manager")
+	rec := callWorker(t, b, "/grove/list", `{}`, "manager")
 	if rec.Code != 403 {
 		t.Fatalf("revoked grove list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}

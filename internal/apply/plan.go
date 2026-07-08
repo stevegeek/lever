@@ -54,8 +54,8 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 		}
 	}
 	addLoad(a.Manager.Image)
-	for _, g := range a.Groves {
-		addLoad(a.GroveImage(g))
+	for _, g := range a.Workers {
+		addLoad(a.WorkerImage(g))
 	}
 	steps = append(steps,
 		Step{Kind: "init-machine"},
@@ -66,8 +66,8 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 		steps = append(steps, Step{Kind: "credential", Target: a.Manager.CredentialFile})
 	}
 	steps = append(steps, Step{Kind: "register-manager", Target: a.Tree})
-	for _, g := range a.Groves {
-		steps = append(steps, Step{Kind: "register-grove", Target: a.GroveDir(g)})
+	for _, g := range a.Workers {
+		steps = append(steps, Step{Kind: "register-grove", Target: a.WorkerDir(g)})
 	}
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})

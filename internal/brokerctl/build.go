@@ -41,8 +41,8 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		}
 	}
 	addGrants(app.ManagerCN(), app.Manager.Obtain, app.Manager.Delegate)
-	agents := make([]string, 0, len(app.Groves))
-	for _, g := range app.Groves {
+	agents := make([]string, 0, len(app.Workers))
+	for _, g := range app.Workers {
 		addGrants(g.Name, g.Obtain, g.Delegate)
 		agents = append(agents, g.Name)
 	}

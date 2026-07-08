@@ -13,7 +13,7 @@ import (
 func attachApp() *config.App {
 	return &config.App{
 		Name: "assistant",
-		Groves: []config.Grove{
+		Workers: []config.Worker{
 			{Name: "scratch", Dir: "groves/scratch"},
 			{Name: "worker", Dir: "groves/worker"},
 		},
@@ -40,7 +40,7 @@ func TestAttachTargetManagerByName(t *testing.T) {
 	}
 }
 
-func TestAttachTargetGrove(t *testing.T) {
+func TestAttachTargetWorker(t *testing.T) {
 	slug, project, err := attachTarget(attachApp(), "/lever", "scratch")
 	if err != nil {
 		t.Fatalf("attachTarget: %v", err)

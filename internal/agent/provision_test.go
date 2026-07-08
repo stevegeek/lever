@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestProvisionMintsGroveTicket(t *testing.T) {
+func TestProvisionMintsWorkerTicket(t *testing.T) {
 	env := testBroker(t)
 	managerID := enrolManager(t, env.CA) // CN=manager; /provision is manager-CN-gated
 	client, err := managerID.Client()

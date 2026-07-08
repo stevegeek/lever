@@ -29,7 +29,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img", CredentialFile: "cred"},
-		Groves:  []config.Grove{{Name: "worker"}},
+		Workers: []config.Worker{{Name: "worker"}},
 		Broker:  config.Broker{JailPort: 8443, AdminPort: 8444},
 	}
 	got := planStepNames(Plan(app, PlanOpts{BrokerOnly: true}))
@@ -66,7 +66,7 @@ func TestPlanOrder(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img", AllowPorts: []int{3305}},
-		Groves:  []config.Grove{{Name: "appa", Dir: "groves/appa"}, {Name: "appb", Dir: "groves/appb"}},
+		Workers: []config.Worker{{Name: "appa", Dir: "groves/appa"}, {Name: "appb", Dir: "groves/appb"}},
 	}
 	steps := Plan(app, PlanOpts{})
 	var kinds []string
@@ -154,7 +154,7 @@ func TestApplyPlan_noWriteManifest(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img"},
-		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "groves/worker"}},
 	}
 	for _, s := range Plan(app, PlanOpts{}) {
 		if s.Kind == "write-manifest" {
@@ -163,11 +163,11 @@ func TestApplyPlan_noWriteManifest(t *testing.T) {
 	}
 }
 
-func TestPlanLoadsDistinctGroveImages(t *testing.T) {
+func TestPlanLoadsDistinctWorkerImages(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "mgr:1"},
-		Groves: []config.Grove{
+		Workers: []config.Worker{
 			{Name: "a", Dir: "groves/a"},                 // inherits mgr:1
 			{Name: "b", Dir: "groves/b", Image: "alt:1"}, // override
 			{Name: "c", Dir: "groves/c", Image: "alt:1"}, // dup override

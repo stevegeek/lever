@@ -267,7 +267,7 @@ func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error 
 	// TODO(hardening): this fixed /tmp path (and the vmIDDir parents) would collide
 	// across concurrent `lever acceptance` runs; fine for the single-run merge gate.
 	wbs := "/tmp/lever-acceptance/worker-bootstrap.json"
-	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-grove", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-worker", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
 		return fmt.Errorf("provision worker (lever-agent provision): %w: %s", err, res.Stdout+res.Stderr)
 	}
 	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.workerID, "-bootstrap", wbs); err != nil {

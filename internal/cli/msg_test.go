@@ -93,7 +93,7 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 	root := newManagerRootWith()
 	var out bytes.Buffer
 	root.SetOut(&out)
-	root.SetArgs([]string{"msg", "list", "--grove", "scratch", "--all"})
+	root.SetArgs([]string{"msg", "list", "--worker", "scratch", "--all"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("list: %v", err)
 	}

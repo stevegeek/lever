@@ -505,15 +505,15 @@ func cmdProvision(args []string) error {
 	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
 	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the manager identity (cert+key+ca)")
-	worker := fs.String("grove", "", "grove name to provision a ticket for")
-	out := fs.String("out", "", "path to write the grove bootstrap JSON (0600)")
+	worker := fs.String("worker", "", "worker name to provision a ticket for")
+	out := fs.String("out", "", "path to write the worker bootstrap JSON (0600)")
 	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL if -broker-url not set)")
 	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *worker == "" {
-		return fmt.Errorf("provision: -grove is required")
+		return fmt.Errorf("provision: -worker is required")
 	}
 	if *out == "" {
 		return fmt.Errorf("provision: -out is required")

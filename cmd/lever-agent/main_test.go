@@ -307,7 +307,7 @@ func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 // is no identity — cmdProvision errors with "no identity", which proves dispatch
 // and flag parsing succeeded without a "flag provided but not defined" error.
 func TestProvisionVerbAcceptedByRun(t *testing.T) {
-	err := run([]string{"lever-agent", "provision", "-grove", "worker", "-out", t.TempDir() + "/w.json", "-id-dir", t.TempDir()})
+	err := run([]string{"lever-agent", "provision", "-worker", "worker", "-out", t.TempDir() + "/w.json", "-id-dir", t.TempDir()})
 	if err == nil {
 		t.Fatal("expected an error (no identity), got nil")
 	}

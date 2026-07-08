@@ -83,7 +83,7 @@ func msgList() *cobra.Command {
 			}
 			return nil
 		}}
-	c.Flags().StringVar(&worker, "grove", "", "manager only: read this grove's project inbox")
+	c.Flags().StringVar(&worker, "worker", "", "manager only: read this worker's project inbox")
 	c.Flags().BoolVar(&all, "all", false, "include already-read events")
 	return c
 }

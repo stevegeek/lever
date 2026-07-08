@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/cap/ca"
@@ -18,14 +19,15 @@ type State struct{ Dir string }
 // StateDir returns the .lever-state directory beside the config.
 func StateDir(configDir string) State { return State{Dir: filepath.Join(configDir, ".lever-state")} }
 
-func (s State) CACert() string     { return filepath.Join(s.Dir, "ca.crt") }
-func (s State) CAKey() string      { return filepath.Join(s.Dir, "ca.key") }
-func (s State) BrokerKey() string  { return filepath.Join(s.Dir, "broker.key") }
-func (s State) BrokerPub() string  { return filepath.Join(s.Dir, "broker.pub") }
-func (s State) Revocation() string { return filepath.Join(s.Dir, "revocation.json") }
-func (s State) PID() string        { return filepath.Join(s.Dir, "broker.pid") }
-func (s State) Log() string        { return filepath.Join(s.Dir, "broker.log") }
-func (s State) OutLog() string     { return filepath.Join(s.Dir, "broker.out.log") }
+func (s State) CACert() string        { return filepath.Join(s.Dir, "ca.crt") }
+func (s State) CAKey() string         { return filepath.Join(s.Dir, "ca.key") }
+func (s State) BrokerKey() string     { return filepath.Join(s.Dir, "broker.key") }
+func (s State) BrokerPub() string     { return filepath.Join(s.Dir, "broker.pub") }
+func (s State) Revocation() string    { return filepath.Join(s.Dir, "revocation.json") }
+func (s State) PID() string           { return filepath.Join(s.Dir, "broker.pid") }
+func (s State) Log() string           { return filepath.Join(s.Dir, "broker.log") }
+func (s State) OutLog() string        { return filepath.Join(s.Dir, "broker.out.log") }
+func (s State) ControllerPAT() string { return filepath.Join(s.Dir, "controller.pat") }
 
 // EnsureKeys loads the CA + capability-signing root keypair from the state dir, generating
 // and persisting them (0600 secrets) on first use. Reused across restarts so
@@ -106,4 +108,39 @@ func (s State) SaveRevocation(rs broker.RevocationState) error {
 		return fmt.Errorf("brokerctl: write revocation: %w", err)
 	}
 	return nil
+}
+
+// SaveControllerPAT persists the scion controller personal access token
+// (0600) under the state dir, creating the dir if needed.
+func (s State) SaveControllerPAT(tok string) error {
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return fmt.Errorf("brokerctl: state dir: %w", err)
+	}
+	if err := os.WriteFile(s.ControllerPAT(), []byte(tok), 0o600); err != nil {
+		return fmt.Errorf("brokerctl: write controller.pat: %w", err)
+	}
+	return nil
+}
+
+// LoadControllerPAT reads the persisted controller PAT. An absent file
+// returns ("", nil) so callers can branch on "" meaning "need to mint".
+// A file present with permissions other than 0600 is treated as tampered
+// or misconfigured and returns an error (mirrors the api_key_file
+// defense-in-depth check in build.go).
+func (s State) LoadControllerPAT() (string, error) {
+	fi, err := os.Stat(s.ControllerPAT())
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("brokerctl: controller.pat: %w", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		return "", fmt.Errorf("brokerctl: controller.pat must be 0600, got %#o", perm)
+	}
+	b, err := os.ReadFile(s.ControllerPAT())
+	if err != nil {
+		return "", fmt.Errorf("brokerctl: read controller.pat: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
 }

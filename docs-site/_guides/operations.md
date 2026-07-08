@@ -10,7 +10,7 @@ Task-shaped guides for running an instance day to day and growing it past the fi
 ## Changing config on a running instance
 
 The broker reads `lever.yaml` **once, at its own startup** — and a re-run of `lever up`/`apply`
-deliberately keeps a healthy broker process running. So editing the config (new grove, new tool,
+deliberately keeps a healthy broker process running. So editing the config (new worker, new tool,
 changed grants) and re-applying **silently changes nothing at the broker layer**: the symptom is a
 correct-looking config plus unexplained denials ("unknown recipient", 403s for a grant you can see
 in the file).
@@ -21,41 +21,45 @@ Use `lever reload`:
 lever reload   # stops the broker, re-runs apply on the current config, spawns a fresh broker
 ```
 
-It restarts the broker onto the edited config, re-registers groves, and re-applies egress — but
-leaves the running manager container alone (apply's start-manager sees it already running), so the
-**manager's conversation is preserved** and your TTY is not taken. It's the broker half of a
-`lever stop` + `lever up` without the VM power cycle or the re-attach. CA, keys, and enrolments all
-persist. (A full `lever stop && lever up` still works and additionally power-cycles the VM if you
-want that.)
+It restarts the broker onto the edited config, re-reads the worker declarations, and re-applies
+egress — but leaves the running manager container alone (apply's start-manager sees it already
+running), so the **manager's conversation is preserved** and your TTY is not taken. It's the broker
+half of a `lever stop` + `lever up` without the VM power cycle or the re-attach. CA, keys, and
+enrolments all persist. (A full `lever stop && lever up` still works and additionally power-cycles
+the VM if you want that.)
 
 reload validates the edited config *before* it stops the broker, so a config typo fails with the
 old broker still serving. If a later step fails (backend, image load), the broker can be briefly
 down until you re-run `lever up` — the same recoverable window as a `stop`+`up` that fails midway.
+The instance's single scion project registration (`register-project`) is idempotent, so reload's
+re-run of apply is a no-op there — it's the broker restart, not a re-registration, that picks up the
+edited worker list.
 
-> **reload adds and changes; it does not remove.** reload re-reads the config and re-registers the
-> groves in it, but it does not tear down a grove you *deleted* from the config. That grove's
-> container keeps running with its already-minted capability tokens (valid until `broker.grant_ttl`,
-> default 24h) even though the new broker no longer knows it — new mints and messaging to it are
-> denied, but held tokens still work. To actually cut off a removed grove, stop it and revoke it
-> before or after the reload: `lever-manager agent stop <grove>` (from the manager) and
-> `lever revoke <grove>`, or `lever broker bump-epoch` to kill every outstanding token at once.
+> **reload adds and changes; it does not remove.** reload re-reads the config so the fresh broker
+> knows the current worker list, but it does not tear down a worker you *deleted* from the config.
+> That worker's container (if one was dispatched) keeps running with its already-minted capability
+> tokens (valid until `broker.grant_ttl`, default 24h) even though the new broker no longer knows
+> it — new mints and messaging to it are denied, but held tokens still work. To actually cut off a
+> removed worker, stop it and revoke it before or after the reload: `lever-manager agent stop
+> <worker>` (from the manager) and `lever revoke <worker>`, or `lever broker bump-epoch` to kill
+> every outstanding token at once.
 
-## Adding a grove to a running instance
+## Adding a worker to a running instance
 
-1. Create the directory under your tree: `mkdir -p workspace/groves/newgrove` (the dir must exist;
-   lever won't create it for you).
+1. Create the directory under your tree: `mkdir -p workspace/workers/newworker` (the dir must
+   exist; lever won't create it for you — the broker `Stat`s it before dispatch).
 2. Declare it in `lever.yaml`:
    ```yaml
-   groves:
-     - name: newgrove
-       dir: groves/newgrove
+   workers:
+     - name: newworker
+       dir: workers/newworker
    ```
    Add `obtain:` grants if it needs brokered tools (see [capabilities](/capabilities/)).
-3. `lever init` — scaffolds the grove's `lever-agent` skill into the new dir.
-4. `lever reload` — the broker must restart to learn the new grove (see above).
+3. `lever init` — scaffolds the worker's `lever-agent` skill into the new dir.
+4. `lever reload` — the broker must restart to learn the new worker (see above).
 5. Verify: `lever doctor` (skills check covers the new dir), then dispatch it from the manager
-   (`lever-manager agent start newgrove --task "…"`) or message it from the host
-   (`lever msg send "…" --to newgrove`).
+   (`lever-manager agent start newworker --task "…"`) or message it from the host
+   (`lever msg send "…" --to newworker`).
 
 ## Where the logs are
 
@@ -77,7 +81,7 @@ command whenever anything looks wrong — every check prints a specific fix hint
 |---|---|---|
 | Tool call denied `missing capability` | agent didn't mint/attach | the agent should follow its `lever-operator` skill (mint via `lever-capability`, pass `_capability`); if the skill is missing, run `lever init` |
 | Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then stop+up |
-| "unknown recipient" / new grove invisible | broker still running on the old config | `lever reload` |
+| "unknown recipient" / new worker invisible | broker still running on the old config | `lever reload` |
 | Gateway 502 on an external tool | the host-side server isn't listening | `lever doctor` (external-backends check), start your server |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/) — `--fresh` resets the conversation, not the tree |

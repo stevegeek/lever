@@ -17,16 +17,20 @@ import (
 )
 
 type Options struct {
-	Bin         string // default "scion"
-	HubEndpoint string // SCION_HUB_ENDPOINT
-	DevToken    string // SCION_DEV_TOKEN
+	Bin            string        // default "scion"
+	HubEndpoint    string        // SCION_HUB_ENDPOINT
+	DevToken       string        // SCION_DEV_TOKEN
+	HubToken       string        // SCION_HUB_TOKEN (static; the controller PAT, P3)
+	HubTokenSource func() string // SCION_HUB_TOKEN (lazy; wins over HubToken — the mint-mid-apply case)
 }
 
 type Client struct {
-	bin         string
-	hubEndpoint string
-	devToken    string
-	r           exec.Runner
+	bin            string
+	hubEndpoint    string
+	devToken       string
+	hubToken       string
+	hubTokenSource func() string
+	r              exec.Runner
 }
 
 func New(r exec.Runner, o Options) *Client {
@@ -34,8 +38,29 @@ func New(r exec.Runner, o Options) *Client {
 	if bin == "" {
 		bin = "scion"
 	}
-	return &Client{bin: bin, hubEndpoint: o.HubEndpoint, devToken: o.DevToken, r: r}
+	return &Client{
+		bin:            bin,
+		hubEndpoint:    o.HubEndpoint,
+		devToken:       o.DevToken,
+		hubToken:       o.HubToken,
+		hubTokenSource: o.HubTokenSource,
+		r:              r,
+	}
 }
+
+// currentHubToken resolves the controller PAT: the lazy source (read at call
+// time, for the mint-mid-apply case where the token isn't known at New())
+// wins over the static value.
+func (c *Client) currentHubToken() string {
+	if c.hubTokenSource != nil {
+		return c.hubTokenSource()
+	}
+	return c.hubToken
+}
+
+// HubToken exposes the resolved controller PAT so callers outside this
+// package (e.g. the attach exec path) can embed it themselves.
+func (c *Client) HubToken() string { return c.currentHubToken() }
 
 // Default reads the dev token from <home>/.scion/dev-token and the hub endpoint
 // from SCION_HUB_ENDPOINT (default loopback), mirroring ScionClient.default.
@@ -58,6 +83,9 @@ func (c *Client) env() map[string]string {
 	}
 	if c.devToken != "" {
 		m["SCION_DEV_TOKEN"] = c.devToken
+	}
+	if tok := c.currentHubToken(); tok != "" {
+		m["SCION_HUB_TOKEN"] = tok
 	}
 	return m
 }

@@ -82,7 +82,14 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		if jerr != nil {
 			return jerr
 		}
-		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
+		// HubTokenSource lets the broker's own worker-dispatch scion client
+		// (host-side, operator identity) authenticate against the real,
+		// dev-auth-off hub with the controller PAT minted by `lever apply`'s
+		// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
+		cfg.Runtime = scion.New(jr, scion.Options{
+			HubEndpoint:    "http://127.0.0.1:8080",
+			HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
+		})
 	}
 	cfg.Workers = WorkerSpecs(app, jailMount)
 	cfg.InstanceProject = jailMount

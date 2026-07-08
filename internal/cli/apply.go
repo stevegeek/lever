@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -47,6 +48,120 @@ func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (
 	cmd.Stdout = f
 	cmd.Stderr = f
 	return cmd, f, nil
+}
+
+// removeJailFileScript guards a jail-side rm: it only removes a REGULAR file
+// at $1 (a directory at $1 is left untouched — a stray in-repo git-mode
+// project, not a stale marker) and is a no-op if $1 is already absent.
+// Shared by Deps.RemoveJailFile (register-project's stale-marker cleanup, see
+// the comment at that call site in buildApplyDeps) and ensureControllerPAT's
+// residual dev-token cleanup below, so the guard text lives in exactly one
+// place.
+const removeJailFileScript = `if [ ! -d "$1" ] && [ -e "$1" ]; then rm -f -- "$1"; fi`
+
+// removeJailFile runs removeJailFileScript through jr against a jail-absolute
+// path. Best-effort by convention at call sites that don't want a missing (or
+// already-removed) target to fail the caller.
+func removeJailFile(ctx context.Context, jr leverexec.Runner, jailPath string) error {
+	if _, err := jr.Run(ctx, nil, "sh", "-c", removeJailFileScript, "_", jailPath); err != nil {
+		return fmt.Errorf("removing jail file %s: %w", jailPath, err)
+	}
+	return nil
+}
+
+// jailProjectPath maps tree (the project ROOT) to its in-jail location.
+// ensureControllerPAT only ever registers the project root (never a worker
+// subtree), so this covers just the hostPath==tree case of
+// internal/apply/run.go's jailPath — that helper is unexported in package
+// apply and can't be imported here, and the general N-path mapping isn't
+// needed for this one caller.
+func jailProjectPath(tree, jailMount string) string {
+	if jailMount == "" || tree == "" {
+		return tree
+	}
+	return jailMount
+}
+
+// throwawayHubPort is the fixed, jail-internal port ensureControllerPAT starts
+// its throwaway dev-auth hub on. A truly random free port would need a
+// jail-side probe; a fixed high port distinct from 8080 (the real hub, started
+// dev-auth-OFF right after by the scion-server apply step) and the broker's
+// admin port is simpler and deterministic, and safe because the throwaway hub
+// never leaves jail loopback and is killed before any agent container exists
+// (the "agent-free window" — see the P3 plan's Global Constraints).
+const throwawayHubPort = 48080
+
+// controllerPATScopes is the EXACT scope set the controller PAT is minted
+// with. agent:message is deliberately omitted — the scion authz review found
+// every interactive verb, message included, gates on agent:attach.
+var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read"}
+
+// ensureControllerPAT backs Deps.EnsureControllerPAT, the "bootstrap-token"
+// apply step (internal/apply/run.go): mint the controller PAT that the real
+// hub — started dev-auth-OFF by the scion-server step right after this one —
+// is driven with.
+//
+// Idempotent: a PAT already persisted in state short-circuits to nil (it
+// survives `down`→`up`; clearStagedRuntimeState only wipes tree/.lever/*, see
+// the P3 plan's Global Constraints). Otherwise this opens an agent-free mint
+// window: start a throwaway dev-auth-ON hub on throwawayHubPort, `scion init`
+// + `hub link` the project tree, mint a PAT scoped to exactly
+// controllerPATScopes, persist it 0600, stop the throwaway hub, and
+// best-effort delete scion's residual dev-token file so it doesn't linger as
+// an open admin credential once the real hub takes over. The throwaway and
+// real hub share the same jail ~/.scion DB BY CONSTRUCTION (both `scion
+// server start` invocations run in the same jail home) — no data-dir control
+// point is needed for the minted project + PAT to carry over.
+//
+// jr/tree/jailMount are passed explicitly (rather than closing over
+// app/b) purely so this function is unit-testable with fakes; jr is the same
+// jail exec.Runner buildApplyDeps already has (this function needs no other
+// backend access).
+//
+// LIVE-VALIDATION ITEMS (P4, not exercised by the unit test below): whether
+// the pinned scion CLI actually supports --port/--dev-auth/server
+// stop/hub token create --scopes (flagged since Task 1); whether
+// /home/scion/.scion/dev-token is the real residual dev-token path (best
+// guess from scion's dev-auth convention — confirm on a live run); whether
+// `scion server stop` exists at all in the pinned build (ServerStop's doc
+// comment notes a jail-pid-kill fallback if not — not implemented here).
+func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerctl.State, tree, jailMount string) error {
+	if tok, _ := state.LoadControllerPAT(); tok != "" {
+		return nil // already minted; survives down→up
+	}
+	tw := scion.New(jr, scion.Options{HubEndpoint: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)})
+	// Register the kill BEFORE ServerStart so a partial start — e.g. a throwaway
+	// dev-auth server left running from a prior failed invocation, whose
+	// readiness poll then times out — is still stopped rather than leaked as a
+	// dev-auth-on admin server. ServerStop tolerates a not-running server.
+	defer func() { _ = tw.ServerStop(ctx) }()
+	if err := tw.ServerStart(ctx, scion.ServerOpts{Port: throwawayHubPort, DevAuth: true}); err != nil {
+		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
+	}
+
+	jp := jailProjectPath(tree, jailMount)
+	if err := tw.InitProject(ctx, jp); err != nil {
+		return fmt.Errorf("bootstrap-token: init project: %w", err)
+	}
+	if err := tw.HubLink(ctx, jp); err != nil {
+		return fmt.Errorf("bootstrap-token: hub link: %w", err)
+	}
+	pat, err := tw.HubTokenCreate(ctx, controllerPATScopes)
+	if err != nil {
+		return fmt.Errorf("bootstrap-token: hub token create: %w", err)
+	}
+	if err := state.SaveControllerPAT(pat); err != nil {
+		return fmt.Errorf("bootstrap-token: persisting controller PAT: %w", err)
+	}
+	if err := tw.ServerStop(ctx); err != nil {
+		// Best-effort: the deferred ServerStop above retries at return, and a
+		// live run against a scion build without `server stop` needs a
+		// jail-pid-kill fallback instead (see ServerStop's doc comment) — a P4
+		// live-validation item, not implemented here.
+		_ = err
+	}
+	_ = removeJailFile(ctx, jr, "/home/scion/.scion/dev-token") // best-effort; live-validation item above
+	return nil
 }
 
 func newApplyCmd(bf BackendFactory) *cobra.Command {
@@ -126,9 +241,18 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return apply.Deps{}, nil, nil, err
 	}
 	jr := b.JailRunner()
-	sc := scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 
+	// state must be built before sc: sc's HubTokenSource closes over it so
+	// every verb issued through sc picks up the controller PAT live, once
+	// ensureControllerPAT (wired into Deps.EnsureControllerPAT below) persists
+	// it mid-apply (see scion.Options.HubTokenSource's doc: lazy, read at
+	// call time, wins over a static HubToken).
 	state := brokerctl.StateDir(filepath.Dir(configPath))
+	sc := scion.New(jr, scion.Options{
+		HubEndpoint:    "http://127.0.0.1:8080",
+		HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
+	})
+
 	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort())
 
 	// The jail's resolved host-alias IP (host.orb.internal as seen from the jail).
@@ -260,11 +384,14 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// The guard leaves directories untouched and is a no-op if the path is
 		// already absent, mirroring removeStaleMarker's host-side semantics.
 		RemoveJailFile: func(ctx context.Context, jailPath string) error {
-			const script = `if [ ! -d "$1" ] && [ -e "$1" ]; then rm -f -- "$1"; fi`
-			if _, err := jr.Run(ctx, nil, "sh", "-c", script, "_", jailPath); err != nil {
-				return fmt.Errorf("removing stale marker %s in jail: %w", jailPath, err)
-			}
-			return nil
+			return removeJailFile(ctx, jr, jailPath)
+		},
+
+		// EnsureControllerPAT backs the "bootstrap-token" apply step (see
+		// ensureControllerPAT's doc above): mint the controller PAT the real,
+		// dev-auth-off hub is driven with, once, in an agent-free window.
+		EnsureControllerPAT: func(ctx context.Context) error {
+			return ensureControllerPAT(ctx, jr, state, app.Tree, b.MountDest())
 		},
 
 		// RemoveScionProjectConfigs clears any stale ~/.scion/project-configs

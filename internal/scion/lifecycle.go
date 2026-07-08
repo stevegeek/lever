@@ -110,7 +110,15 @@ func (c *Client) Suspend(ctx context.Context, worker, project string) error {
 }
 
 // AttachArgv returns the argv to attach interactively. The caller exec()s it to
-// hand over the TTY — it never goes through the runner.
+// hand over the TTY — it never goes through the runner, so it bypasses env()
+// entirely. When the client holds a controller PAT, it is embedded as an
+// `env SCION_HUB_TOKEN=<pat>` prefix (mirroring how the jail env is embedded
+// for attach — see internal/jail/attach.go) so the exec'd scion binary still
+// authenticates; omitted entirely when no token is set.
 func (c *Client) AttachArgv(worker, project string) []string {
-	return append([]string{c.bin, "attach", worker}, projectFlag(project)...)
+	argv := append([]string{c.bin, "attach", worker}, projectFlag(project)...)
+	if tok := c.currentHubToken(); tok != "" {
+		argv = append([]string{"env", "SCION_HUB_TOKEN=" + tok}, argv...)
+	}
+	return argv
 }

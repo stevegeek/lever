@@ -1,6 +1,7 @@
 package brokerctl
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/broker"
@@ -41,5 +42,50 @@ func TestRevocationRoundTrip(t *testing.T) {
 	}
 	if rs.MinEpoch != 3 || len(rs.Revoked) != 1 || rs.Revoked[0] != "worker" {
 		t.Fatalf("revocation did not round-trip: %+v", rs)
+	}
+}
+
+func TestControllerPATRoundTrip(t *testing.T) {
+	s := StateDir(t.TempDir())
+	if err := s.SaveControllerPAT("pat-secret-123"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(s.ControllerPAT())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("controller.pat perms = %#o, want 0600", perm)
+	}
+	tok, err := s.LoadControllerPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "pat-secret-123" {
+		t.Fatalf("LoadControllerPAT() = %q, want %q", tok, "pat-secret-123")
+	}
+}
+
+func TestLoadControllerPATAbsent(t *testing.T) {
+	s := StateDir(t.TempDir())
+	tok, err := s.LoadControllerPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "" {
+		t.Fatalf("LoadControllerPAT() on absent file = %q, want empty", tok)
+	}
+}
+
+func TestLoadControllerPATWrongPerms(t *testing.T) {
+	s := StateDir(t.TempDir())
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.ControllerPAT(), []byte("pat-secret-123"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadControllerPAT(); err == nil {
+		t.Fatal("LoadControllerPAT() with 0644 perms: want error, got nil")
 	}
 }

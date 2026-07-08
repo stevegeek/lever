@@ -8,7 +8,7 @@ import "github.com/stevegeek/lever/internal/config"
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
 // carry operands (a dir to register, the manager image, etc.).
 type Step struct {
-	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | scion-server | credential | register-project | mint-manager-bootstrap | start-manager
+	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | bootstrap-token | scion-server | credential | register-project | mint-manager-bootstrap | start-manager
 	Target string
 	Detail string
 }
@@ -19,7 +19,7 @@ type PlanOpts struct {
 	// needs — jail-up (machine + egress allowlist), broker-up (host broker +
 	// tools), and mint-manager-bootstrap (the manager enrol ticket) — and omits
 	// ALL scion/container/registration steps (load-image, init-machine,
-	// config-registry, scion-server, credential, register-*,
+	// config-registry, bootstrap-token, scion-server, credential, register-*,
 	// start-manager). The gate drives lever-agent directly in the VM, so scion is
 	// never invoked; running init-machine on a fresh machine would fail (no scion
 	// binary). The full container path is a later milestone.
@@ -60,6 +60,10 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	steps = append(steps,
 		Step{Kind: "init-machine"},
 		Step{Kind: "config-registry", Detail: "scionlocal"},
+		// Mint (or reuse) the controller PAT the executor injects into the real,
+		// dev-auth-off hub via SCION_HUB_TOKEN, BEFORE scion-server locks the hub
+		// down. See Deps.EnsureControllerPAT.
+		Step{Kind: "bootstrap-token", Target: a.Tree},
 		Step{Kind: "scion-server"},
 	)
 	if a.Manager.CredentialFile != "" {

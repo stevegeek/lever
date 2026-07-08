@@ -27,11 +27,13 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// destroy, staged runtime state (bootstrap ticket, manifest) is left
 			// alone: stop preserves everything for a fast resume.
 			var appName string
+			var state brokerctl.State // set alongside appName; valid whenever appName != ""
 			if path, perr := resolveConfigPath(""); perr == nil {
+				state = brokerctl.StateDir(filepath.Dir(path))
 				if app, lerr := config.Load(path); lerr == nil {
 					appName = app.Name
 					if machine == "" {
-						if serr := brokerctl.StateDir(filepath.Dir(path)).StopBroker(); serr != nil {
+						if serr := state.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}
 					}
@@ -64,7 +66,13 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-					sc := scion.New(b.JailRunner(), scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
+					// state was set alongside appName above; HubTokenSource lets
+					// suspend authenticate against the real, dev-auth-off hub with
+					// the controller PAT minted by a prior `lever apply`.
+					sc := scion.New(b.JailRunner(), scion.Options{
+						HubEndpoint:    "http://127.0.0.1:8080",
+						HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
+					})
 					_ = sc.Suspend(sctx, appName, b.MountDest())
 					cancel()
 				}

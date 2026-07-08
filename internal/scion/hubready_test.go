@@ -17,7 +17,7 @@ func TestWaitHubReadySucceeds(t *testing.T) {
 	// "scion" prefix covers both "server start" and "list --all ...".
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	c := New(f, Options{})
-	if err := c.ServerStart(context.Background()); err != nil {
+	if err := c.ServerStart(context.Background(), ServerOpts{Port: 8080, DevAuth: false}); err != nil {
 		t.Fatalf("ServerStart should succeed when hub is ready: %v", err)
 	}
 }

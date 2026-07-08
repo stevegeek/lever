@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/scion"
 )
@@ -70,7 +72,17 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			if err := b.ResolveRunUser(cmd.Context()); err != nil {
 				return fmt.Errorf("attach: jail not up (%v) — run `lever up` first", err)
 			}
-			sc := scion.New(b.JailRunner(), scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
+			// state gives this client the controller PAT (minted by a prior
+			// `lever apply`'s bootstrap-token step) via HubTokenSource, so the
+			// attach verb authenticates against the real, dev-auth-off hub;
+			// AttachArgv (see internal/scion/lifecycle.go) embeds the resolved
+			// token into the exec'd argv itself, since the attach path bypasses
+			// this client's own env().
+			state := brokerctl.StateDir(filepath.Dir(cfgPath))
+			sc := scion.New(b.JailRunner(), scion.Options{
+				HubEndpoint:    "http://127.0.0.1:8080",
+				HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
+			})
 			slug, project, err := attachTarget(app, b.MountDest(), argOrEmpty(args))
 			if err != nil {
 				return err

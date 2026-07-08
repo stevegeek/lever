@@ -134,7 +134,7 @@ type Deps struct {
 	RemoveJailFile func(ctx context.Context, jailPath string) error
 	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
 	// registration(s) whose workspace_path == jailWorkspacePath, BEFORE the
-	// register-manager/register-worker step re-inits. Without this, every apply
+	// register-project step re-inits. Without this, every apply
 	// mints a fresh registration via `scion init` and the old ones accumulate
 	// (the `lever doctor` "duplicate registrations" finding) — this is the
 	// removal counterpart to RemoveJailFile's marker-race fix above. nil ⇒
@@ -142,7 +142,7 @@ type Deps struct {
 	RemoveScionProjectConfigs func(ctx context.Context, jailWorkspacePath string) error
 	// ScionProjectRegistered observes whether jailWorkspacePath already has
 	// exactly one valid scion registration (one project-configs entry + the
-	// in-tree marker present) BEFORE the register-manager/register-worker step
+	// in-tree marker present) BEFORE the register-project step
 	// decides whether to run its destructive clean+init path at all. true →
 	// skip marker removal, RemoveScionProjectConfigs, and `scion init`/`hub
 	// link` entirely, so a re-apply does not tear down (and orphan) a
@@ -214,7 +214,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			return fmt.Errorf("reading credential %s: %w", s.Target, err)
 		}
 		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
-	case "register-manager", "register-worker":
+	case "register-project":
 		jp := jailPath(s.Target, app.Tree, d.JailMount)
 
 		// Idempotent register: observe BEFORE doing anything destructive. A

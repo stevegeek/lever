@@ -42,7 +42,7 @@ type skillTarget struct {
 
 func skillTargets(app *config.App) []skillTarget {
 	ts := []skillTarget{{relPath: ".claude/skills/lever-operator/SKILL.md", content: skills.Operator(Version)}}
-	for _, g := range app.Groves {
+	for _, g := range app.Workers {
 		rel := filepath.ToSlash(filepath.Join(g.Dir, ".claude", "skills", "lever-agent", "SKILL.md"))
 		ts = append(ts, skillTarget{relPath: rel, content: skills.Agent(Version)})
 	}
@@ -155,7 +155,7 @@ const (
 func claudeMDBlock() string {
 	return skillMarkerBegin + "\n" +
 		"## Lever operator skill\n\n" +
-		"Operating inside lever (brokered tools, capabilities, messaging, groves) is\n" +
+		"Operating inside lever (brokered tools, capabilities, messaging, workers) is\n" +
 		"documented in the `lever-operator` skill (`.claude/skills/lever-operator/`).\n" +
 		"Consult it before using any brokered MCP tool.\n" +
 		skillMarkerEnd

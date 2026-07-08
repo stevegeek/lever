@@ -37,7 +37,7 @@ func TestBrokerInboxer_postsFullInboxRequest(t *testing.T) {
 	if gotPath != "/msg/list" {
 		t.Fatalf("path = %s, want /msg/list", gotPath)
 	}
-	want := map[string]any{"all": true, "grove": ""}
+	want := map[string]any{"all": true, "worker": ""}
 	if !reflect.DeepEqual(gotBody, want) {
 		t.Fatalf("body = %v, want %v", gotBody, want)
 	}
@@ -63,7 +63,7 @@ func TestBrokerInboxer_unreadTrueRequestsAllFalse(t *testing.T) {
 	if _, err := newBrokerInboxer().Inbox(context.Background(), true, "worker"); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]any{"all": false, "grove": "worker"}
+	want := map[string]any{"all": false, "worker": "worker"}
 	if !reflect.DeepEqual(gotBody, want) {
 		t.Fatalf("body = %v, want %v", gotBody, want)
 	}

@@ -8,7 +8,7 @@ import "github.com/stevegeek/lever/internal/config"
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
 // carry operands (a dir to register, the manager image, etc.).
 type Step struct {
-	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | scion-server | credential | register-manager | register-grove | mint-manager-bootstrap | start-manager
+	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | scion-server | credential | register-manager | register-worker | mint-manager-bootstrap | start-manager
 	Target string
 	Detail string
 }
@@ -42,8 +42,8 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	// at host.orb.internal. Health-checked before the manager starts.
 	steps = append(steps, Step{Kind: "broker-up"})
 	// Load every distinct image into the jail's container runtime: the manager
-	// image plus any grove that overrides it (groves default to the manager
-	// image, which is then loaded once). Groves are started later by the
+	// image plus any worker that overrides it (workers default to the manager
+	// image, which is then loaded once). Workers are started later by the
 	// manager, so their images must already be present — they can't be pulled
 	// under the egress allowlist. Dedup preserves first-seen order.
 	seen := map[string]bool{}
@@ -54,8 +54,8 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 		}
 	}
 	addLoad(a.Manager.Image)
-	for _, g := range a.Groves {
-		addLoad(a.GroveImage(g))
+	for _, g := range a.Workers {
+		addLoad(a.WorkerImage(g))
 	}
 	steps = append(steps,
 		Step{Kind: "init-machine"},
@@ -66,8 +66,8 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 		steps = append(steps, Step{Kind: "credential", Target: a.Manager.CredentialFile})
 	}
 	steps = append(steps, Step{Kind: "register-manager", Target: a.Tree})
-	for _, g := range a.Groves {
-		steps = append(steps, Step{Kind: "register-grove", Target: a.GroveDir(g)})
+	for _, g := range a.Workers {
+		steps = append(steps, Step{Kind: "register-worker", Target: a.WorkerDir(g)})
 	}
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})

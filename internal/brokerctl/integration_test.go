@@ -217,7 +217,7 @@ manager:
     - tool: db
       op: read
       to: [worker]
-groves:
+workers:
   - name: worker
     dir: w
 broker:

@@ -25,7 +25,7 @@ func TestStartArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})
 	c := New(f, Options{})
-	err := c.Start(context.Background(), StartOpts{Grove: "a", Task: "do x", Harness: "claude", Project: "/g/a", Image: "img:1", Workspace: "/lever"})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "do x", Harness: "claude", Project: "/g/a", Image: "img:1", Workspace: "/lever"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
 	// placeholder ANTHROPIC_API_KEY (Hub secret); the real credential is the
 	// in-container broker capability token (settings.json). Must NOT request
 	// oauth-token (no CLAUDE_CODE_OAUTH_TOKEN exists in api-key mode).
-	if err := c.Start(context.Background(), StartOpts{Grove: "a", Task: "x", Harness: "claude", Project: "/g/a", APIKey: true}); err != nil {
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Harness: "claude", Project: "/g/a", APIKey: true}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
@@ -61,7 +61,7 @@ func TestStartOmitsWorkspaceWhenEmpty(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})
 	c := New(f, Options{})
-	if err := c.Start(context.Background(), StartOpts{Grove: "a", Task: "x", Project: "/g/a"}); err != nil {
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--workspace") {

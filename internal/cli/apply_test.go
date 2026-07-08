@@ -19,7 +19,7 @@ func writeTmpConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	tree := filepath.Join(dir, "tree")
-	if err := os.MkdirAll(filepath.Join(tree, "groves", "worker"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tree, "workers", "worker"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := `name: demo
@@ -30,9 +30,9 @@ broker:
 manager:
   image: scionlocal/lever-claude:latest
   allow_ports: [3305]
-groves:
+workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker
 `
 	p := filepath.Join(dir, "app.yaml")
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
@@ -95,7 +95,7 @@ func TestApplyDryRun(t *testing.T) {
 // removes a marker FILE (never a directory) at the given jail-absolute path,
 // invoked as `sh -c '<script>' _ <jailPath>` so the removal shares the jail's
 // own filesystem view with the `scion init` that follows it (see
-// internal/apply/run.go's register-manager/register-grove case for the
+// internal/apply/run.go's register-manager/register-worker case for the
 // VirtioFS unlink/init race this closes).
 func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	p := writeTmpConfig(t)
@@ -140,7 +140,7 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 // TestBuildApplyDepsWiresRemoveScionProjectConfigs verifies buildApplyDeps
 // wires Deps.RemoveScionProjectConfigs straight through to the backend method
 // (which itself reaches the guest — see internal/backend/guest/scionstate.go),
-// so the register-manager/register-grove step in internal/apply/run.go can
+// so the register-manager/register-worker step in internal/apply/run.go can
 // clear stale ~/.scion/project-configs registrations before `scion init`.
 func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	p := writeTmpConfig(t)
@@ -158,17 +158,17 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	if deps.RemoveScionProjectConfigs == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.RemoveScionProjectConfigs")
 	}
-	if err := deps.RemoveScionProjectConfigs(context.Background(), "/lever/groves/worker"); err != nil {
+	if err := deps.RemoveScionProjectConfigs(context.Background(), "/lever/workers/worker"); err != nil {
 		t.Fatalf("RemoveScionProjectConfigs: %v", err)
 	}
-	if len(sb.removeScionCalls) != 1 || sb.removeScionCalls[0] != "/lever/groves/worker" {
-		t.Fatalf("backend.RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever/groves/worker\"", sb.removeScionCalls)
+	if len(sb.removeScionCalls) != 1 || sb.removeScionCalls[0] != "/lever/workers/worker" {
+		t.Fatalf("backend.RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever/workers/worker\"", sb.removeScionCalls)
 	}
 }
 
 // TestBuildApplyDepsWiresScionProjectRegistered verifies buildApplyDeps wires
 // Deps.ScionProjectRegistered straight through to the backend method, so the
-// register-manager/register-grove step (internal/apply/run.go) can observe
+// register-manager/register-worker step (internal/apply/run.go) can observe
 // whether its destructive clean+init path is even necessary before running it.
 func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	p := writeTmpConfig(t)
@@ -186,15 +186,15 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	if deps.ScionProjectRegistered == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.ScionProjectRegistered")
 	}
-	ok, err := deps.ScionProjectRegistered(context.Background(), "/lever/groves/worker")
+	ok, err := deps.ScionProjectRegistered(context.Background(), "/lever/workers/worker")
 	if err != nil {
 		t.Fatalf("ScionProjectRegistered: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected the stubbed true result to pass through")
 	}
-	if len(sb.registeredCalls) != 1 || sb.registeredCalls[0] != "/lever/groves/worker" {
-		t.Fatalf("backend.ScionProjectRegistered calls = %+v, want exactly one call with \"/lever/groves/worker\"", sb.registeredCalls)
+	if len(sb.registeredCalls) != 1 || sb.registeredCalls[0] != "/lever/workers/worker" {
+		t.Fatalf("backend.ScionProjectRegistered calls = %+v, want exactly one call with \"/lever/workers/worker\"", sb.registeredCalls)
 	}
 }
 

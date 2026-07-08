@@ -11,10 +11,10 @@ manager:
   image: scionlocal/lever-claude:latest
   prompt_file: manager.md
   allow_ports: []
-groves:
+workers:
   - name: svc-a
-    dir: groves/svc-a
+    dir: workers/svc-a
   - name: svc-b
-    dir: groves/svc-b
+    dir: workers/svc-b
   - name: svc-c
-    dir: groves/svc-c
+    dir: workers/svc-c

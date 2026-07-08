@@ -32,9 +32,9 @@ func TestJailRunnerRunInUsesEnvChdir(t *testing.T) {
 	host := exec.NewFakeRunner()
 	host.Script("orb", exec.Result{})
 	jr := New(host, OrbPrefix("lever-jail", "leveruser"), "501")
-	_, _ = jr.RunIn(context.Background(), "/lever/groves/worker", nil, "scion", "init", "--non-interactive")
+	_, _ = jr.RunIn(context.Background(), "/lever/workers/worker", nil, "scion", "init", "--non-interactive")
 	got := strings.Join(host.Calls[0].Args, " ")
-	if !strings.Contains(got, "env -C /lever/groves/worker") {
+	if !strings.Contains(got, "env -C /lever/workers/worker") {
 		t.Fatalf("expected env -C <dir>; got %q", got)
 	}
 	if !strings.Contains(got, "scion init --non-interactive") {

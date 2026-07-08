@@ -83,7 +83,7 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 }
 
 // runAcceptance is the live acceptance gate. It brings a REAL jail up (manager +
-// executor grove `worker` + the `db` tool; manager delegate db.read → worker;
+// executor worker `worker` + the `db` tool; manager delegate db.read → worker;
 // worker empty obtain), drives the six checks inside the running jail, writes a
 // dated note to docs/acceptance/<date>-acceptance.md, and returns a non-nil error if
 // ANY check fails (so the command exits non-zero — the gate).
@@ -267,7 +267,7 @@ func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error 
 	// TODO(hardening): this fixed /tmp path (and the vmIDDir parents) would collide
 	// across concurrent `lever acceptance` runs; fine for the single-run merge gate.
 	wbs := "/tmp/lever-acceptance/worker-bootstrap.json"
-	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-grove", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-worker", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
 		return fmt.Errorf("provision worker (lever-agent provision): %w: %s", err, res.Stdout+res.Stderr)
 	}
 	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.workerID, "-bootstrap", wbs); err != nil {

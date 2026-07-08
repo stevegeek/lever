@@ -21,7 +21,7 @@ type brokerInboxer struct{}
 func newBrokerInboxer() brokerInboxer { return brokerInboxer{} }
 
 func (brokerInboxer) Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error) {
-	raw, err := msgCallFn(ctx, "/msg/list", map[string]any{"all": !unread, "grove": project})
+	raw, err := msgCallFn(ctx, "/msg/list", map[string]any{"all": !unread, "worker": project})
 	if err != nil {
 		return nil, err
 	}

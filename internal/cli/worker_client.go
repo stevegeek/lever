@@ -11,15 +11,15 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-type groveResult struct {
-	Grove  string        `json:"grove"`
+type workerResult struct {
+	Worker string        `json:"worker"`
 	Phase  string        `json:"phase"`
 	Agents []scion.Agent `json:"agents"`
 }
 
 // postBroker POSTs body as JSON to baseURL+endpoint using client, decoding the
 // response into T. Split out for unit-testing without mTLS. Generic sibling of
-// the old grove-only postGrove; postGrove/groveCall now specialize it.
+// the old worker-only postWorker; postWorker/workerCall now specialize it.
 func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (T, error) {
 	var zero T
 	raw, err := json.Marshal(body)
@@ -46,24 +46,24 @@ func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoi
 	return res, nil
 }
 
-// postGrove is postBroker specialized to the grove-command response shape.
-// Kept as a named function (rather than inlining postBroker[groveResult] at
+// postWorker is postBroker specialized to the worker-command response shape.
+// Kept as a named function (rather than inlining postBroker[workerResult] at
 // call sites) so existing callers/tests are unaffected.
-func postGrove(ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (groveResult, error) {
-	return postBroker[groveResult](ctx, client, baseURL, endpoint, body)
+func postWorker(ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (workerResult, error) {
+	return postBroker[workerResult](ctx, client, baseURL, endpoint, body)
 }
 
 // brokerCall builds the manager's mTLS client from its bootstrap + identity and
 // POSTs endpoint, decoding into T. This is the production entry both the agent
-// (grove) and msg/watch subcommands use — the bootstrap/identity paths are
-// agent-generic (groves get their own bootstrap at the same in-container path,
-// so the same binary works for manager AND groves).
+// (worker) and msg/watch subcommands use — the bootstrap/identity paths are
+// agent-generic (workers get their own bootstrap at the same in-container path,
+// so the same binary works for manager AND workers).
 //
 // brokerCall is generic, so it cannot be assigned directly to a package-level
 // seam var (`var xCallFn = brokerCall` doesn't type-check without explicit
 // instantiation). Each call site instead gets a small concrete wrapper
-// (groveCall, msgCall) that instantiates brokerCall for its response type;
-// the wrapper is what the test seam (groveCallFn, msgCallFn) points at.
+// (workerCall, msgCall) that instantiates brokerCall for its response type;
+// the wrapper is what the test seam (workerCallFn, msgCallFn) points at.
 func brokerCall[T any](ctx context.Context, endpoint string, body any) (T, error) {
 	var zero T
 	bs, err := agent.LoadBootstrap(managerBootstrapPath)
@@ -81,8 +81,8 @@ func brokerCall[T any](ctx context.Context, endpoint string, body any) (T, error
 	return postBroker[T](ctx, client, bs.BrokerURL, endpoint, body)
 }
 
-// groveCall is brokerCall specialized to the grove-command response shape.
-// This is the production entry the agent subcommands use (via groveCallFn).
-func groveCall(ctx context.Context, endpoint string, body any) (groveResult, error) {
-	return brokerCall[groveResult](ctx, endpoint, body)
+// workerCall is brokerCall specialized to the worker-command response shape.
+// This is the production entry the agent subcommands use (via workerCallFn).
+func workerCall(ctx context.Context, endpoint string, body any) (workerResult, error) {
+	return brokerCall[workerResult](ctx, endpoint, body)
 }

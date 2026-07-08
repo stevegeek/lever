@@ -18,8 +18,8 @@ func (g Guest) ReadScionProjectState(ctx context.Context, mountDest string) (bac
 	//   MARKER 1|0
 	//   ENTRY <project-configs-dir> <workspace_path>
 	// The space-separated ENTRY format assumes no whitespace in a workspace
-	// path; safe because mountDest is the backend constant "/lever" and grove
-	// paths are "/lever/groves/<sanitized-name>".
+	// path; safe because mountDest is the backend constant "/lever" and worker
+	// paths are "/lever/workers/<sanitized-name>".
 	script := `
 if [ -e ` + shellSingleQuote(mountDest+"/.scion") + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
 for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
@@ -42,7 +42,7 @@ done
 // Called before `scion init` in register-* so each apply leaves exactly ONE
 // registration per workspace instead of accumulating a duplicate every run. A
 // no-op when nothing matches. wp is a lever constant (/lever or
-// /lever/groves/<sanitized-name>), never user input.
+// /lever/workers/<sanitized-name>), never user input.
 func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
 	args := append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", scionConfigRemoveScript(wp))
 	if _, err := g.Host.Run(ctx, nil, g.UserPrefix[0], args...); err != nil {
@@ -75,7 +75,7 @@ done
 // (workspacePath/.scion) present. Anything else — zero entries, duplicate
 // entries, or an entry with the marker gone (the bad-teardown signature) — is
 // NOT a valid registration and resolves false, routing the register-manager/
-// register-grove apply step (internal/apply/run.go) to its existing
+// register-worker apply step (internal/apply/run.go) to its existing
 // destructive clean+init path instead of skipping it. Reuses
 // ReadScionProjectState's script (same read-only, no-EnsureUp transport; see
 // its doc for the VirtioFS/marker rationale) rather than duplicating it — a

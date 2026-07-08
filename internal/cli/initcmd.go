@@ -9,7 +9,7 @@ import (
 )
 
 // newInitCmd scaffolds the framework operator skills into the instance tree
-// (idempotent; safe to re-run after every lever upgrade or grove addition).
+// (idempotent; safe to re-run after every lever upgrade or worker addition).
 // Purely host-side file operations — never touches the jail, so it works
 // before the first `lever up`.
 func newInitCmd() *cobra.Command {

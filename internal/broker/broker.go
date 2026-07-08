@@ -54,7 +54,7 @@ type Config struct {
 	Rules           *rules.Policy
 	Registry        *registry.Registry
 	ManagerIdentity string   // the cert CN permitted to call /provision
-	Agents          []string // valid grove identities that may be provisioned
+	Agents          []string // valid worker identities that may be provisioned
 	GrantTTL        time.Duration
 	TicketTTL       time.Duration
 	ServerName      string // the server cert hostname agents dial (host.orb.internal)
@@ -73,12 +73,12 @@ type Config struct {
 	// Set by tests to a fake upstream. NEVER derived from a client request.
 	LLMUpstream string
 
-	// Grove dispatch (host-side). Runtime is the scion client the broker drives;
-	// Groves are the config-derived, path-authoritative grove descriptions;
-	// BrokerCAPEM/BrokerURL are copied into each grove's staged bootstrap so it
+	// Worker dispatch (host-side). Runtime is the scion client the broker drives;
+	// Workers are the config-derived, path-authoritative worker descriptions;
+	// BrokerCAPEM/BrokerURL are copied into each worker's staged bootstrap so it
 	// trusts the same CA and dials the same broker as the manager.
-	Runtime     GroveRuntime
-	Groves      []GroveSpec
+	Runtime     WorkerRuntime
+	Workers     []WorkerSpec
 	BrokerCAPEM string
 	BrokerURL   string
 
@@ -86,14 +86,14 @@ type Config struct {
 	// message is addressed to the manager's agent identity.
 	ManagerProject string
 	// ManagerSlug is the manager's scion agent slug — the app name (apply's
-	// start-manager dispatches the manager as Grove: app.Name). It is DISTINCT
+	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
 	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
 	// only by its slug, so a message routed to agent:<CN> fails with
 	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
 	// (embedders/tests that never message the manager).
 	ManagerSlug string
-	// GroveToGrove enables grove→grove messaging; default false (deny).
-	GroveToGrove bool
+	// WorkerToWorker enables worker→worker messaging; default false (deny).
+	WorkerToWorker bool
 }
 
 // Broker is the running capability authority + gateway.
@@ -113,14 +113,14 @@ type Broker struct {
 	apiKey      []byte
 	llmUpstream *url.URL
 
-	runtime     GroveRuntime
-	groves      map[string]GroveSpec
+	runtime     WorkerRuntime
+	workers     map[string]WorkerSpec
 	brokerCAPEM string
 	brokerURL   string
 
 	managerProject string
 	managerSlug    string // the manager's scion agent slug (app name), ≠ the cert CN
-	groveToGrove   bool
+	workerToWorker bool
 
 	mu           sync.Mutex
 	minEpoch     int
@@ -157,9 +157,9 @@ func New(c Config) *Broker {
 		upstream = "https://api.anthropic.com"
 	}
 	up, _ := url.Parse(upstream) // operator/test-controlled, validated at serve time
-	groves := make(map[string]GroveSpec, len(c.Groves))
-	for _, g := range c.Groves {
-		groves[g.Name] = g
+	workers := make(map[string]WorkerSpec, len(c.Workers))
+	for _, g := range c.Workers {
+		workers[g.Name] = g
 	}
 	if c.ManagerSlug == "" {
 		c.ManagerSlug = c.ManagerIdentity
@@ -172,8 +172,8 @@ func New(c Config) *Broker {
 		revoked:  revoked,
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
-		runtime: c.Runtime, groves: groves, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
-		managerProject: c.ManagerProject, managerSlug: c.ManagerSlug, groveToGrove: c.GroveToGrove,
+		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		managerProject: c.ManagerProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 	}
 }
 

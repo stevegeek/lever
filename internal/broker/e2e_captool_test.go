@@ -180,7 +180,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	managerClient := agentClient(t, b, managerCert)
 
 	// ── Step 1: provision — manager → ticket ──────────────────────────────────
-	provBody, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	provBody, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
 	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
 	if err != nil {
 		t.Fatalf("provision: %v", err)

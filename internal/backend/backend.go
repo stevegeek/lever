@@ -85,7 +85,7 @@ type Backend interface {
 	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
 	// registration(s) whose workspace_path == workspacePath, through the
 	// machine-only guest transport. A no-op when none match. Called before
-	// `scion init` in the register-manager/register-grove apply steps so each
+	// `scion init` in the register-manager/register-worker apply steps so each
 	// apply leaves exactly one registration per workspace instead of
 	// accumulating a duplicate every run (the `lever doctor` "duplicate
 	// registrations" finding).
@@ -95,7 +95,7 @@ type Backend interface {
 	// workspace_path == workspacePath AND the in-tree marker
 	// (workspacePath/.scion) present. Read-only, machine-only guest transport
 	// (no EnsureUp needed) — same pattern as ReadScionProjectState. The
-	// register-manager/register-grove apply step uses this to skip its
+	// register-manager/register-worker apply step uses this to skip its
 	// destructive clean+init path when the registration is already sound, so a
 	// re-apply no longer tears down a resumable scion agent record just to
 	// re-mint an identical registration.

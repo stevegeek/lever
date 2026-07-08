@@ -103,7 +103,7 @@ tree: tree
 manager:
   obtain:
     - {tool: things3, op: "*"}
-groves:
+workers:
   - name: worker
     dir: w
     obtain:

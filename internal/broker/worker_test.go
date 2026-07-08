@@ -18,7 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// fakeRuntime records calls and returns scripted results; satisfies GroveRuntime.
+// fakeRuntime records calls and returns scripted results; satisfies WorkerRuntime.
 type fakeRuntime struct {
 	agents   map[string][]scion.Agent // project -> agents (for List)
 	started  []scion.StartOpts
@@ -36,16 +36,16 @@ func (f *fakeRuntime) Start(_ context.Context, o scion.StartOpts) error {
 	f.started = append(f.started, o)
 	return f.startErr
 }
-func (f *fakeRuntime) Resume(_ context.Context, grove, _ string) error {
-	f.resumed = append(f.resumed, grove)
+func (f *fakeRuntime) Resume(_ context.Context, worker, _ string) error {
+	f.resumed = append(f.resumed, worker)
 	return nil
 }
-func (f *fakeRuntime) Stop(_ context.Context, grove, _ string) error {
-	f.stopped = append(f.stopped, grove)
+func (f *fakeRuntime) Stop(_ context.Context, worker, _ string) error {
+	f.stopped = append(f.stopped, worker)
 	return nil
 }
-func (f *fakeRuntime) Suspend(_ context.Context, grove, _ string) error {
-	f.suspend = append(f.suspend, grove)
+func (f *fakeRuntime) Suspend(_ context.Context, worker, _ string) error {
+	f.suspend = append(f.suspend, worker)
 	return nil
 }
 func (f *fakeRuntime) EnvSet(_ context.Context, _, _, _ string) error {
@@ -57,14 +57,14 @@ func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event,
 	return nil, nil
 }
 
-func TestGroveSpecLookup(t *testing.T) {
+func TestWorkerSpecLookup(t *testing.T) {
 	b := New(Config{
-		Groves: []GroveSpec{{Name: "worker", JailProject: "/lever/groves/worker"}},
+		Workers: []WorkerSpec{{Name: "worker", JailProject: "/lever/workers/worker"}},
 	})
-	if _, ok := b.groveSpec("worker"); !ok {
+	if _, ok := b.workerSpec("worker"); !ok {
 		t.Fatal("expected worker spec present")
 	}
-	if _, ok := b.groveSpec("nope"); ok {
+	if _, ok := b.workerSpec("nope"); ok {
 		t.Fatal("expected absent spec to be missing")
 	}
 }
@@ -87,22 +87,22 @@ func caTicketStore(_ *testing.T) *ca.TicketStore {
 }
 
 // newTestBroker builds a Broker with a fake runtime, a real ticket store, and a
-// temp bootstrap dir for the given single grove.
-func newTestBroker(t *testing.T, rt GroveRuntime, spec GroveSpec) *Broker {
+// temp bootstrap dir for the given single worker.
+func newTestBroker(t *testing.T, rt WorkerRuntime, spec WorkerSpec) *Broker {
 	t.Helper()
 	return New(Config{
 		Tickets:         caTicketStore(t),
 		Registry:        registry.New(),
 		Runtime:         rt,
-		Groves:          []GroveSpec{spec},
+		Workers:         []WorkerSpec{spec},
 		BrokerCAPEM:     "CA-PEM",
 		BrokerURL:       "https://10.0.0.2:8080",
 		ManagerIdentity: "test-manager",
 	})
 }
 
-// callGrove drives a handler with a synthetic verified client cert CN.
-func callGrove(t *testing.T, b *Broker, path, body, cn string) *httptest.ResponseRecorder {
+// callWorker drives a handler with a synthetic verified client cert CN.
+func callWorker(t *testing.T, b *Broker, path, body, cn string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
 	req.TLS = fakeTLSWithCN(cn)
@@ -111,19 +111,19 @@ func callGrove(t *testing.T, b *Broker, path, body, cn string) *httptest.Respons
 	return rec
 }
 
-func TestGroveStart_absent_provisionsStagesStarts(t *testing.T) {
+func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	dir := t.TempDir()
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker",
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
 		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 
-	rec := callGrove(t, b, "/grove/start", `{"grove":"worker","task":"do it"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
-	// bootstrap staged 0600 with the broker CA/URL and the grove CN
+	// bootstrap staged 0600 with the broker CA/URL and the worker CN
 	raw, err := os.ReadFile(filepath.Join(spec.BootstrapDir, "bootstrap.json"))
 	if err != nil {
 		t.Fatalf("bootstrap not staged: %v", err)
@@ -147,8 +147,8 @@ func TestGroveStart_absent_provisionsStagesStarts(t *testing.T) {
 		t.Fatalf("start calls = %d, want 1", len(rt.started))
 	}
 	got := rt.started[0]
-	if got.Project != "/lever/groves/worker" || got.Workspace != "/lever/groves/worker" ||
-		got.Grove != "worker" || got.Image != "img:1" || !got.APIKey {
+	if got.Project != "/lever/workers/worker" || got.Workspace != "/lever/workers/worker" ||
+		got.Worker != "worker" || got.Image != "img:1" || !got.APIKey {
 		t.Fatalf("bad StartOpts: %+v", got)
 	}
 	if got.Task != "do it" {
@@ -159,29 +159,29 @@ func TestGroveStart_absent_provisionsStagesStarts(t *testing.T) {
 	}
 }
 
-func TestGroveStart_running_isNoop(t *testing.T) {
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker", BootstrapDir: t.TempDir()}
+func TestWorkerStart_running_isNoop(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/groves/worker": {{Slug: "worker", Phase: "running"}},
+		"/lever/workers/worker": {{Slug: "worker", Phase: "running"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	rec := callGrove(t, b, "/grove/start", `{"grove":"worker"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	if len(rt.started) != 0 || len(rt.resumed) != 0 {
-		t.Fatal("running grove must be a no-op")
+		t.Fatal("running worker must be a no-op")
 	}
 }
 
-func TestGroveStart_suspended_resumesNoReprovision(t *testing.T) {
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker",
+func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
 		BootstrapDir: filepath.Join(t.TempDir(), ".lever")}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/groves/worker": {{Slug: "worker", Phase: "suspended"}},
+		"/lever/workers/worker": {{Slug: "worker", Phase: "suspended"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	rec := callGrove(t, b, "/grove/start", `{"grove":"worker"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -193,18 +193,18 @@ func TestGroveStart_suspended_resumesNoReprovision(t *testing.T) {
 	}
 }
 
-// TestGroveStart_terminalPhase_resumesNoReprovision verifies that any non-empty,
+// TestWorkerStart_terminalPhase_resumesNoReprovision verifies that any non-empty,
 // non-running phase (e.g. "exited") takes the resume path and never mints a
 // ticket, stages a bootstrap, or calls scion start.
-func TestGroveStart_terminalPhase_resumesNoReprovision(t *testing.T) {
+func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	bootstrapDir := filepath.Join(t.TempDir(), ".lever")
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker",
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
 		BootstrapDir: bootstrapDir}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/groves/worker": {{Slug: "worker", Phase: "exited"}},
+		"/lever/workers/worker": {{Slug: "worker", Phase: "exited"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	rec := callGrove(t, b, "/grove/start", `{"grove":"worker"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -221,26 +221,26 @@ func TestGroveStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	}
 }
 
-func TestGroveStart_authz(t *testing.T) {
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker", BootstrapDir: t.TempDir()}
+func TestWorkerStart_authz(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	b := newTestBroker(t, &fakeRuntime{agents: map[string][]scion.Agent{}}, spec)
 	// wrong CN
-	if rec := callGrove(t, b, "/grove/start", `{"grove":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
+	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
 		t.Fatalf("wrong-CN status = %d, want 403", rec.Code)
 	}
-	// undeclared grove
-	if rec := callGrove(t, b, "/grove/start", `{"grove":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
-		t.Fatalf("undeclared grove status = %d, want 403", rec.Code)
+	// undeclared worker
+	if rec := callWorker(t, b, "/worker/start", `{"worker":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
+		t.Fatalf("undeclared worker status = %d, want 403", rec.Code)
 	}
 }
 
-func TestGroveList(t *testing.T) {
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker", BootstrapDir: t.TempDir()}
+func TestWorkerList(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/groves/worker": {{Slug: "worker", Phase: "running", Activity: "building"}},
+		"/lever/workers/worker": {{Slug: "worker", Phase: "running", Activity: "building"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	req := httptest.NewRequest("GET", "/grove/list", nil)
+	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec, req)
@@ -255,7 +255,7 @@ func TestGroveList(t *testing.T) {
 		t.Fatalf("bad list: %+v", out.Agents)
 	}
 	// non-manager rejected
-	req2 := httptest.NewRequest("GET", "/grove/list", nil)
+	req2 := httptest.NewRequest("GET", "/worker/list", nil)
 	req2.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req2)
@@ -264,69 +264,69 @@ func TestGroveList(t *testing.T) {
 	}
 }
 
-// TestGroveNilRuntime_returns502 proves that when the scion runtime is unwired
-// (nil) the grove handlers return 502, not a panic from a nil-interface call.
-func TestGroveNilRuntime_returns502(t *testing.T) {
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker", BootstrapDir: t.TempDir()}
+// TestWorkerNilRuntime_returns502 proves that when the scion runtime is unwired
+// (nil) the worker handlers return 502, not a panic from a nil-interface call.
+func TestWorkerNilRuntime_returns502(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
 	b := New(Config{
 		Tickets:         caTicketStore(t),
 		Registry:        registry.New(),
 		Runtime:         nil, // unwired: simulates manual `lever broker serve`
-		Groves:          []GroveSpec{spec},
+		Workers:         []WorkerSpec{spec},
 		BrokerCAPEM:     "CA-PEM",
 		BrokerURL:       "https://10.0.0.2:8080",
 		ManagerIdentity: "test-manager",
 	})
 
-	// /grove/start with manager CN must return 502, not panic.
-	rec := callGrove(t, b, "/grove/start", `{"grove":"worker","task":"go"}`, "test-manager")
+	// /worker/start with manager CN must return 502, not panic.
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"go"}`, "test-manager")
 	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("/grove/start nil-runtime: status = %d, want 502", rec.Code)
+		t.Fatalf("/worker/start nil-runtime: status = %d, want 502", rec.Code)
 	}
 
-	// /grove/list with manager CN must also return 502, not panic.
-	req := httptest.NewRequest("GET", "/grove/list", nil)
+	// /worker/list with manager CN must also return 502, not panic.
+	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusBadGateway {
-		t.Fatalf("/grove/list nil-runtime: status = %d, want 502", rec2.Code)
+		t.Fatalf("/worker/list nil-runtime: status = %d, want 502", rec2.Code)
 	}
 }
 
-// TestGroveNilRuntime_authzPrecedence proves that even with nil runtime, an
+// TestWorkerNilRuntime_authzPrecedence proves that even with nil runtime, an
 // unauthenticated or non-manager caller gets 403 (authz runs before the nil check).
-func TestGroveNilRuntime_authzPrecedence(t *testing.T) {
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker", BootstrapDir: t.TempDir()}
+func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	b := New(Config{
 		Tickets:         caTicketStore(t),
 		Registry:        registry.New(),
 		Runtime:         nil,
-		Groves:          []GroveSpec{spec},
+		Workers:         []WorkerSpec{spec},
 		BrokerCAPEM:     "CA-PEM",
 		BrokerURL:       "https://10.0.0.2:8080",
 		ManagerIdentity: "test-manager",
 	})
 
-	// Non-manager CN on /grove/start must get 403, not 502.
-	rec := callGrove(t, b, "/grove/start", `{"grove":"worker"}`, "intruder")
+	// Non-manager CN on /worker/start must get 403, not 502.
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder")
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("/grove/start intruder nil-runtime: status = %d, want 403", rec.Code)
+		t.Fatalf("/worker/start intruder nil-runtime: status = %d, want 403", rec.Code)
 	}
 
-	// Non-manager CN on /grove/list must get 403, not 502.
-	req := httptest.NewRequest("GET", "/grove/list", nil)
+	// Non-manager CN on /worker/list must get 403, not 502.
+	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("/grove/list intruder nil-runtime: status = %d, want 403", rec2.Code)
+		t.Fatalf("/worker/list intruder nil-runtime: status = %d, want 403", rec2.Code)
 	}
 }
 
-func TestGroveLifecycleVerbs(t *testing.T) {
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker", BootstrapDir: t.TempDir()}
+func TestWorkerLifecycleVerbs(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)
 
@@ -334,11 +334,11 @@ func TestGroveLifecycleVerbs(t *testing.T) {
 		path  string
 		check func() bool
 	}{
-		{"/grove/stop", func() bool { return len(rt.stopped) == 1 }},
-		{"/grove/suspend", func() bool { return len(rt.suspend) == 1 }},
-		{"/grove/resume", func() bool { return len(rt.resumed) == 1 }},
+		{"/worker/stop", func() bool { return len(rt.stopped) == 1 }},
+		{"/worker/suspend", func() bool { return len(rt.suspend) == 1 }},
+		{"/worker/resume", func() bool { return len(rt.resumed) == 1 }},
 	} {
-		rec := callGrove(t, b, tc.path, `{"grove":"worker"}`, "test-manager")
+		rec := callWorker(t, b, tc.path, `{"worker":"worker"}`, "test-manager")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s status = %d", tc.path, rec.Code)
 		}
@@ -347,20 +347,20 @@ func TestGroveLifecycleVerbs(t *testing.T) {
 		}
 	}
 	// authz still enforced
-	if rec := callGrove(t, b, "/grove/stop", `{"grove":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
+	if rec := callWorker(t, b, "/worker/stop", `{"worker":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
 		t.Fatalf("undeclared stop = %d, want 403", rec.Code)
 	}
 }
 
-func TestGroveStart_deniesRevokedManager(t *testing.T) {
+func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 	dir := t.TempDir()
-	spec := GroveSpec{Name: "worker", JailProject: "/lever/groves/worker",
+	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
 		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)
 	b.Revoke("test-manager")
 
-	rec := callGrove(t, b, "/grove/start", `{"grove":"worker","task":"do it"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("revoked manager dispatch: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}

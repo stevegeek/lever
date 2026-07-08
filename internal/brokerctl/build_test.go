@@ -20,7 +20,7 @@ func sampleApp() *config.App {
 			Image:    "scionlocal/mgr",
 			Delegate: []config.DelegateGrant{{Tool: "db", Op: "read", To: []string{"worker"}}},
 		},
-		Groves: []config.Grove{{Name: "worker", Dir: "work"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "work"}},
 		Broker: config.Broker{
 			LLMAuth:   config.LLMAuthSubscription,
 			JailPort:  8443,

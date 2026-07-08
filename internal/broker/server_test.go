@@ -83,7 +83,7 @@ func TestJailHandlerRoutesProvision(t *testing.T) {
 	b := New(testConfig(t))
 	h := b.JailHandler()
 
-	r := httptest.NewRequest("POST", "/provision", bytes.NewReader([]byte(`{"grove":"worker"}`)))
+	r := httptest.NewRequest("POST", "/provision", bytes.NewReader([]byte(`{"worker":"worker"}`)))
 	// No TLS → handleProvision will reject (not manager) but must NOT 404.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

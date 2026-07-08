@@ -133,10 +133,10 @@ func TestCheckScionProjectConsistent(t *testing.T) {
 }
 
 func TestCheckScionProjectNoRegistration(t *testing.T) {
-	// A grove's registration for a different path must not implicate /lever.
+	// A worker's registration for a different path must not implicate /lever.
 	st := backend.ScionProjectState{
 		MarkerPresent: false,
-		Entries:       []backend.ScionProjectEntry{{Name: "scratch__x", WorkspacePath: "/lever/groves/scratch"}},
+		Entries:       []backend.ScionProjectEntry{{Name: "scratch__x", WorkspacePath: "/lever/workers/scratch"}},
 	}
 	if r := checkScionProject(st, "/lever"); !r.ok {
 		t.Fatalf("no registration for the tree => pass; got %+v", r)
@@ -149,7 +149,7 @@ func TestCheckScionProjectRegisteredButMarkerGone(t *testing.T) {
 		MarkerPresent: false,
 		Entries: []backend.ScionProjectEntry{
 			{Name: "lever__abc", WorkspacePath: "/lever"},
-			{Name: "scratch__x", WorkspacePath: "/lever/groves/scratch"},
+			{Name: "scratch__x", WorkspacePath: "/lever/workers/scratch"},
 		},
 	}
 	r := checkScionProject(st, "/lever")
@@ -322,10 +322,10 @@ func TestCheckGoToolchainProbeError(t *testing.T) {
 func TestCheckOperatorSkills(t *testing.T) {
 	root := t.TempDir()
 	tree := filepath.Join(root, "workspace")
-	if err := os.MkdirAll(filepath.Join(tree, "groves", "scratch"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tree, "workers", "scratch"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	app := &config.App{Tree: tree, Groves: []config.Grove{{Name: "scratch", Dir: "groves/scratch"}}}
+	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}}
 	stateDir := filepath.Join(root, ".lever-state")
 
 	// Unscaffolded → fail with `lever init` hint.

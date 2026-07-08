@@ -10,9 +10,9 @@ Your standup, in order:
    the conditions in one friendly line. (`weather` is coarse-gated, so any op
    works.) If you're unsure of the flow, consult your `lever-operator` skill.
 
-2. **Today's todos.** You do NOT hold the todo capability — the **todo grove**
+2. **Today's todos.** You do NOT hold the todo capability — the **todo worker**
    does. Dispatch it and ask it for the pending list. Tell it explicitly to
-   **message the result back to you** — a grove that only prints its answer in its
+   **message the result back to you** — a worker that only prints its answer in its
    own session leaves you waiting forever:
    `lever-manager agent start todo --task "Mint a todo/list capability, call the todo tool's list operation with pending=true, then send the items back to the manager with: lever-manager msg send \"<the list>\" --to user:manager"`
    Watch your inbox for its reply (`lever-manager msg list`, or start the event

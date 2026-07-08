@@ -13,7 +13,7 @@ func enrolReq(ticket string, csrPEM []byte) *http.Request {
 	return httptest.NewRequest("POST", "/enrol", bytes.NewReader(body)) // no client cert
 }
 
-func TestEnrolSignsCertForMatchingGrove(t *testing.T) {
+func TestEnrolSignsCertForMatchingWorker(t *testing.T) {
 	b := New(testConfig(t))
 	tk, _ := b.tickets.Issue("worker", b.ticketTTL)
 	csr := makeCSRForCN(t, "worker")
@@ -41,7 +41,7 @@ func TestEnrolRejectsCNMismatchAndPreservesTicket(t *testing.T) {
 	w := httptest.NewRecorder()
 	b.handleEnrol(w, enrolReq(tk, evil))
 	if w.Code == http.StatusOK {
-		t.Fatal("SECURITY: enrol must reject a CSR whose CN != ticket grove")
+		t.Fatal("SECURITY: enrol must reject a CSR whose CN != ticket worker")
 	}
 	// The ticket must still be usable by the legitimate worker.
 	good := makeCSRForCN(t, "worker")

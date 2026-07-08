@@ -498,22 +498,22 @@ func cmdRenew(args []string) error {
 	}
 }
 
-// cmdProvision mints a one-use enrolment ticket for a grove via the broker's
+// cmdProvision mints a one-use enrolment ticket for a worker via the broker's
 // /provision endpoint (manager-CN-gated). The resulting Bootstrap JSON is written
 // to -out (0600) so the acceptance harness can drop it in the jail for boot.
 func cmdProvision(args []string) error {
 	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
 	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the manager identity (cert+key+ca)")
-	grove := fs.String("grove", "", "grove name to provision a ticket for")
-	out := fs.String("out", "", "path to write the grove bootstrap JSON (0600)")
+	worker := fs.String("worker", "", "worker name to provision a ticket for")
+	out := fs.String("out", "", "path to write the worker bootstrap JSON (0600)")
 	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL if -broker-url not set)")
 	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *grove == "" {
-		return fmt.Errorf("provision: -grove is required")
+	if *worker == "" {
+		return fmt.Errorf("provision: -worker is required")
 	}
 	if *out == "" {
 		return fmt.Errorf("provision: -out is required")
@@ -541,12 +541,12 @@ func cmdProvision(args []string) error {
 		return fmt.Errorf("provision: build mTLS client: %w", err)
 	}
 
-	ticket, err := agent.Provision(context.Background(), bURL, client, *grove)
+	ticket, err := agent.Provision(context.Background(), bURL, client, *worker)
 	if err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
 
-	bs := agent.BootstrapFor(*grove, ticket, caPEM, bURL)
+	bs := agent.BootstrapFor(*worker, ticket, caPEM, bURL)
 	data, err := json.Marshal(bs)
 	if err != nil {
 		return fmt.Errorf("provision: marshal bootstrap: %w", err)

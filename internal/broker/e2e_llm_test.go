@@ -66,7 +66,7 @@ func TestE2ELLMProxyOverRealMTLS(t *testing.T) {
 
 	// Provision worker (manager) → ticket.
 	managerClient := agentClient(t, b, signedCert(t, b, "manager"))
-	provBody, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	provBody, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
 	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
 	if err != nil {
 		t.Fatalf("provision: %v", err)

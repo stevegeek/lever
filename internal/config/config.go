@@ -1,5 +1,5 @@
 // Package config loads an application config: the declarative description of a
-// lever agent-manager application (the manager + its groves).
+// lever agent-manager application (the manager + its workers).
 package config
 
 import (
@@ -212,10 +212,10 @@ const (
 // Messaging is the broker's message-routing policy knobs. Routing policy, not
 // capability grants: identities come from mTLS; recipients from config.
 type Messaging struct {
-	// GroveToGrove permits grove→grove sends. nil/unset ⇒ true (allowed);
+	// WorkerToWorker permits worker→worker sends. nil/unset ⇒ true (allowed);
 	// pointer-bool so an explicit `false` is distinguishable for stricter
 	// hub-and-spoke models.
-	GroveToGrove *bool `yaml:"grove_to_grove"`
+	WorkerToWorker *bool `yaml:"worker_to_worker"`
 }
 
 // Broker holds broker settings + first-party tool declarations.
@@ -244,7 +244,7 @@ type Manager struct {
 	Delegate       []DelegateGrant `yaml:"delegate"`
 }
 
-type Grove struct {
+type Worker struct {
 	Name     string          `yaml:"name"`
 	Dir      string          `yaml:"dir"`
 	Image    string          `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
@@ -264,7 +264,7 @@ type ScionConfig struct {
 }
 
 // Security holds opt-in image policy. Both default off (empty/false) for
-// backward compatibility; when set they apply to manager.image and every grove
+// backward compatibility; when set they apply to manager.image and every worker
 // image. See security-model.md §5.
 type Security struct {
 	// AllowedImageRegistries restricts where images may come from: an image is
@@ -284,7 +284,7 @@ type App struct {
 	Tree     string      `yaml:"tree"`
 	Manager  Manager     `yaml:"manager"`
 	Scion    ScionConfig `yaml:"scion"`
-	Groves   []Grove     `yaml:"groves"`
+	Workers  []Worker    `yaml:"workers"`
 	Security Security    `yaml:"security"`
 	Broker   Broker      `yaml:"broker"`
 
@@ -313,7 +313,7 @@ func validateBackend(name string) error {
 // security-model.md §5.
 const CanonicalName = "lever.yaml"
 
-// nameRE constrains an instance/grove name: it becomes a jail machine name
+// nameRE constrains an instance/worker name: it becomes a jail machine name
 // (`lever-<name>`) and a shell token in the scion-install path.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
@@ -460,37 +460,37 @@ func (a *App) Validate() error {
 	if a.Manager.PromptFile != "" && !confinedRel(a.Manager.PromptFile) {
 		return fmt.Errorf("config: manager.prompt_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.PromptFile)
 	}
-	for _, g := range a.Groves {
+	for _, g := range a.Workers {
 		if g.Name == "" || g.Dir == "" {
-			return fmt.Errorf("config: grove needs name + dir (got %+v)", g)
+			return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
 		}
 		if !nameRE.MatchString(g.Name) {
-			return fmt.Errorf("config: grove name %q must match %s", g.Name, nameRE)
+			return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
 		}
 		if g.Name == a.ManagerCN() {
-			return fmt.Errorf("config: grove name %q collides with the manager identity — a grove must not share the manager's CN", g.Name)
+			return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
 		}
 		if g.Name == a.Name {
 			// The manager's scion agent slug IS the app name (apply dispatches
-			// it as Grove: app.Name), and the broker routes manager-recipient
-			// matches by slug — a grove named like the app would be shadowed
+			// it as Worker: app.Name), and the broker routes manager-recipient
+			// matches by slug — a worker named like the app would be shadowed
 			// (messages to it silently route to the manager).
-			return fmt.Errorf("config: grove name %q collides with the manager agent (the app name) — rename the grove or the app", g.Name)
+			return fmt.Errorf("config: worker name %q collides with the manager agent (the app name) — rename the worker or the app", g.Name)
 		}
 		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
-			return fmt.Errorf("config: grove dir %q must be relative and inside the tree", g.Dir)
+			return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
 		}
 		if filepath.Clean(g.Dir) == "." {
-			// A "." dir makes GroveDir(g) == a.Tree, so the grove's jail path
-			// collides with the manager's mount root (/lever). Then the grove's
+			// A "." dir makes WorkerDir(g) == a.Tree, so the worker's jail path
+			// collides with the manager's mount root (/lever). Then the worker's
 			// register step (scion-project-config removal + .scion marker removal)
 			// would be scoped to the MANAGER's registration/marker instead of its
 			// own. confinedRel already rejects "." for `tree` for the same
-			// root-is-the-mount reason; grove dirs must be a strict subdir.
-			return fmt.Errorf("config: grove %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
+			// root-is-the-mount reason; worker dirs must be a strict subdir.
+			return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
 		}
 		if g.Image != "" {
-			if err := a.Security.validateImage(fmt.Sprintf("grove %q image", g.Name), g.Image); err != nil {
+			if err := a.Security.validateImage(fmt.Sprintf("worker %q image", g.Name), g.Image); err != nil {
 				return err
 			}
 		}
@@ -503,7 +503,7 @@ func (a *App) Validate() error {
 
 // validateBroker fails closed on capability-config mistakes: duplicate tool
 // names, grants referencing an undeclared tool/op, and delegate.to naming an
-// undeclared agent. A grove with no grants is fine (default-deny ⇒ no path).
+// undeclared agent. A worker with no grants is fine (default-deny ⇒ no path).
 func (a *App) validateBroker() error {
 	// LLM-auth: validate the enum and, when any agent is api-key, require an
 	// api_key_file that exists at 0600 (fail closed on a world/group-readable key).
@@ -516,9 +516,9 @@ func (a *App) validateBroker() error {
 	if !validMode(a.Manager.LLMAuth) {
 		return fmt.Errorf("config: manager.llm_auth %q invalid (want subscription|api-key)", a.Manager.LLMAuth)
 	}
-	for _, g := range a.Groves {
+	for _, g := range a.Workers {
 		if !validMode(g.LLMAuth) {
-			return fmt.Errorf("config: grove %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
+			return fmt.Errorf("config: worker %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
 	}
 	// Mixed instances are UNSUPPORTED: the OAuth credential is a single jail-wide
@@ -526,7 +526,7 @@ func (a *App) validateBroker() error {
 	// the real token into — and open internet egress for — the api-key agents'
 	// containers, defeating their key isolation. An instance must be uniformly
 	// api-key OR uniformly subscription. See security-model.md §6.1. (Resolved
-	// modes, so a broker/manager default that disagrees with a grove override is
+	// modes, so a broker/manager default that disagrees with a worker override is
 	// caught too.)
 	if a.mixedLLMAuth() {
 		return fmt.Errorf("config: llm_auth is mixed across the instance (both api-key and subscription agents) — this is unsupported; an instance must be uniformly api-key or uniformly subscription (see security-model.md §6.1)")
@@ -571,8 +571,8 @@ func (a *App) llmAuthModes() (anyAPIKey, anySubscription bool) {
 		}
 	}
 	mark(a.EffectiveManagerLLMAuth())
-	for _, g := range a.Groves {
-		mark(a.EffectiveGroveLLMAuth(g))
+	for _, g := range a.Workers {
+		mark(a.EffectiveWorkerLLMAuth(g))
 	}
 	return
 }
@@ -584,7 +584,7 @@ func (a *App) mixedLLMAuth() bool {
 	return anyAPIKey && anySubscription
 }
 
-// AnyAPIKeyAgent reports whether any agent (manager or grove) is api-key.
+// AnyAPIKeyAgent reports whether any agent (manager or worker) is api-key.
 // Exported so brokerctl can decide whether to register the reserved llm pseudo-tool.
 func (a *App) AnyAPIKeyAgent() bool {
 	anyAPIKey, _ := a.llmAuthModes()
@@ -592,7 +592,7 @@ func (a *App) AnyAPIKeyAgent() bool {
 }
 
 // injectLLMGrants adds the implicit obtain {llm, generate} capability to every
-// api-key agent (R3). LLM access is universal in api-key mode; a grove opts out
+// api-key agent (R3). LLM access is universal in api-key mode; a worker opts out
 // with llm_auth: subscription. Idempotent.
 func (a *App) injectLLMGrants() {
 	add := func(obtain *[]Grant) {
@@ -606,9 +606,9 @@ func (a *App) injectLLMGrants() {
 	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
 		add(&a.Manager.Obtain)
 	}
-	for i := range a.Groves {
-		if a.EffectiveGroveLLMAuth(a.Groves[i]) == LLMAuthAPIKey {
-			add(&a.Groves[i].Obtain)
+	for i := range a.Workers {
+		if a.EffectiveWorkerLLMAuth(a.Workers[i]) == LLMAuthAPIKey {
+			add(&a.Workers[i].Obtain)
 		}
 	}
 }
@@ -642,9 +642,9 @@ func (a *App) validateBrokerGrants() error {
 		}
 		toolOps[t.Name] = ops
 	}
-	// Known agent identities: the manager CN + every grove name.
+	// Known agent identities: the manager CN + every worker name.
 	agents := map[string]bool{a.ManagerCN(): true}
-	for _, g := range a.Groves {
+	for _, g := range a.Workers {
 		agents[g.Name] = true
 	}
 	checkCap := func(who, tool, op string) error {
@@ -681,16 +681,16 @@ func (a *App) validateBrokerGrants() error {
 	if err := validate("manager", a.Manager.Obtain, a.Manager.Delegate); err != nil {
 		return err
 	}
-	for _, g := range a.Groves {
-		if err := validate("grove "+g.Name, g.Obtain, g.Delegate); err != nil {
+	for _, g := range a.Workers {
+		if err := validate("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// GroveDir returns the absolute path of a grove dir (tree + relative dir).
-func (a *App) GroveDir(g Grove) string { return filepath.Join(a.Tree, g.Dir) }
+// WorkerDir returns the absolute path of a worker dir (tree + relative dir).
+func (a *App) WorkerDir(g Worker) string { return filepath.Join(a.Tree, g.Dir) }
 
 // EffectiveManagerLLMAuth resolves the manager's LLM-auth mode: the broker
 // default (subscription when unset).
@@ -701,9 +701,9 @@ func (a *App) EffectiveManagerLLMAuth() LLMAuthMode {
 	return a.brokerLLMAuthDefault()
 }
 
-// EffectiveGroveLLMAuth resolves a grove's LLM-auth mode: its own override else
+// EffectiveWorkerLLMAuth resolves a worker's LLM-auth mode: its own override else
 // the broker default.
-func (a *App) EffectiveGroveLLMAuth(g Grove) LLMAuthMode {
+func (a *App) EffectiveWorkerLLMAuth(g Worker) LLMAuthMode {
 	if g.LLMAuth != "" {
 		return g.LLMAuth
 	}
@@ -745,26 +745,26 @@ func (a *App) ClosedInternetEgress() (closed bool, warning string) {
 	return a.Egress == EgressClosed, ""
 }
 
-// GroveImage returns the container image a grove should run on: its own
+// WorkerImage returns the container image a worker should run on: its own
 // `image:` if set, else the manager image (the common single-image case, and
-// the image apply already loads into the jail). The manager dispatches groves
+// the image apply already loads into the jail). The manager dispatches workers
 // later, so this is the single source of truth both apply (what to load) and
 // lever-manager (what to pass to `scion start`) resolve against.
-func (a *App) GroveImage(g Grove) string {
+func (a *App) WorkerImage(g Worker) string {
 	if g.Image != "" {
 		return g.Image
 	}
 	return a.Manager.Image
 }
 
-// GroveByName returns the configured grove with the given name, or false.
-func (a *App) GroveByName(name string) (Grove, bool) {
-	for _, g := range a.Groves {
+// WorkerByName returns the configured worker with the given name, or false.
+func (a *App) WorkerByName(name string) (Worker, bool) {
+	for _, g := range a.Workers {
 		if g.Name == name {
 			return g, true
 		}
 	}
-	return Grove{}, false
+	return Worker{}, false
 }
 
 // ManagerCN returns the manager's cert CN (broker.manager_identity, default "manager").
@@ -787,10 +787,10 @@ func (a *App) ManagerPromptPath() string {
 	return filepath.Join(a.dir, a.Manager.PromptFile)
 }
 
-// GroveToGroveMessaging reports whether groves may message each other
-// (default true; broker.messaging.grove_to_grove: false disables).
-func (a *App) GroveToGroveMessaging() bool {
-	if v := a.Broker.Messaging.GroveToGrove; v != nil {
+// WorkerToWorkerMessaging reports whether workers may message each other
+// (default true; broker.messaging.worker_to_worker: false disables).
+func (a *App) WorkerToWorkerMessaging() bool {
+	if v := a.Broker.Messaging.WorkerToWorker; v != nil {
 		return *v
 	}
 	return true

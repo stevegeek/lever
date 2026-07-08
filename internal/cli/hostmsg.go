@@ -13,7 +13,7 @@ import (
 // BODY --to NAME`. Operator authority, no broker hop (the host owns the CA,
 // jail, and config — the same trust model as `lever attach`). Strictly passive:
 // it resolves the jail transport but never provisions. NAME resolves like
-// attach (the app name → manager; a declared grove name → that grove).
+// attach (the app name → manager; a declared worker name → that worker).
 func newHostMsgCmd(bf BackendFactory) *cobra.Command {
 	cmd := &cobra.Command{Use: "msg", Short: "Send a note to an agent (host-side, fire-and-forget)"}
 	cmd.AddCommand(hostMsgSend(bf))
@@ -26,7 +26,7 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "send BODY",
 		Args:  cobra.MinimumNArgs(1),
-		Short: "Send a message to the manager or a grove (--to NAME)",
+		Short: "Send a message to the manager or a worker (--to NAME)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, err := resolveConfigPath("")
 			if err != nil {
@@ -57,7 +57,7 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&to, "to", "", "recipient: the manager (app name) or a declared grove name (required)")
+	c.Flags().StringVar(&to, "to", "", "recipient: the manager (app name) or a declared worker name (required)")
 	c.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
 	_ = c.MarkFlagRequired("to")
 	return c

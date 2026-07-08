@@ -30,7 +30,7 @@ type brokerEnv struct {
 	Registry *registry.Registry
 }
 
-// testBroker builds a broker that permits provisioning grove "worker" and a CA
+// testBroker builds a broker that permits provisioning worker "worker" and a CA
 // server cert, and returns a brokerEnv with all relevant handles for test setup
 // and assertion (including the policy and registry instances the broker was built
 // from, so callers can drive them directly without any production accessor).
@@ -82,8 +82,8 @@ func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 }
 
 // provisionAs signs a manager client cert with the CA, builds an mTLS client,
-// POSTs /provision {grove}, and returns the ticket string.
-func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *ca.CA, grove string) string {
+// POSTs /provision {worker}, and returns the ticket string.
+func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *ca.CA, worker string) string {
 	t.Helper()
 
 	// Build a manager cert signed by the broker CA (mirrors signedCert in broker e2e_test).
@@ -105,7 +105,7 @@ func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *c
 		Certificates: []tls.Certificate{managerCert},
 	}}}
 
-	body, _ := json.Marshal(map[string]string{"grove": grove})
+	body, _ := json.Marshal(map[string]string{"worker": worker})
 	resp, err := client.Post(srv.URL+"/provision", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("provisionAs: POST /provision: %v", err)
@@ -172,9 +172,9 @@ func TestEnrolReturnsSignedIdentity(t *testing.T) {
 func TestEnrolRejectsCNMismatch(t *testing.T) {
 	env := testBroker(t)
 	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
-	// A CSR CN that doesn't match the ticket's grove must be rejected by the broker.
+	// A CSR CN that doesn't match the ticket's worker must be rejected by the broker.
 	if _, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "evil"); err == nil {
-		t.Fatal("enrol with CN != ticket grove must fail")
+		t.Fatal("enrol with CN != ticket worker must fail")
 	}
 }
 

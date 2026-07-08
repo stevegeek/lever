@@ -28,7 +28,7 @@ func (c *Client) Message(ctx context.Context, o MsgOpts) error {
 // Inbox reads the caller's typed event inbox via `scion notifications` — the
 // command available in agent CLI mode (SCION_CLI_MODE=agent), where `messages`
 // is absent. Events carry id/agentId/status/message. unread=false adds --all
-// (all vs unacknowledged). Requires Hub mode. project scopes to a grove
+// (all vs unacknowledged). Requires Hub mode. project scopes to a worker
 // ("" = the caller's own inbox).
 func (c *Client) Inbox(ctx context.Context, unread bool, project string) ([]Event, error) {
 	args := []string{"notifications", "--json"}

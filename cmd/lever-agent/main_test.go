@@ -307,7 +307,7 @@ func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 // is no identity — cmdProvision errors with "no identity", which proves dispatch
 // and flag parsing succeeded without a "flag provided but not defined" error.
 func TestProvisionVerbAcceptedByRun(t *testing.T) {
-	err := run([]string{"lever-agent", "provision", "-grove", "worker", "-out", t.TempDir() + "/w.json", "-id-dir", t.TempDir()})
+	err := run([]string{"lever-agent", "provision", "-worker", "worker", "-out", t.TempDir() + "/w.json", "-id-dir", t.TempDir()})
 	if err == nil {
 		t.Fatal("expected an error (no identity), got nil")
 	}
@@ -334,7 +334,7 @@ func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
 	}
 }
 
-// TestMCPAddArgsUsesUserScope pins the fix for the grove/manager MCP-wiring gap:
+// TestMCPAddArgsUsesUserScope pins the fix for the worker/manager MCP-wiring gap:
 // the pre-start hook runs `claude mcp add` from the agent home, but the claude
 // session runs in /workspace. `claude mcp add`'s default (local) scope is
 // keyed by CWD, so servers registered from the home are invisible to the

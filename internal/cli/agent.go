@@ -7,8 +7,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// groveCallFn is the active broker caller (seam for tests).
-var groveCallFn = groveCall
+// workerCallFn is the active broker caller (seam for tests).
+var workerCallFn = workerCall
 
 // managerBootstrapPath is where the manager's own bootstrap.json is readable
 // from inside the manager CONTAINER, where scion mounts the tree at /workspace
@@ -25,21 +25,21 @@ var managerIDDir = func() string {
 }()
 
 func newAgentCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "agent", Short: "Drive grove agents via the broker"}
+	cmd := &cobra.Command{Use: "agent", Short: "Drive worker agents via the broker"}
 	cmd.AddCommand(agentList(), agentStart(), agentStop(), agentSuspend(), agentResume())
 	return cmd
 }
 
 func agentStart() *cobra.Command {
 	var task string
-	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume) a grove agent",
+	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume) a worker agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := groveCallFn(cmd.Context(), "/grove/start",
-				map[string]string{"grove": args[0], "task": task})
+			res, err := workerCallFn(cmd.Context(), "/worker/start",
+				map[string]string{"worker": args[0], "task": task})
 			if err != nil {
 				return err
 			}
-			cmd.Printf("%s: %s\n", res.Grove, res.Phase)
+			cmd.Printf("%s: %s\n", res.Worker, res.Phase)
 			return nil
 		}}
 	c.Flags().StringVar(&task, "task", "Read your context, then begin.", "task/boot prompt")
@@ -49,26 +49,26 @@ func agentStart() *cobra.Command {
 func agentVerb(use, short, endpoint string) *cobra.Command {
 	return &cobra.Command{Use: use + " NAME", Args: cobra.ExactArgs(1), Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := groveCallFn(cmd.Context(), endpoint, map[string]string{"grove": args[0]})
+			res, err := workerCallFn(cmd.Context(), endpoint, map[string]string{"worker": args[0]})
 			if err != nil {
 				return err
 			}
-			cmd.Printf("%s: %s\n", res.Grove, res.Phase)
+			cmd.Printf("%s: %s\n", res.Worker, res.Phase)
 			return nil
 		}}
 }
 
-func agentStop() *cobra.Command { return agentVerb("stop", "Stop a grove agent", "/grove/stop") }
+func agentStop() *cobra.Command { return agentVerb("stop", "Stop a worker agent", "/worker/stop") }
 func agentSuspend() *cobra.Command {
-	return agentVerb("suspend", "Suspend a grove agent", "/grove/suspend")
+	return agentVerb("suspend", "Suspend a worker agent", "/worker/suspend")
 }
 func agentResume() *cobra.Command {
-	return agentVerb("resume", "Resume a grove agent", "/grove/resume")
+	return agentVerb("resume", "Resume a worker agent", "/worker/resume")
 }
 
 func agentList() *cobra.Command {
-	return &cobra.Command{Use: "list", Short: "List grove agents", RunE: func(cmd *cobra.Command, _ []string) error {
-		res, err := groveCallFn(cmd.Context(), "/grove/list", map[string]string{})
+	return &cobra.Command{Use: "list", Short: "List worker agents", RunE: func(cmd *cobra.Command, _ []string) error {
+		res, err := workerCallFn(cmd.Context(), "/worker/list", map[string]string{})
 		if err != nil {
 			return err
 		}

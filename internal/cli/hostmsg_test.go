@@ -13,7 +13,7 @@ import (
 	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
-// hostMsgInstanceDir writes a canonical lever.yaml declaring a "scratch" grove
+// hostMsgInstanceDir writes a canonical lever.yaml declaring a "scratch" worker
 // alongside the manager, so --to can resolve both branches of attachTarget.
 func hostMsgInstanceDir(t *testing.T, name string) string {
 	t.Helper()
@@ -25,9 +25,9 @@ broker:
   llm_auth: subscription
 manager:
   image: img:1
-groves:
+workers:
   - name: scratch
-    dir: groves/scratch
+    dir: workers/scratch
 `
 	if err := os.WriteFile(filepath.Join(dir, config.CanonicalName), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestHostMsgSendToManager(t *testing.T) {
 	}
 }
 
-func TestHostMsgSendToGroveWithInterrupt(t *testing.T) {
+func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 	dir := hostMsgInstanceDir(t, "assistant")
 	t.Chdir(dir)
 
@@ -88,7 +88,7 @@ func TestHostMsgSendToGroveWithInterrupt(t *testing.T) {
 		t.Fatalf("want exactly 1 scion call, got %d: %+v", len(fr.Calls), fr.Calls)
 	}
 	got := strings.Join(fr.Calls[0].Args, " ")
-	for _, want := range []string{"agent:scratch", "--interrupt", "-g /lever/groves/scratch"} {
+	for _, want := range []string{"agent:scratch", "--interrupt", "-g /lever/workers/scratch"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
 		}

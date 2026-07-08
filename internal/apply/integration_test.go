@@ -16,7 +16,7 @@ package apply_test
 //	LEVER_IT_IMAGE=scionlocal/lever-claude:latest \
 //	LEVER_IT_SCION_SRC=$LEVER_INSTANCE/vendor/scion-src \
 //	LEVER_IT_CRED=$HOME/.scion/oauth-token \
-//	go test -tags integration -run TestApplyLiveHelloGrove -timeout 35m ./internal/apply/
+//	go test -tags integration -run TestApplyLiveHelloWorker -timeout 35m ./internal/apply/
 //
 // It proves the executor end-to-end. The success signal is the manager agent
 // reaching activity "completed" via `scion list` in the jail — NOT the HELLO
@@ -28,9 +28,9 @@ package apply_test
 // the "agent workspace is a copy+sync" investigation task.
 //
 // It does NOT exercise manager→worker dispatch: the stock agent image carries no
-// scion/lever tooling, so the manager cannot orchestrate the worker grove. The
-// prompt therefore has the manager do the task directly; the worker grove is
-// still registered (exercising the register-grove + path-translation path).
+// scion/lever tooling, so the manager cannot orchestrate the worker. The
+// prompt therefore has the manager do the task directly; the worker is
+// still registered (exercising the register-worker + path-translation path).
 
 import (
 	"context"
@@ -46,7 +46,7 @@ import (
 
 const wantHello = "hello from the lever manager"
 
-func TestApplyLiveHelloGrove(t *testing.T) {
+func TestApplyLiveHelloWorker(t *testing.T) {
 	if os.Getenv("LEVER_IT") != "1" {
 		t.Skip("live integration test: set LEVER_IT=1 to run")
 	}
@@ -70,10 +70,10 @@ func TestApplyLiveHelloGrove(t *testing.T) {
 	mustWrite(t, filepath.Join(tree, "manager.md"),
 		"Create a file named HELLO in your current working directory. Its contents must be\n"+
 			"exactly:\n\n"+wantHello+"\n\nThen you are done — do not do anything else.\n")
-	if err := os.MkdirAll(filepath.Join(tree, "groves", "worker"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tree, "workers", "worker"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mustWrite(t, filepath.Join(tree, "groves", "worker", ".keep"), "")
+	mustWrite(t, filepath.Join(tree, "workers", "worker", ".keep"), "")
 
 	const name = "leverit"
 	mustWrite(t, filepath.Join(tree, "lever.yaml"), fmt.Sprintf(`name: %s
@@ -86,9 +86,9 @@ manager:
   prompt_file: manager.md
   credential_file: %s
   allow_ports: []
-groves:
+workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker
 `, name, scionSrc, image, cred))
 
 	machine := "lever-" + name

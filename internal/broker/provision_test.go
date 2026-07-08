@@ -29,7 +29,7 @@ func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
 
 func TestProvisionIssuesTicketForManager(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()
@@ -48,7 +48,7 @@ func TestProvisionIssuesTicketForManager(t *testing.T) {
 
 func TestProvisionRejectsNonManager(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "analyst") // not the manager
 	w := httptest.NewRecorder()
@@ -58,21 +58,21 @@ func TestProvisionRejectsNonManager(t *testing.T) {
 	}
 }
 
-func TestProvisionRejectsUnknownGrove(t *testing.T) {
+func TestProvisionRejectsUnknownWorker(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Grove: "ghost"})
+	body, _ := json.Marshal(ProvisionRequest{Worker: "ghost"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()
 	b.handleProvision(w, r)
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 for grove not in config", w.Code)
+		t.Fatalf("status = %d, want 403 for worker not in config", w.Code)
 	}
 }
 
 func TestProvisionRejectsNoCert(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body)) // no r.TLS
 	w := httptest.NewRecorder()
 	b.handleProvision(w, r)
@@ -84,7 +84,7 @@ func TestProvisionRejectsNoCert(t *testing.T) {
 func TestProvisionDeniesRevokedManager(t *testing.T) {
 	b := New(testConfig(t))
 	b.Revoke("manager")
-	body, _ := json.Marshal(ProvisionRequest{Grove: "worker"})
+	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()

@@ -13,7 +13,7 @@ import (
 
 // JailRunner rebuilds the command transport into a jail from its already-
 // resolved identity (machine, run user, uid) WITHOUT needing EnsureUp state.
-// The broker uses this for host-side grove dispatch: `lever apply` resolved the
+// The broker uses this for host-side worker dispatch: `lever apply` resolved the
 // identity and passed it via env; the broker process reconstructs the transport
 // here. Task-adding a backend: extend the switch (the lockstep with
 // constructors is exercised by TestJailRunnerCoversAllCandidates).

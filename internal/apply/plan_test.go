@@ -29,7 +29,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img", CredentialFile: "cred"},
-		Groves:  []config.Grove{{Name: "worker"}},
+		Workers: []config.Worker{{Name: "worker"}},
 		Broker:  config.Broker{JailPort: 8443, AdminPort: 8444},
 	}
 	got := planStepNames(Plan(app, PlanOpts{BrokerOnly: true}))
@@ -44,7 +44,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 	}
 	// Scion/container/registration steps must NOT appear (the fresh machine has no
 	// scion binary; init-machine would fail).
-	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-manager", "register-grove", "write-manifest", "start-manager", "config-registry", "credential"} {
+	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-manager", "register-worker", "write-manifest", "start-manager", "config-registry", "credential"} {
 		if contains(got, banned) {
 			t.Fatalf("broker-only plan must omit %q: %v", banned, got)
 		}
@@ -66,14 +66,14 @@ func TestPlanOrder(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img", AllowPorts: []int{3305}},
-		Groves:  []config.Grove{{Name: "appa", Dir: "groves/appa"}, {Name: "appb", Dir: "groves/appb"}},
+		Workers: []config.Worker{{Name: "appa", Dir: "workers/appa"}, {Name: "appb", Dir: "workers/appb"}},
 	}
 	steps := Plan(app, PlanOpts{})
 	var kinds []string
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-worker", "register-worker", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -82,13 +82,13 @@ func TestPlanOrder(t *testing.T) {
 			t.Fatalf("step %d = %q want %q (all=%v)", i, kinds[i], want[i], kinds)
 		}
 	}
-	// register-grove targets: first grove is at index 7, second at index 8
-	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-grove 8:register-grove 9:mint-manager-bootstrap 10:start-manager)
-	if steps[7].Target != "/t/groves/appa" {
-		t.Fatalf("register-grove[0] target=%q", steps[7].Target)
+	// register-worker targets: first worker is at index 7, second at index 8
+	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-worker 8:register-worker 9:mint-manager-bootstrap 10:start-manager)
+	if steps[7].Target != "/t/workers/appa" {
+		t.Fatalf("register-worker[0] target=%q", steps[7].Target)
 	}
-	if steps[8].Target != "/t/groves/appb" {
-		t.Fatalf("register-grove[1] target=%q", steps[8].Target)
+	if steps[8].Target != "/t/workers/appb" {
+		t.Fatalf("register-worker[1] target=%q", steps[8].Target)
 	}
 }
 
@@ -154,7 +154,7 @@ func TestApplyPlan_noWriteManifest(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img"},
-		Groves:  []config.Grove{{Name: "worker", Dir: "groves/worker"}},
+		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	for _, s := range Plan(app, PlanOpts{}) {
 		if s.Kind == "write-manifest" {
@@ -163,14 +163,14 @@ func TestApplyPlan_noWriteManifest(t *testing.T) {
 	}
 }
 
-func TestPlanLoadsDistinctGroveImages(t *testing.T) {
+func TestPlanLoadsDistinctWorkerImages(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "mgr:1"},
-		Groves: []config.Grove{
-			{Name: "a", Dir: "groves/a"},                 // inherits mgr:1
-			{Name: "b", Dir: "groves/b", Image: "alt:1"}, // override
-			{Name: "c", Dir: "groves/c", Image: "alt:1"}, // dup override
+		Workers: []config.Worker{
+			{Name: "a", Dir: "workers/a"},                 // inherits mgr:1
+			{Name: "b", Dir: "workers/b", Image: "alt:1"}, // override
+			{Name: "c", Dir: "workers/c", Image: "alt:1"}, // dup override
 		},
 	}
 	var loads []string

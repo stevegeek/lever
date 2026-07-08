@@ -1,12 +1,12 @@
 ---
 name: lever-agent
-description: Use when calling any brokered MCP tool, minting capabilities, or messaging the manager — how to operate as a lever grove agent.
+description: Use when calling any brokered MCP tool, minting capabilities, or messaging the manager — how to operate as a lever worker agent.
 lever-version: 0.3.1
 ---
 
-# Operating inside Lever (grove agent)
+# Operating inside Lever (worker agent)
 
-You are a grove agent of a Lever instance, running jailed inside an isolated
+You are a worker agent of a Lever instance, running jailed inside an isolated
 VM, dispatched by the manager with a task. Your workspace is bind-mounted
 live — edits are real. All outward reach goes through the capability
 broker's mTLS gateway; there is no other network egress.
@@ -37,7 +37,7 @@ denial as having no token. Reading denials: `missing capability` means you
 skipped step 1 or 2. A denial WITH a token attached means you are not
 granted that tool (or the token expired) — mint once more, and if it still
 denies, report it in your final message instead of retry-looping. You only
-have the tools the operator granted to your grove.
+have the tools the operator granted to your worker.
 
 ## Messaging the manager
 

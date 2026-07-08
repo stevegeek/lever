@@ -202,3 +202,23 @@ The pieces are tightly coupled (the single-project model drives bootstrap, dispa
 - **P4 — Reconciliation, messaging, and the acceptance gate.** Fleet resume, constant-project messaging, and the §12 checks wired into `lever acceptance`.
 
 Each phase ends with a working, testable increment.
+
+---
+
+## 15. Implementation status (2026-07-08)
+
+The re-architecture **model code is implemented and merged to `main`** across all four phases; two clearly-bounded items remain, both gated on live infrastructure rather than more code.
+
+- **P1 — grove→worker rename + config schema.** ✅ merged. Reviewed, tests green.
+- **P2 — single-project model.** ✅ merged. One instance project (`register-project`); broker uses a constant `instanceProject` for `-g` + per-worker subdir `--workspace`; list collapsed; config non-git guard (narrowed to *tree-itself* — an ancestor `.git` is harmless under the workspace guard); `config.go:485` comment rewritten. Reviewed, `-race` green.
+- **P3 — bootstrap + controller PAT + dev-auth-off.** ✅ merged. Throwaway `--dev-auth=true` server mints a scoped controller PAT (`agent:manage,agent:attach,project:read` — `agent:message` dropped; attach gates it), persisted `0600` under `.lever-state/` (survives `down`→`up`); real hub `--dev-auth=false`; `SCION_HUB_TOKEN` threaded into all five scion clients incl. attach. Reviewed, `-race` green.
+- **P4 — reconciliation, messaging, acceptance gate.** §8/§9 were **largely delivered inside P2/P3** (single registration, observe-first manager resume, persistent idempotent PAT, constant-`-g` routing + lifecycle, `worker_to_worker` gate). Remaining work + decisions:
+
+**Resolved open questions:**
+- **§14 Q3 (worker-record reconciliation) — RESOLVED as: workers are lazy, manager-dispatched.** There is no apply-time worker-fleet start/restore; `up` reconciles only the manager (which re-dispatches workers on demand through the broker). Worker agent records are therefore NOT auto-pruned on `up` — pruning a record the manager intends to resume would be destructive. A worker removed from config whose scion record still lingers is left for manual `scion delete` (or a future opt-in prune); not auto-cleaned in P4. This ratifies the P2 §7 "workers not started at apply time" model.
+- **§9 residual fixed:** `attachTarget` (`internal/cli/attach.go`) returned the old per-worker project (`/lever/workers/<name>`) for workers, mis-scoping `lever msg send --to <worker>` and `lever attach <worker>`. Fixed to return the instance project (`mountDest`), addressing the worker by slug — matching the single-project model.
+- **§14 Q2 (PAT rotation):** an invalid persisted PAT fails loud at first hub call (acceptable per spec); beyond-fail-loud remediation remains deferred.
+
+**Gated finals (need live infrastructure, not code):**
+1. **Scion version pin.** `EnsureScion` fetches `github.com/GoogleCloudPlatform/scion@<version>` upstream via the Go proxy; the two required fixes live on unmerged *fork* branches, not in one upstream commit. Options: wait for upstream PR merge and pin that commit; use `scion.source` to build from a combined local fork tree; or push a combined fork branch. **Operator decision.**
+2. **§12 acceptance gate (live).** All seven §12 checks are inherently live (real `scion start` + agent containers + the dev-auth-off hub + PAT); today's `lever acceptance` runs broker-only (scion skipped). Wiring them means extending the harness to a full bring-up + a scion client + the controller PAT and extending the fixture (sibling subdirs, a stray ancestor `.git`, a multi-worker fleet). This is **deferred to a pin-resolved live session** so the checks are written *and validated* against real scion behavior, rather than blind — and it "cannot pass on a pin lacking the git guard" (§5), i.e. it depends on gated-final #1.

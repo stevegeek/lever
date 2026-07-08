@@ -4,8 +4,8 @@ nav_order: 4
 ---
 # Architecture
 
-> **Mostly built.** Jail bring-up, the manager up/attach lifecycle, the capability broker, grove
-> dispatch (the manager calling the broker's `/grove/*` endpoints), broker-routed messaging
+> **Mostly built.** Jail bring-up, the manager up/attach lifecycle, the capability broker, worker
+> dispatch (the manager calling the broker's `/worker/*` endpoints), broker-routed messaging
 > (`/msg/send`, `/msg/list`), and the `lever-manager watch` bridge are implemented and validated (see
 > [security-model.md](/security-model/)). The notification contract in
 > §4 (the `input-needed`/`completed` event names) is still being refined; treat those event names as
@@ -27,18 +27,18 @@ surface** (`lever`).
 graph TD
     subgraph host[macOS host]
         L[lever CLI, operator binary]
-        BK["Capability broker<br/>real credentials, capability minting,<br/>/llm proxy, grove dispatch, MCP gateway,<br/>messaging (/msg/send, /msg/list)"]
+        BK["Capability broker<br/>real credentials, capability minting,<br/>/llm proxy, worker dispatch, MCP gateway,<br/>messaging (/msg/send, /msg/list)"]
         MCP[first-party tool servers<br/>bound to 127.0.0.1]
     end
     subgraph vm[OrbStack VM, the one hardware-virtualization boundary]
         subgraph jail[Isolated machine, THE JAIL]
-            SS[Scion server + runtime broker]
+            SS["Scion server + runtime broker<br/>one project for the whole instance"]
             RD[rootless dockerd]
             FW{{egress allowlist<br/>iptables / ip6tables<br/>enforced in jail netns}}
-            subgraph agents[Agent containers, rootless]
+            subgraph agents[Agent containers, rootless, same project]
                 MGR[Manager agent, the coordinator]
-                GA[Grove agent A]
-                GB[Grove agent B]
+                WA[Worker agent A]
+                WB[Worker agent B]
             end
         end
     end
@@ -46,10 +46,10 @@ graph TD
     L -.->|spawns| BK
     SS --> RD
     RD --> MGR
-    RD --> GA
-    RD --> GB
+    RD --> WA
+    RD --> WB
     BK --- MCP
-    BK -->|drives Scion for grove dispatch| SS
+    BK -->|drives Scion for worker dispatch| SS
     agents -->|all network egress| FW
     FW -->|"allowlisted: broker + model API<br/>via host.orb.internal"| BK
     FW -.->|LAN ranges dropped| LAN[LAN / other hosts]
@@ -59,7 +59,7 @@ graph TD
 - **Only the OrbStack VM is a hardware-virtualization boundary**, you already run it for all Docker
   use. The jail (an OrbStack *isolated machine*) and every container below it are kernel namespaces,
   so there is effectively no per-level CPU tax; nesting is cheap. (With the `orbstack`/`lima`
-  backends this also means a *single* kernel is shared across the manager and all groves, a security
+  backends this also means a *single* kernel is shared across the manager and all workers, a security
   trade noted in [security-model.md §7](/security-model/); the `apple-container` backend gives each
   agent its own VM kernel instead.)
 - **The jail is the containment boundary**, not Scion. The egress allowlist is enforced in the
@@ -75,39 +75,52 @@ graph TD
 
 ## 2. The project model: a project is a directory
 
-A Lever project is registered by pointing Scion at a directory (a non-git "linked" project). Every
-agent of that project gets the directory **bind-mounted in place, read-write**, as its workspace.
-There are no clones, no git worktrees, and no sync loop, an agent edits the real files, exactly as
-a human in that directory would. Git repositories may live *inside* a project directory; the
-runtime neither knows nor cares (a git repo is just files).
+A Lever **instance is one Scion project**, registered once at the tree root (a non-git "linked"
+project — Scion's `.scion` marker is externalized, not committed into the tree). The manager and
+every worker are **agents inside that single project** — not, as an earlier design had it, separate
+projects per agent. Each agent is bound to an explicit, in-place workspace via `--workspace`: the
+manager's workspace is the whole tree root; a worker's workspace is one subdirectory of it. There
+are no clones, no git worktrees, and no sync loop, an agent edits the real files, exactly as a human
+in that directory would. A worker's own subdirectory may itself contain a git repository; the runtime
+neither knows nor cares (a git repo is just files) — but the **tree root itself must be non-git**, see
+below.
 
 {% raw %}
 ```mermaid
 graph TD
-    root["project tree root = MANAGER workspace (whole tree, rw)<br/>- the jail's only mounted host dir"]
+    root["project tree root = MANAGER workspace (whole tree, rw)<br/>- the jail's only mounted host dir<br/>- ONE Scion project for the whole instance"]
     root --> kb["instance content: knowledge base + tools<br/>(instance convention, not required by the core)"]
-    root --> groves["groves/"]
-    groves --> a["groves/app-a/ → grove A workspace (repo inside)"]
-    groves --> b["groves/app-b/ → grove B workspace (repo inside)"]
+    root --> workers["workers/"]
+    workers --> a["workers/app-a/ → worker A workspace (repo inside)"]
+    workers --> b["workers/app-b/ → worker B workspace (repo inside)"]
 ```
 {% endraw %}
 
-- **Manager project**, workspace is the whole tree root, so the manager sees everything the
-  instance keeps there (its knowledge base, tools) and a live view of every grove.
-- **Grove projects**, each `groves/<name>/` is its own project, isolated from the manager and
-  from siblings. A grove agent sees only its own directory.
-- **Overlapping mounts are intentional**, the manager's workspace physically contains the grove
-  directories, so edits are live to all parties. Note this is a single writable tree: *file-level*
-  isolation between the manager and groves currently rests on convention, not enforcement, and is
-  hardened by the planned inner auth layer ([security-model.md §4](/security-model/)). It is **not** a
-  file-access control against a hostile grove today. The *dispatch* boundary, by contrast, is
-  enforced: the manager can only start groves declared in the config, and only via the broker (see
+- **Manager**, an agent whose workspace is the whole tree root, so it sees everything the instance
+  keeps there (its knowledge base, tools) and a live view of every worker.
+- **Workers**, each an agent in the *same* project as the manager, bound to its own subdirectory.
+  Isolation between workers is **"defense by absence"**: Scion never enumerates sibling agents to
+  build deny/shadow mounts, a worker's container simply never bind-mounts anything but its own
+  configured subdirectory, so a sibling's directory is not a mount source at all for it, not merely
+  hidden by convention. This holds only on a **non-git tree root** (config validation refuses/warns on
+  one at load time, and the pinned Scion always plain-mounts an explicit `--workspace` regardless of a
+  stray ancestor `.git`); see [security-model.md §4](/security-model/) for the full guarantee and its
+  residual.
+- **Overlapping mounts are intentional for the manager**, its workspace physically contains every
+  worker's directory, so edits are live to all parties. This is a single writable tree from the
+  manager's vantage point: *file-level* isolation between the manager and a worker's subdirectory
+  rests on convention, not enforcement, the manager is trusted with whole-tree oversight by design.
+  It is **not** a file-access control against a hostile *worker* though, a worker cannot reach outside
+  its own subdirectory in the first place (previous bullet). The *dispatch* boundary is separately
+  enforced: the manager can only start workers declared in the config, and only via the broker (see
   [security-model.md §5.4](/security-model/)).
-- The core only requires a tree root plus a configured grove location; the `knowledge base + tools`
-  layout above is an *instance* convention.
+- The core only requires a tree root plus a configured worker subdirectory; the `knowledge base +
+  tools` layout above is an *instance* convention, as is nesting worker directories under `workers/`.
 
-**Git mode is never used.** Scion's git-anchored project mode triggers a clone per agent and the
-shared-worktree path is unreliable; the directory model sidesteps all of it.
+**Git mode is never used, and the tree root itself must be non-git.** Scion's git-anchored project
+mode triggers a clone per agent and the shared-worktree path is unreliable; more fundamentally, a git
+tree root would defeat the defense-by-absence guarantee above, so the directory model targets
+non-git tree roots and config validation enforces it.
 
 ## 3. Components
 
@@ -119,7 +132,7 @@ shared-worktree path is unreliable; the directory model sidesteps all of it.
 | Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls, and relays typed agent messaging (`/msg/send`, `/msg/list`) | **core** (runs on host) |
 | Manager **runtime/role** | the coordinator: a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
 | Manager **prompt / skills / tool (MCP) config** | what makes it *this* manager | **instance-supplied config** |
-| Grove agents | workers; one project each; isolated | core lifecycle; instance defines the groves |
+| Worker agents | agents in the instance's one Scion project, each bound to its own subdirectory workspace; isolated from siblings by defense-by-absence (§2), not a separate project | core lifecycle; instance defines the workers |
 | Agent base image | the coding-agent harness container | **core ships a generic minimal base; the instance extends/bakes its own** (see §6) |
 | Notification bridge | turns Scion's event stream into a file/sink the operator watches | core mechanism; **sink path is instance-configured** |
 
@@ -129,8 +142,8 @@ ports it may reach, is configuration the instance supplies.
 
 ## 4. The dispatch / notification loop
 
-The manager dispatches a unit of work to a grove and then watches a typed event stream rather than
-polling. Two event types matter most: `input-needed` (the grove is blocked on a decision) and a
+The manager dispatches a unit of work to a worker and then watches a typed event stream rather than
+polling. Two event types matter most: `input-needed` (the worker is blocked on a decision) and a
 terminal `completed`.
 
 {% raw %}
@@ -140,20 +153,20 @@ sequenceDiagram
     participant Mg as Manager
     participant Br as Broker
     participant Sc as Scion
-    participant Gv as Grove agent
+    participant Wk as Worker agent
     Hu->>Mg: "do X in app-a"
-    Mg->>Br: start grove (POST /grove/start, mTLS, correlation id)
-    Br->>Sc: start grove (operator identity, host-side)
-    Sc->>Gv: launch container, deliver task
-    Gv-->>Sc: event: input-needed ("which DB?")
+    Mg->>Br: start worker (POST /worker/start, mTLS, correlation id)
+    Br->>Sc: start worker (controller PAT, host-side)
+    Sc->>Wk: launch container, deliver task
+    Wk-->>Sc: event: input-needed ("which DB?")
     Sc-->>Br: typed event (polled via POST /msg/list, mTLS)
     Br-->>Mg: relayed via the watch bridge
     Mg->>Hu: relay question
     Hu->>Mg: answer
-    Mg->>Br: message grove (POST /msg/send, mTLS)
-    Br->>Sc: relay message (operator identity, host-side)
-    Sc->>Gv: deliver
-    Gv-->>Sc: event: completed
+    Mg->>Br: message worker (POST /msg/send, mTLS)
+    Br->>Sc: relay message (controller PAT, host-side)
+    Sc->>Wk: deliver
+    Wk-->>Sc: event: completed
     Sc-->>Br: typed event (polled via POST /msg/list, mTLS)
     Br-->>Mg: relayed via the watch bridge (echoes the correlation id)
     Mg->>Hu: report done
@@ -162,8 +175,9 @@ sequenceDiagram
 
 Messaging follows the same broker-mediated shape as dispatch above: `lever-manager msg send`/`msg
 list`/`watch` are thin mTLS clients of the broker's `/msg/send` and `/msg/list`, never scion
-directly, because a scion CLI call made *inside* a container is pinned to that container's own
-project and carries no cross-agent authentication, only the broker's host-side, operator-identity
+directly, an in-container `scion` CLI call has no hub credential to authenticate with in the first
+place, the real hub runs dev-auth off and only the host-side broker holds the controller PAT (see
+[security-model.md §4](/security-model/)), so only the broker's host-side, controller-PAT-authorized
 scion access can safely address an arbitrary agent's inbox.
 
 **The task ↔ agent contract.** The core knows nothing about an instance's task records. At dispatch
@@ -197,9 +211,9 @@ destroy`** (delete the jail machine and clear staged runtime state — `lever up
 
 The **core ships a generic, minimal base image** carrying only the coding-agent harness, it is
 deliberately language-agnostic. An **instance extends it** (or bakes its own) for whatever its
-groves need. Two patterns, both instance choices:
+workers need. Two patterns, both instance choices:
 
-- **Per-grove on demand:** agents install language runtimes inside their containers as needed (a
+- **Per-worker on demand:** agents install language runtimes inside their containers as needed (a
   Ruby version manager, Node, Python). Keeps the image small; pays a cold-start.
 - **Baked:** the instance builds an image with its common runtimes pre-installed. Faster start; less
   generic. (The reference instance bakes a default toolchain, an *instance* artifact, not part of
@@ -207,6 +221,6 @@ groves need. Two patterns, both instance choices:
 
 **Filesystem performance note:** compute nesting is near-native, but files served from the host via
 the project-tree mount cross OrbStack's virtiofs, which is slow for metadata-heavy operations (large
-dependency installs). A grove that runs its *own* Docker compounds overlay filesystems; prefer
+dependency installs). A worker that runs its *own* Docker compounds overlay filesystems; prefer
 sibling containers (sharing the jail's rootless daemon) over a nested daemon. See
 [security-model.md §2.3](/security-model/) for the rootless requirement.

@@ -60,6 +60,42 @@ manager:
   credential_file: ~/.scion/oauth-token    # 0600; projected to the agents
 ```
 
+## Providing the Console key
+
+`api_key_file` must hold a real **Anthropic Console key** (`sk-ant-...`), created at
+[console.anthropic.com](https://console.anthropic.com) → API Keys. That's a different credential
+from the Claude subscription OAuth token used in `subscription` mode (`manager.credential_file`,
+above) — a Console key is billed per-token via the API, not tied to your Claude.ai session.
+
+**Local host.** Write it straight to the `api_key_file` path at `0600`, without it ever touching
+your shell history or argv:
+
+```sh
+umask 077 && mkdir -p ~/.secrets
+read -rs key && printf '%s' "$key" > ~/.secrets/anthropic-key && unset key
+```
+
+`read -rs` reads the key from stdin without echoing it or putting it in a command line;
+`umask 077` means the file `>` creates lands `0600` immediately, satisfying the permission check
+below. (Any editor works too, as long as you set the mode afterwards: `chmod 600
+~/.secrets/anthropic-key`.)
+
+**Remote host.** Pipe the key over `ssh` so it never touches the remote shell history or a
+world-readable temp file:
+
+```sh
+pbpaste | ssh user@remote-host 'umask 077; mkdir -p ~/.secrets; cat > ~/.secrets/anthropic-key'
+```
+
+The key travels over the ssh channel only, never as an argument or a remote shell variable;
+`umask 077` on the remote side is what makes the file `cat` writes land `0600` before `lever
+apply`'s permission check sees it. Swap `pbpaste` for however you get the key into your local
+pipe (`cat ~/.secrets/anthropic-key`, a password manager's CLI, etc).
+
+**Rotation.** Overwrite the file (keep it `0600`) and re-run `lever apply`/`lever up` — the key is
+read once when the broker process starts, not per request, so a broker already running keeps using
+the key it started with until it's restarted.
+
 ## Full example
 
 ```yaml
@@ -168,7 +204,8 @@ CN-bound, short-lived capability tokens. See [security-model.md](/security-model
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `llm_auth` | enum | no | `api-key` | Instance-wide default LLM-auth mode (`api-key` \| `subscription`), inherited by manager/workers that don't set their own. `api-key` keeps the real key host-side (the broker injects it); `subscription` projects the OAuth token into the agents. **The effective set must be uniform**, a mixed instance is a hard config error. Egress is a **separate** knob (top-level `egress:`), not implied by this mode. |
-| `api_key_file` | path | **yes for `api-key`** | - | A file holding the real Anthropic Console key. Read host-side by the broker `/llm` proxy and injected into the upstream request; **never enters a container.** Must be **`0600`** (rejected otherwise), mirroring `credential_file`. |
+| `api_key_file` | path | **yes for `api-key`** | - | A file holding the real Anthropic Console key. Read host-side by the broker `/llm` proxy and injected into the upstream request; **never enters a container.** Must be **`0600`** (rejected otherwise), mirroring `credential_file`. See [providing the Console key](#providing-the-console-key). |
+| `llm_upstream` | string (URL) | no | `https://api.anthropic.com` | Overrides the `/llm` proxy target, e.g. to route through an LLM gateway that speaks the Anthropic Messages API. **Operator-set only, never client-controlled** (no SSRF: the broker always streams to this one fixed host); it still injects the real Console key host-side and strips the inbound capability token first. |
 | `jail_port` | int | no | `8443` | mTLS port the in-jail agents reach the broker on (allowlisted in the egress rules). Defaults to 8443; set an explicit port only to run several instances' brokers on one host at once. |
 | `admin_port` | int | no | `8444` | **Loopback-only** unauthenticated admin port (`/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`); bind is rejected if non-loopback. Defaults to 8444. |
 | `grant_ttl` | duration | no | `24h` | Capability token lifetime. A backstop only: the per-call epoch/revocation check is the real cut, so a session-scale TTL is safe (and must outlive the 12h renew cycle). |

@@ -15,12 +15,17 @@ behaving.**
 > broker, mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance` gate,
 > and the **api-key `/llm` strip-and-inject path end-to-end** (broker verifies the capability token,
 > strips it, injects the real Console key host-side), guarded by `make test-apikey-e2e`; container boot
-> enrols the agent and registers the broker tools over mTLS. *Still pending:* the full in-container
-> claude driving a first-party tool
-> (`/mcp/db/`) end-to-end, and mid-session token-refresh pickup (the agent reads `ANTHROPIC_AUTH_TOKEN`
+> enrols the agent and registers the broker tools over mTLS; the **single-project model** (§4) — one
+> Scion project per instance, the real hub running dev-auth off, lifecycle driven only by a host-only
+> controller PAT, and worker↔worker isolation by defense-by-absence — is implemented and merged.
+> *Still pending:* the full in-container claude driving a first-party tool
+> (`/mcp/db/`) end-to-end, mid-session token-refresh pickup (the agent reads `ANTHROPIC_AUTH_TOKEN`
 > once at startup, the 12h renew sidecar runs, but a running session's pickup of a rotated token is
-> unverified). The §4 inner cross-grove auth layer remains open by design (the broker gates LLM +
-> first-party tools, not Scion hub mounts).
+> unverified), and a **dedicated live acceptance gate for the single-project isolation guarantee**:
+> the mechanism (§4) is merged and the required upstream Scion fixes are present in the pinned
+> commit, but the checks that would exercise it against a real `scion start` (sibling subdirectories,
+> a stray ancestor `.git`, the controller PAT's exact scopes) are not yet wired into
+> `lever acceptance`.
 
 ## 1. The core idea: put the boundary *outside* the runtime
 
@@ -208,8 +213,8 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   global-scope v6 today, to catch this drifting silently in the future.
 
 The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
-all groves — see §8; `lima` carries the same trade one level up (its own kernel is separate from the
-host, but still one kernel shared *within* the jail by the manager and every grove). That trade is a
+all workers — see §8; `lima` carries the same trade one level up (its own kernel is separate from the
+host, but still one kernel shared *within* the jail by the manager and every worker). That trade is a
 property of the *backend*, not of Lever, and the table above is how you see it before you choose.
 Run `lever backends` for the live matrix; set the backend with the `backend:` key
 ([config reference](/reference/config/)).
@@ -226,24 +231,85 @@ Run `lever backends` for the live matrix; set the backend with the `backend:` ke
 | real LLM credential in every container | ambient, shared, long-lived OAuth token in every agent | **api-key mode:** no real key in any container, only a CN-bound, short-lived `capability(llm)` token; the broker injects the Console key host-side (§6.1) |
 | exfiltration of in-tree data | n/a | **not bounded** in subscription mode; narrowed (not eliminated) under api-key closed egress, see §8 |
 
-**Result:** an injected manager or grove can reach neither host secrets nor the LAN; its blast
+**Result:** an injected manager or worker can reach neither host secrets nor the LAN; its blast
 radius is the project subtree it was given, *plus* whatever it can send over allowed internet
 egress (§8).
 
-## 4. A second, inner layer (defence in depth)
+## 4. Within the jail: cross-worker isolation (defence in depth)
 
-The jail protects host secrets and the LAN. *Within* the tree, Scion's **development auth** (a
-built-in mode that issues every agent the same broker token, convenient for local dev, but it lets
-any agent drive the broker and reach any project under the hub) means a hijacked grove could ask
-the broker to mount a **sibling grove or the knowledge base**. Both live inside the project tree,
-not a host-secret leak, but a real **cross-grove / KB leak**.
+The jail (§2-§3) protects host secrets and the LAN. *Within* the jail, the manager and every worker
+are agents in the **same Scion project** — Lever registers exactly one project per instance
+([architecture.md §2](/architecture/)), not a separate project per agent as an earlier design did.
+Two structural properties bound what one agent can reach inside that shared project.
 
-**Be explicit: until the inner layer ships, a compromised grove can read and write the entire
-project tree, including the knowledge base and sibling groves.** The "manager reads groves but
-doesn't write them" convention is *not* a security control. Closing this means turning off
-development auth and giving the manager a real credential while groves get only project-scoped
-tokens. It is **defence in depth, scheduled after the jail**, the system is already bounded against
-the primary threats (host secrets, LAN) without it, but cross-grove isolation is not yet enforced.
+### 4.1 Defense by absence: a worker only ever mounts its own subdirectory
+
+Each agent's container bind-mounts **only its own configured workspace path**. The manager's
+container mounts the whole tree root; each worker's container mounts exactly the one subdirectory
+declared for it in config, in place. Scion never enumerates sibling agents to build deny/shadow
+mounts, so a sibling worker's subdirectory is simply **not a mount source** for a given worker's
+container: it is unreadable at the kernel/VM boundary, not merely hidden by convention or file
+permission (container UIDs are synced to the host UID, so file permissions alone give no
+inter-agent isolation here).
+
+This guarantee holds only on a **non-git tree root**: a git repository at the tree root can pull
+Scion's mount builder into a worktree branch that also bind-mounts the whole `.git` object store,
+through which a worker could read *committed* sibling content. Two things close this: config
+validation refuses (or warns on) a git tree root at load time, and the pinned Scion always
+plain-mounts an explicit `--workspace` regardless of a stray ancestor `.git` (the upstream
+`--workspace` git-guard fix; the current `scion.version` pin carries it). A worker's *own*
+subdirectory may still contain its own git repository, that is unaffected.
+
+**The manager still sees everything, by design.** Because the manager's mount is the whole tree,
+and Scion does not shadow child workspace dirs inside a broader mount, the manager's live view
+legitimately includes every worker's in-place edits — the same "mount only your own workspace"
+mechanism, viewed at the manager's wider scope. A compromised *manager* therefore still has
+whole-tree reach (§7); this isolation guarantee is about one *worker* reaching another worker's
+subdirectory, not about bounding the manager.
+
+### 4.2 No agent holds hub authority: dev-auth off, host-only controller PAT
+
+Cross-worker mount isolation would still be moot if a compromised agent could simply ask Scion's
+hub to attach an arbitrary mount, or start a new agent, itself. Scion's **development auth** mode
+(a built-in convenience that issues a shared, admin-equivalent bearer token to any caller) would let
+it do exactly that. Lever closes this: the real, long-lived Scion hub inside the jail runs with
+**`--dev-auth=false`** — no agent, manager or worker, is ever handed a hub credential.
+
+Instead, every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
+capability broker on the manager's behalf, and by `lever` itself for attach/msg/stop) is
+authenticated with a **controller PAT**: a Scion hub token scoped to exactly
+`agent:manage,agent:attach,project:read` (`agent:attach` is load-bearing — the `agent:manage` alias
+alone 403s on `start`, since scion gates every interactive verb, including `start`, on
+`agent:attach`). It is:
+
+- **Minted through a throwaway, jail-local hub.** Before any agent container exists, bring-up starts
+  a temporary `scion server --dev-auth=true` on a fixed private port (48080) no agent ever learns, initializes the
+  instance's single project against it, mints the PAT, then kills that throwaway server (removing
+  the dev-auth token file it left behind) and starts the real `--dev-auth=false` hub agents actually
+  run against.
+- **Persisted host-side only**, `0600`, under `.lever-state/` — never written into the mounted
+  tree, never set as a container environment variable or Scion hub secret, so there is no path by
+  which an agent inside the jail can read it.
+- **Re-minted, not blindly reused, across restarts.** The PAT persists across `stop`→`up`; if the
+  hub rejects it, lever re-runs the agent-free throwaway-hub window rather than ever re-enabling
+  dev-auth on a hub that already has agents.
+- **Injected only into lever's own host-side Scion client calls**, as the `SCION_HUB_TOKEN`
+  environment variable, by the capability broker and by `lever attach`/`lever msg`/`lever stop`.
+
+The result: even a fully compromised worker or manager container has no credential that lets it
+talk to the Scion hub directly, it cannot register a project, request an arbitrary mount, or
+list/attach to another agent. All of that is host-side-only, gated by the controller PAT, and, for
+dispatch specifically, further gated by the config-declared subdirectory per §5.4.
+
+**Residual.** This closes the isolation gap between workers, and between an agent and the hub
+itself. It does not change the manager's own trust position: the manager legitimately mounts the
+whole tree (§4.1), so a compromised manager can still read and write everything the instance keeps
+there, including the knowledge base and every worker's subdirectory, that is an inherent cost of
+giving the manager whole-tree oversight (§7), not a gap in the worker-isolation model above. **Not
+yet done:** the live acceptance checks that would exercise this guarantee against a real
+`scion start` (sibling subdirectories, a stray ancestor `.git`, the controller PAT's exact scopes)
+are not yet wired into `lever acceptance`, the mechanism is merged and the required Scion fixes are
+present in the pinned commit, but the dedicated live gate for it does not exist today.
 
 ## 5. The operator boundary: the config is host-side code, kept out of the mount
 
@@ -264,7 +330,7 @@ prompt is resolved at the root too (`ManagerPromptPath` joins the root, not the 
 there.
 
 Why this matters: if the config or prompt lived *inside* the mount (the natural "config at the
-project root, root == mount" layout), a compromised manager or grove could **rewrite the config the
+project root, root == mount" layout), a compromised manager or worker could **rewrite the config the
 host trusts on the next `lever apply`**, an in-jail-compromise → host-escalation persistence
 channel (point it at `credential_file: ~/.ssh/id_rsa`, `tree: /`, an attacker image, etc.). Keeping
 the root unmounted removes that channel: agents can't see or edit what the host re-reads.
@@ -294,29 +360,31 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 
 | Field | Check |
 |---|---|
-| `name`, grove `name` | `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes the jail machine name and a shell token). |
-| `tree` | confined relative subdir (not `.`/absolute/`..`). |
+| `name`, worker `name` | `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes the jail machine name and a shell token). |
+| `tree` | confined relative subdir (not `.`/absolute/`..`); also rejected (or warned on) if it is itself a git repository, see §4.1. |
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute). |
-| `manager.image`, grove `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
+| `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected if world-readable) and a **size cap**, defence in depth for the secret it becomes (§6). |
-| grove `dir` | already rejected absolute/`..` (unchanged). |
+| worker `dir` | already rejected absolute/`..` (unchanged). |
 
 **What was already sound:** the execution plumbing is argv-clean, no shell injection in the hot
 paths; the single `bash -c` (scion install) correctly single-quote-escapes its interpolated values;
 `jailPath` never fabricates an in-jail path for an out-of-tree target; the credential value is
 base64'd and redacted in error output at its one call site.
 
-### 5.4 The manager holds no grove-dispatch authority
+### 5.4 The manager holds no worker-dispatch authority
 
-Grove lifecycle is owned by the host-side capability broker, not the in-jail manager. The manager's
-`agent start/stop/suspend/resume` commands are thin mTLS clients of the broker's `/grove/*`
-endpoints; the manager holds no scion authority of its own for dispatch. Each request is
-authenticated by the manager's certificate CN and authorized against the config: only a grove
-**declared in the config** can be dispatched, and the manager passes a grove **name**, never a
-filesystem path or scion project — the broker resolves the path, image, and LLM-auth mode from the
-config host-side. A compromised manager therefore cannot start an arbitrary scion project, mount
-another project's tree, or inject a host path; the worst it can do is (re)dispatch a grove it was
-already permitted to dispatch. Because the broker (not the mount) is the source of grove
+Worker lifecycle is owned by the host-side capability broker, not the in-jail manager, and the
+broker itself is the only holder of the controller PAT (§4.2) — the manager has no Scion hub
+credential of its own, in-jail or otherwise. The manager's `agent start/stop/suspend/resume`
+commands are thin mTLS clients of the broker's `/worker/*` endpoints. Each request is authenticated
+by the manager's certificate CN and authorized against the config: only a worker **declared in the
+config** can be dispatched, and the manager passes a worker **name**, never a filesystem path — the
+broker resolves the subdirectory, image, and LLM-auth mode from the config host-side, within the
+one instance project (there is no separate per-worker project to mount instead). A compromised
+manager therefore cannot start an agent against an arbitrary path, widen a worker's mount beyond
+its declared subdirectory, or inject a host path; the worst it can do is (re)dispatch a worker it
+was already permitted to dispatch. Because the broker (not the mount) is the source of worker
 configuration, there is no in-jail config file for a compromised manager to tamper with.
 
 ### 5.5 Residual
@@ -342,12 +410,14 @@ still present under the subscription opt-in.
 
 **Finding.** The manager sets the upstream credential (`CLAUDE_CODE_OAUTH_TOKEN`) as a Hub secret;
 scion **resolves and injects it into every agent container's environment** at start (user/owner
-scope, single jail = single tenant). So **every grove holds the real, long-lived OAuth token** in
-`$CLAUDE_CODE_OAUTH_TOKEN` (or a token file in its home). Combined with §4 (development auth lets any
-in-jail agent drive the broker) and §8 (open internet egress for the model API), a single
-prompt-injected grove can read the token and exfiltrate it, **impersonating the operator's account
-beyond the jail.** The token is *ambient, shared, and long-lived*, the worst combination, and the
-highest-value secret in the system.
+scope, single jail = single tenant). So **every worker holds the real, long-lived OAuth token** in
+`$CLAUDE_CODE_OAUTH_TOKEN` (or a token file in its home), this is a **subscription-mode** exposure
+only (§6.1). Combined with §8 (open internet egress for the model API), a single prompt-injected
+worker can read the token and exfiltrate it, **impersonating the operator's account beyond the
+jail.** (§4's dev-auth-off/controller-PAT hardening closes the *separate* risk of a compromised
+agent driving the hub itself; it does not touch this ambient-credential exposure, which is a
+property of subscription mode's design, not of hub authority.) The token is *ambient, shared, and
+long-lived*, the worst combination, and the highest-value secret in the system.
 
 This is the strongest argument for replacing **pushing keys to agents** with **agents exchanging
 identity for narrow capabilities.**
@@ -355,7 +425,7 @@ identity for narrow capabilities.**
 The fix, **now built**, is a host-side capability broker that holds the raw credential and never
 projects it into a container: agents present their mTLS identity and exchange it for a short-TTL,
 CN-bound capability scoped to exactly what their policy allows. The broker rides the existing egress
-fence (reachable only via the allowlisted host alias) and is the sole minter, so a grove's token is
+fence (reachable only via the allowlisted host alias) and is the sole minter, so a worker's token is
 strictly weaker than the manager's and a delegated token is an online mint, never an offline hand-off.
 §6.1 and §6.2 describe the built, enforced state.
 
@@ -372,7 +442,7 @@ instance.
 single Hub *secret* (`internal/scion/bringup.go:SecretSet`, user/owner scope), gated only by
 `manager.credential_file` and **projected into every container regardless of its `llm_auth` mode**.
 So in a *mixed* instance (any subscription agent ⇒ `credential_file` set ⇒ token hub-projected) an
-`api-key` grove would *also* hold `$CLAUDE_CODE_OAUTH_TOKEN`, letting it read the real token and
+`api-key` worker would *also* hold `$CLAUDE_CODE_OAUTH_TOKEN`, letting it read the real token and
 (egress permitting) reach `api.anthropic.com` directly, bypassing the proxy's capability gating; its
 key isolation would silently not hold.
 
@@ -383,7 +453,7 @@ are both clean: **all-api-key** (the default) = no agent holds a real key, capab
 signed tokens, and `egress: closed` is available to seal the network jail-wide; **all-subscription**
 = every agent holds the OAuth key with open egress (the owner/dev trade, by design). Note this is
 *not* an escalation surface: the `api-key` flag controls only whether an agent obtains a capability
-token, **not** credential availability, and a grove's mode is fixed by the config the broker reads
+token, **not** credential availability, and a worker's mode is fixed by the config the broker reads
 (nothing the manager can rewrite), so it could never *conjure* a token the host did not project; the
 validation gate is about preventing a misleading config, not about containment.
 
@@ -501,17 +571,19 @@ scenario, and what it does not.
     authorize on the token alone if Claude Code presented no client cert. The shipped code does the
     opposite, `ca.RequireAgent` runs first and returns 403 with no cert, so the `capability(llm)`
     token is always CN-bound; there is no non-bound path.
-- **Containing daemon authority inside the jail.** The architecture depends on the broker driving a
-  Docker daemon. Any agent that holds the rootless Docker socket, or, like the manager, has hub
-  authority to drive the broker, can launch arbitrary (including `--privileged`) containers *within
-  the jail*. Containment of that rests entirely on the jail's filesystem/network bound and the
-  kernel, not on denying daemon access.
+- **Containing daemon authority inside the jail.** The architecture depends on the Scion broker
+  driving a Docker daemon. Any agent that holds the rootless Docker socket directly can launch
+  arbitrary (including `--privileged`) containers *within the jail*. (No agent, manager included,
+  holds Scion hub authority itself, that lives host-side only, gated by the controller PAT, §4.2,
+  so an agent driving the hub to launch containers is not a route here.) Containment of direct
+  daemon-socket access rests entirely on the jail's filesystem/network bound and the kernel, not on
+  denying daemon access.
 - **A separate kernel.** An isolated machine shares the host VM's kernel, and the manager and all
-  groves share that one kernel *with each other*. So a kernel-level escape from any single agent
+  workers share that one kernel *with each other*. So a kernel-level escape from any single agent
   defeats inter-agent isolation wholesale and reaches the VM, not merely host-secret protection.
   For a hypervisor-hard boundary between the agent workload and the *host* kernel, the `lima`
   backend is the stronger substrate (its own VM kernel, not shared with the host); the manager and
-  its groves still share *that* kernel with each other, the same inter-agent trade one level up.
+  its workers still share *that* kernel with each other, the same inter-agent trade one level up.
   The OrbStack isolated machine is judged sufficient for a single-operator workstation under this
   threat model. This is an explicit, documented trade — see the
   [containment backends](/reference/backends/) matrix to compare before choosing.
@@ -532,10 +604,13 @@ scenario, and what it does not.
 Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 
 - **The escape exists without the jail.** From inside an ordinary agent container (no host
-  filesystem, no Docker socket), using only the development-auth token every agent is given, the hub
-  accepted a new project + a **provider with an arbitrary host path (no path validation)**; starting
-  an agent then drove the broker to bind-mount a sensitive host directory into a new container,
-  whose files were readable. This is the threat the jail closes.
+  filesystem, no Docker socket), using only a Scion hub **development-auth token** (the mode used
+  for this test; the real hub now runs `--dev-auth=false` and no agent is ever handed a hub
+  credential, §4.2), the hub accepted a new project + a **provider with an arbitrary host path (no
+  path validation)**; starting an agent then drove the broker to bind-mount a sensitive host
+  directory into a new container, whose files were readable. This is the threat the jail closes:
+  even where an agent *did* hold a hub credential, there is no host filesystem outside the project
+  tree for it to mount (§2.1).
 - **Filesystem containment holds with the jail.** An isolated machine has no host home; the host
   secret directories are absent, so the same escape mounts nothing.
 - **LAN unreachable; host loopback reachable and clampable.** From inside the jail the LAN router
@@ -547,7 +622,10 @@ Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 
 What is **not** yet validated (pending the full-system test): the project-tree mount's *allow* side
 (that exactly the chosen tree is present and nothing else), the real manager Claude agent under
-rootless Docker, the manager's MCP reachability in practice, and the §4 inner auth layer.
+rootless Docker, the manager's MCP reachability in practice, and a live run of the §4
+single-project isolation guarantee against a real `scion start` (the code is merged and the
+required Scion fixes are in the pinned commit, but there is no wired acceptance check for it yet,
+see §4.2).
 
 > Validation was performed by checking reachability and file presence by size/permission, never by
 > printing secret contents.

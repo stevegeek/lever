@@ -15,11 +15,12 @@ func WorkerSpecs(app *config.App, jailMount string) []broker.WorkerSpec {
 	specs := make([]broker.WorkerSpec, 0, len(app.Workers))
 	for _, g := range app.Workers {
 		specs = append(specs, broker.WorkerSpec{
-			Name:         g.Name,
-			JailProject:  filepath.Join(jailMount, g.Dir),
-			BootstrapDir: filepath.Join(app.Tree, g.Dir, ".lever"),
-			Image:        app.WorkerImage(g),
-			APIKey:       app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
+			Name:          g.Name,
+			Workspace:     filepath.Join(jailMount, g.Dir), // /lever/<dir> — the --workspace
+			HostWorkspace: filepath.Join(app.Tree, g.Dir),  // <tree>/<dir> — ensured to exist before start
+			BootstrapDir:  filepath.Join(app.Tree, g.Dir, ".lever"),
+			Image:         app.WorkerImage(g),
+			APIKey:        app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 		})
 	}
 	return specs

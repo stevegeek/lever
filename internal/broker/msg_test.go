@@ -19,9 +19,9 @@ import (
 // (scion: `Agent "manager" not found in project`) hid behind an earlier
 // fixture where CN == slug, so routing to agent:<CN> passed by coincidence.
 func msgBroker(g2g bool) *Broker {
-	b := New(Config{ManagerIdentity: "manager", ManagerSlug: "assistant", WorkerToWorker: g2g, ManagerProject: "/lever",
-		Workers: []WorkerSpec{{Name: "scratch", JailProject: "/lever/workers/scratch"},
-			{Name: "worker", JailProject: "/lever/workers/worker"}}})
+	b := New(Config{ManagerIdentity: "manager", ManagerSlug: "assistant", WorkerToWorker: g2g, InstanceProject: "/lever",
+		Workers: []WorkerSpec{{Name: "scratch", Workspace: "/lever/workers/scratch"},
+			{Name: "worker", Workspace: "/lever/workers/worker"}}})
 	return b
 }
 
@@ -32,8 +32,8 @@ func TestResolveMsgTarget(t *testing.T) {
 		wantTo, wantProj string
 		wantErr          bool
 	}{
-		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever/workers/scratch", false},
-		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever/workers/scratch", false},
+		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever", false},
+		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever", false},
 		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false},
 		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false},
 		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false},
@@ -44,9 +44,9 @@ func TestResolveMsgTarget(t *testing.T) {
 		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false},
 		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false},
 		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false},
-		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever/workers/worker", false},
+		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever", false},
 		{"worker to worker disabled", "scratch", "worker", false, "", "", true},
-		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever/workers/scratch", false},
+		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false},
 		{"unknown caller", "mallory", "assistant", true, "", "", true},
 		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true},
 		{"worker to unknown", "scratch", "nope", true, "", "", true},
@@ -71,9 +71,9 @@ func TestResolveListProject(t *testing.T) {
 		wantErr              bool
 	}{
 		{"manager own inbox", "manager", "", "/lever", false},
-		{"manager reads worker", "manager", "scratch", "/lever/workers/scratch", false},
+		{"manager reads worker", "manager", "scratch", "/lever", false},
 		{"manager unknown worker", "manager", "nope", "", true},
-		{"worker own inbox", "scratch", "", "/lever/workers/scratch", false},
+		{"worker own inbox", "scratch", "", "/lever", false},
 		{"worker may not target others", "scratch", "worker", "", true},
 		{"unknown caller", "mallory", "", "", true},
 	}
@@ -121,11 +121,11 @@ func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
 	b := New(Config{
 		ManagerIdentity: "manager",
 		ManagerSlug:     "assistant",
-		ManagerProject:  "/lever",
+		InstanceProject: "/lever",
 		WorkerToWorker:  g2g,
 		Workers: []WorkerSpec{
-			{Name: "scratch", JailProject: "/lever/workers/scratch"},
-			{Name: "worker", JailProject: "/lever/workers/worker"},
+			{Name: "scratch", Workspace: "/lever/workers/scratch"},
+			{Name: "worker", Workspace: "/lever/workers/worker"},
 		},
 		Runtime:  rt,
 		Registry: registry.New(),
@@ -144,7 +144,7 @@ func TestMsgSend_managerToWorker(t *testing.T) {
 		t.Fatalf("Message calls = %d, want 1", len(rt.sent))
 	}
 	got := rt.sent[0]
-	if got.To != "agent:scratch" || got.Project != "/lever/workers/scratch" || !got.Interrupt || got.Body != "go" {
+	if got.To != "agent:scratch" || got.Project != "/lever" || !got.Interrupt || got.Body != "go" {
 		t.Fatalf("bad MsgOpts: %+v", got)
 	}
 }
@@ -196,8 +196,8 @@ func TestMsgList_managerReadsWorker(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
-	if rt.inboxProject != "/lever/workers/scratch" {
-		t.Fatalf("inboxProject = %q, want /lever/workers/scratch", rt.inboxProject)
+	if rt.inboxProject != "/lever" {
+		t.Fatalf("inboxProject = %q, want /lever (the instance project)", rt.inboxProject)
 	}
 	var out msgListResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -221,10 +221,10 @@ func TestMsgList_workerForbiddenOtherWorker(t *testing.T) {
 func TestMsgNilRuntime_returns502(t *testing.T) {
 	b := New(Config{
 		ManagerIdentity: "assistant",
-		ManagerProject:  "/lever",
+		InstanceProject: "/lever",
 		WorkerToWorker:  true,
 		Workers: []WorkerSpec{
-			{Name: "scratch", JailProject: "/lever/workers/scratch"},
+			{Name: "scratch", Workspace: "/lever/workers/scratch"},
 		},
 		Runtime:  nil,
 		Registry: registry.New(),

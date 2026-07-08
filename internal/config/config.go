@@ -438,6 +438,9 @@ func (a *App) Validate() error {
 	if a.Tree == "" {
 		return fmt.Errorf("config: tree is required")
 	}
+	if err := a.validateNonGitTree(); err != nil {
+		return err
+	}
 	if a.Manager.Image != "" {
 		if err := a.Security.validateImage("manager.image", a.Manager.Image); err != nil {
 			return err
@@ -481,12 +484,11 @@ func (a *App) Validate() error {
 			return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
 		}
 		if filepath.Clean(g.Dir) == "." {
-			// A "." dir makes WorkerDir(g) == a.Tree, so the worker's jail path
-			// collides with the manager's mount root (/lever). Then the worker's
-			// register step (scion-project-config removal + .scion marker removal)
-			// would be scoped to the MANAGER's registration/marker instead of its
-			// own. confinedRel already rejects "." for `tree` for the same
-			// root-is-the-mount reason; worker dirs must be a strict subdir.
+			// A "." dir makes WorkerDir(g) == a.Tree, so the worker's workspace would
+			// be the whole tree — mounting root defeats R4 sibling isolation (the
+			// worker could read every sibling's subdir). Workers must occupy a strict
+			// subdir of the shared instance project. (confinedRel rejects "." for
+			// `tree` for the analogous root-is-the-mount reason.)
 			return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
 		}
 		if g.Image != "" {
@@ -497,6 +499,22 @@ func (a *App) Validate() error {
 	}
 	if err := a.validateBroker(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateNonGitTree refuses a tree that is ITSELF a git repository (has its
+// own .git). R4's sibling isolation assumes a non-git tree; per-worker git
+// workflows are deferred (spec §13). It deliberately does not walk up to
+// ancestors: the pinned Scion's --workspace guard (P2 Task 5) plain-mounts
+// the exact tree dir, so an ancestor .git elsewhere in the checkout is never
+// exposed and is harmless — a plain subdirectory inside a larger git repo is
+// fine.
+func (a *App) validateNonGitTree() error {
+	if treeIsGitRepo(a.Tree) {
+		return fmt.Errorf("config: tree %q is itself a git repository; lever targets non-git trees "+
+			"(per-worker git workflows are deferred, spec §13). A plain subdirectory inside a larger "+
+			"git repo is fine — point tree at a non-git directory (or a subdir) instead.", a.Tree)
 	}
 	return nil
 }

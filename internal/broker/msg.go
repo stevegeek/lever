@@ -31,7 +31,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	// manager by its agent slug (the app name; apply dispatches it as
 	// Worker: app.Name), NOT by the cert CN used for authn: agent:<CN> fails
 	// live with `Agent "<CN>" not found in project`.
-	managerTarget := msgTarget{scionTo: "agent:" + b.managerSlug, project: b.managerProject}
+	managerTarget := msgTarget{scionTo: "agent:" + b.managerSlug, project: b.instanceProject}
 	// user:* is a legacy-shaped alias, not a real inbox: scion refuses
 	// user-addressed sends from outside an agent container ("SCION_AGENT_NAME
 	// not set"), and the broker's runtime scion always runs jail-side. In the
@@ -60,7 +60,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if !isManager && caller != name && !b.workerToWorker {
 		return msgTarget{}, fmt.Errorf("worker→worker messaging is disabled")
 	}
-	return msgTarget{scionTo: "agent:" + spec.Name, project: spec.JailProject}, nil
+	return msgTarget{scionTo: "agent:" + spec.Name, project: b.instanceProject}, nil
 }
 
 // resolveListProject resolves which project inbox caller may read. Manager:
@@ -70,22 +70,20 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 func (b *Broker) resolveListProject(caller, worker string) (string, error) {
 	if caller == b.manager {
 		if worker == "" {
-			return b.managerProject, nil
+			return b.instanceProject, nil
 		}
-		spec, ok := b.workers[worker]
-		if !ok {
+		if _, ok := b.workers[worker]; !ok {
 			return "", fmt.Errorf("unknown worker %q", worker)
 		}
-		return spec.JailProject, nil
+		return b.instanceProject, nil
 	}
-	spec, ok := b.workers[caller]
-	if !ok {
+	if _, ok := b.workers[caller]; !ok {
 		return "", fmt.Errorf("caller %q is not the manager or a declared worker", caller)
 	}
 	if worker != "" {
 		return "", fmt.Errorf("a worker may only read its own inbox")
 	}
-	return spec.JailProject, nil
+	return b.instanceProject, nil
 }
 
 type msgSendRequest struct {

@@ -74,8 +74,8 @@ done
 // workspace_path == workspacePath, AND the in-tree marker
 // (workspacePath/.scion) present. Anything else — zero entries, duplicate
 // entries, or an entry with the marker gone (the bad-teardown signature) — is
-// NOT a valid registration and resolves false, routing the register-manager/
-// register-worker apply step (internal/apply/run.go) to its existing
+// NOT a valid registration and resolves false, routing the register-project
+// apply step (internal/apply/run.go) to its existing
 // destructive clean+init path instead of skipping it. Reuses
 // ReadScionProjectState's script (same read-only, no-EnsureUp transport; see
 // its doc for the VirtioFS/marker rationale) rather than duplicating it — a

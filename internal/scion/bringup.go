@@ -86,7 +86,7 @@ func (c *Client) SecretSet(ctx context.Context, key, value string) error {
 // to other agents in the instance. Used to convey LEVER_LLM_AUTH=api-key so an
 // agent's pre-start hook enters api-key mode (scion projects Hub env into the
 // container before pre-start hooks run, so the hook sees it). projectDir must be
-// a registered project's dir (run after register-manager / InitProject).
+// a registered project's dir (run after register-project / InitProject).
 func (c *Client) EnvSet(ctx context.Context, projectDir, key, value string) error {
 	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", key+"="+value)
 	return err

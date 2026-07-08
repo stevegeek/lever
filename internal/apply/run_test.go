@@ -1453,13 +1453,14 @@ func TestRegisterHostFallbackWhenRemoveJailFileNil(t *testing.T) {
 	}
 }
 
-// TestRegisterRemovesStaleScionProjectConfigsBeforeInit proves that both
-// register-manager and register-worker call Deps.RemoveScionProjectConfigs
-// with the target's JAIL workspace path BEFORE `scion init` runs — the
-// removal counterpart to the marker-removal race fix above. Without this,
-// every apply mints a fresh ~/.scion/project-configs/<uuid> registration and
-// the old ones accumulate (the `lever doctor` "duplicate registrations"
-// finding).
+// TestRegisterRemovesStaleScionProjectConfigsBeforeInit proves register-project
+// calls Deps.RemoveScionProjectConfigs with the target's JAIL workspace path
+// BEFORE `scion init` runs — the removal counterpart to the marker-removal
+// race fix above. Without this, every apply mints a fresh
+// ~/.scion/project-configs/<uuid> registration and the old ones accumulate
+// (the `lever doctor` "duplicate registrations" finding). Workers configured
+// alongside the manager must NOT trigger their own registration — there is
+// exactly ONE register-project step, for the instance tree.
 func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	tree := t.TempDir()
 	f := exec.NewFakeRunner()
@@ -1471,12 +1472,10 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	}
 	var removeCalls []string
 	var initCalls []string
-	// Ordering proof: at the moment each RemoveScionProjectConfigs call fires,
+	// Ordering proof: at the moment the RemoveScionProjectConfigs call fires,
 	// count how many `scion init --non-interactive` calls the SAME fake runner
 	// has already recorded. Since FakeRunner appends to f.Calls synchronously
-	// in call order, a count of 0 for the manager's remove call proves it ran
-	// before manager init, and a count of 1 for the worker's remove call proves
-	// it ran after manager init but before worker init.
+	// in call order, a count of 0 proves the removal ran before init.
 	var initCountAtRemove []int
 	deps := Deps{
 		JailUp:    func(context.Context, *config.App) error { return nil },
@@ -1500,23 +1499,17 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if len(removeCalls) != 2 {
-		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly 2 (manager + worker)", removeCalls)
+	if len(removeCalls) != 1 {
+		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly 1 (the instance project only)", removeCalls)
 	}
 	if removeCalls[0] != "/lever" {
-		t.Errorf("manager remove call path = %q, want /lever", removeCalls[0])
+		t.Errorf("remove call path = %q, want /lever", removeCalls[0])
 	}
-	if removeCalls[1] != "/lever/workers/worker" {
-		t.Errorf("worker remove call path = %q, want /lever/workers/worker", removeCalls[1])
-	}
-	// Manager's remove call must precede ANY init (count 0); the worker's remove
-	// call runs after the manager's own init (which already ran, since
-	// register-manager completes as one step before register-worker starts) but
-	// still before the worker's OWN init (count exactly 1, not 2).
-	wantCounts := []int{0, 1}
+	// The remove call must precede ANY init (count 0).
+	wantCounts := []int{0}
 	for i, n := range initCountAtRemove {
 		if n != wantCounts[i] {
-			t.Errorf("remove call %d (%s): %d init call(s) had already fired, want %d — it must run before its OWN init", i, removeCalls[i], n, wantCounts[i])
+			t.Errorf("remove call %d (%s): %d init call(s) had already fired, want %d — it must run before init", i, removeCalls[i], n, wantCounts[i])
 		}
 	}
 
@@ -1526,8 +1519,8 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 			initCalls = append(initCalls, c.Dir)
 		}
 	}
-	if len(initCalls) != 2 {
-		t.Fatalf("init calls = %+v, want exactly 2", initCalls)
+	if len(initCalls) != 1 {
+		t.Fatalf("init calls = %+v, want exactly 1", initCalls)
 	}
 }
 
@@ -1565,12 +1558,11 @@ func TestRegisterToleratesNilRemoveScionProjectConfigs(t *testing.T) {
 
 // TestRegisterSkipsDestructivePathWhenAlreadyRegistered proves the idempotent-
 // register gate: when Deps.ScionProjectRegistered reports the workspace is
-// already validly registered, register-manager/register-worker must skip its
-// destructive clean+init path ENTIRELY — no marker removal, no
-// RemoveScionProjectConfigs, no `scion init`/`hub link`. This is the fix for
-// the resume-orphaning bug: a suspended manager (or worker) agent record's
-// project linkage must survive a re-apply when nothing is actually wrong with
-// the registration.
+// already validly registered, register-project must skip its destructive
+// clean+init path ENTIRELY — no marker removal, no RemoveScionProjectConfigs,
+// no `scion init`/`hub link`. This is the fix for the resume-orphaning bug: a
+// suspended manager agent record's project linkage must survive a re-apply
+// when nothing is actually wrong with the registration.
 func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 	tree := t.TempDir()
 	marker := filepath.Join(tree, ".scion")
@@ -1606,8 +1598,8 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(registeredCalls) != 2 || registeredCalls[0] != "/lever" || registeredCalls[1] != "/lever/workers/worker" {
-		t.Fatalf("ScionProjectRegistered calls = %+v, want [/lever /lever/workers/worker]", registeredCalls)
+	if len(registeredCalls) != 1 || registeredCalls[0] != "/lever" {
+		t.Fatalf("ScionProjectRegistered calls = %+v, want [/lever]", registeredCalls)
 	}
 	if len(removeJailCalls) != 0 {
 		t.Errorf("RemoveJailFile should not be called when already registered; got %+v", removeJailCalls)
@@ -1757,6 +1749,10 @@ func TestRegisterToleratesNilScionProjectRegistered(t *testing.T) {
 	}
 }
 
+// TestRegisterUsesJailPaths proves register-project registers ONLY the
+// instance tree (via its jail path) — even with workers configured, workers
+// no longer get their own scion registration (that per-worker fan-out was
+// dropped; see register-project's single-step doc).
 func TestRegisterUsesJailPaths(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
 	f := exec.NewFakeRunner()
@@ -1775,30 +1771,105 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var managerInit, workerInit bool
+	var managerInit bool
+	var initCalls int
 	for _, c := range f.Calls {
 		j := strings.Join(c.Args, " ")
 		if strings.Contains(j, "init --non-interactive") {
-			switch c.Dir {
-			case "/lever":
-				managerInit = true
-			case "/lever/workers/worker":
-				workerInit = true
-			default:
-				t.Errorf("init call used host dir %q, want jail path", c.Dir)
+			initCalls++
+			if c.Dir != "/lever" {
+				t.Errorf("init call used dir %q, want exactly /lever", c.Dir)
 			}
+			managerInit = true
 		}
-		if strings.Contains(j, "hub link") {
-			if c.Dir != "/lever" && c.Dir != "/lever/workers/worker" {
-				t.Errorf("hub link call used host dir %q, want jail path", c.Dir)
-			}
+		if strings.Contains(j, "hub link") && c.Dir != "/lever" {
+			t.Errorf("hub link call used dir %q, want /lever", c.Dir)
 		}
 	}
 	if !managerInit {
-		t.Errorf("manager init not run with dir /lever")
+		t.Errorf("project init not run with dir /lever")
 	}
-	if !workerInit {
-		t.Errorf("worker init not run with dir /lever/workers/worker")
+	if initCalls != 1 {
+		t.Errorf("init calls = %d, want exactly 1 (single register-project step)", initCalls)
+	}
+}
+
+// TestSingleProjectRegisterRunsOnceAcrossTwoWorkers is Task 6's apply-side
+// single-project integration proof (P2). Every register-project test above
+// configures at most ONE worker, which cannot distinguish "registration
+// collapsed to one per instance" from "one per worker that happens to equal
+// one because there's only one worker". With TWO workers configured
+// (workers/a, workers/b) the distinction is decisive: under the OLD
+// register-manager + N*register-worker model this would drive 3 separate
+// `scion init`/`hub link` calls (manager + worker a + worker b); the
+// collapsed single-project model must still show exactly ONE, entirely
+// against the single instance jail path "/lever" — proving the fan-out is
+// truly gone, not coincidentally absent.
+func TestSingleProjectRegisterRunsOnceAcrossTwoWorkers(t *testing.T) {
+	tree := t.TempDir() // real dir so file-writing steps can write into it
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+		Workers: []config.Worker{
+			{Name: "a", Dir: "workers/a"},
+			{Name: "b", Dir: "workers/b"},
+		},
+	}
+
+	// Point 1: Plan emits exactly ONE register-project step, targeting the
+	// instance tree — never one per worker.
+	var regSteps []Step
+	for _, s := range Plan(app, PlanOpts{}) {
+		if s.Kind == "register-project" {
+			regSteps = append(regSteps, s)
+		}
+	}
+	if len(regSteps) != 1 {
+		t.Fatalf("register-project steps = %+v, want exactly 1 (2 workers configured)", regSteps)
+	}
+	if regSteps[0].Target != tree {
+		t.Fatalf("register-project target = %q, want the instance tree %q", regSteps[0].Target, tree)
+	}
+
+	// Point 2: driving the register step invokes Deps.ScionProjectRegistered,
+	// `scion init`, and `scion hub link` each exactly ONCE, all against the
+	// single instance jail path "/lever" (never workers/a or workers/b).
+	var registeredCalls []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		ScionProjectRegistered: func(_ context.Context, wp string) (bool, error) {
+			registeredCalls = append(registeredCalls, wp)
+			return false, nil // force the destructive path so init/hub-link actually run
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(registeredCalls) != 1 || registeredCalls[0] != "/lever" {
+		t.Fatalf("ScionProjectRegistered calls = %+v, want exactly [\"/lever\"] (once, not per worker)", registeredCalls)
+	}
+
+	var initCalls, hubLinkCalls []string
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "init --non-interactive") {
+			initCalls = append(initCalls, c.Dir)
+		}
+		if strings.Contains(j, "hub link") {
+			hubLinkCalls = append(hubLinkCalls, c.Dir)
+		}
+	}
+	if len(initCalls) != 1 || initCalls[0] != "/lever" {
+		t.Fatalf("scion init calls = %+v, want exactly one at /lever (the OLD per-worker model would show 3 for 2 workers + manager)", initCalls)
+	}
+	if len(hubLinkCalls) != 1 || hubLinkCalls[0] != "/lever" {
+		t.Fatalf("scion hub link calls = %+v, want exactly one at /lever", hubLinkCalls)
 	}
 }
 

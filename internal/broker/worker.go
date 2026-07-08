@@ -40,11 +40,12 @@ type WorkerRuntime interface {
 // WorkerSpec is the config-derived, path-authoritative description of one worker.
 // The broker never accepts any of these from the manager; they come from config.
 type WorkerSpec struct {
-	Name         string // worker identity (== scion agent slug + project name)
-	JailProject  string // jail-absolute -g/--workspace, e.g. /lever/workers/worker
-	BootstrapDir string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
-	Image        string // effective agent image
-	APIKey       bool   // true ⇒ api-key LLM mode for this worker
+	Name          string // worker identity (== scion agent slug within the instance project)
+	Workspace     string // jail-absolute --workspace subdir, e.g. /lever/workers/worker
+	HostWorkspace string // host path to the same subdir, e.g. <tree>/workers/worker; MkdirAll'd before start
+	BootstrapDir  string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
+	Image         string // effective agent image
+	APIKey        bool   // true ⇒ api-key LLM mode for this worker
 }
 
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
@@ -114,7 +115,7 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, wo
 }
 
 func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
-	agents, err := b.runtime.List(ctx, spec.JailProject)
+	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
 		return "", err
 	}
@@ -149,7 +150,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if phase != "" {
 		// exists in a non-running state (suspended/stopped/terminal) → resume, never re-provision
-		if err := b.runtime.Resume(ctx, spec.Name, spec.JailProject); err != nil {
+		if err := b.runtime.Resume(ctx, spec.Name, b.instanceProject); err != nil {
 			http.Error(w, "runtime error", http.StatusBadGateway)
 			return
 		}
@@ -169,14 +170,19 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if spec.APIKey {
-		if err := b.runtime.EnvSet(ctx, spec.JailProject, "LEVER_LLM_AUTH", "api-key"); err != nil {
+		if err := b.runtime.EnvSet(ctx, b.instanceProject, "LEVER_LLM_AUTH", "api-key"); err != nil {
 			http.Error(w, "runtime error", http.StatusBadGateway)
 			return
 		}
 	}
+	if err := os.MkdirAll(spec.HostWorkspace, 0o755); err != nil {
+		b.audit("worker", b.manager, "error", "workspace dir: "+err.Error())
+		http.Error(w, "runtime error", http.StatusBadGateway)
+		return
+	}
 	if err := b.runtime.Start(ctx, scion.StartOpts{
 		Worker: spec.Name, Task: req.Task, Harness: "claude",
-		Project: spec.JailProject, Workspace: spec.JailProject,
+		Project: b.instanceProject, Workspace: spec.Workspace,
 		Image: spec.Image, APIKey: spec.APIKey,
 	}); err != nil {
 		http.Error(w, "runtime error", http.StatusBadGateway)
@@ -211,13 +217,15 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 }
 
 func (b *Broker) handleWorkerStop(w http.ResponseWriter, r *http.Request) {
-	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Stop(ctx, s.Name, s.JailProject) })
+	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Stop(ctx, s.Name, b.instanceProject) })
 }
 func (b *Broker) handleWorkerSuspend(w http.ResponseWriter, r *http.Request) {
-	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Suspend(ctx, s.Name, s.JailProject) })
+	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error {
+		return b.runtime.Suspend(ctx, s.Name, b.instanceProject)
+	})
 }
 func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
-	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Resume(ctx, s.Name, s.JailProject) })
+	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Resume(ctx, s.Name, b.instanceProject) })
 }
 
 func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
@@ -239,18 +247,14 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 	if !b.runtimeReady(w) {
 		return
 	}
-	all := []scion.Agent{}
-	for _, spec := range b.workers {
-		agents, err := b.runtime.List(r.Context(), spec.JailProject)
-		if err != nil {
-			http.Error(w, "runtime error", http.StatusBadGateway)
-			return
-		}
-		all = append(all, agents...)
+	agents, err := b.runtime.List(r.Context(), b.instanceProject)
+	if err != nil {
+		http.Error(w, "runtime error", http.StatusBadGateway)
+		return
 	}
 	writeJSON(w, struct {
 		Agents []scion.Agent `json:"agents"`
-	}{Agents: all})
+	}{Agents: agents})
 }
 
 // stageBootstrap writes bs to <dir>/bootstrap.json (dir 0700, file 0600).

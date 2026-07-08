@@ -20,36 +20,48 @@ import (
 
 // fakeRuntime records calls and returns scripted results; satisfies WorkerRuntime.
 type fakeRuntime struct {
-	agents   map[string][]scion.Agent // project -> agents (for List)
-	started  []scion.StartOpts
-	resumed  []string
-	stopped  []string
-	suspend  []string
-	envSets  []string
-	startErr error
+	agents       map[string][]scion.Agent // project -> agents (for List)
+	started      []scion.StartOpts
+	resumed      []string
+	resumeProj   []string
+	stopped      []string
+	stopProj     []string
+	suspend      []string
+	suspendProj  []string
+	envSets      []string
+	envSetProj   []string
+	startErr     error
+	listCalls    int      // total List invocations, to assert the fan-out is collapsed
+	listProjects []string // project arg of every List call
 }
 
 func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
+	f.listCalls++
+	f.listProjects = append(f.listProjects, project)
 	return f.agents[project], nil
 }
 func (f *fakeRuntime) Start(_ context.Context, o scion.StartOpts) error {
 	f.started = append(f.started, o)
 	return f.startErr
 }
-func (f *fakeRuntime) Resume(_ context.Context, worker, _ string) error {
+func (f *fakeRuntime) Resume(_ context.Context, worker, project string) error {
 	f.resumed = append(f.resumed, worker)
+	f.resumeProj = append(f.resumeProj, project)
 	return nil
 }
-func (f *fakeRuntime) Stop(_ context.Context, worker, _ string) error {
+func (f *fakeRuntime) Stop(_ context.Context, worker, project string) error {
 	f.stopped = append(f.stopped, worker)
+	f.stopProj = append(f.stopProj, project)
 	return nil
 }
-func (f *fakeRuntime) Suspend(_ context.Context, worker, _ string) error {
+func (f *fakeRuntime) Suspend(_ context.Context, worker, project string) error {
 	f.suspend = append(f.suspend, worker)
+	f.suspendProj = append(f.suspendProj, project)
 	return nil
 }
-func (f *fakeRuntime) EnvSet(_ context.Context, _, _, _ string) error {
+func (f *fakeRuntime) EnvSet(_ context.Context, project, _, _ string) error {
 	f.envSets = append(f.envSets, "set")
+	f.envSetProj = append(f.envSetProj, project)
 	return nil
 }
 func (f *fakeRuntime) Message(_ context.Context, _ scion.MsgOpts) error { return nil }
@@ -57,9 +69,14 @@ func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event,
 	return nil, nil
 }
 
+// testInstanceProject is the constant instance project (-g) used across
+// worker/msg tests, matching the single-project model: every worker is an
+// agent within this one project, distinguished by --workspace subdir.
+const testInstanceProject = "/lever"
+
 func TestWorkerSpecLookup(t *testing.T) {
 	b := New(Config{
-		Workers: []WorkerSpec{{Name: "worker", JailProject: "/lever/workers/worker"}},
+		Workers: []WorkerSpec{{Name: "worker", Workspace: "/lever/workers/worker"}},
 	})
 	if _, ok := b.workerSpec("worker"); !ok {
 		t.Fatal("expected worker spec present")
@@ -98,6 +115,7 @@ func newTestBroker(t *testing.T, rt WorkerRuntime, spec WorkerSpec) *Broker {
 		BrokerCAPEM:     "CA-PEM",
 		BrokerURL:       "https://10.0.0.2:8080",
 		ManagerIdentity: "test-manager",
+		InstanceProject: testInstanceProject,
 	})
 }
 
@@ -113,7 +131,8 @@ func callWorker(t *testing.T, b *Broker, path, body, cn string) *httptest.Respon
 
 func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	dir := t.TempDir()
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
+	hostWorkspace := filepath.Join(t.TempDir(), "workers", "worker") // does NOT exist yet
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", HostWorkspace: hostWorkspace,
 		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
@@ -122,6 +141,10 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	// the host workspace subdir is created before dispatch
+	if fi, err := os.Stat(hostWorkspace); err != nil || !fi.IsDir() {
+		t.Fatalf("host workspace not created: %v", err)
 	}
 	// bootstrap staged 0600 with the broker CA/URL and the worker CN
 	raw, err := os.ReadFile(filepath.Join(spec.BootstrapDir, "bootstrap.json"))
@@ -142,27 +165,28 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("bootstrap perms = %v, want 0600", fi.Mode().Perm())
 	}
-	// scion start called with jail-absolute -g/--workspace + api-key + image
+	// scion start called with the constant instance project (-g) + per-worker
+	// --workspace subdir (no longer equal to each other) + api-key + image
 	if len(rt.started) != 1 {
 		t.Fatalf("start calls = %d, want 1", len(rt.started))
 	}
 	got := rt.started[0]
-	if got.Project != "/lever/workers/worker" || got.Workspace != "/lever/workers/worker" ||
+	if got.Project != testInstanceProject || got.Workspace != "/lever/workers/worker" ||
 		got.Worker != "worker" || got.Image != "img:1" || !got.APIKey {
 		t.Fatalf("bad StartOpts: %+v", got)
 	}
 	if got.Task != "do it" {
 		t.Fatalf("StartOpts.Task = %q, want \"do it\"", got.Task)
 	}
-	if len(rt.envSets) != 1 {
-		t.Fatalf("EnvSet calls = %d, want 1 (api-key)", len(rt.envSets))
+	if len(rt.envSets) != 1 || rt.envSetProj[0] != testInstanceProject {
+		t.Fatalf("EnvSet calls = %d (proj %v), want 1 at the instance project", len(rt.envSets), rt.envSetProj)
 	}
 }
 
 func TestWorkerStart_running_isNoop(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/workers/worker": {{Slug: "worker", Phase: "running"}},
+		testInstanceProject: {{Slug: "worker", Phase: "running"}},
 	}}
 	b := newTestBroker(t, rt, spec)
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
@@ -175,10 +199,10 @@ func TestWorkerStart_running_isNoop(t *testing.T) {
 }
 
 func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker",
 		BootstrapDir: filepath.Join(t.TempDir(), ".lever")}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/workers/worker": {{Slug: "worker", Phase: "suspended"}},
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
 	}}
 	b := newTestBroker(t, rt, spec)
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
@@ -187,6 +211,9 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 	}
 	if len(rt.resumed) != 1 || len(rt.started) != 0 {
 		t.Fatalf("expected resume-only; resumed=%d started=%d", len(rt.resumed), len(rt.started))
+	}
+	if rt.resumeProj[0] != testInstanceProject {
+		t.Fatalf("resume project = %q, want the instance project %q", rt.resumeProj[0], testInstanceProject)
 	}
 	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); err == nil {
 		t.Fatal("resume must NOT re-provision/stage a bootstrap")
@@ -198,10 +225,10 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 // ticket, stages a bootstrap, or calls scion start.
 func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	bootstrapDir := filepath.Join(t.TempDir(), ".lever")
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker",
 		BootstrapDir: bootstrapDir}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/workers/worker": {{Slug: "worker", Phase: "exited"}},
+		testInstanceProject: {{Slug: "worker", Phase: "exited"}},
 	}}
 	b := newTestBroker(t, rt, spec)
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
@@ -222,7 +249,7 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 }
 
 func TestWorkerStart_authz(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	b := newTestBroker(t, &fakeRuntime{agents: map[string][]scion.Agent{}}, spec)
 	// wrong CN
 	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
@@ -234,12 +261,29 @@ func TestWorkerStart_authz(t *testing.T) {
 	}
 }
 
+// TestWorkerList proves the list fan-out is collapsed to a SINGLE
+// List(instanceProject) call that returns the whole fleet (multiple workers),
+// not one call per declared worker.
 func TestWorkerList(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		"/lever/workers/worker": {{Slug: "worker", Phase: "running", Activity: "building"}},
+		testInstanceProject: {
+			{Slug: "worker", Phase: "running", Activity: "building"},
+			{Slug: "helper", Phase: "suspended"},
+		},
 	}}
-	b := newTestBroker(t, rt, spec)
+	b := New(Config{
+		Tickets:  caTicketStore(t),
+		Registry: registry.New(),
+		Runtime:  rt,
+		Workers: []WorkerSpec{
+			{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()},
+			{Name: "helper", Workspace: "/lever/workers/helper", BootstrapDir: t.TempDir()},
+		},
+		BrokerCAPEM:     "CA-PEM",
+		BrokerURL:       "https://10.0.0.2:8080",
+		ManagerIdentity: "test-manager",
+		InstanceProject: testInstanceProject,
+	})
 	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec := httptest.NewRecorder()
@@ -247,11 +291,17 @@ func TestWorkerList(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
+	if rt.listCalls != 1 {
+		t.Fatalf("List calls = %d, want exactly 1 (collapsed fan-out)", rt.listCalls)
+	}
+	if rt.listProjects[0] != testInstanceProject {
+		t.Fatalf("List project = %q, want the instance project %q", rt.listProjects[0], testInstanceProject)
+	}
 	var out struct {
 		Agents []scion.Agent `json:"agents"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if len(out.Agents) != 1 || out.Agents[0].Slug != "worker" || out.Agents[0].Phase != "running" {
+	if len(out.Agents) != 2 {
 		t.Fatalf("bad list: %+v", out.Agents)
 	}
 	// non-manager rejected
@@ -267,7 +317,7 @@ func TestWorkerList(t *testing.T) {
 // TestWorkerNilRuntime_returns502 proves that when the scion runtime is unwired
 // (nil) the worker handlers return 502, not a panic from a nil-interface call.
 func TestWorkerNilRuntime_returns502(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
 	b := New(Config{
 		Tickets:         caTicketStore(t),
@@ -298,7 +348,7 @@ func TestWorkerNilRuntime_returns502(t *testing.T) {
 // TestWorkerNilRuntime_authzPrecedence proves that even with nil runtime, an
 // unauthenticated or non-manager caller gets 403 (authz runs before the nil check).
 func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	b := New(Config{
 		Tickets:         caTicketStore(t),
 		Registry:        registry.New(),
@@ -326,7 +376,7 @@ func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 }
 
 func TestWorkerLifecycleVerbs(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)
 
@@ -334,9 +384,9 @@ func TestWorkerLifecycleVerbs(t *testing.T) {
 		path  string
 		check func() bool
 	}{
-		{"/worker/stop", func() bool { return len(rt.stopped) == 1 }},
-		{"/worker/suspend", func() bool { return len(rt.suspend) == 1 }},
-		{"/worker/resume", func() bool { return len(rt.resumed) == 1 }},
+		{"/worker/stop", func() bool { return len(rt.stopped) == 1 && rt.stopProj[0] == testInstanceProject }},
+		{"/worker/suspend", func() bool { return len(rt.suspend) == 1 && rt.suspendProj[0] == testInstanceProject }},
+		{"/worker/resume", func() bool { return len(rt.resumed) == 1 && rt.resumeProj[0] == testInstanceProject }},
 	} {
 		rec := callWorker(t, b, tc.path, `{"worker":"worker"}`, "test-manager")
 		if rec.Code != http.StatusOK {
@@ -354,7 +404,7 @@ func TestWorkerLifecycleVerbs(t *testing.T) {
 
 func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 	dir := t.TempDir()
-	spec := WorkerSpec{Name: "worker", JailProject: "/lever/workers/worker",
+	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", HostWorkspace: t.TempDir(),
 		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)

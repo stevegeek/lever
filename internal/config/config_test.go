@@ -194,6 +194,18 @@ func TestValidateRejectsWorkerDirDot(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsGitTree(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Name: "demo", Backend: "orbstack", Tree: tree}
+	a.Broker.LLMAuth = "subscription"
+	if err := a.validateNonGitTree(); err == nil {
+		t.Fatalf("expected rejection: tree is itself a git repo")
+	}
+}
+
 func TestValidateRejectsScionSourceAndVersionTogether(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: ./scion-src\n  version: abc123\n")
 	if _, err := Load(p); err == nil {

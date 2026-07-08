@@ -85,7 +85,7 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		cfg.Runtime = scion.New(jr, scion.Options{HubEndpoint: "http://127.0.0.1:8080"})
 	}
 	cfg.Workers = WorkerSpecs(app, jailMount)
-	cfg.ManagerProject = jailMount
+	cfg.InstanceProject = jailMount
 	// The manager's scion agent slug is the APP NAME (apply's start-manager
 	// dispatches the manager as Worker: app.Name), not the manager cert CN.
 	cfg.ManagerSlug = app.Name

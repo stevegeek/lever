@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,15 +58,42 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 	return err
 }
 
-// ServerStart starts the workstation daemon (Hub API + broker); it daemonises and
-// returns. Dev auth is default-on, so no `hub enable` is needed.
-func (c *Client) ServerStart(ctx context.Context) error {
+// ServerOpts configures `scion server start`.
+type ServerOpts struct {
+	// Port, when > 0, binds the Hub API to that port (--port). Zero lets scion
+	// pick its default.
+	Port int
+	// DevAuth is always emitted explicitly (--dev-auth=true|false) so the real
+	// hub is never left on the (dev-auth-on) default by omission.
+	DevAuth bool
+}
+
+// ServerStart starts the workstation daemon (Hub API + broker); it daemonises
+// and returns.
+func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
+	args := []string{"server", "start"}
+	if o.Port > 0 {
+		args = append(args, "--port", strconv.Itoa(o.Port))
+	}
+	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
 	// Idempotent: tolerate an already-running server on re-apply; waitHubReady
 	// then confirms the existing server is actually serving.
-	if _, err := c.run(ctx, "", "server", "start"); err != nil && !AlreadyRunning(err) {
+	if _, err := c.run(ctx, "", args...); err != nil && !AlreadyRunning(err) {
 		return err
 	}
 	return c.waitHubReady(ctx)
+}
+
+// ServerStop stops the workstation daemon. Tolerates the "not running" case
+// (AlreadyRunning's message set also covers scion's not-running wording) so
+// callers can call it unconditionally during teardown. NOTE (live): if the
+// pinned scion build lacks `server stop`, callers should fall back to a
+// jail-process kill; this stays the seam either way.
+func (c *Client) ServerStop(ctx context.Context) error {
+	if _, err := c.run(ctx, "", "server", "stop"); err != nil && !AlreadyRunning(err) {
+		return err
+	}
+	return nil
 }
 
 // SecretSet stores a Hub secret. scion (>= da49e14) requires the value to be

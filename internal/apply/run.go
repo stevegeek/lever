@@ -203,7 +203,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 	case "config-registry":
 		return d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
 	case "scion-server":
-		return d.Scion.ServerStart(ctx)
+		return d.Scion.ServerStart(ctx, scion.ServerOpts{Port: 8080, DevAuth: false})
 	case "credential":
 		read := d.ReadCred
 		if read == nil {

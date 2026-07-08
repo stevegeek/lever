@@ -13,7 +13,7 @@ import (
 // /provision endpoint over the caller's mTLS identity. /provision is
 // manager-CN-gated by the broker, so client must present the manager identity.
 func Provision(ctx context.Context, brokerURL string, client *http.Client, worker string) (string, error) {
-	body, err := json.Marshal(map[string]string{"grove": worker})
+	body, err := json.Marshal(map[string]string{"worker": worker})
 	if err != nil {
 		return "", fmt.Errorf("agent: marshal provision: %w", err)
 	}

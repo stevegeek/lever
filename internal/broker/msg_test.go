@@ -192,7 +192,7 @@ func TestMsgSend_unknownCaller(t *testing.T) {
 func TestMsgList_managerReadsWorker(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
 	rt.events = []scion.Event{{"id": "1", "type": "test"}}
-	rec := callWorker(t, b, "/msg/list", `{"grove":"scratch"}`, "manager")
+	rec := callWorker(t, b, "/msg/list", `{"worker":"scratch"}`, "manager")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -210,7 +210,7 @@ func TestMsgList_managerReadsWorker(t *testing.T) {
 
 func TestMsgList_workerForbiddenOtherWorker(t *testing.T) {
 	b, _, _ := newMsgTestBroker(true)
-	rec := callWorker(t, b, "/msg/list", `{"grove":"worker"}`, "scratch")
+	rec := callWorker(t, b, "/msg/list", `{"worker":"worker"}`, "scratch")
 	if rec.Code != 403 {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
@@ -235,7 +235,7 @@ func TestMsgNilRuntime_returns502(t *testing.T) {
 		t.Fatalf("/msg/send nil-runtime: status = %d, want 502", rec.Code)
 	}
 
-	req2 := httptest.NewRequest("POST", "/msg/list", strings.NewReader(`{"grove":"scratch"}`))
+	req2 := httptest.NewRequest("POST", "/msg/list", strings.NewReader(`{"worker":"scratch"}`))
 	req2.TLS = fakeTLSWithCN("assistant")
 	w2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(w2, req2)
@@ -285,7 +285,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 
 	b2, rt2, audit2 := newMsgTestBroker(true)
 	rt2.inboxErr = errors.New(secret)
-	rec2 := callWorker(t, b2, "/msg/list", `{"grove":"scratch"}`, "manager")
+	rec2 := callWorker(t, b2, "/msg/list", `{"worker":"scratch"}`, "manager")
 	if rec2.Code != 502 {
 		t.Fatalf("/msg/list status = %d, want 502", rec2.Code)
 	}
@@ -324,7 +324,7 @@ func TestMsgList_deniesRevokedCaller(t *testing.T) {
 func TestWorkerList_deniesRevokedManager(t *testing.T) {
 	b, _, _ := newMsgTestBroker(true)
 	b.Revoke("manager")
-	rec := callWorker(t, b, "/grove/list", `{}`, "manager")
+	rec := callWorker(t, b, "/worker/list", `{}`, "manager")
 	if rec.Code != 403 {
 		t.Fatalf("revoked grove list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}

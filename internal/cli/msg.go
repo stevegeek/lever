@@ -64,7 +64,7 @@ func msgList() *cobra.Command {
 	var all bool
 	c := &cobra.Command{Use: "list", Short: "Read the typed event inbox",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			raw, err := msgCallFn(cmd.Context(), "/msg/list", map[string]any{"all": all, "grove": worker})
+			raw, err := msgCallFn(cmd.Context(), "/msg/list", map[string]any{"all": all, "worker": worker})
 			if err != nil {
 				return err
 			}

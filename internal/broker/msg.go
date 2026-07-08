@@ -96,7 +96,7 @@ type msgSendRequest struct {
 
 type msgListRequest struct {
 	All    bool   `json:"all"`
-	Worker string `json:"grove"`
+	Worker string `json:"worker"`
 }
 
 type msgListResponse struct {

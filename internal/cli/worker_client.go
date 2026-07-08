@@ -12,7 +12,7 @@ import (
 )
 
 type workerResult struct {
-	Worker string        `json:"grove"`
+	Worker string        `json:"worker"`
 	Phase  string        `json:"phase"`
 	Agents []scion.Agent `json:"agents"`
 }

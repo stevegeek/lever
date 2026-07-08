@@ -105,7 +105,7 @@ func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *c
 		Certificates: []tls.Certificate{managerCert},
 	}}}
 
-	body, _ := json.Marshal(map[string]string{"grove": worker})
+	body, _ := json.Marshal(map[string]string{"worker": worker})
 	resp, err := client.Post(srv.URL+"/provision", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("provisionAs: POST /provision: %v", err)

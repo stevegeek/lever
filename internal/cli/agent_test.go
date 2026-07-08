@@ -25,7 +25,7 @@ func TestAgentStart_callsBroker(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		_ = json.NewEncoder(w).Encode(map[string]string{"grove": "worker", "phase": "running"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"worker": "worker", "phase": "running"})
 	}))
 	defer srv.Close()
 
@@ -42,7 +42,7 @@ func TestAgentStart_callsBroker(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/grove/start" {
-		t.Fatalf("path = %s, want /grove/start", gotPath)
+	if gotPath != "/worker/start" {
+		t.Fatalf("path = %s, want /worker/start", gotPath)
 	}
 }

@@ -53,12 +53,12 @@ func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
 }
 
 type workerStartRequest struct {
-	Worker string `json:"grove"`
+	Worker string `json:"worker"`
 	Task   string `json:"task"`
 }
 
 type workerResponse struct {
-	Worker string `json:"grove"`
+	Worker string `json:"worker"`
 	Phase  string `json:"phase"`
 }
 
@@ -188,7 +188,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 
 func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {
 	var req struct {
-		Worker string `json:"grove"`
+		Worker string `json:"worker"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)

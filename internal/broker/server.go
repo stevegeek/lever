@@ -30,18 +30,18 @@ func resolveAdminAddr(adminAddr string) (string, error) {
 }
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
-// Routes: /provision, /grove/*, /msg/send, /msg/list, /enrol, /renew,
+// Routes: /provision, /worker/*, /msg/send, /msg/list, /enrol, /renew,
 // /request, and one gated gateway per currently-registered tool under
 // /mcp/<name>/. Gateways are bound at call time — tools must be registered
 // before JailHandler() is called.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/provision", b.handleProvision)
-	mux.HandleFunc("/grove/start", b.handleWorkerStart)
-	mux.HandleFunc("/grove/stop", b.handleWorkerStop)
-	mux.HandleFunc("/grove/suspend", b.handleWorkerSuspend)
-	mux.HandleFunc("/grove/resume", b.handleWorkerResume)
-	mux.HandleFunc("/grove/list", b.handleWorkerList)
+	mux.HandleFunc("/worker/start", b.handleWorkerStart)
+	mux.HandleFunc("/worker/stop", b.handleWorkerStop)
+	mux.HandleFunc("/worker/suspend", b.handleWorkerSuspend)
+	mux.HandleFunc("/worker/resume", b.handleWorkerResume)
+	mux.HandleFunc("/worker/list", b.handleWorkerList)
 	mux.HandleFunc("/msg/send", b.handleMsgSend)
 	mux.HandleFunc("/msg/list", b.handleMsgList)
 	mux.HandleFunc("/enrol", b.handleEnrol)

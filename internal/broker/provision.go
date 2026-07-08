@@ -9,7 +9,7 @@ import (
 
 // ProvisionRequest is the body of POST /provision (manager only).
 type ProvisionRequest struct {
-	Worker string `json:"grove"`
+	Worker string `json:"worker"`
 }
 
 // ProvisionResponse carries the one-time enrolment ticket.

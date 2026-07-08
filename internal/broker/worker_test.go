@@ -118,7 +118,7 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 
-	rec := callWorker(t, b, "/grove/start", `{"grove":"worker","task":"do it"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
@@ -165,7 +165,7 @@ func TestWorkerStart_running_isNoop(t *testing.T) {
 		"/lever/groves/worker": {{Slug: "worker", Phase: "running"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	rec := callWorker(t, b, "/grove/start", `{"grove":"worker"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -181,7 +181,7 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 		"/lever/groves/worker": {{Slug: "worker", Phase: "suspended"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	rec := callWorker(t, b, "/grove/start", `{"grove":"worker"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -204,7 +204,7 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 		"/lever/groves/worker": {{Slug: "worker", Phase: "exited"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	rec := callWorker(t, b, "/grove/start", `{"grove":"worker"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -225,11 +225,11 @@ func TestWorkerStart_authz(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", JailProject: "/lever/groves/worker", BootstrapDir: t.TempDir()}
 	b := newTestBroker(t, &fakeRuntime{agents: map[string][]scion.Agent{}}, spec)
 	// wrong CN
-	if rec := callWorker(t, b, "/grove/start", `{"grove":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
+	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
 		t.Fatalf("wrong-CN status = %d, want 403", rec.Code)
 	}
 	// undeclared grove
-	if rec := callWorker(t, b, "/grove/start", `{"grove":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
+	if rec := callWorker(t, b, "/worker/start", `{"worker":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
 		t.Fatalf("undeclared grove status = %d, want 403", rec.Code)
 	}
 }
@@ -240,7 +240,7 @@ func TestWorkerList(t *testing.T) {
 		"/lever/groves/worker": {{Slug: "worker", Phase: "running", Activity: "building"}},
 	}}
 	b := newTestBroker(t, rt, spec)
-	req := httptest.NewRequest("GET", "/grove/list", nil)
+	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec, req)
@@ -255,7 +255,7 @@ func TestWorkerList(t *testing.T) {
 		t.Fatalf("bad list: %+v", out.Agents)
 	}
 	// non-manager rejected
-	req2 := httptest.NewRequest("GET", "/grove/list", nil)
+	req2 := httptest.NewRequest("GET", "/worker/list", nil)
 	req2.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req2)
@@ -280,18 +280,18 @@ func TestWorkerNilRuntime_returns502(t *testing.T) {
 	})
 
 	// /grove/start with manager CN must return 502, not panic.
-	rec := callWorker(t, b, "/grove/start", `{"grove":"worker","task":"go"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"go"}`, "test-manager")
 	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("/grove/start nil-runtime: status = %d, want 502", rec.Code)
+		t.Fatalf("/worker/start nil-runtime: status = %d, want 502", rec.Code)
 	}
 
 	// /grove/list with manager CN must also return 502, not panic.
-	req := httptest.NewRequest("GET", "/grove/list", nil)
+	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusBadGateway {
-		t.Fatalf("/grove/list nil-runtime: status = %d, want 502", rec2.Code)
+		t.Fatalf("/worker/list nil-runtime: status = %d, want 502", rec2.Code)
 	}
 }
 
@@ -310,18 +310,18 @@ func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 	})
 
 	// Non-manager CN on /grove/start must get 403, not 502.
-	rec := callWorker(t, b, "/grove/start", `{"grove":"worker"}`, "intruder")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder")
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("/grove/start intruder nil-runtime: status = %d, want 403", rec.Code)
+		t.Fatalf("/worker/start intruder nil-runtime: status = %d, want 403", rec.Code)
 	}
 
 	// Non-manager CN on /grove/list must get 403, not 502.
-	req := httptest.NewRequest("GET", "/grove/list", nil)
+	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("/grove/list intruder nil-runtime: status = %d, want 403", rec2.Code)
+		t.Fatalf("/worker/list intruder nil-runtime: status = %d, want 403", rec2.Code)
 	}
 }
 
@@ -334,11 +334,11 @@ func TestWorkerLifecycleVerbs(t *testing.T) {
 		path  string
 		check func() bool
 	}{
-		{"/grove/stop", func() bool { return len(rt.stopped) == 1 }},
-		{"/grove/suspend", func() bool { return len(rt.suspend) == 1 }},
-		{"/grove/resume", func() bool { return len(rt.resumed) == 1 }},
+		{"/worker/stop", func() bool { return len(rt.stopped) == 1 }},
+		{"/worker/suspend", func() bool { return len(rt.suspend) == 1 }},
+		{"/worker/resume", func() bool { return len(rt.resumed) == 1 }},
 	} {
-		rec := callWorker(t, b, tc.path, `{"grove":"worker"}`, "test-manager")
+		rec := callWorker(t, b, tc.path, `{"worker":"worker"}`, "test-manager")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s status = %d", tc.path, rec.Code)
 		}
@@ -347,7 +347,7 @@ func TestWorkerLifecycleVerbs(t *testing.T) {
 		}
 	}
 	// authz still enforced
-	if rec := callWorker(t, b, "/grove/stop", `{"grove":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
+	if rec := callWorker(t, b, "/worker/stop", `{"worker":"ghost"}`, "test-manager"); rec.Code != http.StatusForbidden {
 		t.Fatalf("undeclared stop = %d, want 403", rec.Code)
 	}
 }
@@ -360,7 +360,7 @@ func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 	b := newTestBroker(t, rt, spec)
 	b.Revoke("test-manager")
 
-	rec := callWorker(t, b, "/grove/start", `{"grove":"worker","task":"do it"}`, "test-manager")
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("revoked manager dispatch: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}

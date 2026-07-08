@@ -100,7 +100,7 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 	if gotPath != "/msg/list" {
 		t.Fatalf("path = %s, want /msg/list", gotPath)
 	}
-	want := map[string]any{"all": true, "grove": "scratch"}
+	want := map[string]any{"all": true, "worker": "scratch"}
 	for k, v := range want {
 		if gotBody[k] != v {
 			t.Fatalf("body[%s] = %v, want %v (body=%v)", k, gotBody[k], v, gotBody)
@@ -124,7 +124,7 @@ func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	want := map[string]any{"all": false, "grove": ""}
+	want := map[string]any{"all": false, "worker": ""}
 	for k, v := range want {
 		if gotBody[k] != v {
 			t.Fatalf("body[%s] = %v, want %v (body=%v)", k, gotBody[k], v, gotBody)

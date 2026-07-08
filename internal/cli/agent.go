@@ -34,8 +34,8 @@ func agentStart() *cobra.Command {
 	var task string
 	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume) a grove agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := workerCallFn(cmd.Context(), "/grove/start",
-				map[string]string{"grove": args[0], "task": task})
+			res, err := workerCallFn(cmd.Context(), "/worker/start",
+				map[string]string{"worker": args[0], "task": task})
 			if err != nil {
 				return err
 			}
@@ -49,7 +49,7 @@ func agentStart() *cobra.Command {
 func agentVerb(use, short, endpoint string) *cobra.Command {
 	return &cobra.Command{Use: use + " NAME", Args: cobra.ExactArgs(1), Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := workerCallFn(cmd.Context(), endpoint, map[string]string{"grove": args[0]})
+			res, err := workerCallFn(cmd.Context(), endpoint, map[string]string{"worker": args[0]})
 			if err != nil {
 				return err
 			}
@@ -58,17 +58,17 @@ func agentVerb(use, short, endpoint string) *cobra.Command {
 		}}
 }
 
-func agentStop() *cobra.Command { return agentVerb("stop", "Stop a grove agent", "/grove/stop") }
+func agentStop() *cobra.Command { return agentVerb("stop", "Stop a grove agent", "/worker/stop") }
 func agentSuspend() *cobra.Command {
-	return agentVerb("suspend", "Suspend a grove agent", "/grove/suspend")
+	return agentVerb("suspend", "Suspend a grove agent", "/worker/suspend")
 }
 func agentResume() *cobra.Command {
-	return agentVerb("resume", "Resume a grove agent", "/grove/resume")
+	return agentVerb("resume", "Resume a grove agent", "/worker/resume")
 }
 
 func agentList() *cobra.Command {
 	return &cobra.Command{Use: "list", Short: "List grove agents", RunE: func(cmd *cobra.Command, _ []string) error {
-		res, err := workerCallFn(cmd.Context(), "/grove/list", map[string]string{})
+		res, err := workerCallFn(cmd.Context(), "/worker/list", map[string]string{})
 		if err != nil {
 			return err
 		}

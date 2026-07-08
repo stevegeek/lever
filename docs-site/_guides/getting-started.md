@@ -5,16 +5,18 @@ nav_order: 2
 # Getting started
 
 This walks you from nothing to a running lever application, a **manager** agent that dispatches
-work to a **grove** (project agent), all inside a jail that contains the whole stack. We use the
-bundled [`examples/hello-grove`](https://github.com/stevegeek/lever/tree/main/examples/hello-grove) as the worked example.
+work to a **worker** (an agent scoped to its own subdirectory), all inside a jail that contains the
+whole stack. We use the bundled
+[`examples/hello-worker`](https://github.com/stevegeek/lever/tree/main/examples/hello-worker) as the
+worked example.
 
 ## What you'll end up with
 
 ```
 your machine
-└── OrbStack isolated machine  "lever-hello-grove"   (the jail)
+└── OrbStack isolated machine  "lever-hello-worker"   (the jail)
     ├── rootless podman + scion hub (loopback)
-    ├── manager container        ← edits your tree in place, dispatches groves
+    ├── manager container        ← edits your tree in place, dispatches workers
     └── worker container         ← runs the dispatched task
 ```
 
@@ -61,14 +63,14 @@ This builds the host binary:
 The in-jail orchestration binary, **`lever-manager`**, isn't built here, it's baked into your agent
 image. `make lever-image-bins` cross-compiles `lever-manager` (alongside `lever-agent` and
 `lever-tool-db`) into your image build context (`LEVER_IMAGE_CTX` in the Makefile), and your
-Dockerfile `COPY`s them to `/usr/local/bin`, so it's already on `PATH` inside the manager and grove
+Dockerfile `COPY`s them to `/usr/local/bin`, so it's already on `PATH` inside the manager and worker
 containers when they boot.
 
 Verify: `lever version`.
 
 ## 1a. Build the agent image
 
-`examples/hello-grove` (and every instance) runs the agent image
+`examples/hello-worker` (and every instance) runs the agent image
 `scionlocal/lever-claude:latest`. Build the generic one in a single command:
 
 ```sh
@@ -106,7 +108,7 @@ missing.) See scion's `image-build/` for the full story — scion owns this step
 **Extending the image for your instance.** The generic image is deliberately minimal — scion's
 harness plus lever's binaries and boot hook, nothing else. If your agents need a language toolchain
 or a project CLI, write a small instance Dockerfile `FROM lever-claude:latest` that adds it, point
-`manager.image` (and any grove `image:`) at your tag, and — importantly — if your added layer does
+`manager.image` (and any worker `image:`) at your tag, and — importantly — if your added layer does
 root-level work under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and
 `USER scion`. The jail runs rootless Docker, where a root-owned home is unwritable by the agent and
 silently breaks its boot hook. Keep instance-specific tooling in that layer, not in the framework
@@ -114,25 +116,25 @@ image.
 
 ## 2. Look at the instance
 
-`examples/hello-grove` is a complete, minimal instance. The **root** holds the config and boot
+`examples/hello-worker` is a complete, minimal instance. The **root** holds the config and boot
 prompt (host-only); only the **`workspace/`** subdir is bind-mounted into the jail:
 
 ```
-hello-grove/             # instance root, run `lever` here; NOT mounted
+hello-worker/             # instance root, run `lever` here; NOT mounted
 ├── lever.yaml           # the config
 ├── manager.md           # the manager's boot prompt (host-only)
 └── workspace/           # tree: the bind-mounted subdir (agents edit this)
-    └── groves/
-        └── worker/      # the grove's workspace
+    └── workers/
+        └── worker/      # the worker's workspace
 ```
 
 ```yaml
-# examples/hello-grove/lever.yaml
-name: hello-grove
+# examples/hello-worker/lever.yaml
+name: hello-worker
 backend: orbstack
 tree: workspace          # a confined SUBDIR; the root itself is never mounted
 scion:
-  version: 666333f9      # pin a scion commit; fetched + cross-compiled into the jail
+  version: 37a54a8e      # pin a scion commit; fetched + cross-compiled into the jail
 # api-key is the secure default (the real key never enters the container) but
 # needs a Console API key. This demo opts into subscription (your Claude OAuth
 # token), so egress stays open and the token is projected to the agents.
@@ -143,9 +145,9 @@ manager:
   prompt_file: manager.md   # resolved at the root (host-only), not inside the mount
   credential_file: ~/.scion/oauth-token  # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []
-groves:
+workers:
   - name: worker
-    dir: groves/worker      # relative to tree, i.e. workspace/groves/worker
+    dir: workers/worker      # relative to tree, i.e. workspace/workers/worker
 ```
 
 The `credential_file` is the one thing you add: point it at a least-privilege
@@ -164,30 +166,41 @@ boots.
 Run `lever` from the **instance root** (where `lever.yaml` lives, there's no walk-up discovery):
 
 ```sh
-cd examples/hello-grove
+cd examples/hello-worker
 lever apply --dry-run
 ```
 
 You'll see the ordered plan:
 
 ```
-  jail-up                 /…/hello-grove/workspace
+  jail-up                 /…/hello-worker/workspace
   broker-up
   load-image              scionlocal/lever-claude:latest
   init-machine
   config-registry
+  bootstrap-token         /…/hello-worker/workspace
   scion-server
-  register-manager        /…/hello-grove/workspace
-  register-grove          /…/hello-grove/workspace/groves/worker
-  mint-manager-bootstrap  /…/hello-grove/workspace
-  start-manager           hello-grove
+  credential              ~/.scion/oauth-token
+  register-project        /…/hello-worker/workspace
+  mint-manager-bootstrap  /…/hello-worker/workspace
+  start-manager           hello-worker
 ```
+
+`bootstrap-token` mints the controller PAT that drives every later scion verb: a **throwaway**
+dev-auth-on hub, host-only on a random port no agent ever learns, registers the instance project,
+mints a token scoped to exactly `agent:manage,agent:attach,project:read`, persists it `0600` under
+`.lever-state/`, then is killed. `scion-server` then starts the **real** hub with `--dev-auth=false`
+— agents never see an admin-open hub. `credential` (shown here because this example sets
+`credential_file`) stages the manager's Claude OAuth token. `register-project` replaces the old
+per-agent registration: it's the **one** `scion init`/`hub link` for the whole instance — the
+manager and every worker are agents inside it, not separate projects. Workers themselves aren't
+started here; the manager dispatches them on demand once it's up (step 6).
 
 ## 4. Scaffold the operator skills (`lever init`)
 
 Lever ships SKILL.md files that teach your agents how to operate inside the
 jail — the capability flow (mint via `lever-capability`, attach the token as
-`_capability` on every gated call), messaging, and grove dispatch. Scaffold
+`_capability` on every gated call), messaging, and worker dispatch. Scaffold
 them into your instance tree:
 
 ```sh
@@ -195,12 +208,12 @@ lever init
 ```
 
 This writes `.claude/skills/lever-operator/` at the tree root (the manager
-discovers it there), `.claude/skills/lever-agent/` inside each declared grove
+discovers it there), `.claude/skills/lever-agent/` inside each declared worker
 directory, and adds a marked reference block to your tree-root `CLAUDE.md`.
 The files are yours: they're plain markdown in your tree, stamped with the
 lever version they came from.
 
-Re-run `lever init` after upgrading lever or adding a grove — unmodified
+Re-run `lever init` after upgrading lever or adding a worker — unmodified
 files are refreshed in place, while files you've edited are left alone with
 a warning (`--force` overwrites them). `lever init --check` reports staleness
 without writing, and `lever doctor` includes the same check.
@@ -212,9 +225,9 @@ lever up
 ```
 
 `lever up` creates the jail if needed (isolated machine → rootless podman → cross-compiled scion →
-egress allowlist), loads the image, registers the manager + groves, starts the manager, and hands
-you its terminal. **First boot takes ~10-15 minutes** (runtimes + a multi-GB image load); after that
-it's fast.
+egress allowlist), loads the image, mints the controller PAT and registers the one instance project
+(manager and workers alike are agents inside it), starts the manager, and hands you its terminal.
+**First boot takes ~10-15 minutes** (runtimes + a multi-GB image load); after that it's fast.
 
 `up` is idempotent: re-running it resumes a suspended manager and re-attaches. Detach with
 `Ctrl-b d` (the manager is left suspended; the next `lever up` resumes the same conversation).
@@ -229,9 +242,9 @@ backends reachable, the manager credential file's presence/size/mode, scion proj
 consistency, and the operator-skills scaffold from `lever init` being present and current) and
 prints a fix hint per failure.
 
-## 6. Dispatch a grove (inside the manager session)
+## 6. Dispatch a worker (inside the manager session)
 
-You're now talking to the manager agent. It drives groves with the in-jail `lever-manager` binary
+You're now talking to the manager agent. It drives workers with the in-jail `lever-manager` binary
 (baked into the image, already on `PATH`). A dispatch looks like:
 
 ```sh
@@ -239,11 +252,12 @@ lever-manager agent start worker --task "Write a haiku to haiku.md"
 ```
 
 Notes:
-- **`worker` is the grove's configured name**, not a path or a bare scion slug. The command is a
+- **`worker` is the worker's configured name**, not a path or a bare scion slug. The command is a
   thin client of the capability broker: the broker authenticates the manager, validates the name
-  against the config, and starts the grove host-side (with operator identity) so it mounts its own
-  `groves/worker/` workspace rather than the manager's whole tree.
-- **No `--image` needed**, the broker resolves the grove's image from the config (it inherits the
+  against the config, and starts the worker host-side (with operator identity) — as an agent in the
+  same single instance project as the manager, mounted at its own `workers/worker/` subdir rather
+  than the manager's whole tree.
+- **No `--image` needed**, the broker resolves the worker's image from the config (it inherits the
   manager image here). An explicit `--image` overrides.
 
 Watch progress and relay events:
@@ -260,20 +274,20 @@ directly: a scion CLI call made inside a container is pinned to that container's
 the broker (host-side, operator identity) is what actually routes the message. `--to` takes
 `agent:<name>`, a bare `<name>`, or the alias `user:manager` (routes to the manager agent; scion's
 own user-messaging is container-only, so no other `user:*` form is broker-routable). Routing is
-identity-derived and default-deny: the manager may message any declared grove and read any inbox
-(`msg list --grove <name>`); a grove may message the manager and, by default, other groves too
-(disable grove→grove with `broker.messaging.grove_to_grove: false`).
+identity-derived and default-deny: the manager may message any declared worker and read any inbox
+(`msg list --worker <name>`); a worker may message the manager and, by default, other workers too
+(disable worker→worker with `broker.messaging.worker_to_worker: false`).
 
-To eyeball a grove's session directly instead of polling events, run `lever attach worker` from your
-host (another terminal, instance root): it hands your TTY to that grove the same way `lever up`
-hands you the manager's; omit the name to attach to the manager.
+To eyeball a worker's session directly instead of polling events, run `lever attach worker` from
+your host (another terminal, instance root): it hands your TTY to that worker the same way
+`lever up` hands you the manager's; omit the name to attach to the manager.
 
 You can also message an agent from the host without attaching at all: `lever msg send "…" --to
-worker` (or `--to hello-grove` for the manager) is fire-and-forget — the note lands in the agent's
+worker` (or `--to hello-worker` for the manager) is fire-and-forget — the note lands in the agent's
 session as its next user turn, it acts on it unattended, and the exchange is waiting in the
 scrollback the next time you attach. `--interrupt` injects it ahead of the agent's next turn.
 
-When `worker` finishes, the file it wrote (`groves/worker/haiku.md`) is there on your host, it was
+When `worker` finishes, the file it wrote (`workers/worker/haiku.md`) is there on your host, it was
 mounted in place.
 
 ## 7. Give an agent an MCP server (the various ways)
@@ -373,15 +387,15 @@ manager:
     - {tool: calendar, op: "*"}                     # the manager may use calendar itself
   delegate:
     - {tool: devonthink, op: search, to: [worker]}  # …and may hand worker this at dispatch
-groves:
+workers:
   - name: worker
-    dir: groves/worker
+    dir: workers/worker
     obtain:
       - {tool: db, op: read}                         # worker may use db.read — nothing else
 ```
 
 - **`obtain`** — the agent can self-mint a capability for the listed `{tool, op}`.
-- **`delegate`** — the manager can mint a token *bound to a named recipient* grove at dispatch time
+- **`delegate`** — the manager can mint a token *bound to a named recipient* worker at dispatch time
   (an attenuated hand-off).
 - Absence of a grant = no access, and a grant for one agent can't be replayed by another (the token
   is identity-bound). `op: "*"` is honoured **only** for a `gate: coarse` tool, so a wildcard can

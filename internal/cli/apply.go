@@ -130,10 +130,14 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 		return nil // already minted; survives down→up
 	}
 	tw := scion.New(jr, scion.Options{HubEndpoint: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)})
+	// Register the kill BEFORE ServerStart so a partial start — e.g. a throwaway
+	// dev-auth server left running from a prior failed invocation, whose
+	// readiness poll then times out — is still stopped rather than leaked as a
+	// dev-auth-on admin server. ServerStop tolerates a not-running server.
+	defer func() { _ = tw.ServerStop(ctx) }()
 	if err := tw.ServerStart(ctx, scion.ServerOpts{Port: throwawayHubPort, DevAuth: true}); err != nil {
 		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
 	}
-	defer func() { _ = tw.ServerStop(ctx) }() // best-effort kill even on an early return below
 
 	jp := jailProjectPath(tree, jailMount)
 	if err := tw.InitProject(ctx, jp); err != nil {

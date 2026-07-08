@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -247,7 +249,21 @@ func TestAcceptanceWiredAndEnumeratesSixChecks(t *testing.T) {
 // empty obtain, and the db tool is declared. (The full live run needs a real
 // jail; this guards the fixture the RunE loads.)
 func TestAcceptanceFixtureLoads(t *testing.T) {
-	app, err := config.Load("testdata/acceptance/lever.yaml")
+	// Copy the fixture into a fresh non-repo temp dir before Load: the fixture
+	// lives inside this project's own git checkout, and validateNonGitTree
+	// (added for P2) now rejects a tree nested under a `.git` ancestor. That
+	// guard targets real deployments, not this in-repo test fixture, so exercise
+	// the config shape from a git-free location (t.TempDir() is never inside a
+	// repo) rather than weakening the guard for this test.
+	body, err := os.ReadFile("testdata/acceptance/lever.yaml")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "lever.yaml")
+	if err := os.WriteFile(dst, body, 0o644); err != nil {
+		t.Fatalf("write fixture copy: %v", err)
+	}
+	app, err := config.Load(dst)
 	if err != nil {
 		t.Fatalf("acceptance fixture must load: %v", err)
 	}

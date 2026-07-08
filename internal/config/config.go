@@ -438,6 +438,9 @@ func (a *App) Validate() error {
 	if a.Tree == "" {
 		return fmt.Errorf("config: tree is required")
 	}
+	if err := a.validateNonGitTree(); err != nil {
+		return err
+	}
 	if a.Manager.Image != "" {
 		if err := a.Security.validateImage("manager.image", a.Manager.Image); err != nil {
 			return err
@@ -481,12 +484,11 @@ func (a *App) Validate() error {
 			return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
 		}
 		if filepath.Clean(g.Dir) == "." {
-			// A "." dir makes WorkerDir(g) == a.Tree, so the worker's jail path
-			// collides with the manager's mount root (/lever). Then the worker's
-			// register step (scion-project-config removal + .scion marker removal)
-			// would be scoped to the MANAGER's registration/marker instead of its
-			// own. confinedRel already rejects "." for `tree` for the same
-			// root-is-the-mount reason; worker dirs must be a strict subdir.
+			// A "." dir makes WorkerDir(g) == a.Tree, so the worker's workspace would
+			// be the whole tree — mounting root defeats R4 sibling isolation (the
+			// worker could read every sibling's subdir). Workers must occupy a strict
+			// subdir of the shared instance project. (confinedRel rejects "." for
+			// `tree` for the analogous root-is-the-mount reason.)
 			return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
 		}
 		if g.Image != "" {
@@ -497,6 +499,19 @@ func (a *App) Validate() error {
 	}
 	if err := a.validateBroker(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateNonGitTree refuses a tree that sits inside a git repository. R4's
+// sibling isolation assumes a non-git tree; per-worker git workflows are
+// deferred (spec §13). Once the pinned Scion carries the --workspace git guard
+// a stray ancestor .git is harmless at mount time, but the model still targets
+// non-git trees, so we fail loudly at config time rather than silently degrade.
+func (a *App) validateNonGitTree() error {
+	if root, inside := treeInsideGitRepo(a.Tree); inside {
+		return fmt.Errorf("config: tree %q is inside a git repository (%s); lever targets non-git trees "+
+			"(per-worker git workflows are deferred). Point tree at a non-git directory.", a.Tree, root)
 	}
 	return nil
 }

@@ -67,7 +67,7 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	}
 	steps = append(steps, Step{Kind: "register-manager", Target: a.Tree})
 	for _, g := range a.Workers {
-		steps = append(steps, Step{Kind: "register-grove", Target: a.WorkerDir(g)})
+		steps = append(steps, Step{Kind: "register-worker", Target: a.WorkerDir(g)})
 	}
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})

@@ -214,7 +214,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			return fmt.Errorf("reading credential %s: %w", s.Target, err)
 		}
 		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
-	case "register-manager", "register-grove":
+	case "register-manager", "register-worker":
 		jp := jailPath(s.Target, app.Tree, d.JailMount)
 
 		// Idempotent register: observe BEFORE doing anything destructive. A

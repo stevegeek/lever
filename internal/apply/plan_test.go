@@ -44,7 +44,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 	}
 	// Scion/container/registration steps must NOT appear (the fresh machine has no
 	// scion binary; init-machine would fail).
-	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-manager", "register-grove", "write-manifest", "start-manager", "config-registry", "credential"} {
+	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-manager", "register-worker", "write-manifest", "start-manager", "config-registry", "credential"} {
 		if contains(got, banned) {
 			t.Fatalf("broker-only plan must omit %q: %v", banned, got)
 		}
@@ -73,7 +73,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-grove", "register-grove", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "scion-server", "register-manager", "register-worker", "register-worker", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -85,10 +85,10 @@ func TestPlanOrder(t *testing.T) {
 	// register-grove targets: first grove is at index 7, second at index 8
 	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:scion-server 6:register-manager 7:register-grove 8:register-grove 9:mint-manager-bootstrap 10:start-manager)
 	if steps[7].Target != "/t/groves/appa" {
-		t.Fatalf("register-grove[0] target=%q", steps[7].Target)
+		t.Fatalf("register-worker[0] target=%q", steps[7].Target)
 	}
 	if steps[8].Target != "/t/groves/appb" {
-		t.Fatalf("register-grove[1] target=%q", steps[8].Target)
+		t.Fatalf("register-worker[1] target=%q", steps[8].Target)
 	}
 }
 

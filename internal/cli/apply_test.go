@@ -12,6 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // writeTmpConfig writes a minimal app.yaml with a real tree directory structure
@@ -424,5 +425,138 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	if len(f.Calls) != callsAfterFirst {
 		t.Fatalf("second call made %d new runner call(s), want 0 (must be a no-op): %+v",
 			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
+	}
+}
+
+// TestApplyBootstrapTokenThenLockedHubEndToEnd is Task 6's end-to-end proof:
+// it drives the REAL ensureControllerPAT (behind Deps.EnsureControllerPAT, as
+// wired by buildApplyDeps) followed by the REAL-hub scion-server start —
+// exactly the "bootstrap-token" then "scion-server" step sequence runStep
+// executes for every apply (internal/apply/run.go) — through the SAME
+// scion.Client object apply.Run would drive, over one fake jail runner and
+// one temp .lever-state dir.
+//
+// This is deliberately NOT a re-test of TestEnsureControllerPATMintsThenNoOps
+// (the mint window in isolation) or TestBuildApplyDepsWiresEnsureControllerPAT
+// (wiring only, no scion-server). Its new value is proving the COMPOSITION:
+// bootstrap-token precedes scion-server; scion-server locks the real hub
+// (port 8080, dev-auth off); and the mint→persist→thread round-trip actually
+// closes the loop — the client that starts the locked hub carries
+// SCION_HUB_TOKEN=<the PAT ensureControllerPAT just minted and persisted> in
+// its env, because HubTokenSource reads state.LoadControllerPAT() lazily
+// (see scion.Options.HubTokenSource's doc). A second, fresh buildApplyDeps
+// (a re-apply against the same config/state dir) must skip the throwaway
+// entirely (PAT already persisted) while still threading the SAME PAT into
+// the reused hub's env.
+func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f := leverexec.NewFakeRunner()
+	f.Script("scion server start", leverexec.Result{})
+	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll (throwaway AND real hub)
+	f.Script("scion init", leverexec.Result{})
+	f.Script("scion hub link", leverexec.Result{})
+	f.Script("scion hub token create", leverexec.Result{Stdout: "pat-e2e-round-trip\n"})
+	f.Script("scion server stop", leverexec.Result{})
+	f.Script("sh", leverexec.Result{})
+	sb := &stubBackend{runner: f}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	// --- First apply: bootstrap-token then scion-server, via the real Deps
+	// wiring (mirrors runStep's "bootstrap-token"/"scion-server" arms).
+	deps, _, _, err := buildApplyDeps(ctx, app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if deps.EnsureControllerPAT == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.EnsureControllerPAT")
+	}
+	if err := deps.EnsureControllerPAT(ctx); err != nil {
+		t.Fatalf("bootstrap-token step: %v", err)
+	}
+	if err := deps.Scion.ServerStart(ctx, scion.ServerOpts{Port: 8080, DevAuth: false}); err != nil {
+		t.Fatalf("scion-server step: %v", err)
+	}
+
+	// bootstrap-token precedes scion-server: the throwaway (48080, dev-auth
+	// ON) server start must land BEFORE the real hub's (8080, dev-auth OFF).
+	iThrowaway := callIndex(f.Calls, func(c leverexec.Call) bool {
+		return callHasPrefix(c, "scion server start --port 48080")
+	})
+	iReal := callIndex(f.Calls, func(c leverexec.Call) bool {
+		return callHasPrefix(c, "scion server start --port 8080")
+	})
+	if iThrowaway < 0 || iReal < 0 {
+		t.Fatalf("missing server-start call(s); calls=%+v", f.Calls)
+	}
+	if !(iThrowaway < iReal) {
+		t.Fatalf("throwaway server start (call %d) must precede the real hub server start (call %d)", iThrowaway, iReal)
+	}
+
+	// scion-server locks the real hub: port 8080, dev-auth off.
+	realArgs := strings.Join(f.Calls[iReal].Args, " ")
+	if !strings.Contains(realArgs, "--port 8080") || !strings.Contains(realArgs, "--dev-auth=false") {
+		t.Fatalf("real hub server start args = %q, want --port 8080 --dev-auth=false", realArgs)
+	}
+
+	// The mint → persist → thread round-trip: the SAME client that started
+	// the real, dev-auth-off hub carries SCION_HUB_TOKEN=<minted PAT> in the
+	// env it sent the runner for that call.
+	if got := f.Calls[iReal].Env["SCION_HUB_TOKEN"]; got != "pat-e2e-round-trip" {
+		t.Fatalf("real hub server-start env SCION_HUB_TOKEN = %q, want %q (mint->thread round-trip broken)", got, "pat-e2e-round-trip")
+	}
+
+	// Persisted 0600 under the config-derived state dir.
+	state := brokerctl.StateDir(filepath.Dir(p))
+	fi, err := os.Stat(state.ControllerPAT())
+	if err != nil {
+		t.Fatalf("controller.pat not written: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("controller.pat perm = %#o, want 0600", perm)
+	}
+
+	callsAfterFirst := len(f.Calls)
+
+	// --- Second apply: a FRESH buildApplyDeps against the same config/state
+	// dir (what a real re-apply invocation does). The PAT is already
+	// persisted, so bootstrap-token must be a complete no-op — in
+	// particular, no second throwaway server start.
+	deps2, _, _, err := buildApplyDeps(ctx, app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("buildApplyDeps (2nd apply): %v", err)
+	}
+	if err := deps2.EnsureControllerPAT(ctx); err != nil {
+		t.Fatalf("bootstrap-token step (2nd apply): %v", err)
+	}
+	if len(f.Calls) != callsAfterFirst {
+		t.Fatalf("2nd apply's bootstrap-token made %d new runner call(s), want 0 (must be a no-op): %+v",
+			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
+	}
+
+	// scion-server still runs on every apply (locking the hub is not itself
+	// gated on the mint) and must thread the SAME reused PAT.
+	if err := deps2.Scion.ServerStart(ctx, scion.ServerOpts{Port: 8080, DevAuth: false}); err != nil {
+		t.Fatalf("scion-server step (2nd apply): %v", err)
+	}
+	// The 2nd apply's real hub server-start is the LAST such call (ServerStart
+	// itself appends a trailing waitHubReady "list" call right after it, so
+	// it is not simply the last entry in f.Calls).
+	iReal2 := -1
+	for idx, c := range f.Calls {
+		if callHasPrefix(c, "scion server start --port 8080") {
+			iReal2 = idx
+		}
+	}
+	if iReal2 < callsAfterFirst {
+		t.Fatalf("2nd apply's real hub server start not found after call %d; calls=%+v", callsAfterFirst, f.Calls)
+	}
+	if got := f.Calls[iReal2].Env["SCION_HUB_TOKEN"]; got != "pat-e2e-round-trip" {
+		t.Fatalf("2nd apply's real hub server-start env SCION_HUB_TOKEN = %q, want %q (reused PAT not threaded)", got, "pat-e2e-round-trip")
 	}
 }

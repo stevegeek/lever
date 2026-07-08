@@ -36,7 +36,7 @@ The current model (grove-per-project) is load-bearing in these places; the re-ar
 | Every Scion verb `-g <perGroveProject>`-scoped | `scion/client.go:65-70` | Every verb `-g <instanceProject>` — one constant scope |
 | `register-manager` + one `register-grove` **per grove**, each an independent `scion init` + `hub link` | `apply/plan.go:68-71`, `run.go:217-278` | **One** project init + link for the instance; agents need no per-agent project registration |
 | `/grove/list` fans `scion list` across N per-grove projects and concatenates | `broker/grove.go:242-250` | One `scion list -g <instanceProject>` returns all agents |
-| Grove `dir` must be a strict subdir; `dir: "."` rejected to avoid colliding with the manager's project | `config.go:483-491` | Manager (root) and workers (subdirs) legitimately share one project; the collision rule is obsolete |
+| Grove `dir` must be a strict subdir; `dir: "."` rejected to avoid colliding with the manager's project | `config.go:483-491` | Manager (root) and workers (subdirs) legitimately share one project, so the project-**collision rationale** is obsolete — but the **subdir requirement itself is retained** (now load-bearing for R4: a worker mounting root would see the whole tree), as are **both name-collision rules** (now enforcing scion agent-slug uniqueness in the shared project). See §11. |
 | No Scion token minted; relies on Scion **dev-auth open on loopback** (`--dev-auth=true` default), passes no dev token | `bringup.go:60-61`, `client.go:42-63` | Real hub runs **dev-auth off**; lever drives all lifecycle with a minted **controller PAT** (hardening + enables the model) |
 | Guest state hardcodes `/lever` and `/lever/groves/<name>` as one workspace_path per agent | `backend/guest/scionstate.go:20-22` | One project; agent workspaces are `tree` (manager) and `tree/<subdir>` (workers) |
 
@@ -76,12 +76,12 @@ The net Scion delta is **two small, self-contained upstream bug fixes**, both al
 
 | Fix | Branch | Role in this design |
 |---|---|---|
-| `ListProjects` cursor pagination | `fix/listprojects-cursor-pagination` | Correct project/agent enumeration beyond the first page |
+| `ListProjects` cursor pagination | `fix/listprojects-cursor-pagination` | Defensive: correct project enumeration beyond the first page. Only load-bearing on a *shared* hub accumulating >50 projects; a dedicated per-instance hub has exactly one project, so this never triggers for the core model — carried as a correctness fix, not a hard dependency. |
 | `--workspace` git guard (`run.go`, honor explicit workspace over git auto-detection) | `fix/explicit-workspace-git-guard` | Makes §4.2 isolation a guarantee, not a layout precaution |
 
 Everything else — mounts, agent lifecycle, project-scoped tokens, per-agent JWT identity, messaging, suspend/resume — is **stock Scion**. The offline `hub bootstrap` command and the `auto_provide` change explored earlier are **retired**: the single-project model eliminates the multi-project token dilemma, and normal `hub link` project creation fires provider auto-linking for free.
 
-lever pins the Scion version it builds against; these two fixes must be present in that pin (via the fork branch or once merged upstream).
+lever pins the Scion version it builds against; these two fixes must be present in that pin (via the fork branch or once merged upstream). **The pin bump is an explicit P2 task** (see the decomposition): move `scion.version` to a fork commit containing *both* `fix/explicit-workspace-git-guard` and `fix/listprojects-cursor-pagination`, and verify their presence — R4's isolation guarantee and the §12 acceptance checks cannot pass on a pin lacking the git guard. The current pin `666333f9` predates both.
 
 ## 6. Bring-up and bootstrap
 
@@ -90,13 +90,13 @@ lever pins the Scion version it builds against; these two fixes must be present 
 One project ⇒ one project-scoped PAT drives every agent's lifecycle. The real hub runs **dev-auth off** (hardening: agents never see an admin-open hub). During **agent-free** bring-up:
 
 1. Start a **throwaway** hub: `scion server start --port <random> --dev-auth=true`, host-only, on a random port no agent ever learns.
-2. As dev-auth admin against it: `project init` + `hub link` for the instance project, then mint the controller PAT: `scion hub token create --scopes agent:manage,agent:attach,agent:message,project:read`.
+2. As dev-auth admin against it: `project init` + `hub link` for the instance project, then mint the controller PAT: `scion hub token create --scopes agent:manage,agent:attach,project:read`.
 3. Persist the PAT host-side, `0600`, under `.lever-state/`.
-4. **Kill the throwaway.**
-5. Start the real hub: `scion server start --port 8080 --dev-auth=false`.
+4. **Kill the throwaway** and delete the residual `<scionDir>/dev-token` file it wrote (an inert `0600` admin bearer while the real hub runs dev-auth-off, but a dormant credential any future dev-auth hub on that dir would honor).
+5. Start the real hub: `scion server start --port 8080 --dev-auth=false`. **The throwaway and the real hub must share the same hub DB** (`cfg.Database.URL`): the project and the controller PAT are rows in that sqlite DB, so a differing data dir would make the minted project + PAT invisible to the real hub and break bring-up.
 6. Only then dispatch the manager (and, later, workers).
 
-**Controller token scope is exact and load-bearing:** `agent:manage,agent:attach,agent:message,project:read`. The `agent:manage` alias does **not** include `agent:attach` or `agent:message`, which gate `start`/`stop`/`suspend`/`resume`/`message`/`attach`; a token missing them 403s on `start`.
+**Controller token scope is exact and load-bearing:** `agent:manage,agent:attach,project:read`. `agent:attach` is the pivotal scope: the `agent:manage` alias expands to `{create,read,list,start,stop,delete,dispatch}` and does **not** include `attach`, yet every interactive verb — `start`/`stop`/`suspend`/`resume`/`attach` **and `message`** — is gated on `agent:attach` for user tokens (verified in scion authz), so a naive `agent:manage`-only PAT 403s on `start`. `agent:message` is therefore **not required and is omitted**; should a future scion pin ever gate the `message` verb on `agent:message` specifically, add it back.
 
 **Safety with no Scion change:** the dev-auth window exists only on a random throwaway port and is dead before any container exists; the canonical `:8080` hub is `--dev-auth=false` from birth. "Agent-free" is an assertable precondition of the window, so no worker can race in to exploit open admin. Reconciliation on `down`→`up` is agent-free again. A mid-life invalid PAT fails loud and forces a controlled `stop`→`up`; dev-auth is **never** re-enabled on a running instance that has agents.
 
@@ -124,7 +124,7 @@ Workers are **not** started at apply time; the manager dispatches them on demand
 ## 7. Lifecycle and dispatch
 
 - **Workers as agents in the one project.** The broker's worker lifecycle (`/grove/*`, to be renamed) issues `scion start <worker> --workspace <root>/<subdir> -g <instanceProject>` — the **same** project as the manager. `list` becomes a single `scion list -g <instanceProject>` returning all agents; the per-project fan-out is deleted.
-- **Worker subdirs must exist on the host before `start`** (Scion `Stat`s the path). The operator declares them in config; the manager/broker ensures the directory exists before dispatch.
+- **Worker subdirs must exist on the host before `start`** (Scion `Stat`s the path). The operator declares them in config; the manager/broker ensures the directory exists before dispatch. **Owner: P2** (the dispatch-path change).
 - **Manager drives dispatch** via the host broker, exactly as today, but every call now targets the constant instance project instead of a per-grove project.
 - **stop / suspend / resume.** `scion suspend` → `scion start`/`resume` continues the harness (`claude --continue`) because the agent **home** is a host bind-mount outliving the container. This is unchanged; it now applies uniformly to manager and workers in one project.
 
@@ -159,7 +159,8 @@ The rename is entangled with identity and must be done with care, not as a blind
 The user-facing config stays close in *shape* but changes in *meaning*: a user declares one instance (`name`, `backend`, `tree`, `manager`, `workers:[]`), and the workers now become agents in one project rather than separate projects.
 
 - `App.Groves` → `App.Workers`; `Grove` → `Worker` (fields unchanged).
-- The `dir: "."`-rejection rule (`config.go:483-491`) is removed/rethought: manager (root) and workers (subdirs) now legitimately coexist in one project. Workers still require a subdir (a worker mounting the whole root would defeat R4 sibling isolation), so validation keeps "worker dir must be a proper non-empty subdir of tree", but no longer for project-collision reasons.
+- The `dir: "."`-rejection rule (`config.go:483-491`) is **kept, with its rationale rewritten**: manager (root) and workers (subdirs) now legitimately coexist in one project, so the *project-collision* reason is gone — but the **subdir requirement itself stays**, now load-bearing for R4 (a worker mounting the whole root would defeat sibling isolation), and validation keeps "worker dir must be a proper non-empty subdir of tree". **Both name-collision rules also stay** (they now enforce scion agent-slug uniqueness in the shared project, not project-name collision). P2 must **rewrite the stale `config.go:485` comment** (which today justifies the rule via the per-worker-project register step that P2 deletes) — reword the reasoning, do **not** delete the rule.
+- **Non-git tree is enforced, not assumed.** R4's isolation holds only on a non-git tree (§4.2); P2 adds a **config-time guard** that refuses (or loudly warns) when `tree` or an ancestor is a git repo, rather than leaving it to operator discipline.
 - Messaging config keys renamed (`grove_to_grove` → `worker_to_worker`).
 
 ## 12. Isolation guarantees and validation gate
@@ -196,7 +197,7 @@ These become the acceptance checks for the implementation (extending the existin
 The pieces are tightly coupled (the single-project model drives bootstrap, dispatch, messaging, and reconciliation), so this is **one spec** but the implementation should be **phased** into sequential plans, roughly:
 
 - **P1 — Terminology + config surface.** grove→worker rename (identity-aware) and the config schema change, on the current structure, as a mostly-mechanical but reviewed base.
-- **P2 — Single-project model.** Collapse per-agent projects into one instance project: project registration, the Scion client scoping, broker worker-lifecycle, and guest state.
+- **P2 — Single-project model.** Collapse per-agent projects into one instance project: project registration, the Scion client scoping, broker worker-lifecycle, and guest state. Also in P2: **bump the `scion.version` pin** to a commit carrying both §5 fixes (and verify their presence); add the **config-time non-git guard** (§11); **rewrite the stale `config.go:485` comment**. P2's intermediate **stays bootable on the current dev-auth-open loopback hub** — the controller PAT + dev-auth-off is strictly P3 — so P2 lands as a working increment.
 - **P3 — Bootstrap + token plumbing.** Throwaway dev-auth server, controller PAT mint/persist, real hub dev-auth-off, `SCION_HUB_TOKEN` plumbing across apply/attach/msg/stop.
 - **P4 — Reconciliation, messaging, and the acceptance gate.** Fleet resume, constant-project messaging, and the §12 checks wired into `lever acceptance`.
 

@@ -195,18 +195,14 @@ func TestValidateRejectsWorkerDirDot(t *testing.T) {
 }
 
 func TestValidateRejectsGitTree(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tree := filepath.Join(root, "ws")
-	if err := os.Mkdir(tree, 0o755); err != nil {
+	tree := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tree, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	a := &App{Name: "demo", Backend: "orbstack", Tree: tree}
 	a.Broker.LLMAuth = "subscription"
 	if err := a.validateNonGitTree(); err == nil {
-		t.Fatalf("expected rejection: tree inside a git repo")
+		t.Fatalf("expected rejection: tree is itself a git repo")
 	}
 }
 

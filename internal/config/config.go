@@ -503,15 +503,18 @@ func (a *App) Validate() error {
 	return nil
 }
 
-// validateNonGitTree refuses a tree that sits inside a git repository. R4's
-// sibling isolation assumes a non-git tree; per-worker git workflows are
-// deferred (spec §13). Once the pinned Scion carries the --workspace git guard
-// a stray ancestor .git is harmless at mount time, but the model still targets
-// non-git trees, so we fail loudly at config time rather than silently degrade.
+// validateNonGitTree refuses a tree that is ITSELF a git repository (has its
+// own .git). R4's sibling isolation assumes a non-git tree; per-worker git
+// workflows are deferred (spec §13). It deliberately does not walk up to
+// ancestors: the pinned Scion's --workspace guard (P2 Task 5) plain-mounts
+// the exact tree dir, so an ancestor .git elsewhere in the checkout is never
+// exposed and is harmless — a plain subdirectory inside a larger git repo is
+// fine.
 func (a *App) validateNonGitTree() error {
-	if root, inside := treeInsideGitRepo(a.Tree); inside {
-		return fmt.Errorf("config: tree %q is inside a git repository (%s); lever targets non-git trees "+
-			"(per-worker git workflows are deferred). Point tree at a non-git directory.", a.Tree, root)
+	if treeIsGitRepo(a.Tree) {
+		return fmt.Errorf("config: tree %q is itself a git repository; lever targets non-git trees "+
+			"(per-worker git workflows are deferred, spec §13). A plain subdirectory inside a larger "+
+			"git repo is fine — point tree at a non-git directory (or a subdir) instead.", a.Tree)
 	}
 	return nil
 }

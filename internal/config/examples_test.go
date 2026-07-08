@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -20,22 +19,8 @@ func repoRoot(t *testing.T) string {
 func TestShippedExamplesLoadAndValidate(t *testing.T) {
 	root := repoRoot(t)
 	for _, name := range []string{"hello-worker", "two-agents-comms", "multi-project"} {
-		src := filepath.Join(root, "examples", name, "lever.yaml")
-		body, err := os.ReadFile(src)
-		if err != nil {
-			t.Fatalf("example %s: read %s: %v", name, src, err)
-		}
-		// Copy into a fresh non-repo temp dir before Load: the shipped example
-		// lives inside this project's own git checkout, and validateNonGitTree
-		// (added for P2) now rejects a tree nested under a `.git` ancestor. That
-		// guard targets real deployments, not the in-repo example fixtures, so
-		// exercise the config shape from a git-free location (t.TempDir() is
-		// never inside a repo) rather than weakening the guard for this test.
-		dst := filepath.Join(t.TempDir(), "lever.yaml")
-		if err := os.WriteFile(dst, body, 0o644); err != nil {
-			t.Fatalf("example %s: write copy: %v", name, err)
-		}
-		app, err := Load(dst)
+		p := filepath.Join(root, "examples", name, "lever.yaml")
+		app, err := Load(p)
 		if err != nil {
 			t.Fatalf("example %s: Load failed: %v", name, err)
 		}

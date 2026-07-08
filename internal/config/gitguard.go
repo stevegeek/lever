@@ -5,21 +5,19 @@ import (
 	"path/filepath"
 )
 
-// treeInsideGitRepo walks upward from dir; if dir or any ancestor contains a
-// `.git` entry (file or directory), it returns that repo root and true. lever's
-// isolation model (R4) targets non-git trees — the guard keeps an operator from
-// silently running the single-project model against a git working tree, whose
-// per-worker git workflow is deferred (spec §13).
-func treeInsideGitRepo(dir string) (string, bool) {
-	d := filepath.Clean(dir)
-	for {
-		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
-			return d, true
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			return "", false
-		}
-		d = parent
-	}
+// treeIsGitRepo reports whether dir itself contains a `.git` entry (file or
+// directory) — i.e. dir is a git repository root, not merely somewhere inside
+// one. lever's isolation model (R4) targets non-git trees; a tree that is
+// itself a git repo is the genuinely-deferred per-worker git case (spec §13)
+// and is refused.
+//
+// This deliberately does NOT walk upward to check ancestors. A tree that is a
+// plain subdirectory of a larger git repo (e.g. this repo's own shipped
+// example/testdata fixtures, or a deployment tree nested under an operator's
+// monorepo checkout) is fine: the pinned Scion's `--workspace` git guard
+// (P2 Task 5) plain-mounts the exact dir Scion is given, so an ancestor's
+// `.git` is never exposed into the mount. Only the tree's own `.git` matters.
+func treeIsGitRepo(dir string) bool {
+	_, err := os.Lstat(filepath.Join(filepath.Clean(dir), ".git"))
+	return err == nil
 }

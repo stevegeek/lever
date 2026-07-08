@@ -261,12 +261,29 @@ func TestWorkerStart_authz(t *testing.T) {
 	}
 }
 
+// TestWorkerList proves the list fan-out is collapsed to a SINGLE
+// List(instanceProject) call that returns the whole fleet (multiple workers),
+// not one call per declared worker.
 func TestWorkerList(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
-		testInstanceProject: {{Slug: "worker", Phase: "running", Activity: "building"}},
+		testInstanceProject: {
+			{Slug: "worker", Phase: "running", Activity: "building"},
+			{Slug: "helper", Phase: "suspended"},
+		},
 	}}
-	b := newTestBroker(t, rt, spec)
+	b := New(Config{
+		Tickets:  caTicketStore(t),
+		Registry: registry.New(),
+		Runtime:  rt,
+		Workers: []WorkerSpec{
+			{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()},
+			{Name: "helper", Workspace: "/lever/workers/helper", BootstrapDir: t.TempDir()},
+		},
+		BrokerCAPEM:     "CA-PEM",
+		BrokerURL:       "https://10.0.0.2:8080",
+		ManagerIdentity: "test-manager",
+		InstanceProject: testInstanceProject,
+	})
 	req := httptest.NewRequest("GET", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec := httptest.NewRecorder()
@@ -274,11 +291,17 @@ func TestWorkerList(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
+	if rt.listCalls != 1 {
+		t.Fatalf("List calls = %d, want exactly 1 (collapsed fan-out)", rt.listCalls)
+	}
+	if rt.listProjects[0] != testInstanceProject {
+		t.Fatalf("List project = %q, want the instance project %q", rt.listProjects[0], testInstanceProject)
+	}
 	var out struct {
 		Agents []scion.Agent `json:"agents"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if len(out.Agents) != 1 || out.Agents[0].Slug != "worker" || out.Agents[0].Phase != "running" {
+	if len(out.Agents) != 2 {
 		t.Fatalf("bad list: %+v", out.Agents)
 	}
 	// non-manager rejected

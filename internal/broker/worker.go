@@ -247,18 +247,14 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 	if !b.runtimeReady(w) {
 		return
 	}
-	all := []scion.Agent{}
-	for range b.workers {
-		agents, err := b.runtime.List(r.Context(), b.instanceProject)
-		if err != nil {
-			http.Error(w, "runtime error", http.StatusBadGateway)
-			return
-		}
-		all = append(all, agents...)
+	agents, err := b.runtime.List(r.Context(), b.instanceProject)
+	if err != nil {
+		http.Error(w, "runtime error", http.StatusBadGateway)
+		return
 	}
 	writeJSON(w, struct {
 		Agents []scion.Agent `json:"agents"`
-	}{Agents: all})
+	}{Agents: agents})
 }
 
 // stageBootstrap writes bs to <dir>/bootstrap.json (dir 0700, file 0600).

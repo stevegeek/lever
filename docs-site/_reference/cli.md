@@ -31,7 +31,7 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 |---|---|
 | `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each declared worker dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: files you've edited are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing (non-zero exit). Re-run after upgrading lever or adding a worker. |
 | `lever doctor` | Run real health checks — broker alive and serving, external tool backends reachable, manager credential file presence/size/mode, no stray `.mcp.json` in the tree, usable Go toolchain, scion project-registration consistency, operator-skills scaffold current — each failure printing a specific fix hint. Exits non-zero on any failure. `--machine`/`--backend` run the profile away from an instance root. |
-| `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → scion init/config/server → credential → register manager + workers → mint bootstrap → start manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
+| `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → init-machine → config-registry → bootstrap-token, a throwaway dev-auth hub mints the controller PAT → scion-server, dev-auth off → credential → register-project, one registration for the tree → mint-manager-bootstrap → start-manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress rules). `--machine`, `--tree`, `--allow-port`. Idempotent; rarely needed directly — `up`/`apply` call it for you. |
 | `lever backends` | List the containment backends (orbstack, lima) and the guarantees each declares — the matrix config validation checks your `backend:` choice against. |
 
@@ -42,7 +42,7 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 | `lever broker serve [config]` | Run the capability broker + first-party tools in the foreground (normally `up`/`apply` daemonize it for you — this is for debugging and supervised setups). |
 | `lever broker revoke <agent> [config]` / `lever revoke <agent>` | Revoke one agent on the running broker: its capability tokens stop verifying immediately. |
 | `lever broker bump-epoch [config]` | Revoke **all** outstanding tokens at once by raising the epoch floor. |
-| `lever acceptance [config]` | Bring up a real jail and drive the six live capability acceptance checks (enrolment, mint, gateway call, token strip, egress lockdown, renewal) — the merge gate for capability-layer changes. |
+| `lever acceptance [config]` | Bring up a real jail and drive the six live capability/egress acceptance checks — delegated-read, three scope-envelope denials (a disallowed table, a dropped narrowing filter, a worker self-minting an un-granted cap), egress-refused (allowlisted broker port reachable, admin port blocked), and revocation (a token stops working after `bump-epoch`) — the merge gate for capability-layer changes. |
 | `lever version` | Print the version. |
 
 ## `lever-manager` — in-jail orchestration

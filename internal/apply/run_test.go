@@ -1794,6 +1794,85 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 	}
 }
 
+// TestSingleProjectRegisterRunsOnceAcrossTwoWorkers is Task 6's apply-side
+// single-project integration proof (P2). Every register-project test above
+// configures at most ONE worker, which cannot distinguish "registration
+// collapsed to one per instance" from "one per worker that happens to equal
+// one because there's only one worker". With TWO workers configured
+// (workers/a, workers/b) the distinction is decisive: under the OLD
+// register-manager + N*register-worker model this would drive 3 separate
+// `scion init`/`hub link` calls (manager + worker a + worker b); the
+// collapsed single-project model must still show exactly ONE, entirely
+// against the single instance jail path "/lever" — proving the fan-out is
+// truly gone, not coincidentally absent.
+func TestSingleProjectRegisterRunsOnceAcrossTwoWorkers(t *testing.T) {
+	tree := t.TempDir() // real dir so file-writing steps can write into it
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+		Workers: []config.Worker{
+			{Name: "a", Dir: "workers/a"},
+			{Name: "b", Dir: "workers/b"},
+		},
+	}
+
+	// Point 1: Plan emits exactly ONE register-project step, targeting the
+	// instance tree — never one per worker.
+	var regSteps []Step
+	for _, s := range Plan(app, PlanOpts{}) {
+		if s.Kind == "register-project" {
+			regSteps = append(regSteps, s)
+		}
+	}
+	if len(regSteps) != 1 {
+		t.Fatalf("register-project steps = %+v, want exactly 1 (2 workers configured)", regSteps)
+	}
+	if regSteps[0].Target != tree {
+		t.Fatalf("register-project target = %q, want the instance tree %q", regSteps[0].Target, tree)
+	}
+
+	// Point 2: driving the register step invokes Deps.ScionProjectRegistered,
+	// `scion init`, and `scion hub link` each exactly ONCE, all against the
+	// single instance jail path "/lever" (never workers/a or workers/b).
+	var registeredCalls []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		ScionProjectRegistered: func(_ context.Context, wp string) (bool, error) {
+			registeredCalls = append(registeredCalls, wp)
+			return false, nil // force the destructive path so init/hub-link actually run
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(registeredCalls) != 1 || registeredCalls[0] != "/lever" {
+		t.Fatalf("ScionProjectRegistered calls = %+v, want exactly [\"/lever\"] (once, not per worker)", registeredCalls)
+	}
+
+	var initCalls, hubLinkCalls []string
+	for _, c := range f.Calls {
+		j := strings.Join(c.Args, " ")
+		if strings.Contains(j, "init --non-interactive") {
+			initCalls = append(initCalls, c.Dir)
+		}
+		if strings.Contains(j, "hub link") {
+			hubLinkCalls = append(hubLinkCalls, c.Dir)
+		}
+	}
+	if len(initCalls) != 1 || initCalls[0] != "/lever" {
+		t.Fatalf("scion init calls = %+v, want exactly one at /lever (the OLD per-worker model would show 3 for 2 workers + manager)", initCalls)
+	}
+	if len(hubLinkCalls) != 1 || hubLinkCalls[0] != "/lever" {
+		t.Fatalf("scion hub link calls = %+v, want exactly one at /lever", hubLinkCalls)
+	}
+}
+
 func TestStartUsesJailPath(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
 	f := exec.NewFakeRunner()

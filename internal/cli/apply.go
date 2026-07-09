@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -82,13 +83,15 @@ func jailProjectPath(tree, jailMount string) string {
 	return jailMount
 }
 
-// throwawayHubPort is the fixed, jail-internal port ensureControllerPAT starts
-// its throwaway dev-auth hub on. A truly random free port would need a
-// jail-side probe; a fixed high port distinct from 8080 (the real hub, started
-// dev-auth-OFF right after by the scion-server apply step) and the broker's
-// admin port is simpler and deterministic, and safe because the throwaway hub
-// never leaves jail loopback and is killed before any agent container exists
-// (the "agent-free window" — see the P3 plan's Global Constraints).
+// throwawayHubPort is the port ensureControllerPAT's throwaway dev-auth hub is
+// reached on — a distinct port from the real hub (8080). lever runs scion in
+// workstation (combined) mode, where the Hub API rides the web server's port and
+// the standalone --port flag is IGNORED (verified live: `--port 48080` binds
+// :8080); --web-port is what actually binds it (verified: `--web-port 48080`
+// binds :48080). ServerStart emits --web-port, so the throwaway lands here,
+// physically isolated from the real dev-auth-OFF hub the scion-server apply step
+// starts on 8080 right after. The throwaway's dev-auth window is agent-free +
+// jail-loopback only (the "agent-free window" — see the P3 plan).
 const throwawayHubPort = 48080
 
 // controllerPATScopes is the EXACT scope set the controller PAT is minted
@@ -118,13 +121,12 @@ var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read
 // jail exec.Runner buildApplyDeps already has (this function needs no other
 // backend access).
 //
-// LIVE-VALIDATION ITEMS (P4, not exercised by the unit test below): whether
-// the pinned scion CLI actually supports --port/--dev-auth/server
-// stop/hub token create --scopes (flagged since Task 1); whether
-// /home/scion/.scion/dev-token is the real residual dev-token path (best
-// guess from scion's dev-auth convention — confirm on a live run); whether
-// `scion server stop` exists at all in the pinned build (ServerStop's doc
-// comment notes a jail-pid-kill fallback if not — not implemented here).
+// Live-validated against scion 37a54a8e: `scion server start` runs workstation
+// (combined) mode where --port is inert and --web-port binds the Hub API
+// (ServerStart emits --web-port); `scion server stop`, `hub token create
+// --scopes`, and the scopes agent:manage/agent:attach/project:read all exist;
+// the residual dev-token is at the jail user's ~/.scion/dev-token (resolved
+// in-jail below, not assumed).
 func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerctl.State, tree, jailMount string) error {
 	if tok, _ := state.LoadControllerPAT(); tok != "" {
 		return nil // already minted; survives down→up
@@ -135,7 +137,7 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 	// readiness poll then times out — is still stopped rather than leaked as a
 	// dev-auth-on admin server. ServerStop tolerates a not-running server.
 	defer func() { _ = tw.ServerStop(ctx) }()
-	if err := tw.ServerStart(ctx, scion.ServerOpts{Port: throwawayHubPort, DevAuth: true}); err != nil {
+	if err := tw.ServerStart(ctx, scion.ServerOpts{WebPort: throwawayHubPort, DevAuth: true}); err != nil {
 		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
 	}
 
@@ -146,7 +148,11 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 	if err := tw.HubLink(ctx, jp); err != nil {
 		return fmt.Errorf("bootstrap-token: hub link: %w", err)
 	}
-	pat, err := tw.HubTokenCreate(ctx, controllerPATScopes)
+	// scion's `hub token create` requires --project (name or ID) and --name.
+	// The project is registered from jp, so its scion project name is jp's
+	// basename (jailMount is a constant mount root, so this is stable). The
+	// PAT's label is fixed — one controller PAT per instance.
+	pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-controller", controllerPATScopes)
 	if err != nil {
 		return fmt.Errorf("bootstrap-token: hub token create: %w", err)
 	}
@@ -160,7 +166,17 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 		// live-validation item, not implemented here.
 		_ = err
 	}
-	_ = removeJailFile(ctx, jr, "/home/scion/.scion/dev-token") // best-effort; live-validation item above
+	// Best-effort delete of scion's residual dev-token so it doesn't linger as an
+	// open admin credential once the real dev-auth-OFF hub takes over. scion writes
+	// it to <scionDir>/dev-token, default ~/.scion/dev-token (pkg/apiclient/devauth.go),
+	// where ~ is the JAIL USER's home (here /home/stephen — NOT /home/scion, which
+	// is the agent-container user). Resolve that home in-jail rather than hardcode
+	// it, then remove through the guarded removeJailFile helper.
+	if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
+		if h := strings.TrimSpace(home.Stdout); h != "" {
+			_ = removeJailFile(ctx, jr, h+"/.scion/dev-token")
+		}
+	}
 	return nil
 }
 

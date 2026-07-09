@@ -217,9 +217,10 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	f.Script("scion list", leverexec.Result{})
 	f.Script("scion init", leverexec.Result{})
 	f.Script("scion hub link", leverexec.Result{})
-	f.Script("scion hub token create", leverexec.Result{Stdout: "pat-wired-abc\n"})
+	f.Script("scion hub token create", leverexec.Result{Stdout: "Token: pat-wired-abc\n"})
 	f.Script("scion server stop", leverexec.Result{})
-	f.Script("sh", leverexec.Result{})
+	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -349,9 +350,10 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll, run inside ServerStart
 	f.Script("scion init", leverexec.Result{})
 	f.Script("scion hub link", leverexec.Result{})
-	f.Script("scion hub token create", leverexec.Result{Stdout: "pat-mint-xyz\n"})
+	f.Script("scion hub token create", leverexec.Result{Stdout: "Token: pat-mint-xyz\n"})
 	f.Script("scion server stop", leverexec.Result{})
-	f.Script("sh", leverexec.Result{})
+	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
 
 	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
@@ -378,7 +380,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	iLink := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub link") })
 	iToken := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") })
 	iStop := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server stop") })
-	iRm := callIndex(f.Calls, func(c leverexec.Call) bool { return c.Name == "sh" })
+	iRm := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "sh -c if") })
 	if iStart < 0 || iInit < 0 || iLink < 0 || iToken < 0 || iStop < 0 || iRm < 0 {
 		t.Fatalf("missing expected call(s); calls=%+v", f.Calls)
 	}
@@ -388,8 +390,8 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	// Fixed throwaway port, distinct from the real hub's 8080; dev-auth ON.
 	startArgs := strings.Join(f.Calls[iStart].Args, " ")
-	if !strings.Contains(startArgs, "--port 48080") || !strings.Contains(startArgs, "--dev-auth=true") {
-		t.Fatalf("throwaway server start args = %q, want --port 48080 --dev-auth=true", startArgs)
+	if !strings.Contains(startArgs, "--web-port 48080") || !strings.Contains(startArgs, "--dev-auth=true") {
+		t.Fatalf("throwaway server start args = %q, want --web-port 48080 --dev-auth=true", startArgs)
 	}
 
 	// init/hub-link run inside the jail project dir (the tree root).
@@ -400,19 +402,30 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("hub link dir = %q, want %q", f.Calls[iLink].Dir, jailMount)
 	}
 
-	// Exact scopes string — no agent:message (every interactive verb,
-	// message included, gates on agent:attach; see the P3 plan).
+	// scion requires --project (name/ID) and --name; project name is the jail
+	// mount's basename ("lever"). Exact scopes string — no agent:message (every
+	// interactive verb, message included, gates on agent:attach; see the P3 plan).
 	tokenArgs := strings.Join(f.Calls[iToken].Args, " ")
+	if !strings.Contains(tokenArgs, "--project lever") {
+		t.Fatalf("hub token create args = %q, want --project lever", tokenArgs)
+	}
+	if !strings.Contains(tokenArgs, "--name lever-controller") {
+		t.Fatalf("hub token create args = %q, want --name lever-controller", tokenArgs)
+	}
 	if !strings.Contains(tokenArgs, "--scopes agent:manage,agent:attach,project:read") {
 		t.Fatalf("hub token create args = %q, want --scopes agent:manage,agent:attach,project:read", tokenArgs)
 	}
+	// Token create runs in the project dir so scion resolves the project context.
+	if f.Calls[iToken].Dir != jailMount {
+		t.Fatalf("hub token create dir = %q, want %q", f.Calls[iToken].Dir, jailMount)
+	}
 
-	// Best-effort dev-token removal ran through the SAME jail runner as an
-	// `sh -c` guard (mirrors Deps.RemoveJailFile's script — see
-	// removeJailFileScript).
+	// Best-effort dev-token removal ran through the guarded removeJailFile helper
+	// (removeJailFileScript) against ~/.scion/dev-token, where ~ was resolved
+	// in-jail to the scripted $HOME (/home/tester) — not a hardcoded home.
 	rm := f.Calls[iRm]
-	if len(rm.Args) != 4 || rm.Args[0] != "-c" || rm.Args[2] != "_" || rm.Args[3] != "/home/scion/.scion/dev-token" {
-		t.Fatalf("dev-token removal args = %+v, want [-c <script> _ /home/scion/.scion/dev-token]", rm.Args)
+	if len(rm.Args) != 4 || rm.Args[0] != "-c" || rm.Args[2] != "_" || rm.Args[3] != "/home/tester/.scion/dev-token" {
+		t.Fatalf("dev-token removal args = %+v, want [-c <script> _ /home/tester/.scion/dev-token]", rm.Args)
 	}
 
 	callsAfterFirst := len(f.Calls)
@@ -461,9 +474,10 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll (throwaway AND real hub)
 	f.Script("scion init", leverexec.Result{})
 	f.Script("scion hub link", leverexec.Result{})
-	f.Script("scion hub token create", leverexec.Result{Stdout: "pat-e2e-round-trip\n"})
+	f.Script("scion hub token create", leverexec.Result{Stdout: "Token: pat-e2e-round-trip\n"})
 	f.Script("scion server stop", leverexec.Result{})
-	f.Script("sh", leverexec.Result{})
+	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -479,17 +493,17 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	if err := deps.EnsureControllerPAT(ctx); err != nil {
 		t.Fatalf("bootstrap-token step: %v", err)
 	}
-	if err := deps.Scion.ServerStart(ctx, scion.ServerOpts{Port: 8080, DevAuth: false}); err != nil {
+	if err := deps.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
 		t.Fatalf("scion-server step: %v", err)
 	}
 
 	// bootstrap-token precedes scion-server: the throwaway (48080, dev-auth
 	// ON) server start must land BEFORE the real hub's (8080, dev-auth OFF).
 	iThrowaway := callIndex(f.Calls, func(c leverexec.Call) bool {
-		return callHasPrefix(c, "scion server start --port 48080")
+		return callHasPrefix(c, "scion server start --web-port 48080")
 	})
 	iReal := callIndex(f.Calls, func(c leverexec.Call) bool {
-		return callHasPrefix(c, "scion server start --port 8080")
+		return callHasPrefix(c, "scion server start --web-port 8080")
 	})
 	if iThrowaway < 0 || iReal < 0 {
 		t.Fatalf("missing server-start call(s); calls=%+v", f.Calls)
@@ -500,8 +514,8 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 
 	// scion-server locks the real hub: port 8080, dev-auth off.
 	realArgs := strings.Join(f.Calls[iReal].Args, " ")
-	if !strings.Contains(realArgs, "--port 8080") || !strings.Contains(realArgs, "--dev-auth=false") {
-		t.Fatalf("real hub server start args = %q, want --port 8080 --dev-auth=false", realArgs)
+	if !strings.Contains(realArgs, "--web-port 8080") || !strings.Contains(realArgs, "--dev-auth=false") {
+		t.Fatalf("real hub server start args = %q, want --web-port 8080 --dev-auth=false", realArgs)
 	}
 
 	// The mint → persist → thread round-trip: the SAME client that started
@@ -541,7 +555,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 
 	// scion-server still runs on every apply (locking the hub is not itself
 	// gated on the mint) and must thread the SAME reused PAT.
-	if err := deps2.Scion.ServerStart(ctx, scion.ServerOpts{Port: 8080, DevAuth: false}); err != nil {
+	if err := deps2.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
 		t.Fatalf("scion-server step (2nd apply): %v", err)
 	}
 	// The 2nd apply's real hub server-start is the LAST such call (ServerStart
@@ -549,7 +563,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	// it is not simply the last entry in f.Calls).
 	iReal2 := -1
 	for idx, c := range f.Calls {
-		if callHasPrefix(c, "scion server start --port 8080") {
+		if callHasPrefix(c, "scion server start --web-port 8080") {
 			iReal2 = idx
 		}
 	}

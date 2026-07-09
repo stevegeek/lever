@@ -35,7 +35,7 @@ func TestBringupArgv(t *testing.T) {
 	c := New(f, Options{})
 	_ = c.InitMachine(context.Background())
 	_ = c.ConfigSetGlobal(context.Background(), "image_registry", "scionlocal")
-	_ = c.ServerStart(context.Background(), ServerOpts{Port: 8080, DevAuth: false})
+	_ = c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false})
 	_ = c.SecretSet(context.Background(), "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-rawtoken")
 	all := []string{}
 	for _, cc := range f.Calls {
@@ -45,7 +45,7 @@ func TestBringupArgv(t *testing.T) {
 	for _, want := range []string{
 		"init --machine --non-interactive",
 		"config set --global image_registry scionlocal",
-		"server start --port 8080 --dev-auth=false",
+		"server start --web-port 8080 --dev-auth=false",
 		// value is base64-encoded (scion >= da49e14 requires it): b64("sk-ant-rawtoken")
 		"hub secret set CLAUDE_CODE_OAUTH_TOKEN c2stYW50LXJhd3Rva2Vu",
 	} {
@@ -59,14 +59,14 @@ func TestServerStartArgvWithPort(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	c := New(f, Options{})
-	if err := c.ServerStart(context.Background(), ServerOpts{Port: 41000, DevAuth: false}); err != nil {
+	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 41000, DevAuth: false}); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) == 0 {
 		t.Fatal("expected at least one call")
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	if got != "server start --port 41000 --dev-auth=false" {
+	if got != "server start --web-port 41000 --dev-auth=false" {
 		t.Errorf("args = %q", got)
 	}
 }

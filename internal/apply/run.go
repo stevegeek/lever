@@ -216,7 +216,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		}
 		return d.EnsureControllerPAT(ctx)
 	case "scion-server":
-		return d.Scion.ServerStart(ctx, scion.ServerOpts{Port: 8080, DevAuth: false})
+		return d.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false})
 	case "credential":
 		read := d.ReadCred
 		if read == nil {

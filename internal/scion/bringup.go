@@ -60,9 +60,12 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 
 // ServerOpts configures `scion server start`.
 type ServerOpts struct {
-	// Port, when > 0, binds the Hub API to that port (--port). Zero lets scion
-	// pick its default.
-	Port int
+	// WebPort, when > 0, sets the port the Hub API is reachable on (--web-port).
+	// lever runs scion in workstation/combined mode, where the Hub API is mounted
+	// on the web server's port and the standalone --port flag is IGNORED (verified
+	// live — a `--port 48080` start binds :8080). So --web-port is what actually
+	// controls the Hub API port. Zero lets scion pick its default (8080).
+	WebPort int
 	// DevAuth is always emitted explicitly (--dev-auth=true|false) so the real
 	// hub is never left on the (dev-auth-on) default by omission.
 	DevAuth bool
@@ -72,8 +75,8 @@ type ServerOpts struct {
 // and returns.
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	args := []string{"server", "start"}
-	if o.Port > 0 {
-		args = append(args, "--port", strconv.Itoa(o.Port))
+	if o.WebPort > 0 {
+		args = append(args, "--web-port", strconv.Itoa(o.WebPort))
 	}
 	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
 	// Idempotent: tolerate an already-running server on re-apply; waitHubReady

@@ -36,12 +36,21 @@ features:
       pinned at mint time.
 ---
 
-Lever wraps [Scion](https://github.com/GoogleCloudPlatform/scion), Google's
-container-based agent orchestrator, in a **containment-and-credential boundary**.
-Scion runs the agents; Lever keeps your real model key out of every container and
-seals the jail off from your host and LAN, so you can point autonomous coding
-agents at real work without handing them your secrets. Close egress to the broker
-alone when you want nothing else reachable.
+Lever runs **multiagent fleets of coding agents under strong containment** — on
+your laptop or a cloud instance. It wraps
+[Scion](https://github.com/GoogleCloudPlatform/scion), Google's container-based
+agent orchestrator, in a **containment-and-credential boundary**: Scion and every
+agent it runs (via rootless podman) live inside one isolated VM with no host
+filesystem access, no ambient authority, and a locked-down egress allowlist. A
+**capability broker stays on the host**, outside the jail, and mediates everything
+that crosses it — the agents' credentials, their tool calls, and Scion's own hub
+calls — so your real model key never lands in a container, and you can close egress
+to the broker alone when you want nothing else reachable.
+
+A fleet is a **manager** agent with visibility over the whole project tree and
+broker-granted authority to orchestrate the others, plus **worker** agents each
+confined to a subtree with a narrower set of tool grants. Point them at real work
+without handing them your secrets.
 
 **Platforms today:** macOS on Apple Silicon with [OrbStack](https://orbstack.dev)
 is the validated path. A Lima backend (targeting Linux and non-OrbStack macOS) is

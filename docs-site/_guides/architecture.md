@@ -33,7 +33,7 @@ graph TD
     subgraph vm[OrbStack VM, the one hardware-virtualization boundary]
         subgraph jail[Isolated machine, THE JAIL]
             SS["Scion server + runtime broker<br/>one project for the whole instance"]
-            RD[rootless dockerd]
+            RD[rootless podman]
             FW{{egress allowlist<br/>iptables / ip6tables<br/>enforced in jail netns}}
             subgraph agents[Agent containers, rootless, same project]
                 MGR[Manager agent, the coordinator]
@@ -128,7 +128,7 @@ non-git tree roots and config validation enforces it.
 |---|---|---|
 | `lever` (Go binary) | operator CLI + entry point; drives Scion; provisions the jail | **core** (runs on host) |
 | Scion server + Scion broker | container lifecycle, sessions, attach/resume, typed messaging | core (runs inside the jail) |
-| rootless dockerd | the container runtime the Scion broker drives (rootless, see security-model.md) | core (inside the jail) |
+| rootless podman | the container runtime the Scion broker drives (rootless, see security-model.md) | core (inside the jail) |
 | Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls, and relays typed agent messaging (`/msg/send`, `/msg/list`) | **core** (runs on host) |
 | Manager **runtime/role** | the coordinator: a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
 | Manager **prompt / skills / tool (MCP) config** | what makes it *this* manager | **instance-supplied config** |
@@ -190,7 +190,7 @@ authority on *what* and *whether done*.
 
 `lever` is the single command an operator runs on the host. It:
 
-1. Ensures the jail (isolated machine) is up, with rootless Docker, the Scion server/broker, and
+1. Ensures the jail (isolated machine) is up, with rootless podman, the Scion server/broker, and
    the egress allowlist applied.
 2. Ensures the manager agent is up, resuming the prior conversation if it was suspended, creating
    it if absent, attaching if already running.
@@ -222,5 +222,5 @@ workers need. Two patterns, both instance choices:
 **Filesystem performance note:** compute nesting is near-native, but files served from the host via
 the project-tree mount cross OrbStack's virtiofs, which is slow for metadata-heavy operations (large
 dependency installs). A worker that runs its *own* Docker compounds overlay filesystems; prefer
-sibling containers (sharing the jail's rootless daemon) over a nested daemon. See
+sibling containers (sharing the jail's rootless podman) over a nested daemon. See
 [security-model.md §2.3](/security-model/) for the rootless requirement.

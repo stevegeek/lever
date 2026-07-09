@@ -30,14 +30,14 @@ behaving.**
 ## 1. The core idea: put the boundary *outside* the runtime
 
 Scion's **broker** (its host-side component that creates containers and applies mounts) is a
-*confused deputy*: it asks the **Docker daemon** to bind-mount host paths and to join networks, and
-the daemon obliges. Concretely, the escape that motivated this design works because Scion's **hub
+*confused deputy*: it asks the **container runtime** to bind-mount host paths and to join networks, and
+the runtime obliges. Concretely, the escape that motivated this design works because Scion's **hub
 performs no path validation**, any caller can register a project provider with an arbitrary host
 path, and the broker will then mount it (see §9).
 
-The key realisation: **the real boundary is the Docker daemon the runtime drives, plus the
-environment that daemon runs in, not the runtime's code.** Constrain the daemon's filesystem and
-network view, and the runtime can ask for anything it likes; it cannot exceed what the environment
+The key realisation: **the real boundary is the container runtime Scion drives, plus the
+environment that runtime runs in, not the runtime's code.** Constrain the runtime's filesystem and
+network view, and it can ask for anything it likes; it cannot exceed what the environment
 physically permits. This is why **no fork of Scion is needed**, containment is enforced by the jail
 around it.
 
@@ -103,17 +103,19 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 container is in a separate namespace from the rules and cannot flush them; reaching the rules would
 require a container/namespace escape (which reduces to the kernel/runtime caveats in §8).
 
-### 2.3 Rootless Docker (required)
+### 2.3 Rootless podman (required)
 
-Inside an isolated machine, **rootful Docker does not work** and **rootless Docker is required.** An
-isolated machine applies a seccomp filter that blocks the `bpf()` syscall, which rootful `runc`
-needs to program the cgroup-v2 device controller; containers fail with
+Scion runs the agents in **rootless podman** (it auto-prefers podman over Docker; a rootless Docker
+daemon is provisioned in the guest too, but the agent containers are podman). Inside an isolated
+machine, **rootful containers do not work** and a **rootless runtime is required.** An isolated
+machine applies a seccomp filter that blocks the `bpf()` syscall, which a rootful OCI runtime
+(`runc`/`crun`) needs to program the cgroup-v2 device controller; containers fail with
 `bpf_prog_query(BPF_CGROUP_DEVICE) failed: operation not permitted`. This is the isolation hardening
 itself, **not** a missing capability (the machine has full capabilities; a *non-isolated* machine
-runs rootful nested Docker fine). Rootless `runc` does not manage device cgroups, so it never calls
-`bpf()` and containers run normally. Rootless is also a security **bonus**: an extra user-namespace
-layer around every agent. On the OrbStack VM's modern kernel the rootless daemon uses native
-`overlayfs` (not the slow userspace `fuse-overlayfs`), so the performance cost is small.
+runs rootful nested containers fine). A rootless runtime does not manage device cgroups, so it never
+calls `bpf()` and containers run normally. Rootless is also a security **bonus**: an extra
+user-namespace layer around every agent. On the OrbStack VM's modern kernel the rootless runtime uses
+native `overlayfs` (not the slow userspace `fuse-overlayfs`), so the performance cost is small.
 
 ### 2.4 Substrates: the jail is a contract, not a product
 
@@ -178,7 +180,7 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
   guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
   the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
-  this surface reaches VM root, not the host, consistent with the §8 "containing daemon authority
+  this surface reaches VM root, not the host, consistent with the §8 "containing runtime authority
   inside the jail" stance (in-jail privilege escalation is accepted; the jail's own bound is not).
 - **The jail VM survives host reboots, and also `lever stop`.** It is destroyed only by `lever
   destroy` (`limactl delete --force`; `lever down` is a deprecated alias); there is no
@@ -571,13 +573,13 @@ scenario, and what it does not.
     authorize on the token alone if Claude Code presented no client cert. The shipped code does the
     opposite, `ca.RequireAgent` runs first and returns 403 with no cert, so the `capability(llm)`
     token is always CN-bound; there is no non-bound path.
-- **Containing daemon authority inside the jail.** The architecture depends on the Scion broker
-  driving a Docker daemon. Any agent that holds the rootless Docker socket directly can launch
+- **Containing runtime authority inside the jail.** The architecture depends on the Scion broker
+  driving the container runtime. Any agent that holds the rootless podman socket directly can launch
   arbitrary (including `--privileged`) containers *within the jail*. (No agent, manager included,
   holds Scion hub authority itself, that lives host-side only, gated by the controller PAT, §4.2,
   so an agent driving the hub to launch containers is not a route here.) Containment of direct
-  daemon-socket access rests entirely on the jail's filesystem/network bound and the kernel, not on
-  denying daemon access.
+  runtime-socket access rests entirely on the jail's filesystem/network bound and the kernel, not on
+  denying runtime access.
 - **A separate kernel.** An isolated machine shares the host VM's kernel, and the manager and all
   workers share that one kernel *with each other*. So a kernel-level escape from any single agent
   defeats inter-agent isolation wholesale and reaches the VM, not merely host-secret protection.
@@ -617,12 +619,12 @@ Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
   was unreachable (100% packet loss) while a host loopback tool server answered via the alias (over
   both IPv4 and IPv6); an egress allowlist then permitted one tool port and dropped the rest, and
   the rule still held for a rootless `--network=host` container (the topology agents actually use).
-- **The runtime runs inside the jail.** Rootless Docker runs containers (native `overlayfs`); the
+- **The runtime runs inside the jail.** Rootless podman runs containers (native `overlayfs`); the
   Scion binary builds and runs; a rootless host-networked container obeys the egress allowlist.
 
 What is **not** yet validated (pending the full-system test): the project-tree mount's *allow* side
 (that exactly the chosen tree is present and nothing else), the real manager Claude agent under
-rootless Docker, the manager's MCP reachability in practice, and a live run of the §4
+rootless podman, the manager's MCP reachability in practice, and a live run of the §4
 single-project isolation guarantee against a real `scion start` (the code is merged and the
 required Scion fixes are in the pinned commit, but there is no wired acceptance check for it yet,
 see §4.2).

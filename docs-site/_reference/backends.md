@@ -43,7 +43,7 @@ another.
 ### `orbstack` — reference
 
 macOS on Apple Silicon with [OrbStack](https://orbstack.dev). The runtime, the Scion server/broker,
-rootless Docker, and every agent run inside one OrbStack **isolated machine** that shares no host
+rootless podman, and every agent run inside one OrbStack **isolated machine** that shares no host
 files and has its own network namespace. This is the validated substrate today and the reference the
 other backends are measured against. Its trade: a **single kernel** shared across the manager and all
 workers (a kernel-level container escape reaches the whole jail — see [security model §7](/security-model/)).

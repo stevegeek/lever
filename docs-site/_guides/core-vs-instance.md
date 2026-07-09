@@ -25,7 +25,7 @@ graph TD
         MGR[manager runtime/role<br/>singleton, whole-tree workspace, event-watcher]
         BR[notification bridge<br/>mechanism]
         PM[directory-project model]
-        JAIL[jail provisioning<br/>isolated machine + rootless Docker + egress allowlist]
+        JAIL[jail provisioning<br/>isolated machine + rootless podman + egress allowlist]
         IMG[generic minimal agent base image]
         BIN[lever binary]
         DOCS[architecture + security docs]

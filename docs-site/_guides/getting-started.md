@@ -110,7 +110,7 @@ harness plus lever's binaries and boot hook, nothing else. If your agents need a
 or a project CLI, write a small instance Dockerfile `FROM lever-claude:latest` that adds it, point
 `manager.image` (and any worker `image:`) at your tag, and — importantly — if your added layer does
 root-level work under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and
-`USER scion`. The jail runs rootless Docker, where a root-owned home is unwritable by the agent and
+`USER scion`. The jail runs rootless podman, where a root-owned home is unwritable by the agent and
 silently breaks its boot hook. Keep instance-specific tooling in that layer, not in the framework
 image.
 

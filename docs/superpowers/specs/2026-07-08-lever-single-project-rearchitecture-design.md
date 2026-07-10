@@ -1,6 +1,7 @@
 # Lever single-project re-architecture — design spec
 
-**Status:** design spec for review · 2026-07-08
+**Status:** implemented (P1–P4) · 2026-07-08, updated 2026-07-10
+**Implementation note (2026-07-10) — supersedes the "zero fork" framing wherever it appears (§1, §5 heading + pin recipe, and the `-w <root>/sub` absolute-workspace mechanism in §4.1 and the §12 acceptance line):** the "no lever-specific Scion fork" claim held for the two originally-submitted PRs but did **not** survive the R4 crux (§2). Confining each worker to its subdir needed a *third* Scion change — a project-relative `--workspace-subdir` mount with a containment guard — because Scion's hub path **discards a per-agent absolute `--workspace`** for directory projects (so the `-w <root>/sub` mechanism §4.1/§5/§12 describe does not actually isolate a worker; every agent falls back to the whole root). That feature lives on fork branch `feat/per-agent-workspace-subpath`, **not yet upstreamed**; until it lands, worker isolation is delivered (and was live-validated 2026-07-10) by building Scion from the fork (`scion.source`), not the pinned `scion.version`. This stays consistent with R9 (*minimize, ideally zero* Scion changes) — one small, upstreamable addition, not a maintained fork — but the pin recipe in §5 must additionally include `--workspace-subdir`, and the "zero fork" wording is now aspirational rather than current.
 **Supersedes framing in:** `drafts/2026-07-08-lever-on-scion-rearchitecture-findings.md` (candidates + clean-room spike record). This spec consolidates only the locked decisions into an implementation-facing form.
 **Clean break:** lever is prerelease. No backward compatibility with the current grove-per-project model is required or attempted.
 

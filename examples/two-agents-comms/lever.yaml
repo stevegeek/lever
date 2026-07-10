@@ -3,6 +3,10 @@ backend: orbstack
 tree: workspace
 scion:
   version: 37a54a8e   # pin a scion commit; fetched + cross-compiled into the jail
+  # NOTE: dispatching workers needs Scion's `--workspace-subdir` subtree-isolation
+  # feature (fork branch feat/per-agent-workspace-subpath), not yet in this
+  # pinned commit. Until it's upstreamed, build from the fork instead: swap the
+  # `version:` line for `source: /path/to/scion` checked out on that branch.
 # api-key is the secure default (real key never in the container) but needs a
 # Console API key; this demo opts into subscription (your Claude OAuth token).
 broker:

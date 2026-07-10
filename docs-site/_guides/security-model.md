@@ -17,13 +17,16 @@ behaving.**
 > strips it, injects the real Console key host-side), guarded by `make test-apikey-e2e`; container boot
 > enrols the agent and registers the broker tools over mTLS; the **single-project model** (§4) — one
 > Scion project per instance, the real hub running dev-auth off, lifecycle driven only by a host-only
-> controller PAT, and worker↔worker isolation by defense-by-absence — is implemented and merged.
+> controller PAT, and worker↔worker isolation by defense-by-absence — is implemented (worker
+> isolation currently relies on a Scion `--workspace-subdir` addition carried on our fork, not yet
+> upstreamed; see §4.1).
 > *Still pending:* the full in-container claude driving a first-party tool
 > (`/mcp/db/`) end-to-end, mid-session token-refresh pickup (the agent reads `ANTHROPIC_AUTH_TOKEN`
 > once at startup, the 12h renew sidecar runs, but a running session's pickup of a rotated token is
 > unverified), and a **dedicated live acceptance gate for the single-project isolation guarantee**:
-> the mechanism (§4) is merged and the required upstream Scion fixes are present in the pinned
-> commit, but the checks that would exercise it against a real `scion start` (sibling subdirectories,
+> the mechanism (§4) is implemented, though worker isolation currently requires the fork-only
+> `--workspace-subdir` addition (not yet in the pinned `scion.version`; see §4.1), and the checks
+> that would exercise it against a real `scion start` (sibling subdirectories,
 > a stray ancestor `.git`, the controller PAT's exact scopes) are not yet wired into
 > `lever acceptance`.
 
@@ -38,8 +41,15 @@ path, and the broker will then mount it (see §9).
 The key realisation: **the real boundary is the container runtime Scion drives, plus the
 environment that runtime runs in, not the runtime's code.** Constrain the runtime's filesystem and
 network view, and it can ask for anything it likes; it cannot exceed what the environment
-physically permits. This is why **no fork of Scion is needed**, containment is enforced by the jail
-around it.
+physically permits. This is why **no fork of Scion is needed** for containment, it is enforced by
+the jail around it.
+
+> This concerns the **host-containment** boundary (host filesystem, credentials, and LAN). A
+> separate, finer boundary — confining each *worker* to its own subtree so siblings cannot read
+> one another — currently relies on one small Scion addition (`--workspace-subdir`) carried on our
+> fork branch `feat/per-agent-workspace-subpath`, pending an upstream PR. That addition does **not**
+> affect the host-containment guarantee above: a worker that mounted the whole tree would still be
+> fully jailed from the host; it simply would not be isolated from its sibling workers.
 
 ## 2. The jail
 
@@ -254,13 +264,22 @@ container: it is unreadable at the kernel/VM boundary, not merely hidden by conv
 permission (container UIDs are synced to the host UID, so file permissions alone give no
 inter-agent isolation here).
 
-This guarantee holds only on a **non-git tree root**: a git repository at the tree root can pull
-Scion's mount builder into a worktree branch that also bind-mounts the whole `.git` object store,
-through which a worker could read *committed* sibling content. Two things close this: config
-validation refuses (or warns on) a git tree root at load time, and the pinned Scion always
-plain-mounts an explicit `--workspace` regardless of a stray ancestor `.git` (the upstream
-`--workspace` git-guard fix; the current `scion.version` pin carries it). A worker's *own*
-subdirectory may still contain its own git repository, that is unaffected.
+How the subdir mount is delivered: a per-agent **absolute** `--workspace` does not survive Scion's
+hub path for a directory project — the hub discards it, so every agent would otherwise fall back to
+mounting the whole project root. Worker confinement therefore uses a **project-relative
+`--workspace-subdir`** mount with a containment guard (rejecting `..`/symlink escape), which Scion
+resolves within the project root and mounts as exactly that subtree. This is a small Scion addition
+currently carried on our fork branch `feat/per-agent-workspace-subpath`, **not yet upstreamed and
+not in the pinned `scion.version`** — so dispatching workers today requires building Scion from the
+fork (`scion.source`). Live-validated 2026-07-10 (worker `scratch` mounted `/lever/workers/scratch`,
+not `/lever`).
+
+This guarantee also holds only on a **non-git tree root**: a git repository at the tree root can
+pull Scion's mount builder into a worktree branch that also bind-mounts the whole `.git` object
+store, through which a worker could read *committed* sibling content. Config validation refuses (or
+warns on) a git tree root at load time; the `--workspace-subdir` guard likewise resolves within the
+project root regardless of a stray ancestor `.git`. A worker's *own* subdirectory may still contain
+its own git repository, that is unaffected.
 
 **The manager still sees everything, by design.** Because the manager's mount is the whole tree,
 and Scion does not shadow child workspace dirs inside a broader mount, the manager's live view
@@ -310,8 +329,9 @@ there, including the knowledge base and every worker's subdirectory, that is an 
 giving the manager whole-tree oversight (§7), not a gap in the worker-isolation model above. **Not
 yet done:** the live acceptance checks that would exercise this guarantee against a real
 `scion start` (sibling subdirectories, a stray ancestor `.git`, the controller PAT's exact scopes)
-are not yet wired into `lever acceptance`, the mechanism is merged and the required Scion fixes are
-present in the pinned commit, but the dedicated live gate for it does not exist today.
+are not yet wired into `lever acceptance`. The mechanism is implemented and was live-validated once
+by hand (2026-07-10), but worker isolation currently depends on the fork-only `--workspace-subdir`
+addition (not yet in the pinned commit; see §4.1), and no dedicated automated live gate exists today.
 
 ## 5. The operator boundary: the config is host-side code, kept out of the mount
 
@@ -625,9 +645,10 @@ Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 What is **not** yet validated (pending the full-system test): the project-tree mount's *allow* side
 (that exactly the chosen tree is present and nothing else), the real manager Claude agent under
 rootless podman, the manager's MCP reachability in practice, and a live run of the §4
-single-project isolation guarantee against a real `scion start` (the code is merged and the
-required Scion fixes are in the pinned commit, but there is no wired acceptance check for it yet,
-see §4.2).
+single-project isolation guarantee against a real `scion start` (the lever code is implemented and
+was live-validated once by hand, but worker isolation currently depends on the fork-only
+`--workspace-subdir` Scion addition, not yet in the pinned commit, and there is no wired acceptance
+check for it yet, see §4.1 and §4.2).
 
 > Validation was performed by checking reachability and file presence by size/permission, never by
 > printing secret contents.

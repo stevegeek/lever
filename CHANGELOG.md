@@ -28,6 +28,16 @@ version bump moves the block under the new version heading.
   auto-updater remains disabled (updates by rebuild, never at runtime).
 
 ### Fixed
+- Workers now mount **only their own subtree** at `/workspace`. `lever`
+  dispatches each worker with `scion start --workspace-subdir workers/<name>`
+  (project-relative, containment-guarded) instead of an absolute `--workspace`,
+  so a worker can no longer see the manager's tree — and the dispatch-time
+  enrolment failure where a worker read the manager's bootstrap and inherited a
+  spent ticket is gone with it. This relies on Scion's `--workspace-subdir`
+  subtree-isolation feature (fork branch `feat/per-agent-workspace-subpath`,
+  not yet upstreamed); it is **not in the pinned `scion.version`**, so
+  dispatching workers today requires building Scion from that fork
+  (`scion.source`) until the addition lands upstream.
 - `lever up` self-heals an expired agent mTLS leaf: resume now re-stages a
   fresh enrolment ticket before reconnecting, so an instance left down longer
   than the leaf's lifetime no longer needs a full `lever destroy && lever up`

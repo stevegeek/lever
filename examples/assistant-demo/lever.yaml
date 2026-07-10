@@ -20,6 +20,10 @@ tree: workspace              # only workspace/ is mounted; this file + manager.m
 
 scion:
   version: 37a54a8e          # pin a scion commit; fetched + cross-compiled into the jail
+  # NOTE: dispatching workers needs Scion's `--workspace-subdir` subtree-isolation
+  # feature (fork branch feat/per-agent-workspace-subpath), not yet in this
+  # pinned commit. Until it's upstreamed, build from the fork instead: swap the
+  # `version:` line for `source: /path/to/scion` checked out on that branch.
 
 broker:
   llm_auth: subscription     # personal setup: your Claude OAuth token (see manager.credential_file)

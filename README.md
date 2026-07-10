@@ -130,6 +130,11 @@ The honest gaps — things you should know before relying on it:
   [#2](https://github.com/stevegeek/lever/issues/2)) — install via `go install` or a clone. A Go
   toolchain is also required at *runtime* (Scion is compiled at apply time), and the agent image
   is built locally with Docker.
+- **Worker subtree isolation currently needs our Scion fork.** Each worker is confined to its own
+  `workers/<name>` subtree by a `--workspace-subdir` feature that lives on our fork branch
+  (`feat/per-agent-workspace-subpath`) and is not yet upstreamed. Until it lands, dispatching
+  workers requires building Scion from the fork (`scion.source`) rather than the pinned
+  `scion.version` — the shipped example pins do not include the flag.
 
 Docs: [getting-started](docs-site/_guides/getting-started.md), [capabilities](docs-site/_guides/capabilities.md),
 [operations](docs-site/_guides/operations.md), [CLI](docs-site/_reference/cli.md),

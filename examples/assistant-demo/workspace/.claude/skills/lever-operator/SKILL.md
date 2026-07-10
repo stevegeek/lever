@@ -1,7 +1,7 @@
 ---
 name: lever-operator
 description: Use when calling any brokered MCP tool, minting capabilities, messaging agents or the operator, or dispatching or monitoring workers — how to operate inside the lever jail.
-lever-version: 0.3.1
+lever-version: 0.4.0
 ---
 
 # Operating inside Lever (manager)

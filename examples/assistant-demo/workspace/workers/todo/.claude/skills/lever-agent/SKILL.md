@@ -1,7 +1,7 @@
 ---
 name: lever-agent
 description: Use when calling any brokered MCP tool, minting capabilities, or messaging the manager — how to operate as a lever worker agent.
-lever-version: 0.3.1
+lever-version: 0.4.0
 ---
 
 # Operating inside Lever (worker agent)

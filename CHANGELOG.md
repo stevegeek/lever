@@ -7,6 +7,15 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-10
+
+The single-project re-architecture (P1–P4): one Scion project per instance,
+the manager and all workers as agents in it, the real hub running dev-auth-off
+behind a host-side controller PAT. **Worker subtree isolation depends on
+Scion's `--workspace-subdir` feature, which is not yet upstreamed** (fork branch
+`feat/per-agent-workspace-subpath`); dispatching workers requires building Scion
+from that fork (`scion.source`) until it lands — see the Fixed entry below.
+
 ### Added
 - Single-project model: the manager and all workers now share one Scion
   project (the jail mount root), with workers living as in-place subdir

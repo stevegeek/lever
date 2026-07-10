@@ -15,9 +15,12 @@ Lever is the **orchestration and interface layer**; [Scion](https://github.com/G
 the **runtime engine** underneath (containers, sessions, attach/resume, typed messaging). You talk
 to one tool, `lever`, and it drives Scion for you.
 
-> **Status (v0.3.1):** working end-to-end on **macOS (OrbStack)** and **Linux (Lima/QEMU-KVM)**.
+> **Status (v0.4.0):** the single-project architecture — one Scion project per instance, manager +
+> workers as agents in it, the real hub running dev-auth-off behind a host-side controller PAT —
+> working end-to-end on **macOS (OrbStack)** and **Linux (Lima/QEMU-KVM)**.
 > Install with `go install github.com/stevegeek/lever/cmd/lever@latest`; the agent image is built
-> locally (`make lever-image`). Gaps to know about before you rely on it are listed in
+> locally (`make lever-image`). Gaps to know about before you rely on it — including the temporary
+> Scion-fork dependency for worker subtree isolation — are listed in
 > [Where this is today](#where-this-is-today).
 
 ## Why

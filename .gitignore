@@ -13,6 +13,7 @@ internal/cli/testdata/acceptance/docs/
 # Local design drafts (not tracked)
 drafts/
 docs/audits/
+docs/superpowers/plans/
 
 # Per-instance runtime state + staged binaries from running the examples
 # (broker keys/state, deposited bootstrap, scion project markers, cross-compiled

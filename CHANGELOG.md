@@ -7,12 +7,35 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+- Single-project model: the manager and all workers now share one Scion
+  project (the jail mount root), with workers living as in-place subdir
+  workspaces (`workers/<name>`) instead of separate per-agent projects.
+  Collapses `register-manager` + N×`register-worker` into one
+  `register-project` apply step and the worker list into a single
+  instance-project query. (P2 of the single-project re-architecture.)
+- Controller-PAT bootstrap: `lever apply` mints a scoped controller PAT
+  (`agent:manage`, `agent:attach`, `project:read`) via a throwaway dev-auth
+  server, persists it `0600` under `.lever-state/`, and threads it into every
+  scion client (including attach). The real hub now runs with
+  `--dev-auth=false` by default. (P3 of the single-project re-architecture.)
+
 ### Changed
 - Renamed the `grove` concept to `worker` throughout: config keys `groves:`→`workers:` and `grove_to_grove:`→`worker_to_worker:`, the `--grove`/`-grove` CLI flags → `--worker`/`-worker`, broker routes `/grove/*`→`/worker/*`, and the `groves/<name>` workspace convention → `workers/<name>`. Prerelease clean break — no migration. (P1 of the single-project re-architecture.)
 - The agent image (`image/lever-claude`) pins Claude Code explicitly (`ARG
   CLAUDE_CODE_VERSION`) instead of inheriting whatever the scion base image
   baked. Bump the ARG + rebuild + `lever apply` to upgrade; the in-container
   auto-updater remains disabled (updates by rebuild, never at runtime).
+
+### Fixed
+- `lever up` self-heals an expired agent mTLS leaf: resume now re-stages a
+  fresh enrolment ticket before reconnecting, so an instance left down longer
+  than the leaf's lifetime no longer needs a full `lever destroy && lever up`
+  to recover. Adds a `lever doctor` check that detects the expired-leaf
+  handshake failure in the broker log.
+- `lever attach <worker>` and `lever msg send --to <worker>` now target the
+  single instance project instead of a stale per-worker project path,
+  fixing worker addressing under the single-project model. (P4 §9)
 
 ## [0.3.1] - 2026-07-06
 

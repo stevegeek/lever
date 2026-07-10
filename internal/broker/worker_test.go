@@ -76,7 +76,7 @@ const testInstanceProject = "/lever"
 
 func TestWorkerSpecLookup(t *testing.T) {
 	b := New(Config{
-		Workers: []WorkerSpec{{Name: "worker", Workspace: "/lever/workers/worker"}},
+		Workers: []WorkerSpec{{Name: "worker", WorkspaceSubdir: "workers/worker"}},
 	})
 	if _, ok := b.workerSpec("worker"); !ok {
 		t.Fatal("expected worker spec present")
@@ -132,7 +132,7 @@ func callWorker(t *testing.T, b *Broker, path, body, cn string) *httptest.Respon
 func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	dir := t.TempDir()
 	hostWorkspace := filepath.Join(t.TempDir(), "workers", "worker") // does NOT exist yet
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", HostWorkspace: hostWorkspace,
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: hostWorkspace,
 		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
@@ -171,7 +171,7 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 		t.Fatalf("start calls = %d, want 1", len(rt.started))
 	}
 	got := rt.started[0]
-	if got.Project != testInstanceProject || got.Workspace != "/lever/workers/worker" ||
+	if got.Project != testInstanceProject || got.WorkspaceSubdir != "workers/worker" ||
 		got.Worker != "worker" || got.Image != "img:1" || !got.APIKey {
 		t.Fatalf("bad StartOpts: %+v", got)
 	}
@@ -184,7 +184,7 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 }
 
 func TestWorkerStart_running_isNoop(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "worker", Phase: "running"}},
 	}}
@@ -199,7 +199,7 @@ func TestWorkerStart_running_isNoop(t *testing.T) {
 }
 
 func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker",
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		BootstrapDir: filepath.Join(t.TempDir(), ".lever")}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
@@ -225,7 +225,7 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 // ticket, stages a bootstrap, or calls scion start.
 func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	bootstrapDir := filepath.Join(t.TempDir(), ".lever")
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker",
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		BootstrapDir: bootstrapDir}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "worker", Phase: "exited"}},
@@ -249,7 +249,7 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 }
 
 func TestWorkerStart_authz(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	b := newTestBroker(t, &fakeRuntime{agents: map[string][]scion.Agent{}}, spec)
 	// wrong CN
 	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
@@ -276,8 +276,8 @@ func TestWorkerList(t *testing.T) {
 		Registry: registry.New(),
 		Runtime:  rt,
 		Workers: []WorkerSpec{
-			{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()},
-			{Name: "helper", Workspace: "/lever/workers/helper", BootstrapDir: t.TempDir()},
+			{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()},
+			{Name: "helper", WorkspaceSubdir: "workers/helper", BootstrapDir: t.TempDir()},
 		},
 		BrokerCAPEM:     "CA-PEM",
 		BrokerURL:       "https://10.0.0.2:8080",
@@ -317,7 +317,7 @@ func TestWorkerList(t *testing.T) {
 // TestWorkerNilRuntime_returns502 proves that when the scion runtime is unwired
 // (nil) the worker handlers return 502, not a panic from a nil-interface call.
 func TestWorkerNilRuntime_returns502(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
 	b := New(Config{
 		Tickets:         caTicketStore(t),
@@ -348,7 +348,7 @@ func TestWorkerNilRuntime_returns502(t *testing.T) {
 // TestWorkerNilRuntime_authzPrecedence proves that even with nil runtime, an
 // unauthenticated or non-manager caller gets 403 (authz runs before the nil check).
 func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	b := New(Config{
 		Tickets:         caTicketStore(t),
 		Registry:        registry.New(),
@@ -376,7 +376,7 @@ func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 }
 
 func TestWorkerLifecycleVerbs(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)
 
@@ -404,7 +404,7 @@ func TestWorkerLifecycleVerbs(t *testing.T) {
 
 func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 	dir := t.TempDir()
-	spec := WorkerSpec{Name: "worker", Workspace: "/lever/workers/worker", HostWorkspace: t.TempDir(),
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: t.TempDir(),
 		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)

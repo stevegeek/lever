@@ -26,6 +26,17 @@ type StartOpts struct {
 	// (verified 2026-06-16 — the explicit flag takes provision.go's Case-1
 	// "mount this path directly" path). Empty leaves scion to resolve it.
 	Workspace string
+	// WorkspaceSubdir, when set, is a path RELATIVE to the project's workspace_path
+	// (e.g. "workers/scratch"), passed as `--workspace-subdir`. Unlike --workspace
+	// (which scion's hub path DISCARDS for directory projects, so every agent falls
+	// back to mounting the project root), scion resolves --workspace-subdir against
+	// the project root with a containment guard and mounts exactly that subtree at
+	// /workspace. Used for workers so each is confined to its own subdir. Mutually
+	// exclusive with Workspace (scion ignores the subdir if an absolute --workspace
+	// is also given), so a caller sets one or the other. Requires scion with the
+	// WorkspaceSubdir feature (fork branch feat/per-agent-workspace-subpath until
+	// upstreamed).
+	WorkspaceSubdir string
 	// APIKey selects api-key mode for the agent: scion starts the claude harness
 	// with `--harness-auth api-key` (instead of `--harness-auth oauth-token`),
 	// satisfied by a PLACEHOLDER ANTHROPIC_API_KEY the host sets as a Hub secret.
@@ -89,7 +100,11 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
 	}
-	if o.Workspace != "" {
+	if o.WorkspaceSubdir != "" {
+		// Relative to the project's workspace_path; scion mounts exactly this
+		// subtree at /workspace (guarded). Takes precedence over --workspace.
+		args = append(args, "--workspace-subdir", o.WorkspaceSubdir)
+	} else if o.Workspace != "" {
 		args = append(args, "--workspace", o.Workspace)
 	}
 	_, err := c.run(ctx, "", args...)

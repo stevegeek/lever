@@ -40,12 +40,12 @@ type WorkerRuntime interface {
 // WorkerSpec is the config-derived, path-authoritative description of one worker.
 // The broker never accepts any of these from the manager; they come from config.
 type WorkerSpec struct {
-	Name          string // worker identity (== scion agent slug within the instance project)
-	Workspace     string // jail-absolute --workspace subdir, e.g. /lever/workers/worker
-	HostWorkspace string // host path to the same subdir, e.g. <tree>/workers/worker; MkdirAll'd before start
-	BootstrapDir  string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
-	Image         string // effective agent image
-	APIKey        bool   // true ⇒ api-key LLM mode for this worker
+	Name            string // worker identity (== scion agent slug within the instance project)
+	WorkspaceSubdir string // --workspace-subdir: path RELATIVE to the project root, e.g. "workers/worker" — scion mounts this subtree at /workspace
+	HostWorkspace   string // host path to the same subdir, e.g. <tree>/workers/worker; MkdirAll'd before start (scion's guard requires it to exist)
+	BootstrapDir    string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
+	Image           string // effective agent image
+	APIKey          bool   // true ⇒ api-key LLM mode for this worker
 }
 
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
@@ -182,7 +182,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := b.runtime.Start(ctx, scion.StartOpts{
 		Worker: spec.Name, Task: req.Task, Harness: "claude",
-		Project: b.instanceProject, Workspace: spec.Workspace,
+		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
 		Image: spec.Image, APIKey: spec.APIKey,
 	}); err != nil {
 		http.Error(w, "runtime error", http.StatusBadGateway)

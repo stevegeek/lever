@@ -15,12 +15,12 @@ func WorkerSpecs(app *config.App, jailMount string) []broker.WorkerSpec {
 	specs := make([]broker.WorkerSpec, 0, len(app.Workers))
 	for _, g := range app.Workers {
 		specs = append(specs, broker.WorkerSpec{
-			Name:          g.Name,
-			Workspace:     filepath.Join(jailMount, g.Dir), // /lever/<dir> — the --workspace
-			HostWorkspace: filepath.Join(app.Tree, g.Dir),  // <tree>/<dir> — ensured to exist before start
-			BootstrapDir:  filepath.Join(app.Tree, g.Dir, ".lever"),
-			Image:         app.WorkerImage(g),
-			APIKey:        app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
+			Name:            g.Name,
+			WorkspaceSubdir: g.Dir,                          // e.g. "workers/scratch" — relative to the project root (/lever); scion mounts this subtree at /workspace
+			HostWorkspace:   filepath.Join(app.Tree, g.Dir), // <tree>/<dir> — MkdirAll'd before start (scion's guard requires it to exist)
+			BootstrapDir:    filepath.Join(app.Tree, g.Dir, ".lever"),
+			Image:           app.WorkerImage(g),
+			APIKey:          app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 		})
 	}
 	return specs

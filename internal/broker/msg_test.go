@@ -20,8 +20,8 @@ import (
 // fixture where CN == slug, so routing to agent:<CN> passed by coincidence.
 func msgBroker(g2g bool) *Broker {
 	b := New(Config{ManagerIdentity: "manager", ManagerSlug: "assistant", WorkerToWorker: g2g, InstanceProject: "/lever",
-		Workers: []WorkerSpec{{Name: "scratch", Workspace: "/lever/workers/scratch"},
-			{Name: "worker", Workspace: "/lever/workers/worker"}}})
+		Workers: []WorkerSpec{{Name: "scratch", WorkspaceSubdir: "workers/scratch"},
+			{Name: "worker", WorkspaceSubdir: "workers/worker"}}})
 	return b
 }
 
@@ -124,8 +124,8 @@ func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
 		InstanceProject: "/lever",
 		WorkerToWorker:  g2g,
 		Workers: []WorkerSpec{
-			{Name: "scratch", Workspace: "/lever/workers/scratch"},
-			{Name: "worker", Workspace: "/lever/workers/worker"},
+			{Name: "scratch", WorkspaceSubdir: "workers/scratch"},
+			{Name: "worker", WorkspaceSubdir: "workers/worker"},
 		},
 		Runtime:  rt,
 		Registry: registry.New(),
@@ -224,7 +224,7 @@ func TestMsgNilRuntime_returns502(t *testing.T) {
 		InstanceProject: "/lever",
 		WorkerToWorker:  true,
 		Workers: []WorkerSpec{
-			{Name: "scratch", Workspace: "/lever/workers/scratch"},
+			{Name: "scratch", WorkspaceSubdir: "workers/scratch"},
 		},
 		Runtime:  nil,
 		Registry: registry.New(),

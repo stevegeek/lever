@@ -155,17 +155,17 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		t.Fatalf("Start calls = %d, want 2", len(rt.started))
 	}
 	optsA, optsB := rt.started[0], rt.started[1]
-	if optsA.Project != jailMount || optsA.Workspace != "/lever/workers/a" {
-		t.Fatalf("worker a StartOpts = %+v, want Project=%q Workspace=/lever/workers/a", optsA, jailMount)
+	if optsA.Project != jailMount || optsA.WorkspaceSubdir != "workers/a" {
+		t.Fatalf("worker a StartOpts = %+v, want Project=%q WorkspaceSubdir=workers/a", optsA, jailMount)
 	}
-	if optsB.Project != jailMount || optsB.Workspace != "/lever/workers/b" {
-		t.Fatalf("worker b StartOpts = %+v, want Project=%q Workspace=/lever/workers/b", optsB, jailMount)
+	if optsB.Project != jailMount || optsB.WorkspaceSubdir != "workers/b" {
+		t.Fatalf("worker b StartOpts = %+v, want Project=%q WorkspaceSubdir=workers/b", optsB, jailMount)
 	}
 	if optsA.Project != optsB.Project {
 		t.Fatalf("both workers must share the SAME instance project (-g): a=%q b=%q", optsA.Project, optsB.Project)
 	}
-	if optsA.Workspace == optsB.Workspace {
-		t.Fatalf("each worker must get its OWN --workspace subdir, got the same for both: %q", optsA.Workspace)
+	if optsA.WorkspaceSubdir == optsB.WorkspaceSubdir {
+		t.Fatalf("each worker must get its OWN --workspace-subdir, got the same for both: %q", optsA.WorkspaceSubdir)
 	}
 
 	// --- Point: each worker's HostWorkspace dir was actually created on

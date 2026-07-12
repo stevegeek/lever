@@ -74,6 +74,39 @@ func TestCheckAgentCert_NoLogFilePasses(t *testing.T) {
 	}
 }
 
+// stampBrokerPID writes a pid file whose mtime is the broker's start time
+// (reuses writeBrokerPID from doctor_checks_test.go, then backdates the mtime).
+func stampBrokerPID(t *testing.T, st brokerctl.State, started time.Time) {
+	t.Helper()
+	writeBrokerPID(t, st, 12345)
+	if err := os.Chtimes(st.PID(), started, started); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckAgentCert_RejectionBeforeBrokerRestartPasses(t *testing.T) {
+	now := time.Now()
+	st := brokerctl.State{Dir: t.TempDir()}
+	// Rejection is recent (inside the window) but the broker restarted AFTER it
+	// — the restart is the remedy, so the check must not cry wolf post-heal.
+	writeBrokerLog(t, st, certExpiredLine(now.Add(-2*time.Minute))+"\n")
+	stampBrokerPID(t, st, now.Add(-1*time.Minute))
+	if r := checkAgentCert(st, now); !r.ok {
+		t.Fatalf("want PASS for a rejection predating the current broker, got fail: %q", r.detail)
+	}
+}
+
+func TestCheckAgentCert_RejectionAfterBrokerStartStillFails(t *testing.T) {
+	now := time.Now()
+	st := brokerctl.State{Dir: t.TempDir()}
+	// Broker started BEFORE the rejection: the current broker is failing.
+	writeBrokerLog(t, st, certExpiredLine(now.Add(-2*time.Minute))+"\n")
+	stampBrokerPID(t, st, now.Add(-10*time.Minute))
+	if r := checkAgentCert(st, now); r.ok {
+		t.Fatalf("want FAIL when the current broker logged the rejection, got ok: %q", r.detail)
+	}
+}
+
 func TestScanBrokerLogCertExpiry_PicksLatest(t *testing.T) {
 	now := time.Now()
 	st := brokerctl.State{Dir: t.TempDir()}

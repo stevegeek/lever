@@ -8,6 +8,11 @@ version bump moves the block under the new version heading.
 ## [Unreleased]
 
 ### Fixed
+- `lever doctor`'s "agent certificate" check no longer cries wolf right after
+  a healing restart: an expired-leaf rejection logged before the current
+  broker started (pid-file mtime) is reported as healed rather than as an
+  active failure. Previously any rejection inside the 15-minute window failed
+  the check even when the restart that fixed it had already happened.
 - The broker's mTLS serving cert now self-rotates. It was minted once at
   startup with the 24h leaf TTL, so a broker running longer than a day served
   an expired cert and every gateway handshake failed — tools down, and the

@@ -290,6 +290,14 @@ func checkAgentCert(st brokerctl.State, now time.Time) checkResult {
 	case !found:
 		return checkResult{name, true, "no expired-leaf rejections in the broker log", ""}
 	case now.Sub(latest) <= certRejectWindow:
+		// A rejection logged before the CURRENT broker started (pid-file mtime)
+		// describes the pre-restart outage, not this broker — the restart is
+		// exactly the remedy, so don't cry wolf right after it heals.
+		if start, ok := brokerStartTime(st.PID()); ok && latest.Before(start) {
+			return checkResult{name, true,
+				fmt.Sprintf("last expired-leaf rejection at %s predates the current broker (started %s) — healed by restart",
+					latest.Format("2006-01-02 15:04:05"), start.Format("2006-01-02 15:04:05")), ""}
+		}
 		return checkResult{name, false,
 			fmt.Sprintf("broker is rejecting an agent's mTLS leaf as expired (last at %s) — brokered tools are down", latest.Format("2006-01-02 15:04:05")),
 			"run `lever up`: it stages a fresh enrolment ticket so the agent renews its expired leaf on boot (no teardown needed). If it persists, `lever destroy && lever up`"}
@@ -297,6 +305,17 @@ func checkAgentCert(st brokerctl.State, now time.Time) checkResult {
 		return checkResult{name, true,
 			fmt.Sprintf("last expired-leaf rejection at %s (stale, not currently failing)", latest.Format("2006-01-02 15:04:05")), ""}
 	}
+}
+
+// brokerStartTime reports when the current broker started, via the pid file's
+// mtime (written once, after the listeners bind). ok=false if there is no pid
+// file (broker not running — checkBrokerAlive's job).
+func brokerStartTime(pidPath string) (time.Time, bool) {
+	fi, err := os.Stat(pidPath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return fi.ModTime(), true
 }
 
 // scanBrokerLogCertExpiry returns the timestamp of the most recent expired- /

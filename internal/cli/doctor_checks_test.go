@@ -341,7 +341,7 @@ func TestCheckOperatorSkills(t *testing.T) {
 	if _, err := syncSkills(app, stateDir, false, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ensureClaudeMDBlock(tree, false); err != nil {
+	if _, err := ensureClaudeMDBlock(tree, stateDir, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if res = checkOperatorSkills(app, stateDir); !res.ok {
@@ -355,5 +355,28 @@ func TestCheckOperatorSkills(t *testing.T) {
 	}
 	if res = checkOperatorSkills(app, stateDir); res.ok || !strings.Contains(res.fix, "--force") {
 		t.Fatalf("owner-edit must fail with --force hint: %+v", res)
+	}
+
+	// Adopt the customization → pass again, detail names the adoption.
+	if _, err := adoptSkills(app, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if res = checkOperatorSkills(app, stateDir); !res.ok {
+		t.Fatalf("adopted must pass: %+v", res)
+	}
+	if !strings.Contains(res.detail, "adopted") {
+		t.Fatalf("detail should name the adoption: %+v", res)
+	}
+
+	// Drift PAST the adopted baseline → fail with tamper-aware wording.
+	if err := os.WriteFile(op, []byte("edited again"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res = checkOperatorSkills(app, stateDir)
+	if res.ok || !strings.Contains(res.detail, "modified since adoption") {
+		t.Fatalf("post-adoption drift must fail with adoption wording: %+v", res)
+	}
+	if !strings.Contains(res.fix, "--adopt") || !strings.Contains(res.fix, "--force") {
+		t.Fatalf("fix must offer re-adopt and restore: %+v", res)
 	}
 }

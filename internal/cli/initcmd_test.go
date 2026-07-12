@@ -104,3 +104,53 @@ func TestInitWarnsOnOwnerEditAndForceOverwrites(t *testing.T) {
 		t.Fatal("--force must overwrite")
 	}
 }
+
+func TestInitAdoptIsMutuallyExclusiveWithForceAndCheck(t *testing.T) {
+	initFixture(t)
+	if _, err := runInit(t, "--adopt", "--force"); err == nil {
+		t.Fatal("--adopt --force must error")
+	}
+	if _, err := runInit(t, "--adopt", "--check"); err == nil {
+		t.Fatal("--adopt --check must error")
+	}
+}
+
+func TestInitAdoptBlessesCustomizationForCheck(t *testing.T) {
+	root := initFixture(t)
+	if _, err := runInit(t); err != nil {
+		t.Fatal(err)
+	}
+	op := filepath.Join(root, "workspace", ".claude", "skills", "lever-operator", "SKILL.md")
+	if err := os.WriteFile(op, []byte("owner edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runInit(t, "--check"); err == nil {
+		t.Fatal("check must fail before adoption")
+	}
+	out, err := runInit(t, "--adopt")
+	if err != nil {
+		t.Fatalf("adopt: %v\n%s", err, out)
+	}
+	for _, want := range []string{"adopted", "current (no adoption needed)"} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Fatalf("adopt output missing %q:\n%s", want, out)
+		}
+	}
+	if out, err := runInit(t, "--check"); err != nil {
+		t.Fatalf("check after adopt must pass: %v\n%s", err, out)
+	}
+	// Adopted file survives a plain re-run untouched.
+	if _, err := runInit(t); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(op); string(b) != "owner edit" {
+		t.Fatal("plain init must not touch an adopted file")
+	}
+	// Drift past the baseline is caught again.
+	if err := os.WriteFile(op, []byte("edited after adoption"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runInit(t, "--check"); err == nil {
+		t.Fatal("check must fail on drift past the adopted baseline")
+	}
+}

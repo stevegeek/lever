@@ -114,14 +114,14 @@ func TestSyncSkillsCheckModeReportsWithoutWriting(t *testing.T) {
 }
 
 func TestEnsureClaudeMDBlock(t *testing.T) {
-	_, tree, _ := scaffoldFixture(t)
+	_, tree, stateDir := scaffoldFixture(t)
 	// No CLAUDE.md → created.
-	act, err := ensureClaudeMDBlock(tree, false)
+	act, err := ensureClaudeMDBlock(tree, stateDir, false, false)
 	if err != nil || act != skillCreated {
 		t.Fatalf("create: act=%v err=%v", act, err)
 	}
 	// Idempotent.
-	if act, _ = ensureClaudeMDBlock(tree, false); act != skillUnchanged {
+	if act, _ = ensureClaudeMDBlock(tree, stateDir, false, false); act != skillUnchanged {
 		t.Fatalf("rerun: %v", act)
 	}
 	// Owner text preserved; stale inner content replaced.
@@ -131,7 +131,7 @@ func TestEnsureClaudeMDBlock(t *testing.T) {
 	if err := os.WriteFile(p, []byte(mutated), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if act, _ = ensureClaudeMDBlock(tree, false); act != skillRefreshed {
+	if act, _ = ensureClaudeMDBlock(tree, stateDir, false, false); act != skillRefreshed {
 		t.Fatalf("refresh: %v", act)
 	}
 	after, _ := os.ReadFile(p)
@@ -144,7 +144,307 @@ func TestEnsureClaudeMDBlock(t *testing.T) {
 	}
 	// Check mode on a tree with no CLAUDE.md.
 	tree2 := t.TempDir()
-	if act, _ = ensureClaudeMDBlock(tree2, true); act != skillMissing {
+	if act, _ = ensureClaudeMDBlock(tree2, stateDir, false, true); act != skillMissing {
 		t.Fatalf("check-missing: %v", act)
+	}
+}
+
+func readAdopted(t *testing.T, stateDir string) map[string]string {
+	t.Helper()
+	m, err := loadAdoptedState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+const opRel = ".claude/skills/lever-operator/SKILL.md"
+
+func TestAdoptRecordsBaselineAndSyncRespectsIt(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	op := filepath.Join(tree, filepath.FromSlash(opRel))
+	if err := os.WriteFile(op, []byte("my custom operator notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// CLAUDE.md deliberately WITHOUT the lever block — adopting that is the point.
+	cm := filepath.Join(tree, "CLAUDE.md")
+	if err := os.WriteFile(cm, []byte("# my own tree docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := adoptSkills(app, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]skillAction{
+		opRel: skillAdopted,
+		"workers/scratch/.claude/skills/lever-agent/SKILL.md": skillUnchanged, // current, no adoption needed
+		"CLAUDE.md": skillAdopted,
+	}
+	for _, r := range res {
+		if want[r.RelPath] != r.Action {
+			t.Fatalf("adopt: want %s for %s, got %s", want[r.RelPath], r.RelPath, r.Action)
+		}
+	}
+	ad := readAdopted(t, stateDir)
+	if ad[opRel] != skills.Hash([]byte("my custom operator notes")) {
+		t.Fatalf("adopted hash not recorded: %+v", ad)
+	}
+	if _, ok := ad["workers/scratch/.claude/skills/lever-agent/SKILL.md"]; ok {
+		t.Fatal("framework-current file must not get an adoption record")
+	}
+
+	// Check mode: adopted counts as OK.
+	cres, _ := syncSkills(app, stateDir, false, true)
+	if cres[0].Action != skillAdopted || cres[1].Action != skillUnchanged {
+		t.Fatalf("check after adopt: %+v", cres)
+	}
+	blockAct, _ := ensureClaudeMDBlock(tree, stateDir, false, true)
+	if blockAct != skillAdopted {
+		t.Fatalf("block check after adopt: %v", blockAct)
+	}
+	if !skillsUpToDate(cres, blockAct) {
+		t.Fatal("doctor predicate must pass on adopted state")
+	}
+
+	// Plain init (write mode): adopted files untouched, no block appended.
+	wres, _ := syncSkills(app, stateDir, false, false)
+	if wres[0].Action != skillAdopted {
+		t.Fatalf("write after adopt: %+v", wres)
+	}
+	if b, _ := os.ReadFile(op); string(b) != "my custom operator notes" {
+		t.Fatal("plain init must not touch an adopted file")
+	}
+	if blockAct, _ = ensureClaudeMDBlock(tree, stateDir, false, false); blockAct != skillAdopted {
+		t.Fatalf("block write after adopt: %v", blockAct)
+	}
+	if b, _ := os.ReadFile(cm); strings.Contains(string(b), skillMarkerBegin) {
+		t.Fatal("plain init must not append the block to an adopted CLAUDE.md")
+	}
+}
+
+func TestAdoptedThenEditedIsDrift(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	op := filepath.Join(tree, filepath.FromSlash(opRel))
+	if err := os.WriteFile(op, []byte("blessed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cm := filepath.Join(tree, "CLAUDE.md")
+	if err := os.WriteFile(cm, []byte("blessed docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adoptSkills(app, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	// Post-adoption edits (owner… or agent) → drift, never silently OK.
+	if err := os.WriteFile(op, []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cm, []byte("tampered docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cres, _ := syncSkills(app, stateDir, false, true)
+	if cres[0].Action != skillSkipped {
+		t.Fatalf("drifted adoption must check as skipped: %+v", cres)
+	}
+	if act, _ := ensureClaudeMDBlock(tree, stateDir, false, true); act != skillSkipped {
+		t.Fatalf("drifted CLAUDE.md check: %v", act)
+	}
+	// Write mode must not touch drifted owner territory either.
+	if act, _ := ensureClaudeMDBlock(tree, stateDir, false, false); act != skillSkipped {
+		t.Fatalf("drifted CLAUDE.md write: %v", act)
+	}
+	if b, _ := os.ReadFile(cm); string(b) != "tampered docs\n" {
+		t.Fatal("write mode must leave a drifted adopted CLAUDE.md alone")
+	}
+}
+
+func TestForceOverwritesAdoptedAndClearsRecord(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	op := filepath.Join(tree, filepath.FromSlash(opRel))
+	if err := os.WriteFile(op, []byte("custom"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adoptSkills(app, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	fres, _ := syncSkills(app, stateDir, true, false)
+	if fres[0].Action != skillForced {
+		t.Fatalf("force over adopted: %+v", fres)
+	}
+	if _, ok := readAdopted(t, stateDir)[opRel]; ok {
+		t.Fatal("force must clear the stale adoption record")
+	}
+	cres, _ := syncSkills(app, stateDir, false, true)
+	if cres[0].Action != skillUnchanged {
+		t.Fatalf("post-force check: %+v", cres)
+	}
+}
+
+func TestAdoptCurrentFileRemovesStaleRecord(t *testing.T) {
+	app, _, stateDir := scaffoldFixture(t)
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	// Plant a stale record for a file that is now framework-current.
+	if err := saveAdoptedState(stateDir, map[string]string{opRel: "deadbeef"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := adoptSkills(app, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].Action != skillUnchanged {
+		t.Fatalf("current file must not adopt: %+v", res)
+	}
+	if _, ok := readAdopted(t, stateDir)[opRel]; ok {
+		t.Fatal("current beats adopted — stale record must be removed")
+	}
+}
+
+func TestAdoptMissingFilesNotAdoptable(t *testing.T) {
+	app, _, stateDir := scaffoldFixture(t)
+	res, err := adoptSkills(app, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res {
+		if r.Action != skillMissing {
+			t.Fatalf("missing files are not adoptable: %+v", r)
+		}
+	}
+	if len(readAdopted(t, stateDir)) != 0 {
+		t.Fatal("nothing must be recorded for missing files")
+	}
+}
+
+func TestForceRestoresAdoptedClaudeMD(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	cm := filepath.Join(tree, "CLAUDE.md")
+	if err := os.WriteFile(cm, []byte("# fully custom, no block\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adoptSkills(app, stateDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// --force on an intact adopted file: block restored, record cleared.
+	act, err := ensureClaudeMDBlock(tree, stateDir, true, false)
+	if err != nil || act != skillForced {
+		t.Fatalf("force over adopted: act=%v err=%v", act, err)
+	}
+	b, _ := os.ReadFile(cm)
+	if !strings.Contains(string(b), claudeMDBlock()) || !strings.Contains(string(b), "# fully custom") {
+		t.Fatalf("force must append the current block, keeping owner text:\n%s", b)
+	}
+	if _, ok := readAdopted(t, stateDir)[claudeMDAdoptKey]; ok {
+		t.Fatal("force must clear the CLAUDE.md adoption record")
+	}
+	if act, _ = ensureClaudeMDBlock(tree, stateDir, false, true); act != skillUnchanged {
+		t.Fatalf("post-force check: %v", act)
+	}
+
+	// --force on an adopted-then-tampered file: same reclaim.
+	if _, err := adoptSkills(app, stateDir); err != nil { // no-op: block is current now
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cm, []byte("tampered\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Re-adopt the pre-tamper state manually so a record exists, then tamper further.
+	if err := saveAdoptedState(stateDir, map[string]string{claudeMDAdoptKey: skills.Hash([]byte("tampered\n"))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cm, []byte("tampered again\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if act, _ = ensureClaudeMDBlock(tree, stateDir, false, true); act != skillSkipped {
+		t.Fatalf("tampered adopted file must check as skipped: %v", act)
+	}
+	if act, err = ensureClaudeMDBlock(tree, stateDir, true, false); err != nil || act != skillForced {
+		t.Fatalf("force over tampered adoption: act=%v err=%v", act, err)
+	}
+	b, _ = os.ReadFile(cm)
+	if !strings.Contains(string(b), claudeMDBlock()) {
+		t.Fatal("force must restore the block on a tampered adopted file")
+	}
+	if _, ok := readAdopted(t, stateDir)[claudeMDAdoptKey]; ok {
+		t.Fatal("force must clear the tampered adoption record")
+	}
+	if act, _ = ensureClaudeMDBlock(tree, stateDir, false, true); act != skillUnchanged {
+		t.Fatalf("post-force check after tamper: %v", act)
+	}
+}
+
+func TestAdoptCurrentClaudeMDCreatesNoRecord(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureClaudeMDBlock(tree, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	// Plant a stale record for the now-current file.
+	if err := saveAdoptedState(stateDir, map[string]string{claudeMDAdoptKey: "deadbeef"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := adoptSkills(app, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := res[len(res)-1]
+	if last.RelPath != claudeMDAdoptKey || last.Action != skillUnchanged {
+		t.Fatalf("current-block CLAUDE.md must not adopt: %+v", last)
+	}
+	if _, ok := readAdopted(t, stateDir)[claudeMDAdoptKey]; ok {
+		t.Fatal("stale CLAUDE.md record must be removed when the block is current")
+	}
+}
+
+func TestAdoptStaleUnmodifiedScaffoldNotAdopted(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	if _, err := syncSkills(app, stateDir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a post-upgrade stale scaffold: on-disk == skills.json record != current.
+	op := filepath.Join(tree, filepath.FromSlash(opRel))
+	old := []byte("old framework scaffold v0")
+	if err := os.WriteFile(op, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadSkillState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st[opRel] = skills.Hash(old)
+	if err := saveSkillState(stateDir, st); err != nil {
+		t.Fatal(err)
+	}
+	res, err := adoptSkills(app, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].Action != skillStale {
+		t.Fatalf("stale-unmodified scaffold must report stale, not adopt: %+v", res)
+	}
+	if _, ok := readAdopted(t, stateDir)[opRel]; ok {
+		t.Fatal("stale-unmodified scaffold must not get an adoption record")
+	}
+	// `lever init` still refreshes it afterwards.
+	sres, _ := syncSkills(app, stateDir, false, false)
+	if sres[0].Action != skillRefreshed {
+		t.Fatalf("stale scaffold must refresh on plain init: %+v", sres)
 	}
 }

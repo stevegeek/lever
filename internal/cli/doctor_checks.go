@@ -225,36 +225,72 @@ func checkGoToolchain(scion config.ScionConfig) checkResult {
 }
 
 // checkOperatorSkills verifies the framework skills scaffolded by `lever init`
-// are present, current for this lever version, unmodified, and referenced from
-// the tree-root CLAUDE.md. Runs the scaffold engine in check (read-only) mode.
+// are present, current for this lever version, and unmodified — or adopted as
+// an accepted baseline via `lever init --adopt` — and referenced from the
+// tree-root CLAUDE.md. Runs the scaffold engine in check (read-only) mode.
+// Drift PAST an adopted baseline is called out separately: the scaffolds live
+// inside the agent-writable tree, so unexplained change there is the tamper
+// signal this check exists for.
 func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 	const name = "operator skills"
 	results, err := syncSkills(app, stateDir, false, true)
 	if err != nil {
 		return checkResult{name, false, "could not inspect skill scaffolds: " + err.Error(), "run `lever init`"}
 	}
-	blockAct, err := ensureClaudeMDBlock(app.Tree, true)
+	blockAct, err := ensureClaudeMDBlock(app.Tree, stateDir, false, true)
 	if err != nil {
 		return checkResult{name, false, "could not inspect CLAUDE.md: " + err.Error(), "run `lever init`"}
 	}
 	if skillsUpToDate(results, blockAct) {
+		nAdopted := 0
+		for _, r := range results {
+			if r.Action == skillAdopted {
+				nAdopted++
+			}
+		}
+		if nAdopted > 0 || blockAct == skillAdopted {
+			blockDesc := "block present"
+			if blockAct == skillAdopted {
+				blockDesc = "adopted as custom"
+			}
+			return checkResult{name, true, fmt.Sprintf("%d scaffold(s) OK (%d adopted as custom), CLAUDE.md %s", len(results), nAdopted, blockDesc), ""}
+		}
 		return checkResult{name, true, fmt.Sprintf("%d scaffold(s) current (lever-operator + workers), CLAUDE.md block present", len(results)), ""}
 	}
+	adopted, err := loadAdoptedState(stateDir)
+	if err != nil { // syncSkills already parsed it, so this is unreachable
+		return checkResult{name, false, "could not inspect adopted baselines: " + err.Error(), "run `lever init --adopt`"}
+	}
 	var bad []string
-	modified := false
+	modified, adoptDrift := false, false
 	for _, r := range results {
-		if r.Action != skillUnchanged {
-			bad = append(bad, fmt.Sprintf("%s: %s", r.RelPath, r.Action))
-			if r.Action == skillSkipped {
+		if r.Action == skillUnchanged || r.Action == skillAdopted {
+			continue
+		}
+		label := string(r.Action)
+		if r.Action == skillSkipped {
+			if _, ok := adopted[r.RelPath]; ok {
+				label = "modified since adoption"
+				adoptDrift = true
+			} else {
 				modified = true
 			}
 		}
+		bad = append(bad, fmt.Sprintf("%s: %s", r.RelPath, label))
 	}
-	if blockAct != skillUnchanged {
-		bad = append(bad, fmt.Sprintf("CLAUDE.md lever:skills block: %s", blockAct))
+	if blockAct != skillUnchanged && blockAct != skillAdopted {
+		label := string(blockAct)
+		if blockAct == skillSkipped { // only reachable via an adoption record
+			label = "modified since adoption"
+			adoptDrift = true
+		}
+		bad = append(bad, fmt.Sprintf("CLAUDE.md lever:skills block: %s", label))
 	}
 	fix := "run `lever init`"
-	if modified {
+	switch {
+	case adoptDrift:
+		fix = "changed since you adopted it — review the diff (an agent can edit files in the tree), then re-adopt with `lever init --adopt` or restore with `lever init --force`"
+	case modified:
 		fix = "locally-modified scaffold(s): review, then `lever init --force` to overwrite (or keep your edits — this check stays informational)"
 	}
 	return checkResult{name, false, strings.Join(bad, "; "), fix}

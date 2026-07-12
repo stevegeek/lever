@@ -13,7 +13,7 @@ import (
 // Purely host-side file operations — never touches the jail, so it works
 // before the first `lever up`.
 func newInitCmd() *cobra.Command {
-	var force, check bool
+	var force, check, adopt bool
 	cmd := &cobra.Command{
 		Use:          "init",
 		Short:        "Scaffold/refresh the lever operator skills into the instance tree",
@@ -28,11 +28,30 @@ func newInitCmd() *cobra.Command {
 				return err
 			}
 			stateDir := filepath.Join(filepath.Dir(path), ".lever-state")
+			if adopt {
+				results, err := adoptSkills(app, stateDir)
+				if err != nil {
+					return err
+				}
+				for _, r := range results {
+					switch r.Action {
+					case skillAdopted:
+						cmd.Printf("✓ %s — adopted\n", r.RelPath)
+					case skillUnchanged:
+						cmd.Printf("• %s — current (no adoption needed)\n", r.RelPath)
+					case skillStale:
+						cmd.Printf("✗ %s — stale scaffold, run `lever init` to refresh (not adopted)\n", r.RelPath)
+					case skillMissing:
+						cmd.Printf("✗ %s — missing (not adoptable)\n", r.RelPath)
+					}
+				}
+				return nil
+			}
 			results, err := syncSkills(app, stateDir, force, check)
 			if err != nil {
 				return err
 			}
-			blockAct, err := ensureClaudeMDBlock(app.Tree, check)
+			blockAct, err := ensureClaudeMDBlock(app.Tree, stateDir, force, check)
 			if err != nil {
 				return err
 			}
@@ -43,6 +62,8 @@ func newInitCmd() *cobra.Command {
 					cmd.Printf("✓ %s — %s\n", r.RelPath, r.Action)
 				case skillUnchanged:
 					cmd.Printf("• %s — unchanged\n", r.RelPath)
+				case skillAdopted:
+					cmd.Printf("• %s — custom (adopted baseline)\n", r.RelPath)
 				case skillSkipped:
 					if check {
 						cmd.Printf("✗ %s — locally modified\n", r.RelPath)
@@ -61,5 +82,8 @@ func newInitCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite locally-modified scaffolds")
 	cmd.Flags().BoolVar(&check, "check", false, "report without writing; non-zero exit if anything is missing/stale/modified")
+	cmd.Flags().BoolVar(&adopt, "adopt", false, "record customized scaffolds as an accepted baseline (doctor then treats them as OK)")
+	cmd.MarkFlagsMutuallyExclusive("adopt", "force")
+	cmd.MarkFlagsMutuallyExclusive("adopt", "check")
 	return cmd
 }

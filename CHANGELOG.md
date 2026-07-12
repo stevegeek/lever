@@ -7,6 +7,23 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+- `lever init --adopt`: record owner-customized scaffolds (the operator/agent
+  SKILL.md files and the whole tree-root CLAUDE.md) as an accepted baseline in
+  `.lever-state/skills-adopted.json`. Doctor's "operator skills" check and
+  `lever init --check` then treat the adopted content as OK, and a plain
+  `lever init` leaves it alone (including not appending the CLAUDE.md block).
+  Previously a customized scaffold read `skipped-modified` forever. Adoption
+  is deliberately a recorded baseline rather than a mute: the scaffolds live
+  inside the agent-writable tree, so the check doubles as tamper detection —
+  any change PAST the adopted baseline fails doctor as "modified since
+  adoption", and the baseline itself lives host-side where an agent cannot
+  re-bless its own edits. Only genuine customizations qualify: framework-
+  current files and stale-but-unmodified scaffolds (plain-`init` refresh
+  territory) never get a record. `lever init --force` still restores the
+  framework content — for CLAUDE.md, by re-ensuring the marker block in place
+  — and clears the now-stale adoption record.
+
 ### Fixed
 - `lever doctor`'s "agent certificate" check no longer cries wolf right after
   a healing restart: an expired-leaf rejection logged before the current

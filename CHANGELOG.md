@@ -7,6 +7,17 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+- The broker's mTLS serving cert now self-rotates. It was minted once at
+  startup with the 24h leaf TTL, so a broker running longer than a day served
+  an expired cert and every gateway handshake failed — tools down, and the
+  agents' own `/renew` calls failed with it, so their leafs decayed too (the
+  only remedy was a `lever stop && lever up` power-cycle). The broker holds the
+  CA key, so it re-mints its serving cert in-process via a rotating
+  `GetCertificate` source when less than 6h of validity remains; agent leafs
+  were already kept fresh by the 12h renew sidecar once the broker stays
+  reachable.
+
 ## [0.4.0] - 2026-07-10
 
 The single-project re-architecture (P1–P4): one Scion project per instance,

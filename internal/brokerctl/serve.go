@@ -143,15 +143,18 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	defer removePIDFile(state)
 
-	// Issue the broker server cert. Always include the selected backend's host
-	// alias (cfg.ServerName, e.g. host.orb.internal) as a DNS SAN; additionally
-	// include the jail's resolved host-alias IP (passed by `lever apply` via
-	// $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can dial the
-	// broker by IP — DNS/53 is dropped in that posture, so they cannot resolve
-	// the hostname and instead connect to the already-allowlisted alias IP,
-	// which TLS validates against this IP SAN. Absent (e.g. a direct `lever broker
-	// serve`), fall back to the hostname-only cert.
-	certPEM, keyPEM, err := caInst.IssueServerCertSANs(cfg.ServerName, []string{cfg.ServerName}, []string{os.Getenv("LEVER_HOST_ALIAS_IP")})
+	// Broker server cert: a self-rotating SOURCE, not a one-shot mint — leaf
+	// certs live certTTL (24h), and a broker that outlives its serving cert
+	// fails every gateway handshake, including the agents' own /renew calls,
+	// so the whole fleet's certs decay behind it. SANs: always the selected
+	// backend's host alias (cfg.ServerName, e.g. host.orb.internal) as DNS;
+	// additionally the jail's resolved host-alias IP (passed by `lever apply`
+	// via $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can dial
+	// the broker by IP — DNS/53 is dropped in that posture, so they cannot
+	// resolve the hostname and instead connect to the already-allowlisted alias
+	// IP, which TLS validates against this IP SAN. Absent (e.g. a direct
+	// `lever broker serve`), fall back to the hostname-only cert.
+	certSrc, err := caInst.NewServerCertSource(cfg.ServerName, []string{cfg.ServerName}, []string{os.Getenv("LEVER_HOST_ALIAS_IP")})
 	if err != nil {
 		_ = jailLn.Close()
 		_ = adminLn.Close()
@@ -166,5 +169,5 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	defer sup.Stop()
 
-	return b.ServeListeners(ctx, jailLn, adminLn, certPEM, keyPEM)
+	return b.ServeListeners(ctx, jailLn, adminLn, certSrc)
 }

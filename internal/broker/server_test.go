@@ -226,12 +226,12 @@ func TestServeListenersRejectsNonLoopbackAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, key, err := b.ca.IssueServerCert("host.orb.internal")
+	certSrc, err := b.ca.NewServerCertSource("host.orb.internal", []string{"host.orb.internal"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- b.ServeListeners(context.Background(), jailLn, adminLn, cert, key) }()
+	go func() { errc <- b.ServeListeners(context.Background(), jailLn, adminLn, certSrc) }()
 	select {
 	case err := <-errc:
 		if err == nil {

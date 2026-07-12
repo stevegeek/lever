@@ -14,7 +14,9 @@ import (
 	"time"
 )
 
-// certTTL bounds a leaf cert's lifetime. Short by design; rotation is a later milestone.
+// certTTL bounds a leaf cert's lifetime. Short by design; kept fresh by
+// rotation — the broker's serving cert self-rotates (ServerCertSource) and
+// agent leafs renew via the 12h lever-renew sidecar hitting /renew.
 const certTTL = 24 * time.Hour
 
 // SignCSR signs an agent-generated CSR into a short-lived client cert whose

@@ -26,6 +26,20 @@ func (c *CA) ServerTLSConfig(serverCertPEM, serverKeyPEM []byte) (*tls.Config, e
 	}, nil
 }
 
+// ServerTLSConfigSource is ServerTLSConfig with a rotating serving cert: the
+// source re-mints before expiry, so a broker running past certTTL keeps
+// serving a valid cert instead of failing every handshake.
+func (c *CA) ServerTLSConfigSource(src *ServerCertSource) *tls.Config {
+	pool := x509.NewCertPool()
+	pool.AddCert(c.Cert)
+	return &tls.Config{
+		GetCertificate: src.GetCertificate,
+		ClientAuth:     tls.VerifyClientCertIfGiven,
+		ClientCAs:      pool,
+		MinVersion:     tls.VersionTLS12,
+	}
+}
+
 // AgentFromConnState returns the agent identity (client cert CommonName) from a
 // verified mTLS connection. Fails closed if no verified client cert is present.
 func AgentFromConnState(cs tls.ConnectionState) (string, error) {

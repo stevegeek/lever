@@ -152,14 +152,14 @@ broker:
 		t.Fatal(err)
 	}
 	jailURL := "https://" + jailLn.Addr().String()
-	certPEM, keyPEM, err := caInst.IssueServerCert(serverName)
+	certSrc, err := caInst.NewServerCertSource(serverName, []string{serverName}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, certPEM, keyPEM) }()
+	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, certSrc) }()
 
 	manager := workerClient(t, caInst, workerCert(t, caInst, "manager"))
 	worker := workerClient(t, caInst, workerCert(t, caInst, "worker"))

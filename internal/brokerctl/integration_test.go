@@ -273,7 +273,7 @@ broker:
 	jailURL := "https://" + jailLn.Addr().String()
 	adminURL := "http://" + adminLn.Addr().String()
 
-	certPEM, keyPEM, err := caInst.IssueServerCert(serverName)
+	certSrc, err := caInst.NewServerCertSource(serverName, []string{serverName}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ broker:
 
 	// ── Run the broker on the pre-bound listeners ──────────────────────────────
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, certPEM, keyPEM) }()
+	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, certSrc) }()
 
 	// Wait until the real tool's MCP backend is accepting connections. The "db"
 	// gateway route already exists (BuildBroker pre-loads the config-authoritative
@@ -422,13 +422,13 @@ broker:
 		t.Fatal(err)
 	}
 	jailURL2 := "https://" + jailLn2.Addr().String()
-	certPEM2, keyPEM2, err := caInst.IssueServerCert(serverName)
+	certSrc2, err := caInst.NewServerCertSource(serverName, []string{serverName}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
-	go func() { _ = b2.ServeListeners(ctx2, jailLn2, adminLn2, certPEM2, keyPEM2) }()
+	go func() { _ = b2.ServeListeners(ctx2, jailLn2, adminLn2, certSrc2) }()
 	waitEpoch(t, "http://"+adminLn2.Addr().String()) // broker #2 up
 
 	// The same epoch-0 token, against the freshly-restarted broker, is denied by

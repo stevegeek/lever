@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // resolveAdminAddr normalizes adminAddr to a loopback bind address. An empty
@@ -93,8 +95,10 @@ func (b *Broker) AdminHandler() http.Handler {
 
 // ServeListeners runs the broker on pre-bound listeners (the supervisor binds
 // them so it can learn OS-assigned ports before starting tools). Runs until ctx
-// is cancelled. jailLn carries mTLS; adminLn is loopback plain HTTP.
-func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listener, serverCertPEM, serverKeyPEM []byte) error {
+// is cancelled. jailLn carries mTLS with a self-rotating serving cert (certSrc
+// re-mints before certTTL expires, so a long-running broker never serves an
+// expired cert); adminLn is loopback plain HTTP.
+func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listener, certSrc *ca.ServerCertSource) error {
 	// Fail closed if the caller bound adminLn on a non-loopback interface.
 	// The unauthenticated admin routes (/bootstrap, /register, /revoke, …) must
 	// never be reachable from a routable interface — enforce the invariant here
@@ -104,12 +108,7 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listene
 		_ = adminLn.Close()
 		return fmt.Errorf("broker: admin listener must be loopback, got %s", adminLn.Addr())
 	}
-	tlsCfg, err := b.ca.ServerTLSConfig(serverCertPEM, serverKeyPEM)
-	if err != nil {
-		_ = jailLn.Close()
-		_ = adminLn.Close()
-		return err
-	}
+	tlsCfg := b.ca.ServerTLSConfigSource(certSrc)
 	jailSrv := &http.Server{
 		Handler: b.JailHandler(), TLSConfig: tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
@@ -141,7 +140,7 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listene
 // HTTP bound to loopback. It runs until ctx is cancelled, then shuts both
 // servers down. Returns the first non-ErrServerClosed error from either server,
 // or nil on clean shutdown.
-func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, serverCertPEM, serverKeyPEM []byte) error {
+func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, certSrc *ca.ServerCertSource) error {
 	// Ensure admin listener is bound only to loopback — fail closed on
 	// misconfiguration so /register is never reachable from a routable interface.
 	boundAdminAddr, err := resolveAdminAddr(adminAddr)
@@ -157,5 +156,5 @@ func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, serverCe
 		_ = jailLn.Close()
 		return err
 	}
-	return b.ServeListeners(ctx, jailLn, adminLn, serverCertPEM, serverKeyPEM)
+	return b.ServeListeners(ctx, jailLn, adminLn, certSrc)
 }

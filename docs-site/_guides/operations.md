@@ -85,13 +85,17 @@ command whenever anything looks wrong — every check prints a specific fix hint
 | Gateway 502 on an external tool | the host-side server isn't listening | `lever doctor` (external-backends check), start your server |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/) — `--fresh` resets the conversation, not the tree |
+| Doctor nags `skipped-modified` about a SKILL.md / CLAUDE.md you customized on purpose | your edits aren't recorded as accepted | `lever init --adopt` — records them as your baseline (host-side); doctor then passes, and any change *past* that baseline still fails as "modified since adoption" (tamper signal preserved) |
+| Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
 
 ## Upgrading lever
 
 1. Pull and rebuild: `cd lever_to && make all` (host binary), and if the agent-side binaries
    changed, `make lever-image-bins` + rebuild your agent image, then `lever apply` to load it.
-2. `lever init` — refreshes the scaffolded skills (your edited copies are left alone; `--check`
-   to preview). `CHANGELOG.md` in the repo notes anything that needs more than this.
+2. `lever init` — refreshes the scaffolded skills (your edited and adopted copies are left
+   alone; `--check` to preview). `CHANGELOG.md` in the repo notes anything that needs more than
+   this. If you've customized scaffolds and doctor nags about them, accept them once with
+   `lever init --adopt`.
 3. `lever reload` (or `lever stop && lever up` to also power-cycle the VM) — restart onto the new
    binaries/config.
 4. `lever doctor` — every check green means the upgrade landed.

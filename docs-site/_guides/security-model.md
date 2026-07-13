@@ -370,6 +370,15 @@ an agent was prompt-injected, audit what it wrote to the tree (CLAUDE.md include
 restart the thread. When you need boot instructions an agent cannot alter, `prompt_file` is the
 mechanism; `lever init`'s scaffolds are working material, not a trust anchor.
 
+For the scaffold files specifically (the SKILL.mds and CLAUDE.md), `lever doctor` gives you a
+concrete drift signal to start that audit from: it flags any content that matches neither the
+framework scaffold nor a baseline you accepted with `lever init --adopt`. The adopted baseline is
+recorded **host-side** (`.lever-state/skills-adopted.json`, outside the mount), so an agent that
+rewrites its own instructions cannot re-bless the edit — doctor reports it as "modified since
+adoption" until you either re-adopt it yourself or restore with `lever init --force`. This narrows
+the persistence window to files doctor doesn't watch (working files, scripts); it does not replace
+the audit.
+
 ### 5.2 No walk-up discovery (no planted-parent config)
 
 Config is resolved from the **current directory only**, there is deliberately **no walk-up**. A

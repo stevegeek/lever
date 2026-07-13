@@ -348,13 +348,14 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatalf("scaffolded must pass: %+v", res)
 	}
 
-	// Owner edit → fail, informational wording (mentions --force).
+	// Owner edit → fail; the hint must signpost BOTH exits (--adopt to accept,
+	// --force to restore) — a user hitting this nag discovers adoption here.
 	op := filepath.Join(tree, ".claude", "skills", "lever-operator", "SKILL.md")
 	if err := os.WriteFile(op, []byte("edited"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if res = checkOperatorSkills(app, stateDir); res.ok || !strings.Contains(res.fix, "--force") {
-		t.Fatalf("owner-edit must fail with --force hint: %+v", res)
+	if res = checkOperatorSkills(app, stateDir); res.ok || !strings.Contains(res.fix, "--force") || !strings.Contains(res.fix, "--adopt") {
+		t.Fatalf("owner-edit must fail with --adopt and --force hints: %+v", res)
 	}
 
 	// Adopt the customization → pass again, detail names the adoption.

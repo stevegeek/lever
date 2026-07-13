@@ -291,7 +291,7 @@ func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 	case adoptDrift:
 		fix = "changed since you adopted it — review the diff (an agent can edit files in the tree), then re-adopt with `lever init --adopt` or restore with `lever init --force`"
 	case modified:
-		fix = "locally-modified scaffold(s): review, then `lever init --force` to overwrite (or keep your edits — this check stays informational)"
+		fix = "locally-modified scaffold(s): if the edits are yours, accept them as your baseline with `lever init --adopt` (drift past it still fails this check); otherwise restore with `lever init --force`"
 	}
 	return checkResult{name, false, strings.Join(bad, "; "), fix}
 }

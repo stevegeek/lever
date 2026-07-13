@@ -25,6 +25,12 @@ version bump moves the block under the new version heading.
   — and clears the now-stale adoption record.
 
 ### Fixed
+- A tool whose broker backend carries a path (e.g. qmd's `[::1]:3101/mcp`) now
+  reaches that path exactly on the tool root, instead of a trailing-slash
+  variant (`/mcp/`) that a strict streamable-HTTP endpoint 404s. The trailing
+  slash was an artifact of the broker's subtree mux; qmd was the only tool with
+  a path-suffixed backend and so the only one that couldn't connect. Path-less
+  backends (every other tool) and sub-path requests are unaffected.
 - `lever doctor`'s "agent certificate" check no longer cries wolf right after
   a healing restart: an expired-leaf rejection logged before the current
   broker started (pid-file mtime) is reported as healed rather than as an

@@ -2,6 +2,7 @@
   "outputs": { "env": "$HOME/.scion/agent-env.json" },
   "services": [
     { "name": "lever-capability", "command": ["lever-agent", "serve-capability"] },
+    { "name": "lever-gateway", "command": ["lever-agent", "gateway"] },
     { "name": "lever-renew", "command": ["lever-agent", "renew", "--loop"] }
   ]
 }

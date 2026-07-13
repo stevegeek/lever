@@ -54,6 +54,11 @@ type BootConfig struct {
 	// string must be used verbatim as ANTHROPIC_AUTH_TOKEN (already base64url-encoded
 	// by the broker; do not re-encode). Injected so tests can stub it without a live broker.
 	RequestLLMToken func(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error)
+	// GatewayURL is the loopback URL of the in-container gateway proxy that Claude
+	// talks to for MCP + LLM traffic (it re-presents the rotating leaf on Claude's
+	// behalf). Empty means LocalGatewayURL. Only the values written into Claude's
+	// config point here; boot-time broker calls still use the direct mTLS client.
+	GatewayURL string
 }
 
 // Boot enrols the agent (idempotently) and configures the harness: writes the
@@ -62,6 +67,10 @@ type BootConfig struct {
 func Boot(ctx context.Context, c BootConfig) error {
 	if c.Now.IsZero() {
 		c.Now = time.Now()
+	}
+	gatewayURL := c.GatewayURL
+	if gatewayURL == "" {
+		gatewayURL = LocalGatewayURL
 	}
 
 	// Load bootstrap early so BrokerURL is available on both the enrol AND
@@ -109,6 +118,10 @@ func Boot(ctx context.Context, c BootConfig) error {
 	}
 
 	// Env overlay points the harness at the identity files (paths only, never key bytes).
+	// Claude now reaches the broker via the loopback gateway (plaintext) and no longer
+	// presents these itself, but we keep them: they're harmless (nothing on loopback
+	// negotiates TLS) and other in-container tooling may still read NODE_EXTRA_CA_CERTS.
+	// The gateway sidecar owns the rotating leaf; these paths are just informational.
 	overlay := map[string]string{
 		"CLAUDE_CODE_CLIENT_CERT": filepath.Join(c.IDDir, "agent.crt"),
 		"CLAUDE_CODE_CLIENT_KEY":  filepath.Join(c.IDDir, "agent.key"),
@@ -126,7 +139,8 @@ func Boot(ctx context.Context, c BootConfig) error {
 			return fmt.Errorf("agent boot: obtain llm token: %w", err)
 		}
 		overlay["ANTHROPIC_AUTH_TOKEN"] = tok
-		overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(brokerURL, "/") + "/llm"
+		// Claude posts to the loopback gateway, which proxies /llm to the broker.
+		overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(gatewayURL, "/") + "/llm"
 	}
 	if c.WriteEnvOverlay != nil {
 		if err := c.WriteEnvOverlay(overlay); err != nil {
@@ -138,14 +152,14 @@ func Boot(ctx context.Context, c BootConfig) error {
 		if err := c.MCPAdd("lever-capability", "lever-agent", "serve-capability"); err != nil {
 			return err
 		}
-		// Broker tools are HTTP MCP servers at the broker. The mTLS client cert
-		// for these calls is wired in by the env overlay above (paths only).
-		// If brokerURL is empty (no bootstrap configured), skip registration.
+		// Broker tools are HTTP MCP servers reached through the loopback gateway,
+		// which presents the rotating agent leaf on Claude's behalf. If brokerURL is
+		// empty (no bootstrap configured) there are no broker tools to route.
 		for _, tool := range brokerTools {
 			if brokerURL == "" {
 				continue
 			}
-			if err := c.MCPAdd(tool, "--transport", "http", brokerURL+"/mcp/"+tool+"/"); err != nil {
+			if err := c.MCPAdd(tool, "--transport", "http", gatewayURL+"/mcp/"+tool+"/"); err != nil {
 				return err
 			}
 		}

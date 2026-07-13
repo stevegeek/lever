@@ -38,7 +38,7 @@ func main() {
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|provision|request|delegate|call> ...")
+		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call> ...")
 	}
 	switch argv[1] {
 	case "boot":
@@ -47,6 +47,8 @@ func run(argv []string) error {
 		return cmdServeCapability(argv[2:])
 	case "renew":
 		return cmdRenew(argv[2:])
+	case "gateway":
+		return cmdGateway(argv[2:])
 	case "provision":
 		return cmdProvision(argv[2:])
 	case "request", "delegate", "call":
@@ -258,23 +260,25 @@ type renewServiceSpec struct {
 	Restart string   `yaml:"restart"`
 }
 
-// writeRenewServices emits $HOME/.scion/scion-services.yaml describing the
-// lever-renew sidecar, so scion launches in-container auto-refresh of the agent
-// cert and (in api-key mode) the LLM capability token right after the pre-start
-// hooks. scion reads this file as []api.ServiceSpec and launches each entry as
-// the agent user with the container env inherited (so the projected
-// LEVER_LLM_AUTH still flows), but it does NOT set the sidecar's working
-// directory — so every path here is made absolute and the broker URL is resolved
-// from an explicit --bootstrap rather than renew's CWD-relative default.
+// writeRenewServices emits $HOME/.scion/scion-services.yaml describing the two
+// long-lived agent sidecars — lever-gateway (the loopback mTLS proxy Claude talks
+// to) and lever-renew (auto-refresh of the agent cert and, in api-key mode, the
+// LLM capability token) — so scion launches them right after the pre-start hooks.
+// scion reads this file as []api.ServiceSpec and launches each entry as the agent
+// user with the container env inherited (so the projected LEVER_LLM_AUTH still
+// flows), but it does NOT set the sidecar's working directory — so every path here
+// is made absolute and the broker URL is resolved from an explicit --bootstrap
+// rather than a CWD-relative default.
 //
-// The broker URL is resolved here from the bootstrap and baked into the sidecar
-// as --broker-url, so the sidecar never reads the bootstrap file at all: it
-// avoids re-touching the one-time enrolment ticket the bootstrap also carries,
-// and removes any dependency on the sidecar's uid/CWD matching the bootstrap's
-// perms (the sidecar runs as the agent user; the bootstrap is 0600). No-op when
-// the bootstrap is absent or carries no broker URL: a non-brokered agent has
-// nothing to renew against. The renew loop self-heals transient errors (logged,
-// loop continues); restart:on-failure covers a hard crash.
+// The broker URL is resolved here from the bootstrap and baked into BOTH sidecars
+// as --broker-url, so neither reads the bootstrap file at all: it avoids
+// re-touching the one-time enrolment ticket the bootstrap also carries, and
+// removes any dependency on the sidecar's uid/CWD matching the bootstrap's perms
+// (the sidecars run as the agent user; the bootstrap is 0600). No-op when the
+// bootstrap is absent or carries no broker URL: a non-brokered agent has no broker
+// to proxy to or renew against. The renew loop self-heals transient errors
+// (logged, loop continues); the gateway is fail-fast — restart:on-failure
+// relaunches it on a crash. The gateway is emitted first so it is up before renew.
 //
 // Tamper window: this file sits at $HOME/.scion/ under the agent-writable
 // /home/scion bind-mount, so a compromised agent could rewrite it. That grants
@@ -293,14 +297,23 @@ func writeRenewServices(homeDir, idDir, bootstrapPath, settingsPath, llmAuth str
 	if bs.BrokerURL == "" {
 		return nil // brokerless bootstrap — nothing to renew against
 	}
-	command := []string{
+	gatewayCommand := []string{
+		"lever-agent", "gateway",
+		"--id-dir", idDir,
+		"--broker-url", bs.BrokerURL,
+		"--listen", "127.0.0.1:8462",
+	}
+	renewCommand := []string{
 		"lever-agent", "renew", "--loop",
 		"--id-dir", idDir,
 		"--broker-url", bs.BrokerURL,
 		"--llm-auth", llmAuth,
 		"--settings", settingsPath,
 	}
-	specs := []renewServiceSpec{{Name: "lever-renew", Command: command, Restart: "on-failure"}}
+	specs := []renewServiceSpec{
+		{Name: "lever-gateway", Command: gatewayCommand, Restart: "on-failure"},
+		{Name: "lever-renew", Command: renewCommand, Restart: "on-failure"},
+	}
 	b, err := yaml.Marshal(specs)
 	if err != nil {
 		return err
@@ -496,6 +509,52 @@ func cmdRenew(args []string) error {
 			}
 		}
 	}
+}
+
+// cmdGateway runs the long-lived loopback reverse-proxy that presents the
+// always-current agent leaf to the broker on Claude's behalf (Claude caches a
+// cert for its process lifetime, so it can't follow the 24h-TTL leaf's rotation).
+// Claude talks plaintext to --listen; the proxy re-reads <id-dir>/agent.{crt,key}
+// per handshake. Flags: --id-dir, --broker-url / --bootstrap (broker URL + CA),
+// --listen (loopback only).
+func cmdGateway(args []string) error {
+	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
+	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
+	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
+	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
+	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL + CA)")
+	listen := fs.String("listen", "127.0.0.1:8462", "loopback address to serve plaintext MCP/LLM traffic on")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	bURL, err := resolveBrokerURL(*brokerURL, *bootstrapPath)
+	if err != nil {
+		return fmt.Errorf("gateway: %w", err)
+	}
+	// CA to trust the broker's serving cert: prefer the identity's pinned ca.crt
+	// (written at enrol), fall back to the bootstrap's BrokerCA before enrolment.
+	var caPEM []byte
+	if id, ok := agent.LoadIdentity(*idDir); ok {
+		caPEM = id.CAPEM
+	} else if bs, berr := agent.LoadBootstrap(bootstrapPathOrDefault(*bootstrapPath)); berr == nil {
+		caPEM = []byte(bs.BrokerCA)
+	}
+	if len(caPEM) == 0 {
+		return fmt.Errorf("gateway: no CA found in %s or bootstrap", *idDir)
+	}
+	return agent.Gateway(*listen, bURL, caPEM, *idDir)
+}
+
+// bootstrapPathOrDefault resolves an empty --bootstrap the same way
+// resolveBrokerURL does, so the gateway's CA fallback reads the same file.
+func bootstrapPathOrDefault(path string) string {
+	if path != "" {
+		return path
+	}
+	if p := os.Getenv("LEVER_BOOTSTRAP"); p != "" {
+		return p
+	}
+	return "./.lever/bootstrap.json"
 }
 
 // cmdProvision mints a one-use enrolment ticket for a worker via the broker's

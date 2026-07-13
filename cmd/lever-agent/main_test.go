@@ -50,12 +50,35 @@ func TestWriteRenewServicesAPIKey(t *testing.T) {
 	if err := yaml.Unmarshal(b, &specs); err != nil {
 		t.Fatalf("parse services yaml: %v", err)
 	}
-	if len(specs) != 1 {
-		t.Fatalf("want 1 service, got %d: %s", len(specs), b)
+	// Two sidecars: lever-gateway (the loopback mTLS proxy) then lever-renew.
+	if len(specs) != 2 {
+		t.Fatalf("want 2 services, got %d: %s", len(specs), b)
 	}
-	s := specs[0]
+
+	// Gateway MUST be emitted first (up before renew) and carry baked absolute
+	// flags — sidecars get no CWD, so it must never fall back to a bootstrap path.
+	gw := specs[0]
+	if gw.Name != "lever-gateway" {
+		t.Errorf("specs[0].name = %q, want lever-gateway (emitted first)", gw.Name)
+	}
+	if gw.Restart != "on-failure" {
+		t.Errorf("gateway restart = %q, want on-failure", gw.Restart)
+	}
+	gwCmd := strings.Join(gw.Command, " ")
+	for _, want := range []string{
+		"lever-agent gateway",
+		"--id-dir " + idDir,
+		"--broker-url " + brokerURL, // baked; no sidecar bootstrap file-read
+		"--listen 127.0.0.1:8462",
+	} {
+		if !strings.Contains(gwCmd, want) {
+			t.Errorf("gateway command %q missing %q", gwCmd, want)
+		}
+	}
+
+	s := specs[1]
 	if s.Name != "lever-renew" {
-		t.Errorf("name = %q, want lever-renew", s.Name)
+		t.Errorf("specs[1].name = %q, want lever-renew", s.Name)
 	}
 	if s.Restart != "on-failure" {
 		t.Errorf("restart = %q, want on-failure", s.Restart)

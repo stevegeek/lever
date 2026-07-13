@@ -39,6 +39,20 @@ version bump moves the block under the new version heading.
   `GetCertificate` source when less than 6h of validity remains; agent leafs
   were already kept fresh by the 12h renew sidecar once the broker stays
   reachable.
+- The agent's mTLS client leaf now hot-reloads on the live MCP/LLM path. Claude
+  Code read `CLAUDE_CODE_CLIENT_CERT`/`_KEY` once at process start and cached the
+  leaf for its whole lifetime, so after ~24h the boot cert expired and every
+  gateway call failed with `tls: certificate has expired` — despite the renew
+  sidecar rewriting a fresh leaf every 12h — until the manager was restarted. A
+  new `lever-agent gateway` sidecar now runs a loopback (127.0.0.1) reverse-proxy
+  that terminates plaintext from Claude and re-presents the always-current leaf
+  to the broker over mTLS, re-reading `agent.{crt,key}` per TLS handshake. Claude
+  no longer holds the rotating cert: boot points its MCP `--transport http` URLs
+  and `ANTHROPIC_BASE_URL` at the loopback gateway. The proxy caps idle broker
+  connections at 5m so a rotated leaf reaches the broker well before the 24h
+  expiry, uses `FlushInterval = -1` for MCP's SSE streaming, and binds loopback
+  only (it holds the agent key). Boot-time discovery and llm-token calls still go
+  direct to the broker (the gateway isn't up during pre-start).
 
 ## [0.4.0] - 2026-07-10
 

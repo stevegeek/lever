@@ -93,6 +93,40 @@ func TestGatewayDeniesMissingCapabilityWithoutReachingBackend(t *testing.T) {
 	}
 }
 
+// pathRecordingUpstream records the exact URL.Path it was reached at.
+func pathRecordingUpstream(t *testing.T, gotPath *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+}
+
+// The common case — a path-less backend — is untouched: the tool root still
+// forwards as "/". (Path-suffixed backends are covered by
+// TestGatewayComposesBackendPath.)
+func TestGatewayPathlessBackendRootUnchanged(t *testing.T) {
+	var gotPath string
+	up := pathRecordingUpstream(t, &gotPath)
+	defer up.Close()
+	b := New(testConfig(t))
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	h, err := b.gatewayHandler("db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := http.StripPrefix("/mcp/db", h)
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	if gotPath != "/" {
+		t.Fatalf("path-less backend path = %q, want %q (unchanged)", gotPath, "/")
+	}
+}
+
 func TestGatewayDeniesWrongCallerWithoutReachingBackend(t *testing.T) {
 	var reached bool
 	var gotBody string
@@ -446,8 +480,11 @@ func TestGatewayComposesBackendPath(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	if gotPath != "/mcp/" {
-		t.Fatalf("upstream path = %q, want %q (backend path must compose with the stripped prefix)", gotPath, "/mcp/")
+	// Hitting the tool root must forward to the backend's path EXACTLY ("/mcp"),
+	// not "/mcp/": the trailing slash is an artifact of the broker's subtree mux,
+	// and a strict streamable-HTTP endpoint (qmd) 404s on it (verified live).
+	if gotPath != "/mcp" {
+		t.Fatalf("upstream path = %q, want %q (trailing slash is a mux artifact; strict MCP endpoints 404 on it)", gotPath, "/mcp")
 	}
 }
 

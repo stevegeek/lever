@@ -40,7 +40,17 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	rp := httputil.NewSingleHostReverseProxy(target)
 	base := rp.Director
 	rp.Director = func(req *http.Request) {
+		remainder := req.URL.Path // post-StripPrefix, before the backend-path join
 		base(req)
+		// A backend that carries its own path (e.g. qmd's "[::1]:3101/mcp") must
+		// receive that path EXACTLY when the MCP client hits the tool root: the
+		// default join turns "/mcp"+"/" into "/mcp/", which a strict streamable-
+		// HTTP endpoint 404s. Collapse a bare-root remainder to the backend path.
+		// Path-less backends (the common case) are untouched.
+		if (remainder == "" || remainder == "/") && target.Path != "" && target.Path != "/" {
+			req.URL.Path = target.Path
+			req.URL.RawPath = ""
+		}
 		req.Host = target.Host
 		req.Header.Del("Cookie")
 		req.Header.Del("X-Forwarded-For")

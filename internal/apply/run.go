@@ -107,6 +107,21 @@ func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 type Deps struct {
 	JailUp        func(ctx context.Context, app *config.App) error
 	LoadImage     func(ctx context.Context, imageRef string) error
+	// ImageLoaded reports whether the jail already holds imageRef at the same
+	// image ID as the host, letting the load-image step skip a redundant
+	// multi-GB `docker save | podman load` re-stream. This is what stops a
+	// re-apply (including the first-boot retry loop, which re-runs the WHOLE
+	// plan on any step failure) from re-importing every image each time. It is
+	// fail-open by construction (false on any uncertainty), so a wrong answer
+	// costs a redundant load, never a wrongly-skipped one. nil ⇒ always load
+	// (tests, pre-guard behavior).
+	ImageLoaded func(ctx context.Context, imageRef string) bool
+	// PruneImages reclaims dangling images from the jail after a load, so a
+	// rebuilt image does not ratchet the grow-only jail disk up by a full image
+	// size (the superseded copy goes untagged). A no-op when the load added a
+	// new image. Best-effort: a prune failure is logged, not fatal to the
+	// bring-up. nil ⇒ skip pruning (tests).
+	PruneImages func(ctx context.Context) error
 	Scion         *scion.Client
 	ReadCred      func(path string) (string, error) // nil ⇒ defaultReadCred
 	JailMount     string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
@@ -205,7 +220,25 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		}
 		return nil
 	case "load-image":
-		return d.LoadImage(ctx, s.Target)
+		// Skip the multi-GB re-import when the jail already holds this exact
+		// image (same ID). Fail-open: ImageLoaded returns false on any doubt.
+		if d.ImageLoaded != nil && d.ImageLoaded(ctx, s.Target) {
+			return nil
+		}
+		if err := d.LoadImage(ctx, s.Target); err != nil {
+			return err
+		}
+		// After a load, prune dangling images: when this load superseded a tag
+		// (a rebuilt image), the old copy is now untagged and would otherwise
+		// ratchet the grow-only jail disk. A no-op when the load just added a
+		// brand-new image. Best-effort — a prune failure must never fail the
+		// bring-up.
+		if d.PruneImages != nil {
+			if err := d.PruneImages(ctx); err != nil {
+				logf(d, "load-image: pruning superseded jail images failed: %v", err)
+			}
+		}
+		return nil
 	case "init-machine":
 		return d.Scion.InitMachine(ctx)
 	case "config-registry":

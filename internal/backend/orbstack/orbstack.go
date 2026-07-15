@@ -353,6 +353,17 @@ func (o *OrbStack) LoadImage(ctx context.Context, imageRef string) error {
 	return jail.LoadImage(ctx, JailPrefix(o.machine, o.runUser), o.RunUID(), imageRef)
 }
 
+// ImageLoaded reports whether the jail already holds imageRef at the host's
+// image ID (so a re-import can be skipped). Fail-open — see the interface doc.
+func (o *OrbStack) ImageLoaded(ctx context.Context, imageRef string) bool {
+	return jail.ImageLoaded(ctx, JailPrefix(o.machine, o.runUser), o.RunUID(), imageRef)
+}
+
+// PruneJailImages reclaims dangling images from the jail's rootless podman.
+func (o *OrbStack) PruneJailImages(ctx context.Context) error {
+	return jail.PruneImages(ctx, JailPrefix(o.machine, o.runUser), o.RunUID())
+}
+
 // InstallGuestBinary streams a host-local executable into the machine at
 // destPath as root, via the shared guest provisioner (RootPrefix =
 // `orb -u root -m <machine>`).

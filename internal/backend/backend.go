@@ -65,6 +65,15 @@ type Backend interface {
 	JailRunner() exec.Runner            // command transport into the jail
 	AttachArgv(inner []string) []string // interactive TTY argv (lever up)
 	LoadImage(ctx context.Context, imageRef string) error
+	// ImageLoaded reports whether the jail already holds imageRef at the same
+	// image ID as the host, so apply can skip a redundant multi-GB re-import.
+	// Fail-open: false on any uncertainty (a not-yet-loaded or rebuilt image, or
+	// an inspect failure) so a broken check loads rather than wrongly skips.
+	ImageLoaded(ctx context.Context, imageRef string) bool
+	// PruneJailImages reclaims dangling (untagged, unreferenced) images from the
+	// jail's container store — the layers a rebuilt tag orphans on the grow-only
+	// jail disk. Never touches a tagged or container-referenced image.
+	PruneJailImages(ctx context.Context) error
 	// InstallGuestBinary streams a host-local executable into the guest at
 	// destPath as root (used by the acceptance gate to place lever-agent). The
 	// transport is the backend's root prefix, so callers stay backend-agnostic.

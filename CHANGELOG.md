@@ -25,6 +25,20 @@ version bump moves the block under the new version heading.
   — and clears the now-stale adoption record.
 
 ### Fixed
+- `lever apply` no longer re-imports every agent image into the jail on each
+  run. The `load-image` step now first compares the jail's podman image ID
+  against the host docker image ID and skips the multi-GB `docker save |
+  podman load` re-stream when they match (the config digest is stable across
+  save/load, so equal IDs mean the exact bytes are already present). The check
+  is fail-open — any uncertainty (a not-yet-loaded or rebuilt image, an inspect
+  failure) falls through to a load, so it can never wrongly skip and leave a
+  stale image. This matters most under the first-boot retry loop, where any
+  step failing re-runs the *entire* plan: previously each retry re-streamed
+  every image; now unchanged images are near-no-ops. After a load, the step also
+  prunes dangling (untagged, unreferenced) jail images — so a rebuilt image,
+  whose old copy the load leaves untagged, no longer ratchets the grow-only jail
+  disk up by a full image size (a no-op when nothing was superseded). Pruning
+  never touches a tagged or container-referenced image.
 - A tool whose broker backend carries a path (e.g. qmd's `[::1]:3101/mcp`) now
   reaches that path exactly on the tool root, instead of a trailing-slash
   variant (`/mcp/`) that a strict streamable-HTTP endpoint 404s. The trailing

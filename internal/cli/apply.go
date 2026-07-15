@@ -389,6 +389,17 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		LoadImage: func(ctx context.Context, ref string) error {
 			return b.LoadImage(ctx, ref)
 		},
+		// ImageLoaded skips a redundant image re-import when the jail already
+		// holds the exact bytes (same image ID as the host) — see the Deps field
+		// doc. Fail-open in the backend, so a check failure just loads.
+		ImageLoaded: func(ctx context.Context, ref string) bool {
+			return b.ImageLoaded(ctx, ref)
+		},
+		// PruneImages reclaims the dangling image a rebuilt tag orphans, after a
+		// load. Best-effort (the apply step logs, never fails, on error).
+		PruneImages: func(ctx context.Context) error {
+			return b.PruneJailImages(ctx)
+		},
 		Scion:     sc,
 		JailMount: b.MountDest(),
 

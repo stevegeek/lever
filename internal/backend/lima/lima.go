@@ -454,6 +454,17 @@ func (l *Lima) LoadImage(ctx context.Context, imageRef string) error {
 	return jail.LoadImage(ctx, JailPrefix(l.vm), l.RunUID(), imageRef)
 }
 
+// ImageLoaded reports whether the jail already holds imageRef at the host's
+// image ID (so a re-import can be skipped). Fail-open — see the interface doc.
+func (l *Lima) ImageLoaded(ctx context.Context, imageRef string) bool {
+	return jail.ImageLoaded(ctx, JailPrefix(l.vm), l.RunUID(), imageRef)
+}
+
+// PruneJailImages reclaims dangling images from the jail's rootless podman.
+func (l *Lima) PruneJailImages(ctx context.Context) error {
+	return jail.PruneImages(ctx, JailPrefix(l.vm), l.RunUID())
+}
+
 // InstallGuestBinary streams a host-local executable into the VM at destPath as
 // root, via the shared guest provisioner (RootPrefix = `limactl shell <vm> sudo`).
 func (l *Lima) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {

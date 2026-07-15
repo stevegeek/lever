@@ -2077,3 +2077,92 @@ func TestContainerLive(t *testing.T) {
 		}
 	}
 }
+
+// loadImageStep drives just the load-image case of runStep with the given deps.
+func loadImageStep(d Deps) error {
+	return runStep(context.Background(), &config.App{}, Step{Kind: "load-image", Target: "img"}, d, &bootTracker{})
+}
+
+// TestLoadImageStepSkipsWhenAlreadyLoaded: the whole point of the guard — when
+// the jail already holds the exact image, neither re-import nor prune runs.
+func TestLoadImageStepSkipsWhenAlreadyLoaded(t *testing.T) {
+	var loads, prunes int
+	d := Deps{
+		LoadImage:   func(context.Context, string) error { loads++; return nil },
+		ImageLoaded: func(context.Context, string) bool { return true },
+		PruneImages: func(context.Context) error { prunes++; return nil },
+	}
+	if err := loadImageStep(d); err != nil {
+		t.Fatalf("runStep: %v", err)
+	}
+	if loads != 0 {
+		t.Errorf("LoadImage calls = %d, want 0 (image already loaded)", loads)
+	}
+	if prunes != 0 {
+		t.Errorf("PruneImages calls = %d, want 0 (nothing was loaded)", prunes)
+	}
+}
+
+// TestLoadImageStepLoadsAndPrunesWhenAbsent: a not-loaded (or rebuilt-ID)
+// image is loaded, then the superseded dangling image is pruned.
+func TestLoadImageStepLoadsAndPrunesWhenAbsent(t *testing.T) {
+	var loads, prunes int
+	d := Deps{
+		LoadImage:   func(context.Context, string) error { loads++; return nil },
+		ImageLoaded: func(context.Context, string) bool { return false },
+		PruneImages: func(context.Context) error { prunes++; return nil },
+	}
+	if err := loadImageStep(d); err != nil {
+		t.Fatalf("runStep: %v", err)
+	}
+	if loads != 1 {
+		t.Errorf("LoadImage calls = %d, want 1", loads)
+	}
+	if prunes != 1 {
+		t.Errorf("PruneImages calls = %d, want 1 (prune after load)", prunes)
+	}
+}
+
+// TestLoadImageStepNilGuardLoads: no guard wired (nil ImageLoaded/PruneImages)
+// preserves pre-guard behavior — always load, never prune.
+func TestLoadImageStepNilGuardLoads(t *testing.T) {
+	var loads int
+	d := Deps{LoadImage: func(context.Context, string) error { loads++; return nil }}
+	if err := loadImageStep(d); err != nil {
+		t.Fatalf("runStep: %v", err)
+	}
+	if loads != 1 {
+		t.Errorf("LoadImage calls = %d, want 1 (no guard ⇒ always load)", loads)
+	}
+}
+
+// TestLoadImageStepLoadErrorIsFatal: a real load failure propagates and the
+// prune does not run.
+func TestLoadImageStepLoadErrorIsFatal(t *testing.T) {
+	var prunes int
+	d := Deps{
+		LoadImage:   func(context.Context, string) error { return fmt.Errorf("boom") },
+		ImageLoaded: func(context.Context, string) bool { return false },
+		PruneImages: func(context.Context) error { prunes++; return nil },
+	}
+	err := loadImageStep(d)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("runStep err = %v, want the load failure", err)
+	}
+	if prunes != 0 {
+		t.Errorf("PruneImages calls = %d, want 0 (no prune after a failed load)", prunes)
+	}
+}
+
+// TestLoadImageStepPruneErrorIsNonFatal: the image loaded, so a prune failure
+// is logged, not returned.
+func TestLoadImageStepPruneErrorIsNonFatal(t *testing.T) {
+	d := Deps{
+		LoadImage:   func(context.Context, string) error { return nil },
+		ImageLoaded: func(context.Context, string) bool { return false },
+		PruneImages: func(context.Context) error { return fmt.Errorf("prune boom") },
+	}
+	if err := loadImageStep(d); err != nil {
+		t.Fatalf("runStep: a prune failure must be non-fatal, got %v", err)
+	}
+}

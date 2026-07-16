@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -24,10 +25,20 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 			if machine == "" {
 				if path, perr := resolveConfigPath(""); perr == nil {
 					if app, lerr := config.Load(path); lerr == nil {
-						if serr := brokerctl.StateDir(filepath.Dir(path)).StopBroker(); serr != nil {
+						st := brokerctl.StateDir(filepath.Dir(path))
+						if serr := st.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}
 						clearStagedRuntimeState(app)
+						// The controller PAT was minted against the hub DB that lives
+						// inside the jail; destroying the machine discards that DB, so
+						// the persisted PAT is now stale. Remove it so the next `up`
+						// mints a fresh one — otherwise ensureControllerPAT's idempotent
+						// no-op reuses the stale PAT and the new hub's fresh DB rejects
+						// it ("authentication failed" at readiness).
+						if rerr := removeControllerPAT(st); rerr != nil {
+							cmd.PrintErrf("warning: removing stale controller PAT: %v\n", rerr)
+						}
 					}
 				}
 			} else {
@@ -61,4 +72,14 @@ func clearStagedRuntimeState(app *config.App) {
 	_ = os.Remove(filepath.Join(app.Tree, ".lever", "bootstrap.json"))
 	_ = os.Remove(filepath.Join(app.Tree, config.ManifestName))
 	_ = os.Remove(filepath.Join(app.Tree, ".lever")) // removed only if now empty
+}
+
+// removeControllerPAT deletes the persisted controller PAT (see the caller's
+// comment for why destroy must). A missing PAT is not an error; any other
+// removal failure is returned so the caller can warn.
+func removeControllerPAT(st brokerctl.State) error {
+	if err := os.Remove(st.ControllerPAT()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

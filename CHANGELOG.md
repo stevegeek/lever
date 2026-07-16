@@ -25,6 +25,14 @@ version bump moves the block under the new version heading.
   — and clears the now-stale adoption record.
 
 ### Fixed
+- `lever destroy` now clears the persisted controller PAT
+  (`.lever-state/controller.pat`). The PAT is minted against the hub DB that
+  lives inside the jail, so destroying the machine leaves it stale; the next
+  `lever up` reused it (ensureControllerPAT no-ops when a PAT is already
+  persisted) and the new hub's fresh DB rejected it, failing the readiness
+  probe with "authentication failed" until the file was removed by hand. Only
+  the current-instance teardown (no `--machine`) clears it, alongside the
+  broker stop and staged-ticket cleanup it already does.
 - `lever apply` no longer re-imports every agent image into the jail on each
   run. The `load-image` step now first compares the jail's podman image ID
   against the host docker image ID and skips the multi-GB `docker save |

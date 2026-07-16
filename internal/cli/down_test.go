@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -43,6 +44,33 @@ func TestClearStagedRuntimeState(t *testing.T) {
 func TestClearStagedRuntimeStateMissingIsNoop(t *testing.T) {
 	// Nothing staged: must not panic or error.
 	clearStagedRuntimeState(&config.App{Tree: t.TempDir()})
+}
+
+// TestRemoveControllerPAT: destroy must clear the persisted controller PAT so a
+// later `up` mints a fresh one — the old PAT is signed against the hub DB that
+// died with the machine, and reusing it fails the new hub's readiness auth.
+func TestRemoveControllerPAT(t *testing.T) {
+	st := brokerctl.StateDir(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pat := st.ControllerPAT()
+	if err := os.WriteFile(pat, []byte("stale-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeControllerPAT(st); err != nil {
+		t.Fatalf("removeControllerPAT: %v", err)
+	}
+	if _, err := os.Stat(pat); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("controller.pat should be removed, stat err = %v", err)
+	}
+}
+
+func TestRemoveControllerPATMissingIsNoop(t *testing.T) {
+	// No PAT staged: destroy must not error.
+	if err := removeControllerPAT(brokerctl.StateDir(t.TempDir())); err != nil {
+		t.Fatalf("missing PAT must be a no-op, got %v", err)
+	}
 }
 
 // TestDestroyCallsTeardown verifies the renamed command (Use: "destroy")

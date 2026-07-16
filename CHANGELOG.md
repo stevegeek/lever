@@ -27,6 +27,16 @@ version bump moves the block under the new version heading.
   — and clears the now-stale adoption record.
 
 ### Fixed
+- `lever up` no longer needs a second run to clear the first-boot
+  `start-manager` race on a cold VM. The scion workstation daemon registers its
+  runtime broker asynchronously after its Hub API is up, so the first hub calls
+  of `start-manager` can land in that window; on a cold VM scion surfaces it as
+  a "context deadline exceeded" from the hub rather than the clean "no runtime
+  brokers available" the retry recognised, so the apply failed hard and only a
+  second `up` reconciled. The transient-broker retry now also treats a hub
+  "deadline exceeded" as the same race, and the initial observe (the `scion
+  list` preceding the create/resume) rides that bounded, ctx-checked retry too
+  instead of failing on the first blip.
 - `lever destroy` now clears the persisted controller PAT
   (`.lever-state/controller.pat`). The PAT is minted against the hub DB that
   lives inside the jail, so destroying the machine leaves it stale; the next

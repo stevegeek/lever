@@ -159,13 +159,19 @@ type agentLifecycleRunner struct {
 	initPhase, initContainerStatus   string
 	liveWhenPhase, liveWhenContainer string
 
-	resumeErr, deleteErr, startErr error
+	resumeErr, deleteErr, startErr, listErr error
 	// resumeFailsThenSucceed, when > 0, makes resume fail (with resumeErr) for
 	// exactly this many calls, then succeed from the next call onward — models
 	// a transient broker-unavailable race resolving mid-retry. Zero (the
 	// default) preserves the original all-tests-so-far behavior: if resumeErr
 	// is set, resume fails EVERY call (no eventual success).
 	resumeFailsThenSucceed int
+	// listFailsThenSucceed, when > 0, makes the observe List fail (with listErr)
+	// for exactly this many calls, then succeed — models the runtime-broker race
+	// biting the FIRST hub call of start-manager. Only the observe-first List is
+	// affected (waitHubReady's `list --all` falls through verb() to the blanket
+	// script). Zero with listErr set = fail every call.
+	listFailsThenSucceed int
 
 	phase, containerStatus string
 	inited                 bool
@@ -225,6 +231,9 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	case "list":
 		r.listCalls++
 		r.record(dir, env, name, args)
+		if r.listErr != nil && (r.listFailsThenSucceed == 0 || r.listCalls <= r.listFailsThenSucceed) {
+			return exec.Result{Code: 1, Stderr: r.listErr.Error()}, r.listErr
+		}
 		if r.phase == "" {
 			return exec.Result{Stdout: "[]"}, nil
 		}
@@ -546,6 +555,71 @@ func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testi
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], "resume failed") || !strings.Contains(logged[0], "FRESH") {
 		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged)
+	}
+}
+
+// TestIsBrokerUnavailable pins the transient runtime-broker wordings that must
+// be retried during start-manager — including the cold-VM "deadline exceeded"
+// surfacing that previously slipped through and forced a second `up`.
+func TestIsBrokerUnavailable(t *testing.T) {
+	transient := []string{
+		"No runtime brokers available",
+		"cannot resume agent: no runtime broker available",
+		"error: no_runtime_broker",
+		"context deadline exceeded",
+		"Post \"http://hub\": context deadline exceeded",
+	}
+	for _, s := range transient {
+		if !isBrokerUnavailable(fmt.Errorf("%s", s)) {
+			t.Errorf("isBrokerUnavailable(%q) = false, want true (transient)", s)
+		}
+	}
+	for _, s := range []string{
+		"authentication failed", "project not found", "permission denied",
+		"invalid deadline configured", // "deadline" without "exceeded" must NOT match
+	} {
+		if isBrokerUnavailable(fmt.Errorf("%s", s)) {
+			t.Errorf("isBrokerUnavailable(%q) = true, want false (real failure)", s)
+		}
+	}
+	if isBrokerUnavailable(nil) {
+		t.Error("isBrokerUnavailable(nil) = true, want false")
+	}
+}
+
+// TestStartManagerObserveListRetriesOnTransientThenSucceeds: the observe-first
+// List is the FIRST hub call of start-manager, so on a cold VM it can hit the
+// runtime-broker registration window and come back "deadline exceeded". It must
+// ride the same bounded retry as Start/Resume, not fail the whole apply on the
+// first blip (which is what forced a second `up`). Fail the List twice, then
+// succeed onto an already-running record (pure no-op path) so the test isolates
+// the observe retry.
+func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
+	origAtt, origInt := brokerStartAttempts, brokerStartInterval
+	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
+	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
+
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "running", initContainerStatus: "Up 3 seconds",
+		listErr:              fmt.Errorf("Get \"http://hub/agents\": context deadline exceeded"),
+		listFailsThenSucceed: 2,
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("a transient observe-List blip must be retried, not fail the apply: %v", err)
+	}
+	if r.startCalls != 0 || r.resumeCalls != 0 {
+		t.Errorf("startCalls=%d resumeCalls=%d, want 0/0 (already-running record is a no-op once observed)", r.startCalls, r.resumeCalls)
+	}
+	// 2 transient failures + at least one success before the liveness poll.
+	if r.listCalls < 3 {
+		t.Errorf("listCalls = %d, want >= 3 (2 retried failures + success)", r.listCalls)
 	}
 }
 

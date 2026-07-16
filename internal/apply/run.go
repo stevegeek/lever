@@ -36,13 +36,23 @@ var (
 )
 
 // isBrokerUnavailable reports whether err is the transient "runtime broker not
-// yet registered" error from `scion start`/`scion resume` (the registration
-// race), as opposed to a real failure. `scion resume` hits the SAME race as
-// `scion start` (confirmed in scion source,
-// pkg/hub/handlers_agent_create_helpers.go:354,408) but emits the singular
-// "no runtime broker available" — distinct wording from start's plural "No
-// runtime brokers available" — so both must be matched or a resume retry
-// would never see its own transient error as retryable.
+// yet registered" condition during bring-up (the registration race), as opposed
+// to a real failure. The scion workstation daemon starts its Hub API and its
+// runtime broker separately: waitHubReady confirms the Hub API serves, but the
+// runtime broker registers ASYNCHRONOUSLY afterward, so a call issued in that
+// window fails. scion words it three ways depending on the verb and how far the
+// call got before giving up:
+//   - `scion start`: plural "No runtime brokers available".
+//   - `scion resume`: singular "no runtime broker available" — the SAME race
+//     (confirmed in scion pkg/hub/handlers_agent_create_helpers.go:354,408).
+//   - either, on a cold VM: "deadline exceeded" — scion's own internal wait for
+//     the broker times out and surfaces the hub timeout instead of the clean
+//     message (observed live: "context deadline exceeded from the Hub during
+//     start-manager", which needed a second `up` to reconcile).
+// All must be matched or the retry never sees its own transient error as
+// retryable. retryOnBrokerUnavailable is bounded and checks ctx between
+// attempts, so a deadline from OUR context (a genuine timeout, not scion's
+// internal one) returns promptly instead of looping the full budget.
 func isBrokerUnavailable(err error) bool {
 	if err == nil {
 		return false
@@ -50,7 +60,8 @@ func isBrokerUnavailable(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "no_runtime_broker") ||
 		strings.Contains(s, "No runtime brokers available") ||
-		strings.Contains(s, "no runtime broker available")
+		strings.Contains(s, "no runtime broker available") ||
+		strings.Contains(s, "deadline exceeded")
 }
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
@@ -408,12 +419,24 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		// non-zero, verified upstream 2026-07-04); resume
 		// covers suspended AND stopped records, relaunching with
 		// `claude --continue` (conversation restored). Live evidence
-		// 2026-07-04 (see the resume-reconciliation plan's Evidence base). The
-		// hub is already up by this point in Plan() (scion-server runs before
-		// start-manager), so a List error here is real, not a "hub not ready
-		// yet" race — surface it as a hard step error.
-		agents, lerr := d.Scion.List(ctx, jp)
-		if lerr != nil {
+		// 2026-07-04 (see the resume-reconciliation plan's Evidence base).
+		//
+		// The Hub API is up by this point in Plan() (scion-server ran first, and
+		// waitHubReady confirmed it), but the runtime broker registers
+		// asynchronously after it, so this FIRST call into the hub can still hit
+		// the registration window — on a cold VM as a "deadline exceeded" from
+		// the hub. So the observe rides the SAME bounded retry as the Start/Resume
+		// below (isBrokerUnavailable): a transient broker-not-ready blip is
+		// retried, and only a persistent or genuinely-different error is fatal.
+		var agents []scion.Agent
+		if lerr := retryOnBrokerUnavailable(ctx, func() error {
+			a, e := d.Scion.List(ctx, jp)
+			if e != nil {
+				return e
+			}
+			agents = a
+			return nil
+		}); lerr != nil {
 			return fmt.Errorf("start-manager: observing agents: %w", lerr)
 		}
 		var rec *scion.Agent

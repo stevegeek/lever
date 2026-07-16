@@ -623,6 +623,60 @@ func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
 	}
 }
 
+// TestStartManagerWaitsForBrokerReadyBeforeActing: the readiness gate must run
+// BEFORE the observe/create — that's the whole point of gating rather than
+// racing the broker's async registration.
+func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent record → create
+	var waitCalls, startCallsAtGate int
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		WaitBrokerReady: func(ctx context.Context, project string) error {
+			waitCalls++
+			startCallsAtGate = r.startCalls
+			return nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if waitCalls != 1 {
+		t.Errorf("WaitBrokerReady calls = %d, want 1", waitCalls)
+	}
+	if startCallsAtGate != 0 {
+		t.Errorf("start ran (%d) before the readiness gate — the gate must precede any action", startCallsAtGate)
+	}
+	if r.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1 (absent record creates, after the gate)", r.startCalls)
+	}
+}
+
+// TestStartManagerBrokerReadyErrorAbortsBeforeActing: a gate error (e.g. ctx
+// cancellation — the gate's only non-nil return, since it is otherwise
+// fail-soft) aborts start-manager before it touches any record.
+func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		WaitBrokerReady: func(ctx context.Context, project string) error {
+			return context.Canceled
+		},
+	}
+	err := Run(context.Background(), app, deps)
+	if err == nil || !strings.Contains(err.Error(), "runtime broker") {
+		t.Fatalf("a gate error must abort start-manager, got: %v", err)
+	}
+	if r.startCalls != 0 || r.resumeCalls != 0 {
+		t.Errorf("startCalls=%d resumeCalls=%d, want 0/0 (no action when the gate errors)", r.startCalls, r.resumeCalls)
+	}
+}
+
 // TestStartManagerLivenessNeverGreenAfterCreate: `scion start` reports success
 // but the container never actually comes up (scion's own false-success — see
 // the plan's Evidence base). The liveness verify must exhaust its attempts and

@@ -45,6 +45,67 @@ func (c *Client) waitHubReady(ctx context.Context) error {
 	return fmt.Errorf("hub not ready after %d attempts: %w", hubReadyAttempts, lastErr)
 }
 
+// brokerReadyAttempts/brokerReadyInterval bound WaitRuntimeBrokerReady; package
+// vars so tests can shrink them.
+var brokerReadyAttempts = 30
+var brokerReadyInterval = 1 * time.Second
+
+// runtimeBroker is the subset of a `scion hub brokers --format json` row we read
+// to judge readiness. A broker registers with the hub before it finishes
+// connecting, so "a row exists" is not enough — we wait for one that is actually
+// online/connected.
+type runtimeBroker struct {
+	Status          string `json:"status"`
+	ConnectionState string `json:"connectionState"`
+}
+
+func (b runtimeBroker) ready() bool {
+	return b.Status == "online" || b.ConnectionState == "connected"
+}
+
+// WaitRuntimeBrokerReady blocks until the hub reports at least one ONLINE
+// runtime broker, or the attempt budget is exhausted. The scion workstation
+// daemon brings up its Hub API and its runtime broker separately: waitHubReady
+// (called from ServerStart) confirms the Hub API serves, but the runtime broker
+// registers AND connects asynchronously afterward — and `scion start`/`resume`
+// need it. Gating here closes that window at the source, so the create/resume
+// that follows acts against a ready broker instead of racing it (which
+// otherwise fails the first `up` and needs a second, or leans on the start
+// path's broker-unavailable retry).
+//
+// FAIL-SOFT: on budget exhaustion it returns nil (not an error), so the caller
+// proceeds to start regardless — the start path's own bounded broker-unavailable
+// retry (internal/apply's isBrokerUnavailable) is the backstop, and hard-failing
+// the whole bring-up on a readiness probe that can't confirm would be worse than
+// letting start try. Only ctx cancellation returns an error. `hub brokers` lists
+// brokers hub-wide; project scopes only the hub-client/settings resolution, so
+// it is passed to dodge the "no project" resolution failure a bare call hits.
+func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {
+	args := append([]string{"hub", "brokers", "--format", "json"}, projectFlag(project)...)
+	for i := 0; i < brokerReadyAttempts; i++ {
+		if out, err := c.run(ctx, "", args...); err == nil {
+			// parseJSON (not raw Unmarshal): scion prints the dev-auth WARNING
+			// banner into the same stream, and parseJSON strips it + ANSI before
+			// decoding — matching List/messaging. A parse miss leaves brokers empty
+			// (not ready), so it stays fail-soft.
+			var brokers []runtimeBroker
+			if parseJSON(out, &brokers) == nil {
+				for _, b := range brokers {
+					if b.ready() {
+						return nil
+					}
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(brokerReadyInterval):
+		}
+	}
+	return nil
+}
+
 // InitMachine seeds the machine-level scion dir + default harness configs
 // (claude/gemini). Required before `--harness claude` resolves.
 func (c *Client) InitMachine(ctx context.Context) error {

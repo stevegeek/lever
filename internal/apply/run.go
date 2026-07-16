@@ -146,6 +146,15 @@ type Deps struct {
 	// unit tests / legacy — the scion-server step still runs, just without a
 	// pre-minted SCION_HUB_TOKEN to lock the real hub against).
 	EnsureControllerPAT  func(ctx context.Context) error
+	// WaitBrokerReady blocks until the scion runtime broker is registered AND
+	// online, right before start-manager acts. The workstation daemon brings up
+	// its Hub API (confirmed by scion-server's waitHubReady) and its runtime
+	// broker separately, so without this gate the first create/resume races the
+	// broker's async registration — the flakiness that made first-boot need a
+	// second `up`. The implementation is fail-soft (returns nil on timeout), so
+	// it never fails the bring-up on its own; the start path's broker-unavailable
+	// retry still backstops it. nil ⇒ skip the gate (tests / legacy).
+	WaitBrokerReady      func(ctx context.Context, project string) error
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 	// RearmBootstrap restarts the broker (re-arming its single-use /bootstrap
 	// latch; broker CA + signing keys persist on disk so existing agent certs
@@ -373,6 +382,17 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			task = strings.TrimSpace(string(b))
 		}
 		jp := jailPath(app.Tree, app.Tree, d.JailMount)
+		// Gate on runtime-broker readiness before any create/resume: the workstation
+		// daemon registers its runtime broker asynchronously AFTER its Hub API comes
+		// up (waitHubReady only proved the latter), so acting now would race it. This
+		// is the proactive complement to the broker-unavailable retry below — wait
+		// for a ready broker rather than only reacting when a call fails against a
+		// not-yet-ready one. Fail-soft (never errors on timeout); the retry backstops.
+		if d.WaitBrokerReady != nil {
+			if err := d.WaitBrokerReady(ctx, jp); err != nil {
+				return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
+			}
+		}
 		// api-key mode: convey LEVER_LLM_AUTH=api-key to the manager container so
 		// its pre-start hook enters api-key mode (the hook reads $LEVER_LLM_AUTH;
 		// scion projects Hub env before pre-start hooks run). Project-scoped (the

@@ -443,6 +443,14 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		BrokerHealthy:        brokerHealthy,
 		MintManagerBootstrap: mintManagerBootstrap,
 
+		// WaitBrokerReady gates start-manager on the scion runtime broker being
+		// registered + online (see the Deps field doc): the broker registers
+		// asynchronously after the Hub API, so the first create/resume would
+		// otherwise race it. Fail-soft in the client, so it never fails bring-up.
+		WaitBrokerReady: func(ctx context.Context, project string) error {
+			return sc.WaitRuntimeBrokerReady(ctx, project)
+		},
+
 		// RearmBootstrap backs Deps.RearmBootstrap (see its doc in
 		// internal/apply/run.go): start-manager's create path calls this when
 		// no fresh bootstrap material was minted this apply (mint-manager-

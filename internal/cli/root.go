@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"runtime/debug"
+
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
@@ -20,7 +22,52 @@ func defaultFactory(name, machine string) (backend.Backend, error) {
 }
 
 func versionCmd() *cobra.Command {
-	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(Version) }}
+	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(versionString()) }}
+}
+
+// versionString augments the hardcoded release Version with Go's embedded VCS
+// stamp when present: the commit the binary was built from (short) plus a
+// "-dirty" marker for an uncommitted tree, or — for a `go install module@vX`
+// build, which carries no VCS stamp — the module version. This stops `lever
+// version` from masking a stale or local build behind the bare release string
+// (a make-install binary can lag the source it was built from, which the
+// hardcoded const alone hides).
+func versionString() string {
+	var rev, modVersion string
+	dirty := false
+	if info, ok := debug.ReadBuildInfo(); ok {
+		modVersion = info.Main.Version
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.modified":
+				dirty = s.Value == "true"
+			}
+		}
+	}
+	return formatVersion(Version, rev, dirty, modVersion)
+}
+
+// formatVersion renders the version line from the release string plus whichever
+// build provenance is available: a VCS commit (local builds) takes precedence
+// over a module version (go install builds); with neither, just the release.
+func formatVersion(base, rev string, dirty bool, modVersion string) string {
+	switch {
+	case rev != "":
+		short := rev
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		if dirty {
+			short += "-dirty"
+		}
+		return base + " (" + short + ")"
+	case modVersion != "" && modVersion != "(devel)":
+		return base + " (" + modVersion + ")"
+	default:
+		return base
+	}
 }
 
 // NewHostRoot builds the host control-plane CLI (`lever`): provisioning only.

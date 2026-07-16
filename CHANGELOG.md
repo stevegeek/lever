@@ -10,6 +10,11 @@ version bump moves the block under the new version heading.
 ## [0.5.0] - 2026-07-16
 
 ### Added
+- `lever version` now appends build provenance to the release string when the
+  binary carries it: the commit it was built from (short) plus `-dirty` for an
+  uncommitted tree (any `go build` / `make install` from a git checkout), or the
+  module version for a `go install …@vX` build. A make-install binary that lags
+  its source no longer hides behind the bare hardcoded version string.
 - `lever init --adopt`: record owner-customized scaffolds (the operator/agent
   SKILL.md files and the whole tree-root CLAUDE.md) as an accepted baseline in
   `.lever-state/skills-adopted.json`. Doctor's "operator skills" check and

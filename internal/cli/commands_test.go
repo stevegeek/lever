@@ -45,8 +45,8 @@ func (s *stubBackend) AttachArgv(inner []string) []string {
 	return append([]string{"stub-attach"}, inner...)
 }
 func (s *stubBackend) LoadImage(context.Context, string) error                  { return nil }
-func (s *stubBackend) ImageLoaded(context.Context, string) bool                  { return false }
-func (s *stubBackend) PruneJailImages(context.Context) error                     { return nil }
+func (s *stubBackend) ImageLoaded(context.Context, string) bool                 { return false }
+func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
 func (s *stubBackend) ReadScionProjectState(context.Context) (backend.ScionProjectState, error) {
 	return s.scionState, s.scionErr

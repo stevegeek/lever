@@ -38,8 +38,8 @@ func TestImageInspectArgs(t *testing.T) {
 func TestNormalizeImageID(t *testing.T) {
 	hex := "eb84fdc6f2a3a064445bb2a2fbc89c515666c428d6c96b6ab68a4cd218819688"
 	for _, in := range []string{
-		"sha256:" + hex,     // docker form
-		hex,                 // bare podman form
+		"sha256:" + hex,          // docker form
+		hex,                      // bare podman form
 		"  sha256:" + hex + "\n", // with surrounding whitespace (command output)
 		hex + "\n",
 	} {

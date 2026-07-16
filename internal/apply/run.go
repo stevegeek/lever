@@ -105,8 +105,8 @@ func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 // JailUp/LoadImage are host-side (backend.EnsureUp, docker-save|podman-load);
 // Scion runs IN the jail (built on a JailRunner).
 type Deps struct {
-	JailUp        func(ctx context.Context, app *config.App) error
-	LoadImage     func(ctx context.Context, imageRef string) error
+	JailUp    func(ctx context.Context, app *config.App) error
+	LoadImage func(ctx context.Context, imageRef string) error
 	// ImageLoaded reports whether the jail already holds imageRef at the same
 	// image ID as the host, letting the load-image step skip a redundant
 	// multi-GB `docker save | podman load` re-stream. This is what stops a
@@ -121,7 +121,7 @@ type Deps struct {
 	// size (the superseded copy goes untagged). A no-op when the load added a
 	// new image. Best-effort: a prune failure is logged, not fatal to the
 	// bring-up. nil ⇒ skip pruning (tests).
-	PruneImages func(ctx context.Context) error
+	PruneImages   func(ctx context.Context) error
 	Scion         *scion.Client
 	ReadCred      func(path string) (string, error) // nil ⇒ defaultReadCred
 	JailMount     string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation

@@ -11,7 +11,13 @@ import (
 	"net/http"
 )
 
-// Client builds an mTLS http.Client presenting this identity's cert and trusting its CA.
+// Client builds an mTLS http.Client presenting this identity's cert and trusting
+// its CA. The cert is baked in STATICALLY (loaded once), so this is for
+// SHORT-LIVED, one-shot calls only (boot-time tool discovery, the `request`/
+// `delegate`/`call`/`provision` CLIs). A LONG-LIVED daemon must NOT use this — it
+// would freeze the boot leaf and keep presenting it after the 24h TTL despite
+// lever-renew rotating the on-disk leaf; use NewReloadingClient instead (see
+// gateway.go), which re-reads per handshake.
 func (id Identity) Client() (*http.Client, error) {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {

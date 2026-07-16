@@ -365,7 +365,11 @@ func cmdServeCapability(args []string) error {
 	if err != nil {
 		return fmt.Errorf("serve-capability: %w", err)
 	}
-	client, err := id.Client()
+	// serve-capability is a LONG-LIVED sidecar: use a client that re-reads the
+	// rotating leaf per handshake, not id.Client()'s static boot cert (which
+	// would expire after 24h and break every capability mint — the recurring
+	// brokered-tools outage). See agent.NewReloadingClient.
+	client, err := agent.NewReloadingClient(*idDir, id.CAPEM)
 	if err != nil {
 		return fmt.Errorf("serve-capability: build mTLS client: %w", err)
 	}

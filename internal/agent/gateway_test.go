@@ -151,6 +151,64 @@ func (b *recordingBackend) lastSerial() *big.Int {
 	return b.serials[len(b.serials)-1]
 }
 
+// TestNewReloadingClientPresentsRotatingCert proves the serve-capability fix: a
+// client from NewReloadingClient presents the ROTATED leaf on a fresh handshake,
+// where a static Identity.Client() would keep presenting the boot leaf forever
+// (the recurring cert-expiry outage).
+func TestNewReloadingClientPresentsRotatingCert(t *testing.T) {
+	caInst, err := ca.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &recordingBackend{}
+	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvCert, err := tls.X509KeyPair(srvCertPEM, srvKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := httptest.NewUnstartedServer(backend)
+	fake.TLS = &tls.Config{Certificates: []tls.Certificate{srvCert}, ClientAuth: tls.RequireAnyClientCert}
+	fake.StartTLS()
+	defer fake.Close()
+
+	dir := t.TempDir()
+	t0 := time.Now().Add(-time.Hour)
+	serial1 := writeLeaf(t, dir, caInst, t0)
+
+	client, err := NewReloadingClient(dir, caInst.CertPEM())
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func() {
+		resp, perr := client.Post(fake.URL+"/request", "application/json", strings.NewReader("{}"))
+		if perr != nil {
+			t.Fatalf("post: %v", perr)
+		}
+		resp.Body.Close()
+	}
+
+	post()
+	if s := backend.lastSerial(); s == nil || s.Cmp(serial1) != 0 {
+		t.Fatalf("first handshake serial = %v, want %s", s, serial1)
+	}
+
+	// Rotate the leaf (newer mtime) and force a fresh handshake — exactly what
+	// IdleConnTimeout does in production. The reloading client must present the NEW
+	// leaf; a static client would still send serial1.
+	serial2 := writeLeaf(t, dir, caInst, t0.Add(time.Minute))
+	if serial1.Cmp(serial2) == 0 {
+		t.Fatal("rotation produced the same serial; test cannot distinguish")
+	}
+	client.CloseIdleConnections()
+	post()
+	if s := backend.lastSerial(); s == nil || s.Cmp(serial2) != 0 {
+		t.Fatalf("after rotation serial = %v, want %s (reloading client must present the rotated leaf)", s, serial2)
+	}
+}
+
 func TestGatewayProxyPresentsRotatingCert(t *testing.T) {
 	caInst, err := ca.Generate()
 	if err != nil {

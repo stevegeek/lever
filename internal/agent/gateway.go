@@ -71,7 +71,7 @@ func (s *clientCertSource) GetClientCertificate(_ *tls.CertificateRequestInfo) (
 			if s.cert == nil || now().After(s.cert.Leaf.NotAfter) {
 				return nil, rerr
 			}
-			log.Printf("gateway: re-read agent leaf failed, serving cached: %v", rerr)
+			log.Printf("agent: re-read agent leaf failed, serving cached: %v", rerr)
 		}
 	}
 	return s.cert, nil
@@ -102,6 +102,36 @@ func (s *clientCertSource) reloadLocked() error {
 	s.cert = &pair
 	s.mtime = fi.ModTime()
 	return nil
+}
+
+// NewReloadingClient builds an mTLS http.Client for a LONG-LIVED direct-to-broker
+// client (e.g. serve-capability) that re-reads the rotating agent leaf per TLS
+// handshake — the same fix the gateway applies to Claude's proxied traffic. A
+// plain Identity.Client() freezes the boot leaf as a static tls.Certificate, so a
+// daemon holding it keeps presenting an expired cert after the 24h leaf TTL even
+// though lever-renew has written a fresh one to disk; this closes that gap for
+// every remaining long-lived broker client. caPEM is the pinned CA (static — only
+// the leaf rotates). IdleConnTimeout recycles idle connections so a fresh dial
+// (and leaf re-read) happens well within the leaf TTL; a continuously-busy
+// connection isn't capped by it, but this sidecar's mints are bursty and idle
+// often (same reasoning as the gateway).
+// Mints eagerly so a broken id-dir fails now, not on the first live handshake.
+func NewReloadingClient(idDir string, caPEM []byte) (*http.Client, error) {
+	src, err := newClientCertSource(idDir)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("agent: bad CA PEM")
+	}
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:              pool,
+			GetClientCertificate: src.GetClientCertificate,
+		},
+		IdleConnTimeout: idleConnTimeout,
+	}}, nil
 }
 
 // Gateway runs the loopback reverse-proxy: it accepts plaintext HTTP from

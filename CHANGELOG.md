@@ -7,6 +7,19 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+- The capability-minting sidecar (`lever-agent serve-capability`) now re-reads
+  the rotating agent leaf per broker handshake instead of freezing the boot
+  cert. It built its mTLS client once via the static `Identity.Client()`, so
+  after the leaf's 24h TTL every capability mint failed the broker handshake
+  (`certificate has expired`) — taking down every brokered tool (each mints a
+  capability first) while the broker itself stayed healthy, recurring roughly
+  daily. The 2026-07-13 gateway fix covered Claude's proxied MCP/LLM traffic but
+  not this second, direct-to-broker client. A new `agent.NewReloadingClient`
+  (reusing the gateway's per-handshake `clientCertSource`) closes it, and
+  `Identity.Client()` is now documented short-lived-only so no future long-lived
+  holder reintroduces the trap.
+
 ## [0.5.0] - 2026-07-16
 
 ### Added

@@ -7,7 +7,7 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-07-16
+## [0.5.0] - 2026-07-16
 
 ### Added
 - `lever init --adopt`: record owner-customized scaffolds (the operator/agent

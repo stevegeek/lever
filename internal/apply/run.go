@@ -49,6 +49,7 @@ var (
 //     the broker times out and surfaces the hub timeout instead of the clean
 //     message (observed live: "context deadline exceeded from the Hub during
 //     start-manager", which needed a second `up` to reconcile).
+//
 // All must be matched or the retry never sees its own transient error as
 // retryable. retryOnBrokerUnavailable is bounded and checks ctx between
 // attempts, so a deadline from OUR context (a genuine timeout, not scion's
@@ -145,7 +146,7 @@ type Deps struct {
 	// a valid PAT is already persisted, no-op. nil ⇒ skip (dev-auth-open mode —
 	// unit tests / legacy — the scion-server step still runs, just without a
 	// pre-minted SCION_HUB_TOKEN to lock the real hub against).
-	EnsureControllerPAT  func(ctx context.Context) error
+	EnsureControllerPAT func(ctx context.Context) error
 	// WaitBrokerReady blocks until the scion runtime broker is registered AND
 	// online, right before start-manager acts. The workstation daemon brings up
 	// its Hub API (confirmed by scion-server's waitHubReady) and its runtime

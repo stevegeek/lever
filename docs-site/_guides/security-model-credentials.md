@@ -127,21 +127,14 @@ never sees a capability), and replaces the old ambient pattern (per-server `allo
 
 ### 6.3 Leaf rotation and the re-read invariant
 
-The mTLS identity this whole section rests on — the cert an agent presents to mint a capability, and
-the CN every token is bound to — is **not** a long-lived credential. It is a **24h leaf** the broker's
-CA signs at enrolment (`internal/cap/ca/issue.go`), and that short life is a security property: it
-bounds the exposure window of a leaked agent key to a day, backstopping the per-call epoch +
-revocation that is the real cut (§6.2). The private key is generated *inside* the container and never
-leaves it; enrolment rides a **single-use ticket**, burned on redeem and bound to the agent's CN (§6.2).
-
-A short TTL only helps if the leaf is kept current. That introduces one security-relevant
-operational invariant, because getting it wrong is a **silent availability failure that
-masquerades as the broker being down**: an in-container `lever-renew` sidecar re-signs the leaf every 12h, and
-**every long-lived process that talks to the broker must re-read the rotating leaf per TLS handshake**
-rather than cache the cert it booted with. Two such clients exist — the loopback **agent gateway**
-(so Claude Code, which caches any cert it is handed, never holds the leaf) and the **capability
-server** (`serve-capability`, which mints tokens against `/request`). A client that froze its boot
-leaf would keep authenticating fine for 24h, then fail *every* broker handshake at once — and since
-each brokered tool mints a capability first, all brokered tools would appear to fail together while
-the broker itself is healthy. The full mechanism — enrolment, the two sidecars, the broker's own
-self-rotating serving cert — is in [architecture.md §7](/architecture/).
+The mTLS identity this section rests on — the cert an agent presents to mint a capability, and
+the CN every token is bound to — is a **24h leaf** signed at enrolment; the short life bounds the
+exposure window of a leaked agent key to a day, backstopping the per-call epoch + revocation that
+is the real cut (§6.2). The private key is generated inside the container and never leaves it;
+enrolment rides a single-use, CN-bound ticket (§6.2). One operational invariant is
+security-relevant, because getting it wrong is a silent availability failure that masquerades as
+the broker being down: **every long-lived broker client must re-read the rotating leaf per TLS
+handshake**, or all brokered tools fail together at the 24h mark while the broker stays healthy.
+The full lifecycle — enrolment, the `lever-renew` sidecar, the broker's self-rotating serving
+cert, and the two long-lived clients — is on
+[Agent identity & certificates](/agent-identity/).

@@ -53,7 +53,7 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 			steps = append(steps, Step{Kind: "load-image", Target: img})
 		}
 	}
-	addLoad(a.Manager.Image)
+	addLoad(a.ManagerImage())
 	for _, g := range a.Workers {
 		addLoad(a.WorkerImage(g))
 	}
@@ -72,7 +72,7 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	steps = append(steps, Step{Kind: "register-project", Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})
-	steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.Manager.Image})
+	steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.ManagerImage()})
 	if opts.BrokerOnly {
 		filtered := steps[:0:0]
 		for _, s := range steps {

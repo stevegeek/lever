@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+- Agent images are now tagged **by architecture** (`scionlocal/lever-claude:arm64`
+  / `:amd64`) instead of a shared `:latest`, and a **tagless** `manager.image` (or
+  worker `image:`) auto-resolves to the jail's arch at apply time. A host that
+  cross-builds both arches — an arm64 laptop producing an amd64 server image — no
+  longer clobbers one arch's image with the other's under `:latest`, the failure
+  mode where the jail loads a wrong-arch image that dies at boot with `exec format
+  error`. `make lever-image LEVER_IMAGE_ARCH=<arch>` builds `FROM scion-claude:<arch>`
+  and tags the output `:<arch>`; an explicitly-tagged or digest-pinned image ref is
+  left untouched (the escape hatch). Instances that pinned `…:latest` should drop
+  the tag to opt into arch-resolution.
+
 ### Fixed
 - The capability-minting sidecar (`lever-agent serve-capability`) now re-reads
   the rotating agent leaf per broker handshake instead of freezing the boot

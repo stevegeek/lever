@@ -45,7 +45,7 @@ broker:
       backend: 127.0.0.1:3211/mcp
 
 manager:
-  image: scionlocal/lever-claude:latest
+  image: scionlocal/lever-claude
   prompt_file: manager.md
   credential_file: ~/.scion/oauth-token   # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []

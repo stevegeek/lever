@@ -74,7 +74,7 @@ backend: orbstack
 egress: closed
 tree: workspace
 manager:
-  image: scionlocal/lever-claude:latest
+  image: scionlocal/lever-claude
   prompt_file: manager.md
   allow_ports: []
 broker:

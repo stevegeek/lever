@@ -307,6 +307,54 @@ func TestWorkerImageFallsBackToManagerImage(t *testing.T) {
 	}
 }
 
+func TestArchImage(t *testing.T) {
+	for _, c := range []struct{ ref, arch, want string }{
+		{"scionlocal/lever-claude", "arm64", "scionlocal/lever-claude:arm64"}, // tagless local name → arch tag
+		{"scionlocal/lever-claude", "amd64", "scionlocal/lever-claude:amd64"},
+		{"img", "amd64", "img:amd64"},                                                 // bare name
+		{"scionlocal/lever-claude:latest", "amd64", "scionlocal/lever-claude:latest"}, // explicit tag → untouched
+		{"img:v3", "arm64", "img:v3"},
+		{"host:5000/img", "arm64", "host:5000/img:arm64"},       // registry port is NOT a tag → append
+		{"host:5000/img:v2", "arm64", "host:5000/img:v2"},       // registry port + real tag → untouched
+		{"img@sha256:deadbeef", "arm64", "img@sha256:deadbeef"}, // digest-pinned → untouched
+		{"", "arm64", ""}, // empty → empty
+	} {
+		if got := archImage(c.ref, c.arch); got != c.want {
+			t.Errorf("archImage(%q,%q) = %q, want %q", c.ref, c.arch, got, c.want)
+		}
+	}
+}
+
+func TestManagerAndWorkerImageResolveArch(t *testing.T) {
+	save := imageArch
+	imageArch = "arm64"
+	defer func() { imageArch = save }()
+
+	app := &App{
+		Manager: Manager{Image: "scionlocal/lever-claude"}, // tagless → arch-resolved
+		Workers: []Worker{
+			{Name: "plain", Dir: "workers/plain"},                                 // inherits manager
+			{Name: "tagged", Dir: "workers/tagged", Image: "scionlocal/x:latest"}, // explicit tag kept
+			{Name: "bare", Dir: "workers/bare", Image: "scionlocal/y"},            // tagless → arch-resolved
+		},
+	}
+	if got := app.ManagerImage(); got != "scionlocal/lever-claude:arm64" {
+		t.Errorf("ManagerImage = %q, want scionlocal/lever-claude:arm64", got)
+	}
+	plain, _ := app.WorkerByName("plain")
+	if got := app.WorkerImage(plain); got != "scionlocal/lever-claude:arm64" {
+		t.Errorf("plain worker inherits arch-resolved manager image, got %q", got)
+	}
+	tagged, _ := app.WorkerByName("tagged")
+	if got := app.WorkerImage(tagged); got != "scionlocal/x:latest" {
+		t.Errorf("explicitly-tagged worker image must be kept, got %q", got)
+	}
+	bare, _ := app.WorkerByName("bare")
+	if got := app.WorkerImage(bare); got != "scionlocal/y:arm64" {
+		t.Errorf("tagless worker image should arch-resolve, got %q", got)
+	}
+}
+
 func TestLoadParsesWorkerImage(t *testing.T) {
 	p := writeTmp(t, `name: demo
 backend: orbstack

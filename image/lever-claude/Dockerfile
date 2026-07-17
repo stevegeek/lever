@@ -2,12 +2,17 @@
 # boot hook + the in-jail lever binaries. This is the minimal, instance-agnostic
 # base every lever instance can run as-is. Instances that need extra runtimes or
 # tools (a language toolchain, a KB CLI) extend it with their own Dockerfile
-# `FROM lever-claude:latest` — see docs-site "Building the agent image".
+# `FROM lever-claude:<arch>` (images are tagged by arch, not :latest) — see
+# docs-site "Building the agent image".
 #
 # The bin/ and scionhook/ build-context dirs are staged by `make lever-image`
-# (which cross-compiles the binaries for the image's linux/arm64 and copies the
+# (which cross-compiles the binaries for the image's arch and copies the
 # pre-start hook). Do not commit them; they are build output.
-FROM scion-claude:latest
+#
+# SCION_BASE selects the arch-tagged base (scion-claude:arm64 / :amd64) so the
+# two arches never clobber a shared :latest; build-lever-image.sh passes it.
+ARG SCION_BASE=scion-claude:arm64
+FROM ${SCION_BASE}
 
 USER root
 

@@ -424,7 +424,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		// Injecting an env var would be redundant and add a scion StartOpts.Env
 		// dependency that the file convention avoids.
 		opts := scion.StartOpts{
-			Worker: app.Name, Task: task, Project: jp, Image: app.Manager.Image, Harness: "claude",
+			Worker: app.Name, Task: task, Project: jp, Image: app.ManagerImage(), Harness: "claude",
 			// Workspace = the in-jail project tree, so the manager edits the real
 			// host files in place (verified 2026-06-16). Without it scion mounts a
 			// managed copy of the externalized config dir, not the live tree.

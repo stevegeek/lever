@@ -52,10 +52,10 @@ lever-image-bins:
 # Build the generic, instance-agnostic lever-claude agent image IN-REPO (the
 # image every instance can run as-is): cross-compile the in-jail binaries into
 # image/lever-claude, sync the pre-start hook, then `docker build` FROM the local
-# scion-claude:latest base. This is the framework equivalent of the two steps
-# above (lever-image-bins → build-lever-image.sh), self-contained rather than
+# arch-tagged scion-claude:<arch> base. This is the framework equivalent of the two
+# steps above (lever-image-bins → build-lever-image.sh), self-contained rather than
 # staged into an instance dir. Override LEVER_IMAGE_ARCH for a non-arm64 jail.
-# Requires scion-claude:latest in the local Docker store (see the build script).
+# Requires scion-claude:<arch> in the local Docker store (see the build script).
 LEVER_IMAGE_ARCH ?= arm64
 FRAMEWORK_IMAGE_CTX := image/lever-claude
 .PHONY: lever-image
@@ -69,7 +69,7 @@ lever-image:
 		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
-	bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
 
 # Build + install the host control plane (PATH). The in-jail binaries
 # (lever-manager, lever-agent, lever-tool-db) ship baked into the agent image

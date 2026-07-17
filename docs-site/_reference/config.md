@@ -41,7 +41,7 @@ name: myapp
 backend: orbstack
 tree: workspace
 manager:
-  image: scionlocal/lever-claude:latest
+  image: scionlocal/lever-claude
 broker:
   api_key_file: ~/.secrets/anthropic-key   # required by the default api-key mode
 ```
@@ -56,7 +56,7 @@ tree: workspace
 broker:
   llm_auth: subscription
 manager:
-  image: scionlocal/lever-claude:latest
+  image: scionlocal/lever-claude
   credential_file: ~/.scion/oauth-token    # 0600; projected to the agents
 ```
 
@@ -106,7 +106,7 @@ egress: closed                       # seal the jail to the broker only (api-key
 scion:
   version: 666333f9                  # pin a scion commit; fetched + cross-compiled into the jail
 manager:
-  image: scionlocal/lever-claude:latest
+  image: scionlocal/lever-claude
   prompt_file: prompt.md             # boot task; resolved at the ROOT (host-only, outside the mount)
   allow_ports: [3101, 3201]          # host tool ports the jail may reach
 broker:

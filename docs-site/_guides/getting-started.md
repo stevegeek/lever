@@ -35,14 +35,17 @@ the jail does and doesn't protect.
   `resolve go toolchain (is go on PATH?): exit status 126`. The fix is to put the actual toolchain
   bin on `PATH`, e.g. `export PATH="$HOME/.asdf/installs/golang/1.26.4/go/bin:$PATH"` (adjust the
   version); `go version` should print from that path.
-- **The agent image** `scionlocal/lever-claude:latest` on your host Docker. `lever apply` loads it
-  into the jail; it can't be pulled from inside (egress is locked down). If you don't have it yet,
-  build it — one command once you have scion's base image:
+- **The agent image** `scionlocal/lever-claude:<arch>` on your host Docker (images are tagged by
+  architecture — `:arm64` / `:amd64` — so one host can cross-build both without clobbering; a tagless
+  `manager.image` in the config auto-resolves to the jail's arch). `lever apply` loads it into the
+  jail; it can't be pulled from inside (egress is locked down). If you don't have it yet, build it —
+  one command once you have scion's base image:
 
-      make lever-image
+      make lever-image                    # builds for your host arch (default arm64)
+      # make lever-image LEVER_IMAGE_ARCH=amd64   # cross-build for an amd64 server
 
-  This cross-compiles the in-jail binaries and builds `scionlocal/lever-claude:latest` FROM scion's
-  stock `scion-claude:latest`. See [building the agent image](#1a-build-the-agent-image) for the
+  This cross-compiles the in-jail binaries and builds `scionlocal/lever-claude:<arch>` FROM scion's
+  stock `scion-claude:<arch>`. See [building the agent image](#1a-build-the-agent-image) for the
   scion-base prerequisite and how instances extend the image. Confirm with
   `docker images | grep scionlocal/lever-claude`.
 - **A Claude OAuth token** in a file (mint with `claude setup-token`) for this subscription demo.
@@ -71,14 +74,14 @@ Verify: `lever version`.
 ## 1a. Build the agent image
 
 `examples/hello-worker` (and every instance) runs the agent image
-`scionlocal/lever-claude:latest`. Build the generic one in a single command:
+`scionlocal/lever-claude:<arch>`. Build the generic one in a single command:
 
 ```sh
 make lever-image
 ```
 
 This cross-compiles the in-jail binaries into `image/lever-claude/`, syncs the pre-start hook, and
-runs `docker build` to produce `scionlocal/lever-claude:latest` (the local `scionlocal/` registry
+runs `docker build` to produce `scionlocal/lever-claude:<arch>` (the local `scionlocal/` registry
 prefix is what scion loads without a pull).
 
 **Claude Code version:** the image bakes Claude Code at an explicit pin (`ARG
@@ -89,11 +92,11 @@ CLAUDE_CODE_VERSION=X.Y.Z`), rebuild the image, `lever apply`, and power-cycle t
 base image's copy: it installs claude unpinned, so it's whatever was current when that base was
 last rebuilt.
 
-Override the jail arch with `LEVER_IMAGE_ARCH=amd64` if
-needed.
+Cross-build for another arch with `LEVER_IMAGE_ARCH=amd64` (it builds `FROM scion-claude:amd64` and
+tags the output `:amd64`).
 
-**One prerequisite: scion's base image.** lever-claude builds `FROM scion-claude:latest`, scion's
-stock Claude harness image. Build it once from a scion checkout:
+**One prerequisite: scion's base image, arch-tagged.** lever-claude builds `FROM scion-claude:<arch>`,
+scion's stock Claude harness image. Build it once from a scion checkout:
 
 ```sh
 git clone https://github.com/GoogleCloudPlatform/scion
@@ -102,12 +105,18 @@ cd scion && image-build/scripts/build-images.sh --target harnesses
 
 `--target harnesses` builds `scion-claude` (among the harness images); if you're starting from
 nothing, `--target all` builds the whole base chain first. That leaves `scion-claude:latest` in your
-local Docker store; `make lever-image` picks it up. (The build script tells you this if the base is
-missing.) See scion's `image-build/` for the full story — scion owns this step.
+local Docker store — **tag it for its arch** so `make lever-image` finds it:
+
+```sh
+docker tag scion-claude:latest scion-claude:arm64   # or :amd64, matching the image's real arch
+```
+
+(The build script tells you exactly this if the arch-tagged base is missing.) See scion's
+`image-build/` for the full story — scion owns this step.
 
 **Extending the image for your instance.** The generic image is deliberately minimal — scion's
 harness plus lever's binaries and boot hook, nothing else. If your agents need a language toolchain
-or a project CLI, write a small instance Dockerfile `FROM lever-claude:latest` that adds it, point
+or a project CLI, write a small instance Dockerfile `FROM lever-claude:<arch>` that adds it, point
 `manager.image` (and any worker `image:`) at your tag, and — importantly — if your added layer does
 root-level work under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and
 `USER scion`. The jail runs rootless podman, where a root-owned home is unwritable by the agent and
@@ -145,7 +154,7 @@ scion:
 broker:
   llm_auth: subscription
 manager:
-  image: scionlocal/lever-claude:latest
+  image: scionlocal/lever-claude
   prompt_file: manager.md   # resolved at the root (host-only), not inside the mount
   credential_file: ~/.scion/oauth-token  # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []
@@ -179,7 +188,7 @@ You'll see the ordered plan:
 ```
   jail-up                 /…/hello-worker/workspace
   broker-up
-  load-image              scionlocal/lever-claude:latest
+  load-image              scionlocal/lever-claude:arm64
   init-machine
   config-registry
   bootstrap-token         /…/hello-worker/workspace

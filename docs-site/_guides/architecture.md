@@ -224,3 +224,78 @@ the project-tree mount cross OrbStack's virtiofs, which is slow for metadata-hea
 dependency installs). A worker that runs its *own* Docker compounds overlay filesystems; prefer
 sibling containers (sharing the jail's rootless podman) over a nested daemon. See
 [security-model.md §2.3](/security-model/) for the rootless requirement.
+
+## 7. Agent identity & the cert path
+
+Everything an agent does to the capability broker — mint a capability, call a brokered tool, hit the
+`/llm` proxy in api-key mode, send or poll messages — is an **mTLS call authenticated by the agent's
+own certificate**. That certificate is short-lived by design, and keeping it fresh across a long
+session is a piece of machinery worth understanding, because it's the part most likely to surprise you.
+
+**Enrolment (once, at first boot).** On its first start an agent generates a keypair **inside its
+container** — the private key never leaves — and **enrols at the broker's `/enrol`** with a
+**single-use enrolment ticket**: the broker burns the ticket on redeem and binds it to the CSR's CN,
+so a leaked ticket can't be replayed or used to mint a *different* identity. (The manager's ticket is
+itself minted through a one-per-broker-process `/bootstrap` latch; a worker's comes from the
+manager-gated `/provision`.) The broker's CA signs the agent a **leaf certificate**, written to
+`<id-dir>/agent.{crt,key}`. That leaf's CN is the agent's identity; every capability the broker mints
+is bound to it (see [security-model.md §6](/security-model/)).
+
+**The leaf is deliberately short-lived (24h TTL).** A short TTL bounds the damage of a leaked key —
+but it means the leaf must be *continuously* renewed and *continuously* re-read, or the session dies
+after a day. Two sidecars and one invariant make that work:
+
+- **`lever-renew`** runs in the container and renews the leaf every **12h** (well inside the 24h TTL),
+  rewriting `agent.{crt,key}` on disk in place.
+- **The broker's own serving cert** is on the same 24h TTL and **self-rotates in-process**: it
+  re-mints when less than a quarter of its validity (6h) remains, so a broker that stays up for days
+  never serves an expired cert (`internal/cap/ca/rotate.go`).
+- **The invariant:** a process that reads the leaf *once* and caches it keeps presenting the boot cert
+  — which expires at 24h even though `lever-renew` has written a fresh one beside it. So **every
+  long-lived broker client must re-read the rotating leaf per TLS handshake**, not cache it. (One-shot
+  CLI calls that finish in seconds can load it once; only daemons need the reload.)
+
+Two long-lived clients live in every agent container, and each obeys that invariant:
+
+{% raw %}
+```mermaid
+graph LR
+    subgraph container[Agent container]
+        CC["Claude Code<br/>holds NO cert"]
+        GW["gateway proxy<br/>lever-agent gateway<br/>127.0.0.1:8462"]
+        SC["capability server<br/>lever-agent serve-capability"]
+        RN["lever-renew sidecar<br/>renews leaf every 12h"]
+        LEAF[("agent.crt / agent.key<br/>24h leaf, on disk")]
+    end
+    BK["Capability broker (host)<br/>mTLS · 24h serving cert, self-rotating"]
+    CC -->|"plaintext loopback:<br/>MCP /mcp/&lt;tool&gt;/, /llm (api-key)"| GW
+    GW ==>|"mTLS · re-reads leaf per handshake"| BK
+    SC ==>|"mTLS · re-reads leaf per handshake<br/>capability mint (POST /request)"| BK
+    RN -->|writes fresh leaf| LEAF
+    GW -.->|re-reads| LEAF
+    SC -.->|re-reads| LEAF
+```
+{% endraw %}
+
+- **The gateway proxy** (`lever-agent gateway`, loopback `127.0.0.1:8462`) exists because Claude Code
+  reads a client cert **once at process start and caches it for its whole lifetime** — so it can't
+  follow a rotating leaf. Rather than hand Claude the cert, its MCP tool calls (`--transport http
+  …/mcp/<tool>/`) and, in api-key mode, its `ANTHROPIC_BASE_URL` (`…/llm`) point at this **plaintext
+  loopback proxy**, which re-presents the always-current leaf to the broker over mTLS. **Claude never
+  presents a cert itself** (the leaf paths it's handed sit unused on the plaintext loopback), so the
+  boot-cache problem structurally cannot bite it.
+- **The capability server** (`lever-agent serve-capability`) is a stdio MCP subprocess that mints
+  capability tokens against the broker's `/request` — a *second, direct* mTLS client, not proxied
+  through the gateway. Being long-lived, it re-reads the leaf per handshake the same way (via
+  `agent.NewReloadingClient`, which uses the same per-handshake cert-source machinery as the gateway). Every brokered
+  tool mints a capability first, so if this client froze its boot leaf, all brokered tools would go
+  dark at the 24h mark while the broker itself stayed healthy.
+
+Both re-reads happen **per TLS handshake**, and pooled broker connections are capped at **5 minutes
+idle** so a rotated leaf reaches the broker long before the old one expires (a continuously-busy
+connection keeps working on its established handshake regardless — TLS doesn't re-validate mid-connection).
+
+> **Two things called "gateway."** The broker's server-side mTLS entry, where brokered tools are
+> mounted at `/mcp/<name>/`, is sometimes called the "MCP gateway" (§1's diagram). The **gateway
+> proxy** above is a *different* component — an in-*container* loopback reverse-proxy. Same word, opposite
+> ends of the connection; this guide says "gateway proxy" for the in-container one.

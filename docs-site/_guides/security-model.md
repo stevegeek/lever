@@ -20,10 +20,13 @@ behaving.**
 > controller PAT, and worker↔worker isolation by defense-by-absence — is implemented (worker
 > isolation currently relies on a Scion `--workspace-subdir` addition carried on our fork, not yet
 > upstreamed; see §4.1).
-> *Still pending:* the full in-container claude driving a first-party tool
-> (`/mcp/db/`) end-to-end, mid-session token-refresh pickup (the agent reads `ANTHROPIC_AUTH_TOKEN`
-> once at startup, the 12h renew sidecar runs, but a running session's pickup of a rotated token is
-> unverified), and a **dedicated live acceptance gate for the single-project isolation guarantee**:
+> *Mid-session cert/leaf rotation is now built and live* (once a known gap here): the agent's leaf
+> is short-lived and renewed every 12h, and every long-lived broker client re-reads it per handshake
+> rather than caching the boot cert — see §6.3 and [architecture.md §7](/architecture/).
+> *Still pending:* the full in-container claude driving a first-party tool (`/mcp/db/`) end-to-end;
+> a running session's pickup of a rotated **LLM bearer token** (`ANTHROPIC_AUTH_TOKEN`, api-key mode
+> only — `renewOnce` rewrites `settings.json`, but Claude reads it once at startup); and a **dedicated
+> live acceptance gate for the single-project isolation guarantee**:
 > the mechanism (§4) is implemented, though worker isolation currently requires the fork-only
 > `--workspace-subdir` addition (not yet in the pinned `scion.version`; see §4.1), and the checks
 > that would exercise it against a real `scion start` (sibling subdirectories,
@@ -546,6 +549,27 @@ sees a capability), and replaces the old ambient pattern (per-server `allow_port
 - **The gate protects the *jailed agent's* path, nothing more.** Any other host-local
   process can still hit the server's `127.0.0.1` port directly — host processes are already
   inside the host trust boundary; the broker does not claim to sandbox them from each other.
+
+### 6.3 Leaf rotation and the re-read invariant
+
+The mTLS identity this whole section rests on — the cert an agent presents to mint a capability, and
+the CN every token is bound to — is **not** a long-lived credential. It is a **24h leaf** the broker's
+CA signs at enrolment (`internal/cap/ca/issue.go`), and that short life is a security property: it
+bounds the exposure window of a leaked agent key to a day, backstopping the per-call epoch +
+revocation that is the real cut (§6.2). The private key is generated *inside* the container and never
+leaves it; enrolment rides a **single-use ticket**, burned on redeem and bound to the agent's CN (§6.2).
+
+A short TTL only helps if the leaf is kept current, which introduces one operational invariant worth
+stating as security-relevant, because getting it wrong is a **silent availability failure that masquerades
+as the broker being down**: an in-container `lever-renew` sidecar re-signs the leaf every 12h, and
+**every long-lived process that talks to the broker must re-read the rotating leaf per TLS handshake**
+rather than cache the cert it booted with. Two such clients exist — the loopback **gateway proxy**
+(so Claude Code, which caches any cert it is handed, never holds the leaf) and the **capability
+server** (`serve-capability`, which mints tokens against `/request`). A client that froze its boot
+leaf would keep authenticating fine for 24h, then fail *every* broker handshake at once — and since
+each brokered tool mints a capability first, all brokered tools would appear to fail together while
+the broker itself is healthy. The full mechanism — enrolment, the two sidecars, the broker's own
+self-rotating serving cert — is in [architecture.md §7](/architecture/).
 
 ## 7. If an agent is compromised: what it can and can't do
 

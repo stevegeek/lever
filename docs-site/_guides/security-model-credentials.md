@@ -22,9 +22,9 @@ Part of the [security model](/security-model/). Sections keep their original § 
 scion **resolves and injects it into every agent container's environment** at start (user/owner
 scope, single jail = single tenant). So **every worker holds the real, long-lived OAuth token** in
 `$CLAUDE_CODE_OAUTH_TOKEN` (or a token file in its home). This is a **subscription-mode** exposure
-only (§6.1). Combined with §8 (open internet egress for the model API), a single prompt-injected
+only (§6.1). Combined with [§8](/security-model/compromise/) (open internet egress for the model API), a single prompt-injected
 worker can read the token and exfiltrate it, **impersonating the operator's account beyond the
-jail.** (§4's dev-auth-off/controller-PAT hardening closes the *separate* risk of a compromised
+jail.** ([§4](/security-model/worker-isolation/)'s dev-auth-off/controller-PAT hardening closes the *separate* risk of a compromised
 agent driving the hub itself; it does not touch this ambient-credential exposure, which is a
 property of subscription mode's design, not of hub authority.) The token is *ambient, shared, and
 long-lived*, the worst combination, and the highest-value secret in the system.
@@ -45,7 +45,7 @@ The capability broker is now built: an agent in **`llm_auth: api-key`** mode (th
 a short-lived, CN-bound `capability(llm)` token and routes the model through the broker `/llm` proxy,
 which strips the token and injects the real Console key host-side. Such an agent **never receives a
 real Anthropic credential**. Adding **`egress: closed`** (valid only for a uniformly api-key instance)
-then seals outbound network to the broker alone (§2.2), closing the §6 blast radius entirely for that
+then seals outbound network to the broker alone ([§2.2](/security-model/jail/)), closing the §6 blast radius entirely for that
 instance.
 
 **Mixed instances are unsupported, rejected at config validation.** The OAuth credential is set as a

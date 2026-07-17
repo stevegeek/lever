@@ -51,7 +51,7 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 
 - **`egress: open` (default):** `OUTPUT` default-ACCEPT; `LEVER_EGRESS` ACCEPTs the allowlisted host
   `host:port`s on the alias, DROPs the rest of the host alias and the private ranges above. **Public
-  internet stays open** (for the model API and package installs). See the exfiltration caveat in §8.
+  internet stays open** (for the model API and package installs). See the exfiltration caveat in [§8](/security-model/compromise/).
 - **`egress: closed`:** additionally a **catch-all DROP** for both families at the end of the chain,
   with loopback (`-o lo`) ACCEPTed *first* so the in-machine scion hub (127.0.0.1:8080) and host-alias
   tools keep working. The jail can then reach **only** the already-ACCEPTed broker port; arbitrary
@@ -66,7 +66,7 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 
 **Enforcement** lives in the jail's network namespace, for both postures. A **non-privileged** agent
 container is in a separate namespace from the rules and cannot flush them; reaching the rules would
-require a container/namespace escape (which reduces to the kernel/runtime caveats in §8).
+require a container/namespace escape (which reduces to the kernel/runtime caveats in [§8](/security-model/compromise/)).
 
 ### 2.3 Rootless podman (required)
 
@@ -89,7 +89,7 @@ containment backend must provide five things. Guarantee 0 was added 2026-07-02, 
 native-Linux backend on exactly this ground (see below):
 
 0. **A hypervisor boundary between the agent workload and the host kernel.** Mandatory: agents run
-   arbitrary, potentially adversarial code (§1), and a network/mount/user namespace is not a
+   arbitrary, potentially adversarial code ([§1](/security-model/)), and a network/mount/user namespace is not a
    substitute for a separate kernel — one kernel-level exploit from any agent reaches everything
    sharing that kernel. No backend without a VM boundary is added to `lever backends`.
 1. **No host filesystem** beyond the one chosen project tree (§2.1).
@@ -124,13 +124,13 @@ Full mechanism detail, the roadmap entry, and rejected backends live on the
 - **A native, no-VM Linux backend (`linux-docker`) was explored and rejected**, the opposite failure
   from Docker Desktop's: its namespace-based design (root-owned netns, mount-namespace + `tmpfs`
   shadowing) would have satisfied guarantees 1-3, but shares the host kernel outright, violating the
-  new guarantee 0 — an adversarial agent (§1) is one kernel-level privilege escalation from host
+  new guarantee 0 — an adversarial agent ([§1](/security-model/)) is one kernel-level privilege escalation from host
   root. Its egress and filesystem answers were sound and are recorded on the backends page for the
   record; a weaker, explicit-opt-in variant for hosts with no nested-virtualization support (a bare
   VPS) remains a possible future direction, never a silent substitute for a VM backend.
 - **`apple-container` (roadmap) is a different topology.** It runs each agent in its own micro-VM (a
   kernel per agent — the strongest isolation of any Mac option, satisfying guarantee 0 *per agent*
-  rather than per jail, turning the shared-kernel trade in §8 into a non-issue), but there is no
+  rather than per jail, turning the shared-kernel trade in [§8](/security-model/compromise/) into a non-issue), but there is no
   single jail to hang one egress chokepoint on, and its networking is young (full support needs
   macOS 26).
 
@@ -145,7 +145,7 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
   guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
   the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
-  this surface reaches VM root, not the host, consistent with the §8 "containing runtime authority
+  this surface reaches VM root, not the host, consistent with the [§8](/security-model/compromise/) "containing runtime authority
   inside the jail" stance (in-jail privilege escalation is accepted; the jail's own bound is not).
 - **The jail VM survives host reboots, and also `lever stop`.** It is destroyed only by `lever
   destroy` (`limactl delete --force`; `lever down` is a deprecated alias); there is no
@@ -159,7 +159,7 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   network namespace — enforcement lives in that namespace, not the agent's container namespace (§2.2).
   A container→VM-root escape would let the agent rewrite `LEVER_EGRESS` directly, bypassing the
   allowlist rather than merely being contained by it; that escape reduces to the kernel/runtime
-  caveats in §8.
+  caveats in [§8](/security-model/compromise/).
 - **A global lima config can widen the containment surface beyond what the lever template
   requests.** `~/.lima/_config/{default,override}.yaml`, if present on the host, is merged into every
   lima instance's *realized* config, including this one — an operator's own global lima settings could
@@ -180,7 +180,7 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   global-scope v6 today, to catch this drifting silently in the future.
 
 The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
-all workers — see §8; `lima` carries the same trade one level up (its own kernel is separate from the
+all workers — see [§8](/security-model/compromise/); `lima` carries the same trade one level up (its own kernel is separate from the
 host, but still one kernel shared *within* the jail by the manager and every worker). That trade is a
 property of the *backend*, not of Lever, and the table above is how you see it before you choose.
 Run `lever backends` for the live matrix; set the backend with the `backend:` key

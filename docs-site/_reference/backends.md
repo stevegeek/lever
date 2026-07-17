@@ -21,7 +21,7 @@ a single product, and one of its guarantees decides whether a backend can even e
 3. **Egress enforced in that namespace**, not by the agent behaving.
 4. **A host-reachable capability-broker endpoint** for capability, LLM, and tool traffic.
 
-See [security model §2.4](/security-model/) for the full contract in context.
+See [security model §2.4](/security-model/jail/) for the full contract in context.
 
 Run `lever backends` to print the live matrix; this page mirrors it, then adds the roadmap and
 rejected backends the command doesn't list. `lever backends` prints only **implemented**
@@ -46,7 +46,7 @@ macOS on Apple Silicon with [OrbStack](https://orbstack.dev). The runtime, the S
 rootless podman, and every agent run inside one OrbStack **isolated machine** that shares no host
 files and has its own network namespace. This is the validated substrate today and the reference the
 other backends are measured against. Its trade: a **single kernel** shared across the manager and all
-workers (a kernel-level container escape reaches the whole jail — see [security model §7](/security-model/)).
+workers (a kernel-level container escape reaches the whole jail — see [security model §8](/security-model/compromise/)).
 
 ### `lima` — the non-OrbStack path
 

@@ -8,7 +8,7 @@ Part of the [security model](/security-model/). Sections keep their original § 
 
 ## 4. Within the jail: cross-worker isolation (defence in depth)
 
-The jail (§2-§3) protects host secrets and the LAN. *Within* the jail, the manager and every worker
+The jail ([§2](/security-model/jail/)-[§3](/security-model/)) protects host secrets and the LAN. *Within* the jail, the manager and every worker
 are agents in the **same Scion project** — Lever registers exactly one project per instance
 ([architecture.md §2](/architecture/)), not a separate project per agent as an earlier design did.
 Two structural properties bound what one agent can reach inside that shared project.
@@ -44,7 +44,7 @@ its own git repository; that is unaffected.
 and Scion does not shadow child workspace dirs inside a broader mount, the manager's live view
 legitimately includes every worker's in-place edits — the same "mount only your own workspace"
 mechanism, viewed at the manager's wider scope. A compromised *manager* therefore still has
-whole-tree reach (§7); this isolation guarantee is about one *worker* reaching another worker's
+whole-tree reach ([§7](/security-model/compromise/)); this isolation guarantee is about one *worker* reaching another worker's
 subdirectory, not about bounding the manager.
 
 ### 4.2 No agent holds hub authority: dev-auth off, host-only controller PAT
@@ -79,13 +79,13 @@ alone 403s on `start`, since scion gates every interactive verb, including `star
 The result: even a fully compromised worker or manager container has no credential that lets it
 talk to the Scion hub directly. It cannot register a project, request an arbitrary mount, or
 list/attach to another agent. All of that is host-side-only, gated by the controller PAT, and, for
-dispatch specifically, further gated by the config-declared subdirectory per §5.4.
+dispatch specifically, further gated by the config-declared subdirectory per [§5.4](/security-model/config-trust/).
 
 **Residual.** This closes the isolation gap between workers, and between an agent and the hub
 itself. It does not change the manager's own trust position: the manager legitimately mounts the
 whole tree (§4.1), so a compromised manager can still read and write everything the instance keeps
 there, including the knowledge base and every worker's subdirectory, that is an inherent cost of
-giving the manager whole-tree oversight (§7), not a gap in the worker-isolation model above. **Not
+giving the manager whole-tree oversight ([§7](/security-model/compromise/)), not a gap in the worker-isolation model above. **Not
 yet done:** the live acceptance checks that would exercise this guarantee against a real
 `scion start` (sibling subdirectories, a stray ancestor `.git`, the controller PAT's exact scopes)
 are not yet wired into `lever acceptance`. The mechanism is implemented and was live-validated once

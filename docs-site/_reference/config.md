@@ -15,7 +15,7 @@ rewrite the config the host trusts on the next bring-up.
 Config is resolved from the **current directory only**, there is deliberately **no walk-up
 discovery**. Run `lever` from the instance root (where `lever.yaml` lives), or pass an explicit
 config path. A `lever.yaml` planted in a parent directory can therefore never be picked up. See
-[security-model.md](/security-model/) §5.
+[security-model §5](/security-model/config-trust/).
 
 ## Layout
 
@@ -146,7 +146,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `scion` | object | no | - | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | - | The manager agent (see below). |
 | `workers` | list | no | `[]` | Project agents the manager orchestrates (see below). |
-| `egress` | enum | no | `open` | Jail outbound network posture (`open` \| `closed`), applied jail-wide and **independent of `llm_auth`**. `open`: LAN and non-allowlisted host ports dropped, public internet reachable. `closed`: catch-all DROP so the jail reaches **only** the broker port; requires a uniformly `api-key` instance. See [security-model.md](/security-model/) §2.2. |
+| `egress` | enum | no | `open` | Jail outbound network posture (`open` \| `closed`), applied jail-wide and **independent of `llm_auth`**. `open`: LAN and non-allowlisted host ports dropped, public internet reachable. `closed`: catch-all DROP so the jail reaches **only** the broker port; requires a uniformly `api-key` instance. See [security-model §2.2](/security-model/jail/). |
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
 
@@ -167,7 +167,7 @@ Provide **at most one** of `version` or `source` (they are mutually exclusive). 
 | `prompt_file` | path | no | - | A file whose contents become the manager's boot task. Resolved at the instance **root** (host-only, **outside** the mount, so an agent can't rewrite its own next boot prompt). Must be a confined relative path (no `..`, not absolute). Omit to start with scion's default task. |
 | `credential_file` | path | no | - | A file whose contents are set as the `CLAUDE_CODE_OAUTH_TOKEN` Hub secret and **projected into agent containers**. Relative paths resolve against the config file's directory; `~/` is expanded. Read at apply time with a **permission check (rejected if world-readable) and size cap**. **Its contents reach every agent, point it only at a real, least-privilege, `0600` credential.** See [security-model.md](/security-model/). |
 | `allow_ports` | list of int | no | `[]` | Host tool ports the jail may reach over the host alias (`host.orb.internal`). **This opens a host-loopback port to the jailed agent** — the egress allowlist is the only thing standing between the guest and whatever is listening there, so list only ports you intend the agent to reach (host-side MCP servers, etc). The broker's admin port (`broker.admin_port`, default `8444`) is rejected at config load if listed here — it is unauthenticated and meant to be reachable only from the host loopback, never from the jail. |
-| `llm_auth` | enum | no | inherits `broker.llm_auth` (or `api-key`) | `api-key` (this agent holds only a `capability(llm)` token; the broker injects the real key) or `subscription` (the OAuth token is projected to this agent). **The whole instance must be uniform**: mixing `api-key` and `subscription` across manager/workers is rejected at config load (see [security-model.md](/security-model/) §6.1). |
+| `llm_auth` | enum | no | inherits `broker.llm_auth` (or `api-key`) | `api-key` (this agent holds only a `capability(llm)` token; the broker injects the real key) or `subscription` (the OAuth token is projected to this agent). **The whole instance must be uniform**: mixing `api-key` and `subscription` across manager/workers is rejected at config load (see [security-model §6.1](/security-model/credentials/)). |
 | `obtain` | list of `{tool, op}` | no | `[]` | Capabilities this agent may self-obtain from the broker. `api-key` agents are auto-granted `obtain: [{tool: llm, op: generate}]`. |
 | `delegate` | list of `{tool, op, to: [...]}` | no | `[]` | Capabilities this agent may mint *bound to another agent* (`to`) to hand off. A delegated token is strictly narrower than what the delegator holds. |
 
@@ -199,7 +199,7 @@ configs are unaffected until you turn them on.
 ### `broker`
 
 The host-side capability broker (outside the jail) that holds the real credential and mints
-CN-bound, short-lived capability tokens. See [security-model.md](/security-model/) §6.
+CN-bound, short-lived capability tokens. See [security-model §6](/security-model/credentials/).
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|

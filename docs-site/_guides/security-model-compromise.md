@@ -15,10 +15,10 @@ not.
 **What containment holds (the same in every posture):**
 
 - It cannot read your host filesystem, your `~/.ssh`, your other projects — only its own mounted
-  tree. The host home is not mounted (§2.1).
-- It cannot reach your LAN or other machines; egress is allowlisted (§2.2).
+  tree. The host home is not mounted ([§2.1](/security-model/jail/)).
+- It cannot reach your LAN or other machines; egress is allowlisted ([§2.2](/security-model/jail/)).
 - It cannot obtain the real model key: in api-key mode the key is injected host-side and never
-  enters the container (§6). (In subscription mode the projected OAuth token *is* exposed — see
+  enters the container ([§6](/security-model/credentials/)). (In subscription mode the projected OAuth token *is* exposed — see
   below.)
 - Capability tokens it holds or mints are CN-bound and revocable: leaked token text is inert
   elsewhere, and `lever revoke <agent>` cuts it off at use time (see [capabilities](/capabilities/)).
@@ -48,7 +48,7 @@ not.
 ## 8. What this model does *not* claim
 
 - **Data-exfiltration protection.** The bound is on host-secret and LAN reach, **not** on
-  exfiltrating in-tree data. This differs by posture (§2.2):
+  exfiltrating in-tree data. This differs by posture ([§2.2](/security-model/jail/)):
   - *Subscription:* with open internet egress (allowed, for the model API and package installs), a
     compromised agent can leak anything in the tree, the model-API endpoint alone is a covert
     channel. Tightening this would require an egress proxy / data-loss controls not yet specified.
@@ -64,7 +64,7 @@ not.
 - **Containing runtime authority inside the jail.** The architecture depends on the Scion broker
   driving the container runtime. Any agent that holds the rootless podman socket directly can launch
   arbitrary (including `--privileged`) containers *within the jail*. (No agent, manager included,
-  holds Scion hub authority itself, that lives host-side only, gated by the controller PAT, §4.2,
+  holds Scion hub authority itself, that lives host-side only, gated by the controller PAT, [§4.2](/security-model/worker-isolation/),
   so an agent driving the hub to launch containers is not a route here.) Containment of direct
   runtime-socket access rests entirely on the jail's filesystem/network bound and the kernel, not on
   denying runtime access.
@@ -78,7 +78,7 @@ not.
   threat model. This is an explicit, documented trade — see the
   [containment backends](/reference/backends/) matrix to compare before choosing.
 - **Hostile multi-tenant / cloud.** The model targets a single operator's workstation. A
-  remote/cloud deployment faces a harsher threat model and would need the inner layer (§4), egress
+  remote/cloud deployment faces a harsher threat model and would need the inner layer ([§4](/security-model/worker-isolation/)), egress
   controls (above), and hardening not yet specified.
 - **Defeating a kernel 0-day or a Docker/OrbStack escape.** Containment rests on the correctness of
   the kernel, the container runtime, and the hypervisor. Lever reduces attack surface; it does not

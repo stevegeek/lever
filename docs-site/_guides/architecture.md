@@ -59,7 +59,7 @@ graph TD
 - **The OrbStack VM is the only hardware-virtualization boundary.** The jail (an OrbStack
   *isolated machine*) and the containers inside it are kernel namespaces, so nesting adds no
   per-level CPU cost. With the `orbstack`/`lima` backends a single kernel is shared across the
-  manager and all workers — a security trade noted in [security-model.md §7](/security-model/);
+  manager and all workers — a security trade noted in [security-model.md §8](/security-model/compromise/);
   the `apple-container` backend gives each agent its own VM kernel.
 - **The jail is the containment boundary**, not Scion. The egress allowlist is enforced in the
   jail's network namespace, outside the agent containers.
@@ -100,7 +100,7 @@ graph TD
   configured subdirectory, so a sibling's directory is never a mount source for it — not merely
   hidden by convention. This holds only on a **non-git tree root** (config validation enforces it
   at load time, and the pinned Scion plain-mounts an explicit `--workspace` even under a stray
-  ancestor `.git`); see [security-model.md §4](/security-model/) for the full guarantee and its
+  ancestor `.git`); see [security-model.md §4](/security-model/worker-isolation/) for the full guarantee and its
   residual.
 - **The manager's mounts overlap the workers' by design** — its workspace physically contains
   every worker directory, so edits are live to all parties. File-level isolation between the
@@ -108,7 +108,7 @@ graph TD
   whole-tree oversight. This is not an access control against a hostile *worker* — a worker cannot
   reach outside its own subdirectory at all (previous bullet). The *dispatch* boundary is enforced
   separately: the manager can start only workers declared in the config, and only via the broker
-  ([security-model.md §5.4](/security-model/)).
+  ([security-model.md §5.4](/security-model/config-trust/)).
 - The core requires only a tree root plus configured worker subdirectories; the `knowledge base +
   tools` layout and the `workers/` nesting above are instance conventions.
 
@@ -171,7 +171,7 @@ Messaging follows the same broker-mediated shape as dispatch: `lever-manager msg
 list`/`watch` are thin mTLS clients of the broker's `/msg/send` and `/msg/list`, never of Scion
 directly. An in-container `scion` CLI call has no hub credential to authenticate with — the hub
 runs with dev-auth off, and only the host-side broker holds the controller PAT (see
-[security-model.md §4](/security-model/)) — so only the broker can address an arbitrary agent's
+[security-model.md §4](/security-model/worker-isolation/)) — so only the broker can address an arbitrary agent's
 inbox.
 
 **The task ↔ agent contract.** The core knows nothing about an instance's task records. At dispatch
@@ -228,7 +228,7 @@ LEVER_IMAGE_ARCH=<arch>` builds `FROM scion-claude:<arch>` and tags the output t
 the project-tree mount cross OrbStack's virtiofs, which is slow for metadata-heavy operations (large
 dependency installs). A worker that runs its *own* Docker compounds overlay filesystems; prefer
 sibling containers (sharing the jail's rootless podman) over a nested daemon. See
-[security-model.md §2.3](/security-model/) for the rootless requirement.
+[security-model.md §2.3](/security-model/jail/) for the rootless requirement.
 
 ## 7. Agent identity & the cert path
 

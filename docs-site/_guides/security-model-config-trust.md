@@ -65,10 +65,10 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | Field | Check |
 |---|---|
 | `name`, worker `name` | `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes the jail machine name and a shell token). |
-| `tree` | confined relative subdir (not `.`/absolute/`..`); also rejected (or warned on) if it is itself a git repository, see §4.1. |
+| `tree` | confined relative subdir (not `.`/absolute/`..`); also rejected (or warned on) if it is itself a git repository, see [§4.1](/security-model/worker-isolation/). |
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute). |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
-| `credential_file` | read with a **permission check** (rejected if world-readable) and a **size cap**, defence in depth for the secret it becomes (§6). |
+| `credential_file` | read with a **permission check** (rejected if world-readable) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | already rejected absolute/`..` (unchanged). |
 
 **What was already sound:** the execution plumbing is argv-clean, no shell injection in the hot
@@ -79,7 +79,7 @@ base64'd and redacted in error output at its one call site.
 ### 5.4 The manager holds no worker-dispatch authority
 
 Worker lifecycle is owned by the host-side capability broker, not the in-jail manager, and the
-broker itself is the only holder of the controller PAT (§4.2) — the manager has no Scion hub
+broker itself is the only holder of the controller PAT ([§4.2](/security-model/worker-isolation/)) — the manager has no Scion hub
 credential of its own, in-jail or otherwise. The manager's `agent start/stop/suspend/resume`
 commands are thin mTLS clients of the broker's `/worker/*` endpoints. Each request is authenticated
 by the manager's certificate CN and authorized against the config: only a worker **declared in the
@@ -96,6 +96,6 @@ configuration, there is no in-jail config file for a compromised manager to tamp
 Image **registry allowlist** and **digest pinning** are now available as opt-in `security:` policy
 (§5.3), enable them to bound *which* registry an image comes from and to require vetted, immutable
 images. Still open: redaction by secret-key-name rather than argv shape (L1 in the backlog). The
-dominant in-jail risks are §6 (the projected credential) and §8 (open-egress exfiltration): **closed
-in api-key mode** (the default) by the built capability broker (§6.1) plus `egress: closed`, and
+dominant in-jail risks are [§6](/security-model/credentials/) (the projected credential) and [§8](/security-model/compromise/) (open-egress exfiltration): **closed
+in api-key mode** (the default) by the built capability broker ([§6.1](/security-model/credentials/)) plus `egress: closed`, and
 still present under the subscription opt-in.

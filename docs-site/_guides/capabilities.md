@@ -10,9 +10,9 @@ own workspace is represented by a revocable, identity-bound **capability token**
 host-side **broker**, and every use of one is checked, audited, and revocable.
 
 This page describes the model end to end. For the *why* (threat model, what containment alone
-can't buy), see [security-model.md](/security-model/) §6; for the *config keys*, see the
+can't buy), see [security-model §6](/security-model/credentials/); for the *config keys*, see the
 [config reference](/reference/config/); for the hands-on walkthrough, see
-[getting started §7](/getting-started/#7-give-an-agent-an-mcp-server-the-various-ways).
+[getting started §7](/getting-started/mcp-tools/).
 
 ## Identities: enrolment
 
@@ -135,4 +135,4 @@ Three independent handles, all host-side:
 Agents don't know any of this innately. `lever init` scaffolds **operator skills** into your
 instance tree — SKILL.md files that teach the manager (and each worker) the mint-then-attach flow,
 how to read denials, and when to stop and ask the operator. Run it once per instance and re-run
-after upgrades; see [getting started §4](/getting-started/#4-scaffold-the-operator-skills-lever-init).
+after upgrades; see [getting started §4](/getting-started/first-run/#4-scaffold-the-operator-skills-lever-init).

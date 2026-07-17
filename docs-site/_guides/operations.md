@@ -82,7 +82,7 @@ command whenever anything looks wrong — every check prints a specific fix hint
 | Tool call denied `missing capability` | agent didn't mint/attach | the agent should follow its `lever-operator` skill (mint via `lever-capability`, pass `_capability`); if the skill is missing, run `lever init` |
 | Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then stop+up |
 | "unknown recipient" / new worker invisible | broker still running on the old config | `lever reload` |
-| Gateway 502 on an external tool | the host-side server isn't listening | `lever doctor` (external-backends check), start your server |
+| 502 on an external tool call | the host-side server isn't listening | `lever doctor` (external-backends check), start your server |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/config-trust/) — `--fresh` resets the conversation, not the tree |
 | Doctor nags `skipped-modified` about a SKILL.md / CLAUDE.md you customized on purpose | your edits aren't recorded as accepted | `lever init --adopt` — records them as your baseline (host-side); doctor then passes, and any change *past* that baseline still fails as "modified since adoption" (tamper signal preserved) |

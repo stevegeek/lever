@@ -22,7 +22,7 @@ const serverName = "host.orb.internal"
 
 // llmSentinelBackend is the Backend value of the reserved llm pseudo-tool. It
 // satisfies registry.Register's non-empty-Backend invariant but is NEVER dialed:
-// the llm capability is exercised by the broker /llm proxy, not the MCP gateway.
+// the llm capability is exercised by the broker /llm proxy, not an /mcp/<name>/ tool route.
 const llmSentinelBackend = "lever:llm-proxy"
 
 // BuildBroker assembles a broker.Config from the parsed app config: the
@@ -66,7 +66,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			Backend:       t.Backend,
 			Operations:    ops,
 			AllowedValues: copyStringSliceMap(t.AllowedValues),
-			// External servers are third-party: the gateway holds + enforces
+			// External servers are third-party: the broker holds + enforces
 			// the rules and strips the token (they never see a capability).
 			FirstParty: !t.External,
 			External:   t.External,

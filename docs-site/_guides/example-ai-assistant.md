@@ -107,8 +107,8 @@ Behind that one command, the boundary is enforced at three points:
    policy (allowed), validates any requested constraint against `allowed_values`
    (`folder` must be `journal` or `reference`), and mints a short-lived token
    **bound to `archivist`'s identity** with that constraint pinned in.
-3. **Gated call.** The agent calls the `notes` tool through the broker's MCP
-   gateway at `/mcp/notes/`, presenting the token. The gateway verifies the
+3. **Gated call.** The agent calls the `notes` tool through the broker at
+   `/mcp/notes/`, presenting the token. The broker verifies the
    signature, that the caller *is* the bound agent, and that the request matches
    the pinned constraint, then forwards it. The real key for the model, and the
    real backend for the tool, stay on the host side.
@@ -125,7 +125,7 @@ lever-manager agent start researcher \
   capability for it (`/request` → 403). 
 - Even if it somehow obtained a token, every token is **identity-bound**, a
   capability minted for `archivist` is rejected when presented by `researcher`.
-- It cannot reach `api.anthropic.com`, your host, or the LAN directly, egress is
+- It cannot reach `api.anthropic.com`, your host, or the LAN directly. Egress is
   closed, so its only outbound path is the broker, and the broker only does what
   its capabilities allow.
 

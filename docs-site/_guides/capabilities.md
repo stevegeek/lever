@@ -25,13 +25,13 @@ Every agent container proves who it is before it can ask for anything:
 3. The broker issues an mTLS client certificate whose **CN is the agent's identity** — `manager`
    for the manager, the worker name for a worker.
 
-From then on, every request the agent makes to the broker — minting, tool calls through the
-gateway, messaging — is authenticated by that certificate. There is nothing to steal that
+From then on, every request the agent makes to the broker — minting, brokered tool calls,
+messaging — is authenticated by that certificate. There is nothing to steal that
 works anywhere else: the key is container-local and the identity is pinned.
 
 ## Tokens: minting
 
-A capability token is a signed structure (Ed25519, verified offline by the gateway and
+A capability token is a signed structure (Ed25519, verified offline by the broker and
 re-verifiable by first-party tools) naming: the **tool**, the **operation**, the agent it is
 **bound to**, optional **constraints**, and the issue **epoch**. It is not a bearer secret that
 works for anyone: it only works over the mTLS session of the agent it names, so leaked token
@@ -53,15 +53,15 @@ Two **gate grains** exist per tool (`gate:` in the tool's config entry):
 - `coarse` — one capability covers the whole tool. Mint requests are coerced to `op: "*"`; any
   operation passes. Right for personal external servers where per-verb control adds nothing.
 - `fine` (default) — the token names one operation, and `allowed_values` constraints can pin
-  parameters at mint time (e.g. a `db` capability valid only for `table: users`). The gateway
+  parameters at mint time (e.g. a `db` capability valid only for `table: users`). The broker
   chooses the required operation **server-side**, so a coarse `"*"` token can never widen a
   fine-gated tool.
 
-## Using a token: the gateway
+## Using a token: calling a brokered tool
 
-Brokered tools are MCP servers behind the broker's mTLS gateway at `/mcp/<name>/`. To call a
+Brokered tools are MCP servers the broker fronts over mTLS at `/mcp/<name>/`. To call a
 gated operation, the agent passes the token as an extra **`_capability`** string argument on the
-tool call (the gateway advertises this argument in every tool schema). The gateway then:
+tool call (the broker advertises this argument in every tool schema). The broker then:
 
 1. authenticates the caller's certificate,
 2. verifies the token — signature, expiry, epoch, tool/op match, **bound-to matches the caller
@@ -71,16 +71,15 @@ tool call (the gateway advertises this argument in every tool schema). The gatew
 4. writes a `broker.decision` line (allow or deny, with the reason) to `.lever-state/broker.log`.
 
 A denial reads `missing capability` (no token attached — mint one and attach it) or names the
-policy reason (not granted, expired, wrong binding). Agents simply re-mint on an expiry-shaped
-denial — tokens are cheap and the grant policy, not the token, is the durable thing.
+policy reason (not granted, expired, wrong binding). Agents re-mint on an expiry-shaped denial;
+tokens are cheap, and the grant policy — not the token — is what persists.
 
 **The token deliberately rides through the LLM.** Because `_capability` is a tool-call argument,
-the token text passes through the model's context window, transcripts, and logs. This is a
-conscious design choice, and it is safe for a specific reason: tokens are **CN-bound** — the
-gateway only accepts one over the mTLS session of the agent it names. Token text that leaks
-through a transcript, a log file, or a prompt-injection exfiltration is inert without that
-container's private key, which never leaves the container. What a leaked token does reveal is
-metadata (which tool/op an agent was granted), not authority.
+the token text passes through the model's context window, transcripts, and logs. This is safe
+because tokens are **CN-bound**: the broker only accepts one over the mTLS session of the agent it
+names. Token text that leaks through a transcript, a log file, or a prompt-injection exfiltration
+is inert without that container's private key, which never leaves the container. A leaked token
+reveals metadata (which tool/op an agent was granted), not authority.
 
 ## The LLM as a capability (api-key mode)
 
@@ -93,17 +92,16 @@ token before expiry. (`subscription` mode trades this for simplicity: the OAuth 
 to agents directly.)
 
 By default that fixed upstream is `https://api.anthropic.com`; set `broker.llm_upstream` to point
-`/llm` at an LLM gateway or proxy that speaks the Anthropic Messages API instead (logging, caching,
+`/llm` at an LLM proxy that speaks the Anthropic Messages API instead (logging, caching,
 a compliance boundary, etc). The security properties are unchanged: the broker still injects the
-real Console key host-side and strips the capability token before forwarding, `llm_upstream` is a
+real Console key host-side and strips the capability token before forwarding. `llm_upstream` is a
 host-side config value the agent can never influence, and the jail still only ever talks to the
 broker.
 
 ### Choosing `llm_auth`: subscription vs api-key
 
-The shipped examples default to `subscription` because it's the friction-free personal setup —
-but be explicit about what each mode means before you scale up. **The instance must be uniform**
-(mixing modes across manager/workers is rejected at config load):
+The shipped examples default to `subscription` because it's the friction-free personal setup.
+**The instance must be uniform** (mixing modes across manager/workers is rejected at config load):
 
 | | `subscription` | `api-key` |
 |---|---|---|
@@ -121,8 +119,8 @@ Three independent handles, all host-side:
   session-scale on purpose, because the per-call revocation check below is the real cut).
 - **`lever revoke <agent>`** — cuts that agent off immediately (persisted, survives broker
   restarts). Enforcement is by **caller identity at use time**, on every path a revoked agent could
-  act through *or observe from*: tool calls (gateway + `/llm` proxy), minting *and* delegating (it
-  can't hand a fresh token to a still-valid agent), messaging (send + inbox list), worker
+  act through *or observe from*: tool calls (brokered tools + `/llm` proxy), minting *and*
+  delegating (it can't hand a fresh token to a still-valid agent), messaging (send + inbox list), worker
   dispatch/teardown/list and enrolment tickets (for the manager), tool-catalog listing, and cert
   renewal — renew is refused, so the agent's existing cert simply expires and revocation is
   terminal. A revoked agent gains nothing by re-minting, re-messaging, reconnecting, or enumerating.

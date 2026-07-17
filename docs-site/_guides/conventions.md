@@ -9,9 +9,8 @@ requires only `name`, `backend`, and `tree` (workers are optional); everything b
 not a rule.
 
 The one convention that is genuinely framework-relevant is **workers**. The rest of this page
-documents how the **reference instance** (the authors' personal assistant) organises itself, shown
-as one worked example of an instance, not as something the framework expects you to adopt. Take what
-helps, ignore the rest.
+documents how the **reference instance** (the authors' personal assistant) organises itself — one
+worked example, not something the framework expects you to adopt.
 
 ## Workers (framework-relevant)
 
@@ -20,12 +19,12 @@ the one Scion project the manager and every worker run in. The worker's subdirec
 non-git directory; any git repositories live *inside* it. This keeps the runtime's project model
 simple (one instance, one Scion project, in-place subdirectory workspaces) and lets a worker's
 directory hold one or several repos. Workers are how the manager hands isolated, bounded work to
-agents, so this is the one organisational idea the framework actually leans on.
+agents.
 
 ## Reference-instance conventions (not enforced)
 
-The patterns below are **the reference instance's**, shown as one illustration of structure an
-instance might layer on the core. None of it is in the `lever` binary.
+The patterns below are **the reference instance's** — one illustration of structure an instance
+might layer on the core. None of it is in the `lever` binary.
 
 ### Projects vs areas
 
@@ -53,9 +52,9 @@ greppable:
 ### A goals layer (optional)
 
 Above projects and areas, an optional **goals** layer captures long-running aspirations that are
-never "done", they get *served*. Each goal lists the projects and areas serving it. The value is
-triage: when a project drifts, the question is not only "is it active?" but "does it still serve any
-goal?", and a project serving no goal is a candidate to archive.
+never "done" — they get *served*. Each goal lists the projects and areas serving it. The value is
+triage: when a project drifts, ask not only "is it active?" but "does it still serve any goal?" A
+project serving no goal is a candidate to archive.
 
 ## Task ↔ agent invariant (framework-relevant)
 

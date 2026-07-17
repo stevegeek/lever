@@ -91,7 +91,7 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, id any, msg map[string]a
 
 // toolsCallArgs extracts the operation name, canonical string arguments
 // (non-string values json-encoded; _capability excluded), and the _capability.
-// This MUST mirror the broker gateway's projection so verification agrees.
+// This MUST mirror the broker's projection so verification agrees.
 func toolsCallArgs(msg map[string]any) (string, map[string]string, string, bool) {
 	params, ok := msg["params"].(map[string]any)
 	if !ok {

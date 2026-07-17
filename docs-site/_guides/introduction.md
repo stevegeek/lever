@@ -17,8 +17,8 @@ engine to run it safely on your own machine:
 
 ## The problem it solves
 
-An autonomous agent that reads untrusted content, web pages, dependencies,
-issue text, tool output, can be steered into running arbitrary code. The
+An autonomous agent that reads untrusted content (web pages, dependencies,
+issue text, tool output) can be steered into running arbitrary code. The
 moment that agent also holds your model API key and has open internet access,
 a single prompt injection can exfiltrate the key and impersonate you.
 
@@ -28,7 +28,7 @@ container in cleartext. Lever closes that gap.
 
 ## What Lever adds over Scion
 
-Lever's value is the boundary it draws *around* Scion, things Scion presupposes
+Lever's value is the boundary it draws *around* Scion — things Scion presupposes
 but doesn't build:
 
 | | Scion alone | With Lever |

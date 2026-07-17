@@ -15,7 +15,7 @@ Lever is split so that the reusable framework and a particular person's setup ne
   the core itself).
 
 The framework authors run their own personal assistant as the first instance, dogfooding the core
-so the abstraction is proven by real use, not just asserted.
+so the abstraction is proven by real use.
 
 {% raw %}
 ```mermaid

@@ -51,7 +51,7 @@ graph TB
 
     subgraph host["Host (macOS) — outside the jail"]
         CLI[lever CLI]
-        BK["Capability broker<br/>holds real credentials<br/>capabilities · /llm · /worker/* · MCP gateway"]
+        BK["Capability broker<br/>holds real credentials<br/>capabilities · /llm · /worker/* · brokered tools (/mcp/&lt;name&gt;/)"]
         TOOLS[first-party tools<br/>host subprocesses]
         TREE[("project tree<br/>on host disk")]
     end

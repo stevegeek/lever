@@ -16,7 +16,8 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
-// gatewayHandler returns the gated MCP reverse-proxy for one registered tool.
+// gatewayHandler returns the gated MCP reverse-proxy for one registered tool
+// (mounted at /mcp/<name>/ on the jail listener).
 func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	t, ok := b.reg.Lookup(toolName)
 	if !ok {
@@ -114,7 +115,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			}
 			// A coarse tool's whole surface rides one wildcard capability:
 			// require {tool, "*"} regardless of which MCP tool is invoked. The
-			// gateway CHOOSES the required op, so a "*" token can never satisfy
+			// broker CHOOSES the required op, so a "*" token can never satisfy
 			// a fine tool (whose required op is the real params.name) — the
 			// wildcard cannot cross grains.
 			requiredOp := op

@@ -39,7 +39,7 @@ type Op struct {
 	CaveatParam map[string]string `yaml:"caveat_param"`
 }
 
-// Tool declares a tool the broker gates behind its mTLS MCP gateway: either a
+// Tool declares a tool the broker gates behind its mTLS tool routes (/mcp/<name>/): either a
 // first-party (capability-aware) subprocess the broker supervises, or — with
 // External — an already-running host MCP server the broker fronts.
 type Tool struct {
@@ -51,7 +51,7 @@ type Tool struct {
 	// External marks an already-running host MCP server the broker fronts but
 	// does NOT spawn (its lifecycle — and any TCC/Automation grant — stays with
 	// the user session). It is registered from config with FirstParty=false, so
-	// the gateway enforces the rules and strips the capability token. Command
+	// the broker enforces the rules and strips the capability token. Command
 	// must be empty; Backend is the server's own listen address,
 	// host:port[/path], loopback unless AllowNonLoopback.
 	External bool `yaml:"external"`
@@ -59,7 +59,7 @@ type Tool struct {
 	// valid on an external tool.
 	Gate Gate `yaml:"gate"`
 	// AllowNonLoopback permits an external Backend beyond a literal loopback
-	// IP. The gateway proxies HOST-side, so a non-loopback backend hands the
+	// IP. The broker proxies HOST-side, so a non-loopback backend hands the
 	// jailed agent a path to another host THROUGH the broker, bypassing the
 	// jail's LAN-drop egress — leave this off unless that is exactly intended.
 	AllowNonLoopback bool `yaml:"allow_non_loopback"`
@@ -129,7 +129,7 @@ func (t Tool) validate() error {
 }
 
 // validateExternalBackend confines an external backend to a literal loopback
-// IP (127.0.0.1 / [::1]) unless allow_non_loopback is set. The gateway proxies
+// IP (127.0.0.1 / [::1]) unless allow_non_loopback is set. The broker proxies
 // host-side, so a non-loopback backend would let the jailed agent reach other
 // hosts through the broker, circumventing the jail's LAN-drop egress.
 // Hostnames (even "localhost") are rejected: only a literal IP can be
@@ -152,7 +152,7 @@ func (t Tool) validateExternalBackend() error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("config: external broker tool %q backend %q is not a literal loopback IP — the gateway proxies host-side, so a non-loopback backend would let the jailed agent reach other hosts through the broker; set allow_non_loopback: true only if that is exactly what you intend", t.Name, b)
+		return fmt.Errorf("config: external broker tool %q backend %q is not a literal loopback IP — the broker proxies host-side, so a non-loopback backend would let the jailed agent reach other hosts through the broker; set allow_non_loopback: true only if that is exactly what you intend", t.Name, b)
 	}
 	return nil
 }
@@ -171,7 +171,7 @@ const (
 	LLMAuthAPIKey       LLMAuthMode = "api-key"
 )
 
-// Gate selects the capability grain the gateway enforces on an EXTERNAL tool.
+// Gate selects the capability grain the broker enforces on an EXTERNAL tool.
 //   - fine (the default): only the declared operations are callable; a token
 //     must name the specific MCP tool being invoked (op == params.name).
 //   - coarse: one wildcard capability ({tool, "*"}) admits every MCP call the
@@ -318,7 +318,7 @@ const CanonicalName = "lever.yaml"
 // (`lever-<name>`) and a shell token in the scion-install path.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// toolNameRE constrains a broker tool name: it becomes the /mcp/<name>/ gateway
+// toolNameRE constrains a broker tool name: it becomes the /mcp/<name>/ tool
 // route and a `claude mcp add <name>` token. Underscores are admitted (real MCP
 // server names use them, e.g. `apple_notes`), unlike a jail machine name; but
 // whitespace, `/`, `*`, and uppercase are still excluded so the name is safe in
@@ -644,7 +644,7 @@ func (a *App) validateBrokerGrants() error {
 			return fmt.Errorf("config: broker.tools entry has empty name")
 		}
 		if !toolNameRE.MatchString(t.Name) {
-			return fmt.Errorf("config: broker tool name %q must match %s (it becomes the /mcp/%s/ gateway route and a claude mcp add token)", t.Name, toolNameRE, t.Name)
+			return fmt.Errorf("config: broker tool name %q must match %s (it becomes the /mcp/%s/ tool route and a claude mcp add token)", t.Name, toolNameRE, t.Name)
 		}
 		if _, dup := toolOps[t.Name]; dup {
 			return fmt.Errorf("config: duplicate broker tool %q", t.Name)

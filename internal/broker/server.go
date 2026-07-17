@@ -33,8 +33,8 @@ func resolveAdminAddr(adminAddr string) (string, error) {
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
 // Routes: /provision, /worker/*, /msg/send, /msg/list, /enrol, /renew,
-// /request, and one gated gateway per currently-registered tool under
-// /mcp/<name>/. Gateways are bound at call time — tools must be registered
+// /request, and one gated proxy per currently-registered tool under
+// /mcp/<name>/. Tool routes are bound at call time — tools must be registered
 // before JailHandler() is called.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
@@ -53,14 +53,14 @@ func (b *Broker) JailHandler() http.Handler {
 
 	for _, name := range b.reg.Names() {
 		if name == ReservedLLMTool {
-			continue // served by /llm, not the MCP gateway
+			continue // served by /llm, not an /mcp/<name>/ tool route
 		}
 		handler, err := b.gatewayHandler(name)
 		if err != nil {
 			b.audit("gateway", "", "error", err.Error())
 			continue
 		}
-		// Strip the /mcp/<name> prefix so the gateway sees a clean path.
+		// Strip the /mcp/<name> prefix so the tool proxy sees a clean path.
 		prefix := "/mcp/" + name
 		mux.Handle(prefix+"/", http.StripPrefix(prefix, handler))
 	}

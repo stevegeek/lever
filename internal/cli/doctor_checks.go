@@ -60,7 +60,7 @@ func checkBrokerAlive(st brokerctl.State, jailPort int, dial dialFunc) checkResu
 
 // checkExternalBackends verifies every external tool's backend is listening.
 // External servers are fronted, not spawned, so a down one surfaces only as a
-// gateway 502 at call time — this turns that into an up-front diagnosis.
+// 502 on the tool call — this turns that into an up-front diagnosis.
 func checkExternalBackends(tools []config.Tool, dial dialFunc) checkResult {
 	const name = "external tool backends"
 	var down []string

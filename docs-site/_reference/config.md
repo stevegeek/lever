@@ -205,13 +205,13 @@ CN-bound, short-lived capability tokens. See [security-model §6](/security-mode
 |---|---|---|---|---|
 | `llm_auth` | enum | no | `api-key` | Instance-wide default LLM-auth mode (`api-key` \| `subscription`), inherited by manager/workers that don't set their own. `api-key` keeps the real key host-side (the broker injects it); `subscription` projects the OAuth token into the agents. **The effective set must be uniform**, a mixed instance is a hard config error. Egress is a **separate** knob (top-level `egress:`), not implied by this mode. |
 | `api_key_file` | path | **yes for `api-key`** | - | A file holding the real Anthropic Console key. Read host-side by the broker `/llm` proxy and injected into the upstream request; **never enters a container.** Must be **`0600`** (rejected otherwise), mirroring `credential_file`. See [providing the Console key](#providing-the-console-key). |
-| `llm_upstream` | string (URL) | no | `https://api.anthropic.com` | Overrides the `/llm` proxy target, e.g. to route through an LLM gateway that speaks the Anthropic Messages API. **Operator-set only, never client-controlled** (no SSRF: the broker always streams to this one fixed host); it still injects the real Console key host-side and strips the inbound capability token first. |
+| `llm_upstream` | string (URL) | no | `https://api.anthropic.com` | Overrides the `/llm` proxy target, e.g. to route through an LLM proxy that speaks the Anthropic Messages API. **Operator-set only, never client-controlled** (no SSRF: the broker always streams to this one fixed host); it still injects the real Console key host-side and strips the inbound capability token first. |
 | `jail_port` | int | no | `8443` | mTLS port the in-jail agents reach the broker on (allowlisted in the egress rules). Defaults to 8443; set an explicit port only to run several instances' brokers on one host at once. |
 | `admin_port` | int | no | `8444` | **Loopback-only** unauthenticated admin port (`/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`); bind is rejected if non-loopback. Defaults to 8444. |
 | `grant_ttl` | duration | no | `24h` | Capability token lifetime. A backstop only: the per-call epoch/revocation check is the real cut, so a session-scale TTL is safe (and must outlive the 12h renew cycle). |
 | `ticket_ttl` | duration | no | (default) | Lifetime of a one-time enrolment ticket (the manager-bootstrap and agent-enrol tickets minted at apply). Short by design; only needs to outlive container boot. |
 | `manager_identity` | string | no | `manager` | The capability CN the manager enrols under (its certificate identity at the broker), distinct from its Scion agent slug (`name`). |
-| `tools` | list of `{name, command, backend, operations, allowed_values, external, gate, allow_non_loopback}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs; `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. With `external: true` the broker FRONTS an already-running host MCP server instead of spawning one: no `command`, `backend` is the server's own listen address (`host:port[/path]`, literal loopback IP unless `allow_non_loopback: true`), and the tool registers third-party — the gateway enforces the rules and strips the capability before proxying. |
+| `tools` | list of `{name, command, backend, operations, allowed_values, external, gate, allow_non_loopback}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs; `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. With `external: true` the broker FRONTS an already-running host MCP server instead of spawning one: no `command`, `backend` is the server's own listen address (`host:port[/path]`, literal loopback IP unless `allow_non_loopback: true`), and the tool registers third-party — the broker enforces the rules and strips the capability before proxying. |
 | `messaging` | object | no | `worker_to_worker: true` | Routing policy for broker-routed typed messaging (`/msg/send`, `/msg/list`; see [architecture.md](/architecture/)). `worker_to_worker` (bool) permits worker→worker sends; it's a pointer under the hood so unset ⇒ **allowed**, an explicit `false` denies it for a stricter hub-and-spoke model. Recipients themselves aren't a config key, they're resolved from the caller's mTLS identity: the manager may message any declared worker and read any inbox (`msg list --worker <name>`); a worker may always message the manager and read only its own inbox. |
 
 #### External MCP servers (`external: true`)
@@ -219,7 +219,7 @@ CN-bound, short-lived capability tokens. See [security-model §6](/security-mode
 An **external tool** is a host MCP server the broker *fronts but does not spawn* — it keeps
 running as your own user-session process (launchd, a terminal, however you run it), which is
 what keeps macOS Automation/TCC grants intact for AppleScript-driven servers. The broker
-registers it from config at boot, exposes it at `/mcp/<name>/` on the mTLS gateway, and
+registers it from config at boot, exposes it at `/mcp/<name>/` on its mTLS listener, and
 proxies to `backend`. Jailed agents therefore reach it **only through a capability** — no
 `manager.allow_ports` hole, no hand-authored `.mcp.json`.
 
@@ -229,7 +229,7 @@ Per-tool capability grain, `gate`:
   must name the specific operation, and `allowed_values` can pin arguments.
 - **`coarse`:** one wildcard grant — `{tool: <name>, op: "*"}` — admits **every** MCP call
   the server exposes (declare no `operations`). The wildcard is honored *only* for a
-  `gate: coarse` tool: the gateway chooses which capability to require, so a `"*"` token
+  `gate: coarse` tool: the broker chooses which capability to require, so a `"*"` token
   can never widen a `fine` tool. The audit log records the real MCP tool called either way.
 
 ```yaml
@@ -261,12 +261,12 @@ manager:
 ```
 
 `backend` must be a **literal loopback IP** (`127.0.0.1` / `[::1]`; hostnames are rejected):
-the gateway proxies host-side, so a non-loopback backend would let a jailed agent reach
+the broker proxies host-side, so a non-loopback backend would let a jailed agent reach
 another host *through the broker*, bypassing the jail's LAN-drop egress. If you truly need
 that, set `allow_non_loopback: true` on the tool — an explicit, per-tool opt-in.
 
-Liveness is yours: the broker does not restart an external server; if it is down, gateway
-calls return 502.
+Liveness is yours: the broker does not restart an external server; if it is down, calls to
+the tool return 502.
 
 ## Conventions & derived values
 

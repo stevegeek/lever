@@ -1,7 +1,7 @@
-// Package broker is the host-side capability authority and MCP gateway. It mints
-// per-agent signed capability tokens under the request/delegation policy and the
-// tool registry, and gates every MCP call so real credentials never enter a
-// container.
+// Package broker is the host-side capability authority and brokered-tool proxy.
+// It mints per-agent signed capability tokens under the request/delegation
+// policy and the tool registry, and gates every MCP call so real credentials
+// never enter a container.
 package broker
 
 import (
@@ -24,7 +24,7 @@ const (
 	// once at startup and holds it for the whole session, and the in-container
 	// lever-renew sidecar only refreshes every 12h — so a short TTL would strand a
 	// session between refreshes. Token TTL is a backstop only; the live
-	// epoch/revoke gate (checked per call at the gateway and /llm proxy) is the
+	// epoch/revoke gate (checked per call on tool routes and the /llm proxy) is the
 	// real security cut, so a generous default is safe. Operators wanting tighter
 	// expiry can lower broker.grant_ttl, but should keep it above the renew interval.
 	defaultGrantTTL  = 24 * time.Hour
@@ -34,7 +34,7 @@ const (
 const (
 	// ReservedLLMTool is the built-in pseudo-tool name for the LLM proxy. It is
 	// registered (api-key mode) so /request can mint capability(llm) tokens, but
-	// it gets NO /mcp/llm/ gateway route and is hidden from /tools — it is served
+	// it gets NO /mcp/llm/ tool route and is hidden from /tools — it is served
 	// only by the /llm proxy route.
 	ReservedLLMTool = "llm"
 	ReservedLLMOp   = "generate"
@@ -98,7 +98,7 @@ type Config struct {
 	WorkerToWorker bool
 }
 
-// Broker is the running capability authority + gateway.
+// Broker is the running capability authority + brokered-tool proxy.
 type Broker struct {
 	keys      token.KeyPair
 	ca        *ca.CA

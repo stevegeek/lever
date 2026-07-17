@@ -93,8 +93,9 @@ broker:
 
 ### Granting access — who may use which tool
 
-A registered tool is inert until an agent is granted a capability for it. Grants are per-identity and
-default-deny:
+A registered tool is inert until an agent is granted a capability for it. Grants are per-identity
+and default-deny (the token model behind them — identities, minting, delegation, revocation — is
+described in [capabilities.md](/capabilities/)):
 
 ```yaml
 manager:
@@ -112,9 +113,9 @@ workers:
 - **`obtain`** — the agent can self-mint a capability for the listed `{tool, op}`.
 - **`delegate`** — the manager can mint a token *bound to a named recipient* worker at dispatch time
   (an attenuated hand-off).
-- Absence of a grant = no access, and a grant for one agent can't be replayed by another (the token
-  is identity-bound). `op: "*"` is honoured **only** for a `gate: coarse` tool, so a wildcard can
-  never widen a `fine` one.
+- Absence of a grant = no access, and a grant for one agent can't be replayed by another (the
+  token is identity-bound). Gate grains (`fine` vs `coarse`, and why a `"*"` wildcard can never
+  widen a `fine` tool) are covered in [capabilities.md](/capabilities/).
 
 ### Which should I use?
 

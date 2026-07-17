@@ -72,7 +72,9 @@ hard config error.
 
 ### 6.2 What the broker enforces (built lock-downs)
 
-These are the shipped, code-enforced properties of the capability layer, the *how* behind §6.1:
+The capability model itself — identities, minting, delegation, revocation — is described in
+[capabilities.md](/capabilities/). This section lists the shipped, code-enforced properties, the
+*how* behind §6.1:
 
 - **Capabilities are mTLS-CN-bound and non-transferable.** Every token carries an intrinsic check
   `caller == bound_agent` (`internal/cap/token/token.go`); the broker authenticates the caller from its

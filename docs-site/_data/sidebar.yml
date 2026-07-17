@@ -1,4 +1,46 @@
+# Explicit Guide tree so split hubs nest their sub-pages; Reference stays
+# collection-driven (flat, sorted by nav_order).
 - title: Guide
-  collection: guides
+  items:
+    - title: Introduction
+      url: /introduction/
+    - title: Getting started
+      url: /getting-started/
+      children:
+        - title: "Install & build the image"
+          url: /getting-started/install/
+        - title: "First run"
+          url: /getting-started/first-run/
+        - title: "Give agents MCP tools"
+          url: /getting-started/mcp-tools/
+    - title: "Example: AI assistant"
+      url: /example-ai-assistant/
+    - title: Architecture
+      url: /architecture/
+    - title: "Agent identity & certificates"
+      url: /agent-identity/
+    - title: Security model
+      url: /security-model/
+      children:
+        - title: "The jail"
+          url: /security-model/jail/
+        - title: "Worker isolation"
+          url: /security-model/worker-isolation/
+        - title: "Config trust"
+          url: /security-model/config-trust/
+        - title: "Credentials & capabilities"
+          url: /security-model/credentials/
+        - title: "Compromise scenarios"
+          url: /security-model/compromise/
+        - title: "Validation"
+          url: /security-model/validation/
+    - title: Capabilities
+      url: /capabilities/
+    - title: Core vs instance
+      url: /core-vs-instance/
+    - title: Conventions
+      url: /conventions/
+    - title: Operations
+      url: /operations/
 - title: Reference
   collection: reference

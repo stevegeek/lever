@@ -1,6 +1,7 @@
 ---
 title: "Credentials & capabilities"
 nav_order: 5.4
+parent: Security model
 permalink: /security-model/credentials/
 ---
 Part of the [security model](/security-model/). Sections keep their original § numbers.

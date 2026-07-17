@@ -1,6 +1,7 @@
 ---
 title: "Give agents MCP tools"
 nav_order: 2.3
+parent: Getting started
 permalink: /getting-started/mcp-tools/
 ---
 Part of [getting started](/getting-started/). Steps keep their original numbering.

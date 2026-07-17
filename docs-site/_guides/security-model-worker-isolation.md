@@ -1,6 +1,7 @@
 ---
 title: "Worker isolation"
 nav_order: 5.2
+parent: Security model
 permalink: /security-model/worker-isolation/
 ---
 Part of the [security model](/security-model/). Sections keep their original § numbers.

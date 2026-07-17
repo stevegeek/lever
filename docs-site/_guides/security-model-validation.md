@@ -1,6 +1,7 @@
 ---
 title: "Validation"
 nav_order: 5.6
+parent: Security model
 permalink: /security-model/validation/
 ---
 Part of the [security model](/security-model/). Sections keep their original § numbers.

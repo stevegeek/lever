@@ -1,6 +1,7 @@
 ---
 title: "First run"
 nav_order: 2.2
+parent: Getting started
 permalink: /getting-started/first-run/
 ---
 Part of [getting started](/getting-started/). Steps keep their original numbering.

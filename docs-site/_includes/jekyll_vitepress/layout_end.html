@@ -29,4 +29,7 @@
 
   if (document.readyState !== 'loading') renderMermaid();
   else document.addEventListener('DOMContentLoaded', renderMermaid);
+  // Turbo Drive swaps <body> on in-site navigation without firing
+  // DOMContentLoaded; re-run on every Turbo visit (processed nodes are skipped).
+  document.addEventListener('turbo:load', renderMermaid);
 </script>

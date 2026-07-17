@@ -1,6 +1,7 @@
 ---
 title: "Config trust"
 nav_order: 5.3
+parent: Security model
 permalink: /security-model/config-trust/
 ---
 Part of the [security model](/security-model/). Sections keep their original § numbers.

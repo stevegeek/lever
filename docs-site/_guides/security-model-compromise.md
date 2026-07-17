@@ -1,6 +1,7 @@
 ---
 title: "Compromise scenarios"
 nav_order: 5.5
+parent: Security model
 permalink: /security-model/compromise/
 ---
 Part of the [security model](/security-model/). Sections keep their original § numbers.

@@ -1,6 +1,7 @@
 ---
 title: "Install & build the image"
 nav_order: 2.1
+parent: Getting started
 permalink: /getting-started/install/
 ---
 Part of [getting started](/getting-started/). Steps keep their original numbering.

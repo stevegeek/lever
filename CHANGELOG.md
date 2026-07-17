@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-17
+
 ### Changed
 - Agent images are now tagged **by architecture** (`scionlocal/lever-claude:arm64`
   / `:amd64`) instead of a shared `:latest`, and a **tagless** `manager.image` (or

@@ -266,7 +266,7 @@ type ScionConfig struct {
 
 // Security holds opt-in image policy. Both default off (empty/false) for
 // backward compatibility; when set they apply to manager.image and every worker
-// image. See security-model.md §5.
+// image. See security-model-config-trust.md §5.
 type Security struct {
 	// AllowedImageRegistries restricts where images may come from: an image is
 	// allowed iff it equals, or is prefixed by "<entry>/", one of these entries
@@ -311,7 +311,7 @@ func validateBackend(name string) error {
 // instance root (package.json / Cargo.toml style). It is resolved from the
 // current directory ONLY — there is deliberately no walk-up discovery, so a
 // `lever.yaml` planted in a parent directory can never be picked up. See
-// security-model.md §5.
+// security-model-config-trust.md §5.
 const CanonicalName = "lever.yaml"
 
 // nameRE constrains an instance/worker name: it becomes a jail machine name
@@ -405,7 +405,7 @@ func Load(path string) (*App, error) {
 	// mounted — it holds the config and the boot prompt, which must stay out of
 	// the agent-writable mount (a compromised agent could otherwise rewrite the
 	// config the host trusts on the next bring-up). So `tree: .` (root == mount)
-	// is rejected. See security-model.md §5.
+	// is rejected. See security-model-config-trust.md §5.
 	if !confinedRel(app.Tree) {
 		return nil, fmt.Errorf("config: tree %q must be a relative subdirectory inside the instance root (not %q, not absolute, no \"..\")", app.Tree, ".")
 	}
@@ -544,11 +544,11 @@ func (a *App) validateBroker() error {
 	// Hub secret and egress is applied jail-wide, so a subscription agent forces
 	// the real token into — and open internet egress for — the api-key agents'
 	// containers, defeating their key isolation. An instance must be uniformly
-	// api-key OR uniformly subscription. See security-model.md §6.1. (Resolved
+	// api-key OR uniformly subscription. See security-model-credentials.md §6.1. (Resolved
 	// modes, so a broker/manager default that disagrees with a worker override is
 	// caught too.)
 	if a.mixedLLMAuth() {
-		return fmt.Errorf("config: llm_auth is mixed across the instance (both api-key and subscription agents) — this is unsupported; an instance must be uniformly api-key or uniformly subscription (see security-model.md §6.1)")
+		return fmt.Errorf("config: llm_auth is mixed across the instance (both api-key and subscription agents) — this is unsupported; an instance must be uniformly api-key or uniformly subscription (see security-model-credentials.md §6.1)")
 	}
 	// Egress is an independent posture (not derived from llm_auth). `closed`
 	// requires a uniformly api-key instance — a subscription agent needs direct
@@ -597,7 +597,7 @@ func (a *App) llmAuthModes() (anyAPIKey, anySubscription bool) {
 }
 
 // mixedLLMAuth reports whether the instance mixes api-key and subscription
-// agents — an unsupported configuration (see validateBroker / security-model.md §6.1).
+// agents — an unsupported configuration (see validateBroker / security-model-credentials.md §6.1).
 func (a *App) mixedLLMAuth() bool {
 	anyAPIKey, anySubscription := a.llmAuthModes()
 	return anyAPIKey && anySubscription

@@ -664,7 +664,7 @@ func indexOf(s, sub string) int {
 // credential is a single jail-wide Hub secret and egress is jail-wide, so a
 // subscription agent forces the real token into (and open egress for) the
 // api-key agents' containers, defeating their key isolation. See
-// security-model.md §6.1.
+// security-model-credentials.md §6.1.
 func TestRejectsMixedLLMAuthInstance(t *testing.T) {
 	// Broker default api-key ⇒ manager is api-key; worker overrides to subscription.
 	a := &App{

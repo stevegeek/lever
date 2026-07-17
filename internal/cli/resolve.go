@@ -13,7 +13,7 @@ import (
 // canonical config in the CURRENT directory only. There is deliberately NO
 // walk-up discovery: run `lever` from the instance root. This prevents a
 // `lever.yaml` planted in a parent directory from being picked up and trusted.
-// See security-model.md §5.
+// See security-model-config-trust.md §5.
 func resolveConfigPath(arg string) (string, error) {
 	if arg != "" {
 		return arg, nil

@@ -198,7 +198,7 @@ func (l *Lima) ensureVM(ctx context.Context, projectTree string) error {
 // any ~/.lima/_config/{default,override}.yaml on EVERY call — that merged
 // result is what lima actually applies the next time the VM starts, so it is
 // the only read-back that can catch a global override widening the surface
-// (see security-model.md's lima operator-boundary note).
+// (see security-model-jail.md §2.4's lima operational notes).
 type realizedInstance struct {
 	Config struct {
 		Mounts []struct {

@@ -742,7 +742,7 @@ const maxCredentialBytes = 64 << 10
 
 // defaultReadCred reads a credential file, refusing world-readable files (a real
 // credential should be 0600) and oversized files. This is defence-in-depth for
-// the credential projected into agent containers; see security-model.md §5.
+// the credential projected into agent containers; see security-model-config-trust.md §5.
 func defaultReadCred(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {

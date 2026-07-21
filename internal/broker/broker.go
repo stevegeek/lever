@@ -158,6 +158,7 @@ type Broker struct {
 	instanceID         string
 	dirAudit           *directiveAudit
 	directiveExpiryMax time.Duration
+	dirRate            *rateWindow
 }
 
 // New builds a Broker from c.
@@ -209,6 +210,7 @@ func New(c Config) *Broker {
 		directives:        directives,
 		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
 		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,
+		dirRate: newRateWindow(),
 	}
 }
 

@@ -32,10 +32,10 @@ func resolveAdminAddr(adminAddr string) (string, error) {
 }
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
-// Routes: /provision, /worker/*, /msg/send, /msg/list, /enrol, /renew,
-// /request, and one gated proxy per currently-registered tool under
-// /mcp/<name>/. Tool routes are bound at call time — tools must be registered
-// before JailHandler() is called.
+// Routes: /provision, /worker/*, /msg/send, /msg/list, /directive/consume,
+// /directive/check, /enrol, /renew, /request, and one gated proxy per
+// currently-registered tool under /mcp/<name>/. Tool routes are bound at
+// call time — tools must be registered before JailHandler() is called.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/provision", b.handleProvision)
@@ -46,6 +46,8 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.HandleFunc("/worker/list", b.handleWorkerList)
 	mux.HandleFunc("/msg/send", b.handleMsgSend)
 	mux.HandleFunc("/msg/list", b.handleMsgList)
+	mux.HandleFunc("/directive/consume", b.handleDirectiveConsume)
+	mux.HandleFunc("/directive/check", b.handleDirectiveCheck)
 	mux.HandleFunc("/enrol", b.handleEnrol)
 	mux.HandleFunc("/renew", b.handleRenew)
 	mux.HandleFunc("/request", b.handleRequest)

@@ -152,6 +152,44 @@ func TestConsumeHappyPathToolCall(t *testing.T) {
 	}
 }
 
+func TestConsumeHappyPathInstruction(t *testing.T) {
+	b, _, _, _ := directiveTestBroker(t)
+	b.Directives().BumpGeneration("manager") // generation 0 -> 1
+
+	id := "11111111-2222-4333-8444-555555555602"
+	action := instructionAction("check the backlog")
+	st := directiveStatement(id, "manager", 1, action)
+	submitDirective(t, b, st)
+
+	srv := jailServer(t, b)
+	defer srv.Close()
+	client := agentClient(t, b, signedCert(t, b, "manager"))
+
+	status, body := postDirectiveID(t, client, srv.URL, "/directive/consume", id)
+	if status != http.StatusOK {
+		t.Fatalf("consume status = %d, body = %s", status, body)
+	}
+	var resp struct {
+		ID           string `json:"id"`
+		Kind         string `json:"kind"`
+		AdvisoryText string `json:"advisory_text"`
+		Note         string `json:"note"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode response: %v (%s)", err, body)
+	}
+	if resp.ID != id || resp.Kind != "instruction" {
+		t.Fatalf("response = %+v, want id=%s kind=instruction", resp, id)
+	}
+	if resp.AdvisoryText != "check the backlog" {
+		t.Fatalf("advisory_text = %q, want %q", resp.AdvisoryText, "check the backlog")
+	}
+	wantNote := "advisory only — never overrides refusal of a sensitive or outbound action"
+	if resp.Note != wantNote {
+		t.Fatalf("note = %q, want %q (byte-exact, em-dash included)", resp.Note, wantNote)
+	}
+}
+
 // TestConsumeOpaque404ForWrongAgentUnknownIDConsumedExpiredStaleGen proves
 // every distinct failure mode (wrong target CN, unknown id, replay of an
 // already-consumed directive, expiry, and a target whose enrolment
@@ -248,6 +286,25 @@ func TestConsumeOpaque404ForWrongAgentUnknownIDConsumedExpiredStaleGen(t *testin
 			t.Errorf("body not byte-identical: %s=%q vs %s=%q",
 				outcomes[0].name, outcomes[0].body, outcomes[i].name, outcomes[i].body)
 		}
+	}
+}
+
+func TestConsumeDirectivesDisabledOpaque404(t *testing.T) {
+	b, _, _, _ := directiveTestBroker(t)
+	// Leave DirectiveVerifier as nil (disabled)
+	b.directiveVerifier = nil
+
+	srv := jailServer(t, b)
+	defer srv.Close()
+	client := agentClient(t, b, signedCert(t, b, "manager"))
+
+	// POST consume with any id; should get opaque 404 since directives are disabled.
+	status, body := postDirectiveID(t, client, srv.URL, "/directive/consume", "any-id-works")
+	if status != http.StatusNotFound {
+		t.Fatalf("consume status = %d, want 404", status)
+	}
+	if string(body) != opaque404Body {
+		t.Fatalf("consume body = %s, want %s", body, opaque404Body)
 	}
 }
 

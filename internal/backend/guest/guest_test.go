@@ -37,8 +37,8 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			if err := g.EnsureRuntimes(context.Background(), "stephen"); err != nil {
 				t.Fatalf("EnsureRuntimes: %v", err)
 			}
-			if len(f.Calls) != 5 {
-				t.Fatalf("expected 5 calls, got %d: %+v", len(f.Calls), f.Calls)
+			if len(f.Calls) != 6 {
+				t.Fatalf("expected 6 calls, got %d: %+v", len(f.Calls), f.Calls)
 			}
 
 			// call 0: root apt install — RootPrefix then bash -lc <script>.
@@ -90,6 +90,16 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			fourthScript := fourth.Args[len(fourth.Args)-1]
 			if !strings.Contains(fourthScript, "docker info") {
 				t.Errorf("call 4 script missing dockerd start: %q", fourthScript)
+			}
+
+			// call 5: user stages the pasta host-loopback mapping (per-agent netns).
+			fifth := f.Calls[5]
+			if fifth.Name != shape.userPrefix[0] {
+				t.Fatalf("call 5 should be user-prefixed, got %+v", fifth)
+			}
+			fifthScript := fifth.Args[len(fifth.Args)-1]
+			if !strings.Contains(fifthScript, "containers.conf.d") || !strings.Contains(fifthScript, "map-host-loopback") {
+				t.Errorf("call 5 script missing pasta host-loopback mapping: %q", fifthScript)
 			}
 		})
 	}

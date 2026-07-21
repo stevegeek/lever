@@ -81,6 +81,22 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	if err := user(`export XDG_RUNTIME_DIR=/run/user/$(id -u); export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock; systemctl --user enable --now docker 2>/dev/null || (nohup dockerd-rootless.sh >/tmp/lever-dockerd.log 2>&1 &); timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'`); err != nil {
 		return fmt.Errorf("start rootless dockerd: %w", err)
 	}
+	// Per-agent network isolation: agents run in their own pasta netns (no
+	// --network=host; see jail.jailEnvFor), which makes each container's 127.0.0.1
+	// private and isolates the in-container gateway proxy from co-resident agents.
+	// The one thing host-net was buying was the agent's reach to the VM-loopback
+	// hub. Restore it with pasta --map-host-loopback on 169.254.1.2 — the address
+	// podman already resolves host.containers.internal to — so scion's
+	// auto-computed container hub endpoint (host.containers.internal:PORT) reaches
+	// the VM-loopback hub. pasta_options APPEND to podman's defaults (dns-forward,
+	// map-guest-addr preserved). A containers.conf.d drop-in so we never clobber a
+	// base containers.conf; idempotent (deterministic content).
+	if err := user(`mkdir -p ~/.config/containers/containers.conf.d && cat > ~/.config/containers/containers.conf.d/10-lever-pasta.conf <<'EOF'
+[network]
+pasta_options = ["--map-host-loopback", "169.254.1.2"]
+EOF`); err != nil {
+		return fmt.Errorf("stage pasta host-loopback mapping: %w", err)
+	}
 	return nil
 }
 

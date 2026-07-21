@@ -91,3 +91,37 @@ yet done:** the live acceptance checks that would exercise this guarantee agains
 are not yet wired into `lever acceptance`. The mechanism is implemented and was live-validated once
 by hand (2026-07-10), but worker isolation currently depends on the fork-only `--workspace-subdir`
 addition (not yet in the pinned commit; see §4.1), and no dedicated automated live gate exists today.
+
+### 4.3 Per-agent network namespace: a private loopback per agent
+
+Mount and hub-authority isolation would still leave a network gap if all agents shared one network
+namespace. Each agent runs an in-container **gateway proxy** on `127.0.0.1:8462`
+([agent identity](/agent-identity/)) that holds that agent's mTLS client leaf and is itself
+unauthenticated — it trusts whoever connects on its loopback. If agents shared the jail's network
+namespace (`--network=host`), that loopback would be jail-wide: a compromised worker could `POST` to
+the manager's `127.0.0.1:8462` and be authenticated to the broker **as the manager**, with no
+credential — full cross-agent impersonation.
+
+Lever closes this by giving every agent its **own** network namespace. Agents run under rootless
+podman's default **pasta** networking (lever no longer forces `--network=host`), so each container's
+`127.0.0.1` is private to that container; one agent cannot reach another's gateway proxy at all
+(live-validated: a second container's `curl` to a co-resident agent's `127.0.0.1:8462` is refused).
+
+Two things that host networking used to provide are preserved without it:
+
+- **Hub reachability.** The agent's Scion runtime connects to the jail-local hub on loopback. With a
+  private netns the hub is no longer directly reachable, so lever stages a pasta
+  `--map-host-loopback` option (guest `containers.conf.d`) mapping the address podman already resolves
+  `host.containers.internal` to; Scion's auto-computed container hub endpoint
+  (`host.containers.internal:PORT` for podman) then reaches the jail-loopback hub across the netns
+  boundary. The mapping exposes the jail's loopback to each agent — the same surface `--network=host`
+  already gave them, now minus the per-agent gateways that host networking made jail-wide. Nothing
+  unauthenticated should bind the jail loopback beyond the hub and the allowlisted local tools; the
+  broker's control surfaces are host-side, not on the jail loopback.
+- **Egress containment.** The allowlist is enforced on the jail's `OUTPUT` chain. pasta's userspace
+  egress re-emerges as `OUTPUT` traffic in the jail netns, so it still traverses `LEVER_EGRESS`
+  unchanged — a per-agent bridge/`FORWARD` topology would have bypassed it, but pasta does not
+  (live-validated: private-range probes from inside an agent netns still hit the chain's DROP rules).
+
+Escape hatch: setting `LEVER_FORCE_HOST_NETWORK=1` on the host restores `--network=host` for
+debugging — this reopens the shared-loopback gap above and is not isolation-safe.

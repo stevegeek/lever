@@ -9,7 +9,9 @@ package jail
 
 import (
 	"context"
+	"os"
 	"sort"
+	"strconv"
 
 	"github.com/stevegeek/lever/internal/exec"
 )
@@ -36,17 +38,31 @@ func OrbPrefix(machine, user string) []string {
 // run-user uid. Shared by Runner.jailEnv and AttachArgv (attach.go) so the env
 // list lives in exactly one place.
 func jailEnvFor(uid string) []string {
-	return []string{
+	env := []string{
 		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"SCION_HUB_ENABLED=true",
-		// Force the agent containers onto --network=host so they reach the
-		// jail-local hub on loopback (the broker/agent-launch reads this).
-		// Without it, rootless podman uses pasta networking and the agent
-		// cannot reach the hub → heartbeats fail. scion's official escape
-		// hatch (>= upstream da49e14); applies to any runtime, not just docker.
-		"SCION_FORCE_HOST_NETWORK=1",
 	}
+	// Agents run in their OWN per-agent network namespace (rootless podman's
+	// default pasta networking), so each container's 127.0.0.1 is private. That
+	// private loopback is what isolates one agent's in-container gateway proxy
+	// (127.0.0.1:8462) from co-resident agents — under a shared --network=host
+	// netns any agent could reach another's gateway and act as it (no creds).
+	// Hub reachability across the netns boundary is restored host-side, not by
+	// host networking: the guest containers.conf sets pasta
+	// --map-host-loopback 169.254.1.2 (guest.EnsureRuntimes), and scion's
+	// auto-computed container hub endpoint (host.containers.internal → 169.254.1.2)
+	// then resolves to the VM-loopback hub. Egress containment is unaffected:
+	// pasta's egress re-emerges on the VM OUTPUT chain (LEVER_EGRESS), verified
+	// live. Escape hatch: set LEVER_FORCE_HOST_NETWORK to a truthy value (1/true)
+	// on the host to fall back to scion's --network=host (shared netns) for
+	// debugging — NOT isolation-safe. Parsed as a bool so =0/=false correctly
+	// mean OFF and any unparseable/empty value stays OFF (own netns): a surprising
+	// value on this security knob never silently re-opens the shared-loopback gap.
+	if force, _ := strconv.ParseBool(os.Getenv("LEVER_FORCE_HOST_NETWORK")); force {
+		env = append(env, "SCION_FORCE_HOST_NETWORK=1")
+	}
+	return env
 }
 
 // jailEnv is the fixed environment every in-jail command needs.

@@ -142,18 +142,23 @@ for agent lifecycle, but the in-jail scion Hub API itself remains reachable from
 container, using that agent's own scion token (distinct from [§4.2](/security-model/worker-isolation/)'s
 host-only controller PAT — this is the per-agent token scion mints for status/heartbeat use). The
 2026-07-06 create/delete-unaudited vector is closed **structurally**, not by a runtime guard: the
-real hub always starts with `--dev-auth=false` (`internal/apply/run.go:273`, hardcoded, no config
-field turns it on); lever defines no hub-access-scope config anywhere (no `HubAccessScopes` or
-equivalent); and with dev-auth off, an agent token carries only `agent:status:update` /
-`agent:token:refresh` / `project:agent:notify` — scion grants the create/lifecycle scopes only in
-dev-auth mode. So a lever agent's token cannot create or lifecycle agents; those verbs 403 on the
-missing scope. Because that posture is structural rather than config-toggled, there is no runtime
-knob for a `lever doctor` check to guard — a check reading config would always trivially pass. The
-**known exception** is agent `DELETE`: scion does not yet apply an equivalent agent-identity scope
-check to that handler, so an agent's own (minimally-scoped) token can still call it. Closing that
-gap is a scion-side change, tracked separately, not something lever's controller-PAT model can
-guard from the outside. Operationally this residual is bounded by closed egress and a first-party
-manager ([§7](/security-model/compromise/)).
+real hub always starts with `--dev-auth=false` (`internal/apply/run.go`, the `ServerStart(...,
+DevAuth: false)` call, hardcoded, no config field turns it on); lever defines no hub-access-scope
+config anywhere (no `HubAccessScopes` or equivalent); and with dev-auth off, an agent token
+carries only `agent:status:update` / `agent:token:refresh` / `project:agent:notify` — scion grants
+the create/lifecycle scopes only in dev-auth mode. So a lever agent's token cannot create or
+lifecycle agents; those verbs 403 on the missing scope. Because that posture is structural rather
+than config-toggled, there is no runtime knob for a `lever doctor` check to guard — a check
+reading config would always trivially pass. The **known exception** is agent `DELETE`: scion does
+not yet apply an equivalent agent-identity scope check to that handler, so an agent's own
+(minimally-scoped) token can still call it. Closing that gap is a scion-side change, tracked
+separately, not something lever's controller-PAT model can guard from the outside. **Egress mode
+gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically so the
+in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable
+identically under `open` or `closed`. The real (if narrow) bound is tenancy: this is a
+single-operator, single-project instance — an operator-run manager and every worker already
+belong to that same operator's own instance, so an agent reaching this path has no cross-tenant
+blast radius to escalate into ([§8](/security-model/compromise/)).
 
 ### 6.3 Leaf rotation and the re-read invariant
 

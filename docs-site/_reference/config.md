@@ -150,6 +150,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
 | `operator` | object | no | - | Optional operator-directives config: signer trust anchor, signing key, expiry policy (see below). Unset ⇒ directives disabled. |
+| `disk` | string | no | `24GiB` | **Lima only** — guest disk size (e.g. `24GiB`, `40GiB`). Lima's own omitted-disk default is 100GiB, a grow-only qcow2 that can wedge a smaller host; lever caps it at a conservative `24GiB` by default. Applied only at jail **creation**; resizing an existing jail needs `limactl disk resize` or a recreate. Ignored by the OrbStack backend, which manages its own disk. |
 
 ### `scion`
 

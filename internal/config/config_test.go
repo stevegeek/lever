@@ -1131,3 +1131,15 @@ func TestOperatorAcceptsExpiryEqualToMax(t *testing.T) {
 		t.Fatalf("EffectiveDirectiveExpiry() = %v, want 2h", got)
 	}
 }
+
+func TestValidateDiskFormat(t *testing.T) {
+	if err := validateDisk("24GiB"); err != nil {
+		t.Fatalf("24GiB should be valid: %v", err)
+	}
+	if err := validateDisk(""); err != nil {
+		t.Fatalf("empty should be valid (default): %v", err)
+	}
+	if err := validateDisk("lots"); err == nil {
+		t.Fatalf("bad size should be rejected")
+	}
+}

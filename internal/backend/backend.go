@@ -44,6 +44,10 @@ type Config struct {
 	// jail→Anthropic directly. False (open posture) is the default for
 	// subscription mode where the agent reaches Anthropic directly.
 	ClosedInternet bool
+	// Disk is the Lima guest disk size (e.g. "24GiB"). Empty selects the
+	// lima package default. Ignored by backends that manage their own disk
+	// (OrbStack).
+	Disk string
 }
 
 // Backend is the contract the rest of Lever drives. Implementations must make

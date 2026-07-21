@@ -304,6 +304,7 @@ type App struct {
 	Security Security    `yaml:"security"`
 	Broker   Broker      `yaml:"broker"`
 	Operator Operator    `yaml:"operator"`
+	Disk     string      `yaml:"disk"` // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
 
 	dir     string // instance root (the config file's directory)
 	treeRel string // tree as the confined relative subdir (before joining to dir)
@@ -333,6 +334,19 @@ const CanonicalName = "lever.yaml"
 // nameRE constrains an instance/worker name: it becomes a jail machine name
 // (`lever-<name>`) and a shell token in the scion-install path.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+var diskRE = regexp.MustCompile(`^[0-9]+(MiB|GiB|MB|GB)$`)
+
+// validateDisk checks the optional Lima disk size. Empty is valid (default).
+func validateDisk(d string) error {
+	if d == "" {
+		return nil
+	}
+	if !diskRE.MatchString(d) {
+		return fmt.Errorf("config: disk %q invalid (want e.g. 24GiB, 40GiB)", d)
+	}
+	return nil
+}
 
 // toolNameRE constrains a broker tool name: it becomes the /mcp/<name>/ tool
 // route and a `claude mcp add <name>` token. Underscores are admitted (real MCP
@@ -455,6 +469,9 @@ func (a *App) Validate() error {
 		return fmt.Errorf("config: name %q must match %s (it becomes the jail machine name and a shell token)", a.Name, nameRE)
 	}
 	if err := validateBackend(a.Backend); err != nil {
+		return err
+	}
+	if err := validateDisk(a.Disk); err != nil {
 		return err
 	}
 	if a.Tree == "" {

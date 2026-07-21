@@ -24,6 +24,7 @@ images:
     arch: "aarch64"
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
     arch: "x86_64"
+disk: {{.Disk}}
 mounts:
   - location: {{printf "%q" .ProjectTree}}
     mountPoint: "/lever"
@@ -49,14 +50,24 @@ portForwards:
 
 var tpl = template.Must(template.New("lima").Parse(templateText))
 
-// RenderTemplate renders the jail VM template for this host OS.
-func RenderTemplate(projectTree string) (string, error) {
+// defaultDisk caps the Lima guest disk. Lima's own omitted-disk default is
+// 100GiB (grow-only qcow2 on the host) — a silent host-wedge on smaller
+// hosts. Applied only at VM creation; resizing an existing jail needs
+// `limactl disk resize` or a recreate.
+const defaultDisk = "24GiB"
+
+// RenderTemplate renders the jail VM template for this host OS. disk is the
+// guest disk size (e.g. "24GiB"); empty selects defaultDisk.
+func RenderTemplate(projectTree, disk string) (string, error) {
+	if disk == "" {
+		disk = defaultDisk
+	}
 	vmType := "qemu"
 	if runtime.GOOS == "darwin" {
 		vmType = "vz"
 	}
 	var buf bytes.Buffer
-	if err := tpl.Execute(&buf, struct{ VMType, ProjectTree string }{vmType, projectTree}); err != nil {
+	if err := tpl.Execute(&buf, struct{ VMType, ProjectTree, Disk string }{vmType, projectTree, disk}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

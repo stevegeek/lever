@@ -99,7 +99,7 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if !ok {
 		return fmt.Errorf("lever requires Lima >= 2.0.0 for portForwards ignore semantics; found %s", got)
 	}
-	if err := l.ensureVM(ctx, cfg.ProjectTree); err != nil {
+	if err := l.ensureVM(ctx, cfg.ProjectTree, cfg.Disk); err != nil {
 		return err
 	}
 	if err := l.resolveRunUser(ctx); err != nil {
@@ -158,13 +158,13 @@ func limaVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch 
 // doesn't yet exist, then starts it unless already running. The project tree
 // mount is set only at `limactl create` time; changing it on an existing VM
 // requires Teardown+EnsureUp — the same documented limitation as orbstack.
-func (l *Lima) ensureVM(ctx context.Context, projectTree string) error {
+func (l *Lima) ensureVM(ctx context.Context, projectTree, disk string) error {
 	status, err := l.vmStatus(ctx)
 	if err != nil {
 		return err
 	}
 	if status == "" {
-		if err := l.createVM(ctx, projectTree); err != nil {
+		if err := l.createVM(ctx, projectTree, disk); err != nil {
 			return err
 		}
 		status = "Stopped" // freshly created, not yet started
@@ -296,8 +296,8 @@ func (l *Lima) vmStatus(ctx context.Context) (string, error) {
 // createVM renders the containment template to a temp file and creates the VM
 // from it. `limactl create` reads the config file path as a positional arg;
 // the temp file is removed afterward since lima reads it once at create time.
-func (l *Lima) createVM(ctx context.Context, projectTree string) error {
-	cfg, err := RenderTemplate(projectTree)
+func (l *Lima) createVM(ctx context.Context, projectTree, disk string) error {
+	cfg, err := RenderTemplate(projectTree, disk)
 	if err != nil {
 		return fmt.Errorf("render lima template: %w", err)
 	}

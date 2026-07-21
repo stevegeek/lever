@@ -251,6 +251,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		ScionSource:    app.Scion.Source,
 		ScionVersion:   app.Scion.Version,
 		ClosedInternet: closed,
+		Disk:           app.Disk,
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.
 	if err := b.EnsureUp(ctx, cfg); err != nil {

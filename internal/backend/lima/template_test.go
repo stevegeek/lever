@@ -13,7 +13,7 @@ import (
 // writable, at /lever), ALL automatic port-forwarding suppressed (a jailed
 // agent must not be able to squat host-loopback ports), containerd off.
 func TestTemplateContainmentProperties(t *testing.T) {
-	out, err := RenderTemplate("/Users/x/proj")
+	out, err := RenderTemplate("/Users/x/proj", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,5 +91,25 @@ func TestTemplateContainmentProperties(t *testing.T) {
 	}
 	if !strings.Contains(out, "cloud-images.ubuntu.com") {
 		t.Fatal("expected Ubuntu LTS images")
+	}
+}
+
+func TestRenderTemplateDiskDefault(t *testing.T) {
+	out, err := RenderTemplate("/tmp/tree", "")
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(out, "disk: 24GiB") {
+		t.Fatalf("expected default disk line, got:\n%s", out)
+	}
+}
+
+func TestRenderTemplateDiskOverride(t *testing.T) {
+	out, err := RenderTemplate("/tmp/tree", "48GiB")
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(out, "disk: 48GiB") {
+		t.Fatalf("expected overridden disk line, got:\n%s", out)
 	}
 }

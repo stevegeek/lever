@@ -1,0 +1,36 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: lever
+    main: ./cmd/lever
+    binary: lever
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: lever
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  # Keep hand-authored release notes: do not let GoReleaser generate a
+  # changelog body. It attaches the built archives + checksums to the release
+  # created for the tag; the prose notes are curated separately.
+  draft: false
+  mode: append
+  disable: false
+
+changelog:
+  disable: true

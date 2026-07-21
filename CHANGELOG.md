@@ -55,8 +55,10 @@ version bump moves the block under the new version heading.
   HTTP 409 instead of silently resuming the worker's original,
   creation-time task (scion pins a worker's task at creation and its
   `Resume` takes no task argument, so a new task was previously discarded
-  without warning). Redispatch with no task to resume as before, or run
-  `lever worker purge NAME` first to start it fresh with the new task (#7).
+  without warning). To resume an existing worker, use `lever-manager agent
+  resume NAME` (the `/worker/resume` path) — `agent start` cannot resume, as
+  its `--task` defaults to a non-empty prompt so it always carries a task. To
+  run a *new* task, run `lever worker purge NAME` first to start it fresh (#7).
 
 ### Docs
 - Honest security-model note on the in-jail scion Hub API residual: the

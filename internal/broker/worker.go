@@ -147,6 +147,10 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if phase == "running" {
+		// Already running: a no-op. Any new task in req.Task is intentionally
+		// ignored here — the task-mismatch 409 guard below covers only the
+		// non-running branch (a running worker's task is likewise fixed, and
+		// there is nothing to resume). To run a new task, purge then re-dispatch.
 		writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
 		return
 	}

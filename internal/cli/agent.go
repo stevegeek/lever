@@ -32,7 +32,14 @@ func newAgentCmd() *cobra.Command {
 
 func agentStart() *cobra.Command {
 	var task string
-	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1), Short: "Start (or resume) a worker agent",
+	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1),
+		Short: "Start a worker agent (fresh); to resume an existing one use `agent resume`",
+		Long: "Start a worker agent with a task.\n\n" +
+			"To bring an EXISTING (suspended/stopped) worker back up, use `lever-manager agent resume NAME` —\n" +
+			"a worker's task is fixed at creation, so `agent start` against an existing worker with a\n" +
+			"(new) task returns HTTP 409. Run `lever worker purge NAME` first to discard the old record and\n" +
+			"start it fresh with a new task. (Because --task defaults to a non-empty prompt, `agent start`\n" +
+			"never carries an empty task, so it cannot itself resume — that is what `agent resume` is for.)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			res, err := workerCallFn(cmd.Context(), "/worker/start",
 				map[string]string{"worker": args[0], "task": task})

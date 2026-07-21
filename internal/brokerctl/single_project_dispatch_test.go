@@ -42,6 +42,7 @@ import (
 type fakeWorkerRuntime struct {
 	agents       map[string][]scion.Agent // project -> agents, for List
 	started      []scion.StartOpts
+	resumed      []string
 	listCalls    int
 	listProjects []string
 }
@@ -49,13 +50,48 @@ type fakeWorkerRuntime struct {
 func (f *fakeWorkerRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
 	f.listCalls++
 	f.listProjects = append(f.listProjects, project)
-	return f.agents[project], nil
+	// Model scion bringing a worker up: once a worker has been Start/Resume'd,
+	// its record reports running + a live container, so the broker's post-start
+	// waitWorkerLive gate passes. Mirrors internal/broker/worker_test.go's fake.
+	// Any explicitly-seeded agents (e.g. the /worker/list fan-in assertion below)
+	// take precedence over the synthesized bring-up entries.
+	agents := append([]scion.Agent(nil), f.agents[project]...)
+	for _, w := range f.acted() {
+		if !hasSlug(agents, w) {
+			agents = append(agents, scion.Agent{Slug: w, Phase: "running", ContainerStatus: "Up 1 second"})
+		}
+	}
+	return agents, nil
 }
+
+// acted returns the slugs of every worker a Start or Resume has acted on, so
+// List can synthesize their live records for the liveness poll.
+func (f *fakeWorkerRuntime) acted() []string {
+	acted := make([]string, 0, len(f.started)+len(f.resumed))
+	for _, o := range f.started {
+		acted = append(acted, o.Worker)
+	}
+	acted = append(acted, f.resumed...)
+	return acted
+}
+
+func hasSlug(agents []scion.Agent, slug string) bool {
+	for _, a := range agents {
+		if a.Slug == slug {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeWorkerRuntime) Start(_ context.Context, o scion.StartOpts) error {
 	f.started = append(f.started, o)
 	return nil
 }
-func (f *fakeWorkerRuntime) Resume(_ context.Context, _, _ string) error  { return nil }
+func (f *fakeWorkerRuntime) Resume(_ context.Context, worker, _ string) error {
+	f.resumed = append(f.resumed, worker)
+	return nil
+}
 func (f *fakeWorkerRuntime) Stop(_ context.Context, _, _ string) error    { return nil }
 func (f *fakeWorkerRuntime) Suspend(_ context.Context, _, _ string) error { return nil }
 func (f *fakeWorkerRuntime) EnvSet(_ context.Context, _, _, _ string) error {

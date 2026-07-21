@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,6 +11,26 @@ import (
 
 	"github.com/stevegeek/lever/internal/cap/token"
 )
+
+// fakeDirectiveBroker builds a plain (non-TLS) httptest server standing in
+// for the broker's /directive/consume and /directive/check jail routes: it
+// decodes the {"id":...} body and hands the path + id to handle, which
+// writes the response. Mirrors the plain-http fake-broker pattern used for
+// the CLI's broker calls (cli/msg_test.go's withFakeMsgBroker) — this is
+// unit-level and doesn't exercise mTLS itself, unlike this file's other
+// tests which use the real testBroker().
+func fakeDirectiveBroker(t *testing.T, handle func(w http.ResponseWriter, path, id string)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		handle(w, r.URL.Path, body.ID)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
 
 // rpcText drives a tools/call and returns the result token text, failing if the
 // call returned a JSON-RPC error.
@@ -108,6 +129,86 @@ func TestMCPRequestMintsSelfBoundConstrainedToken(t *testing.T) {
 	// The table=A constraint must be baked in: a request without it is denied.
 	if verifies(pub, text, "manager", map[string]string{}) {
 		t.Fatal("request token must carry the table=A constraint (constraintArgs failed to bake it)")
+	}
+}
+
+func TestMCPToolsListAdvertisesDirectiveTools(t *testing.T) {
+	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	tools := resp["result"].(map[string]any)["tools"].([]any)
+	names := map[string]bool{}
+	for _, tl := range tools {
+		names[tl.(map[string]any)["name"].(string)] = true
+	}
+	if !names["directive_consume"] || !names["directive_check"] {
+		t.Fatalf("directive tools missing: %v", names)
+	}
+}
+
+func TestMCPDirectiveConsumePostsIDAndSurfacesAction(t *testing.T) {
+	var gotPath, gotID string
+	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, path, id string) {
+		gotPath, gotID = path, id
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": id, "kind": "tool_call",
+			"action": map[string]any{"tool": "db", "op": "read"},
+		})
+	})
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"directive_consume","arguments":{"id":"D1"}}}`)
+	if gotPath != "/directive/consume" {
+		t.Fatalf("path = %s, want /directive/consume", gotPath)
+	}
+	if gotID != "D1" {
+		t.Fatalf("posted id = %q, want D1", gotID)
+	}
+	if !strings.Contains(text, `"kind":"tool_call"`) || !strings.Contains(text, `"tool":"db"`) {
+		t.Fatalf("tool result text = %q, want the broker's action JSON surfaced verbatim", text)
+	}
+}
+
+func TestMCPDirectiveCheckPostsIDAndSurfacesState(t *testing.T) {
+	var gotPath, gotID string
+	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, path, id string) {
+		gotPath, gotID = path, id
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "state": "active"})
+	})
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"directive_check","arguments":{"id":"D2"}}}`)
+	if gotPath != "/directive/check" {
+		t.Fatalf("path = %s, want /directive/check", gotPath)
+	}
+	if gotID != "D2" {
+		t.Fatalf("posted id = %q, want D2", gotID)
+	}
+	if !strings.Contains(text, `"state":"active"`) {
+		t.Fatalf("tool result text = %q, want the broker's state JSON surfaced verbatim", text)
+	}
+}
+
+func TestMCPDirectiveConsume404SurfacesAsToolCallError(t *testing.T) {
+	// The broker's opaque-404 contract (unknown id / wrong target / already
+	// consumed / expired / stale generation — all byte-identical) must reach
+	// the model as "not found" and nothing more, matching how the existing
+	// `request` case surfaces a broker error (mcpserver.go's writeRPCError),
+	// never a transport panic.
+	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
+	})
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"directive_consume","arguments":{"id":"nope"}}}`)
+	e, isErr := resp["error"].(map[string]any)
+	if !isErr {
+		t.Fatalf("404 broker reply must surface as a JSON-RPC error, got %v", resp)
+	}
+	msg, _ := e["message"].(string)
+	if !strings.Contains(msg, "not found") {
+		t.Fatalf("error message = %q, want it to contain %q", msg, "not found")
 	}
 }
 

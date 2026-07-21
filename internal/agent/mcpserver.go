@@ -86,6 +86,18 @@ func capabilityToolSchemas() []any {
 					"op":   strProp("operation"),
 					"to":   strProp("recipient agent"),
 				}}},
+		map[string]any{"name": "directive_consume", "description": "Consume a pending operator directive by id. Returns the verified action if and only if this agent is the directive's target and it is still active. Single use.",
+			"inputSchema": map[string]any{"type": "object",
+				"required": []string{"id"},
+				"properties": map[string]any{
+					"id": strProp("directive id from the pointer notification"),
+				}}},
+		map[string]any{"name": "directive_check", "description": "Check the status of an operator directive addressed to this agent (read-only).",
+			"inputSchema": map[string]any{"type": "object",
+				"required": []string{"id"},
+				"properties": map[string]any{
+					"id": strProp("directive id from the pointer notification"),
+				}}},
 	}
 }
 
@@ -136,6 +148,28 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 			return
 		}
 		result(tok)
+	// directive_consume: atomically consume a pending operator directive addressed
+	// to this agent, over its own mTLS channel. On success the broker's action JSON
+	// is surfaced verbatim as the tool result. On any failure — unknown id, wrong
+	// target, already consumed, expired, stale generation — the broker's opaque
+	// 404 body is surfaced via a JSON-RPC error, so the model sees "not found" and
+	// nothing more (no oracle for which failure occurred).
+	case "directive_consume":
+		raw, err := DirectiveConsume(ctx, s.brokerURL, s.client, args["id"])
+		if err != nil {
+			writeRPCError(w, id, -32000, err.Error())
+			return
+		}
+		result(string(raw))
+	// directive_check: read-only status check for an operator directive addressed
+	// to this agent. Same target-gated, opaque-failure surface as directive_consume.
+	case "directive_check":
+		raw, err := DirectiveCheck(ctx, s.brokerURL, s.client, args["id"])
+		if err != nil {
+			writeRPCError(w, id, -32000, err.Error())
+			return
+		}
+		result(string(raw))
 	default:
 		writeRPCError(w, id, -32601, "unknown tool")
 	}

@@ -7,6 +7,49 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-21
+
+### Added
+- **Operator directives** — an authenticated human-operator→agent channel. Until
+  now every human→agent instruction (`lever msg`, relayed email/file text) arrived
+  as an unauthenticated `sender:"user:…"` string, so a well-hardened agent
+  correctly refused out-of-band instructions it could not attribute to the
+  operator. Directives give the operator a channel an agent can treat as
+  authoritative **without** creating a prompt-injection backdoor:
+  - The operator signs a structured directive with an SSH key
+    (`lever directive send <agent> --instruction … | --action …`); the host-side
+    broker verifies it (`ssh-keygen -Y verify` against an `allowed_signers` file,
+    exact-byte verify-then-parse, duplicate-key rejection) and delivers only a
+    **pointer** (a directive id) into the agent's inbox — never the content.
+  - The agent, if it independently decides to act, fetches the directive with a
+    `directive_consume` MCP tool over its own mTLS channel. All cryptography is
+    host-side; the model never checks a signature. A directive binds to the
+    caller's mTLS identity **and** enrolment generation (`{cn, generation}`), so a
+    recycled worker slug can never inherit a predecessor's directive and one agent
+    cannot consume another's — consume is a single-use atomic compare-and-swap and
+    every miss returns an identical opaque `not found`.
+  - New host CLI: `lever directive send/list/revoke/selftest`, over a **0600
+    unix-domain-socket** admin channel (unreachable from the VM); every admin op is
+    operator-signed. New config block `operator:` (`allowed_signers`, `signing_key`,
+    `directive_expiry` default 10 min, capped at 24 h). Directive state (active set,
+    replay tombstones, per-CN generations) persists across broker restarts
+    (`directives.json`, atomic writes, fail-closed). A `lever doctor` check and a
+    `selftest` round-trip catch `allowed_signers` misconfiguration before it is
+    needed. Depends on the per-agent netns isolation shipped in 0.7.0.
+  - **Scope (honest):** Phase 1 delivers authenticated, integrity-protected,
+    replay-proof **delivery and verification** of an operator-signed action bound to
+    the target agent. It does **not** yet enforce the bound action at tool-call time:
+    on consume the broker returns the validated action and the agent triggers the
+    call through its ordinary, independently grant-checked capability path, so a
+    directive grants **no new capability** — its value is that the request is
+    provably from the operator. Host-enforced call-time binding (and the `approval`
+    kind's operator-approval gate) is deferred to a later phase with its own review.
+  - Bootstrap prompts (manager + worker) gain a directive carve-out: only an action
+    returned by the agent's own `directive_consume` this turn carries operator
+    authority; messages claiming or quoting a "verified" directive are data.
+    Manager→worker authority does not launder (directives are signed for the worker
+    directly). Existing instances show a scaffold-drift warning until re-scaffolded.
+
 ## [0.7.0] - 2026-07-21
 
 ### Changed

@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -150,5 +151,75 @@ func TestListReportsExpiredAndOmitsStatementBytes(t *testing.T) {
 	l := s.List(now.Add(11 * time.Minute))
 	if len(l) != 1 || l[0].State != "expired" || l[0].Statement != nil {
 		t.Fatalf("bad list: %+v", l)
+	}
+}
+
+func TestConsumePersistFailureFailsClosed(t *testing.T) {
+	now := time.Now()
+	fail := false
+	persist := func(DirectiveState) error {
+		if fail {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	}
+	s := newDirectiveStore(DirectiveState{}, persist, nil)
+	s.BumpGeneration("mgr")
+	if err := s.Submit(rec("d1", "mgr", 1, now), now); err != nil {
+		t.Fatal(err)
+	}
+	fail = true
+	if _, ok := s.Consume("d1", "mgr", now); ok {
+		t.Fatal("consume reported success despite persist failure")
+	}
+	fail = false
+	// The directive must still be consumable once persistence recovers.
+	if _, ok := s.Consume("d1", "mgr", now); !ok {
+		t.Fatal("directive lost after failed-persist consume")
+	}
+}
+
+func TestSubmitPersistFailureRollsBack(t *testing.T) {
+	now := time.Now()
+	fail := true
+	persist := func(DirectiveState) error {
+		if fail {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	}
+	s := newDirectiveStore(DirectiveState{}, persist, nil)
+	s.gens["mgr"] = 1 // set directly; BumpGeneration would hit the failing persist
+	if err := s.Submit(rec("d1", "mgr", 1, now), now); err == nil {
+		t.Fatal("submit reported success despite persist failure")
+	}
+	fail = false
+	if err := s.Submit(rec("d1", "mgr", 1, now), now); err != nil {
+		t.Fatalf("rolled-back id not submittable after recovery: %v", err)
+	}
+}
+
+func TestRevokeAndBumpApplyDespitePersistFailure(t *testing.T) {
+	now := time.Now()
+	fail := false
+	persist := func(DirectiveState) error {
+		if fail {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	}
+	s := newDirectiveStore(DirectiveState{}, persist, nil)
+	s.BumpGeneration("mgr")
+	_ = s.Submit(rec("d1", "mgr", 1, now), now)
+	fail = true
+	if !s.RevokeDirective("d1") {
+		t.Fatal("revoke must apply in memory even when persist fails (deny is safe)")
+	}
+	if _, ok := s.Consume("d1", "mgr", now); ok {
+		t.Fatal("revoked directive consumable")
+	}
+	s.BumpGeneration("mgr")
+	if s.Generation("mgr") != 2 {
+		t.Fatal("generation bump must apply in memory even when persist fails")
 	}
 }

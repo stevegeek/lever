@@ -61,14 +61,20 @@ func newDirectiveStore(st DirectiveState, persist func(DirectiveState) error, lo
 	return &DirectiveStore{gens: gens, recs: recs, persist: persist, log: log}
 }
 
-// persistLocked snapshots and writes through. Caller holds s.mu.
-func (s *DirectiveStore) persistLocked() {
+// persistLocked snapshots and writes through, returning any write-through
+// error. Caller holds s.mu. Callers that hand out a durability-sensitive
+// outcome (Submit, Consume) MUST roll back their in-memory mutation and
+// propagate this error rather than report success on an un-persisted state —
+// see the fail-closed rationale on each caller. Always logged regardless.
+func (s *DirectiveStore) persistLocked() error {
 	if s.persist == nil {
-		return
+		return nil
 	}
-	if err := s.persist(s.snapshotLocked()); err != nil {
+	err := s.persist(s.snapshotLocked())
+	if err != nil {
 		s.log.Error("directive.persist", "err", err.Error())
 	}
+	return err
 }
 
 func (s *DirectiveStore) snapshotLocked() DirectiveState {
@@ -117,7 +123,13 @@ func (s *DirectiveStore) Submit(rec DirectiveRecord, now time.Time) error {
 	rec.State = "active"
 	cp := rec
 	s.recs = append(s.recs, &cp)
-	s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		// Fail closed: an un-persisted submission must not exist in memory
+		// either, or a restart before the next successful persist would
+		// silently drop it while callers believe it was accepted.
+		s.recs = s.recs[:len(s.recs)-1]
+		return fmt.Errorf("persist directive %q: %w", rec.ID, err)
+	}
 	return nil
 }
 
@@ -136,7 +148,15 @@ func (s *DirectiveStore) Consume(id, callerCN string, now time.Time) (DirectiveR
 	}
 	r.State = "consumed"
 	r.ConsumedAt = now
-	s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		// Fail closed: never hand out an action whose consumed-ness isn't
+		// durable — a restart before the next successful persist would
+		// replay it. Roll back to active so the operator can re-send and a
+		// later retry can still succeed.
+		r.State = "active"
+		r.ConsumedAt = time.Time{}
+		return DirectiveRecord{}, false
+	}
 	return *r, true
 }
 
@@ -161,7 +181,11 @@ func (s *DirectiveStore) RevokeDirective(id string) bool {
 		return false
 	}
 	r.State = "revoked"
-	s.persistLocked()
+	// Apply in memory regardless of persist outcome (error already logged by
+	// persistLocked): refusing to revoke on a disk error would fail OPEN —
+	// an operator trying to invalidate a directive must not be told "still
+	// active" because the write-through failed.
+	_ = s.persistLocked()
 	return true
 }
 
@@ -199,7 +223,11 @@ func (s *DirectiveStore) BumpGeneration(cn string) {
 			r.State = "invalidated"
 		}
 	}
-	s.persistLocked()
+	// Apply in memory regardless of persist outcome (error already logged by
+	// persistLocked): refusing to bump/invalidate on a disk error would fail
+	// OPEN — a recycled slug re-enrolling must not retain a predecessor's
+	// still-active directive because the write-through failed.
+	_ = s.persistLocked()
 }
 
 // Generation returns cn's current enrolment generation (0 = never enrolled).

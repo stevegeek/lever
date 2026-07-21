@@ -204,12 +204,6 @@ func newDirectiveSendCmd() *cobra.Command {
 				return err
 			}
 
-			var resolved directiveResolveResp
-			if err := udsDo(cmd.Context(), st.DirectiveSock(), http.MethodGet,
-				"/directive/resolve?agent="+url.QueryEscape(agent), nil, &resolved); err != nil {
-				return err
-			}
-
 			expiry := app.EffectiveDirectiveExpiry()
 			if expiresFlag != "" {
 				d, err := time.ParseDuration(expiresFlag)
@@ -220,6 +214,12 @@ func newDirectiveSendCmd() *cobra.Command {
 			}
 			if expiry > app.EffectiveDirectiveExpiryMax() {
 				return fmt.Errorf("directive send: expiry %s exceeds this instance's cap %s", expiry, app.EffectiveDirectiveExpiryMax())
+			}
+
+			var resolved directiveResolveResp
+			if err := udsDo(cmd.Context(), st.DirectiveSock(), http.MethodGet,
+				"/directive/resolve?agent="+url.QueryEscape(agent), nil, &resolved); err != nil {
+				return err
 			}
 
 			now := time.Now()

@@ -383,6 +383,27 @@ func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
 	}
 }
 
+func TestDirectiveSendOverCapErrorsBeforeResolve(t *testing.T) {
+	dir := directiveTestDir(t)
+	priv, _ := genDirectiveKey(t, dir, "testinst")
+	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n  directive_expiry_max: 1h\n")
+	t.Chdir(dir)
+
+	// Track whether resolve was called by recording any GET request to /directive/resolve.
+	rec := startDirectiveUDS(t, dir, map[string]canned{
+		"/directive/resolve": {body: `{"cn":"worker1","slug":"worker1","generation":1}`},
+		"/directive/send":    {body: `{"id":"x","delivered":true}`},
+	})
+
+	_, err := runDirective(t, "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
+	if err == nil {
+		t.Fatal("expiry beyond the configured cap should error")
+	}
+	if rec.has(http.MethodGet, "/directive/resolve") {
+		t.Fatal("resolve must not be called when expiry cap is violated (cap check must happen before network call)")
+	}
+}
+
 func TestDirectiveSendMissingKeyErrors(t *testing.T) {
 	dir := directiveTestDir(t)
 	// No operator.signing_key in config, no --key flag.

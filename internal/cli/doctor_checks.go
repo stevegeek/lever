@@ -296,6 +296,64 @@ func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 	return checkResult{name, false, strings.Join(bad, "; "), fix}
 }
 
+// checkDirectives verifies the operator-directive channel is usable when
+// configured. Directives are opt-in (gated solely by operator.allowed_signers,
+// see config.App.DirectivesEnabled), so an unset config is a pass, not a
+// warning: most instances never touch this feature. Once configured, three
+// things can silently break the channel without any config-load error —
+// allowed_signers missing/empty (nothing to verify a signature against),
+// ssh-keygen absent from PATH (opsig shells out to it for both signing and
+// verification), and — when the broker is actually up — a missing directive
+// socket (serve.go creates it at startup; its absence means directives can't
+// reach the broker even though everything else looks configured).
+func checkDirectives(app *config.App, st brokerctl.State) checkResult {
+	const name = "operator directives"
+	if !app.DirectivesEnabled() {
+		return checkResult{name, true, "not configured (operator.allowed_signers unset)", ""}
+	}
+	path := app.OperatorAllowedSignersPath()
+	genHint := fmt.Sprintf("generate a key with `ssh-keygen -t ed25519 -f <keyfile>`, then add a line `%s <type> <keydata>` (from <keyfile>.pub) to %s", app.OperatorPrincipal(), path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return checkResult{name, false, fmt.Sprintf("allowed_signers %s: %s", path, err), genHint}
+	}
+	n := countKeyLines(data)
+	if n == 0 {
+		return checkResult{name, false, fmt.Sprintf("allowed_signers %s has no key lines", path), genHint}
+	}
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		return checkResult{name, false, "ssh-keygen not found on PATH (directive signing/verification shells out to it)",
+			"install the OpenSSH client tools so `ssh-keygen` resolves on PATH"}
+	}
+	_, found, alive := st.BrokerPIDStatus()
+	if !found || !alive {
+		return checkResult{name, true, fmt.Sprintf("allowed_signers: %d key(s); broker not running (socket check skipped)", n), ""}
+	}
+	if _, err := os.Stat(st.DirectiveSock()); err != nil {
+		return checkResult{name, false, fmt.Sprintf("allowed_signers: %d key(s); broker is running but the directive socket %s is absent", n, st.DirectiveSock()),
+			"restart the broker (`lever apply` or `lever up`) so it (re)creates the directive socket"}
+	}
+	return checkResult{name, true, fmt.Sprintf("allowed_signers: %d key(s); socket present", n), ""}
+}
+
+// countKeyLines counts substantive lines in an allowed_signers file: each
+// holds "principal keytype keydata"; blank lines and #-comments don't count.
+// Not a full ssh-keygen(1) allowed_signers parser (which also supports
+// per-line options like cert-authority/namespaces) — doctor only needs a
+// "is there at least one usable key" signal, not full validation (ssh-keygen
+// itself is the source of truth when directives are actually verified).
+func countKeyLines(data []byte) int {
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // certRejectWindow bounds how recently the broker must have rejected an expired
 // leaf for checkAgentCert to treat it as an ACTIVE failure. Wider than the
 // agent's handshake-retry cadence (seconds) so an ongoing outage always lands a

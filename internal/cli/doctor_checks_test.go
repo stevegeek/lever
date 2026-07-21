@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -379,5 +380,141 @@ func TestCheckOperatorSkills(t *testing.T) {
 	}
 	if !strings.Contains(res.fix, "--adopt") || !strings.Contains(res.fix, "--force") {
 		t.Fatalf("fix must offer re-adopt and restore: %+v", res)
+	}
+}
+
+// writeDirectivesConfig writes a minimal lever.yaml with operator.allowed_signers
+// set to signersRel (relative to the instance root), or omitted entirely when
+// signersRel is "". Mirrors apply_test.go's writeTmpConfig / config_test.go's
+// writeTmp.
+func writeDirectivesConfig(t *testing.T, signersRel string) *config.App {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, config.CanonicalName)
+	body := "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n"
+	if signersRel != "" {
+		body += "operator:\n  allowed_signers: " + signersRel + "\n"
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+// writeAllowedSigners generates a real ed25519 SSH keypair and writes a
+// one-line allowed_signers file at path, principal "operator@demo" (matches
+// writeDirectivesConfig's app name). Mirrors opsig_test.go's genKey.
+func writeAllowedSigners(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	priv := filepath.Join(t.TempDir(), "opkey")
+	if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", priv, "-C", "op", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v: %s", err, out)
+	}
+	pub, err := os.ReadFile(priv + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(pub)) // type key comment
+	line := "operator@demo " + fields[0] + " " + fields[1] + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCheckDirectivesNotConfigured covers the default, opt-in-only state: no
+// operator.allowed_signers means no directive channel, and that's a pass, not
+// a warning — most instances never touch operator directives.
+func TestCheckDirectivesNotConfigured(t *testing.T) {
+	app := writeDirectivesConfig(t, "")
+	st := brokerctl.StateDir(t.TempDir())
+	r := checkDirectives(app, st)
+	if !r.ok {
+		t.Fatalf("unset allowed_signers must pass (channel just isn't configured): %+v", r)
+	}
+	if !strings.Contains(r.detail, "not configured") || !strings.Contains(r.detail, "allowed_signers") {
+		t.Fatalf("detail should say not configured and name allowed_signers: %q", r.detail)
+	}
+}
+
+func TestCheckDirectivesMissingFile(t *testing.T) {
+	app := writeDirectivesConfig(t, "operator/allowed_signers")
+	st := brokerctl.StateDir(t.TempDir())
+	r := checkDirectives(app, st)
+	if r.ok {
+		t.Fatal("configured but missing allowed_signers file must fail")
+	}
+	if !strings.Contains(r.fix, "allowed_signers") {
+		t.Fatalf("fix should mention allowed_signers: %q", r.fix)
+	}
+}
+
+func TestCheckDirectivesEmptyFile(t *testing.T) {
+	app := writeDirectivesConfig(t, "operator/allowed_signers")
+	path := app.OperatorAllowedSignersPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Comments and blank lines only — zero substantive key lines.
+	if err := os.WriteFile(path, []byte("# no keys yet\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := brokerctl.StateDir(t.TempDir())
+	r := checkDirectives(app, st)
+	if r.ok {
+		t.Fatal("an allowed_signers file with zero key lines must fail")
+	}
+	if !strings.Contains(r.fix, "allowed_signers") {
+		t.Fatalf("fix should mention allowed_signers: %q", r.fix)
+	}
+}
+
+func TestCheckDirectivesHappyPathBrokerNotRunning(t *testing.T) {
+	app := writeDirectivesConfig(t, "operator/allowed_signers")
+	writeAllowedSigners(t, app.OperatorAllowedSignersPath())
+	st := brokerctl.StateDir(t.TempDir()) // no broker.pid => broker not running
+	r := checkDirectives(app, st)
+	if !r.ok {
+		t.Fatalf("a real key + no broker running must pass: %+v", r)
+	}
+	if !strings.Contains(r.detail, "1 key") {
+		t.Fatalf("detail should report the key count: %q", r.detail)
+	}
+}
+
+func TestCheckDirectivesBrokerRunningSocketPresent(t *testing.T) {
+	app := writeDirectivesConfig(t, "operator/allowed_signers")
+	writeAllowedSigners(t, app.OperatorAllowedSignersPath())
+	st := brokerctl.StateDir(t.TempDir())
+	writeBrokerPID(t, st, os.Getpid())
+	if err := os.WriteFile(st.DirectiveSock(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := checkDirectives(app, st)
+	if !r.ok {
+		t.Fatalf("broker alive + socket present must pass: %+v", r)
+	}
+	if !strings.Contains(r.detail, "socket present") {
+		t.Fatalf("detail should say socket present: %q", r.detail)
+	}
+}
+
+func TestCheckDirectivesBrokerRunningSocketAbsent(t *testing.T) {
+	app := writeDirectivesConfig(t, "operator/allowed_signers")
+	writeAllowedSigners(t, app.OperatorAllowedSignersPath())
+	st := brokerctl.StateDir(t.TempDir())
+	writeBrokerPID(t, st, os.Getpid()) // alive, but directive.sock never created
+	r := checkDirectives(app, st)
+	if r.ok {
+		t.Fatal("broker alive but directive socket absent must fail")
+	}
+	if !strings.Contains(r.detail, "socket") {
+		t.Fatalf("failure should be about the missing directive socket: %+v", r)
 	}
 }

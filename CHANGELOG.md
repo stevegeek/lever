@@ -7,6 +7,68 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-22
+
+### Added
+- Configurable Lima guest disk size (`disk:`, default 24GiB) — the guest disk
+  was previously a hardcoded 100GiB sparse file, which could wedge a
+  constrained host even though the sparse file itself grows lazily (#14).
+- `lever doctor` reports the agent image's baked Claude Code version, read
+  from a `claude_code_version` image label baked in at build time — no
+  container run needed. A pre-label image reports informationally rather
+  than failing the check (#6).
+- Per-tool supervisor logs: each supervised tool (e.g. `lever-tool-db`) now
+  writes its own `.lever-state/tool-logs/<tool>.log` instead of sharing one
+  file, plus new `logrotate` guidance in the operations guide since none of
+  `.lever-state/`'s logs rotate on their own (#10).
+- `lever worker purge NAME`: host-side deletion of a worker's scion record
+  and staged bootstrap ticket so it can be redispatched fresh with a new
+  task. Never touches the worker's `HostWorkspace` (its work product);
+  requires `--force` (#7).
+- Prebuilt release binaries via GoReleaser, wired into a GitHub Actions
+  release workflow; curated release notes are preserved rather than
+  overwritten (#1).
+
+### Fixed
+- A supervised tool command that doesn't resolve on the supervisor's PATH is
+  now rejected loudly at config-load instead of failing opaquely at spawn
+  (or silently on a later re-apply); the same check also rejects an
+  absolute command path that is a directory or non-executable. `lever
+  doctor` now probes every configured tool backend — both external
+  (dialed) and supervised (command-resolved), previously untested for the
+  supervised case (#9).
+- Broker denials on `/msg/send`, `/msg/list`, and `/request` now return the
+  specific policy-deny reason in the HTTP body instead of a bare
+  `forbidden`, and the CLI's broker client surfaces it in the returned
+  error — so a denied agent can see *why* instead of guessing. Scion-runtime
+  errors (as opposed to policy denies) are deliberately left opaque (#4a).
+- Worker start/resume now polls the worker's own scion record for a
+  `running` phase and a live container before reporting success, instead of
+  trusting scion's start/resume call, which could report success for a
+  harness that then dies moments later (#7).
+- `lever stop`'s scion-suspend failure is no longer silently swallowed — it's
+  now printed as a warning, so a recurrence of the Lima conversation-loss gap
+  (#3) is diagnosable instead of invisible.
+
+### Changed
+- Dispatching an **existing** worker with a **new** task now fails with
+  HTTP 409 instead of silently resuming the worker's original,
+  creation-time task (scion pins a worker's task at creation and its
+  `Resume` takes no task argument, so a new task was previously discarded
+  without warning). Redispatch with no task to resume as before, or run
+  `lever worker purge NAME` first to start it fresh with the new task (#7).
+
+### Docs
+- Honest security-model note on the in-jail scion Hub API residual: the
+  2026-07-06 create/lifecycle vector is closed *structurally* (the real hub
+  always starts `--dev-auth=false`, hardcoded, no config knob enables it —
+  so there's no runtime toggle for a `lever doctor` check to guard), but
+  agent `DELETE` is not yet scope-checked by scion and remains callable by
+  an agent's own token — tracked as a scion-side fix, not something lever's
+  controller-PAT model can close from outside. Also corrects an egress
+  overclaim: `egress: closed` still admits loopback for the in-machine hub,
+  so this residual is identical under `open` or `closed` (#8).
+
 ## [0.8.1] - 2026-07-21
 
 ### Fixed

@@ -7,6 +7,19 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-21
+
+### Fixed
+- Operator directives now reach agents on instances **upgraded** to 0.8.x, not
+  only freshly-created ones. The directive generation that `target_agent` binds
+  to was established only in the `/enrol` handler, but an agent that restarts with
+  a persisted cert (or whose cert predates 0.8.0) refreshes via `/renew` and never
+  re-hits `/enrol` — so its generation stayed `0` and `lever directive send`
+  failed at resolve with `agent not yet enrolled`. `/renew` now establishes the
+  generation at 1 when unset, without bumping an existing one (bumping stays
+  reserved for genuine re-enrolment, so a 12 h cert refresh never invalidates an
+  agent's own active directives).
+
 ## [0.8.0] - 2026-07-21
 
 ### Added

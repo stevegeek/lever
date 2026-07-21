@@ -14,6 +14,7 @@ import (
 	"github.com/stevegeek/lever/internal/broker/rules"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/opsig"
 )
 
 const (
@@ -102,6 +103,21 @@ type Config struct {
 	ManagerSlug string
 	// WorkerToWorker enables worker→worker messaging; default false (deny).
 	WorkerToWorker bool
+
+	// DirectiveVerifier gates the operator-directive UDS admin channel: nil
+	// means directives are disabled and every /directive/* route 404s.
+	DirectiveVerifier *opsig.Verifier
+	// InstanceID is this instance's name, checked against Statement.Instance /
+	// Envelope.Instance on every signed directive op (opsig.ParseStatement /
+	// ParseEnvelope's instance-mismatch fail-closed check).
+	InstanceID string
+	// DirectiveAuditPath is the bounded JSON-lines audit log for the
+	// directive channel. Empty ⇒ dirAudit.append is a no-op (still non-nil,
+	// so handlers never nil-check it).
+	DirectiveAuditPath string
+	// DirectiveExpiryMax clamps how far in the future a submitted directive's
+	// expires_at may sit (on top of opsig's own 24h hard cap).
+	DirectiveExpiryMax time.Duration
 }
 
 // Broker is the running capability authority + brokered-tool proxy.
@@ -137,6 +153,11 @@ type Broker struct {
 	bootstrapped bool // /bootstrap latch (one manager ticket per process)
 
 	directives *DirectiveStore
+
+	directiveVerifier  *opsig.Verifier
+	instanceID         string
+	dirAudit           *directiveAudit
+	directiveExpiryMax time.Duration
 }
 
 // New builds a Broker from c.
@@ -185,7 +206,9 @@ func New(c Config) *Broker {
 		apiKey:   c.APIKey, llmUpstream: up,
 		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
-		directives: directives,
+		directives:        directives,
+		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
+		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,
 	}
 }
 

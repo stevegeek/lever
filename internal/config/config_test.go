@@ -519,6 +519,30 @@ func TestManagerPromptPathIsRootRelative(t *testing.T) {
 	}
 }
 
+func TestOperatorAllowedSignersPathIsRootRelative(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, CanonicalName)
+	body := "name: demo\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\noperator:\n  allowed_signers: keys/allowed_signers\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want, _ := filepath.Abs(filepath.Join(dir, "keys", "allowed_signers")) // root, NOT under workspace/
+	if app.OperatorAllowedSignersPath() != want {
+		t.Fatalf("allowed_signers path = %q, want %q (root-relative, outside the mount)", app.OperatorAllowedSignersPath(), want)
+	}
+}
+
+func TestOperatorAllowedSignersPathEmptyWhenUnset(t *testing.T) {
+	app := &App{dir: "/some/root"}
+	if got := app.OperatorAllowedSignersPath(); got != "" {
+		t.Fatalf("allowed_signers path = %q, want \"\" when unset", got)
+	}
+}
+
 func TestSecurityImagePolicy(t *testing.T) {
 	mk := func(sec, img string) string {
 		return "name: demo\nbackend: orbstack\ntree: ws\n" + sec + "manager:\n  image: " + img + "\n"

@@ -97,8 +97,12 @@ func (b *Broker) AdminHandler() http.Handler {
 // them so it can learn OS-assigned ports before starting tools). Runs until ctx
 // is cancelled. jailLn carries mTLS with a self-rotating serving cert (certSrc
 // re-mints before certTTL expires, so a long-running broker never serves an
-// expired cert); adminLn is loopback plain HTTP.
-func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listener, certSrc *ca.ServerCertSource) error {
+// expired cert); adminLn is loopback plain HTTP. directiveLn is the
+// operator-directive admin channel's UDS socket — nil when directives are
+// disabled (or a caller has no socket to offer); when non-nil it MUST be a
+// *net.UnixListener (fail closed otherwise), since the directive admin routes
+// are gated by the socket's 0600 file permissions, not by network origin.
+func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveLn net.Listener, certSrc *ca.ServerCertSource) error {
 	// Fail closed if the caller bound adminLn on a non-loopback interface.
 	// The unauthenticated admin routes (/bootstrap, /register, /revoke, …) must
 	// never be reachable from a routable interface — enforce the invariant here
@@ -106,7 +110,18 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listene
 	if ta, ok := adminLn.Addr().(*net.TCPAddr); !ok || !ta.IP.IsLoopback() {
 		_ = jailLn.Close()
 		_ = adminLn.Close()
+		if directiveLn != nil {
+			_ = directiveLn.Close()
+		}
 		return fmt.Errorf("broker: admin listener must be loopback, got %s", adminLn.Addr())
+	}
+	if directiveLn != nil {
+		if _, ok := directiveLn.(*net.UnixListener); !ok {
+			_ = jailLn.Close()
+			_ = adminLn.Close()
+			_ = directiveLn.Close()
+			return fmt.Errorf("broker: directive listener must be a unix socket, got %T", directiveLn)
+		}
 	}
 	tlsCfg := b.ca.ServerTLSConfigSource(certSrc)
 	jailSrv := &http.Server{
@@ -117,18 +132,31 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn net.Listene
 		Handler:           b.AdminHandler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
 	}
-	errc := make(chan error, 2)
+	var directiveSrv *http.Server
+	numServers := 2
+	errc := make(chan error, 3)
 	go func() { errc <- jailSrv.ServeTLS(jailLn, "", "") }()
 	go func() { errc <- adminSrv.Serve(adminLn) }()
+	if directiveLn != nil {
+		directiveSrv = &http.Server{
+			Handler:           b.DirectiveAdminHandler(),
+			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
+		}
+		numServers = 3
+		go func() { errc <- directiveSrv.Serve(directiveLn) }()
+	}
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = jailSrv.Shutdown(shutCtx)
 		_ = adminSrv.Shutdown(shutCtx)
+		if directiveSrv != nil {
+			_ = directiveSrv.Shutdown(shutCtx)
+		}
 	}()
 	// Return the first real error (ignore ErrServerClosed from clean shutdown).
-	for i := 0; i < 2; i++ {
+	for i := 0; i < numServers; i++ {
 		if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
@@ -156,5 +184,5 @@ func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, certSrc 
 		_ = jailLn.Close()
 		return err
 	}
-	return b.ServeListeners(ctx, jailLn, adminLn, certSrc)
+	return b.ServeListeners(ctx, jailLn, adminLn, nil, certSrc)
 }

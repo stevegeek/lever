@@ -159,7 +159,7 @@ broker:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, certSrc) }()
+	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, nil, certSrc) }()
 
 	manager := workerClient(t, caInst, workerCert(t, caInst, "manager"))
 	worker := workerClient(t, caInst, workerCert(t, caInst, "worker"))

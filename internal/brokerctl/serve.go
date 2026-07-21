@@ -13,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -80,6 +81,12 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	cfg.PersistRevocation = state.SaveRevocation
 	cfg.DirectiveState = dirs
 	cfg.PersistDirectives = state.SaveDirectives
+	if app.DirectivesEnabled() {
+		cfg.DirectiveVerifier = &opsig.Verifier{AllowedSigners: app.OperatorAllowedSignersPath(), Principal: app.OperatorPrincipal()}
+		cfg.InstanceID = app.Name
+		cfg.DirectiveAuditPath = filepath.Join(state.Dir, "directives.log")
+		cfg.DirectiveExpiryMax = app.EffectiveDirectiveExpiryMax()
+	}
 	cfg.ServerName = be.HostToolAlias()
 
 	jailMount := be.MountDest()
@@ -138,6 +145,28 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	adminURL := "http://" + adminLn.Addr().String()
 
+	// The operator-directive admin channel: a UDS socket, 0600, gated by
+	// filesystem permissions rather than network origin. nil when directives
+	// are disabled — ServeListeners treats a nil directiveLn as "no channel".
+	var dirLn net.Listener
+	if app.DirectivesEnabled() {
+		sock := state.DirectiveSock()
+		_ = os.Remove(sock) // stale socket from an unclean shutdown
+		ul, lerr := net.Listen("unix", sock)
+		if lerr != nil {
+			_ = jailLn.Close()
+			_ = adminLn.Close()
+			return fmt.Errorf("brokerctl: bind directive socket: %w", lerr)
+		}
+		if cerr := os.Chmod(sock, 0o600); cerr != nil {
+			_ = jailLn.Close()
+			_ = adminLn.Close()
+			_ = ul.Close()
+			return fmt.Errorf("brokerctl: chmod directive socket: %w", cerr)
+		}
+		dirLn = ul
+	}
+
 	// The serve process owns its pid file: written now that both listeners are
 	// bound (a pid on disk ⇒ a broker actually serving, not a failed-bind ghost),
 	// removed when we stop. This also makes a manual `lever broker serve`
@@ -145,6 +174,9 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	if err := writePIDFile(state); err != nil {
 		_ = jailLn.Close()
 		_ = adminLn.Close()
+		if dirLn != nil {
+			_ = dirLn.Close()
+		}
 		return err
 	}
 	defer removePIDFile(state)
@@ -164,6 +196,9 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	if err != nil {
 		_ = jailLn.Close()
 		_ = adminLn.Close()
+		if dirLn != nil {
+			_ = dirLn.Close()
+		}
 		return err
 	}
 
@@ -171,9 +206,12 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	if err := sup.Start(ctx); err != nil {
 		_ = jailLn.Close()
 		_ = adminLn.Close()
+		if dirLn != nil {
+			_ = dirLn.Close()
+		}
 		return err
 	}
 	defer sup.Stop()
 
-	return b.ServeListeners(ctx, jailLn, adminLn, certSrc)
+	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, certSrc)
 }

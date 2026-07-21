@@ -893,6 +893,19 @@ func (a *App) ManagerPromptPath() string {
 	return filepath.Join(a.dir, a.Manager.PromptFile)
 }
 
+// OperatorAllowedSignersPath returns the absolute path to the operator's
+// allowed_signers file, or "" if directives are disabled (AllowedSigners
+// unset). Resolved at the instance ROOT (host side), like ManagerPromptPath —
+// Operator.AllowedSigners itself stays a confined-relative string on the
+// struct; this is the accessor a consumer (the broker's signature verifier)
+// joins against the instance dir to actually read the file.
+func (a *App) OperatorAllowedSignersPath() string {
+	if a.Operator.AllowedSigners == "" {
+		return ""
+	}
+	return filepath.Join(a.dir, a.Operator.AllowedSigners)
+}
+
 // WorkerToWorkerMessaging reports whether workers may message each other
 // (default true; broker.messaging.worker_to_worker: false disables).
 func (a *App) WorkerToWorkerMessaging() bool {

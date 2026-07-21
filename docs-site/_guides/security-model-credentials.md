@@ -108,6 +108,15 @@ The capability model itself — identities, minting, delegation, revocation — 
   sends it as `x-api-key`, which the broker `/llm` proxy **overwrites** with the real Console key
   host-side. Projecting it to every container is safe precisely because the instance is uniformly
   api-key (§6.1).
+- **Operator directives authenticate the requester; they mint no capability.** A separate,
+  operator-signed channel lets an agent verify that an instruction genuinely came from the human
+  operator (its own SSH signing key, held to a similar host-side trust posture as the credentials
+  above — own-machine or hardware-backed by default). A consumed directive only ever hands the agent
+  a validated action *descriptor*; the agent still executes it through the ordinary capability path
+  described in this section, subject to the same `MayObtain`-at-mint and `token.Verify`-at-call
+  checks. See [Operator directives](/security-model/operator-directives/) (§11) for the full threat
+  model, including the honest Phase-1 scope (delivery and verification are built; call-time
+  enforcement is not).
 
 **External MCP servers (broker-fronted).** A `broker.tools` entry with `external: true` is a
 host server the broker *fronts but does not spawn*: it registers from config, is gated on the

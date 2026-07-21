@@ -37,6 +37,7 @@ but doesn't build:
 | **Network egress** | open by default | LAN and non-allowlisted host ports dropped; public internet open by default, or `egress: closed` to seal the jail to the broker alone |
 | **Model credential** | injected into every container in cleartext | held host-side, the broker injects it, agents never see it (api-key, the default). The `subscription` opt-in hands the agent the OAuth token instead |
 | **Tool access** | a coarse, shared token | per-agent, capability-gated MCP calls with pinned constraints |
+| **Operator→agent instructions** | unauthenticated — any text claiming to be "the operator" | SSH-signed, host-verified [operator directives](/operator-directives/), delivered to agents as pointers, never raw content |
 
 Orchestration itself (starting and attaching agents, the directory-project
 model, messaging) is **Scion**, driven through a thin `lever` wrapper.

@@ -83,3 +83,13 @@ graph LR
 Pooled broker connections are capped at **5 minutes idle**, so a rotated leaf reaches the broker
 long before the old one expires. (TLS validates certificates at handshake only; an established,
 busy connection keeps working.)
+
+## Identity and operator directives
+
+[Operator directives](/operator-directives/) bind to this identity more tightly than a
+capability token does: a directive names its target agent's `{cn, enrolment generation}`, a
+persisted per-CN counter bumped on every genuine `/enrol` (so a recycled slug can't inherit a
+predecessor's still-active directives) and established on `/renew` (so an agent that restarts
+with a persisted cert keeps consuming directives issued to it). One agent's live certificate can
+therefore never be used to consume a directive meant for another — see
+[security-model](/security-model/operator-directives/).

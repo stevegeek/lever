@@ -123,7 +123,7 @@ defense-by-absence guarantee above. Config validation enforces a non-git tree ro
 | `lever` (Go binary) | operator CLI + entry point; drives Scion; provisions the jail | **core** (runs on host) |
 | Scion server + Scion broker | container lifecycle, sessions, attach/resume, typed messaging | core (runs inside the jail) |
 | rootless podman | the container runtime the Scion broker drives (rootless, see security-model.md) | core (inside the jail) |
-| Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls, and relays typed agent messaging (`/msg/send`, `/msg/list`) | **core** (runs on host) |
+| Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls, relays typed agent messaging (`/msg/send`, `/msg/list`), and runs the [operator-directive](/operator-directives/) channel (a 0600 UDS admin socket + agent-facing `directive_consume` over mTLS; see [security-model](/security-model/operator-directives/)) | **core** (runs on host) |
 | Manager **runtime/role** | the coordinator: a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
 | Manager **prompt / skills / tool (MCP) config** | what makes it *this* manager | **instance-supplied config** |
 | Worker agents | agents in the instance's one Scion project, each bound to its own subdirectory workspace; isolated from siblings by defense-by-absence (§2), not a separate project | core lifecycle; instance defines the workers |

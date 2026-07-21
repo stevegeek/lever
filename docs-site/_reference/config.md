@@ -149,6 +149,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `egress` | enum | no | `open` | Jail outbound network posture (`open` \| `closed`), applied jail-wide and **independent of `llm_auth`**. `open`: LAN and non-allowlisted host ports dropped, public internet reachable. `closed`: catch-all DROP so the jail reaches **only** the broker port; requires a uniformly `api-key` instance. See [security-model §2.2](/security-model/jail/). |
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
+| `operator` | object | no | - | Optional operator-directives config: signer trust anchor, signing key, expiry policy (see below). Unset ⇒ directives disabled. |
 
 ### `scion`
 
@@ -267,6 +268,41 @@ that, set `allow_non_loopback: true` on the tool — an explicit, per-tool opt-i
 
 Liveness is yours: the broker does not restart an external server; if it is down, calls to
 the tool return 502.
+
+### `operator`
+
+Optional host-side config for **operator directives** — authenticated delivery of an
+operator-signed action to a named agent, verified by the broker against a trust anchor you
+control (see the `lever directive` command group in the [CLI reference](/reference/cli/)). The
+whole block is optional: with `allowed_signers` unset, directives are **disabled** (the channel
+is simply not configured, not half-configured).
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `allowed_signers` | path | no | - | An `ssh-keygen` `allowed_signers` file listing keys trusted to sign directives, under the fixed principal `operator@<instance-name>`. A **confined path under the instance dir**, host-only — keep it **out of** the mounted `tree:`, so a compromised jailed agent can neither read it nor alter the trust anchor. Live-editable: the broker shells out to `ssh-keygen -Y verify` per call, so a key added/removed here takes effect with no restart. |
+| `signing_key` | path | no | - | Default private key `lever directive send` signs with (`--key` overrides it per call). A **host path, not confined** to the instance dir — keep it outside the tree entirely, and gitignore it. |
+| `directive_expiry` | duration | no | `10m` | Default directive lifetime when `lever directive send` is called without `--expires`. |
+| `directive_expiry_max` | duration | no | `24h` | Hard cap on directive lifetime; a `--expires` (or `directive_expiry`) asking for more is rejected. |
+
+```yaml
+operator:
+  allowed_signers: operator_allowed_signers   # ssh-keygen allowed_signers file, confined to the instance dir
+  signing_key: /abs/path/to/operator_key      # default signing key for `lever directive send`; NOT confined
+  directive_expiry: 10m                       # optional; default 10m
+  directive_expiry_max: 24h                   # optional; default 24h
+```
+
+The operator principal is fixed as `operator@<instance-name>`, one principal per instance; put
+**multiple keys** under it (≥2 recommended) so a lost or rotated key never locks the operator out
+(break-glass), and use `allowed_signers` `valid-after`/`valid-before` to expire a key without a
+config edit. Recommended key posture: keep the private key on the operator's own machine, ideally
+hardware-backed (touch-to-sign) — a compromised host then doesn't imply a compromised operator
+key. A key kept on the broker host itself is weaker (effective trust = "can invoke the CLI / read
+the key on that host") and not hardware-backed; acceptable on a personal machine, but document the
+posture in use. Never forward an SSH agent to the broker host for signing — a forwarded agent is a
+signing oracle a compromised host could use to sign arbitrary directives.
+
+See [security-model.md](/security-model/) for the delivery/verification mechanism and threat model.
 
 ## Conventions & derived values
 

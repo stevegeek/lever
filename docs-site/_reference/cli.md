@@ -30,7 +30,7 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 | Command | What it does |
 |---|---|
 | `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each declared worker dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: files you've edited are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing (non-zero exit); `--adopt` records your customizations as an accepted baseline so doctor and `--check` treat them as OK — later drift past that baseline still fails doctor (tamper detection: agents can write these files, the baseline lives host-side). Re-run after upgrading lever or adding a worker. |
-| `lever doctor` | Run real health checks — broker alive and serving, external tool backends reachable, manager credential file presence/size/mode, no stray `.mcp.json` in the tree, usable Go toolchain, scion project-registration consistency, operator-skills scaffold current — each failure printing a specific fix hint. Exits non-zero on any failure. `--machine`/`--backend` run the profile away from an instance root. |
+| `lever doctor` | Run real health checks — broker alive and serving, external tool backends reachable, manager credential file presence/size/mode, no stray `.mcp.json` in the tree, usable Go toolchain, scion project-registration consistency, operator-skills scaffold current, operator directives configured (signer key count, admin socket present) — each failure printing a specific fix hint. Exits non-zero on any failure. `--machine`/`--backend` run the profile away from an instance root. |
 | `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → init-machine → config-registry → bootstrap-token, a throwaway dev-auth hub mints the controller PAT → scion-server, dev-auth off → credential → register-project, one registration for the tree → mint-manager-bootstrap → start-manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress rules). `--machine`, `--tree`, `--allow-port`. Idempotent; rarely needed directly — `up`/`apply` call it for you. |
 | `lever backends` | List the containment backends (orbstack, lima) and the guarantees each declares — the matrix config validation checks your `backend:` choice against. |
@@ -44,6 +44,21 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 | `lever broker bump-epoch [config]` | Revoke **all** outstanding tokens at once by raising the epoch floor. |
 | `lever acceptance [config]` | Bring up a real jail and drive the six live capability/egress acceptance checks — delegated-read, three scope-envelope denials (a disallowed table, a dropped narrowing filter, a worker self-minting an un-granted cap), egress-refused (allowlisted broker port reachable, admin port blocked), and revocation (a token stops working after `bump-epoch`) — the merge gate for capability-layer changes. |
 | `lever version` | Print the version. |
+
+### Operator directives
+
+Authenticated delivery of an operator-signed action to a target agent — see the `operator:` block
+in the [config reference](/reference/config/) for the signer trust anchor and expiry defaults, and
+[security-model.md](/security-model/) for the verification mechanism. Unlike most `lever`
+commands, `directive` subcommands take an explicit `[CONFIG]` rather than resolving only from the
+current directory (`doctor` and `msg` are cwd-based; `directive` isn't).
+
+| Command | What it does |
+|---|---|
+| `lever directive send <agent> (--instruction TEXT \| --action JSON) [--expires DUR] [--key PATH] [--not-before RFC3339] [CONFIG]` | Sign and submit a directive to `<agent>` (the manager's app name, or a declared worker) over the broker's host-only admin socket. `--instruction`/`--action` are mutually exclusive, exactly one required. `--expires` defaults to `operator.directive_expiry`, capped by `operator.directive_expiry_max`. `--key` defaults to `operator.signing_key`. Prints the exact statement bytes it signs, for operator review, before sending. |
+| `lever directive list [--state active\|consumed\|revoked\|invalidated\|expired] [--key PATH] [CONFIG]` | List directives and their state. |
+| `lever directive revoke <id> [--key PATH] [CONFIG]` | Revoke a directive by id. |
+| `lever directive selftest [--key PATH] [CONFIG]` | Round-trip a self-signed test directive (sign → verify) against the configured `allowed_signers`, to catch misconfiguration before it's needed for real. |
 
 ## `lever-manager` — in-jail orchestration
 

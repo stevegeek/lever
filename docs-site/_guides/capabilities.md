@@ -81,6 +81,16 @@ names. Token text that leaks through a transcript, a log file, or a prompt-injec
 is inert without that container's private key, which never leaves the container. A leaked token
 reveals metadata (which tool/op an agent was granted), not authority.
 
+## Operator directives are not a capability grant
+
+Lever separately has [operator directives](/operator-directives/): SSH-signed instructions a
+human operator sends to one target agent. It's easy to conflate the two mechanisms, so to be
+precise — a directive authenticates *who is asking*, it does not widen *what the agent may do*.
+On consume, the broker returns a validated action descriptor; the agent still requests any
+capability it needs and calls brokered tools through the exact mint-then-call path described
+above, subject to the same `obtain:`/`delegate:` policy and epoch/revocation checks. A directive
+grants no new capability.
+
 ## The LLM as a capability (api-key mode)
 
 With `llm_auth: api-key`, even the agent's own model access is a capability: the agent holds only

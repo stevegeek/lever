@@ -23,6 +23,11 @@ What is shipped versus pending is tracked on [validation](/security-model/valida
 | §6 Credential blast radius and the capability broker | [Credentials & capabilities](/security-model/credentials/) |
 | §7–§8 What a compromised agent can and cannot do; non-claims | [Compromise scenarios](/security-model/compromise/) |
 | §9 Validation evidence and current status | [Validation](/security-model/validation/) |
+| §11 Operator directives — an authenticated human channel (honest Phase-1 scope) | [Operator directives](/security-model/operator-directives/) |
+
+§5 covers the operator's control over instance *configuration*; §11 covers a verifiable channel for
+the operator's *runtime* instructions to a live agent — the two close different halves of the same
+"who is the operator, and how does an agent know it" boundary.
 
 ## 1. The core idea: put the boundary *outside* the runtime
 

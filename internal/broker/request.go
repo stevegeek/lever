@@ -83,7 +83,7 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		detail += ")"
 		b.audit("request", caller, "deny", detail)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, detail, http.StatusForbidden)
 		return
 	}
 	if !b.reg.HasOperation(req.Tool, req.Op) {
@@ -96,7 +96,7 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		detail += ")"
 		b.audit("request", caller, "deny", detail)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, detail, http.StatusForbidden)
 		return
 	}
 	if err := b.reg.ValidateConstraints(req.Tool, req.Constraints); err != nil {
@@ -109,7 +109,7 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		detail += ")"
 		b.audit("request", caller, "deny", detail)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, detail, http.StatusForbidden)
 		return
 	}
 	cons := make([]token.Constraint, 0, len(req.Constraints))

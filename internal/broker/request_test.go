@@ -313,6 +313,28 @@ func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
 	}
 }
 
+// TestRequestDenyLeaksReason proves the /request policy-resolution deny
+// (MayObtainRule) returns its specific, leak-safe reason as the HTTP body —
+// not a bare "forbidden" — so agents can self-correct instead of
+// reverse-engineering grants by trial and error.
+func TestRequestDenyLeaksReason(t *testing.T) {
+	cfg, _ := coarseConfig(t, false) // analyst has no wildcard grant
+	b := New(cfg)
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
+	}))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "policy: may not obtain") {
+		t.Fatalf("deny body should carry the resolve reason, got %q", body)
+	}
+}
+
 func TestRequestDeniesRevokedCallerMintingAndDelegation(t *testing.T) {
 	b := New(testConfig(t))
 	b.Revoke("manager")

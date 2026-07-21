@@ -125,7 +125,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	tgt, rerr := b.resolveMsgTarget(caller, req.To)
 	if rerr != nil {
 		b.audit("msg", caller, "deny", "send->"+req.To+": "+rerr.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, rerr.Error(), http.StatusForbidden)
 		return
 	}
 	if !b.runtimeReady(w) {
@@ -166,7 +166,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	project, rerr := b.resolveListProject(caller, req.Worker)
 	if rerr != nil {
 		b.audit("msg", caller, "deny", "list "+req.Worker+": "+rerr.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, rerr.Error(), http.StatusForbidden)
 		return
 	}
 	if !b.runtimeReady(w) {

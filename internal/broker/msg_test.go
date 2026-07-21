@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -175,6 +176,40 @@ func TestMsgSend_workerToWorkerDisabled(t *testing.T) {
 	}
 	if !strings.Contains(audit.String(), "deny") || !strings.Contains(audit.String(), "worker") {
 		t.Fatalf("deny audit line missing recipient: %s", audit.String())
+	}
+}
+
+// TestMsgSendDenyLeaksReason proves the /msg/send policy-resolution deny
+// (resolveMsgTarget) returns its specific reason as the HTTP body — not a
+// bare "forbidden" — so agents can self-correct instead of reverse-engineering
+// routable addresses by trial and error. Contrast with
+// TestMsgRuntimeError_genericBody, whose scion-runtime branch MUST stay opaque.
+func TestMsgSendDenyLeaksReason(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	rec := callWorker(t, b, "/msg/send", `{"to":"user:stephen"}`, "manager")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Fatal("Message must not be called on a resolve deny")
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "not broker-routable") {
+		t.Fatalf("deny body should carry the resolve reason, got %q", body)
+	}
+}
+
+// TestMsgListDenyLeaksReason is the /msg/list analogue: resolveListProject's
+// reason must reach the HTTP body.
+func TestMsgListDenyLeaksReason(t *testing.T) {
+	b, _, _ := newMsgTestBroker(true)
+	rec := callWorker(t, b, "/msg/list", `{"worker":"worker"}`, "scratch")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "a worker may only read its own inbox") {
+		t.Fatalf("deny body should carry the resolve reason, got %q", body)
 	}
 }
 

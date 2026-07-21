@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/stevegeek/lever/internal/agent"
@@ -37,6 +38,11 @@ func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoi
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		trimmed := bytes.TrimSpace(msg)
+		if len(trimmed) > 0 {
+			return zero, fmt.Errorf("broker %s returned %d: %s", endpoint, resp.StatusCode, trimmed)
+		}
 		return zero, fmt.Errorf("broker %s returned %d", endpoint, resp.StatusCode)
 	}
 	var res T

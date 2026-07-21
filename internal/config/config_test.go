@@ -1059,3 +1059,51 @@ func TestOperatorAllowedSignersConfinedLoads(t *testing.T) {
 		t.Fatal("DirectivesEnabled() = false, want true when allowed_signers is set")
 	}
 }
+
+// Negative directive_expiry must be rejected; zero defaults to 10m.
+func TestOperatorRejectsNegativeDirectiveExpiry(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: -10m\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil {
+		t.Fatal("directive_expiry < 0 should be rejected")
+	}
+	if !strings.Contains(err.Error(), "config: operator:") {
+		t.Errorf("error %q should contain 'config: operator:'", err)
+	}
+}
+
+// Negative directive_expiry_max must be rejected; zero defaults to 24h.
+func TestOperatorRejectsNegativeDirectiveExpiryMax(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: -1h\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil {
+		t.Fatal("directive_expiry_max < 0 should be rejected")
+	}
+	if !strings.Contains(err.Error(), "config: operator:") {
+		t.Errorf("error %q should contain 'config: operator:'", err)
+	}
+}
+
+// Exact boundary: directive_expiry_max: 24h is accepted (hard ceiling, not exceeded).
+func TestOperatorAcceptsExactly24hExpiryMax(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: 24h\n"
+	app, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("directive_expiry_max: 24h should be accepted, got error: %v", err)
+	}
+	if got := app.EffectiveDirectiveExpiryMax(); got != 24*time.Hour {
+		t.Fatalf("EffectiveDirectiveExpiryMax() = %v, want 24h", got)
+	}
+}
+
+// Boundary: directive_expiry equal to directive_expiry_max is accepted.
+func TestOperatorAcceptsExpiryEqualToMax(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: 2h\n  directive_expiry_max: 2h\n"
+	app, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("directive_expiry == directive_expiry_max should be accepted, got error: %v", err)
+	}
+	if got := app.EffectiveDirectiveExpiry(); got != 2*time.Hour {
+		t.Fatalf("EffectiveDirectiveExpiry() = %v, want 2h", got)
+	}
+}

@@ -539,6 +539,12 @@ func (a *App) validateOperator() error {
 	if a.Operator.AllowedSigners != "" && !confinedRel(a.Operator.AllowedSigners) {
 		return fmt.Errorf("config: operator: allowed_signers %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Operator.AllowedSigners)
 	}
+	if a.Operator.DirectiveExpiry < 0 {
+		return fmt.Errorf("config: operator: directive_expiry %s must not be negative", a.Operator.DirectiveExpiry)
+	}
+	if a.Operator.DirectiveExpiryMax < 0 {
+		return fmt.Errorf("config: operator: directive_expiry_max %s must not be negative", a.Operator.DirectiveExpiryMax)
+	}
 	if a.EffectiveDirectiveExpiryMax() > 24*time.Hour {
 		return fmt.Errorf("config: operator: directive_expiry_max %s exceeds the 24h hard ceiling", a.EffectiveDirectiveExpiryMax())
 	}
@@ -907,10 +913,10 @@ func (a *App) DirectivesEnabled() bool {
 // EffectiveDirectiveExpiry is the configured operator.directive_expiry, or
 // 10 minutes when unset (0).
 func (a *App) EffectiveDirectiveExpiry() time.Duration {
-	if a.Operator.DirectiveExpiry != 0 {
-		return a.Operator.DirectiveExpiry
+	if a.Operator.DirectiveExpiry <= 0 {
+		return 10 * time.Minute
 	}
-	return 10 * time.Minute
+	return a.Operator.DirectiveExpiry
 }
 
 // EffectiveDirectiveExpiryMax is the configured operator.directive_expiry_max,
@@ -918,10 +924,10 @@ func (a *App) EffectiveDirectiveExpiry() time.Duration {
 // rejects a configured value above it, so a loaded *App never has to clamp
 // here — a config asking for more never gets past Load.
 func (a *App) EffectiveDirectiveExpiryMax() time.Duration {
-	if a.Operator.DirectiveExpiryMax != 0 {
-		return a.Operator.DirectiveExpiryMax
+	if a.Operator.DirectiveExpiryMax <= 0 {
+		return 24 * time.Hour
 	}
-	return 24 * time.Hour
+	return a.Operator.DirectiveExpiryMax
 }
 
 // OperatorPrincipal is the ssh-keygen allowed_signers principal for this

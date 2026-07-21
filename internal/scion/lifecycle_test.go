@@ -8,6 +8,20 @@ import (
 	"github.com/stevegeek/lever/internal/exec"
 )
 
+func TestContainerLive(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"running", true}, {"Up 6 seconds", true}, {"Up About a minute", true},
+		{"stopped", false}, {"Exited (1) 4 minutes ago", false}, {"", false},
+	} {
+		if got := ContainerLive(c.in); got != c.want {
+			t.Fatalf("ContainerLive(%q)=%v want %v", c.in, got, c.want)
+		}
+	}
+}
+
 func TestListParsesAgents(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion list --format json -g /g/a --non-interactive", exec.Result{Stdout: `[{"slug":"a","phase":"running","activity":"building"}]`})

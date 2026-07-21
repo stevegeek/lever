@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/ca"
@@ -33,12 +34,40 @@ type fakeRuntime struct {
 	startErr     error
 	listCalls    int      // total List invocations, to assert the fan-out is collapsed
 	listProjects []string // project arg of every List call
+	// exitedAfterStart, when set, makes List report a present-but-DEAD worker
+	// ("scratch") once Start has run — so the post-start liveness poll observes a
+	// crash-looped container (Phase "running", ContainerStatus "Exited (1)").
+	// Before Start it stays absent, so handleWorkerStart still takes the Start path.
+	exitedAfterStart bool
 }
 
 func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
 	f.listCalls++
 	f.listProjects = append(f.listProjects, project)
+	// After a Start/Resume, model scion bringing the worker up: the record shows
+	// running + a live container, so the post-start liveness poll succeeds. This
+	// mirrors the real runtime — the pre-action `agents` map is the observe-first
+	// state; the poll sees the result of the action. exitedAfterStart flips it to
+	// a crash-loop (present but dead) to exercise the liveness-timeout path.
+	if name, acted := f.lastActed(); acted {
+		if f.exitedAfterStart {
+			return []scion.Agent{{Slug: name, Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}}, nil
+		}
+		return []scion.Agent{{Slug: name, Phase: "running", ContainerStatus: "Up 1 second"}}, nil
+	}
 	return f.agents[project], nil
+}
+
+// lastActed reports the worker name a Start/Resume acted on, and whether any
+// such action has happened yet (so pre-action List calls return the seed state).
+func (f *fakeRuntime) lastActed() (string, bool) {
+	if len(f.started) > 0 {
+		return f.started[len(f.started)-1].Worker, true
+	}
+	if len(f.resumed) > 0 {
+		return f.resumed[len(f.resumed)-1], true
+	}
+	return "", false
 }
 func (f *fakeRuntime) Start(_ context.Context, o scion.StartOpts) error {
 	f.started = append(f.started, o)
@@ -245,6 +274,68 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	// must NOT have staged a bootstrap
 	if _, err := os.Stat(filepath.Join(bootstrapDir, "bootstrap.json")); err == nil {
 		t.Fatal("terminal-phase resume must NOT stage a bootstrap")
+	}
+}
+
+// A re-dispatch carrying a NEW task against a non-running record must REFUSE
+// loudly (409, body points at purge) instead of silently resuming — because
+// scion pins the task at creation, so a resume would replay the ORIGINAL task,
+// not the new one.
+func TestWorkerStartRefusesTaskMismatch(t *testing.T) {
+	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch",
+		BootstrapDir: filepath.Join(t.TempDir(), ".lever")}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "suspended"}},
+	}}
+	b := newTestBroker(t, rt, spec)
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"NEW TASK"}`, "test-manager")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "purge") {
+		t.Fatalf("body must point at `lever worker purge`, got: %s", rec.Body.String())
+	}
+	if len(rt.resumed) != 0 {
+		t.Fatalf("task-mismatch must NOT resume, got %d resume calls", len(rt.resumed))
+	}
+	// A resume with NO task is still allowed (idempotent bring-up).
+	rec2 := callWorker(t, b, "/worker/start", `{"worker":"scratch"}`, "test-manager")
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("taskless resume status = %d, want 200 (%s)", rec2.Code, rec2.Body.String())
+	}
+	if len(rt.resumed) != 1 {
+		t.Fatalf("taskless resume must resume once, got %d", len(rt.resumed))
+	}
+}
+
+// After a successful Start, an un-live container (crash-loop) must surface as a
+// loud error, NOT a false {Phase:"running"}.
+func TestWorkerStartLivenessTimeout(t *testing.T) {
+	origAtt, origInt := workerLiveAttempts, workerLiveInterval
+	workerLiveAttempts, workerLiveInterval = 3, time.Millisecond
+	defer func() { workerLiveAttempts, workerLiveInterval = origAtt, origInt }()
+
+	dir := t.TempDir()
+	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
+		BootstrapDir: filepath.Join(dir, ".lever")}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, exitedAfterStart: true} // absent, then Exited after Start
+	b := newTestBroker(t, rt, spec)
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("un-live container must NOT return 200; body: %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), `"phase":"running"`) {
+		t.Fatalf("must not report running for a dead container: %s", rec.Body.String())
+	}
+	if len(rt.started) != 1 {
+		t.Fatalf("Start should have been attempted once, got %d", len(rt.started))
 	}
 }
 

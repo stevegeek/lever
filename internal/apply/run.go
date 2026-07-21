@@ -646,17 +646,8 @@ var (
 // success ("resumed") for a container that dies moments later (a real scion
 // race: its liveness check is a single immediate poll). Trusting the observed
 // record — not CLI exit codes or error wording — is what makes start-manager's
-// success meaningful.
-// containerLive reports whether a scion `list --format json` containerStatus
-// value describes a LIVE container. For a running container scion passes
-// through the podman status TEXT ("Up 6 seconds", "Up About a minute"), not a
-// canonical token — live-observed 2026-07-04 when the liveness gate wrongly
-// failed a healthy manager by comparing == "running". Non-live values seen:
-// "stopped", "Exited (1) 4 minutes ago".
-func containerLive(status string) bool {
-	return status == "running" || strings.HasPrefix(status, "Up")
-}
-
+// success meaningful. The live-container predicate is scion.ContainerLive,
+// shared with the broker's worker liveness gate.
 func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
 	var lastPhase, lastContainer string
 	var lastErr error
@@ -686,7 +677,7 @@ func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
 				break
 			}
 		}
-		if lastPhase == "running" && containerLive(lastContainer) {
+		if lastPhase == "running" && scion.ContainerLive(lastContainer) {
 			return nil
 		}
 		select {

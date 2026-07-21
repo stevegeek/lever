@@ -1,6 +1,20 @@
 package scion
 
-import "context"
+import (
+	"context"
+	"strings"
+)
+
+// ContainerLive reports whether a scion `list --format json` containerStatus
+// value describes a LIVE container. For a running container scion passes
+// through the podman status TEXT ("Up 6 seconds", "Up About a minute"), not a
+// canonical token — live-observed 2026-07-04 when a liveness gate wrongly
+// failed a healthy manager by comparing == "running". Non-live values seen:
+// "stopped", "Exited (1) 4 minutes ago". Shared by apply's waitManagerLive and
+// the broker's waitWorkerLive so both consumers use one predicate.
+func ContainerLive(status string) bool {
+	return status == "running" || strings.HasPrefix(status, "Up")
+}
 
 type Agent struct {
 	Slug     string `json:"slug"`

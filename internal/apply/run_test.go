@@ -2185,27 +2185,6 @@ func TestDefaultReadCredRejectsWorldReadable(t *testing.T) {
 	}
 }
 
-// TestContainerLive pins the accepted containerStatus shapes: podman's live
-// status text ("Up …") and the canonical "running"; everything else — incl.
-// exited/stopped — is not live.
-func TestContainerLive(t *testing.T) {
-	for _, tc := range []struct {
-		status string
-		want   bool
-	}{
-		{"running", true},
-		{"Up 6 seconds", true},
-		{"Up About a minute", true},
-		{"stopped", false},
-		{"Exited (1) 4 minutes ago", false},
-		{"", false},
-	} {
-		if got := containerLive(tc.status); got != tc.want {
-			t.Errorf("containerLive(%q) = %v, want %v", tc.status, got, tc.want)
-		}
-	}
-}
-
 // loadImageStep drives just the load-image case of runStep with the given deps.
 func loadImageStep(d Deps) error {
 	return runStep(context.Background(), &config.App{}, Step{Kind: "load-image", Target: "img"}, d, &bootTracker{})

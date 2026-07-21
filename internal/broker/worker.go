@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
@@ -149,9 +151,22 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if phase != "" {
-		// exists in a non-running state (suspended/stopped/terminal) → resume, never re-provision
+		// exists in a non-running state (suspended/stopped/terminal). Resuming
+		// replays the record's ORIGINAL task — scion pins the task at creation and
+		// Resume takes no task — so a re-dispatch carrying a NEW task must NOT
+		// silently resume the old one. Refuse loudly and point at purge.
+		if strings.TrimSpace(req.Task) != "" {
+			b.audit("worker", b.manager, "deny", "start "+spec.Name+": task given but worker exists (phase "+phase+")")
+			http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. Run `lever worker purge "+spec.Name+"` to start it fresh with a new task, or dispatch with no task to resume.", http.StatusConflict)
+			return
+		}
 		if err := b.runtime.Resume(ctx, spec.Name, b.instanceProject); err != nil {
 			http.Error(w, "runtime error", http.StatusBadGateway)
+			return
+		}
+		if err := b.waitWorkerLive(ctx, spec); err != nil {
+			b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		b.audit("worker", b.manager, "allow", "resume "+spec.Name)
@@ -188,8 +203,51 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
+	if err := b.waitWorkerLive(ctx, spec); err != nil {
+		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
 	writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
+}
+
+// workerLiveAttempts/workerLiveInterval bound waitWorkerLive's post-start poll.
+// Package vars (not consts) so tests can shrink them.
+var (
+	workerLiveAttempts = 20
+	workerLiveInterval = 500 * time.Millisecond
+)
+
+// waitWorkerLive polls the worker's scion record until it shows Phase=="running"
+// AND a live container, or the budget runs out — so a crash-looping worker
+// surfaces as an error instead of a false "running" (mirrors apply's
+// waitManagerLive). scion's own start/resume success can lie (it reports
+// "resumed" for a container whose harness dies moments later), so the observed
+// record — not the CLI exit code — is what makes success meaningful.
+func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
+	var lastPhase, lastContainer string
+	for attempt := 0; attempt < workerLiveAttempts; attempt++ {
+		agents, err := b.runtime.List(ctx, b.instanceProject)
+		if err == nil {
+			lastPhase, lastContainer = "", ""
+			for _, a := range agents {
+				if a.Slug == spec.Name {
+					lastPhase, lastContainer = a.Phase, a.ContainerStatus
+					break
+				}
+			}
+			if lastPhase == "running" && scion.ContainerLive(lastContainer) {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(workerLiveInterval):
+		}
+	}
+	return fmt.Errorf("worker %q did not come up (last phase %q, container %q) — scion reported success but the harness is not live", spec.Name, lastPhase, lastContainer)
 }
 
 func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {

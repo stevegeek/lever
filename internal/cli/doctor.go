@@ -63,6 +63,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
 				checkAgentCert(state, time.Now()),
 				checkToolBackends(app.Broker.Tools, tcpDial),
+				checkClaudeVersion(app.ManagerImage(), claudeVersionProbe),
 				checkCredentialFile(app.Manager.CredentialFile),
 				checkMcpJsonInTree(app.Tree),
 				checkGoToolchain(app.Scion),

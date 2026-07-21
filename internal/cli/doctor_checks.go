@@ -474,3 +474,37 @@ func readFileTail(path string, max int64) ([]byte, error) {
 	}
 	return io.ReadAll(f)
 }
+
+// claudeVersionProbe reads the baked Claude Code version from an image's
+// `claude_code_version` label via `docker image inspect`. Overridable in tests.
+var claudeVersionProbe = func(imageRef string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "image", "inspect",
+		"--format", `{{index .Config.Labels "claude_code_version"}}`, imageRef).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s", strings.TrimSpace(string(out)))
+	}
+	v := strings.TrimSpace(string(out))
+	if v == "<no value>" { // label absent
+		v = ""
+	}
+	return v, nil
+}
+
+// checkClaudeVersion reports the Claude Code version baked into the manager
+// image. It reads a label (no container run). A missing label means a
+// pre-label image and is reported informationally, not as a failure; an
+// inspect error (image not built/loaded) is a real fault.
+func checkClaudeVersion(imageRef string, probe func(string) (string, error)) checkResult {
+	const name = "agent claude version"
+	v, err := probe(imageRef)
+	if err != nil {
+		return checkResult{name, false, "could not inspect image " + imageRef + ": " + err.Error(),
+			"build/load the agent image (`lever apply`) before this check can read its baked version"}
+	}
+	if v == "" {
+		return checkResult{name, true, "no claude_code_version label on " + imageRef + " (pre-label image; rebuild to record it)", ""}
+	}
+	return checkResult{name, true, "baked " + v + " in " + imageRef + " (running containers keep their version until recreated: `lever stop && lever up`)", ""}
+}

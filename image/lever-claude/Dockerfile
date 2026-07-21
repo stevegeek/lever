@@ -59,6 +59,10 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
   && npm cache clean --force \
   && claude --version
 
+# Persist the baked version as an image label so `lever doctor` can report it
+# without running a container (build-arg → label; no runtime probe needed).
+LABEL claude_code_version="${CLAUDE_CODE_VERSION}"
+
 # Claude is baked in and its global dir is root-owned, so the scion user can't
 # self-update it; the auto-updater would only fail noisily every session.
 ENV DISABLE_AUTOUPDATER=1

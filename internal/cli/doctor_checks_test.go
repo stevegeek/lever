@@ -559,3 +559,25 @@ func TestCheckDirectivesBrokerRunningSocketAbsent(t *testing.T) {
 		t.Fatalf("failure should be about the missing directive socket: %+v", r)
 	}
 }
+
+func TestCheckClaudeVersion(t *testing.T) {
+	saved := claudeVersionProbe
+	t.Cleanup(func() { claudeVersionProbe = saved })
+
+	claudeVersionProbe = func(string) (string, error) { return "2.1.207", nil }
+	if got := checkClaudeVersion("img", claudeVersionProbe); !got.ok || !strings.Contains(got.detail, "2.1.207") {
+		t.Fatalf("expected pass reporting the version, got %+v", got)
+	}
+
+	// Missing label (older image) → informational pass, not a hard fail.
+	claudeVersionProbe = func(string) (string, error) { return "", nil }
+	if got := checkClaudeVersion("img", claudeVersionProbe); !got.ok {
+		t.Fatalf("missing label should be informational, not a failure, got %+v", got)
+	}
+
+	// Inspect error → fail with actionable fix.
+	claudeVersionProbe = func(string) (string, error) { return "", fmt.Errorf("no such image") }
+	if got := checkClaudeVersion("img", claudeVersionProbe); got.ok {
+		t.Fatalf("inspect error should fail the check")
+	}
+}

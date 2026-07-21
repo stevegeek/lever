@@ -66,6 +66,12 @@ type Config struct {
 	// state changes, to write it through to the state dir. nil ⇒ no persistence.
 	PersistRevocation func(RevocationState) error
 
+	// DirectiveState seeds the persistent operator-directive store at
+	// construction (loaded from the state dir); PersistDirectives writes it
+	// through on every mutation. Modeled on RevocationState/PersistRevocation.
+	DirectiveState    DirectiveState
+	PersistDirectives func(DirectiveState) error
+
 	// APIKey is the real Anthropic Console key bytes (loaded host-side from the
 	// 0600 api_key_file by brokerctl). nil ⇒ no /llm route is served.
 	APIKey []byte
@@ -129,6 +135,8 @@ type Broker struct {
 	revoked      map[string]bool
 	persist      func(RevocationState) error
 	bootstrapped bool // /bootstrap latch (one manager ticket per process)
+
+	directives *DirectiveStore
 }
 
 // New builds a Broker from c.
@@ -146,6 +154,7 @@ func New(c Config) *Broker {
 		// the first request.
 		c.Log = slog.New(slog.DiscardHandler)
 	}
+	directives := newDirectiveStore(c.DirectiveState, c.PersistDirectives, c.Log)
 	agents := make(map[string]struct{}, len(c.Agents))
 	for _, a := range c.Agents {
 		agents[a] = struct{}{}
@@ -176,6 +185,7 @@ func New(c Config) *Broker {
 		apiKey:   c.APIKey, llmUpstream: up,
 		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
+		directives: directives,
 	}
 }
 
@@ -246,3 +256,7 @@ func (b *Broker) audit(op, caller, decision, detail string, kvs ...any) {
 	args := append([]any{"op", op, "caller", caller, "decision", decision, "detail", detail}, kvs...)
 	b.log.Info("broker.decision", args...)
 }
+
+// Directives exposes the operator-directive store (enrol bumps generations;
+// admin/agent handlers submit/consume).
+func (b *Broker) Directives() *DirectiveStore { return b.directives }

@@ -3,6 +3,7 @@ package brokerctl
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/broker"
 )
@@ -87,5 +88,31 @@ func TestLoadControllerPATWrongPerms(t *testing.T) {
 	}
 	if _, err := s.LoadControllerPAT(); err == nil {
 		t.Fatal("LoadControllerPAT() with 0644 perms: want error, got nil")
+	}
+}
+
+func TestDirectivesRoundTripAndAbsentIsZero(t *testing.T) {
+	st := StateDir(t.TempDir())
+	ds, err := st.LoadDirectives()
+	if err != nil || len(ds.Directives) != 0 {
+		t.Fatalf("absent file: %v %v", ds, err)
+	}
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := broker.DirectiveState{
+		Generations: map[string]int{"mgr": 2},
+		Directives:  []*broker.DirectiveRecord{{ID: "d1", State: "consumed", TargetCN: "mgr", TargetGen: 1, Kind: "instruction", ExpiresAt: time.Now()}},
+	}
+	if err := st.SaveDirectives(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.LoadDirectives()
+	if err != nil || got.Generations["mgr"] != 2 || len(got.Directives) != 1 || got.Directives[0].State != "consumed" {
+		t.Fatalf("round trip: %+v %v", got, err)
+	}
+	fi, _ := os.Stat(st.Directives())
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("directives.json must be 0600, got %v", fi.Mode().Perm())
 	}
 }

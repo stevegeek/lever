@@ -24,6 +24,8 @@ func (s State) CAKey() string         { return filepath.Join(s.Dir, "ca.key") }
 func (s State) BrokerKey() string     { return filepath.Join(s.Dir, "broker.key") }
 func (s State) BrokerPub() string     { return filepath.Join(s.Dir, "broker.pub") }
 func (s State) Revocation() string    { return filepath.Join(s.Dir, "revocation.json") }
+func (s State) Directives() string    { return filepath.Join(s.Dir, "directives.json") }
+func (s State) DirectiveSock() string { return filepath.Join(s.Dir, "directive.sock") }
 func (s State) PID() string           { return filepath.Join(s.Dir, "broker.pid") }
 func (s State) Log() string           { return filepath.Join(s.Dir, "broker.log") }
 func (s State) OutLog() string        { return filepath.Join(s.Dir, "broker.out.log") }
@@ -106,6 +108,34 @@ func (s State) SaveRevocation(rs broker.RevocationState) error {
 	}
 	if err := os.WriteFile(s.Revocation(), b, 0o600); err != nil {
 		return fmt.Errorf("brokerctl: write revocation: %w", err)
+	}
+	return nil
+}
+
+// LoadDirectives reads persisted directive state; absent file = zero value.
+func (s State) LoadDirectives() (broker.DirectiveState, error) {
+	b, err := os.ReadFile(s.Directives())
+	if errors.Is(err, os.ErrNotExist) {
+		return broker.DirectiveState{}, nil
+	}
+	if err != nil {
+		return broker.DirectiveState{}, fmt.Errorf("brokerctl: read directives: %w", err)
+	}
+	var ds broker.DirectiveState
+	if err := json.Unmarshal(b, &ds); err != nil {
+		return broker.DirectiveState{}, fmt.Errorf("brokerctl: parse directives: %w", err)
+	}
+	return ds, nil
+}
+
+// SaveDirectives persists directive state (0600).
+func (s State) SaveDirectives(ds broker.DirectiveState) error {
+	b, err := json.Marshal(ds)
+	if err != nil {
+		return fmt.Errorf("brokerctl: marshal directives: %w", err)
+	}
+	if err := os.WriteFile(s.Directives(), b, 0o600); err != nil {
+		return fmt.Errorf("brokerctl: write directives: %w", err)
 	}
 	return nil
 }

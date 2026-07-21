@@ -53,6 +53,10 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	if err != nil {
 		return err
 	}
+	dirs, err := state.LoadDirectives()
+	if err != nil {
+		return err
+	}
 
 	// Worker dispatch runs host-side with operator identity (jail runner). apply
 	// passes the resolved run-user/uid via env (LEVER_JAIL_USER/UID); the mount
@@ -74,6 +78,8 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	}
 	cfg.RevocationState = rev
 	cfg.PersistRevocation = state.SaveRevocation
+	cfg.DirectiveState = dirs
+	cfg.PersistDirectives = state.SaveDirectives
 	cfg.ServerName = be.HostToolAlias()
 
 	jailMount := be.MountDest()

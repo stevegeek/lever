@@ -14,6 +14,7 @@ internal/cli/testdata/acceptance/docs/
 drafts/
 docs/audits/
 docs/superpowers/plans/
+docs/superpowers/specs/
 
 # Per-instance runtime state + staged binaries from running the examples
 # (broker keys/state, deposited bootstrap, scion project markers, cross-compiled

@@ -27,6 +27,11 @@ const (
 	// clockLeeway absorbs operator-host vs broker-host skew on the
 	// not_before bound only. Expiry stays strict (fail closed).
 	clockLeeway = 2 * time.Minute
+	// maxJSONDepth bounds walkDupes' recursion. In practice maxStatementBytes
+	// (64KiB) already limits how deep a document can nest, but an explicit
+	// cap is cheap defence-in-depth against a huge-fanout-free, pure-nesting
+	// document (e.g. thousands of "[").
+	maxJSONDepth = 200
 )
 
 var ErrInvalid = errors.New("opsig: invalid")
@@ -70,10 +75,13 @@ type Envelope struct {
 // last value, a differential-parsing hazard for signed documents).
 func RejectDuplicateKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	return walkDupes(dec)
+	return walkDupes(dec, 0)
 }
 
-func walkDupes(dec *json.Decoder) error {
+func walkDupes(dec *json.Decoder, depth int) error {
+	if depth > maxJSONDepth {
+		return fmt.Errorf("%w: nesting too deep", ErrInvalid)
+	}
 	t, err := dec.Token()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalid, err)
@@ -93,7 +101,7 @@ func walkDupes(dec *json.Decoder) error {
 					return fmt.Errorf("%w: duplicate key %q", ErrInvalid, key)
 				}
 				seen[key] = true
-				if err := walkDupes(dec); err != nil {
+				if err := walkDupes(dec, depth+1); err != nil {
 					return err
 				}
 			}
@@ -101,7 +109,7 @@ func walkDupes(dec *json.Decoder) error {
 			return err
 		case '[':
 			for dec.More() {
-				if err := walkDupes(dec); err != nil {
+				if err := walkDupes(dec, depth+1); err != nil {
 					return err
 				}
 			}

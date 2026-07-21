@@ -152,6 +152,44 @@ func TestConsumeHappyPathToolCall(t *testing.T) {
 	}
 }
 
+// TestConsumeRevalidatesStoredStatementRejectsInvalid proves consume
+// re-runs opsig.ParseStatement over the stored statement bytes rather than
+// trusting a plain json.Unmarshal: a record whose bytes decode cleanly as
+// JSON but fail the full validator (here, a wrong instance) must never leak
+// its action — even though the store-level CAS (TargetCN/TargetGen/time
+// bounds) is otherwise satisfied. Submits the record directly (bypassing
+// submitDirective's use of the real instance) so the stored bytes disagree
+// with b.instanceID.
+func TestConsumeRevalidatesStoredStatementRejectsInvalid(t *testing.T) {
+	b, _, _, _ := directiveTestBroker(t)
+	b.Directives().BumpGeneration("manager")
+
+	id := "11111111-2222-4333-8444-555555555640"
+	now := time.Now()
+	bad := directiveStatement(id, "manager", 1, instructionAction("x"))
+	bad.Instance = "wrong-instance" // decodes fine; ParseStatement must reject it
+	raw, err := json.Marshal(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dr := DirectiveRecord{
+		ID: id, Statement: raw, TargetCN: "manager", TargetGen: 1,
+		Kind: "instruction", NotBefore: now.Add(-time.Minute), ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := b.Directives().Submit(dr, now); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := jailServer(t, b)
+	defer srv.Close()
+	client := agentClient(t, b, signedCert(t, b, "manager"))
+
+	status, body := postDirectiveID(t, client, srv.URL, "/directive/consume", id)
+	if status != http.StatusNotFound || string(body) != opaque404Body {
+		t.Fatalf("consume of invalid stored statement = %d %s, want opaque 404 %s", status, body, opaque404Body)
+	}
+}
+
 func TestConsumeHappyPathInstruction(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
 	b.Directives().BumpGeneration("manager") // generation 0 -> 1

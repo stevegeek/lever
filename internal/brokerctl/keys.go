@@ -100,13 +100,13 @@ func (s State) LoadRevocation() (broker.RevocationState, error) {
 	return rs, nil
 }
 
-// SaveRevocation persists the revocation state (0600).
+// SaveRevocation persists the revocation state (0600), atomically.
 func (s State) SaveRevocation(rs broker.RevocationState) error {
 	b, err := json.Marshal(rs)
 	if err != nil {
 		return fmt.Errorf("brokerctl: marshal revocation: %w", err)
 	}
-	if err := os.WriteFile(s.Revocation(), b, 0o600); err != nil {
+	if err := writeFileAtomic(s.Revocation(), b, 0o600); err != nil {
 		return fmt.Errorf("brokerctl: write revocation: %w", err)
 	}
 	return nil
@@ -128,16 +128,43 @@ func (s State) LoadDirectives() (broker.DirectiveState, error) {
 	return ds, nil
 }
 
-// SaveDirectives persists directive state (0600).
+// SaveDirectives persists directive state (0600), atomically: a crash
+// mid-write must never torn-write directives.json, since it holds the
+// replay tombstone set the broker needs on restart.
 func (s State) SaveDirectives(ds broker.DirectiveState) error {
 	b, err := json.Marshal(ds)
 	if err != nil {
 		return fmt.Errorf("brokerctl: marshal directives: %w", err)
 	}
-	if err := os.WriteFile(s.Directives(), b, 0o600); err != nil {
+	if err := writeFileAtomic(s.Directives(), b, 0o600); err != nil {
 		return fmt.Errorf("brokerctl: write directives: %w", err)
 	}
 	return nil
+}
+
+// writeFileAtomic writes data to a temp file in the same directory as path
+// then renames it over path — atomic on POSIX, so a crash mid-write leaves
+// either the old file or the new one, never a torn partial write.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // SaveControllerPAT persists the scion controller personal access token

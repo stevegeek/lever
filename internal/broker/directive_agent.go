@@ -83,9 +83,18 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 		opaque404(w)
 		return
 	}
-	var st opsig.Statement
-	if err := json.Unmarshal(rec.Statement, &st); err != nil {
-		b.audit("directive", caller, "error", "consume "+req.ID+": stored statement unparseable")
+	// Re-run the full validator over the stored bytes rather than a plain
+	// json.Unmarshal: the store's CAS (target CN/generation, time bounds)
+	// already gated this record, and these bytes passed ParseStatement at
+	// submit time, so this succeeds in practice — but re-validating here
+	// means a future code path that stores looser bytes can't leak an
+	// unvalidated action to the model. The CAS has already flipped state to
+	// consumed above; a corrupt stored statement is unreachable via the
+	// normal path, so burning the single use on failure (not un-consuming)
+	// is the safe direction.
+	st, err := opsig.ParseStatement(rec.Statement, b.instanceID, now)
+	if err != nil {
+		b.audit("directive", caller, "error", "consume "+req.ID+": stored statement invalid")
 		opaque404(w)
 		return
 	}

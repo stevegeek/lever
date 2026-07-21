@@ -2,6 +2,7 @@ package brokerctl
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -114,5 +115,54 @@ func TestDirectivesRoundTripAndAbsentIsZero(t *testing.T) {
 	fi, _ := os.Stat(st.Directives())
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("directives.json must be 0600, got %v", fi.Mode().Perm())
+	}
+}
+
+// TestSaveDirectivesIsAtomicAndReplaces proves SaveDirectives writes via a
+// temp-file-then-rename (not a plain in-place write, which would torn-write
+// directives.json — the replay tombstone set — on a mid-write crash): saving
+// a second, different state over a first must fully replace it on reload,
+// and no .tmp-* scratch file may survive a successful save.
+func TestSaveDirectivesIsAtomicAndReplaces(t *testing.T) {
+	st := StateDir(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := broker.DirectiveState{
+		Generations: map[string]int{"mgr": 1},
+		Directives:  []*broker.DirectiveRecord{{ID: "d1", State: "active", TargetCN: "mgr", TargetGen: 1, Kind: "instruction", ExpiresAt: time.Now()}},
+	}
+	if err := st.SaveDirectives(first); err != nil {
+		t.Fatal(err)
+	}
+	second := broker.DirectiveState{
+		Generations: map[string]int{"mgr": 2},
+		Directives:  []*broker.DirectiveRecord{{ID: "d2", State: "consumed", TargetCN: "mgr", TargetGen: 2, Kind: "tool_call", ExpiresAt: time.Now()}},
+	}
+	if err := st.SaveDirectives(second); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.LoadDirectives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Generations["mgr"] != 2 || len(got.Directives) != 1 || got.Directives[0].ID != "d2" {
+		t.Fatalf("second save did not fully replace the first: %+v", got)
+	}
+	fi, err := os.Stat(st.Directives())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("directives.json must be 0600, got %v", fi.Mode().Perm())
+	}
+	entries, err := os.ReadDir(st.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if matched, _ := filepath.Match(".tmp-*", e.Name()); matched {
+			t.Fatalf("leftover temp file after successful save: %s", e.Name())
+		}
 	}
 }

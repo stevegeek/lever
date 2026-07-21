@@ -145,6 +145,22 @@ func TestRejectDuplicateKeys(t *testing.T) {
 	}
 }
 
+// TestRejectDuplicateKeysDepthCapped feeds pathologically deep (but small,
+// well under maxStatementBytes) nesting to prove walkDupes fails closed on
+// an explicit depth bound rather than relying solely on the 64KiB size cap.
+func TestRejectDuplicateKeysDepthCapped(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 5000; i++ {
+		b.WriteByte('[')
+	}
+	for i := 0; i < 5000; i++ {
+		b.WriteByte(']')
+	}
+	if err := RejectDuplicateKeys([]byte(b.String())); err == nil {
+		t.Fatal("deeply nested JSON accepted without a depth bound")
+	}
+}
+
 func TestValidateActionExported(t *testing.T) {
 	if err := ValidateAction(Action{Kind: "instruction", Text: "hi"}); err != nil {
 		t.Fatalf("valid action rejected: %v", err)

@@ -175,6 +175,12 @@ func ParseStatement(raw []byte, instance string, now time.Time) (Statement, erro
 	return st, nil
 }
 
+// ValidateAction exports validateAction's action-shape rules for callers
+// outside this package (the CLI) that construct an Action client-side and
+// want to fail fast — before building/signing a Statement around it — rather
+// than discover a malformed action only after the broker rejects the send.
+func ValidateAction(a Action) error { return validateAction(a) }
+
 func validateAction(a Action) error {
 	switch a.Kind {
 	case "tool_call", "approval":

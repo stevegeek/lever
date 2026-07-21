@@ -145,6 +145,15 @@ func TestRejectDuplicateKeys(t *testing.T) {
 	}
 }
 
+func TestValidateActionExported(t *testing.T) {
+	if err := ValidateAction(Action{Kind: "instruction", Text: "hi"}); err != nil {
+		t.Fatalf("valid action rejected: %v", err)
+	}
+	if err := ValidateAction(Action{Kind: "sudo"}); err == nil {
+		t.Fatal("invalid action kind accepted")
+	}
+}
+
 func TestParseEnvelope(t *testing.T) {
 	now := time.Now()
 	raw, _ := json.Marshal(Envelope{V: 1, Instance: "testinst", Op: "revoke",

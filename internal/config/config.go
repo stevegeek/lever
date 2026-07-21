@@ -278,6 +278,21 @@ type Security struct {
 	RequireImageDigest bool `yaml:"require_image_digest"`
 }
 
+// Operator configures the authenticated operator-directive channel. The
+// zero value disables directives entirely (no allowed_signers = no channel).
+type Operator struct {
+	// AllowedSigners is the ssh-keygen allowed_signers file holding the
+	// operator public keys (principal operator@<name>). Confined to the
+	// instance directory.
+	AllowedSigners string `yaml:"allowed_signers"`
+	// SigningKey is the default private-key path used by `lever directive
+	// send` on the host. Not confined (the key should live OUTSIDE the tree).
+	SigningKey string `yaml:"signing_key"`
+	// DirectiveExpiry / DirectiveExpiryMax follow Broker.GrantTTL's pattern.
+	DirectiveExpiry    time.Duration `yaml:"directive_expiry"`
+	DirectiveExpiryMax time.Duration `yaml:"directive_expiry_max"`
+}
+
 type App struct {
 	Name     string      `yaml:"name"`
 	Backend  string      `yaml:"backend"`
@@ -288,6 +303,7 @@ type App struct {
 	Workers  []Worker    `yaml:"workers"`
 	Security Security    `yaml:"security"`
 	Broker   Broker      `yaml:"broker"`
+	Operator Operator    `yaml:"operator"`
 
 	dir     string // instance root (the config file's directory)
 	treeRel string // tree as the confined relative subdir (before joining to dir)
@@ -419,6 +435,11 @@ func Load(path string) (*App, error) {
 		return nil, fmt.Errorf("config: scion.source and scion.version are mutually exclusive")
 	}
 	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
+	// SigningKey is a host-side path OUTSIDE the instance tree by design (the
+	// operator's private key must never live where a compromised agent could
+	// read it) — expanded like CredentialFile/Scion.Source, but deliberately
+	// NOT confined.
+	app.Operator.SigningKey = resolvePath(app.Operator.SigningKey, app.dir)
 	app.injectLLMGrants()
 	if err := app.Validate(); err != nil {
 		return nil, err
@@ -500,6 +521,29 @@ func (a *App) Validate() error {
 	}
 	if err := a.validateBroker(); err != nil {
 		return err
+	}
+	if err := a.validateOperator(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateOperator fails closed on operator-directive-channel config
+// mistakes: allowed_signers, if set, must be a path confined inside the
+// instance root (like manager.prompt_file); the expiry pair must be sane —
+// directive_expiry <= directive_expiry_max <= 24h, the hard ceiling the
+// directive-signing protocol assumes. Checked unconditionally (even with the
+// channel disabled) so a nonsensical expiry pair is caught at config-load
+// time rather than silently ignored until allowed_signers is later set.
+func (a *App) validateOperator() error {
+	if a.Operator.AllowedSigners != "" && !confinedRel(a.Operator.AllowedSigners) {
+		return fmt.Errorf("config: operator: allowed_signers %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Operator.AllowedSigners)
+	}
+	if a.EffectiveDirectiveExpiryMax() > 24*time.Hour {
+		return fmt.Errorf("config: operator: directive_expiry_max %s exceeds the 24h hard ceiling", a.EffectiveDirectiveExpiryMax())
+	}
+	if a.EffectiveDirectiveExpiry() > a.EffectiveDirectiveExpiryMax() {
+		return fmt.Errorf("config: operator: directive_expiry %s exceeds directive_expiry_max %s", a.EffectiveDirectiveExpiry(), a.EffectiveDirectiveExpiryMax())
 	}
 	return nil
 }
@@ -850,4 +894,38 @@ func (a *App) WorkerToWorkerMessaging() bool {
 		return *v
 	}
 	return true
+}
+
+// DirectivesEnabled reports whether the operator-directive channel is
+// active. allowed_signers is the sole gate: unset means there is no key
+// material to verify a directive's signature against, so the channel stays
+// off (fail closed by omission — no `operator:` block needed to opt out).
+func (a *App) DirectivesEnabled() bool {
+	return a.Operator.AllowedSigners != ""
+}
+
+// EffectiveDirectiveExpiry is the configured operator.directive_expiry, or
+// 10 minutes when unset (0).
+func (a *App) EffectiveDirectiveExpiry() time.Duration {
+	if a.Operator.DirectiveExpiry != 0 {
+		return a.Operator.DirectiveExpiry
+	}
+	return 10 * time.Minute
+}
+
+// EffectiveDirectiveExpiryMax is the configured operator.directive_expiry_max,
+// or 24 hours when unset (0). This is a hard ceiling: validateOperator
+// rejects a configured value above it, so a loaded *App never has to clamp
+// here — a config asking for more never gets past Load.
+func (a *App) EffectiveDirectiveExpiryMax() time.Duration {
+	if a.Operator.DirectiveExpiryMax != 0 {
+		return a.Operator.DirectiveExpiryMax
+	}
+	return 24 * time.Hour
+}
+
+// OperatorPrincipal is the ssh-keygen allowed_signers principal for this
+// instance's operator identity.
+func (a *App) OperatorPrincipal() string {
+	return "operator@" + a.Name
 }

@@ -77,3 +77,30 @@ func TestEnrolTicketIsSingleUse(t *testing.T) {
 		t.Fatal("ticket must be single-use")
 	}
 }
+
+func TestEnrolBumpsDirectiveGeneration(t *testing.T) {
+	b := New(testConfig(t))
+	if got := b.Directives().Generation("w1"); got != 0 {
+		t.Fatalf("pre-enrol generation = %d, want 0", got)
+	}
+	tk, _ := b.tickets.Issue("w1", b.ticketTTL)
+	csr := makeCSRForCN(t, "w1")
+	w := httptest.NewRecorder()
+	b.handleEnrol(w, enrolReq(tk, csr))
+	if w.Code != http.StatusOK {
+		t.Fatalf("first enrol: %d, body = %s", w.Code, w.Body.String())
+	}
+	if got := b.Directives().Generation("w1"); got != 1 {
+		t.Fatalf("post-enrol generation = %d, want 1", got)
+	}
+	tk2, _ := b.tickets.Issue("w1", b.ticketTTL)
+	csr2 := makeCSRForCN(t, "w1")
+	w2 := httptest.NewRecorder()
+	b.handleEnrol(w2, enrolReq(tk2, csr2))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second enrol: %d, body = %s", w2.Code, w2.Body.String())
+	}
+	if got := b.Directives().Generation("w1"); got != 2 {
+		t.Fatalf("re-enrol generation = %d, want 2", got)
+	}
+}

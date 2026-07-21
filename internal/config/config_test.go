@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTmp(t *testing.T, body string) string {
@@ -1000,5 +1001,61 @@ func TestWorkerToWorkerMessagingDefaultsTrue(t *testing.T) {
 				t.Fatalf("WorkerToWorkerMessaging() = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// An unset operator block disables the directive channel entirely (no
+// allowed_signers = no channel) and every effective accessor falls back to
+// its documented default.
+func TestOperatorUnsetDisablesDirectives(t *testing.T) {
+	a := &App{Name: "demo"}
+	if a.DirectivesEnabled() {
+		t.Fatal("DirectivesEnabled() = true, want false when allowed_signers is unset")
+	}
+	if got := a.EffectiveDirectiveExpiry(); got != 10*time.Minute {
+		t.Fatalf("EffectiveDirectiveExpiry() = %v, want 10m", got)
+	}
+	if got := a.EffectiveDirectiveExpiryMax(); got != 24*time.Hour {
+		t.Fatalf("EffectiveDirectiveExpiryMax() = %v, want 24h", got)
+	}
+	if got := a.OperatorPrincipal(); got != "operator@demo" {
+		t.Fatalf("OperatorPrincipal() = %q, want %q", got, "operator@demo")
+	}
+}
+
+// directive_expiry_max is hard-clamped to <= 24h: a config asking for more is
+// a validation error, not silently clamped.
+func TestOperatorRejectsExpiryMaxOver24h(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: 25h\n"
+	if _, err := Load(writeTmp(t, body)); err == nil {
+		t.Fatal("directive_expiry_max > 24h should be rejected")
+	}
+}
+
+// directive_expiry must not exceed directive_expiry_max.
+func TestOperatorRejectsExpiryOverMax(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: 2h\n  directive_expiry_max: 1h\n"
+	if _, err := Load(writeTmp(t, body)); err == nil {
+		t.Fatal("directive_expiry > directive_expiry_max should be rejected")
+	}
+}
+
+// allowed_signers must stay confined to the instance dir, like prompt_file.
+func TestOperatorRejectsAllowedSignersEscapingInstanceDir(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  allowed_signers: ../../etc/passwd\n"
+	if _, err := Load(writeTmp(t, body)); err == nil {
+		t.Fatal("allowed_signers escaping the instance dir should be rejected")
+	}
+}
+
+// A confined allowed_signers loads cleanly and flips DirectivesEnabled on.
+func TestOperatorAllowedSignersConfinedLoads(t *testing.T) {
+	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  allowed_signers: operator/allowed_signers\n"
+	app, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !app.DirectivesEnabled() {
+		t.Fatal("DirectivesEnabled() = false, want true when allowed_signers is set")
 	}
 }

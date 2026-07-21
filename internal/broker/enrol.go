@@ -72,6 +72,10 @@ func (b *Broker) handleEnrol(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// A successful enrolment starts a new directive generation for this CN:
+	// directives are bound to (CN, generation), so anything targeted at a
+	// previous holder of a recycled slug is invalidated here.
+	b.directives.BumpGeneration(cn)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(EnrolResponse{Cert: string(certPEM)})
 	b.audit("enrol", cn, "allow", "")

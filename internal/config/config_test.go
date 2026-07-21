@@ -619,7 +619,7 @@ broker:
   admin_port: 8444
   tools:
     - name: db
-      command: [lever-tool-db, -dsn, "file:ref.db"]
+      command: [true, -dsn, "file:ref.db"]
       backend: 127.0.0.1:3201
       operations:
         - {name: read, caveat_param: {table: table, filter: filter}}
@@ -886,8 +886,8 @@ func TestLoadRejectsExternalToolShapeErrors(t *testing.T) {
 		{"non-loopback backend", "backend: 127.0.0.1:3300", "backend: 192.168.1.9:3300"},
 		{"hostname backend", "backend: 127.0.0.1:3300", "backend: localhost:3300"},
 		{"scheme in backend", "backend: 127.0.0.1:3300", "backend: http://127.0.0.1:3300"},
-		{"gate on supervised tool", "command: [lever-tool-db, -dsn, \"file:ref.db\"]",
-			"command: [lever-tool-db, -dsn, \"file:ref.db\"]\n      gate: coarse"},
+		{"gate on supervised tool", "command: [true, -dsn, \"file:ref.db\"]",
+			"command: [true, -dsn, \"file:ref.db\"]\n      gate: coarse"},
 		{"reserved op name", "- {name: search}", "- {name: \"*\"}"},
 	}
 	for _, c := range cases {
@@ -907,7 +907,7 @@ func TestLoadRejectsFineExternalWithoutOperations(t *testing.T) {
 }
 
 func TestLoadRejectsSupervisedToolWithoutCommand(t *testing.T) {
-	cfg := replaceFirst(extCfg, "command: [lever-tool-db, -dsn, \"file:ref.db\"]\n      ", "")
+	cfg := replaceFirst(extCfg, "command: [true, -dsn, \"file:ref.db\"]\n      ", "")
 	if _, err := Load(writeConfig(t, cfg)); err == nil {
 		t.Fatal("a non-external tool with no command must be rejected")
 	}
@@ -940,8 +940,8 @@ func TestLoadAcceptsBackendWithPath(t *testing.T) {
 // supervised tool setting it is a config mistake that should fail closed, not
 // be silently ignored.
 func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
-	cfg := replaceFirst(baseCfg, "command: [lever-tool-db, -dsn, \"file:ref.db\"]",
-		"command: [lever-tool-db, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true")
+	cfg := replaceFirst(baseCfg, "command: [true, -dsn, \"file:ref.db\"]",
+		"command: [true, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true")
 	_, err := Load(writeConfig(t, cfg))
 	if err == nil {
 		t.Fatal("a non-external tool setting allow_non_loopback must be rejected")
@@ -1141,5 +1141,22 @@ func TestValidateDiskFormat(t *testing.T) {
 	}
 	if err := validateDisk("lots"); err == nil {
 		t.Fatalf("bad size should be rejected")
+	}
+}
+
+func TestToolValidateResolvesCommand(t *testing.T) {
+	// A binary guaranteed on the minimal PATH.
+	ok := Tool{Name: "t", Command: []string{"true"}}
+	if err := ok.validate(); err != nil {
+		t.Fatalf("`true` is on the minimal PATH, should validate: %v", err)
+	}
+	// A binary that is not on the minimal PATH.
+	bad := Tool{Name: "t", Command: []string{"definitely-not-on-path-xyz"}}
+	err := bad.validate()
+	if err == nil {
+		t.Fatalf("missing binary should be rejected")
+	}
+	if !strings.Contains(err.Error(), "definitely-not-on-path-xyz") || !strings.Contains(err.Error(), "PATH") {
+		t.Fatalf("error must name the command and PATH, got: %v", err)
 	}
 }

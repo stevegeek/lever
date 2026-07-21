@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,28 +71,26 @@ func TestCheckBrokerAliveHealthy(t *testing.T) {
 	}
 }
 
-func TestCheckExternalBackendsNoneDeclared(t *testing.T) {
-	// A supervised (non-external) tool must not be probed — a down/absent probe
-	// for it would be a false alarm.
-	tools := []config.Tool{{Name: "db", Command: []string{"lever-tool-db"}, Backend: "127.0.0.1:3201"}}
-	r := checkExternalBackends(tools, failDial)
+func TestCheckToolBackendsNoneDeclared(t *testing.T) {
+	r := checkToolBackends(nil, failDial)
 	if !r.ok {
-		t.Fatalf("no external tools => pass (nothing to probe); got %+v", r)
+		t.Fatalf("no tools declared => pass (nothing to probe); got %+v", r)
 	}
 }
 
-func TestCheckExternalBackendsAllReachable(t *testing.T) {
+func TestCheckToolBackendsAllReachable(t *testing.T) {
 	tools := []config.Tool{
 		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
 		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
+		{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:3201"},
 	}
-	r := checkExternalBackends(tools, okDial)
+	r := checkToolBackends(tools, okDial)
 	if !r.ok {
-		t.Fatalf("all backends reachable => pass; got %+v", r)
+		t.Fatalf("all external backends reachable + supervised command resolvable => pass; got %+v", r)
 	}
 }
 
-func TestCheckExternalBackendsSomeDown(t *testing.T) {
+func TestCheckToolBackendsSomeDown(t *testing.T) {
 	var dialed []string
 	dial := func(addr string) error {
 		dialed = append(dialed, addr)
@@ -104,7 +103,7 @@ func TestCheckExternalBackendsSomeDown(t *testing.T) {
 		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
 		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
 	}
-	r := checkExternalBackends(tools, dial)
+	r := checkToolBackends(tools, dial)
 	if r.ok {
 		t.Fatal("a down backend must fail the check")
 	}
@@ -120,6 +119,22 @@ func TestCheckExternalBackendsSomeDown(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("qmd backend path must be stripped for the dial; dialed=%v", dialed)
+	}
+}
+
+func TestCheckToolBackendsSupervisedMissing(t *testing.T) {
+	tools := []config.Tool{{Name: "db", Command: []string{"definitely-not-on-path-xyz"}}}
+	got := checkToolBackends(tools, func(string) error { return nil })
+	if got.ok {
+		t.Fatalf("supervised tool with missing binary should fail the check")
+	}
+}
+
+func TestCheckToolBackendsExternalDown(t *testing.T) {
+	tools := []config.Tool{{Name: "x", External: true, Backend: "127.0.0.1:59999"}}
+	got := checkToolBackends(tools, func(string) error { return fmt.Errorf("refused") })
+	if got.ok {
+		t.Fatalf("down external backend should fail the check")
 	}
 }
 

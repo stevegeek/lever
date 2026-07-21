@@ -58,30 +58,42 @@ func checkBrokerAlive(st brokerctl.State, jailPort int, dial dialFunc) checkResu
 	return checkResult{name, true, fmt.Sprintf("pid %d, serving on %s", pid, addr), ""}
 }
 
-// checkExternalBackends verifies every external tool's backend is listening.
-// External servers are fronted, not spawned, so a down one surfaces only as a
-// 502 on the tool call — this turns that into an up-front diagnosis.
-func checkExternalBackends(tools []config.Tool, dial dialFunc) checkResult {
-	const name = "external tool backends"
+// checkToolBackends verifies every broker tool is reachable/spawnable up
+// front: external tools must be listening on their loopback backend, and
+// supervised tools must have their command resolvable on the supervisor PATH
+// (a not-on-PATH supervised tool fails silently at spawn otherwise). Config
+// validation already rejects an unresolvable supervised command, so a config
+// that loaded is expected to pass the resolution half here — this check is the
+// operator-facing confirmation and the external-liveness probe.
+func checkToolBackends(tools []config.Tool, dial dialFunc) checkResult {
+	const name = "tool backends"
 	var down []string
 	probed := 0
 	for _, t := range tools {
-		if !t.External {
+		probed++
+		if t.External {
+			addr := backendHostPort(t.Backend)
+			if err := dial(addr); err != nil {
+				down = append(down, fmt.Sprintf("%s (external, %s)", t.Name, addr))
+			}
 			continue
 		}
-		probed++
-		addr := backendHostPort(t.Backend)
-		if err := dial(addr); err != nil {
-			down = append(down, fmt.Sprintf("%s (%s)", t.Name, addr))
+		if len(t.Command) > 0 {
+			bin := t.Command[0]
+			if !strings.ContainsRune(bin, '/') {
+				if _, err := config.LookPathIn(bin, config.ToolSupervisorPATH); err != nil {
+					down = append(down, fmt.Sprintf("%s (supervised, %q not on PATH)", t.Name, bin))
+				}
+			}
 		}
 	}
 	switch {
 	case probed == 0:
-		return checkResult{name, true, "no external tools declared", ""}
+		return checkResult{name, true, "no tools declared", ""}
 	case len(down) > 0:
-		return checkResult{name, false, "not listening: " + strings.Join(down, ", "), "start the server(s) (e.g. your MCP launcher); each must listen on its loopback backend"}
+		return checkResult{name, false, "unreachable: " + strings.Join(down, ", "), "start external server(s) on their loopback backend; for supervised tools, use an absolute command or install it on " + config.ToolSupervisorPATH}
 	default:
-		return checkResult{name, true, fmt.Sprintf("%d reachable", probed), ""}
+		return checkResult{name, true, fmt.Sprintf("%d ok", probed), ""}
 	}
 }
 

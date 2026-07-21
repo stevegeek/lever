@@ -46,7 +46,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		args := append([]string{}, t.Command[1:]...)
 		args = append(args, "-backend", t.Backend, "-admin", s.adminURL)
 		cmd := exec.CommandContext(ctx, t.Command[0], args...)
-		cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"} // minimal, no inherited secrets
+		cmd.Env = []string{"PATH=" + config.ToolSupervisorPATH} // minimal, no inherited secrets
 		cmd.Stdout = s.logw
 		cmd.Stderr = s.logw
 		if err := cmd.Start(); err != nil {

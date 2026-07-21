@@ -27,7 +27,7 @@ broker:
   admin_port: 8444
   tools:
     - name: db
-      command: [lever-tool-db, -dsn, "file:ref.db"]
+      command: [true, -dsn, "file:ref.db"]
       backend: 127.0.0.1:3201
       operations:
         - name: read

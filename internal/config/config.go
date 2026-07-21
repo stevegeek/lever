@@ -74,6 +74,28 @@ func (t Tool) EffectiveGate() Gate {
 	return GateFine
 }
 
+// ToolSupervisorPATH is the EXACT PATH the broker supervisor spawns command
+// tools with (brokerctl.Supervisor). Config validation resolves each
+// supervised tool's binary against this same string so a not-on-PATH command
+// is rejected loudly at config-load instead of failing opaquely (or silently)
+// at spawn time.
+const ToolSupervisorPATH = "/usr/local/bin:/usr/bin:/bin"
+
+// LookPathIn resolves bin against an explicit colon-separated path list,
+// independent of the process environment (mirrors the supervisor's fixed PATH).
+func LookPathIn(bin, pathList string) (string, error) {
+	for _, dir := range filepath.SplitList(pathList) {
+		if dir == "" {
+			continue
+		}
+		p := filepath.Join(dir, bin)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%q not found in %q", bin, pathList)
+}
+
 // validate checks one broker.tools entry's shape, failing closed. External
 // tools are fronted, not spawned: backend required, command forbidden,
 // backend a literal loopback IP unless explicitly opted out. gate applies to
@@ -101,6 +123,16 @@ func (t Tool) validate() error {
 		}
 		if len(t.Command) == 0 {
 			return fmt.Errorf("config: broker tool %q has no command (a supervised tool needs one; did you mean external: true?)", t.Name)
+		}
+		bin := t.Command[0]
+		if !strings.ContainsRune(bin, '/') {
+			resolved, err := LookPathIn(bin, ToolSupervisorPATH)
+			if err != nil {
+				return fmt.Errorf("config: broker tool %q command %q not found on the supervisor PATH (%s); use an absolute path or install it there", t.Name, bin, ToolSupervisorPATH)
+			}
+			_ = resolved
+		} else if _, err := os.Stat(bin); err != nil {
+			return fmt.Errorf("config: broker tool %q command %q is not executable/present: %v", t.Name, bin, err)
 		}
 		return nil
 	}

@@ -138,6 +138,32 @@ func TestCheckToolBackendsExternalDown(t *testing.T) {
 	}
 }
 
+// TestCheckToolBackendsSupervisedNeverDialed pins that a supervised tool's
+// Backend (its own MCP listen address, unrelated to spawnability) is never
+// TCP-dialed by the check — only external tools are dialed. Pairs a
+// resolvable supervised command with an always-failing dial: if the
+// supervised branch ever dialed Backend, this would wrongly fail.
+func TestCheckToolBackendsSupervisedNeverDialed(t *testing.T) {
+	failDial := func(string) error { return fmt.Errorf("refused") }
+	tools := []config.Tool{{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:59999"}}
+	if got := checkToolBackends(tools, failDial); !got.ok {
+		t.Fatalf("supervised tool's Backend must never be dialed; got %+v", got)
+	}
+}
+
+// TestCheckToolBackendsSupervisedAbsolutePathMissing covers the
+// slash-containing (absolute path) supervised branch: today an absolute
+// command path got zero doctor coverage (only the PATH-scoped branch was
+// checked). A missing absolute-path binary must fail the check same as a
+// not-on-PATH bare name.
+func TestCheckToolBackendsSupervisedAbsolutePathMissing(t *testing.T) {
+	tools := []config.Tool{{Name: "db", Command: []string{"/nonexistent/definitely-not-here-xyz"}}}
+	got := checkToolBackends(tools, func(string) error { return nil })
+	if got.ok {
+		t.Fatalf("supervised tool with a missing absolute-path command should fail the check")
+	}
+}
+
 func TestCheckScionProjectConsistent(t *testing.T) {
 	st := backend.ScionProjectState{
 		MarkerPresent: true,

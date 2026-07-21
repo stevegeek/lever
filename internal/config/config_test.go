@@ -1160,3 +1160,22 @@ func TestToolValidateResolvesCommand(t *testing.T) {
 		t.Fatalf("error must name the command and PATH, got: %v", err)
 	}
 }
+
+// TestToolValidateRejectsNonExecutableAbsolutePath: the slash-containing
+// (absolute path) branch of Tool.validate() must apply the same
+// executable-file check as the PATH-scoped branch — a directory or a
+// non-executable file is exactly the #9 failure mode (opaque spawn failure),
+// just via an absolute path instead of a bare PATH-resolved name.
+func TestToolValidateRejectsNonExecutableAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	if err := (Tool{Name: "t", Command: []string{dir}}).validate(); err == nil {
+		t.Fatalf("a directory command path should be rejected")
+	}
+	notExec := filepath.Join(dir, "not-exec")
+	if err := os.WriteFile(notExec, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Tool{Name: "t", Command: []string{notExec}}).validate(); err == nil {
+		t.Fatalf("a non-executable file command path should be rejected")
+	}
+}

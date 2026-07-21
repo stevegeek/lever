@@ -84,6 +84,8 @@ func checkToolBackends(tools []config.Tool, dial dialFunc) checkResult {
 				if _, err := config.LookPathIn(bin, config.ToolSupervisorPATH); err != nil {
 					down = append(down, fmt.Sprintf("%s (supervised, %q not on PATH)", t.Name, bin))
 				}
+			} else if !config.IsExecutableFile(bin) {
+				down = append(down, fmt.Sprintf("%s (supervised, %q is not an executable file)", t.Name, bin))
 			}
 		}
 	}

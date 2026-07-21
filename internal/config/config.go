@@ -81,6 +81,16 @@ func (t Tool) EffectiveGate() Gate {
 // at spawn time.
 const ToolSupervisorPATH = "/usr/local/bin:/usr/bin:/bin"
 
+// IsExecutableFile reports whether p is a regular file with at least one
+// executable bit set — the same shape check LookPathIn applies to each PATH
+// candidate, exported so a resolved/absolute supervised-tool command can be
+// re-verified (config validation, and doctor's spawnability probe) without
+// duplicating the stat logic.
+func IsExecutableFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
+}
+
 // LookPathIn resolves bin against an explicit colon-separated path list,
 // independent of the process environment (mirrors the supervisor's fixed PATH).
 func LookPathIn(bin, pathList string) (string, error) {
@@ -89,7 +99,7 @@ func LookPathIn(bin, pathList string) (string, error) {
 			continue
 		}
 		p := filepath.Join(dir, bin)
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+		if IsExecutableFile(p) {
 			return p, nil
 		}
 	}
@@ -131,8 +141,8 @@ func (t Tool) validate() error {
 				return fmt.Errorf("config: broker tool %q command %q not found on the supervisor PATH (%s); use an absolute path or install it there", t.Name, bin, ToolSupervisorPATH)
 			}
 			_ = resolved
-		} else if _, err := os.Stat(bin); err != nil {
-			return fmt.Errorf("config: broker tool %q command %q is not executable/present: %v", t.Name, bin, err)
+		} else if !IsExecutableFile(bin) {
+			return fmt.Errorf("config: broker tool %q command %q is not an executable file", t.Name, bin)
 		}
 		return nil
 	}

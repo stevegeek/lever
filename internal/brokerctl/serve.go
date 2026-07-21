@@ -202,7 +202,7 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 		return err
 	}
 
-	sup := NewSupervisor(app.Broker.Tools, adminURL, logf)
+	sup := NewSupervisor(app.Broker.Tools, adminURL, state.ToolLogDir())
 	if err := sup.Start(ctx); err != nil {
 		_ = jailLn.Close()
 		_ = adminLn.Close()

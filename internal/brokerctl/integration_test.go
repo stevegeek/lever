@@ -281,12 +281,7 @@ broker:
 	// ── Supervise the REAL lever-tool-db subprocess ────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	logf, err := os.OpenFile(filepath.Join(work, "tool.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer logf.Close()
-	sup := NewSupervisor(app.Broker.Tools, adminURL, logf)
+	sup := NewSupervisor(app.Broker.Tools, adminURL, state.ToolLogDir())
 	if err := sup.Start(ctx); err != nil {
 		t.Fatalf("supervisor start: %v", err)
 	}

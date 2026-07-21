@@ -69,11 +69,32 @@ All host-side state lives in `.lever-state/` at the instance root:
 |---|---|---|
 | `broker.log` | every capability decision — `allow`/`deny` with caller, tool, op, and the deny reason. Mint allows are a ledger line: the token `id`, the matched policy `rule` (`obtain:…`/`delegate:…`), `exp`, `epoch`, and any baked `constraints`. Gateway and LLM lines carry the same `id`, so a mint correlates with every later use — and denied use — of that token: `grep id=<id> .lever-state/broker.log`. (On deny lines the id is the token's *claimed* id — the signature was not necessarily valid.) | **first stop for any 403**: it names the difference between "no token attached", "not granted", and "revoked" |
 | `broker.out.log` | the broker process's own stderr (startup, proxy errors) | broker won't start, or brokered tool calls 502 (backend refused) |
+| `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 
 Agent-side, the source of truth is the session itself: `lever attach [name]` shows the full
 scrollback including every incoming message and tool call. `lever doctor` should be your first
 command whenever anything looks wrong — every check prints a specific fix hint.
+
+### Log rotation
+
+None of the files above rotate on their own — a long-running instance's `.lever-state/` grows
+without bound. Rotate them with a weekly `logrotate` drop-in (adjust the path to your instance):
+
+```
+/path/to/instance/.lever-state/*.log /path/to/instance/.lever-state/tool-logs/*.log {
+    weekly
+    rotate 8
+    copytruncate
+    compress
+    missingok
+    notifempty
+}
+```
+
+`copytruncate` avoids restarting the broker/tools on rotation — they keep writing to the same
+(now-truncated) file descriptor. Give `broker.log` (the audit trail) a longer retention than the
+others if you split it into its own stanza.
 
 ## Troubleshooting quick table
 

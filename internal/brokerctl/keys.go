@@ -31,6 +31,9 @@ func (s State) Log() string           { return filepath.Join(s.Dir, "broker.log"
 func (s State) OutLog() string        { return filepath.Join(s.Dir, "broker.out.log") }
 func (s State) ControllerPAT() string { return filepath.Join(s.Dir, "controller.pat") }
 
+// ToolLogDir is the directory holding per-supervised-tool logs.
+func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }
+
 // EnsureKeys loads the CA + capability-signing root keypair from the state dir, generating
 // and persisting them (0600 secrets) on first use. Reused across restarts so
 // issued agent certs survive a broker restart.

@@ -35,3 +35,4 @@ image/lever-claude/scionhook/
 # Stray local build outputs at repo root.
 /lever-tool-todo
 /weather-stub
+/dist/

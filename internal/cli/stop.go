@@ -60,9 +60,10 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// next `lever up`. (`scion stop` would REMOVE the container and leave
 			// a `stopped` record instead.) Gated on ResolveRunUser so a halted or
 			// never-provisioned machine is still stoppable; the suspend error is
-			// ignored (the VM powers off regardless, and apply's observe-first
-			// start-manager copes with whatever state results). The timeout stops
-			// a hung scion from blocking power-off.
+			// non-fatal — logged, not returned (the VM powers off regardless, and
+			// apply's observe-first start-manager copes with whatever state
+			// results) — but surfaced so a recurrence of #3 is diagnosable. The
+			// timeout stops a hung scion from blocking power-off.
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -73,7 +74,9 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 						HubEndpoint:    "http://127.0.0.1:8080",
 						HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
 					})
-					_ = sc.Suspend(sctx, appName, b.MountDest())
+					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
+						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %v\n", serr)
+					}
 					cancel()
 				}
 			}

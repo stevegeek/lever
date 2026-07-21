@@ -127,8 +127,6 @@ The honest gaps — things you should know before relying on it:
 - **On the Lima backend, `lever stop` → `up` currently comes back with a fresh manager
   conversation** ([#3](https://github.com/stevegeek/lever/issues/3)). OrbStack preserves the
   conversation across a power-off; Lima doesn't yet.
-- **The first `lever up` after a cold VM boot can fail once** with a hub timeout; rerunning it
-  heals ([#5](https://github.com/stevegeek/lever/issues/5)).
 - **No prebuilt binaries or Homebrew yet** ([#1](https://github.com/stevegeek/lever/issues/1),
   [#2](https://github.com/stevegeek/lever/issues/2)) — install via `go install` or a clone. A Go
   toolchain is also required at *runtime* (Scion is compiled at apply time), and the agent image

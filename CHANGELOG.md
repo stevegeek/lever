@@ -7,6 +7,28 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-21
+
+### Changed
+- Agents now run in their **own per-agent network namespace** (rootless podman's
+  default pasta networking) instead of a shared jail netns (`--network=host`).
+  Each container's `127.0.0.1` is now private, which closes a cross-agent
+  escalation: the in-container agent gateway proxy (`127.0.0.1:8462`, holds the
+  agent's mTLS leaf, trusts whoever reaches its loopback) was jail-wide under
+  host networking, so a co-resident worker could `POST` the manager's gateway
+  and be authenticated to the broker **as the manager** with no credential.
+  Hub reachability across the netns boundary is preserved by a pasta
+  `--map-host-loopback` option staged in the guest `containers.conf.d`
+  (Scion's auto-computed container hub endpoint, `host.containers.internal:PORT`
+  for podman, resolves to it); egress containment is unaffected because pasta's
+  userspace egress still re-emerges on the jail `OUTPUT` chain (`LEVER_EGRESS`),
+  not a bypassing `FORWARD` path. No Scion change required. Escape hatch:
+  `LEVER_FORCE_HOST_NETWORK=1` on the host restores `--network=host` for
+  debugging (reopens the shared-loopback gap; not isolation-safe). **Cutover
+  note:** switching a running instance requires `lever stop` + `lever up` — the
+  long-running Scion server process caches the old force-host env, so recreating
+  only the agent is not enough. See the new worker-isolation §4.3.
+
 ## [0.6.0] - 2026-07-17
 
 ### Changed

@@ -137,6 +137,24 @@ never sees a capability), and replaces the old ambient pattern (per-server `allo
   process can still hit the server's `127.0.0.1` port directly — host processes are already
   inside the host trust boundary; the broker does not claim to sandbox them from each other.
 
+**In-jail hub reachability (honest residual).** The capability broker above is the audited seam
+for agent lifecycle, but the in-jail scion Hub API itself remains reachable from inside an agent
+container, using that agent's own scion token (distinct from [§4.2](/security-model/worker-isolation/)'s
+host-only controller PAT — this is the per-agent token scion mints for status/heartbeat use). The
+2026-07-06 create/delete-unaudited vector is closed **structurally**, not by a runtime guard: the
+real hub always starts with `--dev-auth=false` (`internal/apply/run.go:273`, hardcoded, no config
+field turns it on); lever defines no hub-access-scope config anywhere (no `HubAccessScopes` or
+equivalent); and with dev-auth off, an agent token carries only `agent:status:update` /
+`agent:token:refresh` / `project:agent:notify` — scion grants the create/lifecycle scopes only in
+dev-auth mode. So a lever agent's token cannot create or lifecycle agents; those verbs 403 on the
+missing scope. Because that posture is structural rather than config-toggled, there is no runtime
+knob for a `lever doctor` check to guard — a check reading config would always trivially pass. The
+**known exception** is agent `DELETE`: scion does not yet apply an equivalent agent-identity scope
+check to that handler, so an agent's own (minimally-scoped) token can still call it. Closing that
+gap is a scion-side change, tracked separately, not something lever's controller-PAT model can
+guard from the outside. Operationally this residual is bounded by closed egress and a first-party
+manager ([§7](/security-model/compromise/)).
+
 ### 6.3 Leaf rotation and the re-read invariant
 
 The mTLS identity this section rests on — the cert an agent presents to mint a capability, and

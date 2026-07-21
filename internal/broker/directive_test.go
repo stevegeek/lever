@@ -143,6 +143,27 @@ func TestPersistCalledOnEveryMutationAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnsureGenerationEstablishesButNeverBumps(t *testing.T) {
+	s := newStore(nil)
+	// Unset (0) → established at 1: the restarted / pre-existing agent case.
+	s.EnsureGeneration("mgr")
+	if g := s.Generation("mgr"); g != 1 {
+		t.Fatalf("EnsureGeneration on unset = %d, want 1", g)
+	}
+	// Already established → unchanged: renew must NOT bump (would invalidate the
+	// agent's own active directives every 12h refresh).
+	s.EnsureGeneration("mgr")
+	if g := s.Generation("mgr"); g != 1 {
+		t.Fatalf("EnsureGeneration on gen 1 = %d, want 1 (no bump on renew)", g)
+	}
+	// A genuine re-enrol still bumps; a later renew leaves the bumped value.
+	s.BumpGeneration("mgr") // → 2 (recycle)
+	s.EnsureGeneration("mgr")
+	if g := s.Generation("mgr"); g != 2 {
+		t.Fatalf("EnsureGeneration after bump = %d, want 2 (renew never rewinds/bumps)", g)
+	}
+}
+
 func TestListReportsExpiredAndOmitsStatementBytes(t *testing.T) {
 	now := time.Now()
 	s := newStore(nil)

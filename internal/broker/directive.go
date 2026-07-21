@@ -236,3 +236,23 @@ func (s *DirectiveStore) Generation(cn string) int {
 	defer s.mu.Unlock()
 	return s.gens[cn]
 }
+
+// EnsureGeneration establishes cn's generation at 1 if it has none yet (0),
+// WITHOUT bumping an existing one. Called on /renew: an agent that restarts
+// with a persisted cert (or whose cert predates this feature) refreshes via
+// /renew and never re-hits /enrol, so without this its generation stays 0 and
+// no operator directive can ever target it. Bumping is reserved for genuine
+// re-enrolment (BumpGeneration) — renew is the same identity at the same
+// enrolment epoch, so bumping here would invalidate the agent's own active
+// directives on every 12h refresh.
+func (s *DirectiveStore) EnsureGeneration(cn string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gens[cn] != 0 {
+		return
+	}
+	s.gens[cn] = 1
+	// Apply in memory regardless of persist outcome (error already logged): a
+	// transient disk error must not leave the agent unable to receive directives.
+	_ = s.persistLocked()
+}

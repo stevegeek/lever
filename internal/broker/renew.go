@@ -76,6 +76,12 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// Establish this agent's directive generation if it has none yet. An agent
+	// that restarts with a persisted cert (or whose cert predates the operator-
+	// directive feature) refreshes via /renew and never re-hits /enrol, so
+	// without this its generation stays 0 and no operator directive can target
+	// it. Never bumps an existing generation — that is reserved for re-enrolment.
+	b.directives.EnsureGeneration(caller)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(RenewResponse{Cert: string(certPEM)})
 	b.audit("renew", caller, "allow", "")

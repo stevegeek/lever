@@ -367,10 +367,13 @@ func newDirectiveSelftestCmd() *cobra.Command {
 				ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339),
 				Action:      opsig.Action{Kind: "instruction", Text: "selftest"},
 			}
+			// On failure, propagate err as-is (no extra print here): cobra's
+			// default error handler prints "Error: ..." for a non-nil RunE
+			// return, which — combined with a non-zero exit (main.go) — IS the
+			// failure verdict; printing it twice here would just be noise.
 			var out map[string]any
 			if err := signAndPostStatement(cmd, st.DirectiveSock(), keyPath, "/directive/selftest", stmt, &out); err != nil {
-				cmd.Printf("selftest FAILED: %v\n", err)
-				return err
+				return fmt.Errorf("selftest FAILED: %w", err)
 			}
 			cmd.Println("selftest OK: signing key verifies against the broker's allowed_signers")
 			return nil

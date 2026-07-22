@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-22
+
 ### Changed
 - **The Scion fork dependency for worker subtree isolation is gone.** Scion
   merged relative `--workspace` paths resolved against the project root with
@@ -19,6 +21,8 @@ version bump moves the block under the new version heading.
   bumped accordingly. On an older Scion, worker dispatch regresses to the old
   whole-tree-mount enrolment failure (fails closed: the worker 403s at
   enrolment) — bump the pin, or keep building from the fork until you do.
+- The e2e test scripts' default `SCION_VERSION` bumped `666333f9` → `b4c9911d`
+  ([#11](https://github.com/stevegeek/lever/issues/11)).
 
 ## [0.9.2] - 2026-07-22
 

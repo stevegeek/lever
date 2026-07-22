@@ -144,15 +144,12 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 	// caller identity. An LLM-supplied bound_to that is wider than policy allows is
 	// therefore not a client-side escalation — the broker refuses to mint it.
 	case "request":
-		tool, op, boundTo, argErr := capabilityArgs(args, capBindRequest)
+		m, argErr := requestArgs(args, s.agentCN)
 		if argErr != nil {
 			writeRPCError(w, id, -32602, argErr.Error())
 			return
 		}
-		if boundTo == "" {
-			boundTo = s.agentCN
-		}
-		tok, err := Request(ctx, s.brokerURL, s.client, tool, op, boundTo, constraintArgs(args, capReservedKeys...))
+		tok, err := Request(ctx, s.brokerURL, s.client, m.tool, m.op, m.boundTo, constraintArgs(args, m.reserved...))
 		if err != nil {
 			writeRPCError(w, id, -32000, err.Error())
 			return
@@ -163,12 +160,12 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 	// mTLS caller may delegate this capability to `to`, and re-validates every
 	// constraint; minting bound-to-other is a single online call.
 	case "delegate":
-		tool, op, to, argErr := capabilityArgs(args, capBindDelegate)
+		m, argErr := delegateArgs(args, s.agentCN)
 		if argErr != nil {
 			writeRPCError(w, id, -32602, argErr.Error())
 			return
 		}
-		tok, err := Request(ctx, s.brokerURL, s.client, tool, op, to, constraintArgs(args, capReservedKeys...))
+		tok, err := Request(ctx, s.brokerURL, s.client, m.tool, m.op, m.boundTo, constraintArgs(args, m.reserved...))
 		if err != nil {
 			writeRPCError(w, id, -32000, err.Error())
 			return
@@ -252,66 +249,107 @@ func directiveID(args map[string]string) (string, error) {
 	return did, nil
 }
 
-// The bind-target argument of each capability tool, and the reserved keys that
-// are never constraints. Both spellings are reserved for BOTH tools: after
-// capabilityArgs rejects a populated sibling, only a blank one can still be
-// present, and baking `bound_to=""` into a delegated token as a constraint
-// would be nonsense.
+// The bind-target argument of each capability tool. They differ, and the
+// difference matters below: `bound_to` is lever's own vocabulary and is never a
+// tool's argument name, whereas `to` is an ordinary argument name for a real
+// tool (mail, message, transfer).
 const (
 	capBindRequest  = "bound_to"
 	capBindDelegate = "to"
 )
 
-var capReservedKeys = []string{"tool", "op", capBindRequest, capBindDelegate}
+// capMint is a capability tool's validated arguments: the mint parameters plus
+// the keys that must NOT survive into the token as constraints.
+type capMint struct {
+	tool, op, boundTo string
+	reserved          []string
+}
 
-// capabilityArgs validates the caller's own arguments to `request`/`delegate`
-// before any broker call, returning them trimmed. bindKey selects which tool's
-// bind-target spelling applies.
+// missingArg names the argument the caller got wrong. "or non-string" because
+// handleToolsCall drops non-string argument values, so {"to": 123} arrives
+// indistinguishable from an absent one.
+func missingArg(name string) error {
+	return errors.New(`missing or non-string required argument "` + name + `"`)
+}
+
+// mintToolOp validates the two arguments both capability tools share.
 //
 // This mirrors directiveID's rationale: the broker answers a caller-side
 // argument mistake with a policy/registry verdict, which misattributes the
-// error — but here the quieter failure is worse than a wrong error string.
-// handleToolsCall keeps every unrecognised string argument, and constraintArgs
-// strips only reserved keys, so a misspelt bind target was not dropped, it was
-// promoted to a narrowing constraint while the bind target itself went out
-// empty. The broker defaults an empty bind target to the caller (request.go,
-// "default: self-obtain"), so `delegate` with a misspelt `to` minted a
-// SELF-bound token and returned it as an ordinary success. Nothing failed; the
-// agent simply believed it had handed a capability to someone else.
-//
-// Never a privilege question — MayObtain still authoritatively gates what the
-// caller may mint, and these checks read only the caller's own arguments, so
-// they leak nothing and cannot become an oracle.
-func capabilityArgs(args map[string]string, bindKey string) (tool, op, boundTo string, err error) {
-	// "or non-string": handleToolsCall drops non-string argument values, so
-	// {"to": 123} arrives here indistinguishable from an absent one.
-	missing := func(name string) error {
-		return errors.New(`missing or non-string required argument "` + name + `"`)
-	}
+// error. These checks read only the caller's own arguments and run before any
+// lookup, so they leak nothing and cannot become an oracle.
+func mintToolOp(args map[string]string) (tool, op string, err error) {
 	if tool = strings.TrimSpace(args["tool"]); tool == "" {
-		return "", "", "", missing("tool")
+		return "", "", missingArg("tool")
 	}
 	if op = strings.TrimSpace(args["op"]); op == "" {
-		return "", "", "", missing("op")
+		return "", "", missingArg("op")
 	}
-	// The two tools sit side by side and spell the bind target differently, so
-	// the other one's spelling is the likeliest near-miss — and the one that
-	// silently becomes a constraint. Name the argument this tool wants.
-	sibling := capBindRequest
-	if bindKey == capBindRequest {
-		sibling = capBindDelegate
+	return tool, op, nil
+}
+
+// requestArgs validates `request`, whose bind target is optional: absent means
+// self, which is the tool's documented contract.
+//
+// Note what is deliberately NOT guarded here. A `to` argument is left alone and
+// becomes an ordinary narrowing constraint, because constraint keys ARE tool
+// argument names — registry.MapParams identity-maps them, and
+// ValidateConstraints leaves keys without an allowed_values entry unrestricted.
+// Reserving `to` would make a narrowed token unmintable for any tool that has a
+// `to` argument, and the likeliest repair a model would then try is to drop the
+// argument, minting a WIDER token. On this tool the trade is not worth it:
+// binding to self is what `request` promises, so nothing diverges.
+func requestArgs(args map[string]string, self string) (capMint, error) {
+	tool, op, err := mintToolOp(args)
+	if err != nil {
+		return capMint{}, err
 	}
-	if strings.TrimSpace(args[sibling]) != "" {
-		return "", "", "", errors.New(`unknown argument "` + sibling + `" — this tool binds with "` + bindKey + `"`)
+	boundTo := strings.TrimSpace(args[capBindRequest])
+	if boundTo == "" {
+		boundTo = self
 	}
-	boundTo = strings.TrimSpace(args[bindKey])
-	// request's bound_to is optional and defaults to self by design. delegate's
-	// whole purpose is binding to another agent, so falling back to self-obtain
-	// is never what the caller meant.
-	if boundTo == "" && bindKey == capBindDelegate {
-		return "", "", "", missing(capBindDelegate)
+	return capMint{tool, op, boundTo, []string{"tool", "op", capBindRequest}}, nil
+}
+
+// delegateArgs validates `delegate`, whose entire purpose is binding to ANOTHER
+// agent — so unlike `request` it has no meaningful default, and every way of
+// failing to name a recipient used to succeed silently. handleToolsCall keeps
+// every unrecognised string argument and constraintArgs strips only reserved
+// keys, so a misspelt `to` was not dropped: it was promoted to a narrowing
+// constraint while the bind target went out empty. The broker defaults an empty
+// bind target to the caller (request.go, "default: self-obtain"), so a
+// SELF-bound token was minted and returned as an ordinary success — the agent
+// believed it had handed a capability to someone else. Never a privilege
+// question (MayObtain remains the authoritative gate), but a silent one.
+func delegateArgs(args map[string]string, self string) (capMint, error) {
+	tool, op, err := mintToolOp(args)
+	if err != nil {
+		return capMint{}, err
 	}
-	return tool, op, boundTo, nil
+	// `bound_to` is the sibling tool's spelling. Both present and disagreeing is
+	// ambiguous — pick nothing and say so, exactly as directiveID does for
+	// id/directive_id; both present and agreeing states one intent twice and is
+	// accepted. Either way it is reserved, never a constraint.
+	to, alias := strings.TrimSpace(args[capBindDelegate]), strings.TrimSpace(args[capBindRequest])
+	if to != "" && alias != "" && to != alias {
+		return capMint{}, errors.New(`"` + capBindDelegate + `" and "` + capBindRequest + `" disagree — name the recipient once, as "` + capBindDelegate + `"`)
+	}
+	if to == "" {
+		if alias != "" {
+			return capMint{}, errors.New(`this tool names the recipient with "` + capBindDelegate + `", not "` + capBindRequest + `"`)
+		}
+		return capMint{}, missingArg(capBindDelegate)
+	}
+	// Delegating to yourself hands nothing off, and it does not even go through
+	// the delegate policy: MayObtainRule branches on requester == boundTo and
+	// consults the OBTAIN set, so this succeeds for an agent holding no delegate
+	// grant at all and lands in the audit log looking like a self-obtain. Same
+	// silent no-op as the empty `to` above; `request` is the tool that mints for
+	// self, and it takes the same constraints.
+	if to == self {
+		return capMint{}, errors.New(`"` + capBindDelegate + `" names this agent — delegate hands a capability to another agent; use "request" to mint one for yourself`)
+	}
+	return capMint{tool, op, to, []string{"tool", "op", capBindDelegate, capBindRequest}}, nil
 }
 
 // constraintArgs returns args minus the reserved keys (the rest are constraint kv).

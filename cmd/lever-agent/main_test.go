@@ -193,6 +193,40 @@ func TestWriteClaudeSettingsEnvEmptyPathNoop(t *testing.T) {
 	}
 }
 
+func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
+	// lever-agent sits on $PATH inside every agent jail, so `delegate` here is
+	// the same mint path the capability MCP tool exposes — and it had the same
+	// defect: an absent -to sent an empty bind target, which the broker defaults
+	// to the caller, printing a SELF-bound token as a success. The checks must
+	// also run BEFORE the identity load, so a bad invocation reports the bad
+	// argument rather than whatever unrelated thing fails first.
+	missingID := filepath.Join(t.TempDir(), "no-such-id-dir")
+	for _, tc := range []struct {
+		name, verb, want string
+		args             []string
+	}{
+		{"delegate without -to", "delegate", `"-to"`, []string{"-tool", "db", "-op", "read"}},
+		{"delegate blank -to", "delegate", `"-to"`, []string{"-tool", "db", "-op", "read", "-to", "  "}},
+		// A positional `to=worker` is swallowed as a CONSTRAINT while -to stays
+		// empty — the CLI shape of the misspelt-argument bug.
+		{"delegate with positional to=", "delegate", `"-to"`, []string{"-tool", "db", "-op", "read", "to=worker"}},
+		{"delegate without -tool", "delegate", `"-tool"`, []string{"-op", "read", "-to", "worker"}},
+		{"request without -tool", "request", `"-tool"`, []string{"-op", "read"}},
+		{"request without -op", "request", `"-op"`, []string{"-tool", "db"}},
+	} {
+		err := cmdCLI(tc.verb, append([]string{"-id-dir", missingID}, tc.args...))
+		if err == nil {
+			t.Fatalf("%s: must error", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error = %q, want it to name %s", tc.name, err, tc.want)
+		}
+		if strings.Contains(err.Error(), "no identity") {
+			t.Fatalf("%s: argument checks must run before the identity load, got %q", tc.name, err)
+		}
+	}
+}
+
 func TestUnknownSubcommandErrors(t *testing.T) {
 	if err := run([]string{"lever-agent", "bogus"}); err == nil {
 		t.Fatal("unknown subcommand must error")

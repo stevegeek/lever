@@ -364,6 +364,10 @@ func TestMCPDelegateWithoutRecipientIsALocalArgumentError(t *testing.T) {
 		{"misspelt as agent", `{"tool":"db","op":"read","agent":"worker"}`},
 		// Non-string values are dropped by handleToolsCall, so this arrives absent.
 		{"non-string", `{"tool":"db","op":"read","to":123}`},
+		// Only the sibling tool's spelling: the recipient is named, but under an
+		// argument this tool does not declare, so it would have become a
+		// constraint while the bind target fell back to self.
+		{"sibling spelling only", `{"tool":"db","op":"read","bound_to":"worker"}`},
 	} {
 		called := false
 		srv := fakeCapBroker(t, &called)
@@ -419,34 +423,102 @@ func TestMCPCapabilityToolsRequireToolAndOp(t *testing.T) {
 	}
 }
 
-func TestMCPCapabilityToolsRejectSiblingBindArgument(t *testing.T) {
-	// `request` and `delegate` sit next to each other and spell the bind target
-	// differently (bound_to vs to). Each other's spelling is not a constraint the
-	// caller meant — left alone it is silently baked into the token as a bogus
-	// narrowing kv while the real bind target falls back to self. Reject it and
-	// name the right argument rather than minting something nobody asked for.
-	for _, tc := range []struct{ tool, args, want string }{
-		{"request", `{"tool":"db","op":"read","to":"worker"}`, `"bound_to"`},
-		{"delegate", `{"tool":"db","op":"read","to":"worker","bound_to":"worker"}`, `"to"`},
-	} {
-		called := false
-		srv := fakeCapBroker(t, &called)
-		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+func TestMCPDelegateRejectsConflictingBindTarget(t *testing.T) {
+	// On `delegate`, `to` is already the bind target, so a `bound_to` that
+	// DISAGREES with it is an unresolvable contradiction: acting on either
+	// spelling binds the token somewhere the caller did not unambiguously ask
+	// for. Reject rather than pick, mirroring directiveID's id/directive_id rule.
+	called := false
+	srv := fakeCapBroker(t, &called)
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
 
-		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tc.tool+`","arguments":`+tc.args+`}}`)
-		e, isErr := resp["error"].(map[string]any)
-		if !isErr {
-			t.Fatalf("%s: sibling bind argument must error, got %v", tc.tool, resp)
-		}
-		if code, _ := e["code"].(float64); int(code) != -32602 {
-			t.Fatalf("%s: error code = %v, want -32602", tc.tool, e["code"])
-		}
-		if msg, _ := e["message"].(string); !strings.Contains(msg, tc.want) {
-			t.Fatalf("%s: error = %q, want it to point at %s", tc.tool, msg, tc.want)
-		}
-		if called {
-			t.Fatalf("%s: must not reach the broker", tc.tool)
-		}
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":{"tool":"db","op":"read","to":"worker","bound_to":"other"}}}`)
+	e, isErr := resp["error"].(map[string]any)
+	if !isErr {
+		t.Fatalf("conflicting bind target must error, got %v", resp)
+	}
+	if code, _ := e["code"].(float64); int(code) != -32602 {
+		t.Fatalf("error code = %v, want -32602", e["code"])
+	}
+	if msg, _ := e["message"].(string); !strings.Contains(msg, `"to"`) {
+		t.Fatalf("error = %q, want it to point at the canonical argument", msg)
+	}
+	if called {
+		t.Fatalf("must not reach the broker")
+	}
+}
+
+func TestMCPDelegateAcceptsAgreeingBindTarget(t *testing.T) {
+	// A `bound_to` that AGREES with `to` states the same intent twice. directiveID
+	// (same file) tolerates agreeing duplicates and errors only on disagreement;
+	// the two sibling-argument policies must not contradict each other, and
+	// rejecting here would tell the model to use the argument it already used.
+	env := testBroker(t)
+	allowDelegate(t, env, "manager", "db", "read", "worker")
+	regDB(t, env)
+	managerID := enrolManager(t, env.CA)
+	client, _ := managerID.Client()
+	s := NewMCPServer(MCPConfig{BrokerURL: env.Server.URL, AgentCN: "manager", Client: client})
+
+	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":{"tool":"db","op":"read","to":"worker","bound_to":"worker"}}}`)
+	if !verifies(env.Keys.Public, text, "worker", map[string]string{}) {
+		t.Fatal("token must be bound to the agreed recipient (worker)")
+	}
+	// The redundant spelling must not survive as a narrowing constraint: baking
+	// bound_to=worker into the token would fail closed at call time.
+	if !verifies(env.Keys.Public, text, "worker", map[string]string{}) {
+		t.Fatal("bound_to must be reserved, not baked in as a constraint")
+	}
+}
+
+func TestMCPDelegateRejectsSelfAsRecipient(t *testing.T) {
+	// delegate names another agent to hand off to. Naming yourself hands nothing
+	// off — and it does not even go through the delegate policy: MayObtainRule
+	// (rules.go) branches on requester == boundTo and consults the OBTAIN set, so
+	// an agent with no delegate grants at all gets a success and an audit line
+	// that reads like a self-obtain. Same silent no-op class as the empty `to`.
+	called := false
+	srv := fakeCapBroker(t, &called)
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":{"tool":"db","op":"read","to":"manager"}}}`)
+	e, isErr := resp["error"].(map[string]any)
+	if !isErr {
+		t.Fatalf("self-delegation must error, got %v", resp)
+	}
+	if code, _ := e["code"].(float64); int(code) != -32602 {
+		t.Fatalf("error code = %v, want -32602", e["code"])
+	}
+	if msg, _ := e["message"].(string); !strings.Contains(msg, "request") {
+		t.Fatalf("error = %q, want it to point at the tool that does mint for self", msg)
+	}
+	if called {
+		t.Fatalf("must not reach the broker")
+	}
+}
+
+func TestMCPRequestKeepsToUsableAsAConstraint(t *testing.T) {
+	// Constraint keys ARE tool argument names — registry.MapParams identity-maps
+	// them (registry.go), and ValidateConstraints leaves keys without an
+	// allowed_values entry unrestricted. `to` is an ordinary argument name for a
+	// real tool (mail/message/transfer), so `request` must not reserve it: doing
+	// so removes the only route to a NARROWED token and pushes the model toward
+	// dropping the argument and minting an unconstrained one instead. `request`
+	// binds to self by contract, so there is no divergence to guard here — unlike
+	// `delegate`, whose whole purpose is binding elsewhere.
+	env := testBroker(t)
+	env.Rules.AllowObtain("manager", "db", "read")
+	regDB(t, env)
+	managerID := enrolManager(t, env.CA)
+	client, _ := managerID.Client()
+	s := NewMCPServer(MCPConfig{BrokerURL: env.Server.URL, AgentCN: "manager", Client: client})
+
+	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request","arguments":{"tool":"db","op":"read","to":"boss@corp.com"}}}`)
+	if !verifies(env.Keys.Public, text, "manager", map[string]string{"to": "boss@corp.com"}) {
+		t.Fatal("request must keep `to` as an ordinary narrowing constraint")
+	}
+	if verifies(env.Keys.Public, text, "manager", map[string]string{}) {
+		t.Fatal("the to= constraint must be baked in (a call without it must fail closed)")
 	}
 }
 

@@ -644,6 +644,31 @@ func cmdCLI(verb string, args []string) error {
 		return err
 	}
 
+	// Validate the caller's own arguments before touching the identity, the
+	// filesystem or the network, so a bad invocation names the bad argument
+	// instead of surfacing as whatever unrelated thing fails first. lever-agent
+	// is on $PATH inside every agent jail, so these verbs are the same mint path
+	// the capability MCP tool exposes and carried the same hazard: `delegate`
+	// with no recipient sent an EMPTY bind target, which the broker defaults to
+	// the caller ("default: self-obtain"), printing a SELF-bound token as an
+	// ordinary success. See requestArgs/delegateArgs in
+	// internal/agent/mcpserver.go — the checks are deliberately not shared,
+	// because the surfaces differ: here flags and constraints occupy separate
+	// namespaces, so a positional `to=...` is unambiguously a constraint, while
+	// the MCP tool has one flat argument map in which it is ambiguous.
+	switch verb {
+	case "request", "delegate":
+		if strings.TrimSpace(tool) == "" {
+			return fmt.Errorf(`%s: missing required argument "-tool"`, verb)
+		}
+		if strings.TrimSpace(op) == "" {
+			return fmt.Errorf(`%s: missing required argument "-op"`, verb)
+		}
+		if verb == "delegate" && strings.TrimSpace(to) == "" {
+			return errors.New(`delegate: missing required argument "-to" (the recipient agent CN); use "request" to mint a token for yourself`)
+		}
+	}
+
 	id, ok := agent.LoadIdentity(*idDir)
 	if !ok {
 		return fmt.Errorf("%s: no identity in %s", verb, *idDir)
@@ -679,6 +704,16 @@ func cmdCLI(verb string, args []string) error {
 		}
 		fmt.Println(tok)
 	case "delegate":
+		// Parity with the MCP tool: naming yourself hands nothing off, and it
+		// routes through the OBTAIN policy rather than the delegate one, so it
+		// succeeds with no delegate grant and audits like a self-obtain.
+		cn, err := leafCN(id.CertPEM)
+		if err != nil {
+			return err
+		}
+		if to == cn {
+			return errors.New(`delegate: "-to" names this agent; use "request" to mint a token for yourself`)
+		}
 		tok, err := agent.Request(ctx, bURL, client, tool, op, to, constraints)
 		if err != nil {
 			return err

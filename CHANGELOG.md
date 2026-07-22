@@ -8,19 +8,31 @@ version bump moves the block under the new version heading.
 ## [Unreleased]
 
 ### Fixed
-- `delegate` silently minted a **self-bound** token when its `to` argument was
-  absent, blank or misspelt, and reported success. The MCP server passed the
-  empty bind target to the broker, which defaults an empty target to the caller
-  (self-obtain), while the misspelt key survived as a bogus narrowing
-  constraint — so an agent could believe it had handed a capability to another
-  agent when it had only minted one for itself, with nothing in the response
-  saying otherwise. `request`/`delegate` now validate `tool`, `op` and the bind
-  target from the caller's own arguments before any broker call, returning
-  JSON-RPC `-32602`, and reject each other's bind-target spelling instead of
-  promoting it to a constraint. `request`'s `bound_to` stays optional and still
-  defaults to self. Not a privilege issue — `MayObtain` remains the
-  authoritative gate — but the same class of silent argument bug as 0.9.1's
-  directive fix. (#20)
+- `delegate` silently minted a **self-bound** token when no recipient was named,
+  and reported success. Both mint surfaces were affected: the capability MCP
+  tool (`delegate` with `to` absent, blank, or given under the sibling spelling
+  `bound_to`) and the in-jail CLI (`lever-agent delegate` with no `-to`). Each
+  passed an empty bind target to the broker, which defaults an empty target to
+  the caller (self-obtain), while on the MCP path an unrecognised key survived
+  as a bogus narrowing constraint — so an agent could believe it had handed a
+  capability to another agent when it had only minted one for itself, with
+  nothing saying otherwise. Both surfaces now validate `tool`, `op` and the
+  recipient from the caller's own arguments before any broker call (JSON-RPC
+  `-32602` on the MCP path), and both reject naming *yourself* as the
+  recipient — which hands nothing off and, because `MayObtainRule` treats
+  requester == recipient as a self-obtain, succeeded even for an agent holding
+  no delegate grant. `request`'s `bound_to` stays optional and still defaults to
+  self, and `to` remains usable as an ordinary constraint key on `request` (it
+  is an argument name real tools use). Not a privilege issue — `MayObtain`
+  remains the authoritative gate — but the same class of silent argument bug as
+  0.9.1's directive fix. (#20)
+
+  Known limitation: on the MCP path only the sibling spelling `bound_to` is
+  recognised as a mis-named recipient. Any other near-miss (`agent`, `To`,
+  `recipient`) is still accepted as a narrowing constraint — the general case is
+  indistinguishable from a legitimate constraint key, since constraint keys are
+  tool argument names. Such a token fails closed at call time rather than
+  granting anything extra.
 
 ## [0.9.1] - 2026-07-22
 

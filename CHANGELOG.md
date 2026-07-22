@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-22
+
 ### Fixed
 - An agent could fail to consume a **valid** operator directive and conclude
   none existed. The `directive_consume`/`directive_check` MCP tools declared

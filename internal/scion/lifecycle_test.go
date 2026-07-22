@@ -59,11 +59,11 @@ func TestStartWorkspaceSubdirEmitsRelativeFlag(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	if !strings.Contains(got, "--workspace-subdir workers/a") {
-		t.Fatalf("argv %q must contain --workspace-subdir workers/a", got)
+	if !strings.Contains(got, "--workspace workers/a") {
+		t.Fatalf("argv %q must contain --workspace workers/a", got)
 	}
 	if strings.Contains(got, "--workspace /") {
-		t.Fatalf("argv %q must not emit an absolute --workspace when a subdir is set (scion ignores the subdir if both are given)", got)
+		t.Fatalf("argv %q must not emit an absolute --workspace when a subdir is set (the relative form is what scopes the mount to the subtree)", got)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestStartWorkspaceSubdirWinsOverWorkspace(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	if !strings.Contains(got, "--workspace-subdir workers/a") || strings.Contains(got, "--workspace /lever") {
+	if !strings.Contains(got, "--workspace workers/a") || strings.Contains(got, "--workspace /lever") {
 		t.Fatalf("subdir must take precedence over absolute workspace; argv %q", got)
 	}
 }

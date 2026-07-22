@@ -44,8 +44,9 @@ fork of Scion is needed** for containment. It is enforced by the jail around it.
 
 > This concerns the **host-containment** boundary (host filesystem, credentials, and LAN). A
 > separate, finer boundary — confining each *worker* to its own subtree so siblings cannot read
-> one another — currently relies on one small Scion addition (`--workspace-subdir`) carried on our
-> fork branch `feat/per-agent-workspace-subpath`, pending an upstream PR. That addition does **not**
+> one another — relies on one small Scion capability (a relative `--workspace`, resolved against
+> the project root with a containment guard), merged upstream in
+> [scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815). That capability does **not**
 > affect the host-containment guarantee above: a worker that mounted the whole tree would still be
 > fully jailed from the host; it simply would not be isolated from its sibling workers.
 

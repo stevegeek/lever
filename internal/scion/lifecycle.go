@@ -41,15 +41,13 @@ type StartOpts struct {
 	// "mount this path directly" path). Empty leaves scion to resolve it.
 	Workspace string
 	// WorkspaceSubdir, when set, is a path RELATIVE to the project's workspace_path
-	// (e.g. "workers/scratch"), passed as `--workspace-subdir`. Unlike --workspace
-	// (which scion's hub path DISCARDS for directory projects, so every agent falls
-	// back to mounting the project root), scion resolves --workspace-subdir against
-	// the project root with a containment guard and mounts exactly that subtree at
-	// /workspace. Used for workers so each is confined to its own subdir. Mutually
-	// exclusive with Workspace (scion ignores the subdir if an absolute --workspace
-	// is also given), so a caller sets one or the other. Requires scion with the
-	// WorkspaceSubdir feature (fork branch feat/per-agent-workspace-subpath until
-	// upstreamed).
+	// (e.g. "workers/scratch"), passed as a relative `--workspace`. Scion resolves
+	// a relative --workspace against the project root with a containment guard
+	// (rejecting `..`/symlink escape) and mounts exactly that subtree at
+	// /workspace — an absolute --workspace instead mounts that exact host path.
+	// Used for workers so each is confined to its own subdir. Mutually exclusive
+	// with Workspace (both emit the same flag), so a caller sets one or the
+	// other. Requires scion >= b4c9911d (upstream PR #815, relative --workspace).
 	WorkspaceSubdir string
 	// APIKey selects api-key mode for the agent: scion starts the claude harness
 	// with `--harness-auth api-key` (instead of `--harness-auth oauth-token`),
@@ -116,8 +114,9 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	}
 	if o.WorkspaceSubdir != "" {
 		// Relative to the project's workspace_path; scion mounts exactly this
-		// subtree at /workspace (guarded). Takes precedence over --workspace.
-		args = append(args, "--workspace-subdir", o.WorkspaceSubdir)
+		// subtree at /workspace (guarded). Same flag as Workspace — scion
+		// branches on filepath.IsAbs.
+		args = append(args, "--workspace", o.WorkspaceSubdir)
 	} else if o.Workspace != "" {
 		args = append(args, "--workspace", o.Workspace)
 	}

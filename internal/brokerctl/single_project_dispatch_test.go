@@ -201,7 +201,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		t.Fatalf("both workers must share the SAME instance project (-g): a=%q b=%q", optsA.Project, optsB.Project)
 	}
 	if optsA.WorkspaceSubdir == optsB.WorkspaceSubdir {
-		t.Fatalf("each worker must get its OWN --workspace-subdir, got the same for both: %q", optsA.WorkspaceSubdir)
+		t.Fatalf("each worker must get its OWN workspace subdir, got the same for both: %q", optsA.WorkspaceSubdir)
 	}
 
 	// --- Point: each worker's HostWorkspace dir was actually created on

@@ -19,8 +19,7 @@ to one tool, `lever`, and it drives Scion for you.
 > workers as agents in it, the real hub running dev-auth-off behind a host-side controller PAT —
 > working end-to-end on **macOS (OrbStack)** and **Linux (Lima/QEMU-KVM)**.
 > Install with `go install github.com/stevegeek/lever/cmd/lever@latest`; the agent image is built
-> locally (`make lever-image`). Gaps to know about before you rely on it — including the temporary
-> Scion-fork dependency for worker subtree isolation — are listed in
+> locally (`make lever-image`). Gaps to know about before you rely on it are listed in
 > [Where this is today](#where-this-is-today).
 
 ## Why
@@ -132,11 +131,11 @@ The honest gaps — things you should know before relying on it:
   ([#2](https://github.com/stevegeek/lever/issues/2)). You can also `go install` or build from a
   clone. A Go toolchain is still required at *runtime* (Scion is compiled at apply time), and the
   agent image is built locally with Docker.
-- **Worker subtree isolation currently needs our Scion fork.** Each worker is confined to its own
-  `workers/<name>` subtree by a `--workspace-subdir` feature that lives on our fork branch
-  (`feat/per-agent-workspace-subpath`) and is not yet upstreamed. Until it lands, dispatching
-  workers requires building Scion from the fork (`scion.source`) rather than the pinned
-  `scion.version` — the shipped example pins do not include the flag.
+- **Worker subtree isolation runs on stock upstream Scion.** Each worker is confined to its own
+  `workers/<name>` subtree via Scion's relative `--workspace` (resolved against the project root
+  with a containment guard), merged upstream in
+  [scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815). Requires a `scion.version`
+  pin of `b4c9911d` or later — the shipped examples pin it.
 
 Docs: [getting-started](docs-site/_guides/getting-started.md), [capabilities](docs-site/_guides/capabilities.md),
 [operations](docs-site/_guides/operations.md), [CLI](docs-site/_reference/cli.md),

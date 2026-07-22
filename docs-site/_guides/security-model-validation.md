@@ -15,8 +15,8 @@ Part of the [security model](/security-model/). Sections keep their original § 
 > enrols the agent and registers the broker tools over mTLS; the **single-project model** ([§4](/security-model/worker-isolation/)) — one
 > Scion project per instance, the real hub running dev-auth off, lifecycle driven only by a host-only
 > controller PAT, and worker↔worker isolation by defense-by-absence — is implemented (worker
-> isolation currently relies on a Scion `--workspace-subdir` addition carried on our fork, not yet
-> upstreamed; see [§4.1](/security-model/worker-isolation/)).
+> isolation uses Scion's relative `--workspace`, merged upstream in
+> [scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815); see [§4.1](/security-model/worker-isolation/)).
 > *Mid-session cert/leaf rotation is now built and live:* the agent's leaf
 > is short-lived and renewed every 12h, and every long-lived broker client re-reads it per handshake
 > rather than caching the boot cert — see [§6.3](/security-model/credentials/) and [Agent identity & certificates](/agent-identity/).
@@ -24,8 +24,8 @@ Part of the [security model](/security-model/). Sections keep their original § 
 > a running session's pickup of a rotated **LLM bearer token** (`ANTHROPIC_AUTH_TOKEN`, api-key mode
 > only — `renewOnce` rewrites `settings.json`, but Claude reads it once at startup); and a **dedicated
 > live acceptance gate for the single-project isolation guarantee**:
-> the mechanism ([§4](/security-model/worker-isolation/)) is implemented, though worker isolation currently requires the fork-only
-> `--workspace-subdir` addition (not yet in the pinned `scion.version`; see [§4.1](/security-model/worker-isolation/)), and the checks
+> the mechanism ([§4](/security-model/worker-isolation/)) is implemented (on upstream Scion's relative `--workspace`,
+> in the pinned `scion.version`; see [§4.1](/security-model/worker-isolation/)), but the checks
 > that would exercise it against a real `scion start` (sibling subdirectories,
 > a stray ancestor `.git`, the controller PAT's exact scopes) are not yet wired into
 > `lever acceptance`.
@@ -55,9 +55,9 @@ What is **not** yet validated (pending the full-system test): the project-tree m
 (that exactly the chosen tree is present and nothing else), the real manager Claude agent under
 rootless podman, the manager's MCP reachability in practice, and a live run of the [§4](/security-model/worker-isolation/)
 single-project isolation guarantee against a real `scion start` (the lever code is implemented and
-was live-validated once by hand, but worker isolation currently depends on the fork-only
-`--workspace-subdir` Scion addition, not yet in the pinned commit, and there is no wired acceptance
-check for it yet, see [§4.1](/security-model/worker-isolation/) and [§4.2](/security-model/worker-isolation/)).
+was live-validated once by hand on the pre-merge fork implementation — the guard has since merged
+upstream as Scion's relative `--workspace` and is in the pinned commit — but there is no wired
+acceptance check for it yet, see [§4.1](/security-model/worker-isolation/) and [§4.2](/security-model/worker-isolation/)).
 
 > Validation was performed by checking reachability and file presence by size/permission, never by
 > printing secret contents.

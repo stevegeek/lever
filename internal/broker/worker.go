@@ -43,7 +43,7 @@ type WorkerRuntime interface {
 // The broker never accepts any of these from the manager; they come from config.
 type WorkerSpec struct {
 	Name            string // worker identity (== scion agent slug within the instance project)
-	WorkspaceSubdir string // --workspace-subdir: path RELATIVE to the project root, e.g. "workers/worker" — scion mounts this subtree at /workspace
+	WorkspaceSubdir string // relative --workspace: path RELATIVE to the project root, e.g. "workers/worker" — scion mounts this subtree at /workspace
 	HostWorkspace   string // host path to the same subdir, e.g. <tree>/workers/worker; MkdirAll'd before start (scion's guard requires it to exist)
 	BootstrapDir    string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
 	Image           string // effective agent image

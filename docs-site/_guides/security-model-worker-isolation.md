@@ -23,20 +23,20 @@ container: it is unreadable at the kernel/VM boundary, not merely hidden by conv
 permission (container UIDs are synced to the host UID, so file permissions alone give no
 inter-agent isolation here).
 
-How the subdir mount is delivered: a per-agent **absolute** `--workspace` does not survive Scion's
-hub path for a directory project — the hub discards it, so every agent would otherwise fall back to
-mounting the whole project root. Worker confinement therefore uses a **project-relative
-`--workspace-subdir`** mount with a containment guard (rejecting `..`/symlink escape), which Scion
-resolves within the project root and mounts as exactly that subtree. This is a small Scion addition
-currently carried on our fork branch `feat/per-agent-workspace-subpath`, **not yet upstreamed and
-not in the pinned `scion.version`** — so dispatching workers today requires building Scion from the
-fork (`scion.source`). Live-validated 2026-07-10 (worker `scratch` mounted `/lever/workers/scratch`,
-not `/lever`).
+How the subdir mount is delivered: worker confinement uses a **project-relative `--workspace`**
+mount with a containment guard (rejecting `..`/symlink escape), which Scion resolves within the
+project root and mounts as exactly that subtree (an absolute `--workspace` instead mounts that
+exact host path — Scion branches on `filepath.IsAbs`). Merged upstream in
+[scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815); requires a `scion.version`
+pin of `b4c9911d` or later (the shipped examples pin it). Live-validated 2026-07-10 on the
+pre-merge fork implementation of the same guard (worker `scratch` mounted
+`/lever/workers/scratch`, not `/lever`); the upstream implementation has not yet been
+live-revalidated.
 
 This guarantee also holds only on a **non-git tree root**: a git repository at the tree root can
 pull Scion's mount builder into a worktree branch that also bind-mounts the whole `.git` object
 store, through which a worker could read *committed* sibling content. Config validation refuses (or
-warns on) a git tree root at load time; the `--workspace-subdir` guard likewise resolves within the
+warns on) a git tree root at load time; the relative-`--workspace` guard likewise resolves within the
 project root regardless of a stray ancestor `.git`. A worker's *own* subdirectory may still contain
 its own git repository; that is unaffected.
 
@@ -89,8 +89,8 @@ giving the manager whole-tree oversight ([§7](/security-model/compromise/)), no
 yet done:** the live acceptance checks that would exercise this guarantee against a real
 `scion start` (sibling subdirectories, a stray ancestor `.git`, the controller PAT's exact scopes)
 are not yet wired into `lever acceptance`. The mechanism is implemented and was live-validated once
-by hand (2026-07-10), but worker isolation currently depends on the fork-only `--workspace-subdir`
-addition (not yet in the pinned commit; see §4.1), and no dedicated automated live gate exists today.
+by hand (2026-07-10, on the pre-merge fork implementation — the guard has since merged upstream as
+Scion's relative `--workspace`, see §4.1), and no dedicated automated live gate exists today.
 
 ### 4.3 Per-agent network namespace: a private loopback per agent
 

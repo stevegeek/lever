@@ -7,6 +7,19 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+- **The Scion fork dependency for worker subtree isolation is gone.** Scion
+  merged relative `--workspace` paths resolved against the project root with
+  the same containment guard
+  ([scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815), merge
+  commit `b4c9911d`), superseding the fork-only `--workspace-subdir` flag
+  (fork branch `feat/per-agent-workspace-subpath`, upstream PR #699 — closed).
+  Worker dispatch now emits `scion start --workspace workers/<name>` (relative
+  form). Requires `scion.version` >= `b4c9911d`; the shipped example pins are
+  bumped accordingly. On an older Scion, worker dispatch regresses to the old
+  whole-tree-mount enrolment failure (fails closed: the worker 403s at
+  enrolment) — bump the pin, or keep building from the fork until you do.
+
 ## [0.9.2] - 2026-07-22
 
 ### Fixed

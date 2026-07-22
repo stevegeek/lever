@@ -127,10 +127,11 @@ The honest gaps — things you should know before relying on it:
 - **On the Lima backend, `lever stop` → `up` currently comes back with a fresh manager
   conversation** ([#3](https://github.com/stevegeek/lever/issues/3)). OrbStack preserves the
   conversation across a power-off; Lima doesn't yet.
-- **No prebuilt binaries or Homebrew yet** ([#1](https://github.com/stevegeek/lever/issues/1),
-  [#2](https://github.com/stevegeek/lever/issues/2)) — install via `go install` or a clone. A Go
-  toolchain is also required at *runtime* (Scion is compiled at apply time), and the agent image
-  is built locally with Docker.
+- **Prebuilt `lever` binaries now ship on each release** (darwin/linux × amd64/arm64 — see
+  [Releases](https://github.com/stevegeek/lever/releases)); a **Homebrew tap** is still pending
+  ([#2](https://github.com/stevegeek/lever/issues/2)). You can also `go install` or build from a
+  clone. A Go toolchain is still required at *runtime* (Scion is compiled at apply time), and the
+  agent image is built locally with Docker.
 - **Worker subtree isolation currently needs our Scion fork.** Each worker is confined to its own
   `workers/<name>` subtree by a `--workspace-subdir` feature that lives on our fork branch
   (`feat/per-agent-workspace-subpath`) and is not yet upstreamed. Until it lands, dispatching

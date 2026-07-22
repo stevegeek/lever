@@ -59,6 +59,9 @@ version bump moves the block under the new version heading.
   resume NAME` (the `/worker/resume` path) — `agent start` cannot resume, as
   its `--task` defaults to a non-empty prompt so it always carries a task. To
   run a *new* task, run `lever worker purge NAME` first to start it fresh (#7).
+  The `lever-operator` skill now teaches this vocabulary (resume an existing
+  worker, `msg send` to give a running worker new work, `worker purge` is
+  operator-only), so re-scaffold instances with `lever init` after upgrading.
 
 ### Docs
 - Honest security-model note on the in-jail scion Hub API residual: the

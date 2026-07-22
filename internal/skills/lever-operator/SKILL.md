@@ -69,11 +69,25 @@ Review the queue with `lever-manager msg list`.
 ## Dispatching workers
 
 Workers are sibling jailed agents, declared by the operator in the instance
-config. You can start and message them but NOT create them — if a needed
-worker doesn't exist, ask the operator.
+config. You can start, resume, and message them but NOT create or purge them —
+if a needed worker doesn't exist, or one must be discarded and recreated with a
+different task, ask the operator.
 
-- Start: `lever-manager agent start <worker> --task "<task>"` (`--task` is the
-  only flag; the worker's project path and image are resolved host-side).
+- Start (first time): `lever-manager agent start <worker> --task "<task>"` —
+  for a worker with no existing record. Its task is FIXED at creation; `--task`
+  is the only flag (image/workspace resolve host-side). Start confirms the
+  worker is actually live before reporting success.
+- Resume an existing (suspended/stopped/completed) worker: `lever-manager agent
+  resume <worker>` — brings it back on its ORIGINAL task (a suspended worker
+  continues where it paused; a stopped/completed one re-runs it). Use this,
+  NOT `agent start`, for any worker that already has a record: `agent start`
+  always carries a task, so against an existing worker it returns 409 (a
+  worker's task can't be changed in place).
+- Give an existing worker NEW work: don't re-start it — `msg send --to <worker>`
+  once it's running (a worker is a persistent agent; `--task` is only its boot
+  prompt). Replacing the pinned task entirely means discarding the worker, which
+  only the operator can do (`lever worker purge`) — ask them.
+- Suspend / stop: `lever-manager agent suspend|stop <worker>`.
 - Observe: `lever-manager agent list`; for live events run
   `lever-manager watch --events-file <path> &` and tail that file.
 - Relay: when a worker emits `input-needed`, surface its question to the

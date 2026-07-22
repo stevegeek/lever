@@ -15,6 +15,9 @@ Your standup, in order:
    **message the result back to you** — a worker that only prints its answer in its
    own session leaves you waiting forever:
    `lever-manager agent start todo --task "Mint a todo/list capability, call the todo tool's list operation with pending=true, then send the items back to the manager with: lever-manager msg send \"<the list>\" --to user:manager"`
+   (First run only. If `todo` already exists from a prior standup, `agent start`
+   returns 409 — run `lever-manager agent resume todo` to re-run its original
+   task instead, or `msg send --to todo` to give the running worker fresh work.)
    Watch your inbox for its reply (`lever-manager msg list`, or start the event
    bridge and attach a Monitor per your skill), and fold what it returns into the
    standup. Give it a minute; if nothing arrives, say so rather than hanging.

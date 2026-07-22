@@ -54,7 +54,7 @@ ENV NODE_EXTRA_CA_CERTS=/home/scion/.lever-id/ca.crt
 # containers pick it up when next recreated (manager: `lever stop && lever up`).
 # The in-container auto-updater stays disabled (DISABLE_AUTOUPDATER below):
 # updates happen by image rebuild, never at runtime.
-ARG CLAUDE_CODE_VERSION=2.1.207
+ARG CLAUDE_CODE_VERSION=2.1.217
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
   && npm cache clean --force \
   && claude --version

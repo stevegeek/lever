@@ -7,6 +7,14 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-22
+
+### Fixed
+- The 0.10.0 release shipped with the `lever version` constant still reading
+  `0.9.2` (binaries self-report `0.9.2 (v0.10.0)` — the commit suffix is
+  correct, the semver is not). The release workflow now refuses to publish a
+  tag whose version does not match `internal/cli/root.go`'s `Version` constant.
+
 ## [0.10.0] - 2026-07-22
 
 ### Changed

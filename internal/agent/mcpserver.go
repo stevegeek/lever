@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 )
@@ -90,13 +91,13 @@ func capabilityToolSchemas() []any {
 			"inputSchema": map[string]any{"type": "object",
 				"required": []string{"id"},
 				"properties": map[string]any{
-					"id": strProp("directive id from the pointer notification"),
+					"id": strProp("the directive_id from the pointer notification, e.g. \"f81d5baa-8fe4-21e1-0408-35026a57ec47\""),
 				}}},
 		map[string]any{"name": "directive_check", "description": "Check the status of an operator directive addressed to this agent (read-only).",
 			"inputSchema": map[string]any{"type": "object",
 				"required": []string{"id"},
 				"properties": map[string]any{
-					"id": strProp("directive id from the pointer notification"),
+					"id": strProp("the directive_id from the pointer notification, e.g. \"f81d5baa-8fe4-21e1-0408-35026a57ec47\""),
 				}}},
 	}
 }
@@ -155,7 +156,12 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 	// 404 body is surfaced via a JSON-RPC error, so the model sees "not found" and
 	// nothing more (no oracle for which failure occurred).
 	case "directive_consume":
-		raw, err := DirectiveConsume(ctx, s.brokerURL, s.client, args["id"])
+		did, argErr := directiveID(args)
+		if argErr != nil {
+			writeRPCError(w, id, -32602, argErr.Error())
+			return
+		}
+		raw, err := DirectiveConsume(ctx, s.brokerURL, s.client, did)
 		if err != nil {
 			writeRPCError(w, id, -32000, err.Error())
 			return
@@ -164,7 +170,12 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 	// directive_check: read-only status check for an operator directive addressed
 	// to this agent. Same target-gated, opaque-failure surface as directive_consume.
 	case "directive_check":
-		raw, err := DirectiveCheck(ctx, s.brokerURL, s.client, args["id"])
+		did, argErr := directiveID(args)
+		if argErr != nil {
+			writeRPCError(w, id, -32602, argErr.Error())
+			return
+		}
+		raw, err := DirectiveCheck(ctx, s.brokerURL, s.client, did)
 		if err != nil {
 			writeRPCError(w, id, -32000, err.Error())
 			return
@@ -173,6 +184,31 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 	default:
 		writeRPCError(w, id, -32601, "unknown tool")
 	}
+}
+
+// directiveID resolves the directive id argument, accepting `directive_id` as
+// an alias for `id`. The alias is not cosmetic: every spelling the model ever
+// sees for a directive identifier — the signed statement's `directive_id`
+// field, `lever directive send`'s output, the pointer notification's prose — is
+// `directive_id`, so that is what it tends to send.
+//
+// A missing id fails HERE rather than being posted as an empty id, because the
+// broker answers a bad body with its opaque 404 — byte-identical to "unknown
+// id / wrong target / already consumed / expired / stale generation". That
+// opacity is deliberate for directive STATE (no oracle), but a client-side
+// argument mistake carries no state information, and reporting it as "not
+// found" is actively harmful: the agent concludes the operator's directive does
+// not exist and refuses a genuine authorization. Returning -32602 (invalid
+// params) leaks nothing about any directive — this check runs before any lookup.
+func directiveID(args map[string]string) (string, error) {
+	did := args["id"]
+	if did == "" {
+		did = args["directive_id"]
+	}
+	if did == "" {
+		return "", fmt.Errorf(`missing required argument "id" (the directive id from the pointer notification)`)
+	}
+	return did, nil
 }
 
 // constraintArgs returns args minus the reserved keys (the rest are constraint kv).

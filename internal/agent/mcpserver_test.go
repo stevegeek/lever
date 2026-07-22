@@ -212,6 +212,57 @@ func TestMCPDirectiveConsume404SurfacesAsToolCallError(t *testing.T) {
 	}
 }
 
+func TestMCPDirectiveAcceptsDirectiveIDAlias(t *testing.T) {
+	// Every identifier the model has ever seen for a directive is spelled
+	// `directive_id` — the signed statement's field, `lever directive send`'s
+	// output, the design docs. Calling the tool with that spelling must work
+	// rather than silently posting an empty id (which the broker rejects as a
+	// bad body and answers with the opaque 404, so the model concludes the
+	// operator's directive does not exist).
+	for _, tc := range []struct{ tool, route string }{
+		{"directive_consume", "/directive/consume"},
+		{"directive_check", "/directive/check"},
+	} {
+		var gotPath, gotID string
+		srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, path, id string) {
+			gotPath, gotID = path, id
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "state": "active"})
+		})
+		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+		rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tc.tool+`","arguments":{"directive_id":"D9"}}}`)
+		if gotPath != tc.route || gotID != "D9" {
+			t.Fatalf("%s with directive_id alias posted (%q, %q), want (%q, %q)", tc.tool, gotPath, gotID, tc.route, "D9")
+		}
+	}
+}
+
+func TestMCPDirectiveMissingIDIsALocalArgumentError(t *testing.T) {
+	// A missing id is the CALLER's mistake, not a directive-state fact, so it
+	// must fail locally with an actionable message and never reach the broker.
+	// Letting it through would return the opaque "not found" — indistinguishable
+	// from "no such directive", which teaches the agent to disbelieve a genuine
+	// operator authorization.
+	for _, tool := range []string{"directive_consume", "directive_check"} {
+		called := false
+		srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) { called = true })
+		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tool+`","arguments":{}}}`)
+		e, isErr := resp["error"].(map[string]any)
+		if !isErr {
+			t.Fatalf("%s without an id must return a JSON-RPC error, got %v", tool, resp)
+		}
+		msg, _ := e["message"].(string)
+		if !strings.Contains(msg, "id") || strings.Contains(msg, "not found") {
+			t.Fatalf("%s missing-id error = %q, want it to name the argument and NOT read as a directive miss", tool, msg)
+		}
+		if called {
+			t.Fatalf("%s without an id must not reach the broker", tool)
+		}
+	}
+}
+
 func TestMCPUnknownToolDenied(t *testing.T) {
 	// The default case (mcpserver.go:151) must reject an unrecognised tool name with
 	// the JSON-RPC method-not-found code rather than silently minting anything.

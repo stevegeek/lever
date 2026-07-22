@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-22
+
 ### Fixed
 - `delegate` silently minted a **self-bound** token when no recipient was named,
   and reported success. Both mint surfaces were affected: the capability MCP

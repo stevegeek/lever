@@ -9,7 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/exec"
 )
 
-const Version = "0.9.1"
+const Version = "0.9.2"
 
 // BackendFactory builds a named backend for a given machine name.
 type BackendFactory func(name, machine string) (backend.Backend, error)

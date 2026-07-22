@@ -336,6 +336,120 @@ func TestMCPDirectiveSchemaDeclaresBothSpellings(t *testing.T) {
 	}
 }
 
+// fakeCapBroker stands in for the broker's /request route and records whether
+// it was reached at all. Guards that must fail caller-side assert `called`
+// stays false: reaching the broker is the bug, not the error code.
+func fakeCapBroker(t *testing.T, called *bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestMCPDelegateWithoutRecipientIsALocalArgumentError(t *testing.T) {
+	// delegate's entire purpose is binding to ANOTHER agent. An absent, blank or
+	// misspelt `to` used to reach the broker as an empty bind target, which the
+	// broker defaults to the caller (request.go: "default: self-obtain") — so a
+	// SELF-bound token was minted and returned as a plain success. The agent then
+	// believes it handed a capability to the recipient when it did not.
+	for _, tc := range []struct{ name, args string }{
+		{"absent", `{"tool":"db","op":"read"}`},
+		{"blank", `{"tool":"db","op":"read","to":""}`},
+		{"whitespace only", `{"tool":"db","op":"read","to":"   "}`},
+		// The reported case: misspelt as `agent`, which constraintArgs would not
+		// strip, so it was silently promoted to a bogus narrowing constraint.
+		{"misspelt as agent", `{"tool":"db","op":"read","agent":"worker"}`},
+		// Non-string values are dropped by handleToolsCall, so this arrives absent.
+		{"non-string", `{"tool":"db","op":"read","to":123}`},
+	} {
+		called := false
+		srv := fakeCapBroker(t, &called)
+		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":`+tc.args+`}}`)
+		e, isErr := resp["error"].(map[string]any)
+		if !isErr {
+			t.Fatalf("%s: delegate without a recipient must error, got %v", tc.name, resp)
+		}
+		if code, _ := e["code"].(float64); int(code) != -32602 {
+			t.Fatalf("%s: error code = %v, want -32602 (invalid params)", tc.name, e["code"])
+		}
+		if msg, _ := e["message"].(string); !strings.Contains(msg, `"to"`) {
+			t.Fatalf("%s: error = %q, want it to name the missing argument", tc.name, msg)
+		}
+		if called {
+			t.Fatalf("%s: must not reach the broker (an empty bind target self-obtains there)", tc.name)
+		}
+	}
+}
+
+func TestMCPCapabilityToolsRequireToolAndOp(t *testing.T) {
+	// A blank tool/op reached the broker and came back as a policy/registry
+	// verdict — a broker-shaped answer to a caller-side mistake, the same
+	// misattribution the 0.9.1 directive fix removed.
+	for _, tc := range []struct{ tool, args, want string }{
+		{"request", `{"op":"read"}`, `"tool"`},
+		{"request", `{"tool":"","op":"read"}`, `"tool"`},
+		{"request", `{"tool":"db"}`, `"op"`},
+		{"request", `{"tool":"db","op":"  "}`, `"op"`},
+		{"delegate", `{"op":"read","to":"worker"}`, `"tool"`},
+		{"delegate", `{"tool":"db","to":"worker"}`, `"op"`},
+	} {
+		called := false
+		srv := fakeCapBroker(t, &called)
+		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tc.tool+`","arguments":`+tc.args+`}}`)
+		e, isErr := resp["error"].(map[string]any)
+		if !isErr {
+			t.Fatalf("%s %s: must error, got %v", tc.tool, tc.args, resp)
+		}
+		if code, _ := e["code"].(float64); int(code) != -32602 {
+			t.Fatalf("%s %s: error code = %v, want -32602", tc.tool, tc.args, e["code"])
+		}
+		if msg, _ := e["message"].(string); !strings.Contains(msg, tc.want) {
+			t.Fatalf("%s %s: error = %q, want it to name %s", tc.tool, tc.args, msg, tc.want)
+		}
+		if called {
+			t.Fatalf("%s %s: must not reach the broker", tc.tool, tc.args)
+		}
+	}
+}
+
+func TestMCPCapabilityToolsRejectSiblingBindArgument(t *testing.T) {
+	// `request` and `delegate` sit next to each other and spell the bind target
+	// differently (bound_to vs to). Each other's spelling is not a constraint the
+	// caller meant — left alone it is silently baked into the token as a bogus
+	// narrowing kv while the real bind target falls back to self. Reject it and
+	// name the right argument rather than minting something nobody asked for.
+	for _, tc := range []struct{ tool, args, want string }{
+		{"request", `{"tool":"db","op":"read","to":"worker"}`, `"bound_to"`},
+		{"delegate", `{"tool":"db","op":"read","to":"worker","bound_to":"worker"}`, `"to"`},
+	} {
+		called := false
+		srv := fakeCapBroker(t, &called)
+		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tc.tool+`","arguments":`+tc.args+`}}`)
+		e, isErr := resp["error"].(map[string]any)
+		if !isErr {
+			t.Fatalf("%s: sibling bind argument must error, got %v", tc.tool, resp)
+		}
+		if code, _ := e["code"].(float64); int(code) != -32602 {
+			t.Fatalf("%s: error code = %v, want -32602", tc.tool, e["code"])
+		}
+		if msg, _ := e["message"].(string); !strings.Contains(msg, tc.want) {
+			t.Fatalf("%s: error = %q, want it to point at %s", tc.tool, msg, tc.want)
+		}
+		if called {
+			t.Fatalf("%s: must not reach the broker", tc.tool)
+		}
+	}
+}
+
 func TestMCPUnknownToolDenied(t *testing.T) {
 	// The default case (mcpserver.go:151) must reject an unrecognised tool name with
 	// the JSON-RPC method-not-found code rather than silently minting anything.

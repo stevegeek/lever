@@ -7,6 +7,21 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+- `delegate` silently minted a **self-bound** token when its `to` argument was
+  absent, blank or misspelt, and reported success. The MCP server passed the
+  empty bind target to the broker, which defaults an empty target to the caller
+  (self-obtain), while the misspelt key survived as a bogus narrowing
+  constraint — so an agent could believe it had handed a capability to another
+  agent when it had only minted one for itself, with nothing in the response
+  saying otherwise. `request`/`delegate` now validate `tool`, `op` and the bind
+  target from the caller's own arguments before any broker call, returning
+  JSON-RPC `-32602`, and reject each other's bind-target spelling instead of
+  promoting it to a constraint. `request`'s `bound_to` stays optional and still
+  defaults to self. Not a privilege issue — `MayObtain` remains the
+  authoritative gate — but the same class of silent argument bug as 0.9.1's
+  directive fix. (#20)
+
 ## [0.9.1] - 2026-07-22
 
 ### Fixed

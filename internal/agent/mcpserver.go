@@ -291,24 +291,38 @@ func mintToolOp(args map[string]string) (tool, op string, err error) {
 // requestArgs validates `request`, whose bind target is optional: absent means
 // self, which is the tool's documented contract.
 //
-// Note what is deliberately NOT guarded here. A `to` argument is left alone and
-// becomes an ordinary narrowing constraint, because constraint keys ARE tool
-// argument names — registry.MapParams identity-maps them, and
-// ValidateConstraints leaves keys without an allowed_values entry unrestricted.
-// Reserving `to` would make a narrowed token unmintable for any tool that has a
-// `to` argument, and the likeliest repair a model would then try is to drop the
-// argument, minting a WIDER token. On this tool the trade is not worth it:
-// binding to self is what `request` promises, so nothing diverges.
+// That optionality is exactly why a stray `to` must be rejected here, and why
+// this is the load-bearing sibling check rather than delegate's. Nothing else
+// would catch it: it passes tool/op validation, `bound_to` resolves empty and
+// defaults to self, and `to` falls through into the constraints — yielding a
+// self-bound token carrying to=worker, returned as a success. That is the exact
+// mirror of the bug this file's guards exist to close.
+//
+// The argument is genuinely ambiguous, and rejecting it has a real cost.
+// Constraint keys ARE tool argument names (registry.MapParams identity-maps
+// them; ValidateConstraints leaves keys without an allowed_values entry
+// unrestricted), and `to` is an ordinary argument name for a mail, message or
+// transfer tool — so this forecloses minting a `to`-narrowed token through the
+// MCP tool. Rejecting is still right, on this file's standing trade: a loud
+// refusal is recoverable, a confident wrong mint is not. And the refusal has an
+// escape hatch the silent path does not — an operator can rename the caveat in
+// lever.yaml (`caveat_param: {recipient: to}`), which is plumbed through to the
+// registry. The message must therefore not assert the argument is "unknown"
+// (false for such a tool, and the repair it invites — dropping the argument —
+// mints a WIDER token); it names both readings instead.
 func requestArgs(args map[string]string, self string) (capMint, error) {
 	tool, op, err := mintToolOp(args)
 	if err != nil {
 		return capMint{}, err
 	}
+	if strings.TrimSpace(args[capBindDelegate]) != "" {
+		return capMint{}, errors.New(`"` + capBindDelegate + `" is ambiguous on this tool: to bind the token to an agent use "` + capBindRequest + `", or use the "delegate" tool to hand it to another agent`)
+	}
 	boundTo := strings.TrimSpace(args[capBindRequest])
 	if boundTo == "" {
 		boundTo = self
 	}
-	return capMint{tool, op, boundTo, []string{"tool", "op", capBindRequest}}, nil
+	return capMint{tool, op, boundTo, []string{"tool", "op", capBindRequest, capBindDelegate}}, nil
 }
 
 // delegateArgs validates `delegate`, whose entire purpose is binding to ANOTHER

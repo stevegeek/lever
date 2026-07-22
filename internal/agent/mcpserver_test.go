@@ -497,28 +497,42 @@ func TestMCPDelegateRejectsSelfAsRecipient(t *testing.T) {
 	}
 }
 
-func TestMCPRequestKeepsToUsableAsAConstraint(t *testing.T) {
-	// Constraint keys ARE tool argument names — registry.MapParams identity-maps
-	// them (registry.go), and ValidateConstraints leaves keys without an
-	// allowed_values entry unrestricted. `to` is an ordinary argument name for a
-	// real tool (mail/message/transfer), so `request` must not reserve it: doing
-	// so removes the only route to a NARROWED token and pushes the model toward
-	// dropping the argument and minting an unconstrained one instead. `request`
-	// binds to self by contract, so there is no divergence to guard here — unlike
-	// `delegate`, whose whole purpose is binding elsewhere.
-	env := testBroker(t)
-	env.Rules.AllowObtain("manager", "db", "read")
-	regDB(t, env)
-	managerID := enrolManager(t, env.CA)
-	client, _ := managerID.Client()
-	s := NewMCPServer(MCPConfig{BrokerURL: env.Server.URL, AgentCN: "manager", Client: client})
+func TestMCPRequestRejectsSiblingBindArgumentWithoutMisinforming(t *testing.T) {
+	// On `request` this check is the load-bearing one. Unlike delegate's `to`,
+	// `bound_to` is OPTIONAL, so nothing else would catch a stray `to`: it would
+	// pass tool/op validation, bound_to would resolve empty and default to self,
+	// and `to` would fall through into the constraints — a self-bound token
+	// carrying to=worker, returned as a success, which is the exact mirror of the
+	// bug this whole fix exists to close.
+	//
+	// But the argument is genuinely ambiguous: constraint keys ARE tool argument
+	// names (registry.MapParams identity-maps them), and `to` is an ordinary one
+	// for a mail/message/transfer tool. So reject — silence is the worse failure —
+	// while refusing to assert it is "unknown", and name the ways out.
+	called := false
+	srv := fakeCapBroker(t, &called)
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
 
-	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request","arguments":{"tool":"db","op":"read","to":"boss@corp.com"}}}`)
-	if !verifies(env.Keys.Public, text, "manager", map[string]string{"to": "boss@corp.com"}) {
-		t.Fatal("request must keep `to` as an ordinary narrowing constraint")
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request","arguments":{"tool":"db","op":"read","to":"worker"}}}`)
+	e, isErr := resp["error"].(map[string]any)
+	if !isErr {
+		t.Fatalf("request with a stray `to` must error rather than self-bind, got %v", resp)
 	}
-	if verifies(env.Keys.Public, text, "manager", map[string]string{}) {
-		t.Fatal("the to= constraint must be baked in (a call without it must fail closed)")
+	if code, _ := e["code"].(float64); int(code) != -32602 {
+		t.Fatalf("error code = %v, want -32602", e["code"])
+	}
+	msg, _ := e["message"].(string)
+	// Calling it "unknown" is false for a tool whose argument really is named
+	// `to`, and the repair it invites — dropping the argument — mints a WIDER
+	// token. The message must instead offer both real readings.
+	if strings.Contains(msg, "unknown") {
+		t.Fatalf("error = %q, must not claim the argument is unknown", msg)
+	}
+	if !strings.Contains(msg, `"bound_to"`) || !strings.Contains(msg, "delegate") {
+		t.Fatalf("error = %q, want it to name both readings (bound_to, or the delegate tool)", msg)
+	}
+	if called {
+		t.Fatalf("must not reach the broker")
 	}
 }
 

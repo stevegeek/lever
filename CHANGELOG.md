@@ -22,17 +22,25 @@ version bump moves the block under the new version heading.
   recipient — which hands nothing off and, because `MayObtainRule` treats
   requester == recipient as a self-obtain, succeeded even for an agent holding
   no delegate grant. `request`'s `bound_to` stays optional and still defaults to
-  self, and `to` remains usable as an ordinary constraint key on `request` (it
-  is an argument name real tools use). Not a privilege issue — `MayObtain`
-  remains the authoritative gate — but the same class of silent argument bug as
-  0.9.1's directive fix. (#20)
+  self. Not a privilege issue — `MayObtain` remains the authoritative gate — but
+  the same class of silent argument bug as 0.9.1's directive fix. (#20)
 
-  Known limitation: on the MCP path only the sibling spelling `bound_to` is
-  recognised as a mis-named recipient. Any other near-miss (`agent`, `To`,
-  `recipient`) is still accepted as a narrowing constraint — the general case is
-  indistinguishable from a legitimate constraint key, since constraint keys are
-  tool argument names. Such a token fails closed at call time rather than
-  granting anything extra.
+  Compatibility note: the MCP tools now reserve **both** bind-target spellings,
+  so a constraint key literally named `to` or `bound_to` is rejected with
+  `-32602` instead of reaching the token. No shipped tool config uses either
+  name. It matters because constraint keys are tool argument names, and `to` is
+  a plausible one (mail, message, transfer) — but the two readings of `to` on
+  `request` are indistinguishable from the caller's arguments alone, and a loud
+  refusal is recoverable where a confidently wrong mint is not. A tool that
+  needs such a constraint can rename it in `lever.yaml` via
+  `caveat_param: {recipient: to}`. The CLI is unaffected: its flags and its
+  positional `key=value` constraints occupy separate namespaces.
+
+  Known limitation: on the MCP path only the sibling spelling is recognised as a
+  mis-named recipient. Any other near-miss (`agent`, `To`, `recipient`) is still
+  accepted as a narrowing constraint — the general case is indistinguishable
+  from a legitimate constraint key. Such a token fails closed at call time
+  rather than granting anything extra.
 
 ## [0.9.1] - 2026-07-22
 

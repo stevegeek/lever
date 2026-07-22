@@ -2,9 +2,10 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // MCPConfig assembles the capability MCP server.
@@ -88,18 +89,33 @@ func capabilityToolSchemas() []any {
 					"to":   strProp("recipient agent"),
 				}}},
 		map[string]any{"name": "directive_consume", "description": "Consume a pending operator directive by id. Returns the verified action if and only if this agent is the directive's target and it is still active. Single use.",
-			"inputSchema": map[string]any{"type": "object",
-				"required": []string{"id"},
-				"properties": map[string]any{
-					"id": strProp("the directive_id from the pointer notification, e.g. \"f81d5baa-8fe4-21e1-0408-35026a57ec47\""),
-				}}},
+			"inputSchema": directiveInputSchema(strProp)},
 		map[string]any{"name": "directive_check", "description": "Check the status of an operator directive addressed to this agent (read-only).",
-			"inputSchema": map[string]any{"type": "object",
-				"required": []string{"id"},
-				"properties": map[string]any{
-					"id": strProp("the directive_id from the pointer notification, e.g. \"f81d5baa-8fe4-21e1-0408-35026a57ec47\""),
-				}}},
+			"inputSchema": directiveInputSchema(strProp)},
 	}
+}
+
+// directiveInputSchema is the shared schema for both directive tools. It
+// declares BOTH accepted spellings of the identifier: `id` is canonical, and
+// `directive_id` is the name used everywhere else the model looks (the signed
+// statement's field, `lever directive send`'s output, the pointer
+// notification). The server accepts either, so the advertised contract must
+// say so rather than declare one name and quietly tolerate the other — a
+// schema-validating client would otherwise reject the alias before it ever
+// reached us. anyOf keeps "neither supplied" invalid.
+//
+// Returns a fresh map per call: the two tool entries must not share one
+// mutable schema value.
+func directiveInputSchema(strProp func(string) map[string]any) map[string]any {
+	return map[string]any{"type": "object",
+		"anyOf": []any{
+			map[string]any{"required": []string{"id"}},
+			map[string]any{"required": []string{"directive_id"}},
+		},
+		"properties": map[string]any{
+			"id":           strProp(`the directive_id from the pointer notification, e.g. "f81d5baa-8fe4-21e1-0408-35026a57ec47"`),
+			"directive_id": strProp("alias for `id` — supply either one, not both"),
+		}}
 }
 
 func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id any, msg map[string]any) {
@@ -200,13 +216,29 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 // found" is actively harmful: the agent concludes the operator's directive does
 // not exist and refuses a genuine authorization. Returning -32602 (invalid
 // params) leaks nothing about any directive — this check runs before any lookup.
+// A directive id is a 36-char UUID; the cap only has to be loose enough to
+// never reject a real one while keeping junk from reaching the broker.
+const maxDirectiveIDLen = 128
+
 func directiveID(args map[string]string) (string, error) {
-	did := args["id"]
+	id, alias := strings.TrimSpace(args["id"]), strings.TrimSpace(args["directive_id"])
+	// Both supplied and disagreeing is ambiguous — pick nothing and say so,
+	// rather than silently preferring one and acting on an id the caller may
+	// not have meant.
+	if id != "" && alias != "" && id != alias {
+		return "", errors.New(`supply either "id" or "directive_id", not both`)
+	}
+	did := id
 	if did == "" {
-		did = args["directive_id"]
+		did = alias
 	}
 	if did == "" {
-		return "", fmt.Errorf(`missing required argument "id" (the directive id from the pointer notification)`)
+		// "or non-string": handleToolsCall drops non-string argument values, so
+		// {"id": 12345} arrives here indistinguishable from an absent one.
+		return "", errors.New(`missing or non-string required argument "id" (the directive_id from the pointer notification)`)
+	}
+	if len(did) > maxDirectiveIDLen {
+		return "", errors.New("directive id is too long to be valid")
 	}
 	return did, nil
 }

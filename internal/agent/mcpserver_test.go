@@ -253,12 +253,85 @@ func TestMCPDirectiveMissingIDIsALocalArgumentError(t *testing.T) {
 		if !isErr {
 			t.Fatalf("%s without an id must return a JSON-RPC error, got %v", tool, resp)
 		}
+		// The CODE is half the fix: -32602 (invalid params) is what marks this
+		// as the caller's mistake rather than a broker verdict, so assert it —
+		// a silent revert to -32000 must fail here.
+		if code, _ := e["code"].(float64); int(code) != -32602 {
+			t.Fatalf("%s missing-id error code = %v, want -32602 (invalid params)", tool, e["code"])
+		}
 		msg, _ := e["message"].(string)
-		if !strings.Contains(msg, "id") || strings.Contains(msg, "not found") {
+		if !strings.Contains(msg, "missing or non-string required argument") || strings.Contains(msg, "not found") {
 			t.Fatalf("%s missing-id error = %q, want it to name the argument and NOT read as a directive miss", tool, msg)
 		}
 		if called {
 			t.Fatalf("%s without an id must not reach the broker", tool)
+		}
+	}
+}
+
+func TestMCPDirectiveIDGuardsFailLocally(t *testing.T) {
+	// Each of these is a caller-side mistake that must NOT be posted to the
+	// broker: posting it would return the opaque 404 and teach the agent that a
+	// real operator directive does not exist — the whole bug this guards.
+	for _, tc := range []struct{ name, args string }{
+		{"whitespace only", `{"id":"   "}`},
+		{"conflicting spellings", `{"id":"D1","directive_id":"D2"}`},
+		{"absurdly long", `{"id":"` + strings.Repeat("x", 129) + `"}`},
+		{"non-string id", `{"id":12345}`},
+	} {
+		called := false
+		srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) { called = true })
+		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"directive_consume","arguments":`+tc.args+`}}`)
+		e, isErr := resp["error"].(map[string]any)
+		if !isErr {
+			t.Fatalf("%s: want a JSON-RPC error, got %v", tc.name, resp)
+		}
+		if code, _ := e["code"].(float64); int(code) != -32602 {
+			t.Fatalf("%s: error code = %v, want -32602", tc.name, e["code"])
+		}
+		if called {
+			t.Fatalf("%s: must not reach the broker", tc.name)
+		}
+	}
+
+	// Surrounding whitespace is trimmed, not rejected: a copy-pasted id with a
+	// trailing newline is a valid id, and failing it would recreate the bug.
+	var gotID string
+	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, id string) {
+		gotID = id
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "kind": "instruction"})
+	})
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+	rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"directive_consume","arguments":{"id":"  D1\n"}}}`)
+	if gotID != "D1" {
+		t.Fatalf("posted id = %q, want the trimmed %q", gotID, "D1")
+	}
+}
+
+func TestMCPDirectiveSchemaDeclaresBothSpellings(t *testing.T) {
+	// The advertised contract must match what the server accepts: declaring
+	// only `id` while quietly tolerating `directive_id` leaves a
+	// schema-validating client free to reject the alias before it reaches us.
+	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	for _, tl := range resp["result"].(map[string]any)["tools"].([]any) {
+		tool := tl.(map[string]any)
+		name := tool["name"].(string)
+		if name != "directive_consume" && name != "directive_check" {
+			continue
+		}
+		schema := tool["inputSchema"].(map[string]any)
+		props := schema["properties"].(map[string]any)
+		if props["id"] == nil || props["directive_id"] == nil {
+			t.Fatalf("%s schema properties = %v, want both id and directive_id declared", name, props)
+		}
+		if schema["anyOf"] == nil {
+			t.Fatalf("%s schema must require one of the two spellings via anyOf, got %v", name, schema)
+		}
+		if schema["required"] != nil {
+			t.Fatalf("%s schema still carries a flat required (%v), which contradicts the anyOf", name, schema["required"])
 		}
 	}
 }

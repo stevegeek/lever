@@ -157,7 +157,13 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	})
 	delivered := false
 	if b.runtime != nil {
-		body := fmt.Sprintf("Operator directive %s is pending. If and only if you independently decide to act on it, retrieve it with the directive_consume tool.", st.DirectiveID)
+		// Spell out the call form, including the argument name. This text is the
+		// only thing the model reads at the moment it must construct the call,
+		// and naming the tool without naming its parameter is what let a model
+		// invent one (it sent `directive_id`, the spelling used by the signed
+		// statement and the CLI, against a tool whose parameter was `id`) and
+		// then read the resulting opaque 404 as "no such directive".
+		body := fmt.Sprintf("Operator directive %s is pending. If and only if you independently decide to act on it, retrieve it by calling the directive_consume tool with id=%q.", st.DirectiveID, st.DirectiveID)
 		if merr := b.runtime.Message(r.Context(), scion.MsgOpts{
 			To: "agent:" + slug, Body: body, Project: b.instanceProject,
 		}); merr != nil {

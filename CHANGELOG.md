@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+- An agent could fail to consume a **valid** operator directive and conclude
+  none existed. The `directive_consume`/`directive_check` MCP tools declared
+  their argument as `id`, but every other spelling an agent sees is
+  `directive_id` (the signed statement's field, `lever directive send`'s
+  output, the docs), so a model that sent `directive_id` had its argument
+  dropped, posted an empty id, and got the broker's deliberately opaque 404 —
+  byte-identical to "unknown id / wrong target / already consumed / expired".
+  Both spellings are now accepted and both are declared in the advertised
+  schema. A missing, blank, over-long, non-string, or self-contradicting id
+  now fails locally with JSON-RPC `-32602` before any broker call, so a
+  caller-side mistake can never again masquerade as a directive verdict. The
+  opaque-404 contract is untouched for everything genuinely about directive
+  state — the new error is decided without any lookup, so it is not an oracle.
+  The pointer notification now spells out the call form (`directive_consume`
+  with `id="<the id>"`) instead of naming only the tool. **Requires an
+  agent-image rebuild** (`make lever-image`, `LEVER_IMAGE_FORCE=1`) plus a
+  container recreate (`lever stop && lever up`): `lever-agent` is baked into
+  the image, so upgrading the host CLI alone does not fix a running instance.
+
 ## [0.9.0] - 2026-07-22
 
 ### Added

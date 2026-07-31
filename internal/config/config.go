@@ -37,6 +37,12 @@ type DelegateGrant struct {
 type Op struct {
 	Name        string            `yaml:"name"`
 	CaveatParam map[string]string `yaml:"caveat_param"`
+	// Params optionally declares the operation's argument names. When set,
+	// the broker rejects capability-mint constraints on any other key AT MINT
+	// TIME (#21) — a mistyped constraint key otherwise mints a strictly
+	// over-narrowed token that fails closed only at call time, far from the
+	// mistake. Empty keeps the permissive behavior (any key is a constraint).
+	Params []string `yaml:"params"`
 }
 
 // Tool declares a tool the broker gates behind its mTLS tool routes (/mcp/<name>/): either a

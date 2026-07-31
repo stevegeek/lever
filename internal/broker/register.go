@@ -98,7 +98,9 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 			}
 			cp = op.CaveatParam
 		}
-		merged[name] = registry.Operation{Name: name, CaveatParam: cp}
+		// Params come from CONFIG only (the declared guard) — a self-
+		// registering tool cannot widen or drop the operator's declared set.
+		merged[name] = registry.Operation{Name: name, CaveatParam: cp, Params: op.Params}
 	}
 	t := registry.Tool{
 		Name: cfg.Name, Backend: cfg.Backend, AllowedValues: copyAllowedValues(cfg.AllowedValues),

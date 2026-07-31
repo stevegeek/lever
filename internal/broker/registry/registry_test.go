@@ -111,7 +111,7 @@ func TestMapParamsUnknownToolOrOp(t *testing.T) {
 func TestValidateConstraintsAllowsPermittedValue(t *testing.T) {
 	r := New()
 	_ = r.Register(dbTool()) // table ∈ {A,B}
-	if err := r.ValidateConstraints("db", map[string]string{"table": "A"}); err != nil {
+	if err := r.ValidateConstraints("db", "read", map[string]string{"table": "A"}); err != nil {
 		t.Fatalf("table=A is permitted: %v", err)
 	}
 }
@@ -119,7 +119,7 @@ func TestValidateConstraintsAllowsPermittedValue(t *testing.T) {
 func TestValidateConstraintsRejectsForbiddenValue(t *testing.T) {
 	r := New()
 	_ = r.Register(dbTool())
-	if err := r.ValidateConstraints("db", map[string]string{"table": "C"}); err == nil {
+	if err := r.ValidateConstraints("db", "read", map[string]string{"table": "C"}); err == nil {
 		t.Fatal("table=C must be rejected (not in {A,B})")
 	}
 }
@@ -127,14 +127,14 @@ func TestValidateConstraintsRejectsForbiddenValue(t *testing.T) {
 func TestValidateConstraintsUnrestrictedKeyPasses(t *testing.T) {
 	r := New()
 	_ = r.Register(dbTool()) // "filter" has no AllowedValues entry
-	if err := r.ValidateConstraints("db", map[string]string{"filter": "anything"}); err != nil {
+	if err := r.ValidateConstraints("db", "read", map[string]string{"filter": "anything"}); err != nil {
 		t.Fatalf("unrestricted key should pass: %v", err)
 	}
 }
 
 func TestValidateConstraintsUnknownTool(t *testing.T) {
 	r := New()
-	if err := r.ValidateConstraints("ghost", map[string]string{"table": "A"}); err == nil {
+	if err := r.ValidateConstraints("ghost", "read", map[string]string{"table": "A"}); err == nil {
 		t.Fatal("expected error for unknown tool")
 	}
 }
@@ -144,8 +144,42 @@ func TestValidateConstraintsEmptyAllowedSliceRejectsAll(t *testing.T) {
 	tool := dbTool()
 	tool.AllowedValues = map[string][]string{"table": {}} // restricted to nothing
 	_ = r.Register(tool)
-	if err := r.ValidateConstraints("db", map[string]string{"table": "A"}); err == nil {
+	if err := r.ValidateConstraints("db", "read", map[string]string{"table": "A"}); err == nil {
 		t.Fatal("an empty AllowedValues slice must reject every value (fail-closed), not pass")
+	}
+}
+
+// Declared params (#21): when an op declares its parameter set, a constraint
+// key outside Params ∪ CaveatParam keys is rejected AT MINT — a typo'd key
+// would otherwise mint an over-narrowed token that fails closed only at call
+// time, far from the mistake. Undeclared ops stay permissive.
+func TestValidateConstraintsDeclaredParams(t *testing.T) {
+	r := New()
+	tool := dbTool()
+	op := tool.Operations["read"]
+	op.Params = []string{"query", "schema.table"}
+	tool.Operations["read"] = op
+	_ = r.Register(tool)
+
+	if err := r.ValidateConstraints("db", "read", map[string]string{"query": "x"}); err != nil {
+		t.Fatalf("declared param must be accepted: %v", err)
+	}
+	if err := r.ValidateConstraints("db", "read", map[string]string{"table": "A"}); err != nil {
+		t.Fatalf("caveat_param constraint key must be accepted: %v", err)
+	}
+	if err := r.ValidateConstraints("db", "read", map[string]string{"tabel": "A"}); err == nil {
+		t.Fatal("a typo'd constraint key must be rejected at mint when params are declared")
+	}
+	if err := r.ValidateConstraints("db", "read", map[string]string{"agent": "worker"}); err == nil {
+		t.Fatal("a stray reserved-ish key must be rejected at mint when params are declared")
+	}
+
+	// Undeclared op (no Params) keeps today's permissive behavior.
+	perm := dbTool()
+	perm.Name = "db2"
+	_ = r.Register(perm)
+	if err := r.ValidateConstraints("db2", "read", map[string]string{"anything": "goes"}); err != nil {
+		t.Fatalf("undeclared params must stay permissive: %v", err)
 	}
 }
 

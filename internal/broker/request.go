@@ -99,7 +99,7 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, detail, http.StatusForbidden)
 		return
 	}
-	if err := b.reg.ValidateConstraints(req.Tool, req.Constraints); err != nil {
+	if err := b.reg.ValidateConstraints(req.Tool, req.Op, req.Constraints); err != nil {
 		detail := fmt.Sprintf("%s (tool=%s op=%s", err.Error(), req.Tool, requestedOp)
 		if requestedOp != req.Op {
 			detail += fmt.Sprintf(" coerced_to=%s", req.Op)

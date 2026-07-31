@@ -275,7 +275,7 @@ func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 		if len(lagging) > 0 {
 			return checkResult{name, false,
 				fmt.Sprintf("adopted skill baseline lags framework %s: %s — missing framework guidance added since adoption", Version, strings.Join(lagging, "; ")),
-				"review the drift vs the current scaffold, merge what you want to keep, then re-bless with `lever init --adopt` (or reclaim the framework version with `lever init --force`)"}
+				"review the drift vs the current scaffold, merge what you want to keep, set `lever-version: " + Version + "` in the file's frontmatter (your attestation of the baseline reviewed against), then re-bless with `lever init --adopt` — or reclaim the framework version with `lever init --force`"}
 		}
 		nAdopted := 0
 		for _, r := range results {

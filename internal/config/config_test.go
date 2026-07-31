@@ -1179,3 +1179,32 @@ func TestToolValidateRejectsNonExecutableAbsolutePath(t *testing.T) {
 		t.Fatalf("a non-executable file command path should be rejected")
 	}
 }
+
+func TestAutoReenrolKnob(t *testing.T) {
+	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"
+	// Default (absent) = all.
+	p := writeTmp(t, base)
+	app, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.EffectiveAutoReenrol(); got != AutoReenrolAll {
+		t.Fatalf("default auto_reenrol = %q, want %q", got, AutoReenrolAll)
+	}
+	// Explicit values round-trip.
+	for _, v := range []AutoReenrolMode{AutoReenrolAll, AutoReenrolManager, AutoReenrolOff} {
+		p := writeTmp(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: "+string(v)+"\n")
+		app, err := Load(p)
+		if err != nil {
+			t.Fatalf("%s: %v", v, err)
+		}
+		if got := app.EffectiveAutoReenrol(); got != v {
+			t.Fatalf("auto_reenrol = %q, want %q", got, v)
+		}
+	}
+	// Invalid value rejected at load.
+	p = writeTmp(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: sometimes\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected load error for invalid auto_reenrol")
+	}
+}

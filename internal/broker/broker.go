@@ -88,6 +88,13 @@ type Config struct {
 	Workers     []WorkerSpec
 	BrokerCAPEM string
 	BrokerURL   string
+	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
+	// "manager" | "off" (resolved by brokerctl from config; empty = all).
+	AutoReenrol string
+	// ManagerBootstrapDir is the host path to <tree>/.lever — where the
+	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
+	// Empty disables manager healing (audited as an error on lapse).
+	ManagerBootstrapDir string
 
 	// InstanceProject is the single Scion project (-g) that the manager and
 	// all workers are agents in; = the jail mount root. Used when a message
@@ -154,6 +161,16 @@ type Broker struct {
 
 	directives *DirectiveStore
 
+	// Natural-lapse auto-re-enrol state (reenrol.go). reenrolNow is a test
+	// seam (time.Now in production). reenrolMu guards the two maps only.
+	autoReenrol         string
+	managerBootstrapDir string
+	reenrolEvents       chan string
+	reenrolNow          func() time.Time
+	reenrolMu           sync.Mutex
+	reenrolLast         map[string]time.Time
+	reenrolTries        map[string]int
+
 	directiveVerifier  *opsig.Verifier
 	instanceID         string
 	dirAudit           *directiveAudit
@@ -197,6 +214,9 @@ func New(c Config) *Broker {
 	if c.ManagerSlug == "" {
 		c.ManagerSlug = c.ManagerIdentity
 	}
+	if c.AutoReenrol == "" {
+		c.AutoReenrol = autoReenrolAll
+	}
 	return &Broker{
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
 		manager: c.ManagerIdentity, agents: agents,
@@ -207,6 +227,11 @@ func New(c Config) *Broker {
 		apiKey:   c.APIKey, llmUpstream: up,
 		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
+		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
+		reenrolEvents: make(chan string, reenrolQueueDepth),
+		reenrolNow:    time.Now,
+		reenrolLast:   map[string]time.Time{},
+		reenrolTries:  map[string]int{},
 		directives:        directives,
 		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
 		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,

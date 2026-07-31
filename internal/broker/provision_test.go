@@ -24,7 +24,7 @@ func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{leaf}}}
+	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
 }
 
 func TestProvisionIssuesTicketForManager(t *testing.T) {

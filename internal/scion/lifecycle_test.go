@@ -119,12 +119,13 @@ func TestResumeStopSuspendArgv(t *testing.T) {
 	_ = c.Resume(context.Background(), "a", "/g/a")
 	_ = c.Stop(context.Background(), "a", "/g/a")
 	_ = c.Suspend(context.Background(), "a", "/g/a")
+	_ = c.ResumeForce(context.Background(), "a", "/g/a")
 	joined := []string{}
 	for _, cc := range f.Calls {
 		joined = append(joined, strings.Join(cc.Args, " "))
 	}
 	all := strings.Join(joined, "|")
-	for _, want := range []string{"resume a -g /g/a", "stop a -g /g/a", "suspend a -g /g/a"} {
+	for _, want := range []string{"resume a -g /g/a", "stop a -g /g/a", "suspend a -g /g/a", "resume a --force -g /g/a"} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("missing %q in %q", want, all)
 		}

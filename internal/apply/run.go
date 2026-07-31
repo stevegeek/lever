@@ -505,27 +505,60 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			if rerr := retryOnBrokerUnavailable(ctx, func() error {
 				return d.Scion.Resume(ctx, app.Name, jp)
 			}); rerr != nil {
-				// LOUD recovery: the conversation could not be restored. This MUST
-				// reach the user — resume failing means the durable session (the
-				// whole point of suspending, not stopping, at power-off; see
-				// cli/stop.go) is about to be discarded.
-				logf(d, "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
-				if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
-					return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
+				if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
+					logf(d, "start-manager: resume failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
+				} else {
+					// LOUD recovery: the conversation could not be restored. This MUST
+					// reach the user — resume failing means the durable session (the
+					// whole point of suspending, not stopping, at power-off; see
+					// cli/stop.go) is about to be discarded.
+					logf(d, "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
+					if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+						return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
+					}
+					if err := startManagerCreate(ctx, d, boot, opts); err != nil {
+						return err
+					}
 				}
-				if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-					return err
+			}
+		case rec.Phase == "error":
+			// A crashed/wedged manager record. Since scion#895 (`resume
+			// --force`, pin >= 68507153) the error phase IS recoverable — try
+			// that first, with a fresh ticket staged (the leaf may have lapsed
+			// while wedged; same rationale as the suspended branch), and only
+			// discard the conversation when the forced resume itself fails.
+			// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
+			// container state, resume failed, and the then-unconditional
+			// delete+fresh destroyed the manager conversation (#3).
+			if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+				return err
+			}
+			if rerr := retryOnBrokerUnavailable(ctx, func() error {
+				return d.Scion.ResumeForce(ctx, app.Name, jp)
+			}); rerr != nil {
+				if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
+					logf(d, "start-manager: resume --force failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
+				} else {
+					// LOUD recovery, exactly as the failed-resume path above.
+					logf(d, "start-manager: manager in phase \"error\" and resume --force failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
+					if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+						return fmt.Errorf("start-manager: forced resume failed (%v) and delete failed: %w", rerr, derr)
+					}
+					if err := startManagerCreate(ctx, d, boot, opts); err != nil {
+						return err
+					}
 				}
 			}
 		default:
 			// Any other phase — scion's full enum also has created,
-			// provisioning, cloning, starting, stopping, and error (see
+			// provisioning, cloning, starting, and stopping (see
 			// pkg/agent/state/state.go) — is not resumable: `scion resume` is
-			// documented for suspended/stopped records only, and `scion list`'s
+			// documented for suspended/stopped records only (`--force` only
+			// recovers "error", handled above), and `scion list`'s
 			// JSON phase field is the canonical (and only) signal we have, so we
 			// cannot be cleverer here without more scion verbs (e.g. there is no
-			// "wait for starting to settle" verb to poll instead). A crashed
-			// manager (phase "error") or one caught mid-transition by an
+			// "wait for starting to settle" verb to poll instead). A record
+			// caught mid-transition by an
 			// interrupted prior `lever up` (phase "starting"/"created"/…) must
 			// still let `up` converge, so this takes the SAME loud delete+fresh
 			// recovery as a failed resume, rather than hard-failing (bricking)
@@ -590,6 +623,41 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 // already minted earlier in this same run (boot.minted, e.g.
 // mint-manager-bootstrap succeeded outright, or an earlier create in this
 // same Run already re-armed), or d.RearmBootstrap mints one now.
+// managerConcurrentlyRecovered re-observes the manager record after a FAILED
+// resume, before the loud delete+fresh recovery destroys the session. The
+// broker's auto-re-enrol healer (#22) lives in the broker daemon — started by
+// the broker-up step, i.e. BEFORE start-manager runs — and it bounces lapsed
+// agents via the same scion verbs this step uses, in a separate process with
+// no coordination. So a resume failure here can mean "the healer's own
+// suspend/resume was mid-flight", not "unrecoverable" — and deleting on it
+// would destroy the exact conversation both recovery paths exist to save.
+// Only a record that is NOT running on re-observation justifies the delete.
+// The observe rides retryOnBrokerUnavailable: the resume just failed against
+// this same runtime, so a transient blip here is CORRELATED with that failure
+// — an unretried List would undermine the re-observe with a false negative
+// one level up. (Errors that survive the retry budget count as not-recovered:
+// fail toward the loud path, which at least tells the user what it is about
+// to do.)
+func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) bool {
+	var agents []scion.Agent
+	if err := retryOnBrokerUnavailable(ctx, func() error {
+		a, e := d.Scion.List(ctx, jp)
+		if e != nil {
+			return e
+		}
+		agents = a
+		return nil
+	}); err != nil {
+		return false
+	}
+	for i := range agents {
+		if agents[i].Slug == name {
+			return agents[i].Phase == "running"
+		}
+	}
+	return false
+}
+
 func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts scion.StartOpts) error {
 	if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
 		return err

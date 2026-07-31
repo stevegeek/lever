@@ -275,7 +275,22 @@ type Broker struct {
 	LLMUpstream string    `yaml:"llm_upstream"`
 	Tools       []Tool    `yaml:"tools"`
 	Messaging   Messaging `yaml:"messaging"`
+	// AutoReenrol gates the broker's natural-lapse auto-re-enrol healer: which
+	// agents it heals after an mTLS leaf ages out naturally (our CA's cert,
+	// valid in every way but time — never a revoked or epoch-stale identity).
+	// all (default) | manager | off. See the recovery-arc design (#22).
+	AutoReenrol AutoReenrolMode `yaml:"auto_reenrol"`
 }
+
+// AutoReenrolMode selects which agents the broker's natural-lapse healer
+// covers. Empty resolves to AutoReenrolAll (EffectiveAutoReenrol).
+type AutoReenrolMode string
+
+const (
+	AutoReenrolAll     AutoReenrolMode = "all"
+	AutoReenrolManager AutoReenrolMode = "manager"
+	AutoReenrolOff     AutoReenrolMode = "off"
+)
 
 type Manager struct {
 	Image          string          `yaml:"image"`
@@ -512,6 +527,11 @@ func (a *App) Validate() error {
 	}
 	if err := validateBackend(a.Backend); err != nil {
 		return err
+	}
+	switch a.Broker.AutoReenrol {
+	case "", AutoReenrolAll, AutoReenrolManager, AutoReenrolOff:
+	default:
+		return fmt.Errorf("config: broker.auto_reenrol %q must be one of all|manager|off (or unset = all)", a.Broker.AutoReenrol)
 	}
 	if err := validateDisk(a.Disk); err != nil {
 		return err
@@ -854,6 +874,16 @@ func (a *App) EffectiveAdminPort() int {
 		return a.Broker.AdminPort
 	}
 	return DefaultBrokerAdminPort
+}
+
+// EffectiveAutoReenrol is the natural-lapse healer gate: the configured value,
+// or AutoReenrolAll when unset. Validated at load (Validate rejects unknown
+// values), so callers may switch on the three constants exhaustively.
+func (a *App) EffectiveAutoReenrol() AutoReenrolMode {
+	if a.Broker.AutoReenrol != "" {
+		return a.Broker.AutoReenrol
+	}
+	return AutoReenrolAll
 }
 
 func (a *App) brokerLLMAuthDefault() LLMAuthMode {

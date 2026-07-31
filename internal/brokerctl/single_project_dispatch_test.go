@@ -92,6 +92,10 @@ func (f *fakeWorkerRuntime) Resume(_ context.Context, worker, _ string) error {
 	f.resumed = append(f.resumed, worker)
 	return nil
 }
+
+func (f *fakeWorkerRuntime) ResumeForce(ctx context.Context, worker, project string) error {
+	return f.Resume(ctx, worker, project)
+}
 func (f *fakeWorkerRuntime) Stop(_ context.Context, _, _ string) error    { return nil }
 func (f *fakeWorkerRuntime) Suspend(_ context.Context, _, _ string) error { return nil }
 func (f *fakeWorkerRuntime) EnvSet(_ context.Context, _, _, _ string) error {
@@ -104,13 +108,13 @@ func (f *fakeWorkerRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.
 
 // fakeTLSWithCN returns a synthetic TLS connection state whose verified client
 // cert CN is cn — enough for ca.RequireAgent (it reads
-// r.TLS.VerifiedChains[0][0].Subject.CommonName), without a real handshake.
+// r.TLS.PeerCertificates[0].Subject.CommonName), without a real handshake.
 // Mirrors internal/broker/worker_test.go's helper of the same shape (kept
 // local for the same reason as fakeWorkerRuntime above).
 func fakeTLSWithCN(cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{
-		VerifiedChains: [][]*x509.Certificate{
-			{{Subject: pkix.Name{CommonName: cn}}},
+		PeerCertificates: []*x509.Certificate{
+			{Subject: pkix.Name{CommonName: cn}},
 		},
 	}
 }

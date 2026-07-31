@@ -72,15 +72,22 @@ func (b *Broker) JailHandler() http.Handler {
 	return mux
 }
 
-// EpochResponse reports the broker's current minimum acceptable token epoch.
+// EpochResponse reports the broker's current minimum acceptable token epoch,
+// plus the serving process's identity: the binary version it runs and a
+// digest of the broker-relevant configuration it was started with. apply's
+// broker-reuse shortcut compares these against its own expectation and
+// restarts the broker on mismatch (#19) — a broker predating these fields
+// reports them empty, which callers treat as a mismatch.
 type EpochResponse struct {
-	Epoch int `json:"epoch"`
+	Epoch      int    `json:"epoch"`
+	Version    string `json:"version,omitempty"`
+	ConfigHash string `json:"config_hash,omitempty"`
 }
 
 // handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
 func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(EpochResponse{Epoch: b.MinEpoch()})
+	_ = json.NewEncoder(w).Encode(EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.

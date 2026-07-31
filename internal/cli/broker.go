@@ -50,7 +50,7 @@ func newBrokerServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			cmd.Printf("broker %q serving on 127.0.0.1:%d (admin :%d)\n", app.Name, app.EffectiveJailPort(), app.EffectiveAdminPort())
-			return brokerctl.Serve(ctx, app, stateFor(path))
+			return brokerctl.Serve(ctx, app, stateFor(path), versionString())
 		},
 	}
 }

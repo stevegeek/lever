@@ -256,6 +256,27 @@ func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 		return checkResult{name, false, "could not inspect CLAUDE.md: " + err.Error(), "run `lever init`"}
 	}
 	if skillsUpToDate(results, blockAct) {
+		// An adoption is an owner choice, but it silently pins the file to the
+		// framework baseline it was adopted AT — an instance can upgrade many
+		// versions past a (possibly security-relevant) skill change while
+		// doctor reports healthy (#16, reproduced live: a 0.3.1 adoption
+		// surviving to 0.8.1). Version drift on an adopted file is therefore a
+		// FAILING check: visibility only, never an auto-overwrite.
+		var lagging []string
+		for _, r := range results {
+			if r.Action == skillAdopted && r.AdoptedVersion != Version {
+				v := r.AdoptedVersion
+				if v == "" {
+					v = "unknown"
+				}
+				lagging = append(lagging, fmt.Sprintf("%s (baseline %s)", r.RelPath, v))
+			}
+		}
+		if len(lagging) > 0 {
+			return checkResult{name, false,
+				fmt.Sprintf("adopted skill baseline lags framework %s: %s — missing framework guidance added since adoption", Version, strings.Join(lagging, "; ")),
+				"review the drift vs the current scaffold, merge what you want to keep, set `lever-version: " + Version + "` in the file's frontmatter (your attestation of the baseline reviewed against), then re-bless with `lever init --adopt` — or reclaim the framework version with `lever init --force`"}
+		}
 		nAdopted := 0
 		for _, r := range results {
 			if r.Action == skillAdopted {

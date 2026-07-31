@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
@@ -232,6 +233,14 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 // user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
 // that never exercise a Log-emitting path), in which case Log falls back to
 // stderr.
+// brokerReusable reports whether a running broker's /epoch identity matches
+// this binary + this broker config, i.e. whether apply's M2 shortcut may keep
+// it (#19). A broker predating the identity fields reports them empty —
+// mismatch — so old brokers are always restarted rather than trusted.
+func brokerReusable(got broker.EpochResponse, wantVersion, wantHash string) bool {
+	return got.Version == wantVersion && got.ConfigHash == wantHash
+}
+
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
 	machine := "lever-" + app.Name
 	b, err := bf(app.Backend, machine)
@@ -291,14 +300,26 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// Idempotent (M2): if a broker is already serving (re-apply), don't spawn
 		// a duplicate — it would fail to bind the ports, die, and clobber
 		// broker.pid with a dead PID. A fast single-shot probe (no listener =>
-		// instant connection-refused, so no penalty on a fresh apply).
+		// instant connection-refused, so no penalty on a fresh apply). But only
+		// reuse a broker that matches THIS binary and THIS broker config (#19):
+		// a broker started by an older binary (no healer, stale routes) or with
+		// an older tool set would otherwise keep serving while apply reports
+		// success — so on identity mismatch, stop it and fall through to spawn.
 		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
 		if req, err := http.NewRequestWithContext(probeCtx, "GET", adminURL+"/epoch", nil); err == nil {
 			if resp, err := http.DefaultClient.Do(req); err == nil {
+				var er broker.EpochResponse
+				decodeErr := json.NewDecoder(resp.Body).Decode(&er)
 				_ = resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
-					return nil // already serving; keep the existing process + PID
+					if decodeErr == nil && brokerReusable(er, versionString(), brokerctl.ConfigHash(app)) {
+						return nil // same binary + same broker config; keep the process + PID
+					}
+					fmt.Fprintf(os.Stderr, "lever: broker predates this binary or its tool config changed — restarting it (was %q)\n", er.Version)
+					if err := state.StopBroker(); err != nil {
+						return fmt.Errorf("stopping the stale broker before restart: %w", err)
+					}
 				}
 			}
 		}

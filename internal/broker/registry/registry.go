@@ -17,6 +17,13 @@ type Operation struct {
 	// "schema.table"). Constraint keys absent here are identity-mapped
 	// (constraint key == arg name).
 	CaveatParam map[string]string
+	// Params optionally declares the operation's argument names (config's
+	// opt-in `params:` list). When non-empty, ValidateConstraints rejects a
+	// mint whose constraint keys fall outside Params ∪ CaveatParam keys —
+	// turning a deferred, misattributed call-time denial (a typo'd key mints
+	// an over-narrowed token that can never match) into an immediate
+	// mint-time error (#21). Empty = permissive (any key is a constraint).
+	Params []string
 }
 
 // WildcardOp is the operation name of a coarse tool's single capability. It is
@@ -141,15 +148,35 @@ func (r *Registry) MapParams(tool, op string, args map[string]string) (map[strin
 }
 
 // ValidateConstraints returns an error if any (key,value) constraint requests a
-// value the tool's AllowedValues forbids. Keys without an AllowedValues entry
-// are unrestricted at this layer (the tool backstops). Used at mint time as
-// defense-in-depth. Errors if the tool is unregistered.
-func (r *Registry) ValidateConstraints(tool string, constraints map[string]string) error {
+// value the tool's AllowedValues forbids, or — when the operation declares its
+// parameter set (Operation.Params, #21) — if any constraint key falls outside
+// Params ∪ CaveatParam keys. Keys without an AllowedValues entry are otherwise
+// unrestricted at this layer (the tool backstops). Used at mint time as
+// defense-in-depth. Errors if the tool or op is unregistered.
+func (r *Registry) ValidateConstraints(tool, op string, constraints map[string]string) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	t, ok := r.tools[tool]
 	if !ok {
 		return fmt.Errorf("registry: unknown tool %q", tool)
+	}
+	o, ok := t.Operations[op]
+	if !ok {
+		return fmt.Errorf("registry: tool %q has no operation %q", tool, op)
+	}
+	if len(o.Params) > 0 {
+		declared := make(map[string]bool, len(o.Params)+len(o.CaveatParam))
+		for _, p := range o.Params {
+			declared[p] = true
+		}
+		for ck := range o.CaveatParam { // renamed constraint keys are also valid
+			declared[ck] = true
+		}
+		for k := range constraints {
+			if !declared[k] {
+				return fmt.Errorf("registry: %s.%s has no parameter %q (declared: %v) — a constraint on it could never match a call", tool, op, k, o.Params)
+			}
+		}
 	}
 	for k, v := range constraints {
 		allowed, restricted := t.AllowedValues[k]

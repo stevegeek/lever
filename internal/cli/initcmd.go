@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
@@ -63,7 +64,17 @@ func newInitCmd() *cobra.Command {
 				case skillUnchanged:
 					cmd.Printf("• %s — unchanged\n", r.RelPath)
 				case skillAdopted:
-					cmd.Printf("• %s — custom (adopted baseline)\n", r.RelPath)
+					// Version-lag warning applies to SKILL.md scaffolds only —
+					// the CLAUDE.md block entry carries no lever-version stamp.
+					if strings.HasSuffix(r.RelPath, "SKILL.md") && r.AdoptedVersion != Version {
+						v := r.AdoptedVersion
+						if v == "" {
+							v = "unknown"
+						}
+						cmd.Printf("! %s — custom (adopted baseline %s; framework is %s — missing later framework guidance, see `lever doctor`)\n", r.RelPath, v, Version)
+					} else {
+						cmd.Printf("• %s — custom (adopted baseline)\n", r.RelPath)
+					}
 				case skillSkipped:
 					if check {
 						cmd.Printf("✗ %s — locally modified\n", r.RelPath)

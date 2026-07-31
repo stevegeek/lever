@@ -51,7 +51,8 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 	for _, t := range app.Broker.Tools {
 		ops := make(map[string]registry.Operation, len(t.Operations)+1)
 		for _, o := range t.Operations {
-			ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: copyStringMap(o.CaveatParam)}
+			ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: copyStringMap(o.CaveatParam),
+				Params: append([]string(nil), o.Params...)}
 		}
 		coarse := t.External && t.EffectiveGate() == config.GateCoarse
 		if coarse {

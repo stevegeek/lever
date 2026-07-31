@@ -33,6 +33,11 @@ version bump moves the block under the new version heading.
   forced resume also fails — but a failed resume now RE-OBSERVES the record
   first (with the broker-unavailable retry), so apply cannot delete a session
   the broker's healer concurrently recovered.
+- **`up --fresh` discards a record in ANY phase.** Now that apply preserves
+  an error-phase record whose forced resume comes up dead (see #3 above),
+  `--fresh` is the escape hatch for a genuinely-bricked record — but it only
+  triggered for running/suspended, so `up --fresh` resumed the very record
+  the user asked to discard (caught in 0.12.0 live validation).
 - **Worker resume re-stages a fresh enrolment ticket** (mirroring the
   manager's 0.10-era fix) and uses `resume --force` for error-phase records:
   a worker resumed after its ticket/leaf lifetime no longer wedges into

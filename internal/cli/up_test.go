@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/broker"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
 )
@@ -140,5 +141,24 @@ func TestFirstLine(t *testing.T) {
 		if got := firstLine(c.input); got != c.want {
 			t.Errorf("%s: firstLine(%q)=%q want %q", c.name, c.input, got, c.want)
 		}
+	}
+}
+
+// brokerReusable (#19): apply's M2 shortcut may only keep a running broker
+// whose /epoch identity matches this binary AND this broker config. A broker
+// predating the fields reports them empty — always a mismatch.
+func TestBrokerReusable(t *testing.T) {
+	got := broker.EpochResponse{Version: "v", ConfigHash: "h"}
+	if !brokerReusable(got, "v", "h") {
+		t.Fatal("matching identity must be reusable")
+	}
+	if brokerReusable(got, "v2", "h") {
+		t.Fatal("binary version drift must force a restart")
+	}
+	if brokerReusable(got, "v", "h2") {
+		t.Fatal("config drift must force a restart")
+	}
+	if brokerReusable(broker.EpochResponse{}, "v", "h") {
+		t.Fatal("an old broker (no identity fields) must force a restart")
 	}
 }

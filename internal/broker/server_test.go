@@ -215,6 +215,23 @@ func TestEpochEndpointReportsCurrentEpoch(t *testing.T) {
 	}
 }
 
+// /epoch reports the broker's identity (binary version + config hash) so
+// apply's reuse shortcut can detect a stale broker (#19).
+func TestEpochEndpointReportsIdentity(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Version = "1.2.3 (abc)"
+	cfg.ConfigHash = "deadbeef"
+	b := New(cfg)
+	r := httptest.NewRequest("GET", "/epoch", nil)
+	w := httptest.NewRecorder()
+	b.AdminHandler().ServeHTTP(w, r)
+	var resp EpochResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Version != "1.2.3 (abc)" || resp.ConfigHash != "deadbeef" {
+		t.Fatalf("identity = %q/%q, want the configured version/hash", resp.Version, resp.ConfigHash)
+	}
+}
+
 func TestServeListenersRejectsNonLoopbackAdmin(t *testing.T) {
 	b := New(testConfig(t))
 	jailLn, err := net.Listen("tcp", "127.0.0.1:0")

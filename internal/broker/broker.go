@@ -125,6 +125,14 @@ type Config struct {
 	// DirectiveExpiryMax clamps how far in the future a submitted directive's
 	// expires_at may sit (on top of opsig's own 24h hard cap).
 	DirectiveExpiryMax time.Duration
+
+	// Version and ConfigHash identify this broker process: the binary's
+	// version string and a digest of the broker-relevant configuration it was
+	// started with. Reported by /epoch so apply's broker-reuse shortcut can
+	// detect a stale broker (old binary or old tool set) and restart it
+	// instead of silently reusing it (#19). Both optional (empty = unreported).
+	Version    string
+	ConfigHash string
 }
 
 // Broker is the running capability authority + brokered-tool proxy.
@@ -176,6 +184,9 @@ type Broker struct {
 	dirAudit           *directiveAudit
 	directiveExpiryMax time.Duration
 	dirRate            *rateWindow
+
+	version    string // reported by /epoch (see Config.Version)
+	configHash string // reported by /epoch (see Config.ConfigHash)
 }
 
 // New builds a Broker from c.
@@ -236,6 +247,7 @@ func New(c Config) *Broker {
 		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
 		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,
 		dirRate: newRateWindow(),
+		version: c.Version, configHash: c.ConfigHash,
 	}
 }
 

@@ -44,8 +44,10 @@ func removePIDFile(state State) {
 // Serve runs the host-side broker for app until ctx is cancelled: ensure keys +
 // revocation state, build the broker, pre-bind both loopback listeners (learning
 // OS-assigned ports), issue the server cert, supervise the first-party tools, and
-// serve. The supervisor is torn down on shutdown.
-func Serve(ctx context.Context, app *config.App, state State) error {
+// serve. The supervisor is torn down on shutdown. version is this binary's
+// version string, reported by /epoch alongside ConfigHash(app) so apply's
+// broker-reuse shortcut can detect a stale broker (#19).
+func Serve(ctx context.Context, app *config.App, state State, version string) error {
 	kp, caInst, err := state.EnsureKeys()
 	if err != nil {
 		return err
@@ -114,6 +116,8 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	// there; workers carry their dir in WorkerSpec.BootstrapDir).
 	cfg.AutoReenrol = string(app.EffectiveAutoReenrol())
 	cfg.ManagerBootstrapDir = filepath.Join(app.Tree, ".lever")
+	cfg.Version = version
+	cfg.ConfigHash = ConfigHash(app)
 	cfg.WorkerToWorker = app.WorkerToWorkerMessaging()
 	if caPEM, err := os.ReadFile(state.CACert()); err == nil {
 		cfg.BrokerCAPEM = string(caPEM)

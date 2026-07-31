@@ -61,7 +61,13 @@ func managerDefinitelyAbsent(err error) bool {
 
 // upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
 func upDecision(phase string, fresh bool) string {
-	if fresh && (phase == "running" || phase == "suspended") {
+	// --fresh discards ANY present record, whatever its phase. Since 0.12
+	// apply PRESERVES an error-phase record when its forced resume comes up
+	// dead (loud failure, no delete — see start-manager's #3 recovery), so
+	// --fresh is the only clean escape hatch for a genuinely-bricked record;
+	// limiting it to running/suspended would leave `up --fresh` resuming the
+	// very record the user asked to discard.
+	if fresh && phase != "" {
 		return "restart"
 	}
 	switch phase {

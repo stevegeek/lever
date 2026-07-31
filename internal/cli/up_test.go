@@ -79,6 +79,13 @@ func TestUpDecision(t *testing.T) {
 		{"running", true, "restart"},
 		{"suspended", true, "restart"},
 		{"stopped", false, "apply"},
+		// --fresh discards ANY present record: since 0.12 apply preserves an
+		// error-phase record whose forced resume comes up dead (#3), so
+		// --fresh must be the escape hatch for a bricked record — not resume
+		// the very conversation the user asked to discard.
+		{"stopped", true, "restart"},
+		{"error", true, "restart"},
+		{"", true, "apply"},
 	}
 	for _, c := range cases {
 		if got := upDecision(c.phase, c.fresh); got != c.want {

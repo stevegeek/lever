@@ -517,15 +517,40 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 					return err
 				}
 			}
+		case rec.Phase == "error":
+			// A crashed/wedged manager record. Since scion#895 (`resume
+			// --force`, pin >= 68507153) the error phase IS recoverable — try
+			// that first, with a fresh ticket staged (the leaf may have lapsed
+			// while wedged; same rationale as the suspended branch), and only
+			// discard the conversation when the forced resume itself fails.
+			// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
+			// container state, resume failed, and the then-unconditional
+			// delete+fresh destroyed the manager conversation (#3).
+			if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+				return err
+			}
+			if rerr := retryOnBrokerUnavailable(ctx, func() error {
+				return d.Scion.ResumeForce(ctx, app.Name, jp)
+			}); rerr != nil {
+				// LOUD recovery, exactly as the failed-resume path above.
+				logf(d, "start-manager: manager in phase \"error\" and resume --force failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
+				if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+					return fmt.Errorf("start-manager: forced resume failed (%v) and delete failed: %w", rerr, derr)
+				}
+				if err := startManagerCreate(ctx, d, boot, opts); err != nil {
+					return err
+				}
+			}
 		default:
 			// Any other phase — scion's full enum also has created,
-			// provisioning, cloning, starting, stopping, and error (see
+			// provisioning, cloning, starting, and stopping (see
 			// pkg/agent/state/state.go) — is not resumable: `scion resume` is
-			// documented for suspended/stopped records only, and `scion list`'s
+			// documented for suspended/stopped records only (`--force` only
+			// recovers "error", handled above), and `scion list`'s
 			// JSON phase field is the canonical (and only) signal we have, so we
 			// cannot be cleverer here without more scion verbs (e.g. there is no
-			// "wait for starting to settle" verb to poll instead). A crashed
-			// manager (phase "error") or one caught mid-transition by an
+			// "wait for starting to settle" verb to poll instead). A record
+			// caught mid-transition by an
 			// interrupted prior `lever up` (phase "starting"/"created"/…) must
 			// still let `up` converge, so this takes the SAME loud delete+fresh
 			// recovery as a failed resume, rather than hard-failing (bricking)

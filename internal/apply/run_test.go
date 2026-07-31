@@ -177,6 +177,7 @@ type agentLifecycleRunner struct {
 	inited                 bool
 
 	startCalls, resumeCalls, deleteCalls, listCalls int
+	resumeForceCalls                                int // subset of resumeCalls carrying --force
 }
 
 func (r *agentLifecycleRunner) ensureInit() {
@@ -248,6 +249,11 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 		return exec.Result{Stdout: "ok"}, nil
 	case "resume":
 		r.resumeCalls++
+		for _, a := range args {
+			if a == "--force" {
+				r.resumeForceCalls++
+			}
+		}
 		r.record(dir, env, name, args)
 		if r.resumeErr != nil && (r.resumeFailsThenSucceed == 0 || r.resumeCalls <= r.resumeFailsThenSucceed) {
 			return exec.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
@@ -716,6 +722,39 @@ func TestStartManagerLivenessNeverGreenAfterCreate(t *testing.T) {
 // SAME loud delete+fresh recovery as a failed resume, so `up` converges.
 func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
 	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "error", initContainerStatus: "stopped",
+		resumeErr: fmt.Errorf("container state corrupt")}
+	var logged []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		Log: func(format string, args ...any) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("an unrecoverable error phase must recover fresh, not hard-fail the apply: %v", err)
+	}
+	if r.resumeForceCalls != 1 {
+		t.Errorf("resumeForceCalls = %d, want 1 (error phase must TRY resume --force before discarding)", r.resumeForceCalls)
+	}
+	if r.deleteCalls != 1 || r.startCalls != 1 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (delete the unrecoverable record, then fresh create)", r.deleteCalls, r.startCalls)
+	}
+	if len(logged) != 1 {
+		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged)
+	}
+	if !strings.Contains(logged[0], `phase "error"`) || !strings.Contains(logged[0], "FRESH") || !strings.Contains(logged[0], "previous session lost") {
+		t.Fatalf("recovery log line missing expected wording, got %q", logged[0])
+	}
+}
+
+// TestStartManagerErrorPhaseForcedResumeRecovers (#3): an error-phase record
+// is first re-ticketed and `resume --force`d (scion#895); when that succeeds
+// the conversation SURVIVES — no delete, no fresh create, no loud loss notice.
+func TestStartManagerErrorPhaseForcedResumeRecovers(t *testing.T) {
+	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "error", initContainerStatus: "stopped"}
 	var logged []string
 	deps := Deps{
@@ -727,19 +766,18 @@ func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
-		t.Fatalf("an unexpected/error phase must recover fresh, not hard-fail the apply: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
-	if r.resumeCalls != 0 {
-		t.Errorf("resumeCalls = %d, want 0 (an error phase is not resumable — resume is only for suspended/stopped)", r.resumeCalls)
+	if r.resumeForceCalls != 1 {
+		t.Errorf("resumeForceCalls = %d, want 1", r.resumeForceCalls)
 	}
-	if r.deleteCalls != 1 || r.startCalls != 1 {
-		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (delete the unrecoverable record, then fresh create)", r.deleteCalls, r.startCalls)
+	if r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 (forced resume succeeded — the conversation must survive)", r.deleteCalls, r.startCalls)
 	}
-	if len(logged) != 1 {
-		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged)
-	}
-	if !strings.Contains(logged[0], `phase "error"`) || !strings.Contains(logged[0], "FRESH") || !strings.Contains(logged[0], "previous session lost") {
-		t.Fatalf("recovery log line missing expected wording, got %q", logged[0])
+	for _, l := range logged {
+		if strings.Contains(l, "previous session lost") {
+			t.Fatalf("no loss notice expected on successful forced resume, got %q", l)
+		}
 	}
 }
 

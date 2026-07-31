@@ -632,11 +632,22 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 // suspend/resume was mid-flight", not "unrecoverable" — and deleting on it
 // would destroy the exact conversation both recovery paths exist to save.
 // Only a record that is NOT running on re-observation justifies the delete.
-// (Errors observing count as not-recovered: fail toward the loud path, which
-// at least tells the user what it is about to do.)
+// The observe rides retryOnBrokerUnavailable: the resume just failed against
+// this same runtime, so a transient blip here is CORRELATED with that failure
+// — an unretried List would undermine the re-observe with a false negative
+// one level up. (Errors that survive the retry budget count as not-recovered:
+// fail toward the loud path, which at least tells the user what it is about
+// to do.)
 func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) bool {
-	agents, err := d.Scion.List(ctx, jp)
-	if err != nil {
+	var agents []scion.Agent
+	if err := retryOnBrokerUnavailable(ctx, func() error {
+		a, e := d.Scion.List(ctx, jp)
+		if e != nil {
+			return e
+		}
+		agents = a
+		return nil
+	}); err != nil {
 		return false
 	}
 	for i := range agents {

@@ -72,21 +72,16 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		}
 	}
 
-	// Identity gate: configured + not revoked. The revocation check makes
-	// expiry a real kill-switch — `lever revoke` wins over the healer.
+	// Identity gate: only configured identities are healable.
 	spec, isWorker := b.workers[cn]
 	if cn != b.manager && !isWorker {
 		return
 	}
-	b.mu.Lock()
-	revoked := b.revoked[cn]
-	b.mu.Unlock()
-	if revoked {
-		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
-		return
-	}
 
-	// Cooldown + cap.
+	// Cooldown + cap. Deliberately BEFORE the revoked check so the revoked
+	// deny-audit below is throttled to the same cadence as every other
+	// outcome — a revoked cert hammering handshakes must not write one audit
+	// line per attempt.
 	now := b.reenrolNow()
 	b.reenrolMu.Lock()
 	if last, ok := b.reenrolLast[cn]; ok {
@@ -107,6 +102,14 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	b.reenrolLast[cn] = now
 	b.reenrolTries[cn]++
 	b.reenrolMu.Unlock()
+
+	// Revocation makes expiry a real kill-switch — `lever revoke` wins over
+	// the healer. Checked right before ticket mint to keep the window between
+	// check and use minimal.
+	if b.isRevoked(cn) {
+		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
+		return
+	}
 
 	// Target: bootstrap dir + scion slug differ between manager and worker.
 	dir, slug := b.managerBootstrapDir, b.managerSlug

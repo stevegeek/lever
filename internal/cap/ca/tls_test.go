@@ -125,6 +125,17 @@ func TestAgentFromConnStateRejectsEmptyCN(t *testing.T) {
 // every way except time.
 func expiredClientCert(t *testing.T, c *CA, cn string) tls.Certificate {
 	t.Helper()
+	// Inside the CA's own window (Generate backdates it 1h) but ended in the
+	// past — the realistic natural-lapse shape.
+	return caSignedCert(t, c, cn,
+		time.Now().Add(-50*time.Minute), time.Now().Add(-10*time.Minute),
+		x509.ExtKeyUsageClientAuth)
+}
+
+// caSignedCert signs a leaf with our CA with an arbitrary validity window and
+// EKU, for building the near-miss shapes the lapse classifier must reject.
+func caSignedCert(t *testing.T, c *CA, cn string, notBefore, notAfter time.Time, eku x509.ExtKeyUsage) tls.Certificate {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -132,12 +143,10 @@ func expiredClientCert(t *testing.T, c *CA, cn string) tls.Certificate {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: cn},
-		// Inside the CA's own window (Generate backdates it 1h) but ended in
-		// the past — the realistic natural-lapse shape.
-		NotBefore:   time.Now().Add(-50 * time.Minute),
-		NotAfter:    time.Now().Add(-10 * time.Minute),
-		KeyUsage:    x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{eku},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, &key.PublicKey, c.key)
 	if err != nil {
@@ -255,6 +264,32 @@ func TestLapseHookFiresOnlyForOurExpiredCert(t *testing.T) {
 	}
 	if cn, ok := drainLapse(); ok {
 		t.Fatalf("lapse hook must not fire for a certless connection, fired with %q", cn)
+	}
+
+	// (f) our NOT-YET-VALID cert (future window): x509 reports this with the
+	// same Reason (Expired) as a genuine age-out, but it is clock skew, not a
+	// lapse — handshake fails, no hook, no automated bounce.
+	future := caSignedCert(t, c, "scratch",
+		time.Now().Add(10*time.Minute), time.Now().Add(50*time.Minute),
+		x509.ExtKeyUsageClientAuth)
+	if err := dial(&future); err == nil {
+		t.Fatal("not-yet-valid cert must fail the handshake")
+	}
+	if cn, ok := drainLapse(); ok {
+		t.Fatalf("lapse hook must not fire for a not-yet-valid cert, fired with %q", cn)
+	}
+
+	// (g) our EXPIRED cert with the WRONG EKU (server-auth): the time defect
+	// surfaces first in Verify, but the midpoint re-verify must catch the EKU
+	// mismatch — handshake fails, no hook.
+	wrongEKU := caSignedCert(t, c, "scratch",
+		time.Now().Add(-50*time.Minute), time.Now().Add(-10*time.Minute),
+		x509.ExtKeyUsageServerAuth)
+	if err := dial(&wrongEKU); err == nil {
+		t.Fatal("expired wrong-EKU cert must fail the handshake")
+	}
+	if cn, ok := drainLapse(); ok {
+		t.Fatalf("lapse hook must not fire for an expired wrong-EKU cert, fired with %q", cn)
 	}
 }
 

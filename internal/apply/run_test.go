@@ -172,6 +172,11 @@ type agentLifecycleRunner struct {
 	// affected (waitHubReady's `list --all` falls through verb() to the blanket
 	// script). Zero with listErr set = fail every call.
 	listFailsThenSucceed int
+	// healerRecoversOnResumeFail, when true, advances the record to live even
+	// though resume FAILS — modelling the broker daemon's auto-re-enrol healer
+	// (#22) bouncing the same record concurrently: apply's own verb errors, but
+	// the agent comes up anyway.
+	healerRecoversOnResumeFail bool
 
 	phase, containerStatus string
 	inited                 bool
@@ -256,6 +261,9 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 		}
 		r.record(dir, env, name, args)
 		if r.resumeErr != nil && (r.resumeFailsThenSucceed == 0 || r.resumeCalls <= r.resumeFailsThenSucceed) {
+			if r.healerRecoversOnResumeFail {
+				r.goLive()
+			}
 			return exec.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
 		}
 		r.goLive()
@@ -778,6 +786,46 @@ func TestStartManagerErrorPhaseForcedResumeRecovers(t *testing.T) {
 		if strings.Contains(l, "previous session lost") {
 			t.Fatalf("no loss notice expected on successful forced resume, got %q", l)
 		}
+	}
+}
+
+// TestStartManagerResumeFailButHealerRecovered: apply's resume/resume --force
+// fails, but re-observation shows the record RUNNING — the broker daemon's
+// auto-re-enrol healer (a separate process, started by broker-up before this
+// step) bounced the same record concurrently. Apply must NOT delete+recreate:
+// that would destroy the conversation the healer just restored. Covers the
+// apply-vs-healer race from the recovery-arc review (finding 1).
+func TestStartManagerResumeFailButHealerRecovered(t *testing.T) {
+	for _, phase := range []string{"error", "suspended"} {
+		t.Run(phase, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: "stopped",
+				resumeErr:                  fmt.Errorf("verb conflict: agent transition in flight"),
+				healerRecoversOnResumeFail: true}
+			var logged []string
+			deps := Deps{
+				JailUp:    func(context.Context, *config.App) error { return nil },
+				LoadImage: func(context.Context, string) error { return nil },
+				Scion:     scion.New(r, scion.Options{}),
+				Log: func(format string, args ...any) {
+					logged = append(logged, fmt.Sprintf(format, args...))
+				},
+			}
+			if err := Run(context.Background(), app, deps); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if r.deleteCalls != 0 || r.startCalls != 0 {
+				t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 (record is running — the healer recovered it, apply must keep the session)", r.deleteCalls, r.startCalls)
+			}
+			if len(logged) != 1 || !strings.Contains(logged[0], "recovered concurrently") {
+				t.Fatalf("expected one 'recovered concurrently' log line, got %+v", logged)
+			}
+			for _, l := range logged {
+				if strings.Contains(l, "previous session lost") {
+					t.Fatalf("no loss notice when the record survived, got %q", l)
+				}
+			}
+		})
 	}
 }
 

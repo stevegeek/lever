@@ -505,16 +505,20 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			if rerr := retryOnBrokerUnavailable(ctx, func() error {
 				return d.Scion.Resume(ctx, app.Name, jp)
 			}); rerr != nil {
-				// LOUD recovery: the conversation could not be restored. This MUST
-				// reach the user — resume failing means the durable session (the
-				// whole point of suspending, not stopping, at power-off; see
-				// cli/stop.go) is about to be discarded.
-				logf(d, "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
-				if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
-					return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
-				}
-				if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-					return err
+				if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
+					logf(d, "start-manager: resume failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
+				} else {
+					// LOUD recovery: the conversation could not be restored. This MUST
+					// reach the user — resume failing means the durable session (the
+					// whole point of suspending, not stopping, at power-off; see
+					// cli/stop.go) is about to be discarded.
+					logf(d, "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
+					if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+						return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
+					}
+					if err := startManagerCreate(ctx, d, boot, opts); err != nil {
+						return err
+					}
 				}
 			}
 		case rec.Phase == "error":
@@ -532,13 +536,17 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			if rerr := retryOnBrokerUnavailable(ctx, func() error {
 				return d.Scion.ResumeForce(ctx, app.Name, jp)
 			}); rerr != nil {
-				// LOUD recovery, exactly as the failed-resume path above.
-				logf(d, "start-manager: manager in phase \"error\" and resume --force failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
-				if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
-					return fmt.Errorf("start-manager: forced resume failed (%v) and delete failed: %w", rerr, derr)
-				}
-				if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-					return err
+				if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
+					logf(d, "start-manager: resume --force failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
+				} else {
+					// LOUD recovery, exactly as the failed-resume path above.
+					logf(d, "start-manager: manager in phase \"error\" and resume --force failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
+					if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
+						return fmt.Errorf("start-manager: forced resume failed (%v) and delete failed: %w", rerr, derr)
+					}
+					if err := startManagerCreate(ctx, d, boot, opts); err != nil {
+						return err
+					}
 				}
 			}
 		default:
@@ -615,6 +623,30 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 // already minted earlier in this same run (boot.minted, e.g.
 // mint-manager-bootstrap succeeded outright, or an earlier create in this
 // same Run already re-armed), or d.RearmBootstrap mints one now.
+// managerConcurrentlyRecovered re-observes the manager record after a FAILED
+// resume, before the loud delete+fresh recovery destroys the session. The
+// broker's auto-re-enrol healer (#22) lives in the broker daemon — started by
+// the broker-up step, i.e. BEFORE start-manager runs — and it bounces lapsed
+// agents via the same scion verbs this step uses, in a separate process with
+// no coordination. So a resume failure here can mean "the healer's own
+// suspend/resume was mid-flight", not "unrecoverable" — and deleting on it
+// would destroy the exact conversation both recovery paths exist to save.
+// Only a record that is NOT running on re-observation justifies the delete.
+// (Errors observing count as not-recovered: fail toward the loud path, which
+// at least tells the user what it is about to do.)
+func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) bool {
+	agents, err := d.Scion.List(ctx, jp)
+	if err != nil {
+		return false
+	}
+	for i := range agents {
+		if agents[i].Slug == name {
+			return agents[i].Phase == "running"
+		}
+	}
+	return false
+}
+
 func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts scion.StartOpts) error {
 	if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
 		return err

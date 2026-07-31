@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // LapseFunc is the natural-lapse observation hook: it is invoked during a
@@ -95,7 +96,13 @@ func (c *CA) verifyClientCert(pool *x509.CertPool, onLapse LapseFunc) func(tls.C
 			return nil
 		}
 		var invalid x509.CertificateInvalidError
-		if onLapse != nil && errors.As(err, &invalid) && invalid.Reason == x509.Expired && leaf.Subject.CommonName != "" {
+		// x509 reports Reason Expired for BOTH time defects — aged out AND
+		// not-yet-valid. Only the former is a natural lapse; a future-dated
+		// leaf (broker clock stepped backward past issuance) must not trigger
+		// an automated agent bounce, so gate on the leaf actually being past
+		// its NotAfter.
+		if onLapse != nil && errors.As(err, &invalid) && invalid.Reason == x509.Expired &&
+			leaf.Subject.CommonName != "" && time.Now().After(leaf.NotAfter) {
 			// Re-verify at a time when BOTH the leaf and our CA were valid (the
 			// midpoint of their windows' intersection — a cert our CA really
 			// signed always has one): if the chain verifies there, the sole

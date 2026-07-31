@@ -85,6 +85,21 @@ func TestHealLapsedErrorWorkerUsesForce(t *testing.T) {
 	}
 }
 
+// A lapsed worker in a mid-transition phase (e.g. "starting"): NOT bounceable
+// — no verb fires; the audit trail tells the operator to run `lever up`.
+func TestHealUnbounceablePhaseAuditsOnly(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "starting"}},
+	}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	b.healLapse(context.Background(), "scratch")
+
+	if len(rt.suspend)+len(rt.resumed)+len(rt.resumeForced) != 0 {
+		t.Fatalf("verbs fired for unbounceable phase: suspend %v resume %v force %v",
+			rt.suspend, rt.resumed, rt.resumeForced)
+	}
+}
+
 // A lapsed suspended/stopped worker: plain Resume.
 func TestHealLapsedSuspendedWorkerPlainResume(t *testing.T) {
 	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{

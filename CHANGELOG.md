@@ -22,6 +22,21 @@ version bump moves the block under the new version heading.
   per-CN cooldown, 3 per burst, burst resets on success or an hour of quiet).
   A leaf that is not-yet-valid (backward clock step) is rejected but never
   classified as a lapse — no automated bounce on clock skew.
+- **Opt-in declared operation params reject typo'd mint constraints (#21).**
+  An op may declare `params:` (its argument names) alongside `caveat_param`;
+  when declared, `/request` rejects capability constraints on any other key
+  AT MINT TIME with an accurate error — previously a mistyped key minted a
+  strictly over-narrowed token that failed closed only at call time
+  (`constraint not satisfied`), far from the mistake. Undeclared ops keep
+  the permissive behavior; params come from config only (a self-registering
+  tool cannot alter them).
+- **doctor/init surface stale adopted-skill baselines (#16).** An adopted
+  skill's `lever-version:` frontmatter stamp is treated as the owner's
+  attestation of the framework baseline it was reviewed against: doctor now
+  FAILS (never auto-overwrites) when it lags the current version (or is
+  absent), naming both versions; `lever init` marks the line with `!`.
+  Previously an adoption pinned an instance to its adoption-era baseline —
+  through security-relevant skill changes — with doctor green throughout.
 
 ### Fixed
 - **apply no longer discards an error-phase manager without trying to save
@@ -33,6 +48,13 @@ version bump moves the block under the new version heading.
   forced resume also fails — but a failed resume now RE-OBSERVES the record
   first (with the broker-unavailable retry), so apply cannot delete a session
   the broker's healer concurrently recovered.
+- **apply restarts the broker when its binary or tool config is stale
+  (#19).** The M2 broker-reuse shortcut kept ANY serving broker, so a
+  re-apply with a changed tool set — or a lever upgrade — left the old
+  broker (old tools, old routes, no healer) silently running while apply
+  reported success. `/epoch` now reports the broker's binary version + a
+  digest of the broker-relevant config; apply restarts on mismatch (old
+  brokers report neither — always restarted).
 - **`up --fresh` discards a record in ANY phase.** Now that apply preserves
   an error-phase record whose forced resume comes up dead (see #3 above),
   `--fresh` is the escape hatch for a genuinely-bricked record — but it only

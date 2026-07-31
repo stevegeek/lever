@@ -126,6 +126,11 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		}
 	}
 	tlsCfg := b.ca.ServerTLSConfigSource(certSrc, b.lapseFunc())
+	if b.lapseFunc() != nil {
+		// Auto-re-enrol healer (#22): drains natural-lapse events for the life
+		// of the serve. Only started when the hook is installed at all.
+		go b.runHealer(ctx)
+	}
 	jailSrv := &http.Server{
 		Handler: b.JailHandler(), TLSConfig: tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,

@@ -109,6 +109,11 @@ func Serve(ctx context.Context, app *config.App, state State) error {
 	// The manager's scion agent slug is the APP NAME (apply's start-manager
 	// dispatches the manager as Worker: app.Name), not the manager cert CN.
 	cfg.ManagerSlug = app.Name
+	// Natural-lapse auto-re-enrol (#22): mode from config; the manager's
+	// bootstrap.json lives at <tree>/.lever (mint-manager-bootstrap stages it
+	// there; workers carry their dir in WorkerSpec.BootstrapDir).
+	cfg.AutoReenrol = string(app.EffectiveAutoReenrol())
+	cfg.ManagerBootstrapDir = filepath.Join(app.Tree, ".lever")
 	cfg.WorkerToWorker = app.WorkerToWorkerMessaging()
 	if caPEM, err := os.ReadFile(state.CACert()); err == nil {
 		cfg.BrokerCAPEM = string(caPEM)

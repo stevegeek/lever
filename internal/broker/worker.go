@@ -30,6 +30,9 @@ type WorkerRuntime interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 	Start(ctx context.Context, o scion.StartOpts) error
 	Resume(ctx context.Context, worker, project string) error
+	// ResumeForce recovers an error-phase record (scion resume --force,
+	// scion#895); refuses phase running. Used by the recovery paths.
+	ResumeForce(ctx context.Context, worker, project string) error
 	Stop(ctx context.Context, worker, project string) error
 	Suspend(ctx context.Context, worker, project string) error
 	EnvSet(ctx context.Context, projectDir, key, value string) error
@@ -164,7 +167,30 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. Run `lever worker purge "+spec.Name+"` to start it fresh with a new task, or dispatch with no task to resume.", http.StatusConflict)
 			return
 		}
-		if err := b.runtime.Resume(ctx, spec.Name, b.instanceProject); err != nil {
+		// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
+		// ensureFreshBootstrap for the manager): a worker resumed after its
+		// leaf/ticket lifetime re-enrols on boot, and the previously staged
+		// ticket is long spent — without this it wedges into phase=error
+		// (live-hit 2026-07-31). Harmless when the leaf is still valid: boot
+		// skips enrol and the ticket ages out unspent.
+		ticket, err := b.tickets.Issue(spec.Name, b.ticketTTL)
+		if err != nil {
+			b.audit("worker", b.manager, "error", "resume ticket: "+err.Error())
+			http.Error(w, "ticket error", http.StatusInternalServerError)
+			return
+		}
+		bs := workerBootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: spec.Name}
+		if err := stageBootstrap(spec.BootstrapDir, bs); err != nil {
+			b.audit("worker", b.manager, "error", "resume stage: "+err.Error())
+			http.Error(w, "stage error", http.StatusInternalServerError)
+			return
+		}
+		resume := b.runtime.Resume
+		if phase == "error" {
+			// Only resume --force (scion#895) recovers an error-phase record.
+			resume = b.runtime.ResumeForce
+		}
+		if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
 			http.Error(w, "runtime error", http.StatusBadGateway)
 			return
 		}

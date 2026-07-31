@@ -92,6 +92,10 @@ func (f *fakeWorkerRuntime) Resume(_ context.Context, worker, _ string) error {
 	f.resumed = append(f.resumed, worker)
 	return nil
 }
+
+func (f *fakeWorkerRuntime) ResumeForce(ctx context.Context, worker, project string) error {
+	return f.Resume(ctx, worker, project)
+}
 func (f *fakeWorkerRuntime) Stop(_ context.Context, _, _ string) error    { return nil }
 func (f *fakeWorkerRuntime) Suspend(_ context.Context, _, _ string) error { return nil }
 func (f *fakeWorkerRuntime) EnvSet(_ context.Context, _, _, _ string) error {

@@ -25,6 +25,8 @@ type fakeRuntime struct {
 	started      []scion.StartOpts
 	resumed      []string
 	resumeProj   []string
+	resumeForced   []string
+	resumeForceErr error
 	stopped      []string
 	stopProj     []string
 	suspend      []string
@@ -34,6 +36,10 @@ type fakeRuntime struct {
 	startErr     error
 	listCalls    int      // total List invocations, to assert the fan-out is collapsed
 	listProjects []string // project arg of every List call
+	// staticPhases disables the acted->running modelling below: List always
+	// returns the seeded agents. Healer tests need a phase that persists
+	// across repeated heal attempts.
+	staticPhases bool
 	// exitedAfterStart, when set, makes List report a present-but-DEAD worker
 	// ("scratch") once Start has run — so the post-start liveness poll observes a
 	// crash-looped container (Phase "running", ContainerStatus "Exited (1)").
@@ -49,7 +55,7 @@ func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, er
 	// mirrors the real runtime — the pre-action `agents` map is the observe-first
 	// state; the poll sees the result of the action. exitedAfterStart flips it to
 	// a crash-loop (present but dead) to exercise the liveness-timeout path.
-	if name, acted := f.lastActed(); acted {
+	if name, acted := f.lastActed(); acted && !f.staticPhases {
 		if f.exitedAfterStart {
 			return []scion.Agent{{Slug: name, Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}}, nil
 		}
@@ -67,6 +73,9 @@ func (f *fakeRuntime) lastActed() (string, bool) {
 	if len(f.resumed) > 0 {
 		return f.resumed[len(f.resumed)-1], true
 	}
+	if len(f.resumeForced) > 0 {
+		return f.resumeForced[len(f.resumeForced)-1], true
+	}
 	return "", false
 }
 func (f *fakeRuntime) Start(_ context.Context, o scion.StartOpts) error {
@@ -78,6 +87,11 @@ func (f *fakeRuntime) Resume(_ context.Context, worker, project string) error {
 	f.resumeProj = append(f.resumeProj, project)
 	return nil
 }
+func (f *fakeRuntime) ResumeForce(_ context.Context, worker, project string) error {
+	f.resumeForced = append(f.resumeForced, worker)
+	return f.resumeForceErr
+}
+
 func (f *fakeRuntime) Stop(_ context.Context, worker, project string) error {
 	f.stopped = append(f.stopped, worker)
 	f.stopProj = append(f.stopProj, project)
@@ -242,14 +256,19 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 	if rt.resumeProj[0] != testInstanceProject {
 		t.Fatalf("resume project = %q, want the instance project %q", rt.resumeProj[0], testInstanceProject)
 	}
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); err == nil {
-		t.Fatal("resume must NOT re-provision/stage a bootstrap")
+	// Resume DOES stage a fresh one-use ticket (the 0.10-era manager fix,
+	// mirrored): a worker resumed after its leaf/ticket lifetime would
+	// otherwise re-enrol with a spent ticket and wedge into phase=error
+	// (live-hit 2026-07-31). Harmless when the leaf is still valid — boot
+	// skips enrol and the ticket ages out unspent.
+	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); err != nil {
+		t.Fatal("resume must stage a fresh bootstrap ticket")
 	}
 }
 
 // TestWorkerStart_terminalPhase_resumesNoReprovision verifies that any non-empty,
-// non-running phase (e.g. "exited") takes the resume path and never mints a
-// ticket, stages a bootstrap, or calls scion start.
+// non-running phase (e.g. "exited") takes the resume path — a fresh ticket is
+// staged (see the suspended-phase test) but scion start is never re-run.
 func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	bootstrapDir := filepath.Join(t.TempDir(), ".lever")
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
@@ -269,9 +288,33 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	if len(rt.started) != 0 {
 		t.Fatalf("started = %d, want 0 (must not re-provision)", len(rt.started))
 	}
-	// must NOT have staged a bootstrap
-	if _, err := os.Stat(filepath.Join(bootstrapDir, "bootstrap.json")); err == nil {
-		t.Fatal("terminal-phase resume must NOT stage a bootstrap")
+	// fresh ticket staged for the re-enrol-on-boot path
+	if _, err := os.Stat(filepath.Join(bootstrapDir, "bootstrap.json")); err != nil {
+		t.Fatal("terminal-phase resume must stage a fresh bootstrap ticket")
+	}
+}
+
+// An ERROR-phase worker record is recovered via resume --force (scion#895)
+// with a fresh ticket staged — the 2026-07-31 wedge (spent-ticket enrol deny
+// -> error phase -> 409 on every message) heals without a purge.
+func TestWorkerStart_errorPhase_resumeForce(t *testing.T) {
+	bootstrapDir := filepath.Join(t.TempDir(), ".lever")
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+		BootstrapDir: bootstrapDir}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "error"}},
+	}}
+	b := newTestBroker(t, rt, spec)
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.resumeForced) != 1 || len(rt.resumed) != 0 || len(rt.started) != 0 {
+		t.Fatalf("verbs: forced=%d resumed=%d started=%d, want force-only",
+			len(rt.resumeForced), len(rt.resumed), len(rt.started))
+	}
+	if _, err := os.Stat(filepath.Join(bootstrapDir, "bootstrap.json")); err != nil {
+		t.Fatal("error-phase resume must stage a fresh bootstrap ticket")
 	}
 }
 

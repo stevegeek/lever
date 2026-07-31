@@ -119,10 +119,8 @@ func TestWorkerSpecLookup(t *testing.T) {
 // cert CN is cn. Sufficient for RequireAgent in tests that don't need a real CA.
 func fakeTLSWithCN(cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{
-		VerifiedChains: [][]*x509.Certificate{
-			{
-				{Subject: pkix.Name{CommonName: cn}},
-			},
+		PeerCertificates: []*x509.Certificate{
+			{Subject: pkix.Name{CommonName: cn}},
 		},
 	}
 }

@@ -128,6 +128,17 @@ func (c *Client) Resume(ctx context.Context, worker, project string) error {
 	_, err := c.run(ctx, "", append([]string{"resume", worker}, projectFlag(project)...)...)
 	return err
 }
+// ResumeForce is Resume with scion's --force (scion#895, pin >= 68507153):
+// the only verb that recovers a record from phase "error" (plain resume is
+// documented for suspended/stopped only; --force deliberately refuses
+// phase "running"). Used by the recovery paths (#3, #22) so an error-phase
+// record can be retried before the loud delete+fresh fallback discards the
+// conversation.
+func (c *Client) ResumeForce(ctx context.Context, worker, project string) error {
+	_, err := c.run(ctx, "", append([]string{"resume", worker, "--force"}, projectFlag(project)...)...)
+	return err
+}
+
 func (c *Client) Stop(ctx context.Context, worker, project string) error {
 	_, err := c.run(ctx, "", append([]string{"stop", worker}, projectFlag(project)...)...)
 	return err

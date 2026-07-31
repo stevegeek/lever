@@ -125,7 +125,7 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 			return fmt.Errorf("broker: directive listener must be a unix socket, got %T", directiveLn)
 		}
 	}
-	tlsCfg := b.ca.ServerTLSConfigSource(certSrc)
+	tlsCfg := b.ca.ServerTLSConfigSource(certSrc, b.lapseFunc())
 	jailSrv := &http.Server{
 		Handler: b.JailHandler(), TLSConfig: tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,

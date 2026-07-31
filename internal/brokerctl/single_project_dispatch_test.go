@@ -104,13 +104,13 @@ func (f *fakeWorkerRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.
 
 // fakeTLSWithCN returns a synthetic TLS connection state whose verified client
 // cert CN is cn — enough for ca.RequireAgent (it reads
-// r.TLS.VerifiedChains[0][0].Subject.CommonName), without a real handshake.
+// r.TLS.PeerCertificates[0].Subject.CommonName), without a real handshake.
 // Mirrors internal/broker/worker_test.go's helper of the same shape (kept
 // local for the same reason as fakeWorkerRuntime above).
 func fakeTLSWithCN(cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{
-		VerifiedChains: [][]*x509.Certificate{
-			{{Subject: pkix.Name{CommonName: cn}}},
+		PeerCertificates: []*x509.Certificate{
+			{Subject: pkix.Name{CommonName: cn}},
 		},
 	}
 }

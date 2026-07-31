@@ -7,6 +7,32 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-31
+
+### Changed
+- **Scion pin bumped `b4c9911d` → `68507153`** (82 upstream commits,
+  2026-07-22 → 2026-07-31; examples and e2e-script defaults updated). A full
+  review of the range found every lever-critical surface intact: relative
+  `--workspace` subtree isolation (#815), `pre-start.d` script hooks and their
+  ordering, `--dev-auth=false` + UAT token flow, `--map-host-loopback`
+  per-agent netns, default agent-token scopes, and the `list --format json`
+  fields lever parses. Instance-visible upstream deltas to know about:
+  - **scion#894**: the hub now applies a default `--cpus 2` limit to agent
+    containers with no explicit resource spec (`runtime.enforce_resource_defaults`,
+    default on). Set it to `false` in the jail hub settings, or give agents an
+    explicit resource spec, to keep previous unlimited behavior.
+  - **scion#908**: agents with no model configured now get `ANTHROPIC_MODEL`
+    resolved to `opus` — set `SCION_MODEL`/a model in the harness config if you
+    want a different default.
+  - **scion#847**: scion's *claude-harness base image* now ships a tool deny
+    list (including `SendMessage`) in its baked `settings.json`. This arrives
+    only when you rebuild the `scion-claude` base image, not with this pin
+    bump — when you do, verify the deny list doesn't remove tools your agents'
+    workflows need.
+  - **scion#895**: upstream adds `scion resume --force` to recover agents
+    stuck in the error phase — not yet used by lever's recovery paths
+    (candidate follow-up).
+
 ## [0.10.1] - 2026-07-22
 
 ### Fixed

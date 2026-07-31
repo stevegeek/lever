@@ -69,7 +69,7 @@ EOF
 cat > "$INST/lever.yaml" <<EOF
 name: $NAME
 scion:
-  version: ${SCION_VERSION:-b4c9911d}
+  version: ${SCION_VERSION:-68507153}
 backend: orbstack
 egress: closed
 tree: workspace

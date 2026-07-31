@@ -2,10 +2,10 @@
 
 All notable changes to lever are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Process: every merge
-to `main` that changes behavior adds an entry under `## [Unreleased]`; a
+to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
-## [Unreleased]
+## [0.12.0] - 2026-07-31
 
 ### Added
 - **Broker-side auto-re-enrol after natural leaf lapse (#22).** An agent whose
@@ -20,6 +20,8 @@ version bump moves the block under the new version heading.
   `all`); revoked identities are NEVER healed (`lever revoke` stays a real
   kill-switch); attempts are audited (`op=reenrol`) and bounded (10 min
   per-CN cooldown, 3 per burst, burst resets on success or an hour of quiet).
+  A leaf that is not-yet-valid (backward clock step) is rejected but never
+  classified as a lapse — no automated bounce on clock skew.
 
 ### Fixed
 - **apply no longer discards an error-phase manager without trying to save
@@ -28,7 +30,9 @@ version bump moves the block under the new version heading.
   delete+fresh fallback — the 2026-07-31 conversation loss (VM reboot →
   corrupted container state → resume failure → deletion) would have been a
   silent recovery. The loud fallback and its wording are unchanged when the
-  forced resume also fails.
+  forced resume also fails — but a failed resume now RE-OBSERVES the record
+  first (with the broker-unavailable retry), so apply cannot delete a session
+  the broker's healer concurrently recovered.
 - **Worker resume re-stages a fresh enrolment ticket** (mirroring the
   manager's 0.10-era fix) and uses `resume --force` for error-phase records:
   a worker resumed after its ticket/leaf lifetime no longer wedges into

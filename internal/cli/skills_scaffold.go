@@ -35,6 +35,12 @@ const (
 type skillSyncResult struct {
 	RelPath string
 	Action  skillAction
+	// AdoptedVersion is the `lever-version:` frontmatter stamp of an ADOPTED
+	// file (set only for Action == skillAdopted; empty = no stamp found). An
+	// adoption pins the file to the framework baseline it was adopted at, so
+	// doctor compares this against the current Version to surface a baseline
+	// that has silently drifted versions behind (#16).
+	AdoptedVersion string
 }
 
 type skillTarget struct {
@@ -156,7 +162,11 @@ func syncSkills(app *config.App, stateDir string, force, check bool) ([]skillSyn
 				dirty = true
 			}
 		}
-		results = append(results, skillSyncResult{RelPath: tgt.relPath, Action: act})
+		res := skillSyncResult{RelPath: tgt.relPath, Action: act}
+		if act == skillAdopted {
+			res.AdoptedVersion = skills.LeverVersion(onDisk)
+		}
+		results = append(results, res)
 	}
 	if dirty {
 		if err := saveSkillState(stateDir, st); err != nil {

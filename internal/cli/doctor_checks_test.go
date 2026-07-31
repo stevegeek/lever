@@ -392,8 +392,13 @@ func TestCheckOperatorSkills(t *testing.T) {
 
 	// Owner edit → fail; the hint must signpost BOTH exits (--adopt to accept,
 	// --force to restore) — a user hitting this nag discovers adoption here.
+	// The custom content carries a CURRENT lever-version stamp: an adopted
+	// file's stamp is the owner's attestation of the framework baseline it
+	// was reviewed against, and a missing/old stamp fails the check (#16,
+	// covered below).
 	op := filepath.Join(tree, ".claude", "skills", "lever-operator", "SKILL.md")
-	if err := os.WriteFile(op, []byte("edited"), 0o644); err != nil {
+	edited := "---\nname: custom\nlever-version: " + Version + "\n---\nmy own guidance\n"
+	if err := os.WriteFile(op, []byte(edited), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if res = checkOperatorSkills(app, stateDir); res.ok || !strings.Contains(res.fix, "--force") || !strings.Contains(res.fix, "--adopt") {
@@ -409,6 +414,33 @@ func TestCheckOperatorSkills(t *testing.T) {
 	}
 	if !strings.Contains(res.detail, "adopted") {
 		t.Fatalf("detail should name the adoption: %+v", res)
+	}
+
+	// Adopted baseline STAMPED WITH AN OLD VERSION → fail (#16): the file is
+	// pinned to a framework baseline that has since moved on, possibly past
+	// security-relevant guidance, and doctor is the only surface that can say
+	// so. Also covers the missing-stamp case via the "unknown" label.
+	stale := "---\nname: custom\nlever-version: 0.3.1\n---\nmy own guidance\n"
+	if err := os.WriteFile(op, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adoptSkills(app, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	res = checkOperatorSkills(app, stateDir)
+	if res.ok || !strings.Contains(res.detail, "0.3.1") || !strings.Contains(res.detail, Version) {
+		t.Fatalf("stale adopted baseline must fail naming both versions: %+v", res)
+	}
+	if !strings.Contains(res.fix, "--adopt") || !strings.Contains(res.fix, "--force") {
+		t.Fatalf("stale-baseline fix must offer re-adopt and reclaim: %+v", res)
+	}
+
+	// Restore the current-stamp adoption for the drift scenario below.
+	if err := os.WriteFile(op, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adoptSkills(app, stateDir); err != nil {
+		t.Fatal(err)
 	}
 
 	// Drift PAST the adopted baseline → fail with tamper-aware wording.

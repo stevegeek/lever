@@ -87,10 +87,10 @@ func projectFlag(project string) []string {
 	return []string{"-g", project}
 }
 
-// runIn executes a scion subcommand in the given working directory and returns
-// trimmed combined stdout. cwd "" uses the process cwd. Non-zero exit returns
+// run executes a scion subcommand in the given working directory and returns
+// trimmed combined stdout. dir "" uses the process cwd. Non-zero exit returns
 // an error with the dev-auth banner stripped for readability.
-func (c *Client) runIn(ctx context.Context, dir string, args ...string) (string, error) {
+func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	out := res.Stdout + res.Stderr
 	if err != nil {
@@ -112,13 +112,6 @@ func redactArgs(args []string) string {
 	return strings.Join(args, " ")
 }
 
-// run executes a scion subcommand and returns trimmed combined stdout. cwd ""
-// uses the process cwd. Non-zero exit returns an error with the dev-auth banner
-// stripped for readability.
-func (c *Client) run(ctx context.Context, cwd string, args ...string) (string, error) {
-	return c.runIn(ctx, cwd, args...)
-}
-
 var bannerRE = regexp.MustCompile(`(?i)WARNING:.*development auth.*`)
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 var jsonStartRE = regexp.MustCompile(`[\[{]`)
@@ -135,7 +128,7 @@ func clean(output string) string {
 }
 
 // parseJSON strips ANSI escapes and the dev-auth WARNING banner (which scion
-// prints on stderr and can land AFTER the JSON, since runIn concatenates
+// prints on stderr and can land AFTER the JSON, since run concatenates
 // stdout+stderr), skips any preamble before the first JSON token, and unmarshals
 // into v. Empty body unmarshals to nothing (no error).
 func parseJSON(raw string, v any) error {

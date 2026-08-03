@@ -115,9 +115,7 @@ func LookPathIn(bin, pathList string) (string, error) {
 // backend a literal loopback IP unless explicitly opted out. gate applies to
 // external tools only; coarse replaces the operations list with the wildcard.
 func (t Tool) validate() error {
-	switch t.Gate {
-	case "", GateFine, GateCoarse:
-	default:
+	if !t.Gate.valid() {
 		return fmt.Errorf("config: broker tool %q gate %q invalid (want fine|coarse)", t.Name, t.Gate)
 	}
 	for _, o := range t.Operations {
@@ -215,6 +213,12 @@ const (
 	LLMAuthAPIKey       LLMAuthMode = "api-key"
 )
 
+// valid reports whether m is a declared mode or unset (unset resolves to a
+// default at the Effective* layer).
+func (m LLMAuthMode) valid() bool {
+	return m == "" || m == LLMAuthSubscription || m == LLMAuthAPIKey
+}
+
 // Gate selects the capability grain the broker enforces on an EXTERNAL tool.
 //   - fine (the default): only the declared operations are callable; a token
 //     must name the specific MCP tool being invoked (op == params.name).
@@ -227,6 +231,12 @@ const (
 	GateFine   Gate = "fine"
 	GateCoarse Gate = "coarse"
 )
+
+// valid reports whether g is a declared grain or unset (unset resolves to
+// GateFine via EffectiveGate).
+func (g Gate) valid() bool {
+	return g == "" || g == GateFine || g == GateCoarse
+}
 
 // EgressMode selects the jail's outbound network posture. It is independent of
 // LLMAuthMode: api-key isolates the credential; egress controls what the agent
@@ -243,6 +253,12 @@ const (
 	EgressOpen   EgressMode = "open"
 	EgressClosed EgressMode = "closed"
 )
+
+// valid reports whether m is a declared posture or unset (unset resolves to
+// open via ClosedInternetEgress).
+func (m EgressMode) valid() bool {
+	return m == "" || m == EgressOpen || m == EgressClosed
+}
 
 // Default broker ports, used when the config leaves jail_port/admin_port unset
 // (0). They are fixed constants rather than dynamically allocated so the apply
@@ -293,6 +309,12 @@ const (
 	AutoReenrolManager AutoReenrolMode = "manager"
 	AutoReenrolOff     AutoReenrolMode = "off"
 )
+
+// valid reports whether m is a declared mode or unset (unset resolves to
+// AutoReenrolAll via EffectiveAutoReenrol).
+func (m AutoReenrolMode) valid() bool {
+	return m == "" || m == AutoReenrolAll || m == AutoReenrolManager || m == AutoReenrolOff
+}
 
 type Manager struct {
 	Image          string          `yaml:"image"`
@@ -530,9 +552,7 @@ func (a *App) Validate() error {
 	if err := validateBackend(a.Backend); err != nil {
 		return err
 	}
-	switch a.Broker.AutoReenrol {
-	case "", AutoReenrolAll, AutoReenrolManager, AutoReenrolOff:
-	default:
+	if !a.Broker.AutoReenrol.valid() {
 		return fmt.Errorf("config: broker.auto_reenrol %q must be one of all|manager|off (or unset = all)", a.Broker.AutoReenrol)
 	}
 	if err := validateDisk(a.Disk); err != nil {
@@ -657,17 +677,14 @@ func (a *App) validateNonGitTree() error {
 func (a *App) validateBroker() error {
 	// LLM-auth: validate the enum and, when any agent is api-key, require an
 	// api_key_file that exists at 0600 (fail closed on a world/group-readable key).
-	validMode := func(m LLMAuthMode) bool {
-		return m == "" || m == LLMAuthSubscription || m == LLMAuthAPIKey
-	}
-	if !validMode(a.Broker.LLMAuth) {
+	if !a.Broker.LLMAuth.valid() {
 		return fmt.Errorf("config: broker.llm_auth %q invalid (want subscription|api-key)", a.Broker.LLMAuth)
 	}
-	if !validMode(a.Manager.LLMAuth) {
+	if !a.Manager.LLMAuth.valid() {
 		return fmt.Errorf("config: manager.llm_auth %q invalid (want subscription|api-key)", a.Manager.LLMAuth)
 	}
 	for _, g := range a.Workers {
-		if !validMode(g.LLMAuth) {
+		if !g.LLMAuth.valid() {
 			return fmt.Errorf("config: worker %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
 	}
@@ -684,9 +701,7 @@ func (a *App) validateBroker() error {
 	// Egress is an independent posture (not derived from llm_auth). `closed`
 	// requires a uniformly api-key instance — a subscription agent needs direct
 	// internet to reach Anthropic, which a closed jail forbids.
-	switch a.Egress {
-	case "", EgressOpen, EgressClosed:
-	default:
+	if !a.Egress.valid() {
 		return fmt.Errorf("config: egress %q invalid (want open|closed)", a.Egress)
 	}
 	if a.Egress == EgressClosed {

@@ -788,6 +788,28 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid manager llm_auth rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager:\n  llm_auth: bogus\n"
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Fatal("expected error for invalid manager llm_auth value, got nil")
+		}
+		if !strings.Contains(err.Error(), "manager.llm_auth") {
+			t.Errorf("error must name manager.llm_auth, got: %v", err)
+		}
+	})
+
+	t.Run("invalid worker llm_auth rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: w1\n    dir: workers/w1\n    llm_auth: bogus\n"
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Fatal("expected error for invalid worker llm_auth value, got nil")
+		}
+		if !strings.Contains(err.Error(), "worker w1") {
+			t.Errorf("error must name the worker, got: %v", err)
+		}
+	})
+
 	t.Run("api-key without api_key_file rejects", func(t *testing.T) {
 		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n"
 		if _, err := Load(writeConfig(t, body)); err == nil {

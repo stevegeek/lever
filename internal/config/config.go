@@ -587,37 +587,8 @@ func (a *App) Validate() error {
 		return fmt.Errorf("config: manager.prompt_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.PromptFile)
 	}
 	for _, g := range a.Workers {
-		if g.Name == "" || g.Dir == "" {
-			return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
-		}
-		if !nameRE.MatchString(g.Name) {
-			return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
-		}
-		if g.Name == a.ManagerCN() {
-			return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
-		}
-		if g.Name == a.Name {
-			// The manager's scion agent slug IS the app name (apply dispatches
-			// it as Worker: app.Name), and the broker routes manager-recipient
-			// matches by slug — a worker named like the app would be shadowed
-			// (messages to it silently route to the manager).
-			return fmt.Errorf("config: worker name %q collides with the manager agent (the app name) — rename the worker or the app", g.Name)
-		}
-		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
-			return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
-		}
-		if filepath.Clean(g.Dir) == "." {
-			// A "." dir makes WorkerDir(g) == a.Tree, so the worker's workspace would
-			// be the whole tree — mounting root defeats R4 sibling isolation (the
-			// worker could read every sibling's subdir). Workers must occupy a strict
-			// subdir of the shared instance project. (confinedRel rejects "." for
-			// `tree` for the analogous root-is-the-mount reason.)
-			return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
-		}
-		if g.Image != "" {
-			if err := a.Security.validateImage(fmt.Sprintf("worker %q image", g.Name), g.Image); err != nil {
-				return err
-			}
+		if err := a.validateWorker(g); err != nil {
+			return err
 		}
 	}
 	if err := a.validateBroker(); err != nil {
@@ -625,6 +596,44 @@ func (a *App) Validate() error {
 	}
 	if err := a.validateOperator(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateWorker validates a single worker declaration: name shape, collisions
+// with the manager's identities, dir confinement, and image policy.
+func (a *App) validateWorker(g Worker) error {
+	if g.Name == "" || g.Dir == "" {
+		return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
+	}
+	if !nameRE.MatchString(g.Name) {
+		return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
+	}
+	if g.Name == a.ManagerCN() {
+		return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
+	}
+	if g.Name == a.Name {
+		// The manager's scion agent slug IS the app name (apply dispatches
+		// it as Worker: app.Name), and the broker routes manager-recipient
+		// matches by slug — a worker named like the app would be shadowed
+		// (messages to it silently route to the manager).
+		return fmt.Errorf("config: worker name %q collides with the manager agent (the app name) — rename the worker or the app", g.Name)
+	}
+	if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
+		return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
+	}
+	if filepath.Clean(g.Dir) == "." {
+		// A "." dir makes WorkerDir(g) == a.Tree, so the worker's workspace would
+		// be the whole tree — mounting root defeats R4 sibling isolation (the
+		// worker could read every sibling's subdir). Workers must occupy a strict
+		// subdir of the shared instance project. (confinedRel rejects "." for
+		// `tree` for the analogous root-is-the-mount reason.)
+		return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
+	}
+	if g.Image != "" {
+		if err := a.Security.validateImage(fmt.Sprintf("worker %q image", g.Name), g.Image); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -825,7 +834,7 @@ func (a *App) validateBrokerGrants() error {
 		}
 		return nil
 	}
-	validate := func(who string, obtain []Grant, delegate []DelegateGrant) error {
+	checkAgentGrants := func(who string, obtain []Grant, delegate []DelegateGrant) error {
 		for _, g := range obtain {
 			if err := checkCap(who+".obtain", g.Tool, g.Op); err != nil {
 				return err
@@ -843,11 +852,11 @@ func (a *App) validateBrokerGrants() error {
 		}
 		return nil
 	}
-	if err := validate("manager", a.Manager.Obtain, a.Manager.Delegate); err != nil {
+	if err := checkAgentGrants("manager", a.Manager.Obtain, a.Manager.Delegate); err != nil {
 		return err
 	}
 	for _, g := range a.Workers {
-		if err := validate("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
+		if err := checkAgentGrants("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
 			return err
 		}
 	}

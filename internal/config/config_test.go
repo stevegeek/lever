@@ -165,6 +165,23 @@ func TestValidateRequiresBackend(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsWorkerMissingNameOrDir(t *testing.T) {
+	cases := map[string]string{
+		"missing name": "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - dir: workers/a\n",
+		"missing dir":  "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: a\n",
+	}
+	for label, yaml := range cases {
+		p := writeTmp(t, yaml)
+		_, err := Load(p)
+		if err == nil {
+			t.Fatalf("%s: expected error for worker with empty name/dir", label)
+		}
+		if !strings.Contains(err.Error(), "worker needs name + dir") {
+			t.Errorf("%s: error %q should say 'worker needs name + dir'", label, err)
+		}
+	}
+}
+
 func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: bad\n    dir: ../escape\n")
 	if _, err := Load(p); err == nil {

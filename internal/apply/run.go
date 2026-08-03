@@ -717,47 +717,18 @@ var (
 // success meaningful. The live-container predicate is scion.ContainerLive,
 // shared with the broker's worker liveness gate.
 func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
-	var lastPhase, lastContainer string
-	var lastErr error
-	for attempt := 0; attempt < managerLiveAttempts; attempt++ {
-		agents, err := d.Scion.List(ctx, jp)
-		if err != nil {
-			// A mid-poll List blip does NOT mean the manager isn't live: by this
-			// point the observe-first List already succeeded and the create/
-			// resume action itself already succeeded, so the hub is demonstrably
-			// up — a single error here is far more likely a transient hiccup than
-			// a real failure. Consume this attempt (within the SAME overall
-			// budget, not an extra one) and keep polling; only surface the error
-			// if the whole budget exhausts without ever observing a live record.
-			lastErr = err
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(managerLiveInterval):
-			}
-			continue
-		}
-		lastErr = nil
-		lastPhase, lastContainer = "", ""
-		for _, a := range agents {
-			if a.Slug == slug {
-				lastPhase, lastContainer = a.Phase, a.ContainerStatus
-				break
-			}
-		}
-		if lastPhase == "running" && scion.ContainerLive(lastContainer) {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(managerLiveInterval):
-		}
+	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
+		return d.Scion.List(c, jp)
+	}, slug, managerLiveAttempts, managerLiveInterval)
+	if err == nil {
+		return nil
 	}
-	if lastErr != nil {
-		return fmt.Errorf("start-manager: manager %q did not come up (last error observing agents: %w)", slug, lastErr)
+	// WaitAgentLive returns ctx.Err() unwrapped on cancellation; pass it through
+	// as-is (no start-manager prefix) and prefix only the exhaustion error.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
-	return fmt.Errorf("start-manager: manager %q did not come up (last phase %q, container %q) — scion reported success but the harness is not live", slug, lastPhase, lastContainer)
+	return fmt.Errorf("start-manager: manager %q %w", slug, err)
 }
 
 // removeStaleMarker removes a `.scion` MARKER FILE at dir (left by a prior

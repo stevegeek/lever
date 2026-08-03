@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -374,6 +375,60 @@ func TestWorkerStartLivenessTimeout(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"phase":"running"`) {
 		t.Fatalf("must not report running for a dead container: %s", rec.Body.String())
+	}
+	if len(rt.started) != 1 {
+		t.Fatalf("Start should have been attempted once, got %d", len(rt.started))
+	}
+}
+
+// midPollListFailRuntime wraps fakeRuntime to fail the first failAfterAct List
+// calls that occur AFTER a Start/Resume — modelling transient hub blips DURING
+// the post-start liveness poll. The observe-first List (pre-action) still
+// succeeds, matching the real sequence: create/resume already succeeded, so the
+// hub is demonstrably up and a mid-poll List error is a hiccup, not a failure.
+type midPollListFailRuntime struct {
+	*fakeRuntime
+	failAfterAct int
+	postActLists int
+}
+
+func (r *midPollListFailRuntime) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	if _, acted := r.lastActed(); acted {
+		r.postActLists++
+		if r.postActLists <= r.failAfterAct {
+			return nil, fmt.Errorf("hub: transient blip")
+		}
+	}
+	return r.fakeRuntime.List(ctx, project)
+}
+
+// TestWorkerStartLivenessToleratesMidPollListErrors pins waitWorkerLive's
+// mid-poll List tolerance: a transient List error during the post-start
+// liveness poll must NOT abort the start — the failed attempt is consumed
+// within the existing budget and the poll succeeds as soon as a List call
+// reports the worker running/live. This behavior must survive the WaitAgentLive
+// extraction (plan B3).
+func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
+	origAtt, origInt := workerLiveAttempts, workerLiveInterval
+	workerLiveAttempts, workerLiveInterval = 5, time.Millisecond
+	defer func() { workerLiveAttempts, workerLiveInterval = origAtt, origInt }()
+
+	dir := t.TempDir()
+	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
+		BootstrapDir: filepath.Join(dir, ".lever")}
+	rt := &midPollListFailRuntime{
+		fakeRuntime:  &fakeRuntime{agents: map[string][]scion.Agent{}}, // absent -> Start path
+		failAfterAct: 2,                                                // two blips inside the liveness poll before a live record
+	}
+	b := newTestBroker(t, rt, spec)
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("two transient mid-poll List blips must not fail worker start; status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"phase":"running"`) {
+		t.Fatalf("worker should report running once its record goes live; body=%s", rec.Body.String())
 	}
 	if len(rt.started) != 1 {
 		t.Fatalf("Start should have been attempted once, got %d", len(rt.started))

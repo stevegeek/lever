@@ -2,7 +2,9 @@ package scion
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 )
 
 // ContainerLive reports whether a scion `list --format json` containerStatus
@@ -14,6 +16,65 @@ import (
 // the broker's waitWorkerLive so both consumers use one predicate.
 func ContainerLive(status string) bool {
 	return status == "running" || strings.HasPrefix(status, "Up")
+}
+
+// WaitAgentLive polls list until the agent named slug shows BOTH Phase=="running"
+// AND a live container (ContainerLive), or attempts run out. It is the shared
+// post-action liveness backstop for scion's false-success classes: a blind
+// `scion start`'s 409 "already exists" (exit code is non-zero but its text can
+// match an idempotency predicate a layer up) and a `scion resume`/`scion start`
+// that reports success ("resumed") for a container whose harness dies moments
+// later (scion's own liveness check is a single immediate poll). Trusting the
+// observed record — not CLI exit codes or error wording — is what makes a
+// caller's success meaningful.
+//
+// A mid-poll list error does NOT mean the agent isn't live: by the time a caller
+// reaches this poll its observe-first List and the create/resume action have
+// already succeeded, so the hub is demonstrably up and a single error here is
+// far more likely a transient hiccup. The failed attempt is consumed within the
+// SAME budget and polling continues; the error is surfaced only if the whole
+// budget exhausts without ever observing a live record.
+//
+// On exhaustion it returns a "did not come up" error (no subject prefix — the
+// caller wraps it with its own, e.g. `start-manager: manager %q %w` or
+// `worker %q %w`) reporting the last observed phase/container, or the last list
+// error if the final attempts could not observe the record. On context
+// cancellation it returns ctx.Err() unwrapped so callers can detect it.
+func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {
+	var lastPhase, lastContainer string
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		agents, err := list(ctx)
+		if err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(interval):
+			}
+			continue
+		}
+		lastErr = nil
+		lastPhase, lastContainer = "", ""
+		for _, a := range agents {
+			if a.Slug == slug {
+				lastPhase, lastContainer = a.Phase, a.ContainerStatus
+				break
+			}
+		}
+		if lastPhase == "running" && ContainerLive(lastContainer) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("did not come up (last error observing agents: %w)", lastErr)
+	}
+	return fmt.Errorf("did not come up (last phase %q, container %q) — scion reported success but the harness is not live", lastPhase, lastContainer)
 }
 
 type Agent struct {
@@ -128,6 +189,7 @@ func (c *Client) Resume(ctx context.Context, worker, project string) error {
 	_, err := c.run(ctx, "", append([]string{"resume", worker}, projectFlag(project)...)...)
 	return err
 }
+
 // ResumeForce is Resume with scion's --force (scion#895, pin >= 68507153):
 // the only verb that recovers a record from phase "error" (plain resume is
 // documented for suspended/stopped only; --force deliberately refuses

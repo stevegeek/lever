@@ -276,28 +276,18 @@ var (
 // "resumed" for a container whose harness dies moments later), so the observed
 // record — not the CLI exit code — is what makes success meaningful.
 func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
-	var lastPhase, lastContainer string
-	for attempt := 0; attempt < workerLiveAttempts; attempt++ {
-		agents, err := b.runtime.List(ctx, b.instanceProject)
-		if err == nil {
-			lastPhase, lastContainer = "", ""
-			for _, a := range agents {
-				if a.Slug == spec.Name {
-					lastPhase, lastContainer = a.Phase, a.ContainerStatus
-					break
-				}
-			}
-			if lastPhase == "running" && scion.ContainerLive(lastContainer) {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(workerLiveInterval):
-		}
+	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
+		return b.runtime.List(c, b.instanceProject)
+	}, spec.Name, workerLiveAttempts, workerLiveInterval)
+	if err == nil {
+		return nil
 	}
-	return fmt.Errorf("worker %q did not come up (last phase %q, container %q) — scion reported success but the harness is not live", spec.Name, lastPhase, lastContainer)
+	// WaitAgentLive returns ctx.Err() unwrapped on cancellation; pass it through
+	// as-is and prefix only the exhaustion error with the worker subject.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("worker %q %w", spec.Name, err)
 }
 
 func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {

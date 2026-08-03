@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/exec"
 )
@@ -231,5 +232,53 @@ func TestAttachArgvOmitsHubTokenWhenEmpty(t *testing.T) {
 		if strings.HasPrefix(tok, "SCION_HUB_TOKEN=") || tok == "env" {
 			t.Fatalf("argv=%v should not contain an env/SCION_HUB_TOKEN prefix when no token set", argv)
 		}
+	}
+}
+
+func TestFindAgent(t *testing.T) {
+	agents := []Agent{
+		{Slug: "alpha", Phase: "running"},
+		{Slug: "beta", Phase: "suspended"},
+	}
+	if got := FindAgent(agents, "beta"); got == nil || got.Phase != "suspended" {
+		t.Fatalf("FindAgent(beta) = %v, want the suspended beta record", got)
+	}
+	// Returned pointer must alias the slice element (callers read the live record).
+	if got := FindAgent(agents, "alpha"); got != &agents[0] {
+		t.Fatalf("FindAgent must return a pointer into the slice, got %p want %p", got, &agents[0])
+	}
+	if got := FindAgent(agents, "missing"); got != nil {
+		t.Fatalf("FindAgent(missing) = %v, want nil", got)
+	}
+	if got := FindAgent(nil, "x"); got != nil {
+		t.Fatalf("FindAgent(nil) = %v, want nil", got)
+	}
+}
+
+// TestWaitAgentLiveRecordVanishesMidPollResetsToEmpty pins the reset-to-empty
+// behavior (B4 caution 2): once observed with a non-live phase, the record then
+// disappears from the listing on the final attempt. The exhaustion error MUST
+// report the LAST observation ("" / "") — the vanished state — not the stale
+// earlier phase, or the message lies about what scion last reported.
+func TestWaitAgentLiveRecordVanishesMidPollResetsToEmpty(t *testing.T) {
+	call := 0
+	list := func(context.Context) ([]Agent, error) {
+		call++
+		if call == 1 {
+			// Present but not yet live — records "starting"/"Up 1s".
+			return []Agent{{Slug: "mgr", Phase: "starting", ContainerStatus: "Up 1s"}}, nil
+		}
+		// Record gone from the listing.
+		return []Agent{{Slug: "other", Phase: "running", ContainerStatus: "running"}}, nil
+	}
+	err := WaitAgentLive(context.Background(), list, "mgr", 2, time.Millisecond)
+	if err == nil {
+		t.Fatal("WaitAgentLive should fail when the record never becomes live")
+	}
+	if strings.Contains(err.Error(), "starting") || strings.Contains(err.Error(), "Up 1s") {
+		t.Fatalf("error must reflect the reset last observation, not the stale earlier phase: %v", err)
+	}
+	if !strings.Contains(err.Error(), `phase ""`) || !strings.Contains(err.Error(), `container ""`) {
+		t.Fatalf("error must report the vanished (empty) last phase/container: %v", err)
 	}
 }

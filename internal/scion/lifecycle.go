@@ -55,12 +55,11 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 			continue
 		}
 		lastErr = nil
+		// Reset first so a record that vanished mid-poll reports "" (its true
+		// last-observed state), not a stale earlier phase.
 		lastPhase, lastContainer = "", ""
-		for _, a := range agents {
-			if a.Slug == slug {
-				lastPhase, lastContainer = a.Phase, a.ContainerStatus
-				break
-			}
+		if a := FindAgent(agents, slug); a != nil {
+			lastPhase, lastContainer = a.Phase, a.ContainerStatus
 		}
 		if lastPhase == "running" && ContainerLive(lastContainer) {
 			return nil
@@ -75,6 +74,18 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 		return fmt.Errorf("did not come up (last error observing agents: %w)", lastErr)
 	}
 	return fmt.Errorf("did not come up (last phase %q, container %q) — scion reported success but the harness is not live", lastPhase, lastContainer)
+}
+
+// FindAgent returns a pointer to the first agent whose Slug matches, or nil
+// when no record matches. The returned pointer aliases the slice element, so
+// callers read the live record (phase, container status) without copying.
+func FindAgent(agents []Agent, slug string) *Agent {
+	for i := range agents {
+		if agents[i].Slug == slug {
+			return &agents[i]
+		}
+	}
+	return nil
 }
 
 type Agent struct {

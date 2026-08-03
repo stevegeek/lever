@@ -460,24 +460,11 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 	// the hub. So the observe rides the SAME bounded retry as the Start/Resume
 	// below (isBrokerUnavailable): a transient broker-not-ready blip is
 	// retried, and only a persistent or genuinely-different error is fatal.
-	var agents []scion.Agent
-	if lerr := retryOnBrokerUnavailable(ctx, func() error {
-		a, e := d.Scion.List(ctx, jp)
-		if e != nil {
-			return e
-		}
-		agents = a
-		return nil
-	}); lerr != nil {
+	agents, lerr := listAgentsRetry(ctx, d, jp)
+	if lerr != nil {
 		return fmt.Errorf("start-manager: observing agents: %w", lerr)
 	}
-	var rec *scion.Agent
-	for i := range agents {
-		if agents[i].Slug == app.Name {
-			rec = &agents[i]
-			break
-		}
-	}
+	rec := scion.FindAgent(agents, app.Name)
 	switch {
 	case rec == nil:
 		if err := startManagerCreate(ctx, d, boot, opts); err != nil {
@@ -603,6 +590,28 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 	return err
 }
 
+// listAgentsRetry lists the project's agents through the bounded
+// runtime-broker-unavailable retry (retryOnBrokerUnavailable). Used by the two
+// sites that observe the fleet across the async broker-registration window: the
+// initial start-manager observe and the post-failed-resume re-observe (a blip
+// there is correlated with the resume failure it is re-checking). NOTE:
+// waitManagerLive's List is deliberately NOT routed here — it carries its own
+// consume-an-attempt tolerance within its liveness budget.
+func listAgentsRetry(ctx context.Context, d Deps, jp string) ([]scion.Agent, error) {
+	var agents []scion.Agent
+	if err := retryOnBrokerUnavailable(ctx, func() error {
+		a, e := d.Scion.List(ctx, jp)
+		if e != nil {
+			return e
+		}
+		agents = a
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return agents, nil
+}
+
 // startManagerCreate runs the create-manager retry loop: `scion start` races
 // the runtime-broker registration (see brokerStartAttempts) and treats an
 // "already running"/"already exists" 409 as success (idempotent re-apply, or a
@@ -641,21 +650,12 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 // fail toward the loud path, which at least tells the user what it is about
 // to do.)
 func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) bool {
-	var agents []scion.Agent
-	if err := retryOnBrokerUnavailable(ctx, func() error {
-		a, e := d.Scion.List(ctx, jp)
-		if e != nil {
-			return e
-		}
-		agents = a
-		return nil
-	}); err != nil {
+	agents, err := listAgentsRetry(ctx, d, jp)
+	if err != nil {
 		return false
 	}
-	for i := range agents {
-		if agents[i].Slug == name {
-			return agents[i].Phase == scion.PhaseRunning
-		}
+	if a := scion.FindAgent(agents, name); a != nil {
+		return a.Phase == scion.PhaseRunning
 	}
 	return false
 }

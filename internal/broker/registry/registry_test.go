@@ -241,3 +241,24 @@ func TestNamesReturnsBothRegisteredTools(t *testing.T) {
 		t.Error("Names() missing \"calendar\"")
 	}
 }
+
+func TestCloneAllowedValues(t *testing.T) {
+	if got := CloneAllowedValues(nil); got != nil {
+		t.Fatalf("CloneAllowedValues(nil) = %v, want nil", got)
+	}
+	src := map[string][]string{"table": {"A", "B"}, "db": nil}
+	got := CloneAllowedValues(src)
+	if len(got) != 2 || got["table"][0] != "A" || got["table"][1] != "B" {
+		t.Fatalf("CloneAllowedValues = %v, want copy of %v", got, src)
+	}
+	// Deep copy: mutating the source slice must not affect the clone.
+	src["table"][0] = "MUTATED"
+	if got["table"][0] == "MUTATED" {
+		t.Fatal("clone aliased the source slice — must deep-copy")
+	}
+	// And mutating the clone's map must not affect the source.
+	got["extra"] = []string{"x"}
+	if _, ok := src["extra"]; ok {
+		t.Fatal("clone aliased the source map")
+	}
+}

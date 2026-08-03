@@ -31,22 +31,6 @@ type RegisterResponse struct {
 	Epoch     int    `json:"epoch"`
 }
 
-// copyAllowedValues deep-copies a map[string][]string so the registry entry
-// does not alias the caller's map (registry contract: caller must not mutate
-// maps it hands to Register).
-func copyAllowedValues(m map[string][]string) map[string][]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string][]string, len(m))
-	for k, v := range m {
-		cp := make([]string, len(v))
-		copy(cp, v)
-		out[k] = cp
-	}
-	return out
-}
-
 // handleRegister merges a first-party tool's registration against the
 // CONFIG-AUTHORITATIVE envelope pre-loaded at boot (D4): the host config owns
 // backend/allowed_values/FirstParty/permitted-ops; the tool supplies only
@@ -103,7 +87,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		merged[name] = registry.Operation{Name: name, CaveatParam: cp, Params: op.Params}
 	}
 	t := registry.Tool{
-		Name: cfg.Name, Backend: cfg.Backend, AllowedValues: copyAllowedValues(cfg.AllowedValues),
+		Name: cfg.Name, Backend: cfg.Backend, AllowedValues: registry.CloneAllowedValues(cfg.AllowedValues),
 		FirstParty: cfg.FirstParty, Operations: merged,
 	}
 	if err := b.reg.Register(t); err != nil {

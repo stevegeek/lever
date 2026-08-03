@@ -6,6 +6,7 @@ package registry
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -53,6 +54,20 @@ type Tool struct {
 	// ({tool, WildcardOp}): the gateway requires that capability for every
 	// tools/call instead of the per-MCP-tool operation.
 	Coarse bool
+}
+
+// CloneAllowedValues deep-copies an allowed-values map (nil in, nil out) so a
+// registry entry never aliases the caller's map — Register takes ownership of
+// nested maps and callers must not mutate them afterwards.
+func CloneAllowedValues(m map[string][]string) map[string][]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(m))
+	for k, v := range m {
+		out[k] = slices.Clone(v)
+	}
+	return out
 }
 
 // Registry is the concurrency-safe set of registered tools.

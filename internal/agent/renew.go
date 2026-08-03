@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 // Renew rotates the agent's keypair and re-issues its cert under the broker's
@@ -75,6 +74,6 @@ func RefreshLLMToken(
 	}
 	overlay["ANTHROPIC_AUTH_TOKEN"] = tok
 	// Claude posts to the loopback gateway, which proxies /llm to the broker.
-	overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(LocalGatewayURL, "/") + "/llm"
+	overlay["ANTHROPIC_BASE_URL"] = llmBaseURL(LocalGatewayURL)
 	return nil
 }

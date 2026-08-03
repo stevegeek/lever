@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +18,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/agent"
+	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/broker/rules"
+	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/cap/token"
 	"gopkg.in/yaml.v3"
 )
 
@@ -320,6 +332,161 @@ func TestRenewOnceNoIdentityErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "no identity") {
 		t.Errorf("unexpected error: %v", err)
 	}
+}
+
+// TestRenewOnceAPIKeyRefreshesOverlayAndSettings exercises the api-key branch of
+// renewOnce (the overlay build + llm-token refresh + settings rewrite) against a
+// real mTLS broker. It pins the five env keys the rewritten settings.json must
+// carry: the three identity paths, a fresh ANTHROPIC_AUTH_TOKEN, and a
+// gateway-hosted ANTHROPIC_BASE_URL — NOT the broker (the aa63f9f contract). The
+// branch had no coverage before (only the no-identity error path was tested).
+func TestRenewOnceAPIKeyRefreshesOverlayAndSettings(t *testing.T) {
+	srv, caInst := newRenewTestBroker(t)
+	ticket := provisionWorkerTicket(t, caInst, srv.URL, "worker")
+
+	idDir := t.TempDir()
+	id, err := agent.Enrol(context.Background(), srv.URL, caInst.CertPEM(), ticket, "worker")
+	if err != nil {
+		t.Fatalf("enrol worker: %v", err)
+	}
+	if err := id.Write(idDir); err != nil {
+		t.Fatalf("write identity: %v", err)
+	}
+
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := renewOnce(renewOpts{
+		idDir:        idDir,
+		brokerURL:    srv.URL,
+		llmAuth:      "api-key",
+		settingsPath: settingsPath,
+	}); err != nil {
+		t.Fatalf("renewOnce: %v", err)
+	}
+
+	env := readSettingsEnv(t, settingsPath)
+	for _, tc := range []struct{ key, want string }{
+		{"CLAUDE_CODE_CLIENT_CERT", filepath.Join(idDir, "agent.crt")},
+		{"CLAUDE_CODE_CLIENT_KEY", filepath.Join(idDir, "agent.key")},
+		{"NODE_EXTRA_CA_CERTS", filepath.Join(idDir, "ca.crt")},
+	} {
+		if env[tc.key] != tc.want {
+			t.Errorf("env[%s] = %q, want %q", tc.key, env[tc.key], tc.want)
+		}
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] == "" {
+		t.Error("api-key renew must write a fresh ANTHROPIC_AUTH_TOKEN")
+	}
+	if want := "http://127.0.0.1:8462/llm"; env["ANTHROPIC_BASE_URL"] != want {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q (loopback gateway, not the broker)", env["ANTHROPIC_BASE_URL"], want)
+	}
+	if strings.HasPrefix(env["ANTHROPIC_BASE_URL"], srv.URL) {
+		t.Errorf("ANTHROPIC_BASE_URL = %q points at the broker (%s) — renew must write the gateway URL", env["ANTHROPIC_BASE_URL"], srv.URL)
+	}
+}
+
+// newRenewTestBroker starts a real mTLS broker permitting the worker to
+// self-mint an llm capability token, returning the TLS server and its CA.
+func newRenewTestBroker(t *testing.T) (*httptest.Server, *ca.CA) {
+	t.Helper()
+	kp, err := token.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	caInst, err := ca.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rl := rules.NewPolicy()
+	rl.AllowObtain("worker", broker.ReservedLLMTool, broker.ReservedLLMOp)
+	reg := registry.New()
+	if err := reg.Register(registry.Tool{
+		Name:       broker.ReservedLLMTool,
+		Backend:    "lever:llm-proxy",
+		Operations: map[string]registry.Operation{broker.ReservedLLMOp: {Name: broker.ReservedLLMOp}},
+		FirstParty: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := broker.New(broker.Config{
+		Keys:            kp,
+		CA:              caInst,
+		Tickets:         ca.NewTicketStore(),
+		Rules:           rl,
+		Registry:        reg,
+		ManagerIdentity: "manager",
+		Agents:          []string{"manager", "worker"},
+		GrantTTL:        time.Hour,
+		ServerName:      "127.0.0.1",
+	})
+	certPEM, keyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCfg, err := caInst.ServerTLSConfig(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(b.JailHandler())
+	srv.TLS = tlsCfg
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv, caInst
+}
+
+// provisionWorkerTicket mints a one-use enrol ticket for worker by POSTing
+// /provision as a manager cert signed by the broker CA.
+func provisionWorkerTicket(t *testing.T, caInst *ca.CA, brokerURL, worker string) string {
+	t.Helper()
+	csrPEM, keyPEM, err := agent.GenerateCSR("manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, err := caInst.SignCSR(csrPEM)
+	if err != nil {
+		t.Fatalf("sign manager CSR: %v", err)
+	}
+	managerCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(caInst.Cert)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs:      pool,
+		Certificates: []tls.Certificate{managerCert},
+	}}}
+	body, _ := json.Marshal(map[string]string{"worker": worker})
+	resp, err := client.Post(brokerURL+"/provision", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("provision status %d", resp.StatusCode)
+	}
+	var pr struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil || pr.Ticket == "" {
+		t.Fatalf("provision decode=%v ticket=%q", err, pr.Ticket)
+	}
+	return pr.Ticket
+}
+
+// readSettingsEnv reads the env block from a claude settings.json.
+func readSettingsEnv(t *testing.T, path string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatalf("settings.json not valid JSON: %v", err)
+	}
+	return s.Env
 }
 
 // TestRenewNonLoopReturnsErrorImmediately verifies that run with renew (no

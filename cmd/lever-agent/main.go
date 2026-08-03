@@ -74,7 +74,7 @@ func cmdBoot(args []string) error {
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
 	settingsPath := fs.String("settings", "", "path to the claude settings.json whose env block receives ANTHROPIC_AUTH_TOKEN/BASE_URL (api-key mode)")
 	toolsCSV := fs.String("tools", "", "comma-separated broker tool names to register via claude mcp add")
-	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL into the claude settings.json env block; 'subscription' (default) leaves those keys absent and uses the user's own key")
+	llmAuth := fs.String("llm-auth", agent.LLMAuthSubscription, "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL into the claude settings.json env block; 'subscription' (default) leaves those keys absent and uses the user's own key")
 	enrolOnly := fs.Bool("enrol-only", false, "enrol + write the identity only; skip the claude mcp registration and env overlay (no `claude` binary required — used by the VM-level acceptance gate, which drives lever-agent's CLI verbs directly)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -118,7 +118,7 @@ func cmdBoot(args []string) error {
 		cfg.BrokerTools = nil
 		cfg.ListTools = nil
 		cfg.LLMAuth = ""
-	} else if *llmAuth == "api-key" {
+	} else if *llmAuth == agent.LLMAuthAPIKey {
 		// Wire the real requestLLMToken only in non-enrol-only mode and when api-key
 		// is requested; enrol-only mode skips overlay writing entirely.
 		cfg.RequestLLMToken = requestLLMToken
@@ -440,16 +440,12 @@ func renewOnce(opts renewOpts) error {
 	}
 	// api-key mode: refresh the LLM capability token and rewrite the claude
 	// settings.json env block so the next claude launch picks up the fresh token.
-	if opts.llmAuth == "api-key" && opts.settingsPath != "" {
+	if opts.llmAuth == agent.LLMAuthAPIKey && opts.settingsPath != "" {
 		cn, err := leafCN(renewed.CertPEM)
 		if err != nil {
 			return fmt.Errorf("renew: parse CN for llm token: %w", err)
 		}
-		overlay := map[string]string{
-			"CLAUDE_CODE_CLIENT_CERT": filepath.Join(opts.idDir, "agent.crt"),
-			"CLAUDE_CODE_CLIENT_KEY":  filepath.Join(opts.idDir, "agent.key"),
-			"NODE_EXTRA_CA_CERTS":     filepath.Join(opts.idDir, "ca.crt"),
-		}
+		overlay := agent.IdentityEnvOverlay(opts.idDir)
 		if err := agent.RefreshLLMToken(ctx, bURL, renewed, cn, requestLLMToken, overlay); err != nil {
 			return err
 		}
@@ -474,7 +470,7 @@ func cmdRenew(args []string) error {
 	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
 	loop := fs.Bool("loop", false, "run as a renewal daemon (renew then sleep -interval, repeat until signal)")
 	interval := fs.Duration("interval", 12*time.Hour, "renewal interval in loop mode (default 12h; cert TTL is 24h)")
-	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' refreshes ANTHROPIC_AUTH_TOKEN after each cert renewal")
+	llmAuth := fs.String("llm-auth", agent.LLMAuthSubscription, "LLM auth mode: 'api-key' refreshes ANTHROPIC_AUTH_TOKEN after each cert renewal")
 	settingsPath := fs.String("settings", "", "path to the claude settings.json whose env block is rewritten on -llm-auth api-key refresh")
 	if err := fs.Parse(args); err != nil {
 		return err

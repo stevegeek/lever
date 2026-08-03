@@ -7,8 +7,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
-
-	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // RenewRequest carries a fresh CSR (new keypair). Its CN is IGNORED; the renewed
@@ -43,19 +41,12 @@ func csrPublicKey(csrPEM []byte) (crypto.PublicKey, error) {
 // CSR's public key under the authenticated CN (no CN-laundering: the CSR's own
 // CN is never used).
 func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("renew", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// Deny a revoked caller a fresh cert: with renew closed its existing cert
 	// simply expires, fully cutting the identity off rather than letting it
 	// refresh indefinitely (every use-time gate is already CN-keyed, so the
 	// live cert authorizes nothing — but denying renew makes revocation terminal).
-	if b.isRevoked(caller) {
-		b.audit("renew", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "renew", "")
+	if !ok {
 		return
 	}
 	var req RenewRequest

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -85,24 +84,12 @@ func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 // requireManagerWorker authenticates the caller as the manager and authorizes the
 // requested worker against config. Returns the resolved spec, or writes 403/502.
 func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, worker string) (WorkerSpec, bool) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("worker", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return WorkerSpec{}, false
-	}
-	if caller != b.manager {
-		b.audit("worker", caller, "deny", "not the manager identity")
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return WorkerSpec{}, false
-	}
 	// A revoked manager cannot dispatch or tear down workers. Dispatching a worker
 	// is a stronger steering primitive than messaging (it spawns a fresh,
 	// fully-capable agent), so revocation must cut it too — otherwise revoke
 	// leaves the loudest channel open.
-	if b.isRevoked(caller) {
-		b.audit("worker", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireManager(w, r, "worker", "")
+	if !ok {
 		return WorkerSpec{}, false
 	}
 	spec, ok := b.workerSpec(worker)
@@ -317,17 +304,9 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil || caller != b.manager {
-		b.audit("worker", caller, "deny", "list: not the manager identity")
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// A revoked manager cannot enumerate the fleet either (recon that helps a
 	// compromised-then-revoked manager) — consistent with /msg/list.
-	if b.isRevoked(caller) {
-		b.audit("worker", caller, "deny", "list: revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if _, ok := b.requireManager(w, r, "worker", "list: "); !ok {
 		return
 	}
 	// Runtime check is after the manager-CN check — authz precedes so an

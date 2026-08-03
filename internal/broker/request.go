@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
@@ -35,20 +34,13 @@ type CapResponse struct {
 // are permitted (registry.ValidateConstraints). The token is bound to
 // BoundTo and carries the normalized op. Fails closed at every gate.
 func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("request", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// A revoked agent cannot mint OR delegate. The gateway already denies a
 	// revoked caller's tool calls at use time, but without this check a revoked
 	// agent could still delegate a fresh token bound to a non-revoked agent
 	// within its configured delegate grants — a channel that would survive
 	// revocation. Fail closed here so `lever revoke` cuts minting too.
-	if b.isRevoked(caller) {
-		b.audit("request", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "request", "")
+	if !ok {
 		return
 	}
 	var req CapRequest

@@ -77,6 +77,44 @@ func TestWorkerListRevokedManagerDenyAuditDetail(t *testing.T) {
 	}
 }
 
+// Pins the A1-sanctioned audit-line change on /worker/list: pre-refactor the
+// handler merged authn-failure and wrong-CN into one branch that always
+// audited "list: not the manager identity", dropping err.Error() on the
+// certless path. Consolidated onto requireManager, a certless probe now
+// audits caller="" with the op-prefixed RequireAgent error (consistent with
+// every other jail handler), while a wrong-CN caller keeps the exact
+// "list: not the manager identity" line.
+func TestWorkerListCertlessAndWrongCNDenyAuditDetail(t *testing.T) {
+	t.Run("certless", func(t *testing.T) {
+		cfg, audit := auditConfig(t)
+		b := New(cfg)
+		r := httptest.NewRequest("POST", "/worker/list", strings.NewReader(`{}`)) // no client cert
+		rec := httptest.NewRecorder()
+		b.JailHandler().ServeHTTP(rec, r)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+		}
+		got := audit.String()
+		if !strings.Contains(got, `caller=""`) {
+			t.Fatalf(`certless deny must audit caller="", got: %s`, got)
+		}
+		if !strings.Contains(got, `detail="list: ca: request has no TLS state"`) {
+			t.Fatalf(`certless deny must audit detail="list: ca: request has no TLS state", got: %s`, got)
+		}
+	})
+	t.Run("wrong CN", func(t *testing.T) {
+		cfg, audit := auditConfig(t)
+		b := New(cfg)
+		rec := callWorker(t, b, "/worker/list", `{}`, "worker")
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(audit.String(), `detail="list: not the manager identity"`) {
+			t.Fatalf(`wrong-CN deny must audit detail="list: not the manager identity", got: %s`, audit.String())
+		}
+	})
+}
+
 // A certless request to the directive consume/check routes must audit with an
 // EMPTY caller and carry ca.RequireAgent's err.Error() (op-prefixed) in the
 // detail — the forensics line for an unauthenticated probe.

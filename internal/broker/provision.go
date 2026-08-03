@@ -3,8 +3,6 @@ package broker
 import (
 	"encoding/json"
 	"net/http"
-
-	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // ProvisionRequest is the body of POST /provision (manager only).
@@ -26,22 +24,10 @@ type ProvisionResponse struct {
 // delegated capability, so "the manager is just an agent with a wider policy"
 // holds for spawning too (rather than a special-cased manager identity here).
 func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("provision", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	if caller != b.manager {
-		b.audit("provision", caller, "deny", "not the manager identity")
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// A revoked manager cannot issue new enrolment tickets (spawning fresh
 	// agents is a steering channel — see requireManagerWorker).
-	if b.isRevoked(caller) {
-		b.audit("provision", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireManager(w, r, "provision", "")
+	if !ok {
 		return
 	}
 	var req ProvisionRequest

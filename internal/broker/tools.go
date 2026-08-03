@@ -1,10 +1,6 @@
 package broker
 
-import (
-	"net/http"
-
-	"github.com/stevegeek/lever/internal/cap/ca"
-)
+import "net/http"
 
 // handleTools returns the broker's registered tool names to an authenticated
 // agent (mTLS). It is the FULL catalog, not policy-filtered: an agent may call a
@@ -16,17 +12,9 @@ func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("tools", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// A revoked agent cannot enumerate the tool catalog (the last read-only
 	// path — completes "revocation denies every acting/observing path").
-	if b.isRevoked(caller) {
-		b.audit("tools", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if _, ok := b.requireLiveAgent(w, r, "tools", ""); !ok {
 		return
 	}
 	names := b.reg.Names()

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/opsig"
 )
 
@@ -48,15 +47,8 @@ type directiveIDRequest struct {
 }
 
 func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("directive", "", "deny", "consume: "+err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	if b.isRevoked(caller) {
-		b.audit("directive", caller, "deny", "consume: revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "directive", "consume: ")
+	if !ok {
 		return
 	}
 	now := time.Now()
@@ -111,15 +103,8 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 }
 
 func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("directive", "", "deny", "check: "+err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	if b.isRevoked(caller) {
-		b.audit("directive", caller, "deny", "check: revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "directive", "check: ")
+	if !ok {
 		return
 	}
 	now := time.Now()

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -104,18 +103,11 @@ type msgListResponse struct {
 }
 
 func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("msg", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// A revoked agent loses its messaging channel too — otherwise a
 	// compromised-then-revoked agent could keep steering other agents via
 	// messages. Fail closed at use time (identity-keyed, like the gateway).
-	if b.isRevoked(caller) {
-		b.audit("msg", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "msg", "")
+	if !ok {
 		return
 	}
 	var req msgSendRequest
@@ -148,15 +140,8 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("msg", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	if b.isRevoked(caller) {
-		b.audit("msg", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "msg", "")
+	if !ok {
 		return
 	}
 	var req msgListRequest

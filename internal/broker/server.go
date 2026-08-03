@@ -11,25 +11,6 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
-// resolveAdminAddr normalizes adminAddr to a loopback bind address. An empty
-// host defaults to 127.0.0.1. Any explicit non-loopback host is rejected so
-// the unauthenticated admin /register endpoint can never bind to a routable
-// interface.
-func resolveAdminAddr(adminAddr string) (string, error) {
-	host, port, err := net.SplitHostPort(adminAddr)
-	if err != nil {
-		return "", fmt.Errorf("broker: admin address %q: %w", adminAddr, err)
-	}
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return "", fmt.Errorf("broker: admin listener must bind to a loopback address, got %q", host)
-	}
-	return net.JoinHostPort(host, port), nil
-}
-
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
 // Routes: /provision, /worker/*, /msg/send, /msg/list, /directive/consume,
 // /directive/check, /enrol, /renew, /request, and one gated proxy per

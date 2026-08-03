@@ -233,7 +233,10 @@ func (b *Broker) resolveDirectiveAgent(name string) (cn, slug string, ok bool) {
 	return "", "", false
 }
 
-type directiveResolveResponse struct {
+// DirectiveResolveResponse is the /directive/resolve wire reply: the target
+// agent's current CN, scion slug and directive generation. Exported so the
+// lever CLI decodes against this one declaration instead of its own copy.
+type DirectiveResolveResponse struct {
 	CN         string `json:"cn"`
 	Slug       string `json:"slug"`
 	Generation int    `json:"generation"`
@@ -258,7 +261,7 @@ func (b *Broker) handleDirectiveResolve(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	b.dirAudit.append("resolve", map[string]any{"agent": agent, "cn": cn, "generation": gen})
-	writeJSON(w, directiveResolveResponse{CN: cn, Slug: slug, Generation: gen})
+	writeJSON(w, DirectiveResolveResponse{CN: cn, Slug: slug, Generation: gen})
 }
 
 type directiveEnvelopeRequest struct {

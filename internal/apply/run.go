@@ -2,7 +2,6 @@ package apply
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // ErrBootstrapLatched is returned by MintManagerBootstrap when the broker's
@@ -73,13 +73,12 @@ func isBrokerUnavailable(err error) bool {
 // long) in case scion's auth resolution sanity-checks the format.
 const apiKeyPlaceholder = "sk-ant-placeholder0lever0broker0injects0the0real0key0do0not0use000000000000000000000000"
 
-// BootstrapMaterial is what the manager's lever-agent consumes to enrol.
-type BootstrapMaterial struct {
-	Ticket    string `json:"ticket"`
-	BrokerCA  string `json:"broker_ca"`
-	BrokerURL string `json:"broker_url"`
-	AgentCN   string `json:"agent_cn"`
-}
+// BootstrapMaterial is what the manager's lever-agent consumes to enrol. It is
+// an alias for wire.Bootstrap — the ONE declaration of the enrolment envelope
+// (previously this type carried its own hand-maintained, "must stay identical"
+// copy of the json tags). The alias keeps the apply-domain name at every call
+// site while the field/tag definition lives in exactly one place.
+type BootstrapMaterial = wire.Bootstrap
 
 // bootTracker threads the manager's bootstrap material through Run's steps,
 // AND records whether THIS apply run actually minted fresh material (as
@@ -102,15 +101,7 @@ type bootTracker struct {
 // CLI, which stages directly into the tree since start-manager's Step.Target
 // is the manager's slug, not the tree dir — see jailPath/Plan).
 func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
-	dir := filepath.Join(treeDir, ".lever")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, "bootstrap.json"), b, 0o600)
+	return wire.Stage(filepath.Join(treeDir, ".lever"), m)
 }
 
 // Deps are the executor's collaborators, injected so Run is testable offline.

@@ -7,22 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// workerBootstrap is a broker-local mirror of the bootstrap envelope written to
-// <bootstrapDir>/bootstrap.json. JSON tags MUST remain byte-for-byte identical
-// to agent.Bootstrap so the agent package's LoadBootstrap can decode it.
-type workerBootstrap struct {
-	Ticket    string `json:"ticket"`
-	BrokerCA  string `json:"broker_ca"`
-	BrokerURL string `json:"broker_url"`
-	AgentCN   string `json:"agent_cn"`
-}
 
 // WorkerRuntime is the subset of scion.Client the broker uses to drive worker
 // agents host-side. *scion.Client satisfies it; tests inject a fake.
@@ -63,9 +53,18 @@ type workerStartRequest struct {
 	Task   string `json:"task"`
 }
 
-type workerResponse struct {
+// WorkerResponse is the wire envelope for the single-worker endpoints
+// (/worker/start|stop|suspend|resume). Exported so the lever CLI decodes the
+// broker's reply against this one declaration instead of its own copy.
+type WorkerResponse struct {
 	Worker string `json:"worker"`
 	Phase  string `json:"phase"`
+}
+
+// WorkerListResponse is the wire envelope for /worker/list. Exported for the
+// same single-source reason as WorkerResponse.
+type WorkerListResponse struct {
+	Agents []scion.Agent `json:"agents"`
 }
 
 // runtimeReady returns true when the scion runtime is wired. When the runtime
@@ -129,18 +128,18 @@ var (
 )
 
 // stageFreshTicket mints a one-use enrolment ticket for cn and stages a fresh
-// bootstrap.json under dir (the same host authority `lever up` uses). It is the
-// single construction point for the sync-sensitive workerBootstrap envelope
-// (JSON tags MUST mirror agent.Bootstrap, see the type comment). Called on the
-// fresh-start and resume dispatch paths and by the auto-re-enrol healer, which
-// heals the manager too — hence (cn, dir), not a WorkerSpec.
+// bootstrap.json under dir (the same host authority `lever up` uses), via the
+// shared wire.Stage — the single construction+deposit path for the enrolment
+// envelope. Called on the fresh-start and resume dispatch paths and by the
+// auto-re-enrol healer, which heals the manager too — hence (cn, dir), not a
+// WorkerSpec.
 func (b *Broker) stageFreshTicket(cn, dir string) error {
 	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errStepTicket, err)
 	}
-	bs := workerBootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
-	if err := stageBootstrap(dir, bs); err != nil {
+	bs := wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
+	if err := wire.Stage(dir, bs); err != nil {
 		return fmt.Errorf("%w: %w", errStepStage, err)
 	}
 	return nil
@@ -176,7 +175,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		// ignored here — the task-mismatch 409 guard on the resume path covers
 		// only the non-running branch (a running worker's task is likewise fixed,
 		// and there is nothing to resume). To run a new task, purge then re-dispatch.
-		writeJSON(w, workerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+		writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 	case phase != "":
 		b.resumeExistingWorker(w, r, spec, phase, req.Task)
 	default:
@@ -223,7 +222,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		return
 	}
 	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
-	writeJSON(w, workerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // startFreshWorker provisions an absent worker: mint a one-use ticket, stage the
@@ -259,7 +258,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		return
 	}
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
-	writeJSON(w, workerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // workerLiveAttempts/workerLiveInterval bound waitWorkerLive's post-start poll.
@@ -311,7 +310,7 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 		phase = "unknown"
 	}
 	b.audit("worker", b.manager, "allow", r.URL.Path+" "+spec.Name)
-	writeJSON(w, workerResponse{Worker: spec.Name, Phase: phase})
+	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: phase})
 }
 
 func (b *Broker) handleWorkerStop(w http.ResponseWriter, r *http.Request) {
@@ -342,26 +341,5 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, struct {
-		Agents []scion.Agent `json:"agents"`
-	}{Agents: agents})
-}
-
-// stageBootstrap writes bs to <dir>/bootstrap.json (dir 0700, file 0600).
-func stageBootstrap(dir string, bs workerBootstrap) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("stage bootstrap: mkdir: %w", err)
-	}
-	raw, err := json.Marshal(bs)
-	if err != nil {
-		return fmt.Errorf("stage bootstrap: marshal: %w", err)
-	}
-	p := filepath.Join(dir, "bootstrap.json")
-	if err := os.WriteFile(p, raw, 0o600); err != nil {
-		return fmt.Errorf("stage bootstrap: write: %w", err)
-	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return fmt.Errorf("stage bootstrap: chmod: %w", err)
-	}
-	return nil
+	writeJSON(w, WorkerListResponse{Agents: agents})
 }

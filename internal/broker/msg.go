@@ -87,18 +87,21 @@ func (b *Broker) resolveListProject(caller, worker string) (string, error) {
 	return b.instanceProject, nil
 }
 
-type msgSendRequest struct {
+// MsgSendRequest, MsgListRequest and MsgListResponse are the /msg/* wire types.
+// Exported so the lever CLI marshals/decodes against these one declarations
+// instead of ad-hoc maps and anonymous structs.
+type MsgSendRequest struct {
 	To        string `json:"to"`
 	Body      string `json:"body"`
 	Interrupt bool   `json:"interrupt"`
 }
 
-type msgListRequest struct {
+type MsgListRequest struct {
 	All    bool   `json:"all"`
 	Worker string `json:"worker"`
 }
 
-type msgListResponse struct {
+type MsgListResponse struct {
 	Events []scion.Event `json:"events"`
 }
 
@@ -110,7 +113,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req msgSendRequest
+	var req MsgSendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -144,7 +147,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req msgListRequest
+	var req MsgListRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -166,5 +169,5 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "list "+req.Worker)
-	writeJSON(w, msgListResponse{Events: events})
+	writeJSON(w, MsgListResponse{Events: events})
 }

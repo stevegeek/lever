@@ -242,7 +242,7 @@ func TestMsgList_managerReadsWorker(t *testing.T) {
 	if rt.inboxProject != "/lever" {
 		t.Fatalf("inboxProject = %q, want /lever (the instance project)", rt.inboxProject)
 	}
-	var out msgListResponse
+	var out MsgListResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("bad response JSON: %v", err)
 	}

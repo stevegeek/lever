@@ -320,7 +320,7 @@ func TestDirectiveResolveHappyPath(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("resolve status = %d, want 200 (%s)", resp.StatusCode, body)
 	}
-	var got directiveResolveResponse
+	var got DirectiveResolveResponse
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode resolve response: %v (%s)", err, body)
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -25,9 +26,7 @@ func msgCall(ctx context.Context, endpoint string, body any) (json.RawMessage, e
 // print "Inbox empty." and the watch bridge drop events forever, silently. An
 // absent/empty "events" key stays benign: it decodes to a nil slice (empty inbox).
 func decodeMsgEvents(raw json.RawMessage) ([]scion.Event, error) {
-	var res struct {
-		Events []scion.Event `json:"events"`
-	}
+	var res broker.MsgListResponse
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("decode /msg/list response: %w", err)
 	}
@@ -47,7 +46,7 @@ func msgSend() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := strings.Join(args, " ")
 			if _, err := msgCallFn(cmd.Context(), "/msg/send",
-				map[string]any{"to": to, "body": body, "interrupt": interrupt}); err != nil {
+				broker.MsgSendRequest{To: to, Body: body, Interrupt: interrupt}); err != nil {
 				return err
 			}
 			cmd.Printf("Sent to %s.\n", to)
@@ -64,7 +63,7 @@ func msgList() *cobra.Command {
 	var all bool
 	c := &cobra.Command{Use: "list", Short: "Read the typed event inbox",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			raw, err := msgCallFn(cmd.Context(), "/msg/list", map[string]any{"all": all, "worker": worker})
+			raw, err := msgCallFn(cmd.Context(), "/msg/list", broker.MsgListRequest{All: all, Worker: worker})
 			if err != nil {
 				return err
 			}

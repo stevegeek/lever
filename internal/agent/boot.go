@@ -7,15 +7,21 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
-// Bootstrap is the material the host/manager deposits for an agent to enrol.
-type Bootstrap struct {
-	Ticket    string `json:"ticket"`
-	BrokerCA  string `json:"broker_ca"`
-	BrokerURL string `json:"broker_url"`
-	AgentCN   string `json:"agent_cn"`
-}
+// Bootstrap is the material the host/manager deposits for an agent to enrol. It
+// aliases wire.Bootstrap — the single, cross-package declaration of the
+// enrolment envelope (the host stages it via wire.Stage; agent reads it via
+// LoadBootstrap). The alias keeps agent.Bootstrap as the name agent-side code
+// uses while the fields/tags live in exactly one place.
+type Bootstrap = wire.Bootstrap
+
+// Stage deposits b as bootstrap.json under dir; a thin alias of wire.Stage so
+// agent-side callers keep the agent.Stage spelling. The broker (which must not
+// import agent — its tests import broker) calls wire.Stage directly.
+var Stage = wire.Stage
 
 // LoadBootstrap reads the deposited bootstrap.json.
 func LoadBootstrap(path string) (Bootstrap, error) {

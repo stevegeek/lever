@@ -71,7 +71,14 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 		}
 	}
 	if lastErr != nil {
-		return fmt.Errorf("did not come up (last error observing agents: %w)", lastErr)
+		// %v, not %w: this is a terminal "budget exhausted" condition, and a
+		// list error may itself carry an inner context deadline (an HTTP
+		// timeout inside the scion client) even while OUR ctx stayed live.
+		// Wrapping it would let a caller's errors.Is(err, context.DeadlineExceeded)
+		// match here and misclassify exhaustion as cancellation (dropping the
+		// caller's subject prefix). True cancellation of ctx returns ctx.Err()
+		// via the select above, unwrapped.
+		return fmt.Errorf("did not come up (last error observing agents: %v)", lastErr)
 	}
 	return fmt.Errorf("did not come up (last phase %q, container %q) — scion reported success but the harness is not live", lastPhase, lastContainer)
 }

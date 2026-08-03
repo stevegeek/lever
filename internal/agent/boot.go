@@ -18,11 +18,6 @@ import (
 // uses while the fields/tags live in exactly one place.
 type Bootstrap = wire.Bootstrap
 
-// Stage deposits b as bootstrap.json under dir; a thin alias of wire.Stage so
-// agent-side callers keep the agent.Stage spelling. The broker (which must not
-// import agent — its tests import broker) calls wire.Stage directly.
-var Stage = wire.Stage
-
 // LoadBootstrap reads the deposited bootstrap.json.
 func LoadBootstrap(path string) (Bootstrap, error) {
 	b, err := os.ReadFile(path)

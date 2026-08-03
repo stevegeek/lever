@@ -25,6 +25,24 @@ type CapResponse struct {
 	Token string `json:"token"`
 }
 
+// denyDetail builds the deny reason shared by handleRequest's three deny
+// paths (used verbatim as both the audit detail and the 403 body):
+// "<prefix> (tool=<tool> op=<original op>[ coerced_to=<op>][ bound_to=<target>])".
+// The op shown is always the ORIGINAL (pre-coercion) op; coerced_to appears
+// only when the wildcard coercion rewrote it, bound_to only on delegation.
+// The allow-path coercion note ("(op coerced: X -> Y)") is intentionally a
+// different format and stays inline.
+func denyDetail(prefix string, req CapRequest, requestedOp, caller string) string {
+	detail := fmt.Sprintf("%s (tool=%s op=%s", prefix, req.Tool, requestedOp)
+	if requestedOp != req.Op {
+		detail += fmt.Sprintf(" coerced_to=%s", req.Op)
+	}
+	if req.BoundTo != caller {
+		detail += fmt.Sprintf(" bound_to=%s", req.BoundTo)
+	}
+	return detail + ")"
+}
+
 // handleRequest mints a capability token after checking, in order: the caller's
 // identity (mTLS); normalizing the op to the wildcard when the tool is
 // coarse-gated (registry has WildcardOp registered); the request/delegation
@@ -66,40 +84,19 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, allowed := b.rules.MayObtainRule(caller, req.BoundTo, req.Tool, req.Op)
 	if !allowed {
-		detail := fmt.Sprintf("policy: may not obtain/delegate (tool=%s op=%s", req.Tool, requestedOp)
-		if requestedOp != req.Op {
-			detail += fmt.Sprintf(" coerced_to=%s", req.Op)
-		}
-		if req.BoundTo != caller {
-			detail += fmt.Sprintf(" bound_to=%s", req.BoundTo)
-		}
-		detail += ")"
+		detail := denyDetail("policy: may not obtain/delegate", req, requestedOp, caller)
 		b.audit("request", caller, "deny", detail)
 		http.Error(w, detail, http.StatusForbidden)
 		return
 	}
 	if !b.reg.HasOperation(req.Tool, req.Op) {
-		detail := fmt.Sprintf("unregistered op (tool=%s op=%s", req.Tool, requestedOp)
-		if requestedOp != req.Op {
-			detail += fmt.Sprintf(" coerced_to=%s", req.Op)
-		}
-		if req.BoundTo != caller {
-			detail += fmt.Sprintf(" bound_to=%s", req.BoundTo)
-		}
-		detail += ")"
+		detail := denyDetail("unregistered op", req, requestedOp, caller)
 		b.audit("request", caller, "deny", detail)
 		http.Error(w, detail, http.StatusForbidden)
 		return
 	}
 	if err := b.reg.ValidateConstraints(req.Tool, req.Op, req.Constraints); err != nil {
-		detail := fmt.Sprintf("%s (tool=%s op=%s", err.Error(), req.Tool, requestedOp)
-		if requestedOp != req.Op {
-			detail += fmt.Sprintf(" coerced_to=%s", req.Op)
-		}
-		if req.BoundTo != caller {
-			detail += fmt.Sprintf(" bound_to=%s", req.BoundTo)
-		}
-		detail += ")"
+		detail := denyDetail(err.Error(), req, requestedOp, caller)
 		b.audit("request", caller, "deny", detail)
 		http.Error(w, detail, http.StatusForbidden)
 		return

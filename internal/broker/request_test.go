@@ -335,6 +335,32 @@ func TestRequestDenyLeaksReason(t *testing.T) {
 	}
 }
 
+func TestRequestPolicyDenyDetailPinsFullSuffixWithCoercionAndDelegation(t *testing.T) {
+	// Characterization for the deny-detail suffix (plan item A3): pin the FULL
+	// detail string — including both optional segments (coerced_to= for a
+	// coarse tool, bound_to= for delegation) and the closing paren — in the
+	// HTTP body and the audit line. Only substrings were asserted before, so
+	// a suffix-builder regression would have passed silently.
+	cfg, audit := coarseConfig(t, false) // analyst holds no wildcard grant
+	b := New(cfg)
+	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+		Tool: "utilities", Op: "get_weather", BoundTo: "worker", // delegation attempt
+	}))
+	r.TLS = leafFor(t, b, "analyst")
+	w := httptest.NewRecorder()
+	b.handleRequest(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	want := "policy: may not obtain/delegate (tool=utilities op=get_weather coerced_to=* bound_to=worker)"
+	if got := strings.TrimSuffix(w.Body.String(), "\n"); got != want {
+		t.Fatalf("deny body = %q, want %q", got, want)
+	}
+	if !strings.Contains(audit.String(), want) {
+		t.Fatalf("deny audit must carry the full detail %q, got: %s", want, audit.String())
+	}
+}
+
 func TestRequestDeniesRevokedCallerMintingAndDelegation(t *testing.T) {
 	b := New(testConfig(t))
 	b.Revoke("manager")

@@ -51,6 +51,11 @@ func Renew(ctx context.Context, brokerURL string, id Identity) (Identity, error)
 // (already base64url-encoded) — do NOT re-encode it. Called by the renewal sidecar
 // on each cert renewal cycle when LLM auth mode is "api-key".
 //
+// ANTHROPIC_BASE_URL points at the in-container loopback gateway (same host Boot
+// writes), NOT the broker: the gateway presents the rotating agent leaf on
+// Claude's behalf, so a direct-broker URL would resurrect the 24h cached-leaf
+// outage fixed in aa63f9f. brokerURL is only the token-acquisition endpoint.
+//
 // Fail closed: the overlay map is only mutated after a successful token acquisition.
 func RefreshLLMToken(
 	ctx context.Context,
@@ -69,6 +74,7 @@ func RefreshLLMToken(
 		return fmt.Errorf("agent: refresh llm token: obtain: %w", err)
 	}
 	overlay["ANTHROPIC_AUTH_TOKEN"] = tok
-	overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(brokerURL, "/") + "/llm"
+	// Claude posts to the loopback gateway, which proxies /llm to the broker.
+	overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(LocalGatewayURL, "/") + "/llm"
 	return nil
 }

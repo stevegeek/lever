@@ -32,31 +32,39 @@ func TestResolveMsgTarget(t *testing.T) {
 		g2g              bool
 		wantTo, wantProj string
 		wantErr          bool
+		wantErrSub       string // optional: substring the deny reason must contain
 	}{
-		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever", false},
-		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever", false},
-		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false},
-		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false},
-		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false},
-		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false},
-		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false},
-		{"manager to user other", "manager", "user:stephen", true, "", "", true},
-		{"manager to unknown worker", "manager", "nope", true, "", "", true},
-		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false},
-		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false},
-		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false},
-		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever", false},
-		{"worker to worker disabled", "scratch", "worker", false, "", "", true},
-		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false},
-		{"unknown caller", "mallory", "assistant", true, "", "", true},
-		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true},
-		{"worker to unknown", "scratch", "nope", true, "", "", true},
+		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever", false, ""},
+		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever", false, ""},
+		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false, ""},
+		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false, ""},
+		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false, ""},
+		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false, ""},
+		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false, ""},
+		{"manager to user other", "manager", "user:stephen", true, "", "", true, ""},
+		{"manager to unknown worker", "manager", "nope", true, "", "", true, ""},
+		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false, ""},
+		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false, ""},
+		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false, ""},
+		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever", false, ""},
+		{"worker to worker disabled", "scratch", "worker", false, "", "", true, ""},
+		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false, ""},
+		{"unknown caller", "mallory", "assistant", true, "", "", true, ""},
+		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true, ""},
+		{"worker to unknown", "scratch", "nope", true, "", "", true, ""},
+		// Bare prefixes are NOT the empty manager alias / empty agent name:
+		// they must fall through to the unknown-recipient deny.
+		{"bare user: prefix denied", "manager", "user:", true, "", "", true, "unknown recipient"},
+		{"bare agent: prefix denied", "manager", "agent:", true, "", "", true, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			tgt, err := msgBroker(c.g2g).resolveMsgTarget(c.caller, c.to)
 			if c.wantErr != (err != nil) {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if c.wantErrSub != "" && !strings.Contains(err.Error(), c.wantErrSub) {
+				t.Fatalf("err = %v, want substring %q", err, c.wantErrSub)
 			}
 			if err == nil && (tgt.scionTo != c.wantTo || tgt.project != c.wantProj) {
 				t.Fatalf("got (%q,%q), want (%q,%q)", tgt.scionTo, tgt.project, c.wantTo, c.wantProj)

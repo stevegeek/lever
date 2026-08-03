@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
@@ -39,16 +40,17 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	// worth honoring are the ones that plainly mean "the manager" — the taught
 	// alias `user:manager`, the manager's cert CN, and its scion slug. Anything
 	// else is denied rather than silently 502ing at the scion CLI.
-	if len(to) > 5 && to[:5] == "user:" {
-		who := to[5:]
+	// who != "" preserves the bare-"user:" fallthrough to the
+	// unknown-recipient deny below.
+	if who, ok := strings.CutPrefix(to, "user:"); ok && who != "" {
 		if who == "manager" || who == b.manager || who == b.managerSlug {
 			return managerTarget, nil
 		}
 		return msgTarget{}, fmt.Errorf("user-addressed recipient %q is not broker-routable (scion supports user messaging only inside agent containers); message the manager agent instead", to)
 	}
 	name := to
-	if len(to) > 6 && to[:6] == "agent:" {
-		name = to[6:]
+	if rest, ok := strings.CutPrefix(to, "agent:"); ok && rest != "" {
+		name = rest
 	}
 	if name == b.manager || name == b.managerSlug {
 		return managerTarget, nil

@@ -313,7 +313,18 @@ func TestMCPDirectiveIDGuardsFailLocally(t *testing.T) {
 func TestMCPDirectiveSchemaDeclaresBothSpellings(t *testing.T) {
 	// The advertised contract must match what the server accepts: declaring
 	// only `id` while quietly tolerating `directive_id` leaves a
-	// schema-validating client free to reject the alias before it reaches us.
+	// schema-validating client free to reject the alias before it reaches us,
+	// so BOTH spellings must appear in properties.
+	//
+	// But the schema must ALSO be a plain top-level object with NO combinator
+	// (anyOf/oneOf/allOf) and no top-level required: the Anthropic API rejects
+	// a tool input schema carrying a top-level combinator, and Claude Code
+	// then silently DROPS the tool from the session ("No such tool
+	// available") — the directive channel dies invisibly for exactly the
+	// client it exists for (#24). The exactly-one-spelling rule never depended
+	// on the schema: directiveID() enforces it caller-side with -32602 before
+	// any broker call (see TestMCPDirectiveIDResolution / the both-supplied
+	// and neither-supplied cases below).
 	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
 	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
 	for _, tl := range resp["result"].(map[string]any)["tools"].([]any) {
@@ -323,15 +334,17 @@ func TestMCPDirectiveSchemaDeclaresBothSpellings(t *testing.T) {
 			continue
 		}
 		schema := tool["inputSchema"].(map[string]any)
+		if schema["type"] != "object" {
+			t.Fatalf("%s schema type = %v, want object", name, schema["type"])
+		}
 		props := schema["properties"].(map[string]any)
 		if props["id"] == nil || props["directive_id"] == nil {
 			t.Fatalf("%s schema properties = %v, want both id and directive_id declared", name, props)
 		}
-		if schema["anyOf"] == nil {
-			t.Fatalf("%s schema must require one of the two spellings via anyOf, got %v", name, schema)
-		}
-		if schema["required"] != nil {
-			t.Fatalf("%s schema still carries a flat required (%v), which contradicts the anyOf", name, schema["required"])
+		for _, combinator := range []string{"anyOf", "oneOf", "allOf", "required"} {
+			if schema[combinator] != nil {
+				t.Fatalf("%s schema carries top-level %q (%v) — the Anthropic API rejects it and Claude Code silently drops the tool (#24)", name, combinator, schema[combinator])
+			}
 		}
 	}
 }

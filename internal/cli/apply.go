@@ -248,18 +248,13 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return apply.Deps{}, nil, nil, err
 	}
 	allowed := append([]int{app.EffectiveJailPort()}, app.Manager.AllowPorts...)
-	closed, warn := app.ClosedInternetEgress()
-	if warn != "" {
-		// Surface the mixed-mode egress relaxation (R2); not fatal.
-		fmt.Fprintf(os.Stderr, "lever: warning: %s\n", warn)
-	}
 	cfg := backend.Config{
 		MachineName:    machine,
 		ProjectTree:    app.Tree,
 		AllowedPorts:   allowed,
 		ScionSource:    app.Scion.Source,
 		ScionVersion:   app.Scion.Version,
-		ClosedInternet: closed,
+		ClosedInternet: app.ClosedInternetEgress(),
 		Disk:           app.Disk,
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.

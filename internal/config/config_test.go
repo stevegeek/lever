@@ -810,16 +810,16 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 func TestClosedInternetEgress(t *testing.T) {
 	// Explicit knob, decoupled from llm_auth: egress: closed ⇒ closed; unset ⇒ open.
 	closedApp := &App{Egress: EgressClosed, Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
-	if closed, warn := closedApp.ClosedInternetEgress(); !closed || warn != "" {
-		t.Fatalf("egress: closed ⇒ closed=%v warn=%q want true/empty", closed, warn)
+	if !closedApp.ClosedInternetEgress() {
+		t.Fatal("egress: closed ⇒ closed egress")
 	}
 	openAPIKey := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
-	if closed, _ := openAPIKey.ClosedInternetEgress(); closed {
+	if openAPIKey.ClosedInternetEgress() {
 		t.Fatal("api-key without egress: closed must leave egress open (decoupled)")
 	}
 	openSub := &App{Broker: Broker{LLMAuth: LLMAuthSubscription}, Workers: []Worker{{Name: "w"}}}
-	if closed, warn := openSub.ClosedInternetEgress(); closed || warn != "" {
-		t.Fatalf("default (open): closed=%v warn=%q want false/empty", closed, warn)
+	if openSub.ClosedInternetEgress() {
+		t.Fatal("default (open): egress must be open")
 	}
 }
 

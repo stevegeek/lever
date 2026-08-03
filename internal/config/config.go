@@ -903,10 +903,9 @@ func (a *App) brokerLLMAuthDefault() LLMAuthMode {
 // is an explicit, independent knob (App.Egress) — NOT derived from llm_auth:
 // closed iff `egress: closed` is set. validateBroker guarantees `closed`
 // implies a uniformly api-key instance, so a subscription agent is never left
-// unable to reach Anthropic. The warning return is retained for the apply call
-// site but is always empty now that the posture is explicit.
-func (a *App) ClosedInternetEgress() (closed bool, warning string) {
-	return a.Egress == EgressClosed, ""
+// unable to reach Anthropic.
+func (a *App) ClosedInternetEgress() bool {
+	return a.Egress == EgressClosed
 }
 
 // imageArch is the arch appended to a tagless local image ref (see archImage).

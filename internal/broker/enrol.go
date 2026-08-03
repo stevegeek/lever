@@ -1,9 +1,7 @@
 package broker
 
 import (
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net/http"
 	"time"
@@ -20,19 +18,12 @@ type EnrolResponse struct {
 	Cert string `json:"cert"`
 }
 
-// csrCommonName parses a PEM CSR and returns its subject CommonName, verifying
-// the CSR self-signature (proof of private-key possession).
+// csrCommonName parses a PEM CSR (self-signature verified by parseCSR) and
+// returns its subject CommonName.
 func csrCommonName(csrPEM []byte) (string, error) {
-	blk, _ := pem.Decode(csrPEM)
-	if blk == nil {
-		return "", fmt.Errorf("broker: invalid CSR PEM")
-	}
-	csr, err := x509.ParseCertificateRequest(blk.Bytes)
+	csr, err := parseCSR(csrPEM)
 	if err != nil {
-		return "", fmt.Errorf("broker: parse CSR: %w", err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return "", fmt.Errorf("broker: CSR signature: %w", err)
+		return "", err
 	}
 	if csr.Subject.CommonName == "" {
 		return "", fmt.Errorf("broker: CSR has empty common name")

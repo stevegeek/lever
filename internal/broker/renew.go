@@ -2,10 +2,7 @@ package broker
 
 import (
 	"crypto"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
-	"fmt"
 	"net/http"
 )
 
@@ -20,19 +17,12 @@ type RenewResponse struct {
 	Cert string `json:"cert"`
 }
 
-// csrPublicKey parses a PEM CSR, verifies its self-signature (proof of
-// private-key possession), and returns its public key.
+// csrPublicKey parses a PEM CSR (self-signature verified by parseCSR — the
+// only proof-of-possession check on /renew) and returns its public key.
 func csrPublicKey(csrPEM []byte) (crypto.PublicKey, error) {
-	blk, _ := pem.Decode(csrPEM)
-	if blk == nil {
-		return nil, fmt.Errorf("broker: invalid CSR PEM")
-	}
-	csr, err := x509.ParseCertificateRequest(blk.Bytes)
+	csr, err := parseCSR(csrPEM)
 	if err != nil {
-		return nil, fmt.Errorf("broker: parse CSR: %w", err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("broker: CSR signature: %w", err)
+		return nil, err
 	}
 	return csr.PublicKey, nil
 }

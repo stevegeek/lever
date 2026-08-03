@@ -29,11 +29,10 @@ func (b *Broker) llmProxyHandler() http.Handler {
 		if req.Header.Get("anthropic-version") == "" {
 			req.Header.Set("anthropic-version", "2023-06-01")
 		}
-		// Scrub forwarding/identity headers.
-		req.Header.Del("Cookie")
-		req.Header.Del("X-Forwarded-For")
-		req.Header.Del("X-Forwarded-Host")
-		req.Header.Del("X-Forwarded-Proto")
+		// Scrub forwarding/identity headers (shared with the MCP gateway
+		// Director; forwarding headers only — must run without touching the
+		// x-api-key just injected above).
+		scrubProxyHeaders(req.Header)
 	}
 	// R5: do not echo upstream auth/error headers back to the jail.
 	rp.ModifyResponse = func(resp *http.Response) error {

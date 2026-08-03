@@ -16,7 +16,7 @@ import (
 // distinct from `destroy`, which deletes the machine and clears staged
 // runtime state.
 func newStopCmd(factory BackendFactory) *cobra.Command {
-	var machine, backendFlag string
+	var machine, backendFlag *string
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Power off the jail, keeping its disk (fast `lever up` resume)",
@@ -32,22 +32,18 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 				state = brokerctl.StateDir(filepath.Dir(path))
 				if app, lerr := config.Load(path); lerr == nil {
 					appName = app.Name
-					if machine == "" {
+					if *machine == "" {
 						if serr := state.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}
 					}
 				}
 			}
-			if machine != "" {
+			if *machine != "" {
 				cmd.PrintErrln("note: --machine given; the broker is not stopped (run `lever stop` from the instance root to do that).")
 			}
 
-			m, err := machineFromFlagOrConfig(machine)
-			if err != nil {
-				return err
-			}
-			b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+			m, b, err := resolveJailBackend(factory, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
@@ -88,7 +84,6 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
-	cmd.Flags().StringVar(&backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
+	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
 }

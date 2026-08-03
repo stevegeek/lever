@@ -11,7 +11,7 @@ import (
 )
 
 func newDestroyCmd(factory BackendFactory) *cobra.Command {
-	var machine, backendFlag string
+	var machine, backendFlag *string
 	cmd := &cobra.Command{
 		Use:     "destroy",
 		Aliases: []string{"down"},
@@ -22,7 +22,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 			// broker outlives the jail; its single-use bootstrap latch (already
 			// consumed) then gets reused by the next `lever apply`, which stages no
 			// bootstrap ticket and leaves the new manager unable to enrol.
-			if machine == "" {
+			if *machine == "" {
 				if path, perr := resolveConfigPath(""); perr == nil {
 					if app, lerr := config.Load(path); lerr == nil {
 						st := brokerctl.StateDir(filepath.Dir(path))
@@ -45,11 +45,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 				cmd.PrintErrln("note: --machine given; the broker is not stopped and staged state is not cleared (run `lever destroy` from the instance root to do that).")
 			}
 
-			m, err := machineFromFlagOrConfig(machine)
-			if err != nil {
-				return err
-			}
-			b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+			m, b, err := resolveJailBackend(factory, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
@@ -60,8 +56,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
-	cmd.Flags().StringVar(&backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
+	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
 }
 

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/config"
 )
@@ -58,6 +60,33 @@ func machineFromFlagOrConfig(machine string) (string, error) {
 		return "", err
 	}
 	return machineName(app.Name), nil
+}
+
+// addJailTargetFlags registers the --machine/--backend flag pair shared by the
+// host-side jail-targeting commands (destroy/stop/doctor/worker purge) and
+// returns pointers to the bound values. Pointers, not values: destroy/stop read
+// the raw --machine flag before resolution (machine=="" gates their broker-stop
+// branch).
+func addJailTargetFlags(c *cobra.Command) (machine, backendFlag *string) {
+	machine, backendFlag = new(string), new(string)
+	c.Flags().StringVar(machine, "machine", "", "jail machine name (default: lever-<name> from config)")
+	c.Flags().StringVar(backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
+	return machine, backendFlag
+}
+
+// resolveJailBackend resolves the jail machine name from the --machine flag (or
+// config) and constructs the backend from the --backend flag (or config, or the
+// registry default) — the resolution half of addJailTargetFlags.
+func resolveJailBackend(factory BackendFactory, machine, backendFlag string) (string, backend.Backend, error) {
+	m, err := machineFromFlagOrConfig(machine)
+	if err != nil {
+		return "", nil, err
+	}
+	b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+	if err != nil {
+		return "", nil, err
+	}
+	return m, b, nil
 }
 
 // backendFromFlagOrConfig returns the explicit --backend when set, else the

@@ -29,7 +29,7 @@ func newWorkerCmd(factory BackendFactory) *cobra.Command {
 // Destructive, so it requires --force. Only configured worker names are accepted.
 func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 	var force bool
-	var machine, backendFlag string
+	var machine, backendFlag *string
 	c := &cobra.Command{
 		Use:   "purge NAME",
 		Args:  cobra.ExactArgs(1),
@@ -49,11 +49,7 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 				return err
 			}
 
-			m, err := machineFromFlagOrConfig(machine)
-			if err != nil {
-				return err
-			}
-			b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+			_, b, err := resolveJailBackend(factory, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
@@ -94,8 +90,7 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&force, "force", false, "confirm the destructive purge (required)")
-	c.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
-	c.Flags().StringVar(&backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
+	machine, backendFlag = addJailTargetFlags(c)
 	return c
 }
 

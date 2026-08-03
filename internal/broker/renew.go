@@ -82,7 +82,6 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 	// without this its generation stays 0 and no operator directive can target
 	// it. Never bumps an existing generation — that is reserved for re-enrolment.
 	b.directives.EnsureGeneration(caller)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(RenewResponse{Cert: string(certPEM)})
+	writeJSON(w, RenewResponse{Cert: string(certPEM)})
 	b.audit("renew", caller, "allow", "")
 }

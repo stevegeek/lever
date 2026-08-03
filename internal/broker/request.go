@@ -156,6 +156,5 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		kvs = append(kvs, "constraints", string(cj))
 	}
 	b.audit("request", caller, "allow", detail, kvs...)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(CapResponse{Token: base64.RawURLEncoding.EncodeToString(tok)})
+	writeJSON(w, CapResponse{Token: base64.RawURLEncoding.EncodeToString(tok)})
 }

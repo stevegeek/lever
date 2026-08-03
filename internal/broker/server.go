@@ -2,7 +2,6 @@ package broker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -86,8 +85,7 @@ type EpochResponse struct {
 
 // handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
 func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
+	writeJSON(w, EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.

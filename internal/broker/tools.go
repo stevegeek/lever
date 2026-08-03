@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
@@ -38,6 +37,5 @@ func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, n)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string][]string{"tools": out})
+	writeJSON(w, map[string][]string{"tools": out})
 }

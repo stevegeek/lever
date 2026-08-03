@@ -112,8 +112,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("register", req.Name, "allow", cfg.Backend)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(RegisterResponse{
+	writeJSON(w, RegisterResponse{
 		PublicKey: token.EncodePublicKey(b.keys.Public),
 		Epoch:     b.MinEpoch(),
 	})

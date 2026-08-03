@@ -61,7 +61,6 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(ProvisionResponse{Ticket: tk})
+	writeJSON(w, ProvisionResponse{Ticket: tk})
 	b.audit("provision", caller, "allow", req.Worker)
 }

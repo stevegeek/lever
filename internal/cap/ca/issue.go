@@ -19,6 +19,26 @@ import (
 // agent leafs renew via the 12h lever-renew sidecar hitting /renew.
 const certTTL = 24 * time.Hour
 
+// leafTemplate is the single place the leaf-cert security policy lives:
+// random 128-bit serial, 1-minute clock-skew backdate, certTTL lifetime,
+// digital-signature key usage, exactly one EKU.
+func leafTemplate(cn string, eku x509.ExtKeyUsage, dnsNames []string, ipAddrs []net.IP) (*x509.Certificate, error) {
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("ca: serial: %w", err)
+	}
+	return &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(certTTL),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{eku},
+		DNSNames:     dnsNames,
+		IPAddresses:  ipAddrs,
+	}, nil
+}
+
 // SignCSR signs an agent-generated CSR into a short-lived client cert whose
 // CommonName is taken from the CSR subject. The CA never sees the private key.
 func (c *CA) SignCSR(csrPEM []byte) ([]byte, error) {
@@ -36,44 +56,21 @@ func (c *CA) SignCSR(csrPEM []byte) ([]byte, error) {
 	if csr.Subject.CommonName == "" {
 		return nil, fmt.Errorf("ca: CSR has empty common name")
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, fmt.Errorf("ca: serial: %w", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: csr.Subject.CommonName},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(certTTL),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, csr.PublicKey, c.key)
-	if err != nil {
-		return nil, fmt.Errorf("ca: sign csr: %w", err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+	return c.SignPublicKey(csr.PublicKey, csr.Subject.CommonName)
 }
 
 // SignPublicKey signs an externally-provided public key into a short-lived
 // ClientAuth cert with the given CommonName. Unlike SignCSR, the CN is chosen by
 // the caller — used by /renew to stamp the authenticated identity, never a
-// CSR-supplied CN.
+// CSR-supplied CN (SignCSR itself calls this only after validating the CSR and
+// passing along its CN).
 func (c *CA) SignPublicKey(pub crypto.PublicKey, cn string) ([]byte, error) {
 	if cn == "" {
 		return nil, fmt.Errorf("ca: empty common name")
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl, err := leafTemplate(cn, x509.ExtKeyUsageClientAuth, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("ca: serial: %w", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(certTTL),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		return nil, err
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, pub, c.key)
 	if err != nil {
@@ -127,19 +124,9 @@ func (c *CA) issue(cn string, eku x509.ExtKeyUsage, dnsNames []string, ipAddrs [
 	if err != nil {
 		return nil, nil, fmt.Errorf("ca: generate leaf key: %w", err)
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl, err := leafTemplate(cn, eku, dnsNames, ipAddrs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ca: serial: %w", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(certTTL),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{eku},
-		DNSNames:     dnsNames,
-		IPAddresses:  ipAddrs,
+		return nil, nil, err
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, &key.PublicKey, c.key)
 	if err != nil {

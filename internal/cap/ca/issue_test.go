@@ -9,7 +9,24 @@ import (
 	"encoding/pem"
 	"net"
 	"testing"
+	"time"
 )
+
+// assertLeafPolicy pins the parts of the leaf template no other test checks:
+// the validity window (certTTL plus the 1-minute clock-skew backdate) and the
+// key usage. x509 times have 1s granularity and the window endpoints may be
+// computed from separate clock reads, so allow 2s of slack.
+func assertLeafPolicy(t *testing.T, leaf *x509.Certificate) {
+	t.Helper()
+	want := certTTL + time.Minute
+	got := leaf.NotAfter.Sub(leaf.NotBefore)
+	if got < want-2*time.Second || got > want+2*time.Second {
+		t.Errorf("validity window = %v, want ~%v", got, want)
+	}
+	if leaf.KeyUsage != x509.KeyUsageDigitalSignature {
+		t.Errorf("KeyUsage = %v, want KeyUsageDigitalSignature", leaf.KeyUsage)
+	}
+}
 
 // makeCSR builds a PEM-encoded CSR for cn, returning the CSR (the private key
 // stays with the caller, mirroring an agent generating its own key).
@@ -50,6 +67,7 @@ func TestSignCSRHasAgentCNClientAuthAndVerifies(t *testing.T) {
 	if len(leaf.ExtKeyUsage) == 0 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
 		t.Errorf("EKU = %v, want ClientAuth", leaf.ExtKeyUsage)
 	}
+	assertLeafPolicy(t, leaf)
 	pool := x509.NewCertPool()
 	pool.AddCert(c.Cert)
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool,
@@ -79,6 +97,7 @@ func TestSignPublicKeyUsesGivenCN(t *testing.T) {
 	if leaf.Subject.CommonName != "worker" {
 		t.Fatalf("CN = %q, want worker", leaf.Subject.CommonName)
 	}
+	assertLeafPolicy(t, leaf)
 }
 
 func TestSignCSRRejectsGarbage(t *testing.T) {
@@ -121,6 +140,7 @@ func TestIssueServerCertHasServerAuthAndDNS(t *testing.T) {
 	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "host.orb.internal" {
 		t.Errorf("DNSNames = %v, want [host.orb.internal]", leaf.DNSNames)
 	}
+	assertLeafPolicy(t, leaf)
 }
 
 func TestIssueServerCertSANsHasBothDNSAndIP(t *testing.T) {

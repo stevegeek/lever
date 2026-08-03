@@ -8,13 +8,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/exec"
 )
+
+// DefaultHubEndpoint is the host-side hub endpoint (loopback). Passed
+// explicitly as Options.HubEndpoint by host-side constructors — New applies
+// no default, and an empty HubEndpoint omits SCION_HUB_ENDPOINT entirely,
+// deferring to the scion binary's own default.
+const DefaultHubEndpoint = "http://127.0.0.1:8080"
 
 type Options struct {
 	Bin            string        // default "scion"
@@ -61,20 +65,6 @@ func (c *Client) currentHubToken() string {
 // HubToken exposes the resolved controller PAT so callers outside this
 // package (e.g. the attach exec path) can embed it themselves.
 func (c *Client) HubToken() string { return c.currentHubToken() }
-
-// Default reads the dev token from <home>/.scion/dev-token and the hub endpoint
-// from SCION_HUB_ENDPOINT (default loopback), mirroring ScionClient.default.
-func Default(r exec.Runner, home string) *Client {
-	token := ""
-	if b, err := os.ReadFile(filepath.Join(home, ".scion", "dev-token")); err == nil {
-		token = strings.TrimSpace(string(b))
-	}
-	endpoint := os.Getenv("SCION_HUB_ENDPOINT")
-	if endpoint == "" {
-		endpoint = "http://127.0.0.1:8080"
-	}
-	return New(r, Options{HubEndpoint: endpoint, DevToken: token})
-}
 
 func (c *Client) env() map[string]string {
 	m := map[string]string{"SCION_HUB_ENABLED": "true"}

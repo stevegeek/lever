@@ -29,7 +29,7 @@ type CapResponse struct {
 // handleRequest mints a capability token after checking, in order: the caller's
 // identity (mTLS); normalizing the op to the wildcard when the tool is
 // coarse-gated (registry has WildcardOp registered); the request/delegation
-// policy (rules.MayObtain, checked against the normalized op — no grant
+// policy (rules.MayObtainRule, checked against the normalized op — no grant
 // widening, the caller must hold the exact {tool, op} grant); the operation
 // is registered (registry.HasOperation); and the requested constraint values
 // are permitted (registry.ValidateConstraints). The token is bound to

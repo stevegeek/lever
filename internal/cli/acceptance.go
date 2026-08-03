@@ -402,44 +402,8 @@ func (h *acceptanceHarness) checkNoSelfPath(ctx context.Context) (bool, error) {
 	return false, fmt.Errorf("worker self-minted an un-granted cap (must be refused): %s", out)
 }
 
-// classifyCurlResult maps an exec.Result from a curl invocation to a tri-state:
-//
-//   - ("blocked", nil)     -- genuine policy block (curl exit 7 or 28)
-//   - ("allowed", nil)     -- curl connected successfully (exit 0)
-//   - ("uncertain", error) -- curl not found (exit 127) or any other unexpected
-//     exit -- FAIL-CLOSED
-//
-// res.Code is reliable here: jail.Runner wraps exec.RealRunner via `orb`, which
-// passes the inner command's exit code back through *exec.ExitError.ExitCode()
-// even on the non-zero path (see internal/exec/runner.go). Exit 0 means curl
-// succeeded (egress open); exit 7 is CURLE_COULDNT_CONNECT (ECONNREFUSED /
-// network-unreachable); exit 28 is CURLE_OPERATION_TIMEDOUT (packet dropped);
-// exit 127 is command-not-found from the shell.
-func classifyCurlResult(res leverexec.Result, err error) (string, error) {
-	if err == nil {
-		return "allowed", nil
-	}
-	switch res.Code {
-	case 7, 28:
-		// Genuine egress-block signatures: connection rejected or max-time
-		// budget expired because the packet was dropped by the policy.
-		return "blocked", nil
-	case 127:
-		return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail image (exit 127) -- check is UNCERTAIN; image must include curl: %s", res.Stderr)
-	default:
-		// Any other curl exit (DNS failure, SSL error, etc.) is ambiguous:
-		// we cannot tell whether egress was open or blocked. FAIL-CLOSED.
-		combined := res.Stdout + res.Stderr
-		// Guard against shells that emit 126 or the orb wrapper absorbing 127.
-		if strings.Contains(combined, "not found") || strings.Contains(combined, "No such file") {
-			return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail image -- check is UNCERTAIN; image must include curl: %s", combined)
-		}
-		return "uncertain", fmt.Errorf("egress-refused: curl exited %d with unexpected output -- check is UNCERTAIN (FAIL-CLOSED): %s", res.Code, combined)
-	}
-}
-
 // classifyEgressProbe maps a curl probe of a host:port to "reachable"/"blocked"/
-// "uncertain". Unlike classifyCurlResult, a TLS-handshake-level failure counts as
+// "uncertain". A TLS-handshake-level failure counts as
 // REACHABLE: the egress allowlist works at the TCP layer, so if the packet got
 // far enough to start a TLS handshake (curl exit 35 SSL connect error / 60 cert
 // verify failure), the TCP connection SUCCEEDED — connecting is the point. Exit 0

@@ -239,10 +239,10 @@ func New(c Config) *Broker {
 		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
-		reenrolEvents: make(chan string, reenrolQueueDepth),
-		reenrolNow:    time.Now,
-		reenrolLast:   map[string]time.Time{},
-		reenrolTries:  map[string]int{},
+		reenrolEvents:     make(chan string, reenrolQueueDepth),
+		reenrolNow:        time.Now,
+		reenrolLast:       map[string]time.Time{},
+		reenrolTries:      map[string]int{},
 		directives:        directives,
 		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
 		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,
@@ -287,18 +287,6 @@ func (b *Broker) persistLocked() {
 	if err := b.persist(RevocationState{MinEpoch: b.minEpoch, Revoked: revoked}); err != nil {
 		b.log.Error("broker.persist_revocation", "err", err.Error())
 	}
-}
-
-// revocationState returns a snapshot of the current revocation state.
-// Caller must NOT hold b.mu.
-func (b *Broker) revocationState() RevocationState {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	revoked := make([]string, 0, len(b.revoked))
-	for a := range b.revoked {
-		revoked = append(revoked, a)
-	}
-	return RevocationState{MinEpoch: b.minEpoch, Revoked: revoked}
 }
 
 func (b *Broker) isRevoked(agent string) bool {

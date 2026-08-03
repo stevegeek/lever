@@ -178,26 +178,3 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 	}
 	return nil
 }
-
-// Serve starts the jail listener over mTLS and the admin listener over plain
-// HTTP bound to loopback. It runs until ctx is cancelled, then shuts both
-// servers down. Returns the first non-ErrServerClosed error from either server,
-// or nil on clean shutdown.
-func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, certSrc *ca.ServerCertSource) error {
-	// Ensure admin listener is bound only to loopback — fail closed on
-	// misconfiguration so /register is never reachable from a routable interface.
-	boundAdminAddr, err := resolveAdminAddr(adminAddr)
-	if err != nil {
-		return err
-	}
-	jailLn, err := net.Listen("tcp", jailAddr)
-	if err != nil {
-		return err
-	}
-	adminLn, err := net.Listen("tcp", boundAdminAddr)
-	if err != nil {
-		_ = jailLn.Close()
-		return err
-	}
-	return b.ServeListeners(ctx, jailLn, adminLn, nil, certSrc)
-}

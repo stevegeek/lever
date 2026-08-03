@@ -10,7 +10,8 @@ import (
 // handleTools returns the broker's registered tool names to an authenticated
 // agent (mTLS). It is the FULL catalog, not policy-filtered: an agent may call a
 // tool with a delegated token even without a direct grant, so filtering by
-// MayObtain would wrongly hide such tools. The token + mTLS are the real gate.
+// the MayObtainRule policy would wrongly hide such tools. The token + mTLS are
+// the real gate.
 func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

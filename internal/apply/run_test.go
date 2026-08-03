@@ -2314,6 +2314,20 @@ func loadImageStep(d Deps) error {
 	return runStep(context.Background(), &config.App{}, Step{Kind: "load-image", Target: "img"}, d, &bootTracker{})
 }
 
+// TestRunStepUnknownKind pins the switch's default arm: a Step whose Kind is
+// not a known StepKind is a hard error (never a silent no-op), and the message
+// echoes the offending kind. This guards the dispatch table against a Plan that
+// emits a kind runStep has no case for.
+func TestRunStepUnknownKind(t *testing.T) {
+	err := runStep(context.Background(), &config.App{}, Step{Kind: "no-such-kind"}, Deps{}, &bootTracker{})
+	if err == nil {
+		t.Fatal("runStep with an unknown kind must error")
+	}
+	if !strings.Contains(err.Error(), "no-such-kind") {
+		t.Fatalf("error %q must name the unknown kind", err)
+	}
+}
+
 // TestLoadImageStepSkipsWhenAlreadyLoaded: the whole point of the guard — when
 // the jail already holds the exact image, neither re-import nor prune runs.
 func TestLoadImageStepSkipsWhenAlreadyLoaded(t *testing.T) {

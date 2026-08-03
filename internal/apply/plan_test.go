@@ -10,7 +10,7 @@ import (
 func planStepNames(steps []Step) []string {
 	out := make([]string, len(steps))
 	for i, s := range steps {
-		out[i] = s.Kind
+		out[i] = string(s.Kind)
 	}
 	return out
 }
@@ -71,7 +71,7 @@ func TestPlanOrder(t *testing.T) {
 	steps := Plan(app, PlanOpts{})
 	var kinds []string
 	for _, s := range steps {
-		kinds = append(kinds, s.Kind)
+		kinds = append(kinds, string(s.Kind))
 	}
 	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
@@ -129,7 +129,7 @@ func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 	steps := Plan(app, PlanOpts{})
 	var kinds []string
 	for _, s := range steps {
-		kinds = append(kinds, s.Kind)
+		kinds = append(kinds, string(s.Kind))
 	}
 	// credential must appear AFTER scion-server and BEFORE register-project
 	credIdx, scionIdx, regIdx := -1, -1, -1
@@ -163,7 +163,7 @@ func TestPlanInsertsBrokerSteps(t *testing.T) {
 	steps := Plan(app, PlanOpts{})
 	idx := map[string]int{}
 	for i, s := range steps {
-		idx[s.Kind] = i
+		idx[string(s.Kind)] = i
 	}
 	if _, ok := idx["broker-up"]; !ok {
 		t.Fatal("plan must include broker-up")

@@ -225,159 +225,197 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 	return nil
 }
 
+// runStep is the thin dispatch over StepKind: it routes each step to its
+// executor. The non-trivial case bodies live in per-kind run* helpers below,
+// each closing over only (ctx, app, s, d, boot) — no hidden state. The default
+// arm is a hard error so a Plan emitting an unknown kind fails loudly.
 func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTracker) error {
 	switch s.Kind {
-	case "jail-up":
+	case KindJailUp:
 		return d.JailUp(ctx, app)
-	case "broker-up":
-		if d.StartBroker == nil {
-			return nil // tests / dry paths
-		}
-		if err := d.StartBroker(ctx); err != nil {
-			return err
-		}
-		if d.BrokerHealthy != nil {
-			return d.BrokerHealthy(ctx)
-		}
-		return nil
-	case "load-image":
-		// Skip the multi-GB re-import when the jail already holds this exact
-		// image (same ID). Fail-open: ImageLoaded returns false on any doubt.
-		if d.ImageLoaded != nil && d.ImageLoaded(ctx, s.Target) {
-			return nil
-		}
-		if err := d.LoadImage(ctx, s.Target); err != nil {
-			return err
-		}
-		// After a load, prune dangling images: when this load superseded a tag
-		// (a rebuilt image), the old copy is now untagged and would otherwise
-		// ratchet the grow-only jail disk. A no-op when the load just added a
-		// brand-new image. Best-effort — a prune failure must never fail the
-		// bring-up.
-		if d.PruneImages != nil {
-			if err := d.PruneImages(ctx); err != nil {
-				logf(d, "load-image: pruning superseded jail images failed: %v", err)
-			}
-		}
-		return nil
-	case "init-machine":
+	case KindBrokerUp:
+		return runBrokerUp(ctx, d)
+	case KindLoadImage:
+		return runLoadImage(ctx, s, d)
+	case KindInitMachine:
 		return d.Scion.InitMachine(ctx)
-	case "config-registry":
+	case KindConfigRegistry:
 		return d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
-	case "bootstrap-token":
+	case KindBootstrapToken:
 		if d.EnsureControllerPAT == nil {
 			return nil // dev-auth-open mode (unit tests / legacy) — skip
 		}
 		return d.EnsureControllerPAT(ctx)
-	case "scion-server":
+	case KindScionServer:
 		return d.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false})
-	case "credential":
-		read := d.ReadCred
-		if read == nil {
-			read = defaultReadCred
-		}
-		tok, err := read(s.Target)
-		if err != nil {
-			return fmt.Errorf("reading credential %s: %w", s.Target, err)
-		}
-		return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
-	case "register-project":
-		jp := jailPath(s.Target, app.Tree, d.JailMount)
-
-		// Idempotent register: observe BEFORE doing anything destructive. A
-		// suspended manager (or worker) agent record survives a `lever stop` +
-		// `lever up` cycle (its project linkage lives in this same
-		// project-configs registration) — the marker-removal +
-		// RemoveScionProjectConfigs + re-init below unconditionally tore that
-		// linkage down on every apply, orphaning the record and breaking
-		// `scion resume`. When the registration is already sound (exactly one
-		// project-configs entry for jp AND the in-tree marker present), there
-		// is nothing to fix, so skip the whole destructive path. A query
-		// error, or an unsound registration (zero, duplicate, or torn), falls
-		// through unchanged to the existing destructive path below — fail
-		// open, never a hard apply failure over an observe read.
-		if d.ScionProjectRegistered != nil {
-			if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
-				return nil
-			}
-		}
-
-		// Remove a stale `.scion` marker FILE left in the tree by a previous
-		// bring-up. It survives `orb delete` (it lives in the bind-mounted tree),
-		// and `scion init` writes workspace_path only on fresh-create — resolving
-		// a stale marker skips it, so the agent mounts an empty managed config-dir
-		// copy instead of the live tree (the in-place mount silently breaks).
-		// Removing it forces a fresh, correct init.
-		//
-		// The tree is a VirtioFS bind mount: the host and the jail do not share
-		// one filesystem view/cache, so a host-side unlink is not promptly
-		// visible to the guest. Live-reproduced: removing the marker on the HOST
-		// then immediately running `scion init` IN the jail failed with
-		// "failed to initialize project: existing project marker is invalid:
-		// open /lever/.scion: no such file or directory" — scion's guest-side
-		// directory scan still saw the just-deleted marker, then the open()
-		// raced the host unlink and lost. Running the identical `scion init`
-		// manually in the jail moments later succeeded (same view, no race).
-		// So the removal must go THROUGH the jail's own filesystem view — the
-		// same view the subsequent in-jail init uses — which is what
-		// d.RemoveJailFile does. It is nil in tests and the broker-only VM gate
-		// (no jail filesystem view to remove through there), so fall back to
-		// the host-side remove, which still reaches the jail via the bind mount
-		// (just without the same-view guarantee).
-		if d.RemoveJailFile != nil {
-			if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
-				return err
-			}
-		} else if err := removeStaleMarker(s.Target); err != nil {
-			return err
-		}
-		// Clear any stale project-config registration(s) for this workspace path
-		// before re-init, so `scion init` mints exactly ONE registration per
-		// workspace instead of leaving the previous apply's dir behind.
-		if d.RemoveScionProjectConfigs != nil {
-			if err := d.RemoveScionProjectConfigs(ctx, jp); err != nil {
-				return err
-			}
-		}
-		if err := d.Scion.InitProject(ctx, jp); err != nil {
-			return err
-		}
-		return d.Scion.HubLink(ctx, jp)
-	case "mint-manager-bootstrap":
-		if d.MintManagerBootstrap == nil {
-			return nil
-		}
-		// Idempotent (tied to the LIVE broker latch, not a stale file): mint; if the
-		// latch is already consumed (same broker process as a prior apply), tolerate
-		// it — the manager has its bootstrap.json from then. After a broker restart
-		// the latch reopens, mint succeeds, and a fresh ticket is deposited, so a
-		// partially-failed first apply (bootstrap written but manager never enrolled)
-		// recovers on re-apply. (*boot is not read after this step.)
-		m, err := d.MintManagerBootstrap(ctx)
-		if err != nil {
-			if errors.Is(err, ErrBootstrapLatched) {
-				// A spent latch is only tolerable when a bootstrap ticket is already
-				// staged (true idempotent re-apply against the same broker). If none
-				// is staged, a stale broker from a prior run is being reused and the
-				// new manager could never enrol — fail loudly instead of booting a
-				// doomed manager.
-				staged := filepath.Join(s.Target, ".lever", "bootstrap.json")
-				if _, statErr := os.Stat(staged); statErr == nil {
-					return nil
-				}
-				return fmt.Errorf("broker /bootstrap latch already consumed but no bootstrap ticket is staged at %s; a stale broker is likely still running — run `lever down` then retry", staged)
-			}
-			return err
-		}
-		boot.material = m
-		boot.minted = true
-		// Deposit it as a 0600 file in the mount (the lever-agent reads it).
-		return StageBootstrapMaterial(s.Target, m)
-	case "start-manager":
+	case KindCredential:
+		return runCredential(ctx, s, d)
+	case KindRegisterProject:
+		return runRegisterProject(ctx, app, s, d)
+	case KindMintManagerBootstrap:
+		return runMintManagerBootstrap(ctx, s, d, boot)
+	case KindStartManager:
 		return stepStartManager(ctx, app, s, d, boot)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// runBrokerUp runs the broker-up step: start the host broker (+ first-party
+// tools), then health-check it before the manager starts. Both Deps are
+// optional (tests / dry paths).
+func runBrokerUp(ctx context.Context, d Deps) error {
+	if d.StartBroker == nil {
+		return nil // tests / dry paths
+	}
+	if err := d.StartBroker(ctx); err != nil {
+		return err
+	}
+	if d.BrokerHealthy != nil {
+		return d.BrokerHealthy(ctx)
+	}
+	return nil
+}
+
+// runLoadImage runs the load-image step: skip the multi-GB re-import when the
+// jail already holds this exact image (same ID; fail-open — ImageLoaded returns
+// false on any doubt), otherwise load and then best-effort prune the superseded
+// dangling image.
+func runLoadImage(ctx context.Context, s Step, d Deps) error {
+	if d.ImageLoaded != nil && d.ImageLoaded(ctx, s.Target) {
+		return nil
+	}
+	if err := d.LoadImage(ctx, s.Target); err != nil {
+		return err
+	}
+	// After a load, prune dangling images: when this load superseded a tag
+	// (a rebuilt image), the old copy is now untagged and would otherwise
+	// ratchet the grow-only jail disk. A no-op when the load just added a
+	// brand-new image. Best-effort — a prune failure must never fail the
+	// bring-up.
+	if d.PruneImages != nil {
+		if err := d.PruneImages(ctx); err != nil {
+			logf(d, "load-image: pruning superseded jail images failed: %v", err)
+		}
+	}
+	return nil
+}
+
+// runCredential runs the credential step: read the manager credential file
+// (defaultReadCred unless overridden) and set it as the scion secret.
+func runCredential(ctx context.Context, s Step, d Deps) error {
+	read := d.ReadCred
+	if read == nil {
+		read = defaultReadCred
+	}
+	tok, err := read(s.Target)
+	if err != nil {
+		return fmt.Errorf("reading credential %s: %w", s.Target, err)
+	}
+	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
+}
+
+// runRegisterProject runs the register-project step: observe before doing
+// anything destructive, then (only when the registration is unsound) clear the
+// stale marker + project-config registration(s) and re-init + hub-link.
+func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) error {
+	jp := jailPath(s.Target, app.Tree, d.JailMount)
+
+	// Idempotent register: observe BEFORE doing anything destructive. A
+	// suspended manager (or worker) agent record survives a `lever stop` +
+	// `lever up` cycle (its project linkage lives in this same
+	// project-configs registration) — the marker-removal +
+	// RemoveScionProjectConfigs + re-init below unconditionally tore that
+	// linkage down on every apply, orphaning the record and breaking
+	// `scion resume`. When the registration is already sound (exactly one
+	// project-configs entry for jp AND the in-tree marker present), there
+	// is nothing to fix, so skip the whole destructive path. A query
+	// error, or an unsound registration (zero, duplicate, or torn), falls
+	// through unchanged to the existing destructive path below — fail
+	// open, never a hard apply failure over an observe read.
+	if d.ScionProjectRegistered != nil {
+		if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
+			return nil
+		}
+	}
+
+	// Remove a stale `.scion` marker FILE left in the tree by a previous
+	// bring-up. It survives `orb delete` (it lives in the bind-mounted tree),
+	// and `scion init` writes workspace_path only on fresh-create — resolving
+	// a stale marker skips it, so the agent mounts an empty managed config-dir
+	// copy instead of the live tree (the in-place mount silently breaks).
+	// Removing it forces a fresh, correct init.
+	//
+	// The tree is a VirtioFS bind mount: the host and the jail do not share
+	// one filesystem view/cache, so a host-side unlink is not promptly
+	// visible to the guest. Live-reproduced: removing the marker on the HOST
+	// then immediately running `scion init` IN the jail failed with
+	// "failed to initialize project: existing project marker is invalid:
+	// open /lever/.scion: no such file or directory" — scion's guest-side
+	// directory scan still saw the just-deleted marker, then the open()
+	// raced the host unlink and lost. Running the identical `scion init`
+	// manually in the jail moments later succeeded (same view, no race).
+	// So the removal must go THROUGH the jail's own filesystem view — the
+	// same view the subsequent in-jail init uses — which is what
+	// d.RemoveJailFile does. It is nil in tests and the broker-only VM gate
+	// (no jail filesystem view to remove through there), so fall back to
+	// the host-side remove, which still reaches the jail via the bind mount
+	// (just without the same-view guarantee).
+	if d.RemoveJailFile != nil {
+		if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
+			return err
+		}
+	} else if err := removeStaleMarker(s.Target); err != nil {
+		return err
+	}
+	// Clear any stale project-config registration(s) for this workspace path
+	// before re-init, so `scion init` mints exactly ONE registration per
+	// workspace instead of leaving the previous apply's dir behind.
+	if d.RemoveScionProjectConfigs != nil {
+		if err := d.RemoveScionProjectConfigs(ctx, jp); err != nil {
+			return err
+		}
+	}
+	if err := d.Scion.InitProject(ctx, jp); err != nil {
+		return err
+	}
+	return d.Scion.HubLink(ctx, jp)
+}
+
+// runMintManagerBootstrap runs the mint-manager-bootstrap step: mint the
+// manager's one-time enrol ticket and stage it (0600) for lever-agent to read.
+// Idempotent against the LIVE broker latch (not a stale file): a spent latch is
+// tolerated only when a ticket is already staged.
+func runMintManagerBootstrap(ctx context.Context, s Step, d Deps, boot *bootTracker) error {
+	if d.MintManagerBootstrap == nil {
+		return nil
+	}
+	// Idempotent (tied to the LIVE broker latch, not a stale file): mint; if the
+	// latch is already consumed (same broker process as a prior apply), tolerate
+	// it — the manager has its bootstrap.json from then. After a broker restart
+	// the latch reopens, mint succeeds, and a fresh ticket is deposited, so a
+	// partially-failed first apply (bootstrap written but manager never enrolled)
+	// recovers on re-apply. (*boot is not read after this step.)
+	m, err := d.MintManagerBootstrap(ctx)
+	if err != nil {
+		if errors.Is(err, ErrBootstrapLatched) {
+			// A spent latch is only tolerable when a bootstrap ticket is already
+			// staged (true idempotent re-apply against the same broker). If none
+			// is staged, a stale broker from a prior run is being reused and the
+			// new manager could never enrol — fail loudly instead of booting a
+			// doomed manager.
+			staged := filepath.Join(s.Target, ".lever", "bootstrap.json")
+			if _, statErr := os.Stat(staged); statErr == nil {
+				return nil
+			}
+			return fmt.Errorf("broker /bootstrap latch already consumed but no bootstrap ticket is staged at %s; a stale broker is likely still running — run `lever down` then retry", staged)
+		}
+		return err
+	}
+	boot.material = m
+	boot.minted = true
+	// Deposit it as a 0600 file in the mount (the lever-agent reads it).
+	return StageBootstrapMaterial(s.Target, m)
 }
 
 // stepStartManager runs the start-manager plan step: observe the manager

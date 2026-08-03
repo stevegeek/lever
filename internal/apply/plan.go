@@ -5,10 +5,32 @@ package apply
 
 import "github.com/stevegeek/lever/internal/config"
 
+// StepKind names a bring-up operation. It is a lever-owned enum: the constants
+// below are the complete, authoritative set (runStep's dispatch has a case for
+// each, plus a hard-error default). The type is a string alias, so untyped
+// literals still convert implicitly — the protection is named-constants-at-every-
+// site + find-refs, not compile-time exhaustiveness (the repo runs no exhaustive
+// linter). Values are the on-the-wire step names printed by `lever apply --dry-run`.
+type StepKind string
+
+const (
+	KindJailUp               StepKind = "jail-up"
+	KindBrokerUp             StepKind = "broker-up"
+	KindLoadImage            StepKind = "load-image"
+	KindInitMachine          StepKind = "init-machine"
+	KindConfigRegistry       StepKind = "config-registry"
+	KindBootstrapToken       StepKind = "bootstrap-token"
+	KindScionServer          StepKind = "scion-server"
+	KindCredential           StepKind = "credential"
+	KindRegisterProject      StepKind = "register-project"
+	KindMintManagerBootstrap StepKind = "mint-manager-bootstrap"
+	KindStartManager         StepKind = "start-manager"
+)
+
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
 // carry operands (a dir to register, the manager image, etc.).
 type Step struct {
-	Kind   string // jail-up | broker-up | load-image | init-machine | config-registry | bootstrap-token | scion-server | credential | register-project | mint-manager-bootstrap | start-manager
+	Kind   StepKind
 	Target string
 	Detail string
 }
@@ -27,20 +49,20 @@ type PlanOpts struct {
 }
 
 // brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.
-var brokerOnlyKinds = map[string]bool{
-	"jail-up":                true,
-	"broker-up":              true,
-	"mint-manager-bootstrap": true,
+var brokerOnlyKinds = map[StepKind]bool{
+	KindJailUp:               true,
+	KindBrokerUp:             true,
+	KindMintManagerBootstrap: true,
 }
 
 // Plan returns the ordered bring-up for an app. Order is load-bearing: the jail
 // must exist and the image loaded before scion runs in it; projects must be
 // registered before the manager (which orchestrates them) starts.
 func Plan(a *config.App, opts PlanOpts) []Step {
-	steps := []Step{{Kind: "jail-up", Target: a.Tree}}
+	steps := []Step{{Kind: KindJailUp, Target: a.Tree}}
 	// Bring the host broker (+ first-party tools) up early; the jail reaches it
 	// at host.orb.internal. Health-checked before the manager starts.
-	steps = append(steps, Step{Kind: "broker-up"})
+	steps = append(steps, Step{Kind: KindBrokerUp})
 	// Load every distinct image into the jail's container runtime: the manager
 	// image plus any worker that overrides it (workers default to the manager
 	// image, which is then loaded once). Workers are started later by the
@@ -50,7 +72,7 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	addLoad := func(img string) {
 		if img != "" && !seen[img] {
 			seen[img] = true
-			steps = append(steps, Step{Kind: "load-image", Target: img})
+			steps = append(steps, Step{Kind: KindLoadImage, Target: img})
 		}
 	}
 	addLoad(a.ManagerImage())
@@ -58,21 +80,21 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 		addLoad(a.WorkerImage(g))
 	}
 	steps = append(steps,
-		Step{Kind: "init-machine"},
-		Step{Kind: "config-registry", Detail: "scionlocal"},
+		Step{Kind: KindInitMachine},
+		Step{Kind: KindConfigRegistry, Detail: "scionlocal"},
 		// Mint (or reuse) the controller PAT the executor injects into the real,
 		// dev-auth-off hub via SCION_HUB_TOKEN, BEFORE scion-server locks the hub
 		// down. See Deps.EnsureControllerPAT.
-		Step{Kind: "bootstrap-token", Target: a.Tree},
-		Step{Kind: "scion-server"},
+		Step{Kind: KindBootstrapToken, Target: a.Tree},
+		Step{Kind: KindScionServer},
 	)
 	if a.Manager.CredentialFile != "" {
-		steps = append(steps, Step{Kind: "credential", Target: a.Manager.CredentialFile})
+		steps = append(steps, Step{Kind: KindCredential, Target: a.Manager.CredentialFile})
 	}
-	steps = append(steps, Step{Kind: "register-project", Target: a.Tree})
+	steps = append(steps, Step{Kind: KindRegisterProject, Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
-	steps = append(steps, Step{Kind: "mint-manager-bootstrap", Target: a.Tree})
-	steps = append(steps, Step{Kind: "start-manager", Target: a.Name, Detail: a.ManagerImage()})
+	steps = append(steps, Step{Kind: KindMintManagerBootstrap, Target: a.Tree})
+	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name, Detail: a.ManagerImage()})
 	if opts.BrokerOnly {
 		filtered := steps[:0:0]
 		for _, s := range steps {

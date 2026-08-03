@@ -67,16 +67,35 @@ func (a *directiveAudit) append(event string, kvs map[string]any) {
 
 // DirectiveAdminHandler builds an http.Handler for the operator-directive
 // UDS admin channel (0600 socket — see brokerctl's dirLn bind). Every route
-// checks b.directiveVerifier != nil first and 404s otherwise, so the whole
-// channel is invisible when directives are disabled.
+// is wrapped by directiveRoute, which checks b.directiveVerifier != nil first
+// and 404s otherwise, so the whole channel is invisible when directives are
+// disabled.
 func (b *Broker) DirectiveAdminHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/directive/send", b.handleDirectiveSend)
-	mux.HandleFunc("/directive/resolve", b.handleDirectiveResolve)
-	mux.HandleFunc("/directive/list", b.handleDirectiveList)
-	mux.HandleFunc("/directive/revoke", b.handleDirectiveRevoke)
-	mux.HandleFunc("/directive/selftest", b.handleDirectiveSelftest)
+	mux.HandleFunc("/directive/send", b.directiveRoute(http.MethodPost, b.handleDirectiveSend))
+	mux.HandleFunc("/directive/resolve", b.directiveRoute(http.MethodGet, b.handleDirectiveResolve))
+	mux.HandleFunc("/directive/list", b.directiveRoute(http.MethodPost, b.handleDirectiveList))
+	mux.HandleFunc("/directive/revoke", b.directiveRoute(http.MethodPost, b.handleDirectiveRevoke))
+	mux.HandleFunc("/directive/selftest", b.directiveRoute(http.MethodPost, b.handleDirectiveSelftest))
 	return mux
+}
+
+// directiveRoute wraps a directive admin handler with the shared route
+// preamble. Ordering is an invariant: the nil-verifier check runs BEFORE the
+// method check, so a wrong-method request on a disabled channel still gets
+// 404 — the channel stays invisible when directives are disabled.
+func (b *Broker) directiveRoute(method string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if b.directiveVerifier == nil {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != method {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h(w, r)
+	}
 }
 
 type directiveSubmitRequest struct {
@@ -84,24 +103,30 @@ type directiveSubmitRequest struct {
 	Signature string `json:"signature"` // base64/std of the armored ssh signature
 }
 
-func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
-	if b.directiveVerifier == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// decodeSignedStatement decodes the {statement,signature} JSON envelope
+// shared by send and selftest: 256 KiB body cap, then base64/std of both
+// fields. On any failure it writes 400 "bad request" and returns ok=false;
+// callers must return immediately. Signature VERIFICATION stays at the call
+// sites — send and selftest deliberately handle verify failures differently
+// (opaque message vs. verbatim error).
+func decodeSignedStatement(w http.ResponseWriter, r *http.Request) (raw, sig []byte, ok bool) {
 	var req directiveSubmitRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
-		return
+		return nil, nil, false
 	}
 	raw, err1 := base64.StdEncoding.DecodeString(req.Statement)
 	sig, err2 := base64.StdEncoding.DecodeString(req.Signature)
 	if err1 != nil || err2 != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return nil, nil, false
+	}
+	return raw, sig, true
+}
+
+func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
+	raw, sig, ok := decodeSignedStatement(w, r)
+	if !ok {
 		return
 	}
 	// Verify over the EXACT received bytes first; only then parse those bytes.
@@ -153,7 +178,12 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	}
 	b.dirAudit.append("issued", map[string]any{
 		"id": st.DirectiveID, "target": st.TargetAgent.CN, "gen": st.TargetAgent.Generation,
-		"kind": st.Action.Kind, "statement": req.Statement, "signature": req.Signature,
+		"kind": st.Action.Kind,
+		// Re-encoded from the decoded bytes: raw/sig are exactly what Verify
+		// ran over and what the store holds, so this is the same material in
+		// canonical base64.
+		"statement": base64.StdEncoding.EncodeToString(raw),
+		"signature": base64.StdEncoding.EncodeToString(sig),
 	})
 	delivered := false
 	if b.runtime != nil {
@@ -213,14 +243,6 @@ type directiveResolveResponse struct {
 // gate, and the response carries no authority (an operator still has to sign
 // a statement against the reported generation to act on it).
 func (b *Broker) handleDirectiveResolve(w http.ResponseWriter, r *http.Request) {
-	if b.directiveVerifier == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	agent := r.URL.Query().Get("agent")
 	cn, slug, ok := b.resolveDirectiveAgent(agent)
 	if !ok {
@@ -283,14 +305,6 @@ func (b *Broker) verifyAdminEnvelope(w http.ResponseWriter, r *http.Request, op,
 }
 
 func (b *Broker) handleDirectiveList(w http.ResponseWriter, r *http.Request) {
-	if b.directiveVerifier == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if _, ok := b.verifyAdminEnvelope(w, r, "list", "list"); !ok {
 		return
 	}
@@ -301,14 +315,6 @@ func (b *Broker) handleDirectiveList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Broker) handleDirectiveRevoke(w http.ResponseWriter, r *http.Request) {
-	if b.directiveVerifier == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	env, ok := b.verifyAdminEnvelope(w, r, "revoke", "revoke")
 	if !ok {
 		return
@@ -325,23 +331,8 @@ func (b *Broker) handleDirectiveRevoke(w http.ResponseWriter, r *http.Request) {
 // allowed_signers-misconfig probe: unlike send, failures return the actual
 // verify/parse error text so an operator can diagnose a bad key/file/clock.
 func (b *Broker) handleDirectiveSelftest(w http.ResponseWriter, r *http.Request) {
-	if b.directiveVerifier == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req directiveSubmitRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	raw, err1 := base64.StdEncoding.DecodeString(req.Statement)
-	sig, err2 := base64.StdEncoding.DecodeString(req.Signature)
-	if err1 != nil || err2 != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	raw, sig, ok := decodeSignedStatement(w, r)
+	if !ok {
 		return
 	}
 	if err := b.directiveVerifier.Verify(opsig.NamespaceDirective, raw, sig); err != nil {

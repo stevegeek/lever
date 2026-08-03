@@ -72,21 +72,21 @@ func TestUpDecision(t *testing.T) {
 	cases := []struct {
 		phase string // "" = absent
 		fresh bool
-		want  string // "apply" | "resume" | "none" | "restart"
+		want  upAction
 	}{
-		{"", false, "apply"},
-		{"suspended", false, "resume"},
-		{"running", false, "none"},
-		{"running", true, "restart"},
-		{"suspended", true, "restart"},
-		{"stopped", false, "apply"},
+		{"", false, upApply},
+		{"suspended", false, upResume},
+		{"running", false, upNone},
+		{"running", true, upRestart},
+		{"suspended", true, upRestart},
+		{"stopped", false, upApply},
 		// --fresh discards ANY present record: since 0.12 apply preserves an
 		// error-phase record whose forced resume comes up dead (#3), so
 		// --fresh must be the escape hatch for a bricked record — not resume
 		// the very conversation the user asked to discard.
-		{"stopped", true, "restart"},
-		{"error", true, "restart"},
-		{"", true, "apply"},
+		{"stopped", true, upRestart},
+		{"error", true, upRestart},
+		{"", true, upApply},
 	}
 	for _, c := range cases {
 		if got := upDecision(c.phase, c.fresh); got != c.want {

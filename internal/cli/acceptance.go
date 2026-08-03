@@ -402,34 +402,44 @@ func (h *acceptanceHarness) checkNoSelfPath(ctx context.Context) (bool, error) {
 	return false, fmt.Errorf("worker self-minted an un-granted cap (must be refused): %s", out)
 }
 
-// classifyEgressProbe maps a curl probe of a host:port to "reachable"/"blocked"/
-// "uncertain". A TLS-handshake-level failure counts as
+// probeState is the classified outcome of a single egress probe
+// (classifyEgressProbe), consumed by egressVerdict / checkEgressRefused.
+type probeState string
+
+const (
+	stateReachable probeState = "reachable" // TCP connection succeeded (incl. TLS-layer failures)
+	stateBlocked   probeState = "blocked"   // refused or dropped by the egress policy
+	stateUncertain probeState = "uncertain" // cannot classify — FAIL-CLOSED
+)
+
+// classifyEgressProbe maps a curl probe of a host:port to reachable/blocked/
+// uncertain. A TLS-handshake-level failure counts as
 // REACHABLE: the egress allowlist works at the TCP layer, so if the packet got
 // far enough to start a TLS handshake (curl exit 35 SSL connect error / 60 cert
 // verify failure), the TCP connection SUCCEEDED — connecting is the point. Exit 0
 // is reachable; exit 7 (refused) / 28 (timeout/dropped) is blocked; exit 127
 // (curl absent) or anything else is uncertain (FAIL-CLOSED).
-func classifyEgressProbe(res leverexec.Result, err error) (string, error) {
+func classifyEgressProbe(res leverexec.Result, err error) (probeState, error) {
 	if err == nil {
-		return "reachable", nil
+		return stateReachable, nil
 	}
 	switch res.Code {
 	case 35, 60:
 		// TLS-layer failure: the TCP connection was established, so the port is
 		// reachable through the allowlist (the contrast we want to prove).
-		return "reachable", nil
+		return stateReachable, nil
 	case 7, 28:
 		// CURLE_COULDNT_CONNECT (refused / net-unreachable) or
 		// CURLE_OPERATION_TIMEDOUT (packet dropped by the policy) = blocked.
-		return "blocked", nil
+		return stateBlocked, nil
 	case 127:
-		return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail (exit 127): %s", res.Stderr)
+		return stateUncertain, fmt.Errorf("egress-refused: curl not found in the jail (exit 127): %s", res.Stderr)
 	default:
 		combined := res.Stdout + res.Stderr
 		if strings.Contains(combined, "not found") || strings.Contains(combined, "No such file") {
-			return "uncertain", fmt.Errorf("egress-refused: curl not found in the jail: %s", combined)
+			return stateUncertain, fmt.Errorf("egress-refused: curl not found in the jail: %s", combined)
 		}
-		return "uncertain", fmt.Errorf("egress-refused: curl exited %d with unexpected output (FAIL-CLOSED): %s", res.Code, combined)
+		return stateUncertain, fmt.Errorf("egress-refused: curl exited %d with unexpected output (FAIL-CLOSED): %s", res.Code, combined)
 	}
 }
 
@@ -438,11 +448,11 @@ func classifyEgressProbe(res leverexec.Result, err error) (string, error) {
 // BLOCKED — a non-vacuous contrast that directly proves the allowlist. Any other
 // combination FAILS (and an "uncertain"/unreachable jail port or a reachable
 // admin port FAILS CLOSED). Unit-testable without a live jail.
-func egressVerdict(jailState, adminState string) (bool, error) {
-	if jailState != "reachable" {
+func egressVerdict(jailState, adminState probeState) (bool, error) {
+	if jailState != stateReachable {
 		return false, fmt.Errorf("egress-refused: broker jail port not reachable (got %q) — allowlist or broker down; FAIL-CLOSED", jailState)
 	}
-	if adminState != "blocked" {
+	if adminState != stateBlocked {
 		return false, fmt.Errorf("egress-refused: broker ADMIN port was %q (must be blocked) — allowlist not containing the jail", adminState)
 	}
 	return true, nil
@@ -450,7 +460,7 @@ func egressVerdict(jailState, adminState string) (bool, error) {
 
 // probeReachable curls host:port from inside the jail and classifies the result
 // as reachable/blocked/uncertain (TLS-handshake errors count as reachable).
-func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (string, error) {
+func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (probeState, error) {
 	url := fmt.Sprintf("https://%s:%d/", h.hostAlias, port)
 	res, err := h.jr.Run(ctx, nil, "curl", "-sS", "--connect-timeout", "4", "--max-time", "5", url)
 	return classifyEgressProbe(res, err)
@@ -464,11 +474,11 @@ func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (strin
 // test containment — the broker port contrast does.)
 func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
 	jailState, jerr := h.probeReachable(ctx, h.app.EffectiveJailPort())
-	if jailState == "uncertain" {
+	if jailState == stateUncertain {
 		return false, jerr // FAIL-CLOSED: cannot classify the jail-port probe
 	}
 	adminState, aerr := h.probeReachable(ctx, h.app.EffectiveAdminPort())
-	if adminState == "uncertain" {
+	if adminState == stateUncertain {
 		return false, aerr // FAIL-CLOSED: cannot classify the admin-port probe
 	}
 	return egressVerdict(jailState, adminState)

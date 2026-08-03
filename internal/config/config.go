@@ -3,6 +3,7 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"net"
 	"os"
@@ -74,10 +75,7 @@ type Tool struct {
 // EffectiveGate resolves a tool's capability grain: the declared gate, or
 // GateFine when unset.
 func (t Tool) EffectiveGate() Gate {
-	if t.Gate != "" {
-		return t.Gate
-	}
-	return GateFine
+	return cmp.Or(t.Gate, GateFine)
 }
 
 // ToolSupervisorPATH is the EXACT PATH the broker supervisor spawns command
@@ -142,11 +140,9 @@ func (t Tool) validate() error {
 		}
 		bin := t.Command[0]
 		if !strings.ContainsRune(bin, '/') {
-			resolved, err := LookPathIn(bin, ToolSupervisorPATH)
-			if err != nil {
+			if _, err := LookPathIn(bin, ToolSupervisorPATH); err != nil {
 				return fmt.Errorf("config: broker tool %q command %q not found on the supervisor PATH (%s); use an absolute path or install it there", t.Name, bin, ToolSupervisorPATH)
 			}
-			_ = resolved
 		} else if !IsExecutableFile(bin) {
 			return fmt.Errorf("config: broker tool %q command %q is not an executable file", t.Name, bin)
 		}
@@ -849,54 +845,36 @@ func (a *App) WorkerDir(g Worker) string { return filepath.Join(a.Tree, g.Dir) }
 // EffectiveManagerLLMAuth resolves the manager's LLM-auth mode: the broker
 // default (subscription when unset).
 func (a *App) EffectiveManagerLLMAuth() LLMAuthMode {
-	if a.Manager.LLMAuth != "" {
-		return a.Manager.LLMAuth
-	}
-	return a.brokerLLMAuthDefault()
+	return cmp.Or(a.Manager.LLMAuth, a.brokerLLMAuthDefault())
 }
 
 // EffectiveWorkerLLMAuth resolves a worker's LLM-auth mode: its own override else
 // the broker default.
 func (a *App) EffectiveWorkerLLMAuth(g Worker) LLMAuthMode {
-	if g.LLMAuth != "" {
-		return g.LLMAuth
-	}
-	return a.brokerLLMAuthDefault()
+	return cmp.Or(g.LLMAuth, a.brokerLLMAuthDefault())
 }
 
 // EffectiveJailPort is the broker's in-jail mTLS port: the configured value, or
 // DefaultBrokerJailPort when unset (0).
 func (a *App) EffectiveJailPort() int {
-	if a.Broker.JailPort != 0 {
-		return a.Broker.JailPort
-	}
-	return DefaultBrokerJailPort
+	return cmp.Or(a.Broker.JailPort, DefaultBrokerJailPort)
 }
 
 // EffectiveAdminPort is the broker's loopback admin port: the configured value,
 // or DefaultBrokerAdminPort when unset (0).
 func (a *App) EffectiveAdminPort() int {
-	if a.Broker.AdminPort != 0 {
-		return a.Broker.AdminPort
-	}
-	return DefaultBrokerAdminPort
+	return cmp.Or(a.Broker.AdminPort, DefaultBrokerAdminPort)
 }
 
 // EffectiveAutoReenrol is the natural-lapse healer gate: the configured value,
 // or AutoReenrolAll when unset. Validated at load (Validate rejects unknown
 // values), so callers may switch on the three constants exhaustively.
 func (a *App) EffectiveAutoReenrol() AutoReenrolMode {
-	if a.Broker.AutoReenrol != "" {
-		return a.Broker.AutoReenrol
-	}
-	return AutoReenrolAll
+	return cmp.Or(a.Broker.AutoReenrol, AutoReenrolAll)
 }
 
 func (a *App) brokerLLMAuthDefault() LLMAuthMode {
-	if a.Broker.LLMAuth != "" {
-		return a.Broker.LLMAuth
-	}
-	return LLMAuthAPIKey
+	return cmp.Or(a.Broker.LLMAuth, LLMAuthAPIKey)
 }
 
 // ClosedInternetEgress reports the jail's egress posture, applied jail-wide. It
@@ -969,10 +947,7 @@ func (a *App) WorkerByName(name string) (Worker, bool) {
 
 // ManagerCN returns the manager's cert CN (broker.manager_identity, default "manager").
 func (a *App) ManagerCN() string {
-	if a.Broker.ManagerIdentity != "" {
-		return a.Broker.ManagerIdentity
-	}
-	return "manager"
+	return cmp.Or(a.Broker.ManagerIdentity, "manager")
 }
 
 // ManagerPromptPath returns the absolute path to the manager's prompt file, or

@@ -637,6 +637,9 @@ func TestLoadParsesBrokerAndGrants(t *testing.T) {
 	if app.ManagerCN() != "manager" {
 		t.Fatalf("default manager CN = %q", app.ManagerCN())
 	}
+	if got := (&App{Broker: Broker{ManagerIdentity: "ops"}}).ManagerCN(); got != "ops" {
+		t.Fatalf("manager_identity override CN = %q, want ops", got)
+	}
 	if len(app.Manager.Delegate) != 1 || app.Manager.Delegate[0].To[0] != "worker" {
 		t.Fatalf("manager delegate = %+v", app.Manager.Delegate)
 	}
@@ -769,6 +772,11 @@ func TestEffectiveLLMAuthWorkerOverride(t *testing.T) {
 	a.Workers[0].LLMAuth = LLMAuthSubscription
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthSubscription {
 		t.Fatalf("worker override: got %q want subscription", got)
+	}
+	// manager override wins over the broker default
+	a.Manager.LLMAuth = LLMAuthSubscription
+	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthSubscription {
+		t.Fatalf("manager override: got %q want subscription", got)
 	}
 }
 

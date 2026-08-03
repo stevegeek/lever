@@ -374,207 +374,209 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		// Deposit it as a 0600 file in the mount (the lever-agent reads it).
 		return StageBootstrapMaterial(s.Target, m)
 	case "start-manager":
-		task := ""
-		if p := app.ManagerPromptPath(); p != "" {
-			b, err := os.ReadFile(p)
-			if err != nil {
-				return fmt.Errorf("reading manager prompt %s: %w", p, err)
-			}
-			task = strings.TrimSpace(string(b))
-		}
-		jp := jailPath(app.Tree, app.Tree, d.JailMount)
-		// Gate on runtime-broker readiness before any create/resume: the workstation
-		// daemon registers its runtime broker asynchronously AFTER its Hub API comes
-		// up (waitHubReady only proved the latter), so acting now would race it. This
-		// is the proactive complement to the broker-unavailable retry below — wait
-		// for a ready broker rather than only reacting when a call fails against a
-		// not-yet-ready one. Fail-soft (never errors on timeout); the retry backstops.
-		if d.WaitBrokerReady != nil {
-			if err := d.WaitBrokerReady(ctx, jp); err != nil {
-				return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
-			}
-		}
-		// api-key mode: convey LEVER_LLM_AUTH=api-key to the manager container so
-		// its pre-start hook enters api-key mode (the hook reads $LEVER_LLM_AUTH;
-		// scion projects Hub env before pre-start hooks run). Project-scoped (the
-		// manager's project = jp) so it never leaks to other agents. Set BEFORE
-		// start so it is present when the container boots.
-		if app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey {
-			if err := d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
-				return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
-			}
-			// Satisfy scion's start-time auth gate with a placeholder ANTHROPIC_API_KEY
-			// (Hub secret, projected to every container — fine since the instance is
-			// uniformly api-key). It is a sentinel, NOT a real credential: the agent's
-			// real LLM credential is the in-container broker capability token, and
-			// the broker /llm overwrites this placeholder x-api-key with the real key.
-			// Without it scion's env-gather/auth-resolution refuses to launch the
-			// container (and thus lever-agent boot, which writes the real token). Set
-			// once here; later-started workers inherit the same Hub secret.
-			if err := d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
-				return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
-			}
-		}
-		// LEVER_BOOTSTRAP reconciliation: we do NOT set
-		// LEVER_BOOTSTRAP here. lever-agent boot's canonical-path default
-		// (./.lever/bootstrap.json relative to CWD) suffices: scion sets
-		// --workspace = jp (the in-jail project tree), and the container's CWD is
-		// /workspace, so ./.lever/bootstrap.json resolves to jp/.lever/bootstrap.json —
-		// exactly where mint-manager-bootstrap wrote the manager's bootstrap.json.
-		// Injecting an env var would be redundant and add a scion StartOpts.Env
-		// dependency that the file convention avoids.
-		opts := scion.StartOpts{
-			Worker: app.Name, Task: task, Project: jp, Image: app.ManagerImage(), Harness: "claude",
-			// Workspace = the in-jail project tree, so the manager edits the real
-			// host files in place (verified 2026-06-16). Without it scion mounts a
-			// managed copy of the externalized config dir, not the live tree.
-			Workspace: jp,
-			// api-key: start with --harness-auth api-key (satisfied by the placeholder
-			// secret set above); the real credential arrives in-container.
-			APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
-		}
-		// Observe, then act on the delta — scion's verbs are state-specific:
-		// start CREATES (409 "already exists" over a stopped record; the 409
-		// error TEXT matches AlreadyRunning, so a blind start false-succeeds
-		// through that idempotency check — scion's own exit code is correctly
-		// non-zero, verified upstream 2026-07-04); resume
-		// covers suspended AND stopped records, relaunching with
-		// `claude --continue` (conversation restored). Live evidence
-		// 2026-07-04 (see the resume-reconciliation plan's Evidence base).
-		//
-		// The Hub API is up by this point in Plan() (scion-server ran first, and
-		// waitHubReady confirmed it), but the runtime broker registers
-		// asynchronously after it, so this FIRST call into the hub can still hit
-		// the registration window — on a cold VM as a "deadline exceeded" from
-		// the hub. So the observe rides the SAME bounded retry as the Start/Resume
-		// below (isBrokerUnavailable): a transient broker-not-ready blip is
-		// retried, and only a persistent or genuinely-different error is fatal.
-		var agents []scion.Agent
-		if lerr := retryOnBrokerUnavailable(ctx, func() error {
-			a, e := d.Scion.List(ctx, jp)
-			if e != nil {
-				return e
-			}
-			agents = a
-			return nil
-		}); lerr != nil {
-			return fmt.Errorf("start-manager: observing agents: %w", lerr)
-		}
-		var rec *scion.Agent
-		for i := range agents {
-			if agents[i].Slug == app.Name {
-				rec = &agents[i]
-				break
-			}
-		}
-		switch {
-		case rec == nil:
-			if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-				return err
-			}
-		case rec.Phase == scion.PhaseRunning:
-			// No-op — fall through to the liveness verify below, which still
-			// confirms the container is actually up: a running RECORD with a
-			// dead container must fail loudly, not silently pass.
-		case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
-			// Self-heal an expired mTLS leaf BEFORE resuming. A manager whose
-			// short-lived agent leaf expired while the instance was down (the
-			// in-container renew sidecar cannot run while stopped, so downtime
-			// longer than the leaf lifetime guarantees expiry) must be able to
-			// re-enrol on boot. lever-agent's boot re-enrols an expired leaf
-			// (ValidCert → false), but ONLY if a fresh, unspent enrolment ticket
-			// is staged — and the resume path used to stage none, so the leaf
-			// stayed dead and every brokered call failed the mTLS handshake until
-			// a full `lever destroy`. ensureFreshBootstrap fixes that without a
-			// teardown: it is a no-op when this run already minted fresh material
-			// (the normal stop→up path, where broker-up reopened the /bootstrap
-			// latch and mint-manager-bootstrap already staged a ticket), and
-			// re-arms + stages a fresh ticket only when the broker outlived a
-			// spent latch across the manager's downtime — exactly the expired-leaf
-			// case. The unspent ticket is harmless when the leaf is still valid
-			// (boot's ValidCert passes and skips enrol, leaving it unredeemed).
-			if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
-				return err
-			}
-			// Resume rides the SAME runtime-broker-race retry as a create Start
-			// (see isBrokerUnavailable's doc): on a cold VM the runtime broker may
-			// not have re-registered with the hub yet, and resume hits that
-			// identical transient window. Only once the retry budget is exhausted
-			// (or the error is not the transient one at all) is the session
-			// declared unrecoverable.
-			if rerr := retryOnBrokerUnavailable(ctx, func() error {
-				return d.Scion.Resume(ctx, app.Name, jp)
-			}); rerr != nil {
-				if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
-					logf(d, "start-manager: resume failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
-				} else {
-					// LOUD recovery: the conversation could not be restored. This MUST
-					// reach the user — resume failing means the durable session (the
-					// whole point of suspending, not stopping, at power-off; see
-					// cli/stop.go) is about to be discarded.
-					logf(d, "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
-					if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
-						return fmt.Errorf("start-manager: resume failed (%v) and delete failed: %w", rerr, derr)
-					}
-					if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-						return err
-					}
-				}
-			}
-		case rec.Phase == scion.PhaseError:
-			// A crashed/wedged manager record. Since scion#895 (`resume
-			// --force`, pin >= 68507153) the error phase IS recoverable — try
-			// that first, with a fresh ticket staged (the leaf may have lapsed
-			// while wedged; same rationale as the suspended branch), and only
-			// discard the conversation when the forced resume itself fails.
-			// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
-			// container state, resume failed, and the then-unconditional
-			// delete+fresh destroyed the manager conversation (#3).
-			if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
-				return err
-			}
-			if rerr := retryOnBrokerUnavailable(ctx, func() error {
-				return d.Scion.ResumeForce(ctx, app.Name, jp)
-			}); rerr != nil {
-				if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
-					logf(d, "start-manager: resume --force failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
-				} else {
-					// LOUD recovery, exactly as the failed-resume path above.
-					logf(d, "start-manager: manager in phase \"error\" and resume --force failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr)
-					if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
-						return fmt.Errorf("start-manager: forced resume failed (%v) and delete failed: %w", rerr, derr)
-					}
-					if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-						return err
-					}
-				}
-			}
-		default:
-			// Any other phase — scion's full enum also has created,
-			// provisioning, cloning, starting, and stopping (see
-			// pkg/agent/state/state.go) — is not resumable: `scion resume` is
-			// documented for suspended/stopped records only (`--force` only
-			// recovers "error", handled above), and `scion list`'s
-			// JSON phase field is the canonical (and only) signal we have, so we
-			// cannot be cleverer here without more scion verbs (e.g. there is no
-			// "wait for starting to settle" verb to poll instead). A record
-			// caught mid-transition by an
-			// interrupted prior `lever up` (phase "starting"/"created"/…) must
-			// still let `up` converge, so this takes the SAME loud delete+fresh
-			// recovery as a failed resume, rather than hard-failing (bricking)
-			// the apply with no path forward but a hard `lever destroy`.
-			logf(d, "start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", app.Name, rec.Phase)
-			if derr := d.Scion.Delete(ctx, app.Name, jp); derr != nil {
-				return fmt.Errorf("start-manager: manager in phase %q and delete failed: %w", rec.Phase, derr)
-			}
-			if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-				return err
-			}
-		}
-		return waitManagerLive(ctx, d, jp, app.Name)
+		return stepStartManager(ctx, app, s, d, boot)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// stepStartManager runs the start-manager plan step: observe the manager
+// record, then act on the delta (create / no-op / resume / forced resume /
+// loud recovery) and verify the container is actually live. Split out of
+// runStep's dispatch; the three unresumable tails share recoverDeleteAndCreate.
+func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTracker) error {
+	task := ""
+	if p := app.ManagerPromptPath(); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return fmt.Errorf("reading manager prompt %s: %w", p, err)
+		}
+		task = strings.TrimSpace(string(b))
+	}
+	jp := jailPath(app.Tree, app.Tree, d.JailMount)
+	// Gate on runtime-broker readiness before any create/resume: the workstation
+	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
+	// up (waitHubReady only proved the latter), so acting now would race it. This
+	// is the proactive complement to the broker-unavailable retry below — wait
+	// for a ready broker rather than only reacting when a call fails against a
+	// not-yet-ready one. Fail-soft (never errors on timeout); the retry backstops.
+	if d.WaitBrokerReady != nil {
+		if err := d.WaitBrokerReady(ctx, jp); err != nil {
+			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
+		}
+	}
+	// api-key mode: convey LEVER_LLM_AUTH=api-key to the manager container so
+	// its pre-start hook enters api-key mode (the hook reads $LEVER_LLM_AUTH;
+	// scion projects Hub env before pre-start hooks run). Project-scoped (the
+	// manager's project = jp) so it never leaks to other agents. Set BEFORE
+	// start so it is present when the container boots.
+	if app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey {
+		if err := d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
+			return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
+		}
+		// Satisfy scion's start-time auth gate with a placeholder ANTHROPIC_API_KEY
+		// (Hub secret, projected to every container — fine since the instance is
+		// uniformly api-key). It is a sentinel, NOT a real credential: the agent's
+		// real LLM credential is the in-container broker capability token, and
+		// the broker /llm overwrites this placeholder x-api-key with the real key.
+		// Without it scion's env-gather/auth-resolution refuses to launch the
+		// container (and thus lever-agent boot, which writes the real token). Set
+		// once here; later-started workers inherit the same Hub secret.
+		if err := d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
+			return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
+		}
+	}
+	// LEVER_BOOTSTRAP reconciliation: we do NOT set
+	// LEVER_BOOTSTRAP here. lever-agent boot's canonical-path default
+	// (./.lever/bootstrap.json relative to CWD) suffices: scion sets
+	// --workspace = jp (the in-jail project tree), and the container's CWD is
+	// /workspace, so ./.lever/bootstrap.json resolves to jp/.lever/bootstrap.json —
+	// exactly where mint-manager-bootstrap wrote the manager's bootstrap.json.
+	// Injecting an env var would be redundant and add a scion StartOpts.Env
+	// dependency that the file convention avoids.
+	opts := scion.StartOpts{
+		Worker: app.Name, Task: task, Project: jp, Image: app.ManagerImage(), Harness: "claude",
+		// Workspace = the in-jail project tree, so the manager edits the real
+		// host files in place (verified 2026-06-16). Without it scion mounts a
+		// managed copy of the externalized config dir, not the live tree.
+		Workspace: jp,
+		// api-key: start with --harness-auth api-key (satisfied by the placeholder
+		// secret set above); the real credential arrives in-container.
+		APIKey: app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey,
+	}
+	// Observe, then act on the delta — scion's verbs are state-specific:
+	// start CREATES (409 "already exists" over a stopped record; the 409
+	// error TEXT matches AlreadyRunning, so a blind start false-succeeds
+	// through that idempotency check — scion's own exit code is correctly
+	// non-zero, verified upstream 2026-07-04); resume
+	// covers suspended AND stopped records, relaunching with
+	// `claude --continue` (conversation restored). Live evidence
+	// 2026-07-04 (see the resume-reconciliation plan's Evidence base).
+	//
+	// The Hub API is up by this point in Plan() (scion-server ran first, and
+	// waitHubReady confirmed it), but the runtime broker registers
+	// asynchronously after it, so this FIRST call into the hub can still hit
+	// the registration window — on a cold VM as a "deadline exceeded" from
+	// the hub. So the observe rides the SAME bounded retry as the Start/Resume
+	// below (isBrokerUnavailable): a transient broker-not-ready blip is
+	// retried, and only a persistent or genuinely-different error is fatal.
+	var agents []scion.Agent
+	if lerr := retryOnBrokerUnavailable(ctx, func() error {
+		a, e := d.Scion.List(ctx, jp)
+		if e != nil {
+			return e
+		}
+		agents = a
+		return nil
+	}); lerr != nil {
+		return fmt.Errorf("start-manager: observing agents: %w", lerr)
+	}
+	var rec *scion.Agent
+	for i := range agents {
+		if agents[i].Slug == app.Name {
+			rec = &agents[i]
+			break
+		}
+	}
+	switch {
+	case rec == nil:
+		if err := startManagerCreate(ctx, d, boot, opts); err != nil {
+			return err
+		}
+	case rec.Phase == scion.PhaseRunning:
+		// No-op — fall through to the liveness verify below, which still
+		// confirms the container is actually up: a running RECORD with a
+		// dead container must fail loudly, not silently pass.
+	case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
+		// Self-heal an expired mTLS leaf BEFORE resuming. A manager whose
+		// short-lived agent leaf expired while the instance was down (the
+		// in-container renew sidecar cannot run while stopped, so downtime
+		// longer than the leaf lifetime guarantees expiry) must be able to
+		// re-enrol on boot. lever-agent's boot re-enrols an expired leaf
+		// (ValidCert → false), but ONLY if a fresh, unspent enrolment ticket
+		// is staged — and the resume path used to stage none, so the leaf
+		// stayed dead and every brokered call failed the mTLS handshake until
+		// a full `lever destroy`. ensureFreshBootstrap fixes that without a
+		// teardown: it is a no-op when this run already minted fresh material
+		// (the normal stop→up path, where broker-up reopened the /bootstrap
+		// latch and mint-manager-bootstrap already staged a ticket), and
+		// re-arms + stages a fresh ticket only when the broker outlived a
+		// spent latch across the manager's downtime — exactly the expired-leaf
+		// case. The unspent ticket is harmless when the leaf is still valid
+		// (boot's ValidCert passes and skips enrol, leaving it unredeemed).
+		if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+			return err
+		}
+		// Resume rides the SAME runtime-broker-race retry as a create Start
+		// (see isBrokerUnavailable's doc): on a cold VM the runtime broker may
+		// not have re-registered with the hub yet, and resume hits that
+		// identical transient window. Only once the retry budget is exhausted
+		// (or the error is not the transient one at all) is the session
+		// declared unrecoverable.
+		if rerr := retryOnBrokerUnavailable(ctx, func() error {
+			return d.Scion.Resume(ctx, app.Name, jp)
+		}); rerr != nil {
+			if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
+				logf(d, "start-manager: resume failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
+			} else {
+				// LOUD recovery: the conversation could not be restored. This MUST
+				// reach the user — resume failing means the durable session (the
+				// whole point of suspending, not stopping, at power-off; see
+				// cli/stop.go) is about to be discarded.
+				if err := recoverDeleteAndCreate(ctx, d, boot, app.Name, jp, opts,
+					fmt.Sprintf("start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr),
+					fmt.Sprintf("resume failed (%v)", rerr)); err != nil {
+					return err
+				}
+			}
+		}
+	case rec.Phase == scion.PhaseError:
+		// A crashed/wedged manager record. Since scion#895 (`resume
+		// --force`, pin >= 68507153) the error phase IS recoverable — try
+		// that first, with a fresh ticket staged (the leaf may have lapsed
+		// while wedged; same rationale as the suspended branch), and only
+		// discard the conversation when the forced resume itself fails.
+		// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
+		// container state, resume failed, and the then-unconditional
+		// delete+fresh destroyed the manager conversation (#3).
+		if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+			return err
+		}
+		if rerr := retryOnBrokerUnavailable(ctx, func() error {
+			return d.Scion.ResumeForce(ctx, app.Name, jp)
+		}); rerr != nil {
+			if managerConcurrentlyRecovered(ctx, d, app.Name, jp) {
+				logf(d, "start-manager: resume --force failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", rerr)
+			} else {
+				// LOUD recovery, exactly as the failed-resume path above.
+				if err := recoverDeleteAndCreate(ctx, d, boot, app.Name, jp, opts,
+					fmt.Sprintf("start-manager: manager in phase \"error\" and resume --force failed (%v) — deleting the manager record and starting FRESH (previous session lost)", rerr),
+					fmt.Sprintf("forced resume failed (%v)", rerr)); err != nil {
+					return err
+				}
+			}
+		}
+	default:
+		// Any other phase — scion's full enum also has created,
+		// provisioning, cloning, starting, and stopping (see
+		// pkg/agent/state/state.go) — is not resumable: `scion resume` is
+		// documented for suspended/stopped records only (`--force` only
+		// recovers "error", handled above), and `scion list`'s
+		// JSON phase field is the canonical (and only) signal we have, so we
+		// cannot be cleverer here without more scion verbs (e.g. there is no
+		// "wait for starting to settle" verb to poll instead). A record
+		// caught mid-transition by an
+		// interrupted prior `lever up` (phase "starting"/"created"/…) must
+		// still let `up` converge, so this takes the SAME loud delete+fresh
+		// recovery as a failed resume, rather than hard-failing (bricking)
+		// the apply with no path forward but a hard `lever destroy`.
+		if err := recoverDeleteAndCreate(ctx, d, boot, app.Name, jp, opts,
+			fmt.Sprintf("start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", app.Name, rec.Phase),
+			fmt.Sprintf("manager in phase %q", rec.Phase)); err != nil {
+			return err
+		}
+	}
+	return waitManagerLive(ctx, d, jp, app.Name)
 }
 
 // retryOnBrokerUnavailable runs action up to brokerStartAttempts times,
@@ -671,6 +673,26 @@ func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts sci
 		}
 		return startErr
 	})
+}
+
+// recoverDeleteAndCreate performs the LOUD delete+fresh recovery shared by
+// start-manager's three unresumable tails (a failed resume, a failed forced
+// resume, and any non-resumable phase): emit the caller's loud
+// previous-session-lost notice, delete the stale record, and — only if the
+// delete succeeds — fall back to startManagerCreate's fresh create.
+//
+// The wording differs per tail and is preserved verbatim: logMsg is the
+// fully-formed loud line, and deleteFailReason is that tail's clause for the
+// hard delete-failure error ("start-manager: <reason> and delete failed: %w"),
+// which surfaces BOTH the original failure (baked into the clause) and the
+// delete failure — there is no safe fallback, since a fresh Start over an
+// undeleted, un-resumable record would just 409 again.
+func recoverDeleteAndCreate(ctx context.Context, d Deps, boot *bootTracker, name, jp string, opts scion.StartOpts, logMsg, deleteFailReason string) error {
+	logf(d, "%s", logMsg)
+	if derr := d.Scion.Delete(ctx, name, jp); derr != nil {
+		return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
+	}
+	return startManagerCreate(ctx, d, boot, opts)
 }
 
 // ensureFreshBootstrap guarantees fresh, enrolable bootstrap material exists

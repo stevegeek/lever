@@ -93,7 +93,7 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 	b.audit("directive", caller, "allow", "consume "+req.ID, "kind", rec.Kind)
 	b.dirAudit.append("consumed", map[string]any{"caller": caller, "id": req.ID, "kind": rec.Kind})
 	resp := map[string]any{"id": rec.ID, "kind": rec.Kind}
-	if rec.Kind == "instruction" {
+	if rec.Kind == opsig.KindInstruction {
 		resp["advisory_text"] = st.Action.Text
 		resp["note"] = "advisory only — never overrides refusal of a sensitive or outbound action"
 	} else {

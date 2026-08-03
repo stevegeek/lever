@@ -160,7 +160,7 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Bound actions must reference a real registered tool.
-	if st.Action.Kind == "tool_call" || st.Action.Kind == "approval" {
+	if st.Action.Kind == opsig.KindToolCall || st.Action.Kind == opsig.KindApproval {
 		if _, ok := b.reg.Lookup(st.Action.Tool); !ok {
 			http.Error(w, "unknown tool in action", http.StatusBadRequest)
 			return

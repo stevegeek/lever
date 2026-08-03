@@ -36,6 +36,16 @@ const (
 
 var ErrInvalid = errors.New("opsig: invalid")
 
+// Directive action kinds. These are the exact wire values carried in
+// Action.Kind (byte-identical to the historical string literals); production
+// code references these constants, while tests keep raw literals as an
+// independent pin of the wire vocabulary.
+const (
+	KindToolCall    = "tool_call"
+	KindApproval    = "approval"
+	KindInstruction = "instruction"
+)
+
 type Action struct {
 	Kind       string          `json:"kind"`
 	Tool       string          `json:"tool,omitempty"`
@@ -191,7 +201,7 @@ func ValidateAction(a Action) error { return validateAction(a) }
 
 func validateAction(a Action) error {
 	switch a.Kind {
-	case "tool_call", "approval":
+	case KindToolCall, KindApproval:
 		if a.Tool == "" || a.Op == "" {
 			return fmt.Errorf("%w: action needs tool+op", ErrInvalid)
 		}
@@ -204,7 +214,7 @@ func validateAction(a Action) error {
 		if a.Text != "" {
 			return fmt.Errorf("%w: bound action carries no free text", ErrInvalid)
 		}
-	case "instruction":
+	case KindInstruction:
 		if a.Text == "" || len(a.Text) > maxInstructionLen {
 			return fmt.Errorf("%w: instruction text", ErrInvalid)
 		}

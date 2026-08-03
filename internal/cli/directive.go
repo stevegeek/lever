@@ -184,7 +184,7 @@ func newDirectiveSendCmd() *cobra.Command {
 					return fmt.Errorf("directive send: --action: invalid JSON: %w", err)
 				}
 			} else {
-				action = opsig.Action{Kind: "instruction", Text: instruction}
+				action = opsig.Action{Kind: opsig.KindInstruction, Text: instruction}
 			}
 			if err := opsig.ValidateAction(action); err != nil {
 				return fmt.Errorf("directive send: invalid action: %w", err)
@@ -360,7 +360,7 @@ func newDirectiveSelftestCmd() *cobra.Command {
 				IssuedAt:    now.Format(time.RFC3339),
 				NotBefore:   now.Format(time.RFC3339),
 				ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339),
-				Action:      opsig.Action{Kind: "instruction", Text: "selftest"},
+				Action:      opsig.Action{Kind: opsig.KindInstruction, Text: "selftest"},
 			}
 			// On failure, propagate err as-is (no extra print here): cobra's
 			// default error handler prints "Error: ..." for a non-nil RunE

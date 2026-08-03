@@ -130,6 +130,44 @@ func TestParseStatementRejections(t *testing.T) {
 	}
 }
 
+// TestValidateActionApproval pins the "approval" kind: a well-formed approval
+// action (tool+op, exact binding, uses==1, no free text) is accepted, and the
+// same tool-shape rejections apply as for tool_call. No other test exercises
+// kind "approval" — it guards the validateAction "approval" case-label and,
+// once the literal becomes a constant, that KindApproval keeps the wire value.
+func TestValidateActionApproval(t *testing.T) {
+	now := time.Now()
+	base := validStatement(now)
+	withAction := func(a Action) []byte {
+		s := base
+		s.Action = a
+		b, _ := json.Marshal(s)
+		return b
+	}
+
+	good := withAction(Action{Kind: "approval", Tool: "db", Op: "read", ArgBinding: "exact", Uses: 1})
+	st, err := ParseStatement(good, "testinst", now)
+	if err != nil {
+		t.Fatalf("valid approval rejected: %v", err)
+	}
+	if st.Action.Kind != "approval" {
+		t.Fatalf("parsed kind = %q, want approval", st.Action.Kind)
+	}
+
+	rejects := map[string]Action{
+		"approval no tool":     {Kind: "approval", Op: "read", ArgBinding: "exact", Uses: 1},
+		"approval no op":       {Kind: "approval", Tool: "db", ArgBinding: "exact", Uses: 1},
+		"approval bad binding": {Kind: "approval", Tool: "db", Op: "read", ArgBinding: "loose", Uses: 1},
+		"approval uses!=1":     {Kind: "approval", Tool: "db", Op: "read", ArgBinding: "exact", Uses: 2},
+		"approval has text":    {Kind: "approval", Tool: "db", Op: "read", ArgBinding: "exact", Uses: 1, Text: "x"},
+	}
+	for name, a := range rejects {
+		if _, err := ParseStatement(withAction(a), "testinst", now); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func TestRejectDuplicateKeys(t *testing.T) {
 	dup := []byte(`{"v":1,"v":1,"instance":"testinst"}`)
 	if err := RejectDuplicateKeys(dup); err == nil {

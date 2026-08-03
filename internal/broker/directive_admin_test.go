@@ -321,6 +321,60 @@ func TestDirectiveSendRejectsToolCallForUnknownTool(t *testing.T) {
 	}
 }
 
+// TestDirectiveSendAcceptsApprovalForRegisteredTool covers the "approval"
+// kind end-to-end through the admin submit path: it is bound-tool-checked like
+// tool_call (the `|| == "approval"` half of directive_admin.go's registered-
+// tool gate), stored, and delivered as a bound action (not advisory). No other
+// test drives an approval directive; it guards that KindApproval keeps the
+// wire value once the literal becomes a constant.
+func TestDirectiveSendAcceptsApprovalForRegisteredTool(t *testing.T) {
+	b, priv, _, rt := directiveTestBroker(t)
+	sock := serveDirectiveAdmin(t, b)
+	client := directiveClient(sock)
+
+	b.Directives().BumpGeneration("manager")
+
+	id := "11111111-2222-4333-8444-555555555531"
+	// "db"/"read" is the tool registered by testConfig.
+	action := opsig.Action{Kind: "approval", Tool: "db", Op: "read", ArgBinding: "exact", Uses: 1}
+	code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, action))
+	if code != http.StatusOK {
+		t.Fatalf("approval send status = %d, want 200, body=%s", code, body)
+	}
+
+	recs := b.Directives().List(time.Now())
+	if len(recs) != 1 || recs[0].ID != id || recs[0].Kind != "approval" {
+		t.Fatalf("store after approval send = %+v", recs)
+	}
+	if len(rt.messages) != 1 {
+		t.Fatalf("Message calls = %d, want 1", len(rt.messages))
+	}
+	if !strings.Contains(rt.messages[0].Body, id) {
+		t.Fatalf("delivered body missing directive id: %q", rt.messages[0].Body)
+	}
+}
+
+// TestDirectiveSendRejectsApprovalForUnknownTool is the approval twin of
+// TestDirectiveSendRejectsToolCallForUnknownTool: the registered-tool gate
+// must reject an approval referencing an unregistered tool.
+func TestDirectiveSendRejectsApprovalForUnknownTool(t *testing.T) {
+	b, priv, _, _ := directiveTestBroker(t)
+	sock := serveDirectiveAdmin(t, b)
+	client := directiveClient(sock)
+
+	b.Directives().BumpGeneration("manager")
+
+	id := "11111111-2222-4333-8444-555555555532"
+	action := opsig.Action{Kind: "approval", Tool: "no-such-tool", Op: "read", ArgBinding: "exact", Uses: 1}
+	code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, action))
+	if code != http.StatusBadRequest {
+		t.Fatalf("unknown-tool approval send status = %d, want 400, body=%s", code, body)
+	}
+	if recs := b.Directives().List(time.Now()); len(recs) != 0 {
+		t.Fatalf("store not empty after rejected approval: %+v", recs)
+	}
+}
+
 // TestDirectiveSendRejectsExpiryBeyondInstanceCap proves the handler's own
 // b.directiveExpiryMax clamp (internal/broker/directive_admin.go, checked
 // AFTER opsig.ParseStatement) actually fires: a statement well inside

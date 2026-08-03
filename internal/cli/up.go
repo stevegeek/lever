@@ -82,9 +82,9 @@ func upDecision(phase string, fresh bool) upAction {
 		return upRestart
 	}
 	switch phase {
-	case "running":
+	case scion.PhaseRunning:
 		return upNone
-	case "suspended":
+	case scion.PhaseSuspended:
 		return upResume
 	default: // absent, stopped, error
 		return upApply

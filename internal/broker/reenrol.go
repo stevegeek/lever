@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // Natural-lapse auto-re-enrol (#22): the mTLS listener's LapseFunc observes a
@@ -144,15 +145,15 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	}
 	var verb string
 	switch phase {
-	case "running":
+	case scion.PhaseRunning:
 		verb = "suspend+resume"
 		if err = b.runtime.Suspend(ctx, slug, b.instanceProject); err == nil {
 			err = b.runtime.Resume(ctx, slug, b.instanceProject)
 		}
-	case "suspended", "stopped":
+	case scion.PhaseSuspended, scion.PhaseStopped:
 		verb = "resume"
 		err = b.runtime.Resume(ctx, slug, b.instanceProject)
-	case "error":
+	case scion.PhaseError:
 		verb = "resume --force"
 		err = b.runtime.ResumeForce(ctx, slug, b.instanceProject)
 	default:

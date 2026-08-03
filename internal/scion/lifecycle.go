@@ -88,6 +88,18 @@ type Agent struct {
 	ContainerStatus string `json:"containerStatus"`
 }
 
+// Phase values for Agent.Phase. These mirror upstream scion's agent-state wire
+// vocabulary (pkg/agent/state/state.go); the values change only with a pin
+// bump. scion's full enum also includes created/provisioning/cloning/starting/
+// stopping, which no lever comparison site needs. Untyped string constants so
+// they compare directly against the raw Agent.Phase field and switch on it.
+const (
+	PhaseRunning   = "running"
+	PhaseSuspended = "suspended"
+	PhaseStopped   = "stopped"
+	PhaseError     = "error"
+)
+
 type StartOpts struct {
 	Worker  string
 	Task    string

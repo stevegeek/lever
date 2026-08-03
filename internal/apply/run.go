@@ -472,11 +472,11 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 			if err := startManagerCreate(ctx, d, boot, opts); err != nil {
 				return err
 			}
-		case rec.Phase == "running":
+		case rec.Phase == scion.PhaseRunning:
 			// No-op — fall through to the liveness verify below, which still
 			// confirms the container is actually up: a running RECORD with a
 			// dead container must fail loudly, not silently pass.
-		case rec.Phase == "suspended" || rec.Phase == "stopped":
+		case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
 			// Self-heal an expired mTLS leaf BEFORE resuming. A manager whose
 			// short-lived agent leaf expired while the instance was down (the
 			// in-container renew sidecar cannot run while stopped, so downtime
@@ -521,7 +521,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 					}
 				}
 			}
-		case rec.Phase == "error":
+		case rec.Phase == scion.PhaseError:
 			// A crashed/wedged manager record. Since scion#895 (`resume
 			// --force`, pin >= 68507153) the error phase IS recoverable — try
 			// that first, with a fresh ticket staged (the leaf may have lapsed
@@ -652,7 +652,7 @@ func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) 
 	}
 	for i := range agents {
 		if agents[i].Slug == name {
-			return agents[i].Phase == "running"
+			return agents[i].Phase == scion.PhaseRunning
 		}
 	}
 	return false

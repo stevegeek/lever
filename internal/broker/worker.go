@@ -171,12 +171,12 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case phase == "running":
+	case phase == scion.PhaseRunning:
 		// Already running: a no-op. Any new task in req.Task is intentionally
 		// ignored here — the task-mismatch 409 guard on the resume path covers
 		// only the non-running branch (a running worker's task is likewise fixed,
 		// and there is nothing to resume). To run a new task, purge then re-dispatch.
-		writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
+		writeJSON(w, workerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 	case phase != "":
 		b.resumeExistingWorker(w, r, spec, phase, req.Task)
 	default:
@@ -209,7 +209,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		return
 	}
 	resume := b.runtime.Resume
-	if phase == "error" {
+	if phase == scion.PhaseError {
 		// Only resume --force (scion#895) recovers an error-phase record.
 		resume = b.runtime.ResumeForce
 	}
@@ -223,7 +223,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		return
 	}
 	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
-	writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
+	writeJSON(w, workerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // startFreshWorker provisions an absent worker: mint a one-use ticket, stage the
@@ -259,7 +259,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		return
 	}
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
-	writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
+	writeJSON(w, workerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // workerLiveAttempts/workerLiveInterval bound waitWorkerLive's post-start poll.

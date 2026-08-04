@@ -51,9 +51,9 @@ func GenerateCSR(cn string) (csrPEM, keyPEM []byte, err error) {
 // caClient builds an HTTPS client that trusts caPEM (server-authenticated; the
 // agent has no client cert yet at enrol — /enrol uses VerifyClientCertIfGiven).
 func caClient(caPEM []byte) (*http.Client, error) {
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("agent: bad CA PEM")
+	pool, err := caPool(caPEM, "agent")
+	if err != nil {
+		return nil, err
 	}
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}, nil
 }

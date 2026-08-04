@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net/http"
 )
@@ -20,9 +19,9 @@ func (id Identity) Client() (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agent: client cert: %w", err)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(id.CAPEM) {
-		return nil, fmt.Errorf("agent: bad CA PEM")
+	pool, err := caPool(id.CAPEM, "agent")
+	if err != nil {
+		return nil, err
 	}
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 		Certificates: []tls.Certificate{cert}, RootCAs: pool,

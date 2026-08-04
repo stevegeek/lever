@@ -688,29 +688,14 @@ func cmdCLI(verb string, args []string) error {
 		}
 		fmt.Println(tok)
 	case "call":
-		// call: POST a JSON-RPC 2.0 tools/call to the broker gateway /mcp/<tool>/.
-		// The capability token MUST be in params.arguments._capability (not a header);
-		// the gateway reads the token exclusively from that field and actively scrubs
-		// all inbound X-Lever-* headers. The tool name is encoded in the URL path;
-		// params.name carries the operation name within that tool.
-		body := buildToolCallBody(op, tokenStr, constraints)
-		req, err := http.NewRequestWithContext(ctx, "POST", bURL+"/mcp/"+tool+"/", bytes.NewReader(body))
+		// agent.Call POSTs the JSON-RPC tools/call to the gateway and hands back
+		// the raw body, status and error separately so we can print the body
+		// BEFORE surfacing a non-200 error — the acceptance harness's deny checks
+		// rely on both the printed output and the non-zero exit.
+		out, _, err := agent.Call(ctx, bURL, client, tool, op, tokenStr, constraints)
+		fmt.Print(out)
 		if err != nil {
 			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			return fmt.Errorf("call: %w", err)
-		}
-		defer resp.Body.Close()
-		var buf bytes.Buffer
-		if _, err := buf.ReadFrom(resp.Body); err != nil {
-			return fmt.Errorf("call: read response: %w", err)
-		}
-		fmt.Print(buf.String())
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("call: status %d", resp.StatusCode)
 		}
 	}
 	return nil
@@ -742,30 +727,6 @@ func commonFlags(fs *flag.FlagSet, idDirHelp, bootstrapHelp string) (idDir, brok
 	brokerURL = fs.String("broker-url", "", "broker URL (overrides bootstrap)")
 	bootstrap = fs.String("bootstrap", "", bootstrapHelp)
 	return idDir, brokerURL, bootstrap
-}
-
-// buildToolCallBody constructs the JSON-RPC 2.0 body for a tools/call request to
-// the capability gateway. The token is placed in arguments._capability as required
-// by the gateway contract (internal/broker/mcp.go:toolsCallFields). The tool's
-// URL path carries the tool name; op maps to params.name (the operation within
-// that tool). Extra key=value pairs from the CLI are merged into arguments.
-func buildToolCallBody(op, token string, args map[string]string) []byte {
-	arguments := make(map[string]any, len(args)+1)
-	for k, v := range args {
-		arguments[k] = v
-	}
-	arguments["_capability"] = token
-	body := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name":      op,
-			"arguments": arguments,
-		},
-	}
-	out, _ := json.Marshal(body)
-	return out
 }
 
 // leafCN parses the common name from the first certificate in certPEM.

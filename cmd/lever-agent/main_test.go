@@ -251,54 +251,6 @@ func TestRunRequiresSubcommand(t *testing.T) {
 	}
 }
 
-// TestBuildToolCallBody verifies that the JSON-RPC body produced for the
-// gateway satisfies the contract expected by internal/broker/mcp.go:toolsCallFields:
-//   - jsonrpc == "2.0", method == "tools/call"
-//   - params.name == op
-//   - params.arguments._capability == token
-//   - extra kv args appear in params.arguments
-func TestBuildToolCallBody(t *testing.T) {
-	const op = "query"
-	const tok = "tok_abc123"
-	extra := map[string]string{"table": "users", "limit": "10"}
-
-	body := buildToolCallBody(op, tok, extra)
-
-	var msg map[string]any
-	if err := json.Unmarshal(body, &msg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if got := msg["jsonrpc"]; got != "2.0" {
-		t.Errorf("jsonrpc: got %v, want 2.0", got)
-	}
-	if got := msg["method"]; got != "tools/call" {
-		t.Errorf("method: got %v, want tools/call", got)
-	}
-
-	params, ok := msg["params"].(map[string]any)
-	if !ok {
-		t.Fatal("params missing or wrong type")
-	}
-	if got := params["name"]; got != op {
-		t.Errorf("params.name: got %v, want %q", got, op)
-	}
-
-	args, ok := params["arguments"].(map[string]any)
-	if !ok {
-		t.Fatal("params.arguments missing or wrong type")
-	}
-	if got := args["_capability"]; got != tok {
-		t.Errorf("arguments._capability: got %v, want %q", got, tok)
-	}
-	if got := args["table"]; got != "users" {
-		t.Errorf("arguments.table: got %v, want users", got)
-	}
-	if got := args["limit"]; got != "10" {
-		t.Errorf("arguments.limit: got %v, want 10", got)
-	}
-}
-
 // TestRenewFlagAcceptance verifies that the renew flagset accepts --loop and
 // --interval without a parse error (reconciles manifest.json sidecar declaration).
 func TestRenewFlagAcceptance(t *testing.T) {
@@ -540,21 +492,115 @@ func TestProvisionVerbAcceptedByRun(t *testing.T) {
 	}
 }
 
-// TestBuildToolCallBodyEmptyArgs verifies token-only calls (no extra kv pairs).
-func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
-	body := buildToolCallBody("op", "mytoken", nil)
-	var msg map[string]any
-	if err := json.Unmarshal(body, &msg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+// captureStdout redirects os.Stdout for the duration of fn and returns whatever
+// fn printed. Small outputs only (the pipe buffer is not drained concurrently).
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	params := msg["params"].(map[string]any)
-	args := params["arguments"].(map[string]any)
-	if got := args["_capability"]; got != "mytoken" {
-		t.Errorf("arguments._capability: got %v, want mytoken", got)
+	orig := os.Stdout
+	os.Stdout = w
+	fn()
+	os.Stdout = orig
+	w.Close()
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
 	}
-	// Only _capability should be present
-	if len(args) != 1 {
-		t.Errorf("expected 1 argument (only _capability), got %d: %v", len(args), args)
+	return buf.String()
+}
+
+// callVerbWorkerID enrols a worker identity against a real mTLS broker and writes
+// it to a temp dir, returning the dir. The `call` verb needs a loadable identity
+// (id.Client builds the mTLS client), but the broker it dials for the actual tool
+// call is a separate stub, so any valid identity suffices.
+func callVerbWorkerID(t *testing.T) string {
+	t.Helper()
+	srv, caInst := newRenewTestBroker(t)
+	ticket := provisionWorkerTicket(t, caInst, srv.URL, "worker")
+	id, err := agent.Enrol(context.Background(), srv.URL, caInst.CertPEM(), ticket, "worker")
+	if err != nil {
+		t.Fatalf("enrol worker: %v", err)
+	}
+	idDir := t.TempDir()
+	if err := id.Write(idDir); err != nil {
+		t.Fatalf("write identity: %v", err)
+	}
+	return idDir
+}
+
+// TestCallVerbSemantics pins the wire + I/O contract of the `call` verb, whose
+// only prior coverage was the live acceptance harness (not run by `go test`):
+// it POSTs a JSON-RPC tools/call to /mcp/<tool>/ with Content-Type
+// application/json, the token in arguments._capability, prints the raw response
+// body to stdout EVEN on a non-200, and maps a non-200 to `call: status %d`.
+func TestCallVerbSemantics(t *testing.T) {
+	idDir := callVerbWorkerID(t)
+
+	for _, tc := range []struct {
+		name    string
+		status  int
+		body    string
+		wantErr string
+	}{
+		{"success", http.StatusOK, `{"result":"ok"}`, ""},
+		{"denied", http.StatusForbidden, `{"error":"denied"}`, "call: status 403"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotCT, gotBody string
+			// Plain-HTTP stub: id.Client's mTLS transport dials http:// fine
+			// (its TLS config is inert for a non-TLS scheme).
+			stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotCT = r.Header.Get("Content-Type")
+				var b bytes.Buffer
+				b.ReadFrom(r.Body)
+				gotBody = b.String()
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer stub.Close()
+
+			var err error
+			out := captureStdout(t, func() {
+				err = cmdCLI("call", []string{
+					"-id-dir", idDir,
+					"-broker-url", stub.URL,
+					"-tool", "db",
+					"-op", "read",
+					"-token", "tok_xyz",
+					"table=users",
+				})
+			})
+
+			if gotPath != "/mcp/db/" {
+				t.Errorf("POST path = %q, want /mcp/db/", gotPath)
+			}
+			if gotCT != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", gotCT)
+			}
+			if !strings.Contains(gotBody, `"_capability":"tok_xyz"`) {
+				t.Errorf("request body missing _capability token: %s", gotBody)
+			}
+			if !strings.Contains(gotBody, `"table":"users"`) {
+				t.Errorf("request body missing constraint arg: %s", gotBody)
+			}
+			// Body is printed to stdout regardless of status.
+			if !strings.Contains(out, tc.body) {
+				t.Errorf("stdout = %q, want it to contain response body %q", out, tc.body)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Errorf("error = %v, want %q", err, tc.wantErr)
+				}
+			}
+		})
 	}
 }
 

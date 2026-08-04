@@ -25,7 +25,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 			if *machine == "" {
 				if path, perr := resolveConfigPath(""); perr == nil {
 					if app, lerr := config.Load(path); lerr == nil {
-						st := brokerctl.StateDir(filepath.Dir(path))
+						st := stateFor(path)
 						if serr := st.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}

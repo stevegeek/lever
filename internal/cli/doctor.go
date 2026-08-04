@@ -2,11 +2,9 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -41,7 +39,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			state := brokerctl.StateDir(filepath.Dir(path))
+			state := stateFor(path)
 
 			// Scion project health needs a read into the jail (via the backend).
 			// A read error almost always means the jail machine isn't up — report

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -57,11 +56,9 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Attach your TTY to the manager (default) or a named worker agent",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfgPath, err := resolveConfigPath("")
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(cfgPath)
+			// Config is always discovered from the CWD (never a positional — the
+			// positional is the agent NAME, resolved by attachTarget below).
+			app, state, err := loadAppAndState(nil)
 			if err != nil {
 				return err
 			}
@@ -79,7 +76,6 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			// AttachArgv (see internal/scion/lifecycle.go) embeds the resolved
 			// token into the exec'd argv itself, since the attach path bypasses
 			// this client's own env().
-			state := brokerctl.StateDir(filepath.Dir(cfgPath))
 			sc := brokerctl.HostScionClient(b.JailRunner(), state)
 			slug, project, err := attachTarget(app, b.MountDest(), argOrEmpty(args))
 			if err != nil {

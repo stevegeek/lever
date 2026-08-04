@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"path/filepath"
-
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -39,7 +36,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			// finds nothing serving and spawns a fresh process on the new config
 			// (its keep-existing branch would otherwise leave the stale broker,
 			// and the config change, in place). Idempotent: a no-op if none runs.
-			if err := brokerctl.StateDir(filepath.Dir(path)).StopBroker(); err != nil {
+			if err := stateFor(path).StopBroker(); err != nil {
 				return err
 			}
 			deps, _, _, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)

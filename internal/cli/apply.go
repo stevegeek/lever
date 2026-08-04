@@ -242,7 +242,7 @@ func brokerReusable(got broker.EpochResponse, wantVersion, wantHash string) bool
 }
 
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
-	machine := "lever-" + app.Name
+	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)
 	if err != nil {
 		return apply.Deps{}, nil, nil, err
@@ -268,7 +268,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// ensureControllerPAT (wired into Deps.EnsureControllerPAT below) persists
 	// it mid-apply (see scion.Options.HubTokenSource's doc: lazy, read at
 	// call time, wins over a static HubToken).
-	state := brokerctl.StateDir(filepath.Dir(configPath))
+	state := stateFor(configPath)
 	sc := brokerctl.HostScionClient(jr, state)
 
 	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort())

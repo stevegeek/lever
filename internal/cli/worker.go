@@ -39,11 +39,9 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 				return fmt.Errorf("`lever worker purge %s` deletes the worker's scion record and staged bootstrap so it can run a new task (its work product in the workspace is KEPT); re-run with --force to proceed", name)
 			}
 
-			path, err := resolveConfigPath("")
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			// Config (and its beside-the-config state dir) is discovered from the
+			// CWD; the positional is the worker NAME, never a config path.
+			app, state, err := loadAppAndState(nil)
 			if err != nil {
 				return err
 			}
@@ -58,14 +56,13 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			// match exactly — never a manager-supplied or ad-hoc path.
 			spec, ok := findWorkerSpec(brokerctl.WorkerSpecs(app, b.MountDest()), name)
 			if !ok {
-				return fmt.Errorf("unknown worker %q — declare it under `workers:` in %s", name, filepath.Base(path))
+				return fmt.Errorf("unknown worker %q — declare it under `workers:` in %s", name, config.CanonicalName)
 			}
 
 			// Delete the scion record via the same runtime seam newDestroyCmd/
 			// restartManagerFresh reach through: a host-side scion client over the
 			// jail runner, authenticating with the controller PAT.
 			project := b.MountDest()
-			state := brokerctl.StateDir(filepath.Dir(path))
 			sc := brokerctl.HostScionClient(b.JailRunner(), state)
 			if err := sc.Delete(cmd.Context(), spec.Name, project); err != nil {
 				return fmt.Errorf("deleting worker %q scion record: %w", spec.Name, err)

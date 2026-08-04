@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,7 +27,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			var appName string
 			var state brokerctl.State // set alongside appName; valid whenever appName != ""
 			if path, perr := resolveConfigPath(""); perr == nil {
-				state = brokerctl.StateDir(filepath.Dir(path))
+				state = stateFor(path)
 				if app, lerr := config.Load(path); lerr == nil {
 					appName = app.Name
 					if *machine == "" {

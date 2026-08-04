@@ -14,7 +14,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -138,38 +137,26 @@ func cmdBoot(args []string) error {
 }
 
 // requestLLMToken obtains a capability(llm) token from the broker /request
-// endpoint over mTLS. The broker returns {"token":"<base64url>"} — the token
-// field is already base64url-encoded (broker does RawURLEncoding.EncodeToString
-// server-side), so we return it verbatim. Do NOT re-encode. The proxy's
-// bearerToken does RawURLEncoding.DecodeString on the value after "Bearer ",
-// so ANTHROPIC_AUTH_TOKEN must equal cr.Token exactly.
+// endpoint over mTLS. It is a thin wrapper over agent.Request (the same wire
+// call: tool=llm op=generate bound_to=cn), keeping two things that Request does
+// not: the trailing-slash URL normalization, and the empty-token guard — a blank
+// ANTHROPIC_AUTH_TOKEN must fail closed rather than silently break LLM auth. The
+// broker returns {"token":"<base64url>"} already base64url-encoded (broker does
+// RawURLEncoding.EncodeToString server-side), so we return it verbatim. Do NOT
+// re-encode: the proxy's bearerToken does RawURLEncoding.DecodeString on the
+// value after "Bearer ", so ANTHROPIC_AUTH_TOKEN must equal the token exactly.
+// (agent.Request sends "constraints":null; the broker decodes into a nil map, so
+// omitting vs null-ing the field is equivalent.) It stays assignable to the
+// requestFn seam (renew.go); its error prefix is log-only, re-wrapped by renew.
 func requestLLMToken(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"tool": "llm", "op": "generate", "bound_to": cn})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(brokerURL, "/")+"/request", bytes.NewReader(body))
+	tok, err := agent.Request(ctx, strings.TrimRight(brokerURL, "/"), client, "llm", "generate", cn, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("broker /request: %s: %s", resp.Status, strings.TrimSpace(string(raw)))
-	}
-	var cr struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return "", fmt.Errorf("broker /request: decode: %w", err)
-	}
-	if cr.Token == "" {
+	if tok == "" {
 		return "", fmt.Errorf("broker /request: empty token in response")
 	}
-	return cr.Token, nil // already base64url-encoded; return verbatim
+	return tok, nil // already base64url-encoded; return verbatim
 }
 
 // mcpAddArgs builds the `claude mcp add` argv. It forces --scope user (global,

@@ -1,13 +1,10 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 )
 
@@ -35,31 +32,13 @@ func (id Identity) Client() (*http.Client, error) {
 // Request mints a capability token via the broker's /request endpoint. boundTo is
 // the caller (self-obtain) or another agent (delegation). Returns the base64url token.
 func Request(ctx context.Context, brokerURL string, client *http.Client, tool, op, boundTo string, constraints map[string]string) (string, error) {
-	body, err := json.Marshal(map[string]any{
-		"tool": tool, "op": op, "bound_to": boundTo, "constraints": constraints,
-	})
-	if err != nil {
-		return "", fmt.Errorf("agent: marshal request: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", brokerURL+"/request", bytes.NewReader(body))
+	cr, err := postJSON[struct {
+		Token string `json:"token"`
+	}](ctx, client, brokerURL+"/request",
+		map[string]any{"tool": tool, "op": op, "bound_to": boundTo, "constraints": constraints},
+		0, "agent: request", true)
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("agent: request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("agent: request status %d: %s", resp.StatusCode, bytes.TrimSpace(b))
-	}
-	var cr struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
-		return "", fmt.Errorf("agent: request decode: %w", err)
 	}
 	return cr.Token, nil
 }

@@ -5,7 +5,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -13,7 +12,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net/http"
@@ -71,25 +69,13 @@ func Enrol(ctx context.Context, brokerURL string, caPEM []byte, ticket, cn strin
 	if err != nil {
 		return Identity{}, err
 	}
-	body, _ := json.Marshal(map[string]string{"ticket": ticket, "csr": string(csrPEM)})
-	req, err := http.NewRequestWithContext(ctx, "POST", brokerURL+"/enrol", bytes.NewReader(body))
+	er, err := postJSON[struct {
+		Cert string `json:"cert"`
+	}](ctx, client, brokerURL+"/enrol",
+		map[string]string{"ticket": ticket, "csr": string(csrPEM)},
+		0, "agent: enrol", false)
 	if err != nil {
 		return Identity{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return Identity{}, fmt.Errorf("agent: enrol: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return Identity{}, fmt.Errorf("agent: enrol status %d", resp.StatusCode)
-	}
-	var er struct {
-		Cert string `json:"cert"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
-		return Identity{}, fmt.Errorf("agent: enrol decode: %w", err)
 	}
 	return Identity{CertPEM: []byte(er.Cert), KeyPEM: keyPEM, CAPEM: caPEM}, nil
 }

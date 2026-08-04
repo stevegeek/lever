@@ -1,9 +1,7 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 )
@@ -21,25 +19,13 @@ func Renew(ctx context.Context, brokerURL string, id Identity) (Identity, error)
 	if err != nil {
 		return Identity{}, err
 	}
-	body, _ := json.Marshal(map[string]string{"csr": string(csrPEM)})
-	req, err := http.NewRequestWithContext(ctx, "POST", brokerURL+"/renew", bytes.NewReader(body))
+	rr, err := postJSON[struct {
+		Cert string `json:"cert"`
+	}](ctx, client, brokerURL+"/renew",
+		map[string]string{"csr": string(csrPEM)},
+		0, "agent: renew", false)
 	if err != nil {
 		return Identity{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return Identity{}, fmt.Errorf("agent: renew: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return Identity{}, fmt.Errorf("agent: renew status %d", resp.StatusCode)
-	}
-	var rr struct {
-		Cert string `json:"cert"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rr); err != nil {
-		return Identity{}, fmt.Errorf("agent: renew decode: %w", err)
 	}
 	return Identity{CertPEM: []byte(rr.Cert), KeyPEM: keyPEM, CAPEM: id.CAPEM}, nil
 }

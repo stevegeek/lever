@@ -5,6 +5,23 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Fixed
+- **Directive tools no longer silently vanish from Claude Code sessions
+  (#24).** `directive_consume` / `directive_check` advertised an input schema
+  with a top-level `anyOf` combinator (added in the 0.9.1 both-spellings fix).
+  The Anthropic API rejects a tool input schema carrying a top-level
+  combinator, and Claude Code then drops the tool from the session with no
+  error — so validly-signed, delivered operator directives could not be
+  consumed, and the model's `request`/CLI fallback surfaced a misleading
+  `policy: may not obtain/delegate` denial. The schema is now a plain object
+  declaring both `id` and `directive_id`; the exactly-one-spelling rule was
+  already enforced caller-side by `directiveID()` (JSON-RPC -32602 before any
+  broker call), so nothing is lost. NOTE: the bug lives in the baked
+  `lever-agent` binary — the fix reaches a running instance only via an agent
+  **image rebuild + restart**, not a host lever upgrade.
+
 ## [0.12.0] - 2026-07-31
 
 ### Added

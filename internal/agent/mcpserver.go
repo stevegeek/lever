@@ -102,18 +102,24 @@ func capabilityToolSchemas() []any {
 // notification). The server accepts either, so the advertised contract must
 // say so rather than declare one name and quietly tolerate the other — a
 // schema-validating client would otherwise reject the alias before it ever
-// reached us. anyOf keeps "neither supplied" invalid.
+// reached us.
+//
+// It MUST be a plain top-level object: no anyOf/oneOf/allOf combinator and no
+// top-level `required`. The Anthropic API rejects a tool input schema
+// carrying a top-level combinator, and Claude Code then silently DROPS the
+// tool from the session ("No such tool available") — so the directive channel
+// dies invisibly for exactly the client it exists for (#24). The
+// exactly-one-spelling rule never depended on the schema: directiveID()
+// enforces it caller-side (neither supplied, and both-supplied-and-disagreeing,
+// each return JSON-RPC -32602 before any broker call), so the schema only
+// advertises the two properties without constraining their combination.
 //
 // Returns a fresh map per call: the two tool entries must not share one
 // mutable schema value.
 func directiveInputSchema(strProp func(string) map[string]any) map[string]any {
 	return map[string]any{"type": "object",
-		"anyOf": []any{
-			map[string]any{"required": []string{"id"}},
-			map[string]any{"required": []string{"directive_id"}},
-		},
 		"properties": map[string]any{
-			"id":           strProp(`the directive_id from the pointer notification, e.g. "f81d5baa-8fe4-21e1-0408-35026a57ec47"`),
+			"id":           strProp(`the directive_id from the pointer notification, e.g. "f81d5baa-8fe4-21e1-0408-35026a57ec47" — supply this OR directive_id, not both`),
 			"directive_id": strProp("alias for `id` — supply either one, not both"),
 		}}
 }

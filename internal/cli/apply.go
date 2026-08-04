@@ -241,6 +241,170 @@ func brokerReusable(got broker.EpochResponse, wantVersion, wantHash string) bool
 	return got.Version == wantVersion && got.ConfigHash == wantHash
 }
 
+// brokerController owns the apply-time broker lifecycle: spawning the detached
+// `lever broker serve` child, polling it healthy, and minting the manager's
+// one-time bootstrap ticket from it. Its Start/Healthy/Mint methods back the
+// like-named Deps funcs, and Rearm recombines them for the re-arm-on-create
+// path — replacing what used to be a cluster of mutually-referencing closures
+// inside buildApplyDeps (so Rearm can reuse the broker-start/health/mint logic
+// verbatim without duplicating it). Built once, after EnsureUp/HostAliasV4 have
+// resolved the run-user/uid and host alias.
+type brokerController struct {
+	app        *config.App     // EffectiveJailPort, ManagerCN, ConfigHash, Tree (Rearm)
+	state      brokerctl.State // pid file, out log, CA cert, StopBroker
+	configPath string          // passed to `lever broker serve`
+	adminURL   string          // http://127.0.0.1:<admin port>
+	aliasV4    string          // resolved host-alias IP (LEVER_HOST_ALIAS_IP for the child)
+	brokerHost string          // host agents dial the broker by (IP if resolved, else hostname)
+	runUser    string          // in-machine run user for the broker child
+	runUID     string          // in-machine run uid for the broker child
+}
+
+// Start spawns `lever broker serve <config>` as a daemonized child (its own
+// session, via brokerServeCmd) so it outlives the apply invocation.
+//
+// Idempotent (M2): if a broker is already serving (re-apply), don't spawn a
+// duplicate — it would fail to bind the ports, die, and clobber broker.pid with
+// a dead PID. A fast single-shot probe (no listener => instant
+// connection-refused, so no penalty on a fresh apply). But only reuse a broker
+// that matches THIS binary and THIS broker config (#19): a broker started by an
+// older binary (no healer, stale routes) or with an older tool set would
+// otherwise keep serving while apply reports success — so on identity mismatch,
+// stop it and fall through to spawn.
+func (bc *brokerController) Start(ctx context.Context) error {
+	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if req, err := http.NewRequestWithContext(probeCtx, "GET", bc.adminURL+"/epoch", nil); err == nil {
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			var er broker.EpochResponse
+			decodeErr := json.NewDecoder(resp.Body).Decode(&er)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				if decodeErr == nil && brokerReusable(er, versionString(), brokerctl.ConfigHash(bc.app)) {
+					return nil // same binary + same broker config; keep the process + PID
+				}
+				fmt.Fprintf(os.Stderr, "lever: broker predates this binary or its tool config changed — restarting it (was %q)\n", er.Version)
+				if err := bc.state.StopBroker(); err != nil {
+					return fmt.Errorf("stopping the stale broker before restart: %w", err)
+				}
+			}
+		}
+	}
+	cmd, logf, err := brokerServeCmd(os.Args[0], bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
+	if err != nil {
+		return err
+	}
+	// Keep the log fd owned by the child; close our copy after Start.
+	defer logf.Close()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("lever broker serve: %w", err)
+	}
+	return nil
+}
+
+// Healthy polls GET /epoch until 200 or a ~10s timeout.
+func (bc *brokerController) Healthy(ctx context.Context) error {
+	deadline := time.Now().Add(10 * time.Second)
+	epochURL := bc.adminURL + "/epoch"
+	for {
+		req, err := http.NewRequestWithContext(ctx, "GET", epochURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("broker did not become healthy within 10s (last err: %v)", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// Mint POSTs /bootstrap to obtain the one-time manager enrolment ticket, reads
+// the CA PEM from the state dir, and returns the full BootstrapMaterial. A 403
+// means the single-use latch was already consumed — surfaced as
+// apply.ErrBootstrapLatched so the mint step tolerates it on an idempotent
+// re-apply against the same broker process.
+func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", bc.adminURL+"/bootstrap", bytes.NewReader(nil))
+	if err != nil {
+		return apply.BootstrapMaterial{}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
+	}
+	if resp.StatusCode != http.StatusOK {
+		return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap returned %d", resp.StatusCode)
+	}
+	var result struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap decode: %w", err)
+	}
+	caPEM, err := os.ReadFile(bc.state.CACert())
+	if err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("reading broker CA cert: %w", err)
+	}
+	return apply.BootstrapMaterial{
+		Ticket:    result.Ticket,
+		BrokerCA:  string(caPEM),
+		BrokerURL: fmt.Sprintf("https://%s:%d", bc.brokerHost, bc.app.EffectiveJailPort()),
+		AgentCN:   bc.app.ManagerCN(),
+	}, nil
+}
+
+// Rearm backs Deps.RearmBootstrap (see its doc in internal/apply/run.go):
+// start-manager's create path calls this when no fresh bootstrap material was
+// minted this apply (Mint tolerated a spent latch), because a freshly-created
+// scion agent record has no agent home to reuse and so ALWAYS re-enrols —
+// against a spent latch that would 403.
+//
+// Reuses the exact same broker-start/health/mint logic as the broker-up and
+// mint-manager-bootstrap steps (no duplicated broker-start logic): stop the
+// (possibly still-running) broker so its next start re-arms the single-use
+// latch — the CA and signing keys live on disk in the state dir and are
+// untouched by a process restart, so existing agent certs and capability tokens
+// keep working — then start it fresh, wait for it to become healthy, mint, and
+// stage the result into app.Tree/.lever/bootstrap.json via the same
+// StageBootstrapMaterial helper the mint-manager-bootstrap step itself uses (one
+// staging code path). Staging happens HERE (not in apply/run.go) because
+// start-manager's Step.Target is the manager's slug, not the tree dir — this
+// controller is the only place that has app.Tree in scope.
+func (bc *brokerController) Rearm(ctx context.Context) (apply.BootstrapMaterial, error) {
+	if err := bc.state.StopBroker(); err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
+	}
+	if err := bc.Start(ctx); err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("restarting the broker to re-arm its bootstrap latch: %w", err)
+	}
+	if err := bc.Healthy(ctx); err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("waiting for the re-armed broker to become healthy: %w", err)
+	}
+	m, err := bc.Mint(ctx)
+	if err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("minting bootstrap material from the re-armed broker: %w", err)
+	}
+	if err := apply.StageBootstrapMaterial(bc.app.Tree, m); err != nil {
+		return apply.BootstrapMaterial{}, fmt.Errorf("staging re-armed bootstrap material: %w", err)
+	}
+	return m, nil
+}
+
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)
@@ -283,116 +447,18 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		brokerHost = aliasV4 // …but prefer the resolved IP (no DNS needed)
 	}
 
-	// startBroker spawns `lever broker serve <config>` as a daemonized child
-	// (its own session, via brokerServeCmd) so it outlives the apply
-	// invocation. Named (rather than inlined in the Deps literal below) so
-	// RearmBootstrap can reuse it verbatim instead of duplicating the
-	// broker-start logic.
-	startBroker := func(ctx context.Context) error {
-		// Idempotent (M2): if a broker is already serving (re-apply), don't spawn
-		// a duplicate — it would fail to bind the ports, die, and clobber
-		// broker.pid with a dead PID. A fast single-shot probe (no listener =>
-		// instant connection-refused, so no penalty on a fresh apply). But only
-		// reuse a broker that matches THIS binary and THIS broker config (#19):
-		// a broker started by an older binary (no healer, stale routes) or with
-		// an older tool set would otherwise keep serving while apply reports
-		// success — so on identity mismatch, stop it and fall through to spawn.
-		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
-		defer cancel()
-		if req, err := http.NewRequestWithContext(probeCtx, "GET", adminURL+"/epoch", nil); err == nil {
-			if resp, err := http.DefaultClient.Do(req); err == nil {
-				var er broker.EpochResponse
-				decodeErr := json.NewDecoder(resp.Body).Decode(&er)
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					if decodeErr == nil && brokerReusable(er, versionString(), brokerctl.ConfigHash(app)) {
-						return nil // same binary + same broker config; keep the process + PID
-					}
-					fmt.Fprintf(os.Stderr, "lever: broker predates this binary or its tool config changed — restarting it (was %q)\n", er.Version)
-					if err := state.StopBroker(); err != nil {
-						return fmt.Errorf("stopping the stale broker before restart: %w", err)
-					}
-				}
-			}
-		}
-		cmd, logf, err := brokerServeCmd(os.Args[0], configPath, state.OutLog(), aliasV4, b.RunUser(), b.RunUID())
-		if err != nil {
-			return err
-		}
-		// Keep the log fd owned by the child; close our copy after Start.
-		defer logf.Close()
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("lever broker serve: %w", err)
-		}
-		return nil
-	}
-
-	// brokerHealthy polls GET /epoch until 200 or a ~10s timeout. Named (see
-	// startBroker's comment) so RearmBootstrap can reuse it.
-	brokerHealthy := func(ctx context.Context) error {
-		deadline := time.Now().Add(10 * time.Second)
-		epochURL := adminURL + "/epoch"
-		for {
-			req, err := http.NewRequestWithContext(ctx, "GET", epochURL, nil)
-			if err != nil {
-				return err
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err == nil {
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					return nil
-				}
-			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("broker did not become healthy within 10s (last err: %v)", err)
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(200 * time.Millisecond):
-			}
-		}
-	}
-
-	// mintManagerBootstrap POSTs /bootstrap to obtain the one-time manager
-	// enrolment ticket, reads the CA PEM from the state dir, and returns the
-	// full BootstrapMaterial. Named (see startBroker's comment) so
-	// RearmBootstrap can reuse it instead of duplicating the mint logic.
-	mintManagerBootstrap := func(ctx context.Context) (apply.BootstrapMaterial, error) {
-		req, err := http.NewRequestWithContext(ctx, "POST", adminURL+"/bootstrap", bytes.NewReader(nil))
-		if err != nil {
-			return apply.BootstrapMaterial{}, err
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusForbidden {
-			// Single-use latch already consumed — signal the mint step to tolerate
-			// it (idempotent re-apply against the same broker process).
-			return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
-		}
-		if resp.StatusCode != http.StatusOK {
-			return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap returned %d", resp.StatusCode)
-		}
-		var result struct {
-			Ticket string `json:"ticket"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap decode: %w", err)
-		}
-		caPEM, err := os.ReadFile(state.CACert())
-		if err != nil {
-			return apply.BootstrapMaterial{}, fmt.Errorf("reading broker CA cert: %w", err)
-		}
-		return apply.BootstrapMaterial{
-			Ticket:    result.Ticket,
-			BrokerCA:  string(caPEM),
-			BrokerURL: fmt.Sprintf("https://%s:%d", brokerHost, app.EffectiveJailPort()),
-			AgentCN:   app.ManagerCN(),
-		}, nil
+	// bc owns the broker lifecycle (start/health/mint) and the re-arm
+	// recombination — see brokerController's doc. Built here, after
+	// EnsureUp/HostAliasV4, so runUser/runUID/aliasV4 are already resolved.
+	bc := &brokerController{
+		app:        app,
+		state:      state,
+		configPath: configPath,
+		adminURL:   adminURL,
+		aliasV4:    aliasV4,
+		brokerHost: brokerHost,
+		runUser:    b.RunUser(),
+		runUID:     b.RunUID(),
 	}
 
 	return apply.Deps{
@@ -453,9 +519,9 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return b.ScionProjectRegistered(ctx, wp)
 		},
 
-		StartBroker:          startBroker,
-		BrokerHealthy:        brokerHealthy,
-		MintManagerBootstrap: mintManagerBootstrap,
+		StartBroker:          bc.Start,
+		BrokerHealthy:        bc.Healthy,
+		MintManagerBootstrap: bc.Mint,
 
 		// WaitBrokerReady gates start-manager on the scion runtime broker being
 		// registered + online (see the Deps field doc): the broker registers
@@ -465,44 +531,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return sc.WaitRuntimeBrokerReady(ctx, project)
 		},
 
-		// RearmBootstrap backs Deps.RearmBootstrap (see its doc in
-		// internal/apply/run.go): start-manager's create path calls this when
-		// no fresh bootstrap material was minted this apply (mint-manager-
-		// bootstrap tolerated a spent latch), because a freshly-created scion
-		// agent record has no agent home to reuse and so ALWAYS re-enrols —
-		// against a spent latch that would 403.
-		//
-		// Reuses the exact same broker-start/health/mint closures as the
-		// broker-up and mint-manager-bootstrap steps (no duplicated broker-
-		// start logic): stop the (possibly still-running) broker so its next
-		// start re-arms the single-use latch — the CA and signing keys live on
-		// disk in the state dir and are untouched by a process restart, so
-		// existing agent certs and capability tokens keep working — then start
-		// it fresh, wait for it to become healthy, mint, and stage the result
-		// into app.Tree/.lever/bootstrap.json via the same StageBootstrapMaterial
-		// helper the mint-manager-bootstrap step itself uses (one staging code
-		// path). Staging happens HERE (not in apply/run.go) because start-
-		// manager's Step.Target is the manager's slug, not the tree dir — this
-		// closure is the only place that has app.Tree in scope.
-		RearmBootstrap: func(ctx context.Context) (apply.BootstrapMaterial, error) {
-			if err := state.StopBroker(); err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
-			}
-			if err := startBroker(ctx); err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("restarting the broker to re-arm its bootstrap latch: %w", err)
-			}
-			if err := brokerHealthy(ctx); err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("waiting for the re-armed broker to become healthy: %w", err)
-			}
-			m, err := mintManagerBootstrap(ctx)
-			if err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("minting bootstrap material from the re-armed broker: %w", err)
-			}
-			if err := apply.StageBootstrapMaterial(app.Tree, m); err != nil {
-				return apply.BootstrapMaterial{}, fmt.Errorf("staging re-armed bootstrap material: %w", err)
-			}
-			return m, nil
-		},
+		// RearmBootstrap backs Deps.RearmBootstrap — see brokerController.Rearm
+		// for the full rationale (re-arm the single-use latch on the create path,
+		// staging the result because only the controller has app.Tree in scope).
+		RearmBootstrap: bc.Rearm,
 
 		// Log surfaces start-manager's loud resume-failed recovery notice (see
 		// apply.Deps.Log) on the invoking command's stderr, mirroring how other

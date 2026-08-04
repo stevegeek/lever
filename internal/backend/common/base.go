@@ -159,12 +159,12 @@ func (b *Base) LoadImage(ctx context.Context, imageRef string) error {
 // ImageLoaded reports whether the jail already holds imageRef at the host's
 // image ID (so a re-import can be skipped). Fail-open — see the interface doc.
 func (b *Base) ImageLoaded(ctx context.Context, imageRef string) bool {
-	return jail.ImageLoaded(ctx, b.jailPrefix(), b.RunUID(), imageRef)
+	return jail.ImageLoaded(ctx, b.R, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
 // PruneJailImages reclaims dangling images from the jail's rootless podman.
 func (b *Base) PruneJailImages(ctx context.Context) error {
-	return jail.PruneImages(ctx, b.jailPrefix(), b.RunUID())
+	return jail.PruneImages(ctx, b.R, b.jailPrefix(), b.RunUID())
 }
 
 // InstallGuestBinary streams a host-local executable into the machine at

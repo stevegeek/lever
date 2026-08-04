@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -17,24 +18,22 @@ import (
 // <tree>/.img.tar on the host, then in-jail: podman load -i <tree>/.img.tar.
 // Implement the pipe first.
 func LoadImageArgs(prefix []string, uid string) []string {
-	argv := append([]string{}, prefix...)
-	return append(argv,
+	return slices.Concat(prefix, []string{
 		"env",
-		"XDG_RUNTIME_DIR=/run/user/"+uid,
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"podman", "load",
-	)
+	})
 }
 
 // ImageInspectArgs returns the host argv that reads the jail podman image ID
 // (config digest) for imageRef. The command exits non-zero when the image is
 // absent, which the ID readers below treat as "not loaded".
 func ImageInspectArgs(prefix []string, uid, imageRef string) []string {
-	argv := append([]string{}, prefix...)
-	return append(argv,
+	return slices.Concat(prefix, []string{
 		"env",
-		"XDG_RUNTIME_DIR=/run/user/"+uid,
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"podman", "image", "inspect", "--format", "{{.Id}}", imageRef,
-	)
+	})
 }
 
 // PruneImagesArgs returns the host argv that prunes DANGLING (untagged,
@@ -43,12 +42,11 @@ func ImageInspectArgs(prefix []string, uid, imageRef string) []string {
 // container, so the running manager — and any stopped worker's image — is
 // safe; it only reclaims the layers a rebuilt tag orphaned.
 func PruneImagesArgs(prefix []string, uid string) []string {
-	argv := append([]string{}, prefix...)
-	return append(argv,
+	return slices.Concat(prefix, []string{
 		"env",
-		"XDG_RUNTIME_DIR=/run/user/"+uid,
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"podman", "image", "prune", "-f",
-	)
+	})
 }
 
 // normalizeImageID canonicalizes a docker/podman image ID for comparison. The

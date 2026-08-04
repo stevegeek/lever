@@ -7,18 +7,7 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/egress"
-	"github.com/stevegeek/lever/internal/exec"
 )
-
-// rootRun executes args inside the guest as root via RootPrefix, e.g.
-// RootPrefix ["orb","-u","root","-m",m] + args ["iptables","-S",chain] runs
-// `orb -u root -m <m> iptables -S <chain>`. Defensively copies RootPrefix[1:]
-// before appending so concurrent callers can't alias/corrupt each other's argv
-// (append may reuse the underlying array when capacity allows).
-func (g Guest) rootRun(ctx context.Context, args ...string) (exec.Result, error) {
-	argv := append(append([]string{}, g.RootPrefix[1:]...), args...)
-	return g.Host.Run(ctx, nil, g.RootPrefix[0], argv...)
-}
 
 // ApplyEgress applies the LEVER_EGRESS ruleset inside the guest via RootPrefix,
 // preserving the I2 no-reopen property: if closedInternet and the closed chain

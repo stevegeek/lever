@@ -431,7 +431,7 @@ func TestHostToolAliasAndJailPrefix(t *testing.T) {
 
 func TestJailTransportMethods(t *testing.T) {
 	l := New(exec.NewFakeRunner(), "lever-x")
-	l.runUID = "501"
+	l.UID = "501"
 
 	if l.JailRunner() == nil {
 		t.Fatal("JailRunner() = nil")
@@ -439,6 +439,69 @@ func TestJailTransportMethods(t *testing.T) {
 	attach := l.AttachArgv([]string{"scion", "attach"})
 	if attach[0] != "limactl" || attach[len(attach)-1] != "attach" {
 		t.Fatalf("AttachArgv = %v", attach)
+	}
+}
+
+// --- F1 guard: per-backend exact-argv assertions for the image-op / jail-
+// transport forwarders. Before F1 these had no per-backend argv assertion
+// (TestJailTransportMethods only checked non-nil), so a prefix mis-wiring in
+// the shared base — lima's jail prefix is the static ["limactl","shell",vm] —
+// would only fail at runtime. LoadImage/ImageLoaded/PruneJailImages exec docker
+// directly (unobservable offline) but share jailPrefix() with JailRunner and
+// AttachArgv, so pinning those two transitively guards them; InstallGuestBinary
+// is pinned directly through the root transport. ---
+
+func TestInstallGuestBinaryArgv(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("bash", exec.Result{})
+	l := New(f, "lever-x")
+	if err := l.InstallGuestBinary(context.Background(), "/host/lever-agent", "/usr/local/bin/lever-agent"); err != nil {
+		t.Fatalf("InstallGuestBinary: %v", err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("want 1 host call, got %d", len(f.Calls))
+	}
+	c := f.Calls[0]
+	if c.Name != "bash" || len(c.Args) != 2 || c.Args[0] != "-c" {
+		t.Fatalf("want `bash -c <script>`, got %s %v", c.Name, c.Args)
+	}
+	// The root transport prefix must be wired through verbatim (shell-quoted).
+	if !strings.Contains(c.Args[1], `'limactl' 'shell' 'lever-x' 'sudo'`) {
+		t.Fatalf("root prefix mis-wired in install script: %q", c.Args[1])
+	}
+}
+
+func TestJailRunnerArgv(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("limactl", exec.Result{Stdout: "ok\n"})
+	l := New(f, "lever-x")
+	l.UID = "501"
+	if _, err := l.JailRunner().Run(context.Background(), nil, "true"); err != nil {
+		t.Fatalf("JailRunner run: %v", err)
+	}
+	c := f.Calls[len(f.Calls)-1]
+	// jail.Runner uses prefix[0] as the host command and prefix[1:]+env as args:
+	// `limactl shell lever-x env <jailenv...> true`.
+	if c.Name != "limactl" {
+		t.Fatalf("host command = %q, want limactl", c.Name)
+	}
+	if wantPrefix := []string{"shell", "lever-x", "env"}; !reflect.DeepEqual(c.Args[:3], wantPrefix) {
+		t.Fatalf("jail prefix mis-wired: %v", c.Args[:3])
+	}
+	if c.Args[len(c.Args)-1] != "true" {
+		t.Fatalf("inner command not last: %v", c.Args)
+	}
+}
+
+func TestAttachArgvFullPrefix(t *testing.T) {
+	l := New(exec.NewFakeRunner(), "lever-x")
+	l.UID = "501"
+	attach := l.AttachArgv([]string{"scion", "attach"})
+	if wantPrefix := []string{"limactl", "shell", "lever-x", "env"}; !reflect.DeepEqual(attach[:4], wantPrefix) {
+		t.Fatalf("attach prefix mis-wired: %v", attach[:4])
+	}
+	if last2 := attach[len(attach)-2:]; !reflect.DeepEqual(last2, []string{"scion", "attach"}) {
+		t.Fatalf("inner command not trailing: %v", last2)
 	}
 }
 
@@ -549,7 +612,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
 	// live chain, so a re-apply that hits the skip must leave a prior
 	// aliasV6 untouched rather than zeroing it.
-	l.aliasV6 = "fd07::fe"
+	l.AliasV6 = "fd07::fe"
 
 	if err := l.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
@@ -565,7 +628,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	if l.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", l.HostAliasV4())
 	}
-	if l.aliasV6 != "fd07::fe" {
-		t.Fatalf("skip path must not clobber a prior aliasV6; got %q", l.aliasV6)
+	if l.AliasV6 != "fd07::fe" {
+		t.Fatalf("skip path must not clobber a prior aliasV6; got %q", l.AliasV6)
 	}
 }

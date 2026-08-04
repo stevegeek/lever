@@ -1,3 +1,11 @@
+// Package lima implements the Backend contract via a Lima VM (own kernel) +
+// rootless Docker + iptables egress.
+//
+// The prefix/guest-delegating half of the contract (DockerHost, the jail
+// transport + image ops, the guest scion/egress delegations, run-user caching)
+// lives once in internal/backend/common.Base, which this embeds; only the
+// Lima-specific verbs (version preflight, VM create/start/stop, realized-config
+// verification) and the two prefix/guest hooks are here.
 package lima
 
 import (
@@ -10,55 +18,47 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/exec"
-	"github.com/stevegeek/lever/internal/jail"
 )
 
-const (
-	// mountDest is the path inside the VM where the project tree is bind-
-	// mounted, set at `limactl create` time by the rendered template
-	// (template.go).
-	mountDest = "/lever"
-	// defaultRunUID is the fallback UID used for the rootless Docker socket
-	// path before EnsureUp has resolved the real UID. Lima's guest user
-	// mirrors the host user, and macOS hosts are UID 501, so this default is
-	// sensible even before EnsureUp, per the interface's "valid after
-	// EnsureUp" contract.
-	defaultRunUID = "501"
-	// hostAlias is the DNS name Lima resolves to the host from inside the VM.
-	hostAlias = "host.lima.internal"
-)
+// hostAlias is the DNS name Lima resolves to the host from inside the VM.
+const hostAlias = "host.lima.internal"
 
 // limaVersionRe matches "limactl version 2.1.3" lines from `limactl --version`.
 var limaVersionRe = regexp.MustCompile(`limactl version (\d+)\.(\d+)\.(\d+)`)
 
 type Lima struct {
-	r       exec.Runner
-	vm      string
-	aliasV4 string
-	aliasV6 string
-	runUser string // resolved via `limactl shell <vm> whoami`
-	runUID  string // resolved via `limactl shell <vm> id -u`
+	common.Base
 }
 
-func New(r exec.Runner, vm string) *Lima { return &Lima{r: r, vm: vm} }
+func New(r exec.Runner, vm string) *Lima {
+	l := &Lima{}
+	l.Base = common.Base{
+		R:         r,
+		Machine:   vm,
+		HostAlias: hostAlias,
+		Hooks: common.Hooks{
+			// Lima's jail prefix is static — it does not depend on the run user.
+			JailPrefix: func(machine, _ string) []string { return JailPrefix(machine) },
+			Guest: func(r exec.Runner, machine string) guest.Guest {
+				return guest.Guest{
+					Host:       r,
+					UserPrefix: JailPrefix(machine),
+					RootPrefix: append(JailPrefix(machine), "sudo"), // lima's default user has passwordless sudo
+					Machine:    machine,
+				}
+			},
+			ResolveHostAlias: l.resolveHostAlias,
+		},
+	}
+	return l
+}
 
 // JailPrefix is the argv prefix that executes inside this backend's VM.
 // Exported for registry.JailRunner (broker-side re-derivation).
 func JailPrefix(vm string) []string { return []string{"limactl", "shell", vm} }
-
-// guest returns the shared guest provisioner scoped to this VM, used to
-// install runtimes and scion via host-side argv prefixes. See
-// internal/backend/guest for the provisioning scripts themselves.
-func (l *Lima) guest() guest.Guest {
-	return guest.Guest{
-		Host:       l.r,
-		UserPrefix: JailPrefix(l.vm),
-		RootPrefix: append(JailPrefix(l.vm), "sudo"), // lima's default user has passwordless sudo
-		Machine:    l.vm,
-	}
-}
 
 // Profile returns lima's declared guarantees. The value lives once in
 // backend.Candidates (the single source of the guarantee matrix); returning it
@@ -68,22 +68,6 @@ func (l *Lima) Profile() backend.Profile {
 	return p
 }
 
-func (l *Lima) DockerHost() string {
-	uid := l.runUID
-	if uid == "" {
-		uid = defaultRunUID
-	}
-	return fmt.Sprintf("unix:///run/user/%s/docker.sock", uid)
-}
-
-func (l *Lima) HostToolAlias() string { return hostAlias }
-
-// HostAliasV4 returns the resolved IPv4 of host.lima.internal as seen from
-// the jail, valid after EnsureUp/ApplyEgress. Empty if not yet resolved. Used
-// to mint the broker cert with an IP SAN and to build IP-based broker URLs so
-// agents reach the broker without DNS under closed-internet egress.
-func (l *Lima) HostAliasV4() string { return l.aliasV4 }
-
 func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {
 		return fmt.Errorf("EnsureUp: ProjectTree is required")
@@ -92,7 +76,7 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	// semantics — explicit guestIPMustBeZero is required from 2.0 on (see
 	// template.go) — so an older limactl would silently forward guest ports to
 	// the host loopback despite the rendered ignore rules.
-	ok, got, err := limaVersionAtLeast(ctx, l.r, 2, 0, 0)
+	ok, got, err := limaVersionAtLeast(ctx, l.R, 2, 0, 0)
 	if err != nil {
 		return fmt.Errorf("EnsureUp: limactl version check: %w", err)
 	}
@@ -102,14 +86,14 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := l.ensureVM(ctx, cfg.ProjectTree, cfg.Disk); err != nil {
 		return err
 	}
-	if err := l.resolveRunUser(ctx); err != nil {
+	if err := l.ReadRunUser(ctx); err != nil {
 		return err
 	}
-	if err := l.guest().EnsureRuntimes(ctx, l.runUser); err != nil {
+	if err := l.Guest().EnsureRuntimes(ctx, l.User); err != nil {
 		return err
 	}
 	if cfg.ScionSource != "" || cfg.ScionVersion != "" {
-		if err := l.guest().EnsureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
+		if err := l.Guest().EnsureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
 			return err
 		}
 	}
@@ -184,7 +168,7 @@ func (l *Lima) ensureVM(ctx context.Context, projectTree, disk string) error {
 		// Idempotent: already up (and just verified un-drifted).
 		return nil
 	}
-	if _, err := l.r.Run(ctx, nil, "limactl", "start", "--tty=false", l.vm); err != nil {
+	if _, err := l.R.Run(ctx, nil, "limactl", "start", "--tty=false", l.Machine); err != nil {
 		return fmt.Errorf("limactl start: %w", err)
 	}
 	return nil
@@ -229,7 +213,7 @@ func (inst realizedInstance) matchesContainment(projectTree string) bool {
 	if len(c.Mounts) != 1 {
 		return false
 	}
-	if c.Mounts[0].Location != projectTree || c.Mounts[0].MountPoint != mountDest || !c.Mounts[0].Writable {
+	if c.Mounts[0].Location != projectTree || c.Mounts[0].MountPoint != common.MountDest || !c.Mounts[0].Writable {
 		return false
 	}
 	if c.Containerd.System || c.Containerd.User {
@@ -263,16 +247,16 @@ func (inst realizedInstance) matchesContainment(projectTree string) bool {
 // realizedInstance) and fails closed unless it matches the containment
 // template's intent for projectTree.
 func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) error {
-	res, err := l.r.Run(ctx, nil, "limactl", "list", "--json", l.vm)
+	res, err := l.R.Run(ctx, nil, "limactl", "list", "--json", l.Machine)
 	if err != nil {
-		return fmt.Errorf("read back realized config for %q: %w", l.vm, err)
+		return fmt.Errorf("read back realized config for %q: %w", l.Machine, err)
 	}
 	var inst realizedInstance
 	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &inst); err != nil {
-		return fmt.Errorf("parse realized config for %q: %w", l.vm, err)
+		return fmt.Errorf("parse realized config for %q: %w", l.Machine, err)
 	}
 	if !inst.matchesContainment(projectTree) {
-		return fmt.Errorf("lima VM %q exists with a mismatched containment config (mounts/port-forwards/containerd drifted from the lever template); run 'lever down' then 'lever up' to recreate", l.vm)
+		return fmt.Errorf("lima VM %q exists with a mismatched containment config (mounts/port-forwards/containerd drifted from the lever template); run 'lever down' then 'lever up' to recreate", l.Machine)
 	}
 	return nil
 }
@@ -280,13 +264,13 @@ func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) err
 // vmStatus returns this VM's status field from `limactl list`, or "" if the
 // VM is not listed at all.
 func (l *Lima) vmStatus(ctx context.Context) (string, error) {
-	res, err := l.r.Run(ctx, nil, "limactl", "list", "--format", "{{.Name}} {{.Status}}")
+	res, err := l.R.Run(ctx, nil, "limactl", "list", "--format", "{{.Name}} {{.Status}}")
 	if err != nil {
 		return "", fmt.Errorf("limactl list: %w", err)
 	}
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		f := strings.Fields(line)
-		if len(f) >= 2 && f[0] == l.vm {
+		if len(f) >= 2 && f[0] == l.Machine {
 			return f[1], nil
 		}
 	}
@@ -314,7 +298,7 @@ func (l *Lima) createVM(ctx context.Context, projectTree, disk string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close lima config tempfile: %w", err)
 	}
-	if _, err := l.r.Run(ctx, nil, "limactl", "create", "--name="+l.vm, "--tty=false", path); err != nil {
+	if _, err := l.R.Run(ctx, nil, "limactl", "create", "--name="+l.Machine, "--tty=false", path); err != nil {
 		return fmt.Errorf("limactl create: %w", err)
 	}
 	return nil
@@ -331,30 +315,12 @@ func (l *Lima) ResolveRunUser(ctx context.Context) error {
 		return err
 	}
 	if status == "" {
-		return fmt.Errorf("lima VM %q does not exist", l.vm)
+		return fmt.Errorf("lima VM %q does not exist", l.Machine)
 	}
 	if status != "Running" {
-		return fmt.Errorf("lima VM %q is not running (status %q)", l.vm, status)
+		return fmt.Errorf("lima VM %q is not running (status %q)", l.Machine, status)
 	}
-	return l.resolveRunUser(ctx)
-}
-
-// resolveRunUser caches the in-VM run user and UID so the rootless Docker
-// socket path and the subid/linger script work for any Lima guest user, not a
-// hardcoded one. Called after ensureVM (the VM must be up) and before
-// EnsureRuntimes.
-func (l *Lima) resolveRunUser(ctx context.Context) error {
-	res, err := l.r.Run(ctx, nil, "limactl", "shell", l.vm, "whoami")
-	if err != nil {
-		return fmt.Errorf("resolve run user: %w", err)
-	}
-	l.runUser = strings.TrimSpace(res.Stdout)
-	res, err = l.r.Run(ctx, nil, "limactl", "shell", l.vm, "id", "-u")
-	if err != nil {
-		return fmt.Errorf("resolve run uid: %w", err)
-	}
-	l.runUID = strings.TrimSpace(res.Stdout)
-	return nil
+	return l.ReadRunUser(ctx)
 }
 
 // Teardown deletes the jail VM. Idempotent: a no-op if the VM is already
@@ -367,7 +333,7 @@ func (l *Lima) Teardown(ctx context.Context) error {
 	if status == "" {
 		return nil // already gone
 	}
-	if _, err := l.r.Run(ctx, nil, "limactl", "delete", "--force", l.vm); err != nil {
+	if _, err := l.R.Run(ctx, nil, "limactl", "delete", "--force", l.Machine); err != nil {
 		return fmt.Errorf("limactl delete: %w", err)
 	}
 	return nil
@@ -385,16 +351,17 @@ func (l *Lima) Stop(ctx context.Context) error {
 	if status == "" {
 		return nil // already gone; nothing to stop
 	}
-	if _, err := l.r.Run(ctx, nil, "limactl", "stop", l.vm); err != nil {
+	if _, err := l.R.Run(ctx, nil, "limactl", "stop", l.Machine); err != nil {
 		return fmt.Errorf("limactl stop: %w", err)
 	}
 	return nil
 }
 
 // resolveHostAlias returns the IPv4 and IPv6 addresses host.lima.internal
-// resolves to FROM INSIDE the VM (both forward to the host's 127.0.0.1).
+// resolves to FROM INSIDE the VM (both forward to the host's 127.0.0.1). It is
+// the Base ResolveHostAlias hook (and is exercised directly by lima_test.go).
 func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) {
-	res, err := l.r.Run(ctx, nil, "limactl", "shell", l.vm, "getent", "ahosts", hostAlias)
+	res, err := l.R.Run(ctx, nil, "limactl", "shell", l.Machine, "getent", "ahosts", hostAlias)
 	if err != nil {
 		return "", "", fmt.Errorf("getent %s: %w", hostAlias, err)
 	}
@@ -403,92 +370,6 @@ func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) 
 		return "", "", fmt.Errorf("%s resolved to no addresses", hostAlias)
 	}
 	return v4, v6, nil
-}
-
-func (l *Lima) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	v4, v6, rebuilt, err := l.guest().ApplyEgress(ctx, l.resolveHostAlias, allowedPorts, closedInternet)
-	if err != nil {
-		return err
-	}
-	if rebuilt {
-		l.aliasV4, l.aliasV6 = v4, v6
-	} else {
-		// I2 skip path: v6 is not authoritative here (existingClosedAlias only
-		// parses v4 from the live chain) — do not clobber a prior aliasV6.
-		l.aliasV4 = v4
-	}
-	return nil
-}
-
-// MountDest returns the path inside the jail where the project tree is bind-mounted.
-func (l *Lima) MountDest() string { return mountDest }
-
-// MachineName returns the jail VM name this backend targets.
-func (l *Lima) MachineName() string { return l.vm }
-
-// RunUser returns the in-VM run user resolved by EnsureUp (valid after EnsureUp).
-func (l *Lima) RunUser() string { return l.runUser }
-
-// RunUID returns the in-VM run user's UID resolved by EnsureUp. Falls back to
-// defaultRunUID if EnsureUp has not yet been called.
-func (l *Lima) RunUID() string {
-	if l.runUID == "" {
-		return defaultRunUID
-	}
-	return l.runUID
-}
-
-// JailRunner returns the command transport into the jail (valid after EnsureUp,
-// which resolves the run user's uid).
-func (l *Lima) JailRunner() exec.Runner {
-	return jail.New(l.r, JailPrefix(l.vm), l.RunUID())
-}
-
-// AttachArgv builds the host argv for an interactive in-jail command.
-func (l *Lima) AttachArgv(inner []string) []string {
-	return jail.AttachArgv(JailPrefix(l.vm), l.RunUID(), inner)
-}
-
-// LoadImage streams a host docker image into the jail's rootless podman.
-func (l *Lima) LoadImage(ctx context.Context, imageRef string) error {
-	return jail.LoadImage(ctx, JailPrefix(l.vm), l.RunUID(), imageRef)
-}
-
-// ImageLoaded reports whether the jail already holds imageRef at the host's
-// image ID (so a re-import can be skipped). Fail-open — see the interface doc.
-func (l *Lima) ImageLoaded(ctx context.Context, imageRef string) bool {
-	return jail.ImageLoaded(ctx, JailPrefix(l.vm), l.RunUID(), imageRef)
-}
-
-// PruneJailImages reclaims dangling images from the jail's rootless podman.
-func (l *Lima) PruneJailImages(ctx context.Context) error {
-	return jail.PruneImages(ctx, JailPrefix(l.vm), l.RunUID())
-}
-
-// InstallGuestBinary streams a host-local executable into the VM at destPath as
-// root, via the shared guest provisioner (RootPrefix = `limactl shell <vm> sudo`).
-func (l *Lima) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {
-	return l.guest().InstallRootBinary(ctx, localPath, destPath)
-}
-
-// ReadScionProjectState reads scion's registration state from the VM for `lever
-// doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
-// machine-only guest prefix, so it needs no EnsureUp.
-func (l *Lima) ReadScionProjectState(ctx context.Context) (backend.ScionProjectState, error) {
-	return l.guest().ReadScionProjectState(ctx, mountDest)
-}
-
-// RemoveScionProjectConfigs removes stale scion project-config registrations
-// for wp from the VM, via the machine-only guest prefix.
-func (l *Lima) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
-	return l.guest().RemoveScionProjectConfigs(ctx, wp)
-}
-
-// ScionProjectRegistered reports whether workspacePath already has exactly one
-// valid scion registration, via the machine-only guest prefix. Read-only, no
-// EnsureUp.
-func (l *Lima) ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error) {
-	return l.guest().ScionProjectRegistered(ctx, workspacePath)
 }
 
 var _ backend.Backend = (*Lima)(nil)

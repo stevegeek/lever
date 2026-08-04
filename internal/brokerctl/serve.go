@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/cap/ca"
@@ -66,20 +67,7 @@ func Serve(ctx context.Context, app *config.App, state State, version string) er
 	if err != nil {
 		return err
 	}
-	rev, err := state.LoadRevocation()
-	if err != nil {
-		return err
-	}
-	dirs, err := state.LoadDirectives()
-	if err != nil {
-		return err
-	}
 
-	// Worker dispatch runs host-side with operator identity (jail runner). apply
-	// passes the resolved run-user/uid via env (LEVER_JAIL_USER/UID); the mount
-	// dest is a backend constant. Without the env (manual `broker serve` with no
-	// prior apply) cfg.Runtime stays nil; the worker handlers detect this via
-	// runtimeReady and return 502 — they do not panic. apply is the real path.
 	machine := "lever-" + app.Name
 	// app.Backend was validated selectable at config.Load, so this cannot pick a
 	// planned backend; routing through the registry keeps the mount dest coming
@@ -90,6 +78,90 @@ func Serve(ctx context.Context, app *config.App, state State, version string) er
 	}
 
 	cfg, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if err != nil {
+		return err
+	}
+	if err := decorateConfig(&cfg, app, state, be, version); err != nil {
+		return err
+	}
+
+	// Persist the broker's audit decisions (provision/enrol/request/revoke …) to
+	// the state-dir log. Without this the broker defaults to a discard logger, so
+	// every allow/deny — the first thing you need when a worker can't enrol — is
+	// lost. Opened before broker.New so cfg.Log is set; reused by the supervisor.
+	logf, err := os.OpenFile(state.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logf.Close()
+	cfg.Log = slog.New(slog.NewTextHandler(logf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	b := broker.New(cfg)
+
+	jailLn, adminLn, dirLn, err := bindListeners(app, state)
+	if err != nil {
+		return err
+	}
+	// Own the listeners until ServeListeners takes over: any early return below
+	// (pid file, cert source, supervisor) must not leak a bound port. Once we
+	// hand off to ServeListeners the flag flips — it closes all three on its own
+	// fail-closed paths, and a double-close would be benign anyway (ErrClosed).
+	served := false
+	defer func() {
+		if !served {
+			closeListeners(jailLn, adminLn, dirLn)
+		}
+	}()
+	adminURL := "http://" + adminLn.Addr().String()
+
+	// The serve process owns its pid file: written now that both listeners are
+	// bound (a pid on disk ⇒ a broker actually serving, not a failed-bind ghost),
+	// removed when we stop. This also makes a manual `lever broker serve`
+	// doctor-visible, which a parent-written pid never was.
+	if err := writePIDFile(state); err != nil {
+		return err
+	}
+	defer removePIDFile(state)
+
+	// Broker server cert: a self-rotating SOURCE, not a one-shot mint — leaf
+	// certs live certTTL (24h), and a broker that outlives its serving cert
+	// fails every gateway handshake, including the agents' own /renew calls,
+	// so the whole fleet's certs decay behind it. SANs: always the selected
+	// backend's host alias (cfg.ServerName, e.g. host.orb.internal) as DNS;
+	// additionally the jail's resolved host-alias IP (passed by `lever apply`
+	// via $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can dial
+	// the broker by IP — DNS/53 is dropped in that posture, so they cannot
+	// resolve the hostname and instead connect to the already-allowlisted alias
+	// IP, which TLS validates against this IP SAN. Absent (e.g. a direct
+	// `lever broker serve`), fall back to the hostname-only cert.
+	certSrc, err := caInst.NewServerCertSource(cfg.ServerName, []string{cfg.ServerName}, []string{os.Getenv("LEVER_HOST_ALIAS_IP")})
+	if err != nil {
+		return err
+	}
+
+	sup := NewSupervisor(app.Broker.Tools, adminURL, state.ToolLogDir())
+	if err := sup.Start(ctx); err != nil {
+		return err
+	}
+	defer sup.Stop()
+
+	served = true
+	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, certSrc)
+}
+
+// decorateConfig fills the host-side, config-derived fields of a broker.Config
+// that BuildBroker leaves unset: the persisted revocation/directive state and
+// their write-through closures, the operator-directive verifier, the selected
+// backend's server name + mount dest, the worker-dispatch runtime, the worker
+// specs + instance project, and the identity/URL fields. It is the exact wiring
+// Serve applies between BuildBroker and broker.New; single_project_dispatch_test
+// drives this same function so the two can never drift.
+func decorateConfig(cfg *broker.Config, app *config.App, state State, be backend.Backend, version string) error {
+	rev, err := state.LoadRevocation()
+	if err != nil {
+		return err
+	}
+	dirs, err := state.LoadDirectives()
 	if err != nil {
 		return err
 	}
@@ -106,8 +178,13 @@ func Serve(ctx context.Context, app *config.App, state State, version string) er
 	cfg.ServerName = be.HostToolAlias()
 
 	jailMount := be.MountDest()
+	// Worker dispatch runs host-side with operator identity (jail runner). apply
+	// passes the resolved run-user/uid via env (LEVER_JAIL_USER/UID). Without the
+	// env (manual `broker serve` with no prior apply) cfg.Runtime stays nil; the
+	// worker handlers detect this via runtimeReady and return 502 — they do not
+	// panic. apply is the real path.
 	if u, id := os.Getenv("LEVER_JAIL_USER"), os.Getenv("LEVER_JAIL_UID"); u != "" && id != "" {
-		jr, jerr := registry.JailRunner(app.Backend, leverexec.RealRunner{}, machine, u, id)
+		jr, jerr := registry.JailRunner(app.Backend, leverexec.RealRunner{}, "lever-"+app.Name, u, id)
 		if jerr != nil {
 			return jerr
 		}
@@ -140,98 +217,51 @@ func Serve(ctx context.Context, app *config.App, state State, version string) er
 		host = cfg.ServerName
 	}
 	cfg.BrokerURL = workerBrokerURL(host, app.EffectiveJailPort())
+	return nil
+}
 
-	// Persist the broker's audit decisions (provision/enrol/request/revoke …) to
-	// the state-dir log. Without this the broker defaults to a discard logger, so
-	// every allow/deny — the first thing you need when a worker can't enrol — is
-	// lost. Opened before broker.New so cfg.Log is set; reused by the supervisor.
-	logf, err := os.OpenFile(state.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
+// closeListeners closes every non-nil listener, discarding errors: a
+// double-close (ServeListeners may already have closed them on a fail-closed
+// path) surfaces as ErrClosed, which is benign here.
+func closeListeners(lns ...net.Listener) {
+	for _, ln := range lns {
+		if ln != nil {
+			_ = ln.Close()
+		}
 	}
-	defer logf.Close()
-	cfg.Log = slog.New(slog.NewTextHandler(logf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
 
-	b := broker.New(cfg)
-
-	jailLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveJailPort()))
+// bindListeners pre-binds the broker's loopback listeners so Serve learns the
+// OS-assigned ports before serving: the jail-facing TCP listener, the admin TCP
+// listener, and — only when operator directives are enabled — the directive UDS
+// (0600, gated by filesystem permissions rather than network origin; a stale
+// socket from an unclean shutdown is removed first). dirLn is nil when
+// directives are disabled — ServeListeners treats a nil directiveLn as "no
+// channel". On any bind/chmod failure every already-bound listener is closed so
+// no port leaks, and (nil, nil, nil, err) is returned.
+func bindListeners(app *config.App, state State) (jailLn, adminLn, dirLn net.Listener, err error) {
+	jailLn, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveJailPort()))
 	if err != nil {
-		return fmt.Errorf("brokerctl: bind jail listener: %w", err)
+		return nil, nil, nil, fmt.Errorf("brokerctl: bind jail listener: %w", err)
 	}
-	adminLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveAdminPort()))
+	adminLn, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveAdminPort()))
 	if err != nil {
-		_ = jailLn.Close()
-		return fmt.Errorf("brokerctl: bind admin listener: %w", err)
+		closeListeners(jailLn)
+		return nil, nil, nil, fmt.Errorf("brokerctl: bind admin listener: %w", err)
 	}
-	adminURL := "http://" + adminLn.Addr().String()
-
-	// The operator-directive admin channel: a UDS socket, 0600, gated by
-	// filesystem permissions rather than network origin. nil when directives
-	// are disabled — ServeListeners treats a nil directiveLn as "no channel".
-	var dirLn net.Listener
 	if app.DirectivesEnabled() {
 		sock := state.DirectiveSock()
 		_ = os.Remove(sock) // stale socket from an unclean shutdown
 		ul, lerr := net.Listen("unix", sock)
 		if lerr != nil {
-			_ = jailLn.Close()
-			_ = adminLn.Close()
-			return fmt.Errorf("brokerctl: bind directive socket: %w", lerr)
+			closeListeners(jailLn, adminLn)
+			return nil, nil, nil, fmt.Errorf("brokerctl: bind directive socket: %w", lerr)
 		}
 		if cerr := os.Chmod(sock, 0o600); cerr != nil {
-			_ = jailLn.Close()
-			_ = adminLn.Close()
-			_ = ul.Close()
-			return fmt.Errorf("brokerctl: chmod directive socket: %w", cerr)
+			closeListeners(jailLn, adminLn, ul)
+			return nil, nil, nil, fmt.Errorf("brokerctl: chmod directive socket: %w", cerr)
 		}
 		dirLn = ul
 	}
-
-	// The serve process owns its pid file: written now that both listeners are
-	// bound (a pid on disk ⇒ a broker actually serving, not a failed-bind ghost),
-	// removed when we stop. This also makes a manual `lever broker serve`
-	// doctor-visible, which a parent-written pid never was.
-	if err := writePIDFile(state); err != nil {
-		_ = jailLn.Close()
-		_ = adminLn.Close()
-		if dirLn != nil {
-			_ = dirLn.Close()
-		}
-		return err
-	}
-	defer removePIDFile(state)
-
-	// Broker server cert: a self-rotating SOURCE, not a one-shot mint — leaf
-	// certs live certTTL (24h), and a broker that outlives its serving cert
-	// fails every gateway handshake, including the agents' own /renew calls,
-	// so the whole fleet's certs decay behind it. SANs: always the selected
-	// backend's host alias (cfg.ServerName, e.g. host.orb.internal) as DNS;
-	// additionally the jail's resolved host-alias IP (passed by `lever apply`
-	// via $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can dial
-	// the broker by IP — DNS/53 is dropped in that posture, so they cannot
-	// resolve the hostname and instead connect to the already-allowlisted alias
-	// IP, which TLS validates against this IP SAN. Absent (e.g. a direct
-	// `lever broker serve`), fall back to the hostname-only cert.
-	certSrc, err := caInst.NewServerCertSource(cfg.ServerName, []string{cfg.ServerName}, []string{os.Getenv("LEVER_HOST_ALIAS_IP")})
-	if err != nil {
-		_ = jailLn.Close()
-		_ = adminLn.Close()
-		if dirLn != nil {
-			_ = dirLn.Close()
-		}
-		return err
-	}
-
-	sup := NewSupervisor(app.Broker.Tools, adminURL, state.ToolLogDir())
-	if err := sup.Start(ctx); err != nil {
-		_ = jailLn.Close()
-		_ = adminLn.Close()
-		if dirLn != nil {
-			_ = dirLn.Close()
-		}
-		return err
-	}
-	defer sup.Stop()
-
-	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, certSrc)
+	return jailLn, adminLn, dirLn, nil
 }

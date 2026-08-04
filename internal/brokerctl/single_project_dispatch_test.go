@@ -26,10 +26,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -156,14 +158,27 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildBroker: %v", err)
 	}
-	// The remaining fields mirror Serve's non-backend-dependent wiring (serve.go):
-	// only Runtime is faked — everything else is the real production assembly.
+	// Drive the REAL production wiring (serve.go's decorateConfig), not a
+	// hand-mirrored copy — so this dispatch proof can never silently drift from
+	// what Serve actually assembles. Only Runtime is faked: no LEVER_JAIL_USER/UID
+	// env is set, so decorateConfig takes the no-Runtime path and we inject the
+	// fake afterward. Workers/InstanceProject (jailMount) come from the selected
+	// backend's MountDest, which is "/lever" for orbstack (== the jailMount const).
+	be, err := registry.Select(app.Backend, leverexec.RealRunner{}, "lever-"+app.Name)
+	if err != nil {
+		t.Fatalf("registry.Select: %v", err)
+	}
+	state := StateDir(t.TempDir())
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	if err := decorateConfig(&cfg, app, state, be, "test"); err != nil {
+		t.Fatalf("decorateConfig: %v", err)
+	}
+	if cfg.InstanceProject != jailMount {
+		t.Fatalf("decorateConfig InstanceProject = %q, want backend MountDest %q", cfg.InstanceProject, jailMount)
+	}
 	cfg.Runtime = rt
-	cfg.Workers = specs
-	cfg.InstanceProject = jailMount
-	cfg.ManagerSlug = app.Name
-	cfg.BrokerCAPEM = "CA-PEM"
-	cfg.BrokerURL = "https://10.0.0.2:8080"
 	b := broker.New(cfg)
 
 	call := func(method, path, body string) *httptest.ResponseRecorder {

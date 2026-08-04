@@ -632,3 +632,124 @@ func TestClaudeMCPAddSurfacesAddError(t *testing.T) {
 		t.Fatal("a failing add must return an error")
 	}
 }
+
+// TestCommonFlagsDefinesTrio pins the id-dir/broker-url/bootstrap trio that
+// commonFlags registers for the five lazy-resolving subcommands: flag names, the
+// per-command-configurable help strings, and the defaults (id-dir →
+// $HOME/.lever-id, the other two empty). D3 collapses five hand-rolled copies
+// onto this one helper, so this is the guard for that single source of truth.
+func TestCommonFlagsDefinesTrio(t *testing.T) {
+	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	idDir, brokerURL, bootstrap := commonFlags(fs, "id help", "bootstrap help")
+
+	wantIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
+	if *idDir != wantIDDir {
+		t.Errorf("id-dir default: got %q, want %q", *idDir, wantIDDir)
+	}
+	if *brokerURL != "" {
+		t.Errorf("broker-url default: got %q, want empty", *brokerURL)
+	}
+	if *bootstrap != "" {
+		t.Errorf("bootstrap default: got %q, want empty", *bootstrap)
+	}
+
+	for _, tc := range []struct {
+		name, usage string
+	}{
+		{"id-dir", "id help"},
+		{"broker-url", "broker URL (overrides bootstrap)"},
+		{"bootstrap", "bootstrap help"},
+	} {
+		f := fs.Lookup(tc.name)
+		if f == nil {
+			t.Errorf("flag %q not defined", tc.name)
+			continue
+		}
+		if f.Usage != tc.usage {
+			t.Errorf("flag %q usage: got %q, want %q", tc.name, f.Usage, tc.usage)
+		}
+	}
+}
+
+// TestResolveBrokerURLFallbackChain pins the three-step resolution order of
+// resolveBrokerURL: an explicit --broker-url wins outright without touching any
+// file; otherwise the broker URL is read from a bootstrap file located by
+// --bootstrap, then $LEVER_BOOTSTRAP, then ./.lever/bootstrap.json. D3 folds the
+// path-resolution half into bootstrapPathOrDefault, so this guards the merge —
+// neither resolveBrokerURL nor bootstrapPathOrDefault had a test before.
+func TestResolveBrokerURLFallbackChain(t *testing.T) {
+	writeBootstrap := func(t *testing.T, dir, url string) string {
+		t.Helper()
+		p := filepath.Join(dir, "bootstrap.json")
+		data, err := json.Marshal(agent.Bootstrap{BrokerURL: url})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("explicit broker-url wins without reading any file", func(t *testing.T) {
+		// $LEVER_BOOTSTRAP points at a nonexistent file; if it were consulted the
+		// call would error. It must not be — the explicit flag short-circuits.
+		t.Setenv("LEVER_BOOTSTRAP", filepath.Join(t.TempDir(), "does-not-exist.json"))
+		got, err := resolveBrokerURL("https://explicit.example", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "https://explicit.example" {
+			t.Errorf("got %q, want the explicit flag value", got)
+		}
+	})
+
+	t.Run("bootstrap flag path is read when broker-url is empty", func(t *testing.T) {
+		// env points elsewhere; the explicit --bootstrap path must take precedence.
+		t.Setenv("LEVER_BOOTSTRAP", filepath.Join(t.TempDir(), "wrong.json"))
+		p := writeBootstrap(t, t.TempDir(), "https://from-flag.example")
+		got, err := resolveBrokerURL("", p)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "https://from-flag.example" {
+			t.Errorf("got %q, want the URL from the --bootstrap file", got)
+		}
+	})
+
+	t.Run("LEVER_BOOTSTRAP is used when both flags are empty", func(t *testing.T) {
+		p := writeBootstrap(t, t.TempDir(), "https://from-env.example")
+		t.Setenv("LEVER_BOOTSTRAP", p)
+		got, err := resolveBrokerURL("", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "https://from-env.example" {
+			t.Errorf("got %q, want the URL from $LEVER_BOOTSTRAP", got)
+		}
+	})
+
+	t.Run("defaults to ./.lever/bootstrap.json when nothing is set", func(t *testing.T) {
+		t.Setenv("LEVER_BOOTSTRAP", "")
+		dir := t.TempDir()
+		leverDir := filepath.Join(dir, ".lever")
+		if err := os.MkdirAll(leverDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(agent.Bootstrap{BrokerURL: "https://from-default.example"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(leverDir, "bootstrap.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		got, err := resolveBrokerURL("", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "https://from-default.example" {
+			t.Errorf("got %q, want the URL from ./.lever/bootstrap.json", got)
+		}
+	})
+}

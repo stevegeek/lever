@@ -337,10 +337,7 @@ func writeRenewServices(homeDir, idDir, bootstrapPath, settingsPath, llmAuth str
 // validates this transport live in the acceptance run.
 func cmdServeCapability(args []string) error {
 	fs := flag.NewFlagSet("serve-capability", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL)")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json (for broker URL)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -451,10 +448,7 @@ func renewOnce(opts renewOpts) error {
 // renewal and rewrites the claude settings.json env block at -settings.
 func cmdRenew(args []string) error {
 	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
 	loop := fs.Bool("loop", false, "run as a renewal daemon (renew then sleep -interval, repeat until signal)")
 	interval := fs.Duration("interval", 12*time.Hour, "renewal interval in loop mode (default 12h; cert TTL is 24h)")
 	llmAuth := fs.String("llm-auth", agent.LLMAuthSubscription, "LLM auth mode: 'api-key' refreshes ANTHROPIC_AUTH_TOKEN after each cert renewal")
@@ -506,10 +500,7 @@ func cmdRenew(args []string) error {
 // --listen (loopback only).
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL + CA)")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity (cert+key+ca)", "path to bootstrap.json (for broker URL + CA)")
 	listen := fs.String("listen", "127.0.0.1:8462", "loopback address to serve plaintext MCP/LLM traffic on")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -549,12 +540,9 @@ func bootstrapPathOrDefault(path string) string {
 // to -out (0600) so the acceptance harness can drop it in the jail for boot.
 func cmdProvision(args []string) error {
 	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the manager identity (cert+key+ca)")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the manager identity (cert+key+ca)", "path to bootstrap.json (for broker URL if -broker-url not set)")
 	worker := fs.String("worker", "", "worker name to provision a ticket for")
 	out := fs.String("out", "", "path to write the worker bootstrap JSON (0600)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL if -broker-url not set)")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -605,10 +593,7 @@ func cmdProvision(args []string) error {
 
 func cmdCLI(verb string, args []string) error {
 	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
 	// verb-specific flags
 	var tool, op, to, tokenStr string
 	switch verb {
@@ -737,18 +722,26 @@ func resolveBrokerURL(brokerURL, bootstrapPath string) (string, error) {
 	if brokerURL != "" {
 		return brokerURL, nil
 	}
-	bsPath := bootstrapPath
-	if bsPath == "" {
-		bsPath = os.Getenv("LEVER_BOOTSTRAP")
-	}
-	if bsPath == "" {
-		bsPath = "./.lever/bootstrap.json"
-	}
-	bs, err := agent.LoadBootstrap(bsPath)
+	bs, err := agent.LoadBootstrap(bootstrapPathOrDefault(bootstrapPath))
 	if err != nil {
 		return "", fmt.Errorf("resolve broker URL: %w", err)
 	}
 	return bs.BrokerURL, nil
+}
+
+// commonFlags registers the id-dir/broker-url/bootstrap trio shared verbatim by
+// the five lazy-resolving subcommands (serve-capability, renew, gateway,
+// provision, cmdCLI) and returns the bound pointers. The id-dir and bootstrap
+// help strings genuinely differ per command (provision names the *manager*
+// identity; gateway's bootstrap also carries the CA), so they are passed in; the
+// broker-url flag is identical everywhere. cmdBoot is deliberately NOT a caller:
+// it has no --broker-url and eagerly resolves its --bootstrap default.
+func commonFlags(fs *flag.FlagSet, idDirHelp, bootstrapHelp string) (idDir, brokerURL, bootstrap *string) {
+	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
+	idDir = fs.String("id-dir", defaultIDDir, idDirHelp)
+	brokerURL = fs.String("broker-url", "", "broker URL (overrides bootstrap)")
+	bootstrap = fs.String("bootstrap", "", bootstrapHelp)
+	return idDir, brokerURL, bootstrap
 }
 
 // buildToolCallBody constructs the JSON-RPC 2.0 body for a tools/call request to

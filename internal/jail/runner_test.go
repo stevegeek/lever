@@ -10,10 +10,17 @@ import (
 	"github.com/stevegeek/lever/internal/exec"
 )
 
+// orbPrefix is a test-only helper mirroring the OrbStack backend's JailPrefix
+// (["orb","-m",machine,"-u",user]); the jail package itself is backend-agnostic
+// and no longer exports it.
+func orbPrefix(machine, user string) []string {
+	return []string{"orb", "-m", machine, "-u", user}
+}
+
 func TestJailRunnerWrapsWithOrbEnv(t *testing.T) {
 	host := exec.NewFakeRunner()
 	host.Script("orb", exec.Result{Stdout: "ok"})
-	jr := New(host, OrbPrefix("lever-jail", "leveruser"), "501")
+	jr := New(host, orbPrefix("lever-jail", "leveruser"), "501")
 	_, err := jr.Run(context.Background(), map[string]string{"SCION_HUB_ENDPOINT": "http://127.0.0.1:8080"}, "scion", "list", "--format", "json")
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -32,7 +39,7 @@ func TestJailRunnerWrapsWithOrbEnv(t *testing.T) {
 func TestJailRunnerRunInUsesEnvChdir(t *testing.T) {
 	host := exec.NewFakeRunner()
 	host.Script("orb", exec.Result{})
-	jr := New(host, OrbPrefix("lever-jail", "leveruser"), "501")
+	jr := New(host, orbPrefix("lever-jail", "leveruser"), "501")
 	_, _ = jr.RunIn(context.Background(), "/lever/workers/worker", nil, "scion", "init", "--non-interactive")
 	got := strings.Join(host.Calls[0].Args, " ")
 	if !strings.Contains(got, "env -C /lever/workers/worker") {
@@ -81,7 +88,7 @@ func TestForceHostNetworkEscapeHatch(t *testing.T) {
 			t.Setenv("LEVER_FORCE_HOST_NETWORK", c.val)
 			host := exec.NewFakeRunner()
 			host.Script("orb", exec.Result{})
-			jr := New(host, OrbPrefix("lever-x", "leveruser"), "501")
+			jr := New(host, orbPrefix("lever-x", "leveruser"), "501")
 			if _, err := jr.Run(context.Background(), nil, "true"); err != nil {
 				t.Fatalf("run: %v", err)
 			}

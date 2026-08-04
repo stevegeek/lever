@@ -6,7 +6,7 @@ import (
 )
 
 func TestLoadImageArgs(t *testing.T) {
-	got := LoadImageArgs(OrbPrefix("lever-demo", "leveruser"), "501")
+	got := LoadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -19,7 +19,7 @@ func TestLoadImageArgs(t *testing.T) {
 }
 
 func TestImageInspectArgs(t *testing.T) {
-	got := ImageInspectArgs(OrbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:latest")
+	got := ImageInspectArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:latest")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -53,7 +53,7 @@ func TestNormalizeImageID(t *testing.T) {
 }
 
 func TestPruneImagesArgs(t *testing.T) {
-	got := PruneImagesArgs(OrbPrefix("lever-demo", "leveruser"), "501")
+	got := PruneImagesArgs(orbPrefix("lever-demo", "leveruser"), "501")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",

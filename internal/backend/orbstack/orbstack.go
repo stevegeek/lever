@@ -21,7 +21,6 @@ import (
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/exec"
-	"github.com/stevegeek/lever/internal/jail"
 )
 
 // distro is the isolated-machine base image (arch-tagless: OrbStack selects the
@@ -270,6 +269,8 @@ func (o *OrbStack) Stop(ctx context.Context) error {
 
 // JailPrefix is the argv prefix that executes inside this backend's machine as
 // the given user. Exported for registry.JailRunner (broker-side re-derivation).
-func JailPrefix(machine, user string) []string { return jail.OrbPrefix(machine, user) }
+func JailPrefix(machine, user string) []string {
+	return []string{"orb", "-m", machine, "-u", user}
+}
 
 var _ backend.Backend = (*OrbStack)(nil)

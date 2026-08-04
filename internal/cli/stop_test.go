@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 )
@@ -23,6 +24,13 @@ import (
 func TestStopSuspendsManager(t *testing.T) {
 	dir := instanceDir(t, "demo")
 	t.Chdir(dir)
+
+	// Seed the controller PAT so the suspend client's HubTokenSource resolves it:
+	// this guards that stop's scion client keeps its HubTokenSource wiring (a
+	// dropped source would authenticate anonymously against the dev-auth-off hub).
+	if err := brokerctl.StateDir(dir).SaveControllerPAT("pat-stop-suspend"); err != nil {
+		t.Fatal(err)
+	}
 
 	f := leverexec.NewFakeRunner()
 	f.Script("scion", leverexec.Result{Stdout: "ok"})
@@ -45,6 +53,9 @@ func TestStopSuspendsManager(t *testing.T) {
 	call := f.Calls[0]
 	if call.Name != "scion" || len(call.Args) == 0 || call.Args[0] != "suspend" {
 		t.Fatalf("expected `scion suspend ...`, got %+v", call)
+	}
+	if got := call.Env["SCION_HUB_TOKEN"]; got != "pat-stop-suspend" {
+		t.Fatalf("suspend env SCION_HUB_TOKEN = %q, want %q (HubTokenSource dropped)", got, "pat-stop-suspend")
 	}
 }
 

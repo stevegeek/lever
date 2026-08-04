@@ -9,7 +9,6 @@ import (
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/scion"
 )
 
 // newWorkerCmd is the host-side worker admin command. Distinct from the
@@ -67,10 +66,7 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			// jail runner, authenticating with the controller PAT.
 			project := b.MountDest()
 			state := brokerctl.StateDir(filepath.Dir(path))
-			sc := scion.New(b.JailRunner(), scion.Options{
-				HubEndpoint:    "http://127.0.0.1:8080",
-				HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-			})
+			sc := brokerctl.HostScionClient(b.JailRunner(), state)
 			if err := sc.Delete(cmd.Context(), spec.Name, project); err != nil {
 				return fmt.Errorf("deleting worker %q scion record: %w", spec.Name, err)
 			}

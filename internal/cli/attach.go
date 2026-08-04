@@ -80,10 +80,7 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			// token into the exec'd argv itself, since the attach path bypasses
 			// this client's own env().
 			state := brokerctl.StateDir(filepath.Dir(cfgPath))
-			sc := scion.New(b.JailRunner(), scion.Options{
-				HubEndpoint:    "http://127.0.0.1:8080",
-				HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-			})
+			sc := brokerctl.HostScionClient(b.JailRunner(), state)
 			slug, project, err := attachTarget(app, b.MountDest(), argOrEmpty(args))
 			if err != nil {
 				return err

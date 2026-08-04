@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/scion"
 )
 
 // newStopCmd powers the jail machine off while keeping its disk, so a
@@ -63,13 +62,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-					// state was set alongside appName above; HubTokenSource lets
-					// suspend authenticate against the real, dev-auth-off hub with
-					// the controller PAT minted by a prior `lever apply`.
-					sc := scion.New(b.JailRunner(), scion.Options{
-						HubEndpoint:    "http://127.0.0.1:8080",
-						HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-					})
+					// state was set alongside appName above; HostScionClient's
+					// HubTokenSource lets suspend authenticate against the real,
+					// dev-auth-off hub with the controller PAT minted by a prior
+					// `lever apply`.
+					sc := brokerctl.HostScionClient(b.JailRunner(), state)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %v\n", serr)
 					}

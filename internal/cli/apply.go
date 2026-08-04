@@ -269,10 +269,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// it mid-apply (see scion.Options.HubTokenSource's doc: lazy, read at
 	// call time, wins over a static HubToken).
 	state := brokerctl.StateDir(filepath.Dir(configPath))
-	sc := scion.New(jr, scion.Options{
-		HubEndpoint:    "http://127.0.0.1:8080",
-		HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-	})
+	sc := brokerctl.HostScionClient(jr, state)
 
 	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort())
 

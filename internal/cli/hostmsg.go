@@ -53,10 +53,7 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 			// `lever apply`'s bootstrap-token step) via HubTokenSource, so `msg
 			// send` authenticates against the real, dev-auth-off hub.
 			state := brokerctl.StateDir(filepath.Dir(cfgPath))
-			sc := scion.New(b.JailRunner(), scion.Options{
-				HubEndpoint:    "http://127.0.0.1:8080",
-				HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-			})
+			sc := brokerctl.HostScionClient(b.JailRunner(), state)
 			if err := sc.Message(cmd.Context(), scion.MsgOpts{
 				To: "agent:" + slug, Body: strings.Join(args, " "), Interrupt: interrupt, Project: project,
 			}); err != nil {

@@ -17,6 +17,20 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
+// HostScionClient builds the host-side scion client used by every operator-side
+// verb (apply's start-manager, stop's suspend, attach, msg send, worker purge,
+// and the broker's own worker-dispatch runtime). It threads the loopback hub
+// endpoint (DefaultHubEndpoint is load-bearing: an empty HubEndpoint would omit
+// SCION_HUB_ENDPOINT and defer to the scion binary's default) and a lazy
+// HubTokenSource that reads the controller PAT from state at call time — so a
+// PAT minted mid-apply is picked up live (see scion.Options.HubTokenSource).
+func HostScionClient(jr leverexec.Runner, st State) *scion.Client {
+	return scion.New(jr, scion.Options{
+		HubEndpoint:    scion.DefaultHubEndpoint,
+		HubTokenSource: func() string { t, _ := st.LoadControllerPAT(); return t },
+	})
+}
+
 // writePIDFile records the running broker's pid at state.PID() (0600), after
 // its listeners have bound — so a broker.pid on disk means a broker is (or was)
 // actually serving, never a failed-bind ghost. Returns an error: a pid file we
@@ -97,14 +111,11 @@ func Serve(ctx context.Context, app *config.App, state State, version string) er
 		if jerr != nil {
 			return jerr
 		}
-		// HubTokenSource lets the broker's own worker-dispatch scion client
+		// HostScionClient lets the broker's own worker-dispatch scion client
 		// (host-side, operator identity) authenticate against the real,
 		// dev-auth-off hub with the controller PAT minted by `lever apply`'s
 		// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
-		cfg.Runtime = scion.New(jr, scion.Options{
-			HubEndpoint:    "http://127.0.0.1:8080",
-			HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-		})
+		cfg.Runtime = HostScionClient(jr, state)
 	}
 	cfg.Workers = WorkerSpecs(app, jailMount)
 	cfg.InstanceProject = jailMount

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 )
@@ -48,6 +49,13 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Seed the controller PAT so purge's scion delete client authenticates with
+	// it via HubTokenSource: guards the source wiring (a dropped source would
+	// delete anonymously against the dev-auth-off hub).
+	if err := brokerctl.StateDir(dir).SaveControllerPAT("pat-worker-purge"); err != nil {
+		t.Fatal(err)
+	}
+
 	f := leverexec.NewFakeRunner()
 	f.Script("scion", leverexec.Result{Stdout: "ok"})
 	sb := &stubBackend{runner: f}
@@ -68,6 +76,9 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	call := f.Calls[0]
 	if call.Name != "scion" || len(call.Args) < 2 || call.Args[0] != "delete" || call.Args[1] != "scratch" {
 		t.Fatalf("expected `scion delete scratch ...`, got %+v", call)
+	}
+	if got := call.Env["SCION_HUB_TOKEN"]; got != "pat-worker-purge" {
+		t.Fatalf("delete env SCION_HUB_TOKEN = %q, want %q (HubTokenSource dropped)", got, "pat-worker-purge")
 	}
 	// project is the mount root, passed via -g.
 	if !containsArg(call.Args, "/lever") {

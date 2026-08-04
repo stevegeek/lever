@@ -5,7 +5,7 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
-## [Unreleased]
+## [0.13.0] - 2026-08-04
 
 ### Fixed
 - **Directive tools no longer silently vanish from Claude Code sessions
@@ -21,6 +21,27 @@ version bump moves the block under the new version heading.
   broker call), so nothing is lost. NOTE: the bug lives in the baked
   `lever-agent` binary — the fix reaches a running instance only via an agent
   **image rebuild + restart**, not a host lever upgrade.
+- **Agent renewal no longer re-points Claude at the mTLS broker for LLM
+  traffic.** The 12-hourly leaf renewal (`RefreshLLMToken`) wrote
+  `ANTHROPIC_BASE_URL` from the broker URL while boot writes the loopback
+  gateway URL — a drift introduced when the `aa63f9f` gateway leaf-hot-reload
+  fix moved only boot. In api-key mode this re-introduced the 24h cached-leaf
+  LLM outage that fix closed, at the first renewal after boot. Renew now pins
+  the same loopback gateway URL as boot.
+
+### Changed
+- **Internal refactoring pass (no behavior change).** Executed the 2026-08-01
+  whole-codebase refactoring plan: deduplicated the broker security-path
+  handler preambles, unified the bootstrap wire envelope and agent HTTP
+  helpers into single sources, split the oversized orchestration functions
+  (`handleWorkerStart`, `start-manager`, `buildApplyDeps`, `brokerctl.Serve`),
+  extracted a shared backend base for orbstack/lima, introduced typed
+  constants for the agent-phase / step-kind / directive-kind / config-enum
+  string vocabularies, and deleted vestigial exports. Test count rose
+  (838 → 905); the full suite and `go vet` stay green, race-clean on the
+  concurrency-sensitive packages. One deliberate, documented micro-change rode
+  along: the `handleWorkerList` certless-caller audit line now carries the
+  underlying error like its siblings.
 
 ## [0.12.0] - 2026-07-31
 

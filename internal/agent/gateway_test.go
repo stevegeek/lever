@@ -124,6 +124,34 @@ func TestNewClientCertSourceFailsOnMissingIDDir(t *testing.T) {
 	}
 }
 
+// TestCAPoolRejectsBadPEM covers the shared helper's bad-CA branch (untested at
+// every call site before D2) and pins the caller-supplied error prefix.
+func TestCAPoolRejectsBadPEM(t *testing.T) {
+	if _, err := caPool(nil, "agent"); err == nil {
+		t.Fatal("caPool must reject an empty CA PEM")
+	}
+	_, err := caPool([]byte("-----BEGIN CERTIFICATE-----\nnotpem\n-----END CERTIFICATE-----"), "gateway")
+	if err == nil || !strings.Contains(err.Error(), "gateway: bad CA PEM") {
+		t.Fatalf("caPool must reject a malformed CA PEM with the site prefix, got %v", err)
+	}
+}
+
+// TestReloadingTransportRejectsBadPEM proves the shared transport builder
+// propagates the bad-CA-PEM failure (with the caller's prefix) after a valid
+// id-dir mint.
+func TestReloadingTransportRejectsBadPEM(t *testing.T) {
+	caInst, err := ca.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeLeaf(t, dir, caInst, time.Now())
+	_, err = reloadingTransport(dir, []byte("garbage"), "agent")
+	if err == nil || !strings.Contains(err.Error(), "agent: bad CA PEM") {
+		t.Fatalf("reloadingTransport must reject a malformed CA PEM, got %v", err)
+	}
+}
+
 // recordingBackend is a fake mTLS broker: it records each presented client-cert
 // serial and echoes the request path + body so the proxy round-trip is verifiable.
 type recordingBackend struct {

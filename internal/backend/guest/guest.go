@@ -24,16 +24,36 @@ type Guest struct {
 	Machine    string      // jail identifier (temp-file naming)
 }
 
+// rootRun / userRun execute args inside the guest via the RootPrefix / UserPrefix
+// transport respectively, e.g. RootPrefix ["orb","-u","root","-m",m] + args
+// ["iptables","-S",chain] runs `orb -u root -m <m> iptables -S <chain>`. Both
+// delegate to prefixRun, which defensively copies prefix[1:] before appending so
+// concurrent callers can't alias/corrupt each other's argv (append may reuse the
+// underlying array when capacity allows) — the single place the prefix-splat
+// idiom lives.
+func (g Guest) rootRun(ctx context.Context, args ...string) (exec.Result, error) {
+	return g.prefixRun(ctx, g.RootPrefix, args...)
+}
+
+func (g Guest) userRun(ctx context.Context, args ...string) (exec.Result, error) {
+	return g.prefixRun(ctx, g.UserPrefix, args...)
+}
+
+func (g Guest) prefixRun(ctx context.Context, prefix []string, args ...string) (exec.Result, error) {
+	argv := append(append([]string{}, prefix[1:]...), args...)
+	return g.Host.Run(ctx, nil, prefix[0], argv...)
+}
+
 // EnsureRuntimes installs prereqs + rootless Docker and rootless Podman.
 // Idempotent: the rootless install script and systemctl --start are safe to re-run.
 // Podman is daemonless so no service startup is needed; scion auto-prefers it over Docker.
 func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	root := func(script string) error {
-		_, err := g.Host.Run(ctx, nil, g.RootPrefix[0], append(append([]string{}, g.RootPrefix[1:]...), "bash", "-lc", script)...)
+		_, err := g.rootRun(ctx, "bash", "-lc", script)
 		return err
 	}
 	user := func(script string) error {
-		_, err := g.Host.Run(ctx, nil, g.UserPrefix[0], append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", script)...)
+		_, err := g.userRun(ctx, "bash", "-lc", script)
 		return err
 	}
 	// Guard the apt step behind a dpkg presence check so a re-apply (or a second
@@ -103,9 +123,7 @@ EOF`); err != nil {
 // GOARCH returns the guest's Go cross-compile arch, detected via `uname -m`
 // run inside the guest (as the run user).
 func (g Guest) GOARCH(ctx context.Context) (string, error) {
-	// Defensive copy: appending directly to g.UserPrefix[1:] risks aliasing/
-	// corrupting the shared slice's backing array when capacity allows reuse.
-	res, err := g.Host.Run(ctx, nil, g.UserPrefix[0], append(append([]string{}, g.UserPrefix[1:]...), "uname", "-m")...)
+	res, err := g.userRun(ctx, "uname", "-m")
 	if err != nil {
 		return "", fmt.Errorf("uname -m: %w", err)
 	}

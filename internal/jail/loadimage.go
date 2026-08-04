@@ -3,8 +3,11 @@ package jail
 import (
 	"context"
 	"fmt"
-	"os/exec"
+	osexec "os/exec"
+	"slices"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/exec"
 )
 
 // LoadImageArgs returns the full host argv (including the prefix binary) that
@@ -17,24 +20,22 @@ import (
 // <tree>/.img.tar on the host, then in-jail: podman load -i <tree>/.img.tar.
 // Implement the pipe first.
 func LoadImageArgs(prefix []string, uid string) []string {
-	argv := append([]string{}, prefix...)
-	return append(argv,
+	return slices.Concat(prefix, []string{
 		"env",
-		"XDG_RUNTIME_DIR=/run/user/"+uid,
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"podman", "load",
-	)
+	})
 }
 
 // ImageInspectArgs returns the host argv that reads the jail podman image ID
 // (config digest) for imageRef. The command exits non-zero when the image is
 // absent, which the ID readers below treat as "not loaded".
 func ImageInspectArgs(prefix []string, uid, imageRef string) []string {
-	argv := append([]string{}, prefix...)
-	return append(argv,
+	return slices.Concat(prefix, []string{
 		"env",
-		"XDG_RUNTIME_DIR=/run/user/"+uid,
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"podman", "image", "inspect", "--format", "{{.Id}}", imageRef,
-	)
+	})
 }
 
 // PruneImagesArgs returns the host argv that prunes DANGLING (untagged,
@@ -43,12 +44,11 @@ func ImageInspectArgs(prefix []string, uid, imageRef string) []string {
 // container, so the running manager — and any stopped worker's image — is
 // safe; it only reclaims the layers a rebuilt tag orphaned.
 func PruneImagesArgs(prefix []string, uid string) []string {
-	argv := append([]string{}, prefix...)
-	return append(argv,
+	return slices.Concat(prefix, []string{
 		"env",
-		"XDG_RUNTIME_DIR=/run/user/"+uid,
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
 		"podman", "image", "prune", "-f",
-	)
+	})
 }
 
 // normalizeImageID canonicalizes a docker/podman image ID for comparison. The
@@ -63,25 +63,28 @@ func normalizeImageID(id string) string {
 }
 
 // hostImageID returns the host docker image ID (config digest) for imageRef,
-// normalized (see normalizeImageID), or "" if docker cannot resolve it.
-func hostImageID(ctx context.Context, imageRef string) string {
-	out, err := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", imageRef).Output()
+// normalized (see normalizeImageID), or "" if docker cannot resolve it. Runs on
+// the host via the plain exec.Runner seam (not the in-jail JailRunner, which
+// would inject jail env and rewrite the argv).
+func hostImageID(ctx context.Context, r exec.Runner, imageRef string) string {
+	res, err := r.Run(ctx, nil, "docker", "image", "inspect", "--format", "{{.Id}}", imageRef)
 	if err != nil {
 		return ""
 	}
-	return normalizeImageID(string(out))
+	return normalizeImageID(res.Stdout)
 }
 
 // jailImageID returns the jail podman image ID for imageRef, normalized, or ""
 // if it is not loaded (the inspect exits non-zero) or the command otherwise
-// fails.
-func jailImageID(ctx context.Context, prefix []string, uid, imageRef string) string {
+// fails. The prefix argv runs on the host too (the prefix binary reaches into
+// the jail), so it takes the same plain host Runner.
+func jailImageID(ctx context.Context, r exec.Runner, prefix []string, uid, imageRef string) string {
 	args := ImageInspectArgs(prefix, uid, imageRef)
-	out, err := exec.CommandContext(ctx, args[0], args[1:]...).Output()
+	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
 		return ""
 	}
-	return normalizeImageID(string(out))
+	return normalizeImageID(res.Stdout)
 }
 
 // ImageLoaded reports whether the jail's rootless podman already holds imageRef
@@ -92,20 +95,23 @@ func jailImageID(ctx context.Context, prefix []string, uid, imageRef string) str
 // tag whose ID no longer matches), so an unreliable check at worst costs a
 // redundant load — never a wrongly-skipped one that would leave a stale image
 // in the jail.
-func ImageLoaded(ctx context.Context, prefix []string, uid, imageRef string) bool {
-	host := hostImageID(ctx, imageRef)
+func ImageLoaded(ctx context.Context, r exec.Runner, prefix []string, uid, imageRef string) bool {
+	host := hostImageID(ctx, r, imageRef)
 	if host == "" {
 		return false
 	}
-	return host == jailImageID(ctx, prefix, uid, imageRef)
+	return host == jailImageID(ctx, r, prefix, uid, imageRef)
 }
 
-// PruneImages removes dangling images from the jail (see PruneImagesArgs).
-func PruneImages(ctx context.Context, prefix []string, uid string) error {
+// PruneImages removes dangling images from the jail (see PruneImagesArgs). Runs
+// on the host via the plain exec.Runner seam. Unlike the removed CombinedOutput
+// path, the Runner captures stdout and stderr separately, so the error detail is
+// composed from both (stderr first, where podman writes failures).
+func PruneImages(ctx context.Context, r exec.Runner, prefix []string, uid string) error {
 	args := PruneImagesArgs(prefix, uid)
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("prune images: %w: %s", err, strings.TrimSpace(string(out)))
+	res, err := r.Run(ctx, nil, args[0], args[1:]...)
+	if err != nil {
+		return fmt.Errorf("prune images: %w: %s", err, strings.TrimSpace(res.Stderr+res.Stdout))
 	}
 	return nil
 }
@@ -115,9 +121,9 @@ func PruneImages(ctx context.Context, prefix []string, uid string) error {
 // argv. Uses os/exec directly because the payload can be multi-GB — the
 // exec.Runner abstraction buffers stdout in memory, which is unsuitable here.
 func LoadImage(ctx context.Context, prefix []string, uid, imageRef string) error {
-	save := exec.CommandContext(ctx, "docker", "save", imageRef)
+	save := osexec.CommandContext(ctx, "docker", "save", imageRef)
 	args := LoadImageArgs(prefix, uid)
-	load := exec.CommandContext(ctx, args[0], args[1:]...)
+	load := osexec.CommandContext(ctx, args[0], args[1:]...)
 
 	pipe, err := save.StdoutPipe()
 	if err != nil {

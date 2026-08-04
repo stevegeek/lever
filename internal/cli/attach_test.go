@@ -64,6 +64,33 @@ func TestAttachTargetUnknownListsValidNames(t *testing.T) {
 	}
 }
 
+// TestAttachNamePositionalIsNotAConfigPath pins that `attach <name>`'s positional
+// is the agent NAME (fed to attachTarget), never the config path: config is always
+// discovered from the CWD (the explicit-empty variant). A regression that mistook
+// the NAME for a config path would fail at config.Load("scratch") with a
+// file-not-found error, never reaching the jail-not-up hint.
+func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
+	dir := instanceDir(t, "demo")
+	t.Chdir(dir)
+
+	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
+	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root.SetArgs([]string{"attach", "scratch"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected attach to fail when the jail is not up")
+	}
+	// Reaching the jail-not-up hint proves lever.yaml loaded from the CWD and the
+	// positional "scratch" was NOT treated as a config path.
+	if !strings.Contains(err.Error(), "lever up") {
+		t.Fatalf("`attach scratch` must load config from CWD and fail at ResolveRunUser; got: %v", err)
+	}
+}
+
 // TestAttachIsPassiveWhenJailNotUp is the regression test for the reviewed
 // finding: `lever attach` against a down jail must fail fast with a
 // `lever up` hint, never provision the machine (no buildApplyDeps/EnsureUp).

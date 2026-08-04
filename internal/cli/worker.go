@@ -9,7 +9,6 @@ import (
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/scion"
 )
 
 // newWorkerCmd is the host-side worker admin command. Distinct from the
@@ -29,7 +28,7 @@ func newWorkerCmd(factory BackendFactory) *cobra.Command {
 // Destructive, so it requires --force. Only configured worker names are accepted.
 func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 	var force bool
-	var machine, backendFlag string
+	var machine, backendFlag *string
 	c := &cobra.Command{
 		Use:   "purge NAME",
 		Args:  cobra.ExactArgs(1),
@@ -40,20 +39,14 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 				return fmt.Errorf("`lever worker purge %s` deletes the worker's scion record and staged bootstrap so it can run a new task (its work product in the workspace is KEPT); re-run with --force to proceed", name)
 			}
 
-			path, err := resolveConfigPath("")
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			// Config (and its beside-the-config state dir) is discovered from the
+			// CWD; the positional is the worker NAME, never a config path.
+			app, state, err := loadAppAndState(nil)
 			if err != nil {
 				return err
 			}
 
-			m, err := machineFromFlagOrConfig(machine)
-			if err != nil {
-				return err
-			}
-			b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+			_, b, err := resolveJailBackend(factory, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
@@ -63,18 +56,14 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			// match exactly — never a manager-supplied or ad-hoc path.
 			spec, ok := findWorkerSpec(brokerctl.WorkerSpecs(app, b.MountDest()), name)
 			if !ok {
-				return fmt.Errorf("unknown worker %q — declare it under `workers:` in %s", name, filepath.Base(path))
+				return fmt.Errorf("unknown worker %q — declare it under `workers:` in %s", name, config.CanonicalName)
 			}
 
 			// Delete the scion record via the same runtime seam newDestroyCmd/
 			// restartManagerFresh reach through: a host-side scion client over the
 			// jail runner, authenticating with the controller PAT.
 			project := b.MountDest()
-			state := brokerctl.StateDir(filepath.Dir(path))
-			sc := scion.New(b.JailRunner(), scion.Options{
-				HubEndpoint:    "http://127.0.0.1:8080",
-				HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-			})
+			sc := brokerctl.HostScionClient(b.JailRunner(), state)
 			if err := sc.Delete(cmd.Context(), spec.Name, project); err != nil {
 				return fmt.Errorf("deleting worker %q scion record: %w", spec.Name, err)
 			}
@@ -94,8 +83,7 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&force, "force", false, "confirm the destructive purge (required)")
-	c.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
-	c.Flags().StringVar(&backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
+	machine, backendFlag = addJailTargetFlags(c)
 	return c
 }
 

@@ -59,7 +59,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	// live chain (existingClosedAlias never reads v6), so a re-apply that hits
 	// the skip must leave the previously-resolved v6 alias untouched rather
 	// than zeroing it.
-	b.aliasV6 = "fd07::fe"
+	b.AliasV6 = "fd07::fe"
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
@@ -74,8 +74,8 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	if b.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", b.HostAliasV4())
 	}
-	if b.aliasV6 != "fd07::fe" {
-		t.Fatalf("skip path must not clobber a prior aliasV6 (it cannot know v6 from the live chain); got %q", b.aliasV6)
+	if b.AliasV6 != "fd07::fe" {
+		t.Fatalf("skip path must not clobber a prior aliasV6 (it cannot know v6 from the live chain); got %q", b.AliasV6)
 	}
 }
 
@@ -675,7 +675,7 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 func TestJailTransportMethods(t *testing.T) {
 	o := New(exec.NewFakeRunner(), "lever-x")
 	// Pre-EnsureUp the prefix uses the zero-value user; we only test post-resolve.
-	o.runUser, o.runUID = "stephen", "501"
+	o.User, o.UID = "stephen", "501"
 
 	if got := JailPrefix("lever-x", "stephen"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
 		t.Fatalf("JailPrefix = %v", got)
@@ -686,6 +686,69 @@ func TestJailTransportMethods(t *testing.T) {
 	attach := o.AttachArgv([]string{"scion", "attach"})
 	if attach[0] != "orb" || attach[len(attach)-1] != "attach" {
 		t.Fatalf("AttachArgv = %v", attach)
+	}
+}
+
+// --- F1 guard: per-backend exact-argv assertions for the image-op / jail-
+// transport forwarders. Before F1 these forwarders had no per-backend argv
+// assertion (TestJailTransportMethods only checked non-nil), so a prefix mis-
+// wiring in the shared base — the orbstack jail prefix is run-user-dependent —
+// would only fail at runtime. LoadImage/ImageLoaded/PruneJailImages exec docker
+// directly (unobservable offline) but share jailPrefix() with JailRunner and
+// AttachArgv, so pinning those two transitively guards them; InstallGuestBinary
+// is pinned directly through the root transport. ---
+
+func TestInstallGuestBinaryArgv(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("bash", exec.Result{})
+	o := New(f, "lever-x")
+	if err := o.InstallGuestBinary(context.Background(), "/host/lever-agent", "/usr/local/bin/lever-agent"); err != nil {
+		t.Fatalf("InstallGuestBinary: %v", err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("want 1 host call, got %d", len(f.Calls))
+	}
+	c := f.Calls[0]
+	if c.Name != "bash" || len(c.Args) != 2 || c.Args[0] != "-c" {
+		t.Fatalf("want `bash -c <script>`, got %s %v", c.Name, c.Args)
+	}
+	// The root transport prefix must be wired through verbatim (shell-quoted).
+	if !strings.Contains(c.Args[1], `'orb' '-u' 'root' '-m' 'lever-x'`) {
+		t.Fatalf("root prefix mis-wired in install script: %q", c.Args[1])
+	}
+}
+
+func TestJailRunnerArgv(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb", exec.Result{Stdout: "ok\n"})
+	o := New(f, "lever-x")
+	o.User, o.UID = "stephen", "501"
+	if _, err := o.JailRunner().Run(context.Background(), nil, "true"); err != nil {
+		t.Fatalf("JailRunner run: %v", err)
+	}
+	c := f.Calls[len(f.Calls)-1]
+	// jail.Runner uses prefix[0] as the host command and prefix[1:]+env as args:
+	// `orb -m lever-x -u stephen env <jailenv...> true`.
+	if c.Name != "orb" {
+		t.Fatalf("host command = %q, want orb", c.Name)
+	}
+	if wantPrefix := []string{"-m", "lever-x", "-u", "stephen", "env"}; !reflect.DeepEqual(c.Args[:5], wantPrefix) {
+		t.Fatalf("jail prefix mis-wired: %v", c.Args[:5])
+	}
+	if c.Args[len(c.Args)-1] != "true" {
+		t.Fatalf("inner command not last: %v", c.Args)
+	}
+}
+
+func TestAttachArgvFullPrefix(t *testing.T) {
+	o := New(exec.NewFakeRunner(), "lever-x")
+	o.User, o.UID = "stephen", "501"
+	attach := o.AttachArgv([]string{"scion", "attach"})
+	if wantPrefix := []string{"orb", "-m", "lever-x", "-u", "stephen", "env"}; !reflect.DeepEqual(attach[:6], wantPrefix) {
+		t.Fatalf("attach prefix mis-wired: %v", attach[:6])
+	}
+	if last2 := attach[len(attach)-2:]; !reflect.DeepEqual(last2, []string{"scion", "attach"}) {
+		t.Fatalf("inner command not trailing: %v", last2)
 	}
 }
 

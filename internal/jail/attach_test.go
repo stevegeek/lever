@@ -8,7 +8,7 @@ import (
 func TestAttachArgv(t *testing.T) {
 	t.Setenv("LEVER_FORCE_HOST_NETWORK", "") // pin the default regardless of ambient env
 	inner := []string{"scion", "attach", "demo", "-g", "/lever"}
-	got := AttachArgv(OrbPrefix("lever-demo", "leveruser"), "501", inner)
+	got := AttachArgv(orbPrefix("lever-demo", "leveruser"), "501", inner)
 	// Default: own pasta netns, so SCION_FORCE_HOST_NETWORK is NOT emitted.
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser", "env",

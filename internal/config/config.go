@@ -3,6 +3,7 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"net"
 	"os"
@@ -74,10 +75,7 @@ type Tool struct {
 // EffectiveGate resolves a tool's capability grain: the declared gate, or
 // GateFine when unset.
 func (t Tool) EffectiveGate() Gate {
-	if t.Gate != "" {
-		return t.Gate
-	}
-	return GateFine
+	return cmp.Or(t.Gate, GateFine)
 }
 
 // ToolSupervisorPATH is the EXACT PATH the broker supervisor spawns command
@@ -117,9 +115,7 @@ func LookPathIn(bin, pathList string) (string, error) {
 // backend a literal loopback IP unless explicitly opted out. gate applies to
 // external tools only; coarse replaces the operations list with the wildcard.
 func (t Tool) validate() error {
-	switch t.Gate {
-	case "", GateFine, GateCoarse:
-	default:
+	if !t.Gate.valid() {
 		return fmt.Errorf("config: broker tool %q gate %q invalid (want fine|coarse)", t.Name, t.Gate)
 	}
 	for _, o := range t.Operations {
@@ -142,11 +138,9 @@ func (t Tool) validate() error {
 		}
 		bin := t.Command[0]
 		if !strings.ContainsRune(bin, '/') {
-			resolved, err := LookPathIn(bin, ToolSupervisorPATH)
-			if err != nil {
+			if _, err := LookPathIn(bin, ToolSupervisorPATH); err != nil {
 				return fmt.Errorf("config: broker tool %q command %q not found on the supervisor PATH (%s); use an absolute path or install it there", t.Name, bin, ToolSupervisorPATH)
 			}
-			_ = resolved
 		} else if !IsExecutableFile(bin) {
 			return fmt.Errorf("config: broker tool %q command %q is not an executable file", t.Name, bin)
 		}
@@ -219,6 +213,12 @@ const (
 	LLMAuthAPIKey       LLMAuthMode = "api-key"
 )
 
+// valid reports whether m is a declared mode or unset (unset resolves to a
+// default at the Effective* layer).
+func (m LLMAuthMode) valid() bool {
+	return m == "" || m == LLMAuthSubscription || m == LLMAuthAPIKey
+}
+
 // Gate selects the capability grain the broker enforces on an EXTERNAL tool.
 //   - fine (the default): only the declared operations are callable; a token
 //     must name the specific MCP tool being invoked (op == params.name).
@@ -231,6 +231,12 @@ const (
 	GateFine   Gate = "fine"
 	GateCoarse Gate = "coarse"
 )
+
+// valid reports whether g is a declared grain or unset (unset resolves to
+// GateFine via EffectiveGate).
+func (g Gate) valid() bool {
+	return g == "" || g == GateFine || g == GateCoarse
+}
 
 // EgressMode selects the jail's outbound network posture. It is independent of
 // LLMAuthMode: api-key isolates the credential; egress controls what the agent
@@ -247,6 +253,12 @@ const (
 	EgressOpen   EgressMode = "open"
 	EgressClosed EgressMode = "closed"
 )
+
+// valid reports whether m is a declared posture or unset (unset resolves to
+// open via ClosedInternetEgress).
+func (m EgressMode) valid() bool {
+	return m == "" || m == EgressOpen || m == EgressClosed
+}
 
 // Default broker ports, used when the config leaves jail_port/admin_port unset
 // (0). They are fixed constants rather than dynamically allocated so the apply
@@ -297,6 +309,12 @@ const (
 	AutoReenrolManager AutoReenrolMode = "manager"
 	AutoReenrolOff     AutoReenrolMode = "off"
 )
+
+// valid reports whether m is a declared mode or unset (unset resolves to
+// AutoReenrolAll via EffectiveAutoReenrol).
+func (m AutoReenrolMode) valid() bool {
+	return m == "" || m == AutoReenrolAll || m == AutoReenrolManager || m == AutoReenrolOff
+}
 
 type Manager struct {
 	Image          string          `yaml:"image"`
@@ -534,9 +552,7 @@ func (a *App) Validate() error {
 	if err := validateBackend(a.Backend); err != nil {
 		return err
 	}
-	switch a.Broker.AutoReenrol {
-	case "", AutoReenrolAll, AutoReenrolManager, AutoReenrolOff:
-	default:
+	if !a.Broker.AutoReenrol.valid() {
 		return fmt.Errorf("config: broker.auto_reenrol %q must be one of all|manager|off (or unset = all)", a.Broker.AutoReenrol)
 	}
 	if err := validateDisk(a.Disk); err != nil {
@@ -571,37 +587,8 @@ func (a *App) Validate() error {
 		return fmt.Errorf("config: manager.prompt_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.PromptFile)
 	}
 	for _, g := range a.Workers {
-		if g.Name == "" || g.Dir == "" {
-			return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
-		}
-		if !nameRE.MatchString(g.Name) {
-			return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
-		}
-		if g.Name == a.ManagerCN() {
-			return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
-		}
-		if g.Name == a.Name {
-			// The manager's scion agent slug IS the app name (apply dispatches
-			// it as Worker: app.Name), and the broker routes manager-recipient
-			// matches by slug — a worker named like the app would be shadowed
-			// (messages to it silently route to the manager).
-			return fmt.Errorf("config: worker name %q collides with the manager agent (the app name) — rename the worker or the app", g.Name)
-		}
-		if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
-			return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
-		}
-		if filepath.Clean(g.Dir) == "." {
-			// A "." dir makes WorkerDir(g) == a.Tree, so the worker's workspace would
-			// be the whole tree — mounting root defeats R4 sibling isolation (the
-			// worker could read every sibling's subdir). Workers must occupy a strict
-			// subdir of the shared instance project. (confinedRel rejects "." for
-			// `tree` for the analogous root-is-the-mount reason.)
-			return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
-		}
-		if g.Image != "" {
-			if err := a.Security.validateImage(fmt.Sprintf("worker %q image", g.Name), g.Image); err != nil {
-				return err
-			}
+		if err := a.validateWorker(g); err != nil {
+			return err
 		}
 	}
 	if err := a.validateBroker(); err != nil {
@@ -609,6 +596,44 @@ func (a *App) Validate() error {
 	}
 	if err := a.validateOperator(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateWorker validates a single worker declaration: name shape, collisions
+// with the manager's identities, dir confinement, and image policy.
+func (a *App) validateWorker(g Worker) error {
+	if g.Name == "" || g.Dir == "" {
+		return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
+	}
+	if !nameRE.MatchString(g.Name) {
+		return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
+	}
+	if g.Name == a.ManagerCN() {
+		return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
+	}
+	if g.Name == a.Name {
+		// The manager's scion agent slug IS the app name (apply dispatches
+		// it as Worker: app.Name), and the broker routes manager-recipient
+		// matches by slug — a worker named like the app would be shadowed
+		// (messages to it silently route to the manager).
+		return fmt.Errorf("config: worker name %q collides with the manager agent (the app name) — rename the worker or the app", g.Name)
+	}
+	if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
+		return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
+	}
+	if filepath.Clean(g.Dir) == "." {
+		// A "." dir makes WorkerDir(g) == a.Tree, so the worker's workspace would
+		// be the whole tree — mounting root defeats R4 sibling isolation (the
+		// worker could read every sibling's subdir). Workers must occupy a strict
+		// subdir of the shared instance project. (confinedRel rejects "." for
+		// `tree` for the analogous root-is-the-mount reason.)
+		return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
+	}
+	if g.Image != "" {
+		if err := a.Security.validateImage(fmt.Sprintf("worker %q image", g.Name), g.Image); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -661,17 +686,14 @@ func (a *App) validateNonGitTree() error {
 func (a *App) validateBroker() error {
 	// LLM-auth: validate the enum and, when any agent is api-key, require an
 	// api_key_file that exists at 0600 (fail closed on a world/group-readable key).
-	validMode := func(m LLMAuthMode) bool {
-		return m == "" || m == LLMAuthSubscription || m == LLMAuthAPIKey
-	}
-	if !validMode(a.Broker.LLMAuth) {
+	if !a.Broker.LLMAuth.valid() {
 		return fmt.Errorf("config: broker.llm_auth %q invalid (want subscription|api-key)", a.Broker.LLMAuth)
 	}
-	if !validMode(a.Manager.LLMAuth) {
+	if !a.Manager.LLMAuth.valid() {
 		return fmt.Errorf("config: manager.llm_auth %q invalid (want subscription|api-key)", a.Manager.LLMAuth)
 	}
 	for _, g := range a.Workers {
-		if !validMode(g.LLMAuth) {
+		if !g.LLMAuth.valid() {
 			return fmt.Errorf("config: worker %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
 	}
@@ -688,9 +710,7 @@ func (a *App) validateBroker() error {
 	// Egress is an independent posture (not derived from llm_auth). `closed`
 	// requires a uniformly api-key instance — a subscription agent needs direct
 	// internet to reach Anthropic, which a closed jail forbids.
-	switch a.Egress {
-	case "", EgressOpen, EgressClosed:
-	default:
+	if !a.Egress.valid() {
 		return fmt.Errorf("config: egress %q invalid (want open|closed)", a.Egress)
 	}
 	if a.Egress == EgressClosed {
@@ -814,7 +834,7 @@ func (a *App) validateBrokerGrants() error {
 		}
 		return nil
 	}
-	validate := func(who string, obtain []Grant, delegate []DelegateGrant) error {
+	checkAgentGrants := func(who string, obtain []Grant, delegate []DelegateGrant) error {
 		for _, g := range obtain {
 			if err := checkCap(who+".obtain", g.Tool, g.Op); err != nil {
 				return err
@@ -832,11 +852,11 @@ func (a *App) validateBrokerGrants() error {
 		}
 		return nil
 	}
-	if err := validate("manager", a.Manager.Obtain, a.Manager.Delegate); err != nil {
+	if err := checkAgentGrants("manager", a.Manager.Obtain, a.Manager.Delegate); err != nil {
 		return err
 	}
 	for _, g := range a.Workers {
-		if err := validate("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
+		if err := checkAgentGrants("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
 			return err
 		}
 	}
@@ -849,64 +869,45 @@ func (a *App) WorkerDir(g Worker) string { return filepath.Join(a.Tree, g.Dir) }
 // EffectiveManagerLLMAuth resolves the manager's LLM-auth mode: the broker
 // default (subscription when unset).
 func (a *App) EffectiveManagerLLMAuth() LLMAuthMode {
-	if a.Manager.LLMAuth != "" {
-		return a.Manager.LLMAuth
-	}
-	return a.brokerLLMAuthDefault()
+	return cmp.Or(a.Manager.LLMAuth, a.brokerLLMAuthDefault())
 }
 
 // EffectiveWorkerLLMAuth resolves a worker's LLM-auth mode: its own override else
 // the broker default.
 func (a *App) EffectiveWorkerLLMAuth(g Worker) LLMAuthMode {
-	if g.LLMAuth != "" {
-		return g.LLMAuth
-	}
-	return a.brokerLLMAuthDefault()
+	return cmp.Or(g.LLMAuth, a.brokerLLMAuthDefault())
 }
 
 // EffectiveJailPort is the broker's in-jail mTLS port: the configured value, or
 // DefaultBrokerJailPort when unset (0).
 func (a *App) EffectiveJailPort() int {
-	if a.Broker.JailPort != 0 {
-		return a.Broker.JailPort
-	}
-	return DefaultBrokerJailPort
+	return cmp.Or(a.Broker.JailPort, DefaultBrokerJailPort)
 }
 
 // EffectiveAdminPort is the broker's loopback admin port: the configured value,
 // or DefaultBrokerAdminPort when unset (0).
 func (a *App) EffectiveAdminPort() int {
-	if a.Broker.AdminPort != 0 {
-		return a.Broker.AdminPort
-	}
-	return DefaultBrokerAdminPort
+	return cmp.Or(a.Broker.AdminPort, DefaultBrokerAdminPort)
 }
 
 // EffectiveAutoReenrol is the natural-lapse healer gate: the configured value,
 // or AutoReenrolAll when unset. Validated at load (Validate rejects unknown
 // values), so callers may switch on the three constants exhaustively.
 func (a *App) EffectiveAutoReenrol() AutoReenrolMode {
-	if a.Broker.AutoReenrol != "" {
-		return a.Broker.AutoReenrol
-	}
-	return AutoReenrolAll
+	return cmp.Or(a.Broker.AutoReenrol, AutoReenrolAll)
 }
 
 func (a *App) brokerLLMAuthDefault() LLMAuthMode {
-	if a.Broker.LLMAuth != "" {
-		return a.Broker.LLMAuth
-	}
-	return LLMAuthAPIKey
+	return cmp.Or(a.Broker.LLMAuth, LLMAuthAPIKey)
 }
 
 // ClosedInternetEgress reports the jail's egress posture, applied jail-wide. It
 // is an explicit, independent knob (App.Egress) — NOT derived from llm_auth:
 // closed iff `egress: closed` is set. validateBroker guarantees `closed`
 // implies a uniformly api-key instance, so a subscription agent is never left
-// unable to reach Anthropic. The warning return is retained for the apply call
-// site but is always empty now that the posture is explicit.
-func (a *App) ClosedInternetEgress() (closed bool, warning string) {
-	return a.Egress == EgressClosed, ""
+// unable to reach Anthropic.
+func (a *App) ClosedInternetEgress() bool {
+	return a.Egress == EgressClosed
 }
 
 // imageArch is the arch appended to a tagless local image ref (see archImage).
@@ -970,10 +971,7 @@ func (a *App) WorkerByName(name string) (Worker, bool) {
 
 // ManagerCN returns the manager's cert CN (broker.manager_identity, default "manager").
 func (a *App) ManagerCN() string {
-	if a.Broker.ManagerIdentity != "" {
-		return a.Broker.ManagerIdentity
-	}
-	return "manager"
+	return cmp.Or(a.Broker.ManagerIdentity, "manager")
 }
 
 // ManagerPromptPath returns the absolute path to the manager's prompt file, or

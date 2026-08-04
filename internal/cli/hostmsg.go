@@ -2,12 +2,10 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
-	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -30,11 +28,9 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MinimumNArgs(1),
 		Short: "Send a message to the manager or a worker (--to NAME)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfgPath, err := resolveConfigPath("")
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(cfgPath)
+			// Config is always discovered from the CWD; the recipient NAME comes
+			// from --to, never a positional config path.
+			app, state, err := loadAppAndState(nil)
 			if err != nil {
 				return err
 			}
@@ -52,11 +48,7 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 			// state gives this client the controller PAT (minted by a prior
 			// `lever apply`'s bootstrap-token step) via HubTokenSource, so `msg
 			// send` authenticates against the real, dev-auth-off hub.
-			state := brokerctl.StateDir(filepath.Dir(cfgPath))
-			sc := scion.New(b.JailRunner(), scion.Options{
-				HubEndpoint:    "http://127.0.0.1:8080",
-				HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-			})
+			sc := brokerctl.HostScionClient(b.JailRunner(), state)
 			if err := sc.Message(cmd.Context(), scion.MsgOpts{
 				To: "agent:" + slug, Body: strings.Join(args, " "), Interrupt: interrupt, Project: project,
 			}); err != nil {

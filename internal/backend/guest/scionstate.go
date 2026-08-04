@@ -29,8 +29,7 @@ for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
   echo "ENTRY $d $wp"
 done
 `
-	args := append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", script)
-	res, err := g.Host.Run(ctx, nil, g.UserPrefix[0], args...)
+	res, err := g.userRun(ctx, "bash", "-lc", script)
 	if err != nil {
 		return backend.ScionProjectState{}, fmt.Errorf("guest: read scion project state: %w", err)
 	}
@@ -44,8 +43,7 @@ done
 // no-op when nothing matches. wp is a lever constant (/lever or
 // /lever/workers/<sanitized-name>), never user input.
 func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
-	args := append(append([]string{}, g.UserPrefix[1:]...), "bash", "-lc", scionConfigRemoveScript(wp))
-	if _, err := g.Host.Run(ctx, nil, g.UserPrefix[0], args...); err != nil {
+	if _, err := g.userRun(ctx, "bash", "-lc", scionConfigRemoveScript(wp)); err != nil {
 		return fmt.Errorf("guest: remove scion project configs for %s: %w", wp, err)
 	}
 	return nil

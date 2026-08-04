@@ -22,7 +22,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("bash -c", exec.Result{})
 
 	o := New(f, "lever-vtest")
-	if err := o.guest().EnsureScion(context.Background(), "", pin); err != nil {
+	if err := o.Guest().EnsureScion(context.Background(), "", pin); err != nil {
 		t.Fatalf("EnsureScion(version): %v", err)
 	}
 
@@ -49,7 +49,7 @@ func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
 	f.Script("/opt/go/bin/go mod download -json", exec.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
 	o := New(f, "lever-vtest")
-	if err := o.guest().EnsureScion(context.Background(), "", "deadbeef"); err == nil {
+	if err := o.Guest().EnsureScion(context.Background(), "", "deadbeef"); err == nil {
 		t.Fatal("expected error when go mod download reports a bad revision")
 	}
 }

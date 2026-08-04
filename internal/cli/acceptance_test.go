@@ -9,86 +9,6 @@ import (
 	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
-// TestClassifyCurlResult asserts the pure egress-classification helper correctly
-// maps curl exit codes to blocked/allowed/uncertain without touching the live jail.
-// This makes the critical egress discrimination CI-testable.
-func TestClassifyCurlResult(t *testing.T) {
-	errNonZero := fmt.Errorf("exit 1") // sentinel — classifyCurlResult only checks err == nil, not the value
-
-	cases := []struct {
-		name        string
-		res         leverexec.Result
-		err         error
-		wantState   string
-		wantErrNil  bool
-		wantErrSnip string // substring expected in error message (if non-nil)
-	}{
-		{
-			name:       "exit 0 = allowed (egress open)",
-			res:        leverexec.Result{Code: 0, Stdout: "<html>", Stderr: ""},
-			err:        nil,
-			wantState:  "allowed",
-			wantErrNil: true,
-		},
-		{
-			name:       "exit 7 = blocked (CURLE_COULDNT_CONNECT)",
-			res:        leverexec.Result{Code: 7, Stderr: "curl: (7) Failed to connect"},
-			err:        errNonZero,
-			wantState:  "blocked",
-			wantErrNil: true,
-		},
-		{
-			name:       "exit 28 = blocked (CURLE_OPERATION_TIMEDOUT)",
-			res:        leverexec.Result{Code: 28, Stderr: "curl: (28) Operation timed out"},
-			err:        errNonZero,
-			wantState:  "blocked",
-			wantErrNil: true,
-		},
-		{
-			name:        "exit 127 = uncertain (curl not found by exit code)",
-			res:         leverexec.Result{Code: 127, Stderr: "bash: curl: command not found"},
-			err:         errNonZero,
-			wantState:   "uncertain",
-			wantErrNil:  false,
-			wantErrSnip: "not found",
-		},
-		{
-			name:        "exit 126 with not-found text = uncertain (curl absent, shell absorbed code)",
-			res:         leverexec.Result{Code: 126, Stderr: "curl: No such file or directory"},
-			err:         errNonZero,
-			wantState:   "uncertain",
-			wantErrNil:  false,
-			wantErrSnip: "not found",
-		},
-		{
-			name:        "exit 6 (DNS failure) = uncertain (FAIL-CLOSED)",
-			res:         leverexec.Result{Code: 6, Stderr: "curl: (6) Could not resolve host"},
-			err:         errNonZero,
-			wantState:   "uncertain",
-			wantErrNil:  false,
-			wantErrSnip: "FAIL-CLOSED",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			state, err := classifyCurlResult(tc.res, tc.err)
-			if state != tc.wantState {
-				t.Errorf("state = %q, want %q", state, tc.wantState)
-			}
-			if tc.wantErrNil && err != nil {
-				t.Errorf("want nil error, got %v", err)
-			}
-			if !tc.wantErrNil && err == nil {
-				t.Errorf("want non-nil error, got nil")
-			}
-			if tc.wantErrSnip != "" && err != nil && !strings.Contains(err.Error(), tc.wantErrSnip) {
-				t.Errorf("error %q missing expected snippet %q", err.Error(), tc.wantErrSnip)
-			}
-		})
-	}
-}
-
 // TestVMIDDirPerRole asserts the per-role VM identity dirs are distinct and
 // non-empty (the manager delegates, the worker exercises — they must not share
 // an identity directory).
@@ -106,39 +26,39 @@ func TestVMIDDirPerRole(t *testing.T) {
 func TestEgressVerdict(t *testing.T) {
 	cases := []struct {
 		name      string
-		jail      string
-		admin     string
+		jail      probeState
+		admin     probeState
 		wantPass  bool
 		wantErr   bool
 		errSubstr string
 	}{
 		{
 			name:     "jail reachable + admin blocked = PASS",
-			jail:     "reachable",
-			admin:    "blocked",
+			jail:     stateReachable,
+			admin:    stateBlocked,
 			wantPass: true,
 			wantErr:  false,
 		},
 		{
 			name:      "jail reachable + admin reachable = FAIL (admin not contained)",
-			jail:      "reachable",
-			admin:     "reachable",
+			jail:      stateReachable,
+			admin:     stateReachable,
 			wantPass:  false,
 			wantErr:   true,
 			errSubstr: "ADMIN port",
 		},
 		{
 			name:      "jail blocked = FAIL-CLOSED (allowlist or broker down)",
-			jail:      "blocked",
-			admin:     "blocked",
+			jail:      stateBlocked,
+			admin:     stateBlocked,
 			wantPass:  false,
 			wantErr:   true,
 			errSubstr: "jail port not reachable",
 		},
 		{
 			name:      "jail uncertain = FAIL-CLOSED",
-			jail:      "uncertain",
-			admin:     "blocked",
+			jail:      stateUncertain,
+			admin:     stateBlocked,
 			wantPass:  false,
 			wantErr:   true,
 			errSubstr: "jail port not reachable",
@@ -147,8 +67,8 @@ func TestEgressVerdict(t *testing.T) {
 			// Admin probe couldn't be classified: must NOT pass (can't confirm
 			// the admin port is contained) — fail-closed.
 			name:      "admin uncertain = FAIL-CLOSED (cannot confirm admin contained)",
-			jail:      "reachable",
-			admin:     "uncertain",
+			jail:      stateReachable,
+			admin:     stateUncertain,
 			wantPass:  false,
 			wantErr:   true,
 			errSubstr: "ADMIN port",
@@ -183,15 +103,15 @@ func TestClassifyEgressProbe(t *testing.T) {
 		name      string
 		res       leverexec.Result
 		err       error
-		wantState string
+		wantState probeState
 	}{
-		{name: "exit 0 = reachable", res: leverexec.Result{Code: 0}, err: nil, wantState: "reachable"},
-		{name: "exit 35 (TLS connect) = reachable", res: leverexec.Result{Code: 35}, err: errNonZero, wantState: "reachable"},
-		{name: "exit 60 (cert verify) = reachable", res: leverexec.Result{Code: 60}, err: errNonZero, wantState: "reachable"},
-		{name: "exit 7 (refused) = blocked", res: leverexec.Result{Code: 7}, err: errNonZero, wantState: "blocked"},
-		{name: "exit 28 (timeout/dropped) = blocked", res: leverexec.Result{Code: 28}, err: errNonZero, wantState: "blocked"},
-		{name: "exit 127 (curl absent) = uncertain", res: leverexec.Result{Code: 127, Stderr: "command not found"}, err: errNonZero, wantState: "uncertain"},
-		{name: "exit 6 (DNS) = uncertain", res: leverexec.Result{Code: 6, Stderr: "could not resolve"}, err: errNonZero, wantState: "uncertain"},
+		{name: "exit 0 = reachable", res: leverexec.Result{Code: 0}, err: nil, wantState: stateReachable},
+		{name: "exit 35 (TLS connect) = reachable", res: leverexec.Result{Code: 35}, err: errNonZero, wantState: stateReachable},
+		{name: "exit 60 (cert verify) = reachable", res: leverexec.Result{Code: 60}, err: errNonZero, wantState: stateReachable},
+		{name: "exit 7 (refused) = blocked", res: leverexec.Result{Code: 7}, err: errNonZero, wantState: stateBlocked},
+		{name: "exit 28 (timeout/dropped) = blocked", res: leverexec.Result{Code: 28}, err: errNonZero, wantState: stateBlocked},
+		{name: "exit 127 (curl absent) = uncertain", res: leverexec.Result{Code: 127, Stderr: "command not found"}, err: errNonZero, wantState: stateUncertain},
+		{name: "exit 6 (DNS) = uncertain", res: leverexec.Result{Code: 6, Stderr: "could not resolve"}, err: errNonZero, wantState: stateUncertain},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,10 +119,10 @@ func TestClassifyEgressProbe(t *testing.T) {
 			if state != tc.wantState {
 				t.Errorf("state = %q, want %q", state, tc.wantState)
 			}
-			if tc.wantState == "uncertain" && err == nil {
+			if tc.wantState == stateUncertain && err == nil {
 				t.Errorf("uncertain must carry a non-nil error")
 			}
-			if tc.wantState != "uncertain" && err != nil {
+			if tc.wantState != stateUncertain && err != nil {
 				t.Errorf("non-uncertain must carry a nil error, got %v", err)
 			}
 		})

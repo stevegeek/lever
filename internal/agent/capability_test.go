@@ -1,8 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +61,155 @@ func decodeB64(t *testing.T, s string) []byte {
 		t.Fatalf("decodeB64: %v", err)
 	}
 	return b
+}
+
+// TestBuildToolCallBody verifies that the JSON-RPC body produced for the gateway
+// satisfies the contract expected by internal/broker/mcp.go:toolsCallFields:
+//   - jsonrpc == "2.0", method == "tools/call"
+//   - params.name == op
+//   - params.arguments._capability == token
+//   - extra kv args appear in params.arguments
+func TestBuildToolCallBody(t *testing.T) {
+	const op = "query"
+	const tok = "tok_abc123"
+	extra := map[string]string{"table": "users", "limit": "10"}
+
+	body := buildToolCallBody(op, tok, extra)
+
+	var msg map[string]any
+	if err := json.Unmarshal(body, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got := msg["jsonrpc"]; got != "2.0" {
+		t.Errorf("jsonrpc: got %v, want 2.0", got)
+	}
+	if got := msg["method"]; got != "tools/call" {
+		t.Errorf("method: got %v, want tools/call", got)
+	}
+
+	params, ok := msg["params"].(map[string]any)
+	if !ok {
+		t.Fatal("params missing or wrong type")
+	}
+	if got := params["name"]; got != op {
+		t.Errorf("params.name: got %v, want %q", got, op)
+	}
+
+	args, ok := params["arguments"].(map[string]any)
+	if !ok {
+		t.Fatal("params.arguments missing or wrong type")
+	}
+	if got := args["_capability"]; got != tok {
+		t.Errorf("arguments._capability: got %v, want %q", got, tok)
+	}
+	if got := args["table"]; got != "users" {
+		t.Errorf("arguments.table: got %v, want users", got)
+	}
+	if got := args["limit"]; got != "10" {
+		t.Errorf("arguments.limit: got %v, want 10", got)
+	}
+}
+
+// TestBuildToolCallBodyEmptyArgs verifies token-only calls (no extra kv pairs).
+func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
+	body := buildToolCallBody("op", "mytoken", nil)
+	var msg map[string]any
+	if err := json.Unmarshal(body, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	params := msg["params"].(map[string]any)
+	args := params["arguments"].(map[string]any)
+	if got := args["_capability"]; got != "mytoken" {
+		t.Errorf("arguments._capability: got %v, want mytoken", got)
+	}
+	// Only _capability should be present
+	if len(args) != 1 {
+		t.Errorf("expected 1 argument (only _capability), got %d: %v", len(args), args)
+	}
+}
+
+// TestCallWireContract pins agent.Call's HTTP contract against an httptest stub:
+// it POSTs to /mcp/<tool>/ with Content-Type application/json and the token in
+// arguments._capability, and — critically, unlike Request — returns the raw
+// response body EVEN on a non-200 (the caller prints it before surfacing the
+// error), with a non-200 mapped to `call: status %d`.
+func TestCallWireContract(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		body    string
+		wantErr string
+	}{
+		{"success", http.StatusOK, `{"result":"ok"}`, ""},
+		{"denied", http.StatusForbidden, `{"error":"denied"}`, "call: status 403"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotMethod, gotPath, gotCT string
+			var gotBody bytes.Buffer
+			stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				gotPath = r.URL.Path
+				gotCT = r.Header.Get("Content-Type")
+				gotBody.ReadFrom(r.Body)
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer stub.Close()
+
+			body, status, err := Call(context.Background(), stub.URL, stub.Client(),
+				"db", "read", "tok_xyz", map[string]string{"table": "users"})
+
+			if gotMethod != http.MethodPost {
+				t.Errorf("method = %q, want POST", gotMethod)
+			}
+			if gotPath != "/mcp/db/" {
+				t.Errorf("path = %q, want /mcp/db/", gotPath)
+			}
+			if gotCT != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", gotCT)
+			}
+			if !strings.Contains(gotBody.String(), `"_capability":"tok_xyz"`) {
+				t.Errorf("request body missing _capability token: %s", gotBody.String())
+			}
+			if !strings.Contains(gotBody.String(), `"table":"users"`) {
+				t.Errorf("request body missing constraint: %s", gotBody.String())
+			}
+			// Body returned regardless of status; status echoed back.
+			if body != tc.body {
+				t.Errorf("body = %q, want %q", body, tc.body)
+			}
+			if status != tc.status {
+				t.Errorf("status = %d, want %d", status, tc.status)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else if err == nil || err.Error() != tc.wantErr {
+				t.Errorf("error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestCallTransportError verifies a dial failure yields an empty body, zero
+// status and a `call:`-wrapped error (no body was ever received to print).
+func TestCallTransportError(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := stub.URL
+	stub.Close() // nothing is listening now → dial fails
+
+	body, status, err := Call(context.Background(), url, http.DefaultClient, "db", "read", "tok", nil)
+	if err == nil {
+		t.Fatal("dial failure must error")
+	}
+	if !strings.HasPrefix(err.Error(), "call: ") {
+		t.Errorf("error = %q, want a call:-prefixed wrap", err)
+	}
+	if body != "" || status != 0 {
+		t.Errorf("transport failure must yield empty body/zero status, got %q/%d", body, status)
+	}
 }
 
 func TestRequestMintsDelegatedToken(t *testing.T) {

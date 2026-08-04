@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,21 +22,21 @@ import (
 
 // fakeRuntime records calls and returns scripted results; satisfies WorkerRuntime.
 type fakeRuntime struct {
-	agents       map[string][]scion.Agent // project -> agents (for List)
-	started      []scion.StartOpts
-	resumed      []string
-	resumeProj   []string
+	agents         map[string][]scion.Agent // project -> agents (for List)
+	started        []scion.StartOpts
+	resumed        []string
+	resumeProj     []string
 	resumeForced   []string
 	resumeForceErr error
-	stopped      []string
-	stopProj     []string
-	suspend      []string
-	suspendProj  []string
-	envSets      []string
-	envSetProj   []string
-	startErr     error
-	listCalls    int      // total List invocations, to assert the fan-out is collapsed
-	listProjects []string // project arg of every List call
+	stopped        []string
+	stopProj       []string
+	suspend        []string
+	suspendProj    []string
+	envSets        []string
+	envSetProj     []string
+	startErr       error
+	listCalls      int      // total List invocations, to assert the fan-out is collapsed
+	listProjects   []string // project arg of every List call
 	// staticPhases disables the acted->running modelling below: List always
 	// returns the seeded agents. Healer tests need a phase that persists
 	// across repeated heal attempts.
@@ -377,6 +378,104 @@ func TestWorkerStartLivenessTimeout(t *testing.T) {
 	}
 	if len(rt.started) != 1 {
 		t.Fatalf("Start should have been attempted once, got %d", len(rt.started))
+	}
+}
+
+// midPollListFailRuntime wraps fakeRuntime to fail the first failAfterAct List
+// calls that occur AFTER a Start/Resume — modelling transient hub blips DURING
+// the post-start liveness poll. The observe-first List (pre-action) still
+// succeeds, matching the real sequence: create/resume already succeeded, so the
+// hub is demonstrably up and a mid-poll List error is a hiccup, not a failure.
+type midPollListFailRuntime struct {
+	*fakeRuntime
+	failAfterAct int
+	postActLists int
+}
+
+func (r *midPollListFailRuntime) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	if _, acted := r.lastActed(); acted {
+		r.postActLists++
+		if r.postActLists <= r.failAfterAct {
+			return nil, fmt.Errorf("hub: transient blip")
+		}
+	}
+	return r.fakeRuntime.List(ctx, project)
+}
+
+// TestWorkerStartLivenessToleratesMidPollListErrors pins waitWorkerLive's
+// mid-poll List tolerance: a transient List error during the post-start
+// liveness poll must NOT abort the start — the failed attempt is consumed
+// within the existing budget and the poll succeeds as soon as a List call
+// reports the worker running/live. This behavior must survive the WaitAgentLive
+// extraction (plan B3).
+func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
+	origAtt, origInt := workerLiveAttempts, workerLiveInterval
+	workerLiveAttempts, workerLiveInterval = 5, time.Millisecond
+	defer func() { workerLiveAttempts, workerLiveInterval = origAtt, origInt }()
+
+	dir := t.TempDir()
+	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
+		BootstrapDir: filepath.Join(dir, ".lever")}
+	rt := &midPollListFailRuntime{
+		fakeRuntime:  &fakeRuntime{agents: map[string][]scion.Agent{}}, // absent -> Start path
+		failAfterAct: 2,                                                // two blips inside the liveness poll before a live record
+	}
+	b := newTestBroker(t, rt, spec)
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("two transient mid-poll List blips must not fail worker start; status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"phase":"running"`) {
+		t.Fatalf("worker should report running once its record goes live; body=%s", rec.Body.String())
+	}
+	if len(rt.started) != 1 {
+		t.Fatalf("Start should have been attempted once, got %d", len(rt.started))
+	}
+}
+
+// TestWorkerStartStageFailure forces stageBootstrap to fail — BootstrapDir sits
+// directly under a read-only parent so its MkdirAll is denied — on BOTH the
+// fresh-start (absent) and resume (existing non-running) paths, and asserts each
+// returns 500 with body "stage error" and dispatches no scion verb. These
+// stage-failure branches otherwise have zero coverage.
+func TestWorkerStartStageFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		agents map[string][]scion.Agent
+	}{
+		{"fresh_start", map[string][]scion.Agent{}},
+		{"resume", map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			if err := os.Chmod(parent, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			// Restore write before TempDir's own cleanup removes the tree (LIFO:
+			// this runs before the removal registered at t.TempDir() time).
+			t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+			spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+				HostWorkspace: t.TempDir(),
+				BootstrapDir:  filepath.Join(parent, ".lever")} // MkdirAll denied under 0500 parent
+			rt := &fakeRuntime{agents: tc.agents}
+			b := newTestBroker(t, rt, spec)
+
+			rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500 (%s)", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "stage error") {
+				t.Fatalf("body = %q, want to contain \"stage error\"", rec.Body.String())
+			}
+			// A stage failure must abort before any scion start/resume runs.
+			if len(rt.started) != 0 || len(rt.resumed) != 0 || len(rt.resumeForced) != 0 {
+				t.Fatalf("stage-failure must not dispatch: started=%d resumed=%d forced=%d",
+					len(rt.started), len(rt.resumed), len(rt.resumeForced))
+			}
+		})
 	}
 }
 

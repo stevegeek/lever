@@ -36,6 +36,16 @@ const (
 
 var ErrInvalid = errors.New("opsig: invalid")
 
+// Directive action kinds. These are the exact wire values carried in
+// Action.Kind (byte-identical to the historical string literals); production
+// code references these constants, while tests keep raw literals as an
+// independent pin of the wire vocabulary.
+const (
+	KindToolCall    = "tool_call"
+	KindApproval    = "approval"
+	KindInstruction = "instruction"
+)
+
 type Action struct {
 	Kind       string          `json:"kind"`
 	Tool       string          `json:"tool,omitempty"`
@@ -129,21 +139,32 @@ func parseTime(field, v string) (time.Time, error) {
 	return ts, nil
 }
 
+// decodeStrict runs the shared parse prologue for signed documents: enforce the
+// size cap, reject duplicate object keys, then strict-decode (no unknown fields)
+// into dst. raw MUST be the exact bytes the signature was verified over. what
+// names the document ("statement"/"envelope"), used only in the size-cap error.
+func decodeStrict(raw []byte, what string, dst any) error {
+	if len(raw) > maxStatementBytes {
+		return fmt.Errorf("%w: %s too large", ErrInvalid, what)
+	}
+	if err := RejectDuplicateKeys(raw); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	return nil
+}
+
 // ParseStatement validates raw as a directive statement for instance at now.
 // raw MUST be the exact bytes the signature was verified over; the caller
 // verifies the signature FIRST, then parses the same bytes here.
 func ParseStatement(raw []byte, instance string, now time.Time) (Statement, error) {
-	if len(raw) > maxStatementBytes {
-		return Statement{}, fmt.Errorf("%w: statement too large", ErrInvalid)
-	}
-	if err := RejectDuplicateKeys(raw); err != nil {
-		return Statement{}, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var st Statement
-	if err := dec.Decode(&st); err != nil {
-		return Statement{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+	if err := decodeStrict(raw, "statement", &st); err != nil {
+		return Statement{}, err
 	}
 	if st.V != 1 {
 		return Statement{}, fmt.Errorf("%w: version %d", ErrInvalid, st.V)
@@ -191,7 +212,7 @@ func ValidateAction(a Action) error { return validateAction(a) }
 
 func validateAction(a Action) error {
 	switch a.Kind {
-	case "tool_call", "approval":
+	case KindToolCall, KindApproval:
 		if a.Tool == "" || a.Op == "" {
 			return fmt.Errorf("%w: action needs tool+op", ErrInvalid)
 		}
@@ -204,7 +225,7 @@ func validateAction(a Action) error {
 		if a.Text != "" {
 			return fmt.Errorf("%w: bound action carries no free text", ErrInvalid)
 		}
-	case "instruction":
+	case KindInstruction:
 		if a.Text == "" || len(a.Text) > maxInstructionLen {
 			return fmt.Errorf("%w: instruction text", ErrInvalid)
 		}
@@ -220,17 +241,9 @@ func validateAction(a Action) error {
 // ParseEnvelope validates a signed admin-op envelope (list/revoke) with a
 // freshness window of ±maxSkew around now.
 func ParseEnvelope(raw []byte, instance string, now time.Time, maxSkew time.Duration) (Envelope, error) {
-	if len(raw) > maxStatementBytes {
-		return Envelope{}, fmt.Errorf("%w: envelope too large", ErrInvalid)
-	}
-	if err := RejectDuplicateKeys(raw); err != nil {
-		return Envelope{}, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var e Envelope
-	if err := dec.Decode(&e); err != nil {
-		return Envelope{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+	if err := decodeStrict(raw, "envelope", &e); err != nil {
+		return Envelope{}, err
 	}
 	if e.V != 1 || e.Instance != instance || e.Op == "" {
 		return Envelope{}, fmt.Errorf("%w: envelope fields", ErrInvalid)

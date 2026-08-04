@@ -86,63 +86,57 @@ func (s State) EnsureKeys() (token.KeyPair, *ca.CA, error) {
 	return kp, caInst, nil
 }
 
-// LoadRevocation reads the persisted revocation state; an absent file is the
-// zero value (epoch 0, no revocations).
-func (s State) LoadRevocation() (broker.RevocationState, error) {
-	b, err := os.ReadFile(s.Revocation())
+// loadJSONState reads a JSON-encoded state value from path; an absent file is
+// the zero value. `what` names the state in error messages (e.g. "revocation").
+func loadJSONState[T any](path, what string) (T, error) {
+	var v T
+	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return broker.RevocationState{}, nil
+		return v, nil
 	}
 	if err != nil {
-		return broker.RevocationState{}, fmt.Errorf("brokerctl: read revocation: %w", err)
+		return v, fmt.Errorf("brokerctl: read %s: %w", what, err)
 	}
-	var rs broker.RevocationState
-	if err := json.Unmarshal(b, &rs); err != nil {
-		return broker.RevocationState{}, fmt.Errorf("brokerctl: parse revocation: %w", err)
+	if err := json.Unmarshal(b, &v); err != nil {
+		return v, fmt.Errorf("brokerctl: parse %s: %w", what, err)
 	}
-	return rs, nil
+	return v, nil
 }
 
-// SaveRevocation persists the revocation state (0600), atomically.
-func (s State) SaveRevocation(rs broker.RevocationState) error {
-	b, err := json.Marshal(rs)
+// saveJSONState persists a JSON-encoded state value (0600), atomically. `what`
+// names the state in error messages.
+func saveJSONState[T any](path, what string, v T) error {
+	b, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("brokerctl: marshal revocation: %w", err)
+		return fmt.Errorf("brokerctl: marshal %s: %w", what, err)
 	}
-	if err := writeFileAtomic(s.Revocation(), b, 0o600); err != nil {
-		return fmt.Errorf("brokerctl: write revocation: %w", err)
+	if err := writeFileAtomic(path, b, 0o600); err != nil {
+		return fmt.Errorf("brokerctl: write %s: %w", what, err)
 	}
 	return nil
 }
 
+// LoadRevocation reads the persisted revocation state; an absent file is the
+// zero value (epoch 0, no revocations).
+func (s State) LoadRevocation() (broker.RevocationState, error) {
+	return loadJSONState[broker.RevocationState](s.Revocation(), "revocation")
+}
+
+// SaveRevocation persists the revocation state (0600), atomically.
+func (s State) SaveRevocation(rs broker.RevocationState) error {
+	return saveJSONState(s.Revocation(), "revocation", rs)
+}
+
 // LoadDirectives reads persisted directive state; absent file = zero value.
 func (s State) LoadDirectives() (broker.DirectiveState, error) {
-	b, err := os.ReadFile(s.Directives())
-	if errors.Is(err, os.ErrNotExist) {
-		return broker.DirectiveState{}, nil
-	}
-	if err != nil {
-		return broker.DirectiveState{}, fmt.Errorf("brokerctl: read directives: %w", err)
-	}
-	var ds broker.DirectiveState
-	if err := json.Unmarshal(b, &ds); err != nil {
-		return broker.DirectiveState{}, fmt.Errorf("brokerctl: parse directives: %w", err)
-	}
-	return ds, nil
+	return loadJSONState[broker.DirectiveState](s.Directives(), "directives")
 }
 
 // SaveDirectives persists directive state (0600), atomically: a crash
 // mid-write must never torn-write directives.json, since it holds the
 // replay tombstone set the broker needs on restart.
 func (s State) SaveDirectives(ds broker.DirectiveState) error {
-	b, err := json.Marshal(ds)
-	if err != nil {
-		return fmt.Errorf("brokerctl: marshal directives: %w", err)
-	}
-	if err := writeFileAtomic(s.Directives(), b, 0o600); err != nil {
-		return fmt.Errorf("brokerctl: write directives: %w", err)
-	}
-	return nil
+	return saveJSONState(s.Directives(), "directives", ds)
 }
 
 // writeFileAtomic writes data to a temp file in the same directory as path

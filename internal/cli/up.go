@@ -59,8 +59,19 @@ func managerDefinitelyAbsent(err error) bool {
 		strings.Contains(msg, "no git origin remote found")
 }
 
+// upAction is the action `up` takes for the manager's current state, as
+// decided by upDecision and dispatched in newUpCmd's switch.
+type upAction string
+
+const (
+	upRestart upAction = "restart" // --fresh over a present record: delete, then apply
+	upApply   upAction = "apply"   // absent/stopped/error: full bring-up
+	upResume  upAction = "resume"  // suspended: resume the existing manager
+	upNone    upAction = "none"    // already running: nothing to do, just attach
+)
+
 // upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
-func upDecision(phase string, fresh bool) string {
+func upDecision(phase string, fresh bool) upAction {
 	// --fresh discards ANY present record, whatever its phase. Since 0.12
 	// apply PRESERVES an error-phase record when its forced resume comes up
 	// dead (loud failure, no delete — see start-manager's #3 recovery), so
@@ -68,15 +79,15 @@ func upDecision(phase string, fresh bool) string {
 	// limiting it to running/suspended would leave `up --fresh` resuming the
 	// very record the user asked to discard.
 	if fresh && phase != "" {
-		return "restart"
+		return upRestart
 	}
 	switch phase {
-	case "running":
-		return "none"
-	case "suspended":
-		return "resume"
+	case scion.PhaseRunning:
+		return upNone
+	case scion.PhaseSuspended:
+		return upResume
 	default: // absent, stopped, error
-		return "apply"
+		return upApply
 	}
 }
 
@@ -117,7 +128,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("No running manager (%s) — bringing the application up.\n", firstLine(probeErr.Error()))
 			}
 			switch upDecision(phase, fresh) {
-			case "restart":
+			case upRestart:
 				// A failed delete must be VISIBLE: with the record still
 				// present, the following apply's observe-first start-manager
 				// would RESUME the old conversation — silently defeating
@@ -128,15 +139,15 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := apply.Run(cmd.Context(), app, deps); err != nil {
 					return err
 				}
-			case "apply":
+			case upApply:
 				if err := apply.Run(cmd.Context(), app, deps); err != nil {
 					return err
 				}
-			case "resume":
+			case upResume:
 				if err := sc.Resume(cmd.Context(), app.Name, project); err != nil {
 					return err
 				}
-			case "none":
+			case upNone:
 			}
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)

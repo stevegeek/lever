@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/opsig"
@@ -118,12 +119,6 @@ func udsDo(ctx context.Context, sock, method, path string, body []byte, out any)
 	return nil
 }
 
-type directiveResolveResp struct {
-	CN         string `json:"cn"`
-	Slug       string `json:"slug"`
-	Generation int    `json:"generation"`
-}
-
 // signAndPostStatement marshals st, prints it for operator review (the
 // operator must be able to see exactly what they're about to sign), signs
 // it under opsig.NamespaceDirective, and POSTs the {statement,signature}
@@ -189,7 +184,7 @@ func newDirectiveSendCmd() *cobra.Command {
 					return fmt.Errorf("directive send: --action: invalid JSON: %w", err)
 				}
 			} else {
-				action = opsig.Action{Kind: "instruction", Text: instruction}
+				action = opsig.Action{Kind: opsig.KindInstruction, Text: instruction}
 			}
 			if err := opsig.ValidateAction(action); err != nil {
 				return fmt.Errorf("directive send: invalid action: %w", err)
@@ -216,7 +211,7 @@ func newDirectiveSendCmd() *cobra.Command {
 				return fmt.Errorf("directive send: expiry %s exceeds this instance's cap %s", expiry, app.EffectiveDirectiveExpiryMax())
 			}
 
-			var resolved directiveResolveResp
+			var resolved broker.DirectiveResolveResponse
 			if err := udsDo(cmd.Context(), st.DirectiveSock(), http.MethodGet,
 				"/directive/resolve?agent="+url.QueryEscape(agent), nil, &resolved); err != nil {
 				return err
@@ -365,7 +360,7 @@ func newDirectiveSelftestCmd() *cobra.Command {
 				IssuedAt:    now.Format(time.RFC3339),
 				NotBefore:   now.Format(time.RFC3339),
 				ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339),
-				Action:      opsig.Action{Kind: "instruction", Text: "selftest"},
+				Action:      opsig.Action{Kind: opsig.KindInstruction, Text: "selftest"},
 			}
 			// On failure, propagate err as-is (no extra print here): cobra's
 			// default error handler prints "Error: ..." for a non-nil RunE

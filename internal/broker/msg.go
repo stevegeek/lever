@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -39,16 +39,17 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	// worth honoring are the ones that plainly mean "the manager" — the taught
 	// alias `user:manager`, the manager's cert CN, and its scion slug. Anything
 	// else is denied rather than silently 502ing at the scion CLI.
-	if len(to) > 5 && to[:5] == "user:" {
-		who := to[5:]
+	// who != "" preserves the bare-"user:" fallthrough to the
+	// unknown-recipient deny below.
+	if who, ok := strings.CutPrefix(to, "user:"); ok && who != "" {
 		if who == "manager" || who == b.manager || who == b.managerSlug {
 			return managerTarget, nil
 		}
 		return msgTarget{}, fmt.Errorf("user-addressed recipient %q is not broker-routable (scion supports user messaging only inside agent containers); message the manager agent instead", to)
 	}
 	name := to
-	if len(to) > 6 && to[:6] == "agent:" {
-		name = to[6:]
+	if rest, ok := strings.CutPrefix(to, "agent:"); ok && rest != "" {
+		name = rest
 	}
 	if name == b.manager || name == b.managerSlug {
 		return managerTarget, nil
@@ -86,37 +87,33 @@ func (b *Broker) resolveListProject(caller, worker string) (string, error) {
 	return b.instanceProject, nil
 }
 
-type msgSendRequest struct {
+// MsgSendRequest, MsgListRequest and MsgListResponse are the /msg/* wire types.
+// Exported so the lever CLI marshals/decodes against these one declarations
+// instead of ad-hoc maps and anonymous structs.
+type MsgSendRequest struct {
 	To        string `json:"to"`
 	Body      string `json:"body"`
 	Interrupt bool   `json:"interrupt"`
 }
 
-type msgListRequest struct {
+type MsgListRequest struct {
 	All    bool   `json:"all"`
 	Worker string `json:"worker"`
 }
 
-type msgListResponse struct {
+type MsgListResponse struct {
 	Events []scion.Event `json:"events"`
 }
 
 func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("msg", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// A revoked agent loses its messaging channel too — otherwise a
 	// compromised-then-revoked agent could keep steering other agents via
 	// messages. Fail closed at use time (identity-keyed, like the gateway).
-	if b.isRevoked(caller) {
-		b.audit("msg", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "msg", "")
+	if !ok {
 		return
 	}
-	var req msgSendRequest
+	var req MsgSendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -146,18 +143,11 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("msg", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "msg", "")
+	if !ok {
 		return
 	}
-	if b.isRevoked(caller) {
-		b.audit("msg", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	var req msgListRequest
+	var req MsgListRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -179,5 +169,5 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "list "+req.Worker)
-	writeJSON(w, msgListResponse{Events: events})
+	writeJSON(w, MsgListResponse{Events: events})
 }

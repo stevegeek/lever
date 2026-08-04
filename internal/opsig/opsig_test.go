@@ -130,6 +130,44 @@ func TestParseStatementRejections(t *testing.T) {
 	}
 }
 
+// TestValidateActionApproval pins the "approval" kind: a well-formed approval
+// action (tool+op, exact binding, uses==1, no free text) is accepted, and the
+// same tool-shape rejections apply as for tool_call. No other test exercises
+// kind "approval" — it guards the validateAction "approval" case-label and,
+// once the literal becomes a constant, that KindApproval keeps the wire value.
+func TestValidateActionApproval(t *testing.T) {
+	now := time.Now()
+	base := validStatement(now)
+	withAction := func(a Action) []byte {
+		s := base
+		s.Action = a
+		b, _ := json.Marshal(s)
+		return b
+	}
+
+	good := withAction(Action{Kind: "approval", Tool: "db", Op: "read", ArgBinding: "exact", Uses: 1})
+	st, err := ParseStatement(good, "testinst", now)
+	if err != nil {
+		t.Fatalf("valid approval rejected: %v", err)
+	}
+	if st.Action.Kind != "approval" {
+		t.Fatalf("parsed kind = %q, want approval", st.Action.Kind)
+	}
+
+	rejects := map[string]Action{
+		"approval no tool":     {Kind: "approval", Op: "read", ArgBinding: "exact", Uses: 1},
+		"approval no op":       {Kind: "approval", Tool: "db", ArgBinding: "exact", Uses: 1},
+		"approval bad binding": {Kind: "approval", Tool: "db", Op: "read", ArgBinding: "loose", Uses: 1},
+		"approval uses!=1":     {Kind: "approval", Tool: "db", Op: "read", ArgBinding: "exact", Uses: 2},
+		"approval has text":    {Kind: "approval", Tool: "db", Op: "read", ArgBinding: "exact", Uses: 1, Text: "x"},
+	}
+	for name, a := range rejects {
+		if _, err := ParseStatement(withAction(a), "testinst", now); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func TestRejectDuplicateKeys(t *testing.T) {
 	dup := []byte(`{"v":1,"v":1,"instance":"testinst"}`)
 	if err := RejectDuplicateKeys(dup); err == nil {
@@ -158,6 +196,65 @@ func TestRejectDuplicateKeysDepthCapped(t *testing.T) {
 	}
 	if err := RejectDuplicateKeys([]byte(b.String())); err == nil {
 		t.Fatal("deeply nested JSON accepted without a depth bound")
+	}
+}
+
+// The next four tests exercise the size cap and duplicate-key rejection
+// *through* the parsers (ParseStatement/ParseEnvelope), not via a direct
+// RejectDuplicateKeys call. Each input is otherwise valid — it would decode
+// and pass field/temporal validation — so ONLY the strict-decode prologue
+// step under test can reject it. This pins that the C6 decodeStrict extraction
+// keeps both the size cap and the dup-key walk on both parse paths; dropping
+// either step would let these inputs through.
+
+func TestParseStatementRejectsOversized(t *testing.T) {
+	now := time.Now()
+	s := validStatement(now)
+	// tool_call carries an arbitrary-size Args (json.RawMessage) — the only
+	// field that can make an otherwise-valid statement exceed the cap.
+	big := strings.Repeat("a", maxStatementBytes+1)
+	s.Action = Action{Kind: "tool_call", Tool: "x", Op: "y", ArgBinding: "exact", Uses: 1,
+		Args: json.RawMessage(`"` + big + `"`)}
+	raw, _ := json.Marshal(s)
+	if len(raw) <= maxStatementBytes {
+		t.Fatalf("input not oversized: %d bytes", len(raw))
+	}
+	if _, err := ParseStatement(raw, "testinst", now); err == nil {
+		t.Fatal("oversized statement accepted")
+	}
+}
+
+func TestParseStatementRejectsDuplicateKey(t *testing.T) {
+	now := time.Now()
+	raw, _ := json.Marshal(validStatement(now)) // begins {"v":1,...
+	// Inject a duplicate top-level "v" key. encoding/json keeps last-wins, so
+	// without RejectDuplicateKeys this decodes to the identical valid statement.
+	dup := append([]byte(`{"v":1,`), raw[1:]...)
+	if _, err := ParseStatement(dup, "testinst", now); err == nil {
+		t.Fatal("duplicate-key statement accepted")
+	}
+}
+
+func TestParseEnvelopeRejectsOversized(t *testing.T) {
+	now := time.Now()
+	big := strings.Repeat("a", maxStatementBytes+1)
+	raw, _ := json.Marshal(Envelope{V: 1, Instance: "testinst", Op: "revoke",
+		Params: map[string]string{"id": big}, IssuedAt: now.Format(time.RFC3339)})
+	if len(raw) <= maxStatementBytes {
+		t.Fatalf("input not oversized: %d bytes", len(raw))
+	}
+	if _, err := ParseEnvelope(raw, "testinst", now, 2*time.Minute); err == nil {
+		t.Fatal("oversized envelope accepted")
+	}
+}
+
+func TestParseEnvelopeRejectsDuplicateKey(t *testing.T) {
+	now := time.Now()
+	raw, _ := json.Marshal(Envelope{V: 1, Instance: "testinst", Op: "revoke",
+		IssuedAt: now.Format(time.RFC3339)}) // begins {"v":1,...
+	dup := append([]byte(`{"v":1,`), raw[1:]...)
+	if _, err := ParseEnvelope(dup, "testinst", now, 2*time.Minute); err == nil {
+		t.Fatal("duplicate-key envelope accepted")
 	}
 }
 

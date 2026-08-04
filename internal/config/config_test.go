@@ -165,6 +165,23 @@ func TestValidateRequiresBackend(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsWorkerMissingNameOrDir(t *testing.T) {
+	cases := map[string]string{
+		"missing name": "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - dir: workers/a\n",
+		"missing dir":  "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: a\n",
+	}
+	for label, yaml := range cases {
+		p := writeTmp(t, yaml)
+		_, err := Load(p)
+		if err == nil {
+			t.Fatalf("%s: expected error for worker with empty name/dir", label)
+		}
+		if !strings.Contains(err.Error(), "worker needs name + dir") {
+			t.Errorf("%s: error %q should say 'worker needs name + dir'", label, err)
+		}
+	}
+}
+
 func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: bad\n    dir: ../escape\n")
 	if _, err := Load(p); err == nil {
@@ -637,6 +654,9 @@ func TestLoadParsesBrokerAndGrants(t *testing.T) {
 	if app.ManagerCN() != "manager" {
 		t.Fatalf("default manager CN = %q", app.ManagerCN())
 	}
+	if got := (&App{Broker: Broker{ManagerIdentity: "ops"}}).ManagerCN(); got != "ops" {
+		t.Fatalf("manager_identity override CN = %q, want ops", got)
+	}
 	if len(app.Manager.Delegate) != 1 || app.Manager.Delegate[0].To[0] != "worker" {
 		t.Fatalf("manager delegate = %+v", app.Manager.Delegate)
 	}
@@ -770,6 +790,11 @@ func TestEffectiveLLMAuthWorkerOverride(t *testing.T) {
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthSubscription {
 		t.Fatalf("worker override: got %q want subscription", got)
 	}
+	// manager override wins over the broker default
+	a.Manager.LLMAuth = LLMAuthSubscription
+	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthSubscription {
+		t.Fatalf("manager override: got %q want subscription", got)
+	}
 }
 
 func TestValidateBrokerLLMAuth(t *testing.T) {
@@ -777,6 +802,28 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: bogus\n"
 		if _, err := Load(writeConfig(t, body)); err == nil {
 			t.Fatal("expected error for invalid llm_auth value, got nil")
+		}
+	})
+
+	t.Run("invalid manager llm_auth rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager:\n  llm_auth: bogus\n"
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Fatal("expected error for invalid manager llm_auth value, got nil")
+		}
+		if !strings.Contains(err.Error(), "manager.llm_auth") {
+			t.Errorf("error must name manager.llm_auth, got: %v", err)
+		}
+	})
+
+	t.Run("invalid worker llm_auth rejects", func(t *testing.T) {
+		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: w1\n    dir: workers/w1\n    llm_auth: bogus\n"
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Fatal("expected error for invalid worker llm_auth value, got nil")
+		}
+		if !strings.Contains(err.Error(), "worker w1") {
+			t.Errorf("error must name the worker, got: %v", err)
 		}
 	})
 
@@ -810,16 +857,16 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 func TestClosedInternetEgress(t *testing.T) {
 	// Explicit knob, decoupled from llm_auth: egress: closed ⇒ closed; unset ⇒ open.
 	closedApp := &App{Egress: EgressClosed, Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
-	if closed, warn := closedApp.ClosedInternetEgress(); !closed || warn != "" {
-		t.Fatalf("egress: closed ⇒ closed=%v warn=%q want true/empty", closed, warn)
+	if !closedApp.ClosedInternetEgress() {
+		t.Fatal("egress: closed ⇒ closed egress")
 	}
 	openAPIKey := &App{Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
-	if closed, _ := openAPIKey.ClosedInternetEgress(); closed {
+	if openAPIKey.ClosedInternetEgress() {
 		t.Fatal("api-key without egress: closed must leave egress open (decoupled)")
 	}
 	openSub := &App{Broker: Broker{LLMAuth: LLMAuthSubscription}, Workers: []Worker{{Name: "w"}}}
-	if closed, warn := openSub.ClosedInternetEgress(); closed || warn != "" {
-		t.Fatalf("default (open): closed=%v warn=%q want false/empty", closed, warn)
+	if openSub.ClosedInternetEgress() {
+		t.Fatal("default (open): egress must be open")
 	}
 }
 

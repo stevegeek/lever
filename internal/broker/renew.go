@@ -2,13 +2,8 @@ package broker
 
 import (
 	"crypto"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
-	"fmt"
 	"net/http"
-
-	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // RenewRequest carries a fresh CSR (new keypair). Its CN is IGNORED; the renewed
@@ -22,19 +17,12 @@ type RenewResponse struct {
 	Cert string `json:"cert"`
 }
 
-// csrPublicKey parses a PEM CSR, verifies its self-signature (proof of
-// private-key possession), and returns its public key.
+// csrPublicKey parses a PEM CSR (self-signature verified by parseCSR — the
+// only proof-of-possession check on /renew) and returns its public key.
 func csrPublicKey(csrPEM []byte) (crypto.PublicKey, error) {
-	blk, _ := pem.Decode(csrPEM)
-	if blk == nil {
-		return nil, fmt.Errorf("broker: invalid CSR PEM")
-	}
-	csr, err := x509.ParseCertificateRequest(blk.Bytes)
+	csr, err := parseCSR(csrPEM)
 	if err != nil {
-		return nil, fmt.Errorf("broker: parse CSR: %w", err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("broker: CSR signature: %w", err)
+		return nil, err
 	}
 	return csr.PublicKey, nil
 }
@@ -43,19 +31,12 @@ func csrPublicKey(csrPEM []byte) (crypto.PublicKey, error) {
 // CSR's public key under the authenticated CN (no CN-laundering: the CSR's own
 // CN is never used).
 func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("renew", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// Deny a revoked caller a fresh cert: with renew closed its existing cert
 	// simply expires, fully cutting the identity off rather than letting it
 	// refresh indefinitely (every use-time gate is already CN-keyed, so the
 	// live cert authorizes nothing — but denying renew makes revocation terminal).
-	if b.isRevoked(caller) {
-		b.audit("renew", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireLiveAgent(w, r, "renew", "")
+	if !ok {
 		return
 	}
 	var req RenewRequest
@@ -82,7 +63,6 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 	// without this its generation stays 0 and no operator directive can target
 	// it. Never bumps an existing generation — that is reserved for re-enrolment.
 	b.directives.EnsureGeneration(caller)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(RenewResponse{Cert: string(certPEM)})
+	writeJSON(w, RenewResponse{Cert: string(certPEM)})
 	b.audit("renew", caller, "allow", "")
 }

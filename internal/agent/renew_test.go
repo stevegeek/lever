@@ -53,8 +53,17 @@ func TestRefreshLLMTokenWritesAnthropicOverlay(t *testing.T) {
 	if got := overlay["ANTHROPIC_AUTH_TOKEN"]; got != "STUBTOKEN_worker" {
 		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want STUBTOKEN_worker", got)
 	}
-	if !strings.HasSuffix(overlay["ANTHROPIC_BASE_URL"], "/llm") {
-		t.Errorf("ANTHROPIC_BASE_URL = %q, want suffix /llm", overlay["ANTHROPIC_BASE_URL"])
+	// Host pinning (the aa63f9f contract, same as boot): Claude posts LLM traffic
+	// to the loopback gateway, which presents the rotating leaf on its behalf.
+	// Pointing renew back at the mTLS broker re-introduces the 24h cached-leaf
+	// outage that aa63f9f fixed. The literal here is an independent pin of
+	// LocalGatewayURL; env.Server.URL is the broker in this test, so the second
+	// check proves the base URL is explicitly NOT the broker.
+	if want := "http://127.0.0.1:8462/llm"; overlay["ANTHROPIC_BASE_URL"] != want {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q (must point at the loopback gateway, not the broker)", overlay["ANTHROPIC_BASE_URL"], want)
+	}
+	if strings.HasPrefix(overlay["ANTHROPIC_BASE_URL"], env.Server.URL) {
+		t.Errorf("ANTHROPIC_BASE_URL = %q points at the broker (%s) — renew must write the gateway URL", overlay["ANTHROPIC_BASE_URL"], env.Server.URL)
 	}
 	// Must not clobber pre-existing overlay keys.
 	if overlay["EXISTING_KEY"] != "existing_val" {

@@ -8,13 +8,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/exec"
 )
+
+// DefaultHubEndpoint is the host-side hub endpoint (loopback). Passed
+// explicitly as Options.HubEndpoint by host-side constructors — New applies
+// no default, and an empty HubEndpoint omits SCION_HUB_ENDPOINT entirely,
+// deferring to the scion binary's own default.
+const DefaultHubEndpoint = "http://127.0.0.1:8080"
 
 type Options struct {
 	Bin            string        // default "scion"
@@ -62,20 +66,6 @@ func (c *Client) currentHubToken() string {
 // package (e.g. the attach exec path) can embed it themselves.
 func (c *Client) HubToken() string { return c.currentHubToken() }
 
-// Default reads the dev token from <home>/.scion/dev-token and the hub endpoint
-// from SCION_HUB_ENDPOINT (default loopback), mirroring ScionClient.default.
-func Default(r exec.Runner, home string) *Client {
-	token := ""
-	if b, err := os.ReadFile(filepath.Join(home, ".scion", "dev-token")); err == nil {
-		token = strings.TrimSpace(string(b))
-	}
-	endpoint := os.Getenv("SCION_HUB_ENDPOINT")
-	if endpoint == "" {
-		endpoint = "http://127.0.0.1:8080"
-	}
-	return New(r, Options{HubEndpoint: endpoint, DevToken: token})
-}
-
 func (c *Client) env() map[string]string {
 	m := map[string]string{"SCION_HUB_ENABLED": "true"}
 	if c.hubEndpoint != "" {
@@ -97,10 +87,10 @@ func projectFlag(project string) []string {
 	return []string{"-g", project}
 }
 
-// runIn executes a scion subcommand in the given working directory and returns
-// trimmed combined stdout. cwd "" uses the process cwd. Non-zero exit returns
+// run executes a scion subcommand in the given working directory and returns
+// trimmed combined stdout. dir "" uses the process cwd. Non-zero exit returns
 // an error with the dev-auth banner stripped for readability.
-func (c *Client) runIn(ctx context.Context, dir string, args ...string) (string, error) {
+func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	out := res.Stdout + res.Stderr
 	if err != nil {
@@ -122,13 +112,6 @@ func redactArgs(args []string) string {
 	return strings.Join(args, " ")
 }
 
-// run executes a scion subcommand and returns trimmed combined stdout. cwd ""
-// uses the process cwd. Non-zero exit returns an error with the dev-auth banner
-// stripped for readability.
-func (c *Client) run(ctx context.Context, cwd string, args ...string) (string, error) {
-	return c.runIn(ctx, cwd, args...)
-}
-
 var bannerRE = regexp.MustCompile(`(?i)WARNING:.*development auth.*`)
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 var jsonStartRE = regexp.MustCompile(`[\[{]`)
@@ -145,7 +128,7 @@ func clean(output string) string {
 }
 
 // parseJSON strips ANSI escapes and the dev-auth WARNING banner (which scion
-// prints on stderr and can land AFTER the JSON, since runIn concatenates
+// prints on stderr and can land AFTER the JSON, since run concatenates
 // stdout+stderr), skips any preamble before the first JSON token, and unmarshals
 // into v. Empty body unmarshals to nothing (no error).
 func parseJSON(raw string, v any) error {

@@ -14,7 +14,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -74,7 +73,7 @@ func cmdBoot(args []string) error {
 	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
 	settingsPath := fs.String("settings", "", "path to the claude settings.json whose env block receives ANTHROPIC_AUTH_TOKEN/BASE_URL (api-key mode)")
 	toolsCSV := fs.String("tools", "", "comma-separated broker tool names to register via claude mcp add")
-	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL into the claude settings.json env block; 'subscription' (default) leaves those keys absent and uses the user's own key")
+	llmAuth := fs.String("llm-auth", agent.LLMAuthSubscription, "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL into the claude settings.json env block; 'subscription' (default) leaves those keys absent and uses the user's own key")
 	enrolOnly := fs.Bool("enrol-only", false, "enrol + write the identity only; skip the claude mcp registration and env overlay (no `claude` binary required — used by the VM-level acceptance gate, which drives lever-agent's CLI verbs directly)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -118,7 +117,7 @@ func cmdBoot(args []string) error {
 		cfg.BrokerTools = nil
 		cfg.ListTools = nil
 		cfg.LLMAuth = ""
-	} else if *llmAuth == "api-key" {
+	} else if *llmAuth == agent.LLMAuthAPIKey {
 		// Wire the real requestLLMToken only in non-enrol-only mode and when api-key
 		// is requested; enrol-only mode skips overlay writing entirely.
 		cfg.RequestLLMToken = requestLLMToken
@@ -138,38 +137,26 @@ func cmdBoot(args []string) error {
 }
 
 // requestLLMToken obtains a capability(llm) token from the broker /request
-// endpoint over mTLS. The broker returns {"token":"<base64url>"} — the token
-// field is already base64url-encoded (broker does RawURLEncoding.EncodeToString
-// server-side), so we return it verbatim. Do NOT re-encode. The proxy's
-// bearerToken does RawURLEncoding.DecodeString on the value after "Bearer ",
-// so ANTHROPIC_AUTH_TOKEN must equal cr.Token exactly.
+// endpoint over mTLS. It is a thin wrapper over agent.Request (the same wire
+// call: tool=llm op=generate bound_to=cn), keeping two things that Request does
+// not: the trailing-slash URL normalization, and the empty-token guard — a blank
+// ANTHROPIC_AUTH_TOKEN must fail closed rather than silently break LLM auth. The
+// broker returns {"token":"<base64url>"} already base64url-encoded (broker does
+// RawURLEncoding.EncodeToString server-side), so we return it verbatim. Do NOT
+// re-encode: the proxy's bearerToken does RawURLEncoding.DecodeString on the
+// value after "Bearer ", so ANTHROPIC_AUTH_TOKEN must equal the token exactly.
+// (agent.Request sends "constraints":null; the broker decodes into a nil map, so
+// omitting vs null-ing the field is equivalent.) It stays assignable to the
+// requestFn seam (renew.go); its error prefix is log-only, re-wrapped by renew.
 func requestLLMToken(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"tool": "llm", "op": "generate", "bound_to": cn})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(brokerURL, "/")+"/request", bytes.NewReader(body))
+	tok, err := agent.Request(ctx, strings.TrimRight(brokerURL, "/"), client, "llm", "generate", cn, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("broker /request: %s: %s", resp.Status, strings.TrimSpace(string(raw)))
-	}
-	var cr struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return "", fmt.Errorf("broker /request: decode: %w", err)
-	}
-	if cr.Token == "" {
+	if tok == "" {
 		return "", fmt.Errorf("broker /request: empty token in response")
 	}
-	return cr.Token, nil // already base64url-encoded; return verbatim
+	return tok, nil // already base64url-encoded; return verbatim
 }
 
 // mcpAddArgs builds the `claude mcp add` argv. It forces --scope user (global,
@@ -350,10 +337,7 @@ func writeRenewServices(homeDir, idDir, bootstrapPath, settingsPath, llmAuth str
 // validates this transport live in the acceptance run.
 func cmdServeCapability(args []string) error {
 	fs := flag.NewFlagSet("serve-capability", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL)")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json (for broker URL)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -440,16 +424,12 @@ func renewOnce(opts renewOpts) error {
 	}
 	// api-key mode: refresh the LLM capability token and rewrite the claude
 	// settings.json env block so the next claude launch picks up the fresh token.
-	if opts.llmAuth == "api-key" && opts.settingsPath != "" {
+	if opts.llmAuth == agent.LLMAuthAPIKey && opts.settingsPath != "" {
 		cn, err := leafCN(renewed.CertPEM)
 		if err != nil {
 			return fmt.Errorf("renew: parse CN for llm token: %w", err)
 		}
-		overlay := map[string]string{
-			"CLAUDE_CODE_CLIENT_CERT": filepath.Join(opts.idDir, "agent.crt"),
-			"CLAUDE_CODE_CLIENT_KEY":  filepath.Join(opts.idDir, "agent.key"),
-			"NODE_EXTRA_CA_CERTS":     filepath.Join(opts.idDir, "ca.crt"),
-		}
+		overlay := agent.IdentityEnvOverlay(opts.idDir)
 		if err := agent.RefreshLLMToken(ctx, bURL, renewed, cn, requestLLMToken, overlay); err != nil {
 			return err
 		}
@@ -468,13 +448,10 @@ func renewOnce(opts renewOpts) error {
 // renewal and rewrites the claude settings.json env block at -settings.
 func cmdRenew(args []string) error {
 	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
 	loop := fs.Bool("loop", false, "run as a renewal daemon (renew then sleep -interval, repeat until signal)")
 	interval := fs.Duration("interval", 12*time.Hour, "renewal interval in loop mode (default 12h; cert TTL is 24h)")
-	llmAuth := fs.String("llm-auth", "subscription", "LLM auth mode: 'api-key' refreshes ANTHROPIC_AUTH_TOKEN after each cert renewal")
+	llmAuth := fs.String("llm-auth", agent.LLMAuthSubscription, "LLM auth mode: 'api-key' refreshes ANTHROPIC_AUTH_TOKEN after each cert renewal")
 	settingsPath := fs.String("settings", "", "path to the claude settings.json whose env block is rewritten on -llm-auth api-key refresh")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -523,10 +500,7 @@ func cmdRenew(args []string) error {
 // --listen (loopback only).
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity (cert+key+ca)")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL + CA)")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity (cert+key+ca)", "path to bootstrap.json (for broker URL + CA)")
 	listen := fs.String("listen", "127.0.0.1:8462", "loopback address to serve plaintext MCP/LLM traffic on")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -566,12 +540,9 @@ func bootstrapPathOrDefault(path string) string {
 // to -out (0600) so the acceptance harness can drop it in the jail for boot.
 func cmdProvision(args []string) error {
 	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the manager identity (cert+key+ca)")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the manager identity (cert+key+ca)", "path to bootstrap.json (for broker URL if -broker-url not set)")
 	worker := fs.String("worker", "", "worker name to provision a ticket for")
 	out := fs.String("out", "", "path to write the worker bootstrap JSON (0600)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json (for broker URL if -broker-url not set)")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -622,10 +593,7 @@ func cmdProvision(args []string) error {
 
 func cmdCLI(verb string, args []string) error {
 	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	idDir := fs.String("id-dir", defaultIDDir, "directory for the agent identity")
-	brokerURL := fs.String("broker-url", "", "broker URL (overrides bootstrap)")
-	bootstrapPath := fs.String("bootstrap", "", "path to bootstrap.json")
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
 	// verb-specific flags
 	var tool, op, to, tokenStr string
 	switch verb {
@@ -720,29 +688,14 @@ func cmdCLI(verb string, args []string) error {
 		}
 		fmt.Println(tok)
 	case "call":
-		// call: POST a JSON-RPC 2.0 tools/call to the broker gateway /mcp/<tool>/.
-		// The capability token MUST be in params.arguments._capability (not a header);
-		// the gateway reads the token exclusively from that field and actively scrubs
-		// all inbound X-Lever-* headers. The tool name is encoded in the URL path;
-		// params.name carries the operation name within that tool.
-		body := buildToolCallBody(op, tokenStr, constraints)
-		req, err := http.NewRequestWithContext(ctx, "POST", bURL+"/mcp/"+tool+"/", bytes.NewReader(body))
+		// agent.Call POSTs the JSON-RPC tools/call to the gateway and hands back
+		// the raw body, status and error separately so we can print the body
+		// BEFORE surfacing a non-200 error — the acceptance harness's deny checks
+		// rely on both the printed output and the non-zero exit.
+		out, _, err := agent.Call(ctx, bURL, client, tool, op, tokenStr, constraints)
+		fmt.Print(out)
 		if err != nil {
 			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			return fmt.Errorf("call: %w", err)
-		}
-		defer resp.Body.Close()
-		var buf bytes.Buffer
-		if _, err := buf.ReadFrom(resp.Body); err != nil {
-			return fmt.Errorf("call: read response: %w", err)
-		}
-		fmt.Print(buf.String())
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("call: status %d", resp.StatusCode)
 		}
 	}
 	return nil
@@ -754,42 +707,26 @@ func resolveBrokerURL(brokerURL, bootstrapPath string) (string, error) {
 	if brokerURL != "" {
 		return brokerURL, nil
 	}
-	bsPath := bootstrapPath
-	if bsPath == "" {
-		bsPath = os.Getenv("LEVER_BOOTSTRAP")
-	}
-	if bsPath == "" {
-		bsPath = "./.lever/bootstrap.json"
-	}
-	bs, err := agent.LoadBootstrap(bsPath)
+	bs, err := agent.LoadBootstrap(bootstrapPathOrDefault(bootstrapPath))
 	if err != nil {
 		return "", fmt.Errorf("resolve broker URL: %w", err)
 	}
 	return bs.BrokerURL, nil
 }
 
-// buildToolCallBody constructs the JSON-RPC 2.0 body for a tools/call request to
-// the capability gateway. The token is placed in arguments._capability as required
-// by the gateway contract (internal/broker/mcp.go:toolsCallFields). The tool's
-// URL path carries the tool name; op maps to params.name (the operation within
-// that tool). Extra key=value pairs from the CLI are merged into arguments.
-func buildToolCallBody(op, token string, args map[string]string) []byte {
-	arguments := make(map[string]any, len(args)+1)
-	for k, v := range args {
-		arguments[k] = v
-	}
-	arguments["_capability"] = token
-	body := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name":      op,
-			"arguments": arguments,
-		},
-	}
-	out, _ := json.Marshal(body)
-	return out
+// commonFlags registers the id-dir/broker-url/bootstrap trio shared verbatim by
+// the five lazy-resolving subcommands (serve-capability, renew, gateway,
+// provision, cmdCLI) and returns the bound pointers. The id-dir and bootstrap
+// help strings genuinely differ per command (provision names the *manager*
+// identity; gateway's bootstrap also carries the CA), so they are passed in; the
+// broker-url flag is identical everywhere. cmdBoot is deliberately NOT a caller:
+// it has no --broker-url and eagerly resolves its --bootstrap default.
+func commonFlags(fs *flag.FlagSet, idDirHelp, bootstrapHelp string) (idDir, brokerURL, bootstrap *string) {
+	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
+	idDir = fs.String("id-dir", defaultIDDir, idDirHelp)
+	brokerURL = fs.String("broker-url", "", "broker URL (overrides bootstrap)")
+	bootstrap = fs.String("bootstrap", "", bootstrapHelp)
+	return idDir, brokerURL, bootstrap
 }
 
 // leafCN parses the common name from the first certificate in certPEM.

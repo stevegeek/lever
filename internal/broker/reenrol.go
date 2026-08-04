@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // Natural-lapse auto-re-enrol (#22): the mTLS listener's LapseFunc observes a
@@ -121,15 +122,11 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		return
 	}
 
-	// Re-stage a fresh one-use ticket (host authority, same as `lever up`).
-	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
-	if err != nil {
-		b.audit("reenrol", cn, "error", "ticket: "+err.Error())
-		return
-	}
-	bs := workerBootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
-	if err := stageBootstrap(dir, bs); err != nil {
-		b.audit("reenrol", cn, "error", "stage: "+err.Error())
+	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
+	// helper's step-discriminated wrap ("ticket:"/"stage:") reproduces the two
+	// audit lines this path emitted before the shared extraction.
+	if err := b.stageFreshTicket(cn, dir); err != nil {
+		b.audit("reenrol", cn, "error", err.Error())
 		return
 	}
 
@@ -148,15 +145,15 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	}
 	var verb string
 	switch phase {
-	case "running":
+	case scion.PhaseRunning:
 		verb = "suspend+resume"
 		if err = b.runtime.Suspend(ctx, slug, b.instanceProject); err == nil {
 			err = b.runtime.Resume(ctx, slug, b.instanceProject)
 		}
-	case "suspended", "stopped":
+	case scion.PhaseSuspended, scion.PhaseStopped:
 		verb = "resume"
 		err = b.runtime.Resume(ctx, slug, b.instanceProject)
-	case "error":
+	case scion.PhaseError:
 		verb = "resume --force"
 		err = b.runtime.ResumeForce(ctx, slug, b.instanceProject)
 	default:

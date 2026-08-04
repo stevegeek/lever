@@ -29,11 +29,6 @@ func New(host exec.Runner, prefix []string, uid string) *Runner {
 	return &Runner{host: host, prefix: prefix, uid: uid}
 }
 
-// OrbPrefix is the argv prefix that executes inside an OrbStack machine.
-func OrbPrefix(machine, user string) []string {
-	return []string{"orb", "-m", machine, "-u", user}
-}
-
 // jailEnvFor is the fixed environment every in-jail command needs, for a given
 // run-user uid. Shared by Runner.jailEnv and AttachArgv (attach.go) so the env
 // list lives in exactly one place.

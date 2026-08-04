@@ -2,7 +2,6 @@ package broker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,25 +10,6 @@ import (
 
 	"github.com/stevegeek/lever/internal/cap/ca"
 )
-
-// resolveAdminAddr normalizes adminAddr to a loopback bind address. An empty
-// host defaults to 127.0.0.1. Any explicit non-loopback host is rejected so
-// the unauthenticated admin /register endpoint can never bind to a routable
-// interface.
-func resolveAdminAddr(adminAddr string) (string, error) {
-	host, port, err := net.SplitHostPort(adminAddr)
-	if err != nil {
-		return "", fmt.Errorf("broker: admin address %q: %w", adminAddr, err)
-	}
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return "", fmt.Errorf("broker: admin listener must bind to a loopback address, got %q", host)
-	}
-	return net.JoinHostPort(host, port), nil
-}
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
 // Routes: /provision, /worker/*, /msg/send, /msg/list, /directive/consume,
@@ -86,8 +66,7 @@ type EpochResponse struct {
 
 // handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
 func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
+	writeJSON(w, EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.
@@ -177,27 +156,4 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		}
 	}
 	return nil
-}
-
-// Serve starts the jail listener over mTLS and the admin listener over plain
-// HTTP bound to loopback. It runs until ctx is cancelled, then shuts both
-// servers down. Returns the first non-ErrServerClosed error from either server,
-// or nil on clean shutdown.
-func (b *Broker) Serve(ctx context.Context, jailAddr, adminAddr string, certSrc *ca.ServerCertSource) error {
-	// Ensure admin listener is bound only to loopback — fail closed on
-	// misconfiguration so /register is never reachable from a routable interface.
-	boundAdminAddr, err := resolveAdminAddr(adminAddr)
-	if err != nil {
-		return err
-	}
-	jailLn, err := net.Listen("tcp", jailAddr)
-	if err != nil {
-		return err
-	}
-	adminLn, err := net.Listen("tcp", boundAdminAddr)
-	if err != nil {
-		_ = jailLn.Close()
-		return err
-	}
-	return b.ServeListeners(ctx, jailLn, adminLn, nil, certSrc)
 }

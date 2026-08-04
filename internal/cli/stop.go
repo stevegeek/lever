@@ -2,13 +2,11 @@ package cli
 
 import (
 	"context"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/scion"
 )
 
 // newStopCmd powers the jail machine off while keeping its disk, so a
@@ -16,7 +14,7 @@ import (
 // distinct from `destroy`, which deletes the machine and clears staged
 // runtime state.
 func newStopCmd(factory BackendFactory) *cobra.Command {
-	var machine, backendFlag string
+	var machine, backendFlag *string
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Power off the jail, keeping its disk (fast `lever up` resume)",
@@ -29,25 +27,21 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			var appName string
 			var state brokerctl.State // set alongside appName; valid whenever appName != ""
 			if path, perr := resolveConfigPath(""); perr == nil {
-				state = brokerctl.StateDir(filepath.Dir(path))
+				state = stateFor(path)
 				if app, lerr := config.Load(path); lerr == nil {
 					appName = app.Name
-					if machine == "" {
+					if *machine == "" {
 						if serr := state.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}
 					}
 				}
 			}
-			if machine != "" {
+			if *machine != "" {
 				cmd.PrintErrln("note: --machine given; the broker is not stopped (run `lever stop` from the instance root to do that).")
 			}
 
-			m, err := machineFromFlagOrConfig(machine)
-			if err != nil {
-				return err
-			}
-			b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+			m, b, err := resolveJailBackend(factory, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
@@ -67,13 +61,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-					// state was set alongside appName above; HubTokenSource lets
-					// suspend authenticate against the real, dev-auth-off hub with
-					// the controller PAT minted by a prior `lever apply`.
-					sc := scion.New(b.JailRunner(), scion.Options{
-						HubEndpoint:    "http://127.0.0.1:8080",
-						HubTokenSource: func() string { t, _ := state.LoadControllerPAT(); return t },
-					})
+					// state was set alongside appName above; HostScionClient's
+					// HubTokenSource lets suspend authenticate against the real,
+					// dev-auth-off hub with the controller PAT minted by a prior
+					// `lever apply`.
+					sc := brokerctl.HostScionClient(b.JailRunner(), state)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %v\n", serr)
 					}
@@ -88,7 +80,6 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
-	cmd.Flags().StringVar(&backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
+	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
 }

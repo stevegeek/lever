@@ -5,7 +5,9 @@ package brokerctl
 
 import (
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/broker"
@@ -51,8 +53,9 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 	for _, t := range app.Broker.Tools {
 		ops := make(map[string]registry.Operation, len(t.Operations)+1)
 		for _, o := range t.Operations {
-			ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: copyStringMap(o.CaveatParam),
-				Params: append([]string(nil), o.Params...)}
+			// Cloned so the registry (which takes ownership) never aliases the parsed config.
+			ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: maps.Clone(o.CaveatParam),
+				Params: slices.Clone(o.Params)}
 		}
 		coarse := t.External && t.EffectiveGate() == config.GateCoarse
 		if coarse {
@@ -66,7 +69,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			Name:          t.Name,
 			Backend:       t.Backend,
 			Operations:    ops,
-			AllowedValues: copyStringSliceMap(t.AllowedValues),
+			AllowedValues: registry.CloneAllowedValues(t.AllowedValues),
 			// External servers are third-party: the broker holds + enforces
 			// the rules and strips the token (they never see a capability).
 			FirstParty: !t.External,
@@ -126,30 +129,4 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 	}
 
 	return cfg, nil
-}
-
-// copyStringMap returns a fresh copy so the registry (which takes ownership)
-// never aliases the parsed config.
-func copyStringMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-func copyStringSliceMap(m map[string][]string) map[string][]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string][]string, len(m))
-	for k, v := range m {
-		cp := make([]string, len(v))
-		copy(cp, v)
-		out[k] = cp
-	}
-	return out
 }

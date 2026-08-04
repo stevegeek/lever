@@ -1,6 +1,12 @@
 // Package orbstack implements the Backend contract on macOS via an OrbStack
 // isolated machine + rootless Docker + iptables egress. See docs-site/_guides/security-model-compromise.md §8 for the validated commands. Rootful Docker FAILS inside an isolated machine (seccomp blocks
 // bpf()); rootless is required.
+//
+// The prefix/guest-delegating half of the contract (DockerHost, the jail
+// transport + image ops, the guest scion/egress delegations, run-user caching)
+// lives once in internal/backend/common.Base, which this embeds; only the
+// OrbStack-specific verbs (version preflight, machine create/start/stop) and the
+// two prefix/guest hooks are here.
 package orbstack
 
 import (
@@ -12,23 +18,14 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/exec"
-	"github.com/stevegeek/lever/internal/jail"
 )
 
-const (
-	distro = "ubuntu"
-	// mountDest is the path inside the isolated machine where the project tree
-	// is bind-mounted via `orb create --mount <host>:/lever`. Agents work
-	// exclusively within this directory; no host home is visible.
-	mountDest = "/lever"
-	// defaultRunUID is the fallback UID used for the rootless Docker socket path
-	// (/run/user/<uid>/docker.sock) before EnsureUp has resolved the real UID.
-	// OrbStack maps the host user to 501 by default, so DockerHost() is sensible
-	// even before EnsureUp, per the interface's "valid after EnsureUp" contract.
-	defaultRunUID = "501"
-)
+// distro is the isolated-machine base image (arch-tagless: OrbStack selects the
+// host arch).
+const distro = "ubuntu"
 
 // orbVersionRe matches "Version: 2.2.1 (2020100)" lines from `orb version`.
 var orbVersionRe = regexp.MustCompile(`Version:\s*(\d+)\.(\d+)\.(\d+)`)
@@ -44,15 +41,32 @@ var (
 )
 
 type OrbStack struct {
-	r       exec.Runner
-	machine string
-	aliasV4 string
-	aliasV6 string
-	runUser string // resolved via `orb -m <machine> whoami`
-	runUID  string // resolved via `orb -m <machine> id -u`
+	common.Base
 }
 
-func New(r exec.Runner, machine string) *OrbStack { return &OrbStack{r: r, machine: machine} }
+func New(r exec.Runner, machine string) *OrbStack {
+	o := &OrbStack{}
+	o.Base = common.Base{
+		R:         r,
+		Machine:   machine,
+		HostAlias: "host.orb.internal",
+		Hooks: common.Hooks{
+			JailPrefix: JailPrefix,
+			Guest: func(r exec.Runner, machine string) guest.Guest {
+				return guest.Guest{
+					Host:       r,
+					UserPrefix: []string{"orb", "-m", machine},
+					RootPrefix: []string{"orb", "-u", "root", "-m", machine},
+					Machine:    machine,
+				}
+			},
+			ResolveHostAlias: func(ctx context.Context) (string, string, error) {
+				return resolveHostAlias(ctx, r, machine)
+			},
+		},
+	}
+	return o
+}
 
 // Profile returns orbstack's declared guarantees. The value lives once in
 // backend.Candidates (the single source of the guarantee matrix); returning it
@@ -62,27 +76,12 @@ func (o *OrbStack) Profile() backend.Profile {
 	return p
 }
 
-func (o *OrbStack) DockerHost() string {
-	uid := o.runUID
-	if uid == "" {
-		uid = defaultRunUID
-	}
-	return fmt.Sprintf("unix:///run/user/%s/docker.sock", uid)
-}
-func (o *OrbStack) HostToolAlias() string { return "host.orb.internal" }
-
-// HostAliasV4 returns the resolved IPv4 of host.orb.internal as seen from the
-// jail, valid after EnsureUp/ApplyEgress. Empty if not yet resolved. Used to mint
-// the broker cert with an IP SAN and to build IP-based broker URLs so agents
-// reach the broker without DNS under closed-internet egress.
-func (o *OrbStack) HostAliasV4() string { return o.aliasV4 }
-
 func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {
 		return fmt.Errorf("EnsureUp: ProjectTree is required")
 	}
 	// Preflight: require OrbStack >= 2.1.1 for --mount support on isolated machines.
-	ok, got, err := orbVersionAtLeast(ctx, o.r, 2, 1, 1)
+	ok, got, err := orbVersionAtLeast(ctx, o.R, 2, 1, 1)
 	if err != nil {
 		return fmt.Errorf("EnsureUp: orb version check: %w", err)
 	}
@@ -92,30 +91,18 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.ensureMachine(ctx, cfg.ProjectTree); err != nil {
 		return err
 	}
-	if err := o.resolveRunUser(ctx); err != nil {
+	if err := o.ReadRunUser(ctx); err != nil {
 		return err
 	}
-	if err := o.guest().EnsureRuntimes(ctx, o.runUser); err != nil {
+	if err := o.Guest().EnsureRuntimes(ctx, o.User); err != nil {
 		return err
 	}
 	if cfg.ScionSource != "" || cfg.ScionVersion != "" {
-		if err := o.guest().EnsureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
+		if err := o.Guest().EnsureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
 			return err
 		}
 	}
 	return o.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
-}
-
-// guest returns the shared guest provisioner scoped to this machine, used to
-// install runtimes and scion via host-side argv prefixes. See
-// internal/backend/guest for the provisioning scripts themselves.
-func (o *OrbStack) guest() guest.Guest {
-	return guest.Guest{
-		Host:       o.r,
-		UserPrefix: []string{"orb", "-m", o.machine},
-		RootPrefix: []string{"orb", "-u", "root", "-m", o.machine},
-		Machine:    o.machine,
-	}
 }
 
 // orbVersionAtLeast runs `orb version`, parses the semver, and returns whether
@@ -152,42 +139,24 @@ func orbVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch i
 	}
 }
 
-// resolveRunUser caches the in-machine run user and UID so the subid/linger
-// script and the rootless Docker socket path work for any OrbStack user, not a
-// hardcoded one. Called after ensureMachine (the machine must exist) and before
-// guest provisioning (guest.EnsureRuntimes).
-func (o *OrbStack) resolveRunUser(ctx context.Context) error {
-	res, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "whoami")
-	if err != nil {
-		return fmt.Errorf("resolve run user: %w", err)
-	}
-	o.runUser = strings.TrimSpace(res.Stdout)
-	res, err = o.r.Run(ctx, nil, "orb", "-m", o.machine, "id", "-u")
-	if err != nil {
-		return fmt.Errorf("resolve run uid: %w", err)
-	}
-	o.runUID = strings.TrimSpace(res.Stdout)
-	return nil
-}
-
 // ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning: it
 // probes the machine's existence/state via the same read-only `orb list` check
 // ensureMachine uses, and errors if the machine is absent or not running,
 // rather than creating, starting, or configuring it. For passive verbs
 // (attach) that need the jail transport but must never bring the machine up.
 func (o *OrbStack) ResolveRunUser(ctx context.Context) error {
-	res, err := o.r.Run(ctx, nil, "orb", "list")
+	res, err := o.R.Run(ctx, nil, "orb", "list")
 	if err != nil {
 		return fmt.Errorf("orb list: %w", err)
 	}
-	status, found := machineStatus(res.Stdout, o.machine)
+	status, found := machineStatus(res.Stdout, o.Machine)
 	if !found {
-		return fmt.Errorf("machine %q does not exist", o.machine)
+		return fmt.Errorf("machine %q does not exist", o.Machine)
 	}
 	if !strings.EqualFold(status, "running") {
-		return fmt.Errorf("machine %q is not running (status %q)", o.machine, status)
+		return fmt.Errorf("machine %q is not running (status %q)", o.Machine, status)
 	}
-	return o.resolveRunUser(ctx)
+	return o.ReadRunUser(ctx)
 }
 
 // ensureMachine creates the isolated OrbStack machine if it doesn't yet exist.
@@ -196,11 +165,11 @@ func (o *OrbStack) ResolveRunUser(ctx context.Context) error {
 // teardown+recreate — mounts cannot be modified on a running machine (acceptable
 // limitation; document it in operator notes).
 func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error {
-	res, err := o.r.Run(ctx, nil, "orb", "list")
+	res, err := o.R.Run(ctx, nil, "orb", "list")
 	if err != nil {
 		return fmt.Errorf("orb list: %w", err)
 	}
-	if status, found := machineStatus(res.Stdout, o.machine); found {
+	if status, found := machineStatus(res.Stdout, o.Machine); found {
 		if strings.EqualFold(status, "running") {
 			// Idempotent: already up (and we cannot alter the mount after
 			// creation, so no action is taken here). To change the project
@@ -210,13 +179,13 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 		// Machine exists but is powered off (e.g. after `lever stop`) — power
 		// it back on so `up` resumes a halted machine rather than silently
 		// no-op'ing into an unreachable jail.
-		if _, err := o.r.Run(ctx, nil, "orb", "start", o.machine); err != nil {
+		if _, err := o.R.Run(ctx, nil, "orb", "start", o.Machine); err != nil {
 			return fmt.Errorf("orb start: %w", err)
 		}
 		return o.waitMachineReachable(ctx)
 	}
-	mountArg := projectTree + ":" + mountDest
-	if _, err := o.r.Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.machine); err != nil {
+	mountArg := projectTree + ":" + common.MountDest
+	if _, err := o.R.Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.Machine); err != nil {
 		return fmt.Errorf("orb create: %w", err)
 	}
 	return nil
@@ -228,7 +197,7 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 func (o *OrbStack) waitMachineReachable(ctx context.Context) error {
 	var lastErr error
 	for attempt := 0; attempt < orbStartProbeAttempts; attempt++ {
-		_, err := o.r.Run(ctx, nil, "orb", "-m", o.machine, "true")
+		_, err := o.R.Run(ctx, nil, "orb", "-m", o.Machine, "true")
 		if err == nil {
 			return nil
 		}
@@ -239,7 +208,7 @@ func (o *OrbStack) waitMachineReachable(ctx context.Context) error {
 		case <-time.After(orbStartProbeInterval):
 		}
 	}
-	return fmt.Errorf("machine %q not reachable after orb start: %w", o.machine, lastErr)
+	return fmt.Errorf("machine %q not reachable after orb start: %w", o.Machine, lastErr)
 }
 
 func machineListed(stdout, name string) bool {
@@ -267,14 +236,14 @@ func machineStatus(stdout, name string) (status string, found bool) {
 // Teardown deletes the jail machine. Idempotent: a no-op if the machine is
 // already absent.
 func (o *OrbStack) Teardown(ctx context.Context) error {
-	res, err := o.r.Run(ctx, nil, "orb", "list")
+	res, err := o.R.Run(ctx, nil, "orb", "list")
 	if err != nil {
 		return fmt.Errorf("orb list: %w", err)
 	}
-	if !machineListed(res.Stdout, o.machine) {
+	if !machineListed(res.Stdout, o.Machine) {
 		return nil // already gone
 	}
-	if _, err := o.r.Run(ctx, nil, "orb", "delete", o.machine); err != nil {
+	if _, err := o.R.Run(ctx, nil, "orb", "delete", o.Machine); err != nil {
 		return fmt.Errorf("orb delete: %w", err)
 	}
 	return nil
@@ -285,110 +254,23 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 // a no-op if the machine is already absent; orb tolerates stopping an
 // already-stopped machine, so no separate guard is needed for that case.
 func (o *OrbStack) Stop(ctx context.Context) error {
-	res, err := o.r.Run(ctx, nil, "orb", "list")
+	res, err := o.R.Run(ctx, nil, "orb", "list")
 	if err != nil {
 		return fmt.Errorf("orb list: %w", err)
 	}
-	if !machineListed(res.Stdout, o.machine) {
+	if !machineListed(res.Stdout, o.Machine) {
 		return nil // already gone; nothing to stop
 	}
-	if _, err := o.r.Run(ctx, nil, "orb", "stop", o.machine); err != nil {
+	if _, err := o.R.Run(ctx, nil, "orb", "stop", o.Machine); err != nil {
 		return fmt.Errorf("orb stop: %w", err)
 	}
 	return nil
 }
 
-func (o *OrbStack) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	v4, v6, rebuilt, err := o.guest().ApplyEgress(ctx,
-		func(ctx context.Context) (string, string, error) { return resolveHostAlias(ctx, o.r, o.machine) },
-		allowedPorts, closedInternet)
-	if err != nil {
-		return err
-	}
-	if rebuilt {
-		o.aliasV4, o.aliasV6 = v4, v6
-	} else {
-		// I2 skip path: v6 is not authoritative here (existingClosedAlias only
-		// parses v4 from the live chain) — do not clobber a prior aliasV6.
-		o.aliasV4 = v4
-	}
-	return nil
-}
-
-// MountDest returns the path inside the jail where the project tree is bind-mounted.
-func (o *OrbStack) MountDest() string { return mountDest }
-
-// MachineName returns the jail machine name this backend targets.
-func (o *OrbStack) MachineName() string { return o.machine }
-
-// RunUser returns the in-machine run user resolved by EnsureUp (valid after EnsureUp).
-func (o *OrbStack) RunUser() string { return o.runUser }
-
-// RunUID returns the in-machine run user's UID resolved by EnsureUp.
-// Falls back to defaultRunUID if EnsureUp has not yet been called.
-func (o *OrbStack) RunUID() string {
-	if o.runUID == "" {
-		return defaultRunUID
-	}
-	return o.runUID
-}
-
 // JailPrefix is the argv prefix that executes inside this backend's machine as
 // the given user. Exported for registry.JailRunner (broker-side re-derivation).
-func JailPrefix(machine, user string) []string { return jail.OrbPrefix(machine, user) }
-
-// JailRunner returns the command transport into the jail (valid after EnsureUp,
-// which resolves the run user).
-func (o *OrbStack) JailRunner() exec.Runner {
-	return jail.New(o.r, JailPrefix(o.machine, o.runUser), o.RunUID())
-}
-
-// AttachArgv builds the host argv for an interactive in-jail command.
-func (o *OrbStack) AttachArgv(inner []string) []string {
-	return jail.AttachArgv(JailPrefix(o.machine, o.runUser), o.RunUID(), inner)
-}
-
-// LoadImage streams a host docker image into the jail's rootless podman.
-func (o *OrbStack) LoadImage(ctx context.Context, imageRef string) error {
-	return jail.LoadImage(ctx, JailPrefix(o.machine, o.runUser), o.RunUID(), imageRef)
-}
-
-// ImageLoaded reports whether the jail already holds imageRef at the host's
-// image ID (so a re-import can be skipped). Fail-open — see the interface doc.
-func (o *OrbStack) ImageLoaded(ctx context.Context, imageRef string) bool {
-	return jail.ImageLoaded(ctx, JailPrefix(o.machine, o.runUser), o.RunUID(), imageRef)
-}
-
-// PruneJailImages reclaims dangling images from the jail's rootless podman.
-func (o *OrbStack) PruneJailImages(ctx context.Context) error {
-	return jail.PruneImages(ctx, JailPrefix(o.machine, o.runUser), o.RunUID())
-}
-
-// InstallGuestBinary streams a host-local executable into the machine at
-// destPath as root, via the shared guest provisioner (RootPrefix =
-// `orb -u root -m <machine>`).
-func (o *OrbStack) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {
-	return o.guest().InstallRootBinary(ctx, localPath, destPath)
-}
-
-// ReadScionProjectState reads scion's registration state from the machine for
-// `lever doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
-// machine-only guest prefix, so it needs no EnsureUp.
-func (o *OrbStack) ReadScionProjectState(ctx context.Context) (backend.ScionProjectState, error) {
-	return o.guest().ReadScionProjectState(ctx, mountDest)
-}
-
-// RemoveScionProjectConfigs removes stale scion project-config registrations
-// for wp from the machine, via the machine-only guest prefix.
-func (o *OrbStack) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
-	return o.guest().RemoveScionProjectConfigs(ctx, wp)
-}
-
-// ScionProjectRegistered reports whether workspacePath already has exactly one
-// valid scion registration, via the machine-only guest prefix. Read-only, no
-// EnsureUp.
-func (o *OrbStack) ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error) {
-	return o.guest().ScionProjectRegistered(ctx, workspacePath)
+func JailPrefix(machine, user string) []string {
+	return []string{"orb", "-m", machine, "-u", user}
 }
 
 var _ backend.Backend = (*OrbStack)(nil)

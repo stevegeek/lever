@@ -494,6 +494,44 @@ func TestStartManagerResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
 // broker-unavailable wording must be RETRIED (same brokerStartAttempts/
 // brokerStartInterval budget as Start) before any loud recovery — a transient
 // blip must never destroy a resumable conversation.
+// TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError pins
+// the ERROR branch's distinct delete-fail error wrap ("forced resume failed
+// (%v) and delete failed: %w"), which is worded differently from the
+// suspended branch's ("resume failed (%v) and delete failed") — an
+// error-phase record whose `resume --force` fails AND whose delete then fails
+// must surface a hard error naming BOTH failures and must not attempt a fresh
+// create over the undeleted record.
+func TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "error", initContainerStatus: "stopped",
+		resumeErr: fmt.Errorf("forced resume: container state corrupt"),
+		deleteErr: fmt.Errorf("delete: agent locked"),
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+	}
+	err := Run(context.Background(), app, deps)
+	if err == nil {
+		t.Fatal("a failed forced resume AND a failed delete must be a hard error")
+	}
+	if !strings.Contains(err.Error(), "forced resume failed") {
+		t.Fatalf("error should carry the error-branch's distinct 'forced resume failed' prefix, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "container state corrupt") || !strings.Contains(err.Error(), "delete: agent locked") {
+		t.Fatalf("error should mention BOTH the forced-resume and delete failures, got: %v", err)
+	}
+	if r.resumeForceCalls != 1 {
+		t.Errorf("resumeForceCalls = %d, want 1 (error phase must TRY resume --force first)", r.resumeForceCalls)
+	}
+	if r.startCalls != 0 {
+		t.Errorf("startCalls = %d, want 0 (must not attempt a fresh create over an undeleted record)", r.startCalls)
+	}
+}
+
 func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) {
 	origAtt, origInt := brokerStartAttempts, brokerStartInterval
 	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
@@ -2274,6 +2312,20 @@ func TestDefaultReadCredRejectsWorldReadable(t *testing.T) {
 // loadImageStep drives just the load-image case of runStep with the given deps.
 func loadImageStep(d Deps) error {
 	return runStep(context.Background(), &config.App{}, Step{Kind: "load-image", Target: "img"}, d, &bootTracker{})
+}
+
+// TestRunStepUnknownKind pins the switch's default arm: a Step whose Kind is
+// not a known StepKind is a hard error (never a silent no-op), and the message
+// echoes the offending kind. This guards the dispatch table against a Plan that
+// emits a kind runStep has no case for.
+func TestRunStepUnknownKind(t *testing.T) {
+	err := runStep(context.Background(), &config.App{}, Step{Kind: "no-such-kind"}, Deps{}, &bootTracker{})
+	if err == nil {
+		t.Fatal("runStep with an unknown kind must error")
+	}
+	if !strings.Contains(err.Error(), "no-such-kind") {
+		t.Fatalf("error %q must name the unknown kind", err)
+	}
 }
 
 // TestLoadImageStepSkipsWhenAlreadyLoaded: the whole point of the guard — when

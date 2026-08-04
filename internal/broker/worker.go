@@ -3,26 +3,16 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// workerBootstrap is a broker-local mirror of the bootstrap envelope written to
-// <bootstrapDir>/bootstrap.json. JSON tags MUST remain byte-for-byte identical
-// to agent.Bootstrap so the agent package's LoadBootstrap can decode it.
-type workerBootstrap struct {
-	Ticket    string `json:"ticket"`
-	BrokerCA  string `json:"broker_ca"`
-	BrokerURL string `json:"broker_url"`
-	AgentCN   string `json:"agent_cn"`
-}
 
 // WorkerRuntime is the subset of scion.Client the broker uses to drive worker
 // agents host-side. *scion.Client satisfies it; tests inject a fake.
@@ -63,9 +53,18 @@ type workerStartRequest struct {
 	Task   string `json:"task"`
 }
 
-type workerResponse struct {
+// WorkerResponse is the wire envelope for the single-worker endpoints
+// (/worker/start|stop|suspend|resume). Exported so the lever CLI decodes the
+// broker's reply against this one declaration instead of its own copy.
+type WorkerResponse struct {
 	Worker string `json:"worker"`
 	Phase  string `json:"phase"`
+}
+
+// WorkerListResponse is the wire envelope for /worker/list. Exported for the
+// same single-source reason as WorkerResponse.
+type WorkerListResponse struct {
+	Agents []scion.Agent `json:"agents"`
 }
 
 // runtimeReady returns true when the scion runtime is wired. When the runtime
@@ -85,24 +84,12 @@ func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 // requireManagerWorker authenticates the caller as the manager and authorizes the
 // requested worker against config. Returns the resolved spec, or writes 403/502.
 func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, worker string) (WorkerSpec, bool) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil {
-		b.audit("worker", "", "deny", err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return WorkerSpec{}, false
-	}
-	if caller != b.manager {
-		b.audit("worker", caller, "deny", "not the manager identity")
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return WorkerSpec{}, false
-	}
 	// A revoked manager cannot dispatch or tear down workers. Dispatching a worker
 	// is a stronger steering primitive than messaging (it spawns a fresh,
 	// fully-capable agent), so revocation must cut it too — otherwise revoke
 	// leaves the loudest channel open.
-	if b.isRevoked(caller) {
-		b.audit("worker", caller, "deny", "revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	caller, ok := b.requireManager(w, r, "worker", "")
+	if !ok {
 		return WorkerSpec{}, false
 	}
 	spec, ok := b.workerSpec(worker)
@@ -132,6 +119,40 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	return "", nil
 }
 
+// stage-step sentinels discriminate stageFreshTicket failures by which step
+// failed, so callers can map each to its own HTTP status/body. The wrap
+// prefixes ("ticket:"/"stage:") also match the healer's existing audit text.
+var (
+	errStepTicket = errors.New("ticket")
+	errStepStage  = errors.New("stage")
+)
+
+// stageFreshTicket mints a one-use enrolment ticket for cn and stages a fresh
+// bootstrap.json under dir (the same host authority `lever up` uses), via the
+// shared wire.Stage — the single construction+deposit path for the enrolment
+// envelope. Called on the fresh-start and resume dispatch paths and by the
+// auto-re-enrol healer, which heals the manager too — hence (cn, dir), not a
+// WorkerSpec.
+func (b *Broker) stageFreshTicket(cn, dir string) error {
+	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errStepTicket, err)
+	}
+	bs := wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
+	if err := wire.Stage(dir, bs); err != nil {
+		return fmt.Errorf("%w: %w", errStepStage, err)
+	}
+	return nil
+}
+
+// stageErrorBody maps a stageFreshTicket step error to its 500 response body.
+func stageErrorBody(err error) string {
+	if errors.Is(err, errStepStage) {
+		return "stage error"
+	}
+	return "ticket error"
+}
+
 func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	var req workerStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -142,76 +163,74 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx := r.Context()
-	phase, err := b.phaseOf(ctx, spec)
+	phase, err := b.phaseOf(r.Context(), spec)
 	if err != nil {
 		b.audit("worker", b.manager, "error", "phase: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	if phase == "running" {
+	switch {
+	case phase == scion.PhaseRunning:
 		// Already running: a no-op. Any new task in req.Task is intentionally
-		// ignored here — the task-mismatch 409 guard below covers only the
-		// non-running branch (a running worker's task is likewise fixed, and
-		// there is nothing to resume). To run a new task, purge then re-dispatch.
-		writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
+		// ignored here — the task-mismatch 409 guard on the resume path covers
+		// only the non-running branch (a running worker's task is likewise fixed,
+		// and there is nothing to resume). To run a new task, purge then re-dispatch.
+		writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+	case phase != "":
+		b.resumeExistingWorker(w, r, spec, phase, req.Task)
+	default:
+		b.startFreshWorker(w, r, spec, req.Task)
+	}
+}
+
+// resumeExistingWorker brings a non-running record (suspended/stopped/terminal/
+// error) back up. It refuses a re-dispatch that carries a NEW task, then stages
+// a fresh ticket and resumes (resume --force for an error-phase record).
+func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, phase, task string) {
+	ctx := r.Context()
+	// Resuming replays the record's ORIGINAL task — scion pins the task at
+	// creation and Resume takes no task — so a re-dispatch carrying a NEW task
+	// must NOT silently resume the old one. Refuse loudly and point at purge.
+	if strings.TrimSpace(task) != "" {
+		b.audit("worker", b.manager, "deny", "start "+spec.Name+": task given but worker exists (phase "+phase+")")
+		http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. Run `lever worker purge "+spec.Name+"` to start it fresh with a new task, or dispatch with no task to resume.", http.StatusConflict)
 		return
 	}
-	if phase != "" {
-		// exists in a non-running state (suspended/stopped/terminal). Resuming
-		// replays the record's ORIGINAL task — scion pins the task at creation and
-		// Resume takes no task — so a re-dispatch carrying a NEW task must NOT
-		// silently resume the old one. Refuse loudly and point at purge.
-		if strings.TrimSpace(req.Task) != "" {
-			b.audit("worker", b.manager, "deny", "start "+spec.Name+": task given but worker exists (phase "+phase+")")
-			http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. Run `lever worker purge "+spec.Name+"` to start it fresh with a new task, or dispatch with no task to resume.", http.StatusConflict)
-			return
-		}
-		// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
-		// ensureFreshBootstrap for the manager): a worker resumed after its
-		// leaf/ticket lifetime re-enrols on boot, and the previously staged
-		// ticket is long spent — without this it wedges into phase=error
-		// (live-hit 2026-07-31). Harmless when the leaf is still valid: boot
-		// skips enrol and the ticket ages out unspent.
-		ticket, err := b.tickets.Issue(spec.Name, b.ticketTTL)
-		if err != nil {
-			b.audit("worker", b.manager, "error", "resume ticket: "+err.Error())
-			http.Error(w, "ticket error", http.StatusInternalServerError)
-			return
-		}
-		bs := workerBootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: spec.Name}
-		if err := stageBootstrap(spec.BootstrapDir, bs); err != nil {
-			b.audit("worker", b.manager, "error", "resume stage: "+err.Error())
-			http.Error(w, "stage error", http.StatusInternalServerError)
-			return
-		}
-		resume := b.runtime.Resume
-		if phase == "error" {
-			// Only resume --force (scion#895) recovers an error-phase record.
-			resume = b.runtime.ResumeForce
-		}
-		if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
-			http.Error(w, "runtime error", http.StatusBadGateway)
-			return
-		}
-		if err := b.waitWorkerLive(ctx, spec); err != nil {
-			b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		b.audit("worker", b.manager, "allow", "resume "+spec.Name)
-		writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
+	// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
+	// ensureFreshBootstrap for the manager): a worker resumed after its
+	// leaf/ticket lifetime re-enrols on boot, and the previously staged
+	// ticket is long spent — without this it wedges into phase=error
+	// (live-hit 2026-07-31). Harmless when the leaf is still valid: boot
+	// skips enrol and the ticket ages out unspent.
+	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
+		b.audit("worker", b.manager, "error", "resume "+err.Error())
+		http.Error(w, stageErrorBody(err), http.StatusInternalServerError)
 		return
 	}
-	// phase == "" → absent: mint a one-use ticket, stage the worker's OWN bootstrap, start.
-	ticket, err := b.tickets.Issue(spec.Name, b.ticketTTL)
-	if err != nil {
-		http.Error(w, "ticket error", http.StatusInternalServerError)
+	resume := b.runtime.Resume
+	if phase == scion.PhaseError {
+		// Only resume --force (scion#895) recovers an error-phase record.
+		resume = b.runtime.ResumeForce
+	}
+	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
+		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	bs := workerBootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: spec.Name}
-	if err := stageBootstrap(spec.BootstrapDir, bs); err != nil {
-		http.Error(w, "stage error", http.StatusInternalServerError)
+	if err := b.waitWorkerLive(ctx, spec); err != nil {
+		b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
+	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+}
+
+// startFreshWorker provisions an absent worker: mint a one-use ticket, stage the
+// worker's OWN bootstrap, then scion start.
+func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
+	ctx := r.Context()
+	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
+		http.Error(w, stageErrorBody(err), http.StatusInternalServerError)
 		return
 	}
 	if spec.APIKey {
@@ -226,7 +245,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := b.runtime.Start(ctx, scion.StartOpts{
-		Worker: spec.Name, Task: req.Task, Harness: "claude",
+		Worker: spec.Name, Task: task, Harness: "claude",
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
 		Image: spec.Image, APIKey: spec.APIKey,
 	}); err != nil {
@@ -239,7 +258,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
-	writeJSON(w, workerResponse{Worker: spec.Name, Phase: "running"})
+	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // workerLiveAttempts/workerLiveInterval bound waitWorkerLive's post-start poll.
@@ -256,28 +275,18 @@ var (
 // "resumed" for a container whose harness dies moments later), so the observed
 // record — not the CLI exit code — is what makes success meaningful.
 func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
-	var lastPhase, lastContainer string
-	for attempt := 0; attempt < workerLiveAttempts; attempt++ {
-		agents, err := b.runtime.List(ctx, b.instanceProject)
-		if err == nil {
-			lastPhase, lastContainer = "", ""
-			for _, a := range agents {
-				if a.Slug == spec.Name {
-					lastPhase, lastContainer = a.Phase, a.ContainerStatus
-					break
-				}
-			}
-			if lastPhase == "running" && scion.ContainerLive(lastContainer) {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(workerLiveInterval):
-		}
+	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
+		return b.runtime.List(c, b.instanceProject)
+	}, spec.Name, workerLiveAttempts, workerLiveInterval)
+	if err == nil {
+		return nil
 	}
-	return fmt.Errorf("worker %q did not come up (last phase %q, container %q) — scion reported success but the harness is not live", spec.Name, lastPhase, lastContainer)
+	// WaitAgentLive returns ctx.Err() unwrapped on cancellation; pass it through
+	// as-is and prefix only the exhaustion error with the worker subject.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("worker %q %w", spec.Name, err)
 }
 
 func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {
@@ -301,7 +310,7 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 		phase = "unknown"
 	}
 	b.audit("worker", b.manager, "allow", r.URL.Path+" "+spec.Name)
-	writeJSON(w, workerResponse{Worker: spec.Name, Phase: phase})
+	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: phase})
 }
 
 func (b *Broker) handleWorkerStop(w http.ResponseWriter, r *http.Request) {
@@ -317,17 +326,9 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
-	caller, err := ca.RequireAgent(r)
-	if err != nil || caller != b.manager {
-		b.audit("worker", caller, "deny", "list: not the manager identity")
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	// A revoked manager cannot enumerate the fleet either (recon that helps a
 	// compromised-then-revoked manager) — consistent with /msg/list.
-	if b.isRevoked(caller) {
-		b.audit("worker", caller, "deny", "list: revoked")
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if _, ok := b.requireManager(w, r, "worker", "list: "); !ok {
 		return
 	}
 	// Runtime check is after the manager-CN check — authz precedes so an
@@ -340,32 +341,5 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, struct {
-		Agents []scion.Agent `json:"agents"`
-	}{Agents: agents})
-}
-
-// stageBootstrap writes bs to <dir>/bootstrap.json (dir 0700, file 0600).
-func stageBootstrap(dir string, bs workerBootstrap) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("stage bootstrap: mkdir: %w", err)
-	}
-	raw, err := json.Marshal(bs)
-	if err != nil {
-		return fmt.Errorf("stage bootstrap: marshal: %w", err)
-	}
-	p := filepath.Join(dir, "bootstrap.json")
-	if err := os.WriteFile(p, raw, 0o600); err != nil {
-		return fmt.Errorf("stage bootstrap: write: %w", err)
-	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return fmt.Errorf("stage bootstrap: chmod: %w", err)
-	}
-	return nil
-}
-
-// writeJSON encodes v as JSON to w with Content-Type set.
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	writeJSON(w, WorkerListResponse{Agents: agents})
 }

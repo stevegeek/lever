@@ -16,6 +16,20 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
+// scrubProxyHeaders drops client-supplied forwarding/identity headers before a
+// broker-side reverse proxy forwards a jail request upstream. Shared by the
+// MCP gateway and llm-proxy Directors. Forwarding/identity headers ONLY —
+// never credential headers (Authorization/x-api-key): the llm Director calls
+// this after injecting the real Console key, so a widened scrub would strip
+// it. The agent-side loopback gateway (internal/agent/gateway.go) is a
+// different trust context and intentionally does not scrub.
+func scrubProxyHeaders(h http.Header) {
+	h.Del("Cookie")
+	h.Del("X-Forwarded-For")
+	h.Del("X-Forwarded-Host")
+	h.Del("X-Forwarded-Proto")
+}
+
 // gatewayHandler returns the gated MCP reverse-proxy for one registered tool
 // (mounted at /mcp/<name>/ on the jail listener).
 func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
@@ -53,10 +67,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			req.URL.RawPath = ""
 		}
 		req.Host = target.Host
-		req.Header.Del("Cookie")
-		req.Header.Del("X-Forwarded-For")
-		req.Header.Del("X-Forwarded-Host")
-		req.Header.Del("X-Forwarded-Proto")
+		scrubProxyHeaders(req.Header)
 	}
 	// Rewrite tools/list responses to advertise _capability.
 	rp.ModifyResponse = func(resp *http.Response) error {

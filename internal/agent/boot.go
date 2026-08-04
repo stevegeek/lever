@@ -6,18 +6,17 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
-// Bootstrap is the material the host/manager deposits for an agent to enrol.
-type Bootstrap struct {
-	Ticket    string `json:"ticket"`
-	BrokerCA  string `json:"broker_ca"`
-	BrokerURL string `json:"broker_url"`
-	AgentCN   string `json:"agent_cn"`
-}
+// Bootstrap is the material the host/manager deposits for an agent to enrol. It
+// aliases wire.Bootstrap — the single, cross-package declaration of the
+// enrolment envelope (the host stages it via wire.Stage; agent reads it via
+// LoadBootstrap). The alias keeps agent.Bootstrap as the name agent-side code
+// uses while the fields/tags live in exactly one place.
+type Bootstrap = wire.Bootstrap
 
 // LoadBootstrap reads the deposited bootstrap.json.
 func LoadBootstrap(path string) (Bootstrap, error) {
@@ -122,14 +121,10 @@ func Boot(ctx context.Context, c BootConfig) error {
 	// presents these itself, but we keep them: they're harmless (nothing on loopback
 	// negotiates TLS) and other in-container tooling may still read NODE_EXTRA_CA_CERTS.
 	// The gateway sidecar owns the rotating leaf; these paths are just informational.
-	overlay := map[string]string{
-		"CLAUDE_CODE_CLIENT_CERT": filepath.Join(c.IDDir, "agent.crt"),
-		"CLAUDE_CODE_CLIENT_KEY":  filepath.Join(c.IDDir, "agent.key"),
-		"NODE_EXTRA_CA_CERTS":     filepath.Join(c.IDDir, "ca.crt"),
-	}
+	overlay := IdentityEnvOverlay(c.IDDir)
 	// api-key mode: obtain a capability(llm) token and inject the Anthropic env vars.
 	// Fail closed: a partial overlay without a valid token is worse than a failed boot.
-	if c.LLMAuth == "api-key" && c.RequestLLMToken != nil {
+	if c.LLMAuth == LLMAuthAPIKey && c.RequestLLMToken != nil {
 		llmClient, err := id.Client()
 		if err != nil {
 			return fmt.Errorf("agent boot: build mTLS client for llm token: %w", err)
@@ -140,7 +135,7 @@ func Boot(ctx context.Context, c BootConfig) error {
 		}
 		overlay["ANTHROPIC_AUTH_TOKEN"] = tok
 		// Claude posts to the loopback gateway, which proxies /llm to the broker.
-		overlay["ANTHROPIC_BASE_URL"] = strings.TrimRight(gatewayURL, "/") + "/llm"
+		overlay["ANTHROPIC_BASE_URL"] = llmBaseURL(gatewayURL)
 	}
 	if c.WriteEnvOverlay != nil {
 		if err := c.WriteEnvOverlay(overlay); err != nil {

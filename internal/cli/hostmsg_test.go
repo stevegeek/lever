@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 )
@@ -39,6 +40,13 @@ func TestHostMsgSendToManager(t *testing.T) {
 	dir := hostMsgInstanceDir(t, "assistant")
 	t.Chdir(dir)
 
+	// Seed the controller PAT so `msg send`'s scion client authenticates with
+	// it via HubTokenSource: guards that the source wiring survives (a dropped
+	// source would send anonymously against the dev-auth-off hub).
+	if err := brokerctl.StateDir(dir).SaveControllerPAT("pat-hostmsg-send"); err != nil {
+		t.Fatal(err)
+	}
+
 	fr := leverexec.NewFakeRunner()
 	fr.Script("scion", leverexec.Result{})
 	sb := &stubBackend{runner: fr}
@@ -64,6 +72,9 @@ func TestHostMsgSendToManager(t *testing.T) {
 		if gotArgv[i] != wantArgv[i] {
 			t.Fatalf("argv = %v, want %v", gotArgv, wantArgv)
 		}
+	}
+	if got := fr.Calls[0].Env["SCION_HUB_TOKEN"]; got != "pat-hostmsg-send" {
+		t.Fatalf("message env SCION_HUB_TOKEN = %q, want %q (HubTokenSource dropped)", got, "pat-hostmsg-send")
 	}
 }
 

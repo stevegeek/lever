@@ -47,25 +47,21 @@ workers:
 // `egress: closed` is set; api-key alone leaves egress open.
 func TestApplyEgressPostureFromConfig(t *testing.T) {
 	closedApp := &config.App{Egress: config.EgressClosed, Broker: config.Broker{LLMAuth: config.LLMAuthAPIKey, JailPort: 8443}}
-	if closed, warn := closedApp.ClosedInternetEgress(); !closed || warn != "" {
-		t.Fatalf("egress: closed must resolve closed egress: closed=%v warn=%q", closed, warn)
+	if !closedApp.ClosedInternetEgress() {
+		t.Fatal("egress: closed must resolve closed egress")
 	}
 	openApp := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthAPIKey, JailPort: 8443}}
-	if closed, _ := openApp.ClosedInternetEgress(); closed {
+	if openApp.ClosedInternetEgress() {
 		t.Fatal("api-key WITHOUT egress: closed must leave egress open (decoupled)")
 	}
 }
 
 // TestApplyOpenEgressForSubscription verifies that a subscription instance does
-// not set the closed posture (and emits no warning since it's a pure subscription).
+// not set the closed posture.
 func TestApplyOpenEgressForSubscription(t *testing.T) {
 	app := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthSubscription, JailPort: 8443}}
-	closed, warn := app.ClosedInternetEgress()
-	if closed {
-		t.Fatalf("subscription instance must not resolve closed egress")
-	}
-	if warn != "" {
-		t.Fatalf("pure subscription must not produce warning; got %q", warn)
+	if app.ClosedInternetEgress() {
+		t.Fatal("subscription instance must not resolve closed egress")
 	}
 }
 

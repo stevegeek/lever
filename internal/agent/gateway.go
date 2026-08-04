@@ -104,6 +104,42 @@ func (s *clientCertSource) reloadLocked() error {
 	return nil
 }
 
+// caPool builds a RootCAs pool from a PEM bundle. prefix tags the returned error
+// ("agent"/"gateway") so each caller keeps its existing error string; nothing
+// matches on those strings, so the prefix is purely for operator-facing clarity.
+func caPool(caPEM []byte, prefix string) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("%s: bad CA PEM", prefix)
+	}
+	return pool, nil
+}
+
+// reloadingTransport builds the mTLS http.Transport shared by both long-lived
+// broker clients (NewReloadingClient) and the gateway reverse-proxy: it trusts
+// caPEM and presents the rotating agent leaf from idDir via a per-handshake
+// clientCertSource, with IdleConnTimeout capping pooled-connection reuse so a
+// rotated leaf reaches the broker well within its TTL. Mints eagerly so a broken
+// id-dir fails now, not on the first live handshake. prefix tags the bad-CA-PEM
+// error for the calling site.
+func reloadingTransport(idDir string, caPEM []byte, prefix string) (*http.Transport, error) {
+	src, err := newClientCertSource(idDir)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := caPool(caPEM, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:              pool,
+			GetClientCertificate: src.GetClientCertificate,
+		},
+		IdleConnTimeout: idleConnTimeout,
+	}, nil
+}
+
 // NewReloadingClient builds an mTLS http.Client for a LONG-LIVED direct-to-broker
 // client (e.g. serve-capability) that re-reads the rotating agent leaf per TLS
 // handshake — the same fix the gateway applies to Claude's proxied traffic. A
@@ -117,21 +153,11 @@ func (s *clientCertSource) reloadLocked() error {
 // often (same reasoning as the gateway).
 // Mints eagerly so a broken id-dir fails now, not on the first live handshake.
 func NewReloadingClient(idDir string, caPEM []byte) (*http.Client, error) {
-	src, err := newClientCertSource(idDir)
+	tr, err := reloadingTransport(idDir, caPEM, "agent")
 	if err != nil {
 		return nil, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("agent: bad CA PEM")
-	}
-	return &http.Client{Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{
-			RootCAs:              pool,
-			GetClientCertificate: src.GetClientCertificate,
-		},
-		IdleConnTimeout: idleConnTimeout,
-	}}, nil
+	return &http.Client{Transport: tr}, nil
 }
 
 // Gateway runs the loopback reverse-proxy: it accepts plaintext HTTP from
@@ -175,24 +201,14 @@ func newGatewayProxy(brokerURL string, caPEM []byte, idDir string) (*httputil.Re
 	if err != nil {
 		return nil, fmt.Errorf("gateway: parse broker URL %q: %w", brokerURL, err)
 	}
-	src, err := newClientCertSource(idDir)
+	tr, err := reloadingTransport(idDir, caPEM, "gateway")
 	if err != nil {
 		return nil, err
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("gateway: bad CA PEM")
 	}
 	// target is the broker origin (no path), so SingleHostReverseProxy forwards the
 	// incoming path verbatim (/mcp/<tool>/…, /llm) with method, body, and headers.
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			RootCAs:              pool,
-			GetClientCertificate: src.GetClientCertificate,
-		},
-		IdleConnTimeout: idleConnTimeout,
-	}
+	proxy.Transport = tr
 	// MCP tool responses stream over SSE; -1 flushes every write immediately so
 	// streamed chunks reach Claude without buffering (the default buffers and
 	// streaming tool calls stall).

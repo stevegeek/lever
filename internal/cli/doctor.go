@@ -2,16 +2,14 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 )
 
 func newDoctorCmd(factory BackendFactory) *cobra.Command {
-	var machine, backendFlag string
+	var machine, backendFlag *string
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose the instance: backend profile, broker, tool backends, agent image version, credential, scion state",
@@ -21,11 +19,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Backend containment profile (informational header) — resolved from
 			// the flags/config exactly as before.
-			m, err := machineFromFlagOrConfig(machine)
-			if err != nil {
-				return err
-			}
-			b, err := factory(backendFromFlagOrConfig(backendFlag), m)
+			_, b, err := resolveJailBackend(factory, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
@@ -45,7 +39,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			state := brokerctl.StateDir(filepath.Dir(path))
+			state := stateFor(path)
 
 			// Scion project health needs a read into the jail (via the backend).
 			// A read error almost always means the jail machine isn't up — report
@@ -89,7 +83,6 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&machine, "machine", "", "jail machine name (default: lever-<name> from config)")
-	cmd.Flags().StringVar(&backendFlag, "backend", "", "containment backend (default: config's backend, else the registry default)")
+	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
 }

@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"encoding/json"
 	"net/http"
 )
 
@@ -29,6 +28,5 @@ func (b *Broker) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("bootstrap", b.manager, "allow", "")
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"ticket": ticket})
+	writeJSON(w, map[string]string{"ticket": ticket})
 }

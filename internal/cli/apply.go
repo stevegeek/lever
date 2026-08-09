@@ -98,7 +98,10 @@ const throwawayHubPort = 48080
 // controllerPATScopes is the EXACT scope set the controller PAT is minted
 // with. agent:message is deliberately omitted — the scion authz review found
 // every interactive verb, message included, gates on agent:attach.
-var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read"}
+// project:update is required for the post-register scratchpad-shared-dir strip
+// (scion#925): the shared-dirs REST endpoint gates on project ActionUpdate,
+// and agent:manage does NOT expand to project:update.
+var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read", "project:update"}
 
 // ensureControllerPAT backs Deps.EnsureControllerPAT, the "bootstrap-token"
 // apply step (internal/apply/run.go): mint the controller PAT that the real

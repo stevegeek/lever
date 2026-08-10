@@ -5,7 +5,7 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
-## [Unreleased]
+## [0.14.0] - 2026-08-10
 
 ### Security
 - **Agents are pinned to the `baseline` role automatically (scion#1089/#1090).**
@@ -39,7 +39,10 @@ version bump moves the block under the new version heading.
   the other two, and is checked against the guest's architecture — via the ELF
   header, before anything is written into the jail — so a workstation arch
   mix-up fails with "binary is arm64, but the guest is amd64" rather than as
-  `exec format error` at manager start.
+  `exec format error` at manager start. `scion.binary` and `scion.source` are
+  rejected when they resolve **inside the mounted tree**: whatever they name is
+  installed as root as the engine every agent runs under, and the tree is the
+  one place agents can write.
 - **`scion.agent_role` overrides the role lever picks.** Rarely needed — the
   default above is the safe one. Naming a role on a scion with no `--role` flag
   is a hard error rather than a silent downgrade, and an unknown value is
@@ -54,13 +57,17 @@ version bump moves the block under the new version heading.
   hub applies one-way DB migrations on first boot, and agent tokens minted at
   the old pin 403 on newly scope-gated read endpoints until they refresh.
   Snapshot the hub DB first. The examples stay pinned at `68507153`.
-
-### Changed
 - **scion is no longer re-streamed into the jail when it has not changed.** The
   binary is 158 MB and was piped in on every `lever up`, in all modes. lever now
-  records its sha256 beside it in the guest and skips the copy when it matches.
-  The digest is written only after the binary lands, so an interrupted install
-  reinstalls next time instead of being recorded as done.
+  hashes the installed binary in the guest and skips the copy only when it
+  matches — the file itself, not a record of what was installed once, so a
+  binary that was deleted, truncated or replaced is reinstalled and `lever up`
+  stays self-healing. Every failure mode (no such file, no `sha256sum`,
+  unreadable) falls through to installing.
+- **The broker restarts when the `scion` config block changes.** It holds a
+  long-lived client that caches what the installed scion supports, and the
+  reuse check previously ignored `scion:` entirely — so that cache could outlive
+  the binary it described across a pin bump.
 
 ### Fixed
 - **New projects no longer carry scion's cross-agent `scratchpad` shared dir
@@ -77,7 +84,15 @@ version bump moves the block under the new version heading.
   inside the jail, like every other scion call: the hub binds the jail's
   loopback, and the Lima backend suppresses guest→host port forwarding by
   design. `lever doctor` gained a matching check. The controller PAT now also
-  carries `project:update`, which the shared-dirs endpoint requires.
+  carries `project:update`, which the shared-dirs endpoint requires. The strip
+  refuses to guess when a hub lists more than one project of the same name, and
+  requires the `sharedDirs` field in the response — an absent field would
+  otherwise decode as an empty list and pass the verify vacuously, which is the
+  exact failure the verify exists to catch.
+- **`go test ./...` no longer fork-bombs the machine.** Two broker tests
+  re-exec'd `os.Args[0]` — the *test binary* under `go test` — as a detached
+  (`Setsid`) `broker serve`, which outlived the run, accumulated across runs and
+  re-spawned. A full suite left 724 stray processes behind.
 
 ## [0.13.0] - 2026-08-04
 

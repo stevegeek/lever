@@ -164,7 +164,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "arm64\n"})
 			f.Script("go build", exec.Result{})
 			f.Script("bash -c", exec.Result{})
-			f.Script(strings.Join(shape.userPrefix, " ")+" cat", exec.Result{Code: 1})
+			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			src := t.TempDir() // must exist for the stat check
 			stageFakeBuildOutput(t, "lever-jail")
@@ -390,7 +390,7 @@ func TestInstallIfChangedSkipsWhenMarkerMatches(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			local, sum := stageBinary(t, "scion-bytes")
 			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" cat /usr/local/bin/scion.sha256",
+			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c",
 				exec.Result{Stdout: sum + "\n"})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
@@ -416,7 +416,7 @@ func TestInstallIfChangedInstallsWhenMarkerDiffersOrAbsent(t *testing.T) {
 			local, _ := stageBinary(t, "scion-bytes")
 			shape := prefixShapes("lever-jail")[0]
 			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" cat", tc.marker)
+			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", tc.marker)
 			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
@@ -438,7 +438,7 @@ func TestInstallIfChangedWritesMarkerAfterTheBinary(t *testing.T) {
 	local, sum := stageBinary(t, "scion-bytes")
 	shape := prefixShapes("lever-jail")[0]
 	f := exec.NewFakeRunner()
-	f.Script(strings.Join(shape.userPrefix, " ")+" cat", exec.Result{Code: 1})
+	f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
 	f.Script("bash -c", exec.Result{})
 	f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
@@ -485,7 +485,7 @@ func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 			bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
 			f := exec.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "aarch64\n"})
-			f.Script(strings.Join(shape.userPrefix, " ")+" cat", exec.Result{Code: 1})
+			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
 			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
@@ -539,5 +539,51 @@ func TestEnsureScionRejectsNoModeNamingAllThreeKeys(t *testing.T) {
 	}
 	if len(f.Calls) != 0 {
 		t.Errorf("a config error must not touch the guest; got %+v", f.Calls)
+	}
+}
+
+func TestInstallIfChangedInstallsWhenBinaryIsGoneDespiteMarker(t *testing.T) {
+	// The marker records the right digest but the binary it describes is no
+	// longer there. Trusting the marker alone would install nothing and leave
+	// the guest with no scion, surfacing far away as a missing command.
+	local, sum := stageBinary(t, "scion-bytes")
+	shape := prefixShapes("lever-jail")[0]
+	f := exec.NewFakeRunner()
+	// `test -x <dest> && cat <marker>` fails as a whole when the binary is
+	// absent, so no digest is returned however good the marker is.
+	f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
+	f.Script("bash -c", exec.Result{})
+	f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
+	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
+
+	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
+	}
+	if n := installCalls(f); n != 1 {
+		t.Fatalf("a missing binary must be reinstalled even with a matching marker; got %d install call(s)", n)
+	}
+	_ = sum
+}
+
+func TestInstallIfChangedProbeChecksTheBinaryNotJustTheMarker(t *testing.T) {
+	// Pin the probe's shape: it must test the binary AND read the marker, so a
+	// future edit cannot quietly go back to trusting the marker alone.
+	local, sum := stageBinary(t, "scion-bytes")
+	shape := prefixShapes("lever-jail")[0]
+	f := exec.NewFakeRunner()
+	f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Stdout: sum + "\n"})
+	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
+
+	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
+	}
+	if len(f.Calls) == 0 {
+		t.Fatal("expected a probe call")
+	}
+	probe := strings.Join(f.Calls[0].Args, " ")
+	for _, want := range []string{"test -x", "'/usr/local/bin/scion'", "'/usr/local/bin/scion.sha256'"} {
+		if !strings.Contains(probe, want) {
+			t.Errorf("probe %q must contain %q", probe, want)
+		}
 	}
 }

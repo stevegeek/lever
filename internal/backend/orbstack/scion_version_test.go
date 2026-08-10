@@ -22,7 +22,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 		exec.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
 	f.Script("/opt/go/bin/go build -o", exec.Result{})
 	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
-	f.Script("orb -m lever-vtest cat", exec.Result{Code: 1})
+	f.Script("orb -m lever-vtest sh -c", exec.Result{Code: 1})
 	f.Script("orb -u root -m lever-vtest", exec.Result{})
 	f.Script("bash -c", exec.Result{})
 

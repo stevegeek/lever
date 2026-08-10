@@ -559,7 +559,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	f.Script("go build", exec.Result{})
 	f.Script("bash -c", exec.Result{})
 	// The install now reads a digest marker first and records one after.
-	f.Script("orb -m lever-jail cat", exec.Result{Code: 1})
+	f.Script("orb -m lever-jail sh -c", exec.Result{Code: 1})
 	f.Script("orb -u root -m lever-jail sh -c", exec.Result{})
 	src := t.TempDir() // must exist for the stat check
 	stageFakeBuildOutput(t, "lever-jail")

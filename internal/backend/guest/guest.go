@@ -305,7 +305,13 @@ func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPa
 		return fmt.Errorf("hashing %s: %w", localPath, err)
 	}
 	marker := markerPath(destPath)
-	if res, err := g.userRun(ctx, "cat", marker); err == nil && strings.TrimSpace(res.Stdout) == want {
+	// Skip only when the recorded digest matches AND the binary it describes is
+	// actually there and executable. Trusting the marker alone would strand the
+	// guest with no scion at all if the binary were removed or replaced while
+	// the marker survived: the digest would still match, lever would install
+	// nothing, and the failure would surface far away as a missing command.
+	probe := fmt.Sprintf("test -x %s && cat %s", shellSingleQuote(destPath), shellSingleQuote(marker))
+	if res, err := g.userRun(ctx, "sh", "-c", probe); err == nil && strings.TrimSpace(res.Stdout) == want {
 		return nil
 	}
 	if err := g.InstallRootBinary(ctx, localPath, destPath); err != nil {

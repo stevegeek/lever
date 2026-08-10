@@ -97,7 +97,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.Guest().EnsureRuntimes(ctx, o.User); err != nil {
 		return err
 	}
-	if cfg.ScionSource != "" || cfg.ScionVersion != "" {
+	if cfg.HasScion() {
 		if err := o.Guest().EnsureScion(ctx, guest.ScionSpec{
 			Binary:  cfg.ScionBinary,
 			Source:  cfg.ScionSource,

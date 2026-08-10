@@ -118,7 +118,6 @@ const (
 	PhaseError     = "error"
 )
 
-
 // agentRoleBaseline is the role lever wants for every agent: heartbeat and
 // self-token-refresh, with no agent create/lifecycle or secret scope. Worker
 // dispatch runs host-side under the controller PAT, never an agent's own token,

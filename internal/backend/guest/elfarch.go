@@ -2,6 +2,7 @@ package guest
 
 import (
 	"debug/elf"
+	"encoding/binary"
 	"fmt"
 	"os"
 )
@@ -34,10 +35,22 @@ func verifyELFArch(path, wantGOARCH string) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	// A Go PIE build is ET_DYN; an ordinary build is ET_EXEC. Anything else (an
-	// object file, a core dump) is not something the guest can run.
+	// A Go PIE build is ET_DYN; an ordinary build is ET_EXEC. This rejects an
+	// object file or a core dump. It does NOT separate an executable from a
+	// shared library — both are ET_DYN, and only a PT_INTERP segment really
+	// tells them apart — so a .so still reaches the guest and fails there.
 	if f.Type != elf.ET_EXEC && f.Type != elf.ET_DYN {
 		return fmt.Errorf("scion binary %q is an ELF %v, not an executable", path, f.Type)
+	}
+	// The machine alone does not pin the ABI: a 32-bit or big-endian header can
+	// still declare EM_X86_64/EM_AARCH64, and either would fail in the guest
+	// with the exec-format error this check exists to prevent. Real toolchains
+	// do not emit these, which is exactly why they would be baffling.
+	if f.Class != elf.ELFCLASS64 {
+		return fmt.Errorf("scion binary %q is %v, but the guest needs a 64-bit binary", path, f.Class)
+	}
+	if f.ByteOrder != binary.LittleEndian {
+		return fmt.Errorf("scion binary %q is big-endian, but the guest is little-endian", path)
 	}
 	want, ok := elfMachineForGOARCH[wantGOARCH]
 	if !ok {

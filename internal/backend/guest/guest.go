@@ -268,10 +268,6 @@ func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string
 	return nil
 }
 
-// markerPath is where the digest of the currently-installed binary is recorded,
-// beside the binary itself.
-func markerPath(destPath string) string { return destPath + ".sha256" }
-
 // hashFile returns the hex sha256 of a host-local file.
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)
@@ -286,42 +282,37 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// InstallRootBinaryIfChanged installs localPath at destPath only when the guest
-// does not already hold that exact binary, then records the digest beside it.
+// InstallRootBinaryIfChanged installs localPath at destPath unless the guest
+// already holds exactly those bytes.
 //
 // scion is 158MB and was otherwise re-streamed into the guest on every
 // bring-up, in every mode, whether or not it had changed.
 //
-// Two rules make the marker safe to trust:
-//   - It is written strictly AFTER the binary lands, so a crash between the two
-//     leaves it stale or absent and the next run reinstalls. Recording success
-//     first would strand a binary that never arrived.
-//   - An unreadable or absent marker means "unknown", which installs. Being
-//     wrong that way costs redundant work; the other way would skip a real
-//     install.
+// It compares against the GUEST BINARY ITSELF, by hashing it in place — not
+// against a marker file recording what lever installed once. A marker attests a
+// past event; only the file answers "is the right binary there NOW?". Hashing
+// the file covers deletion, truncation and out-of-band replacement in one
+// check, keeps `lever up` self-healing the way it was before any skip existed,
+// and needs no second write whose ordering has to be defended.
+//
+// It costs a 158MB read off guest disk rather than a 158MB stream across the
+// transport, which is the cheaper side of that trade by a wide margin.
+//
+// Fails open: if the guest digest cannot be read for any reason — no such file,
+// no sha256sum, an unreadable path — lever installs. Being wrong that way costs
+// redundant work; the other way would skip a real install.
 func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) error {
 	want, err := hashFile(localPath)
 	if err != nil {
 		return fmt.Errorf("hashing %s: %w", localPath, err)
 	}
-	marker := markerPath(destPath)
-	// Skip only when the recorded digest matches AND the binary it describes is
-	// actually there and executable. Trusting the marker alone would strand the
-	// guest with no scion at all if the binary were removed or replaced while
-	// the marker survived: the digest would still match, lever would install
-	// nothing, and the failure would surface far away as a missing command.
-	probe := fmt.Sprintf("test -x %s && cat %s", shellSingleQuote(destPath), shellSingleQuote(marker))
-	if res, err := g.userRun(ctx, "sh", "-c", probe); err == nil && strings.TrimSpace(res.Stdout) == want {
-		return nil
+	if res, err := g.userRun(ctx, "sha256sum", destPath); err == nil {
+		// `sha256sum` prints "<hex>  <path>"; take the digest field only.
+		if f := strings.Fields(res.Stdout); len(f) > 0 && f[0] == want {
+			return nil
+		}
 	}
-	if err := g.InstallRootBinary(ctx, localPath, destPath); err != nil {
-		return err
-	}
-	write := fmt.Sprintf("printf %%s %s > %s", shellSingleQuote(want), shellSingleQuote(marker))
-	if _, err := g.rootRun(ctx, "sh", "-c", write); err != nil {
-		return fmt.Errorf("recording %s: %w", marker, err)
-	}
-	return nil
+	return g.InstallRootBinary(ctx, localPath, destPath)
 }
 
 // fetchScionModule downloads the pinned scion module via the Go module system

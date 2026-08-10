@@ -1,9 +1,10 @@
 package orbstack
 
 import (
-	"path/filepath"
-	"os"
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/guest"
@@ -53,10 +54,13 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
+	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
 	f.Script("/opt/go/bin/go mod download -json", exec.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
 	o := New(f, "lever-vtest")
 	if err := o.Guest().EnsureScion(context.Background(), guest.ScionSpec{Version: "deadbeef"}); err == nil {
 		t.Fatal("expected error when go mod download reports a bad revision")
+	} else if !strings.Contains(err.Error(), "unknown revision") {
+		t.Errorf("error must carry the download failure, got %v", err)
 	}
 }
 

@@ -164,7 +164,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "arm64\n"})
 			f.Script("go build", exec.Result{})
 			f.Script("bash -c", exec.Result{})
-			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
+			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", exec.Result{Code: 1})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			src := t.TempDir() // must exist for the stat check
 			stageFakeBuildOutput(t, "lever-jail")
@@ -288,10 +288,13 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
+	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
 	f.Script("/opt/go/bin/go mod download -json", exec.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-vtest"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-vtest"}, Machine: "lever-vtest"}
 	if err := g.EnsureScion(context.Background(), ScionSpec{Version: "deadbeef"}); err == nil {
 		t.Fatal("expected error when go mod download reports a bad revision")
+	} else if !strings.Contains(err.Error(), "unknown revision") {
+		t.Errorf("error must carry the download failure, got %v", err)
 	}
 }
 
@@ -374,7 +377,7 @@ func stageBinary(t *testing.T, content string) (string, string) {
 }
 
 // installCalls counts the streaming install (the host-side `bash -c` pipe),
-// which is the 158MB cost the marker exists to avoid.
+// which is the 158MB cost the digest check exists to avoid.
 func installCalls(f *exec.FakeRunner) int {
 	n := 0
 	for _, c := range f.Calls {
@@ -385,38 +388,39 @@ func installCalls(f *exec.FakeRunner) int {
 	return n
 }
 
-func TestInstallIfChangedSkipsWhenMarkerMatches(t *testing.T) {
+func TestInstallIfChangedSkipsWhenGuestBinaryMatches(t *testing.T) {
 	for _, shape := range prefixShapes("lever-jail") {
 		t.Run(shape.name, func(t *testing.T) {
 			local, sum := stageBinary(t, "scion-bytes")
 			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c",
-				exec.Result{Stdout: sum + "\n"})
+			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum",
+				exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
 			if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
 				t.Fatalf("InstallRootBinaryIfChanged: %v", err)
 			}
 			if n := installCalls(f); n != 0 {
-				t.Fatalf("a matching marker must not re-stream the binary; got %d install call(s)", n)
+				t.Fatalf("a matching guest binary must not be re-streamed; got %d install call(s)", n)
 			}
 		})
 	}
 }
 
-func TestInstallIfChangedInstallsWhenMarkerDiffersOrAbsent(t *testing.T) {
+func TestInstallIfChangedInstallsWhenGuestBinaryDiffersOrAbsent(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		marker exec.Result
+		name        string
+		guestDigest exec.Result
 	}{
-		{"marker differs", exec.Result{Stdout: "0000\n"}},
-		{"marker absent", exec.Result{Code: 1, Stderr: "No such file"}},
+		{"guest binary differs", exec.Result{Stdout: "0000  /usr/local/bin/scion\n"}},
+		{"guest binary absent", exec.Result{Code: 1, Stderr: "No such file"}},
+		{"sha256sum unavailable", exec.Result{Code: 127, Stderr: "command not found"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			local, _ := stageBinary(t, "scion-bytes")
 			shape := prefixShapes("lever-jail")[0]
 			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", tc.marker)
+			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", tc.guestDigest)
 			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
@@ -430,40 +434,6 @@ func TestInstallIfChangedInstallsWhenMarkerDiffersOrAbsent(t *testing.T) {
 		})
 	}
 }
-
-func TestInstallIfChangedWritesMarkerAfterTheBinary(t *testing.T) {
-	// Ordering is the safety property: a crash between the two must leave the
-	// marker stale or absent so the next bring-up reinstalls. Recording success
-	// first would strand a binary that never arrived.
-	local, sum := stageBinary(t, "scion-bytes")
-	shape := prefixShapes("lever-jail")[0]
-	f := exec.NewFakeRunner()
-	f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
-	f.Script("bash -c", exec.Result{})
-	f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
-	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
-
-	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
-		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
-	}
-	installIdx, markerIdx := -1, -1
-	for i, c := range f.Calls {
-		joined := c.Name + " " + strings.Join(c.Args, " ")
-		if c.Name == "bash" && strings.Contains(joined, "cat ") && installIdx < 0 {
-			installIdx = i
-		}
-		if strings.Contains(joined, sum) && strings.Contains(joined, "scion.sha256") {
-			markerIdx = i
-		}
-	}
-	if installIdx < 0 || markerIdx < 0 {
-		t.Fatalf("expected both an install and a marker write; calls=%+v", f.Calls)
-	}
-	if markerIdx < installIdx {
-		t.Error("the marker must be written AFTER the binary lands")
-	}
-}
-
 func TestInstallIfChangedFailsOnUnreadableLocalFile(t *testing.T) {
 	f := exec.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb"}, RootPrefix: []string{"orb"}, Machine: "lever-jail"}
@@ -485,7 +455,7 @@ func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 			bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
 			f := exec.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "aarch64\n"})
-			f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
+			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", exec.Result{Code: 1})
 			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
@@ -542,48 +512,31 @@ func TestEnsureScionRejectsNoModeNamingAllThreeKeys(t *testing.T) {
 	}
 }
 
-func TestInstallIfChangedInstallsWhenBinaryIsGoneDespiteMarker(t *testing.T) {
-	// The marker records the right digest but the binary it describes is no
-	// longer there. Trusting the marker alone would install nothing and leave
-	// the guest with no scion, surfacing far away as a missing command.
+func TestInstallIfChangedHashesTheGuestBinaryNotAMarker(t *testing.T) {
+	// Pin the mechanism: lever must ask the guest what is actually installed.
+	// A marker file recording a past install would still match after the binary
+	// was deleted, truncated or replaced, and lever would skip — leaving the
+	// guest with no working scion and no way for `lever up` to repair it.
 	local, sum := stageBinary(t, "scion-bytes")
 	shape := prefixShapes("lever-jail")[0]
 	f := exec.NewFakeRunner()
-	// `test -x <dest> && cat <marker>` fails as a whole when the binary is
-	// absent, so no digest is returned however good the marker is.
-	f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Code: 1})
-	f.Script("bash -c", exec.Result{})
-	f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
+	f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
 	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
 		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
 	}
-	if n := installCalls(f); n != 1 {
-		t.Fatalf("a missing binary must be reinstalled even with a matching marker; got %d install call(s)", n)
-	}
-	_ = sum
-}
-
-func TestInstallIfChangedProbeChecksTheBinaryNotJustTheMarker(t *testing.T) {
-	// Pin the probe's shape: it must test the binary AND read the marker, so a
-	// future edit cannot quietly go back to trusting the marker alone.
-	local, sum := stageBinary(t, "scion-bytes")
-	shape := prefixShapes("lever-jail")[0]
-	f := exec.NewFakeRunner()
-	f.Script(strings.Join(shape.userPrefix, " ")+" sh -c", exec.Result{Stdout: sum + "\n"})
-	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
-
-	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
-		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
-	}
-	if len(f.Calls) == 0 {
-		t.Fatal("expected a probe call")
+	if len(f.Calls) != 1 {
+		t.Fatalf("want exactly one probe call and no install, got %+v", f.Calls)
 	}
 	probe := strings.Join(f.Calls[0].Args, " ")
-	for _, want := range []string{"test -x", "'/usr/local/bin/scion'", "'/usr/local/bin/scion.sha256'"} {
-		if !strings.Contains(probe, want) {
-			t.Errorf("probe %q must contain %q", probe, want)
+	if !strings.Contains(probe, "sha256sum /usr/local/bin/scion") {
+		t.Errorf("probe %q must hash the installed binary itself", probe)
+	}
+	// No marker file may be written: nothing to go stale, no ordering to defend.
+	for _, c := range f.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), ".sha256") {
+			t.Errorf("no marker file may be written; got %+v", c)
 		}
 	}
 }

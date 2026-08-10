@@ -2,6 +2,7 @@ package orbstack
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -771,5 +772,50 @@ func TestRunUserUIDAfterEnsureUp(t *testing.T) {
 	}
 	if got := b.RunUID(); got != "501" {
 		t.Errorf("RunUID: want %q got %q", "501", got)
+	}
+}
+
+// Binary mode must reach the guest THROUGH EnsureUp. It did not: ScionBinary
+// was plumbed into the ScionSpec literal while the guard around it still asked
+// only about ScionSource/ScionVersion, so `lever up` installed nothing and
+// reported success. Every other binary-mode test calls EnsureScion directly and
+// so cannot see it — this one drives the real entry point.
+func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "scion")
+	h := make([]byte, 64)
+	copy(h, []byte{0x7f, 'E', 'L', 'F'})
+	h[4], h[5], h[6] = 2, 1, 1 // 64-bit, little-endian, v1
+	h[16] = 2                  // ET_EXEC
+	h[18] = 183                // EM_AARCH64
+	h[20] = 1                  // e_version
+	h[52] = 64                 // e_ehsize
+	if err := os.WriteFile(bin, h, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f := exec.NewFakeRunner()
+	scriptedMachine(f)
+	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "aarch64\n"})
+	f.Script("orb -m lever-jail sha256sum", exec.Result{Code: 1}) // not installed yet
+	f.Script("bash -c", exec.Result{})
+	b := New(f, "lever-jail")
+
+	if err := b.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-jail", ProjectTree: "/t", ScionBinary: bin,
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+
+	var installed bool
+	for _, c := range f.Calls {
+		if c.Name == "go" {
+			t.Fatalf("binary mode must never invoke go through EnsureUp; got %+v", c)
+		}
+		if c.Name == "bash" && len(c.Args) > 1 && strings.Contains(c.Args[1], "cat ") {
+			installed = true
+		}
+	}
+	if !installed {
+		t.Fatal("EnsureUp with only ScionBinary set installed nothing")
 	}
 }

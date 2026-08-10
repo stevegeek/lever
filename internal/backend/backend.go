@@ -55,6 +55,16 @@ type Config struct {
 	Disk string
 }
 
+// HasScion reports whether any scion mode is configured.
+//
+// A predicate, not a hand-written condition at each call site: the three fields
+// are checked in two backends, and when ScionBinary was added the struct literal
+// was updated while the guard around it was not — so binary mode silently never
+// ran. One place to change is the fix for that class.
+func (c Config) HasScion() bool {
+	return c.ScionBinary != "" || c.ScionSource != "" || c.ScionVersion != ""
+}
+
 // Backend is the contract the rest of Lever drives. Implementations must make
 // EnsureUp idempotent. RunUser/RunUID/HostAliasV4/JailRunner are valid after
 // EnsureUp (constructors may return sensible defaults before).

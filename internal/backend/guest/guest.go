@@ -306,7 +306,12 @@ func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPa
 	if err != nil {
 		return fmt.Errorf("hashing %s: %w", localPath, err)
 	}
-	if res, err := g.userRun(ctx, "sha256sum", destPath); err == nil {
+	// Absolute path, not a bare name: userRun passes no env, so a bare name
+	// resolves on the guest user's PATH, which precedes /usr/bin with
+	// run-user-writable directories. A shim there could report the expected
+	// digest for a replaced binary and pin it forever. That needs guest root
+	// (who could replace scion outright), but the fix is one word.
+	if res, err := g.userRun(ctx, "/usr/bin/sha256sum", destPath); err == nil {
 		// `sha256sum` prints "<hex>  <path>"; take the digest field only.
 		if f := strings.Fields(res.Stdout); len(f) > 0 && f[0] == want {
 			return nil

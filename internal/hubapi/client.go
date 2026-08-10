@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // Doer performs one hub request and returns the HTTP status and response body.
@@ -110,10 +111,27 @@ func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string)
 	if err := c.get(ctx, "/api/v1/projects", &body); err != nil {
 		return "", err
 	}
+	var matched []project
 	for _, p := range body.Projects {
 		if p.Name == nameOrSlug || p.Slug == nameOrSlug {
-			return p.ID, nil
+			matched = append(matched, p)
 		}
+	}
+	// More than one match must fail, not pick the first. Every other lever call
+	// identifies the project by its in-jail path; only this one matches on a
+	// name. If a hub ever accumulated two records for one tree, taking the first
+	// would strip a shared dir from the wrong record and report success while
+	// the live project kept the writable mount.
+	if len(matched) > 1 {
+		ids := make([]string, 0, len(matched))
+		for _, p := range matched {
+			ids = append(ids, p.ID)
+		}
+		return "", &APIError{Msg: fmt.Sprintf("hub %s lists %d projects named %q (%s); refusing to guess which one",
+			endpointHint, len(matched), nameOrSlug, strings.Join(ids, ", "))}
+	}
+	if len(matched) == 1 {
+		return matched[0].ID, nil
 	}
 	return "", &APIError{Msg: fmt.Sprintf("no project named %q at hub %s (it listed %d project(s))",
 		nameOrSlug, endpointHint, len(body.Projects))}
@@ -121,13 +139,24 @@ func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string)
 
 // SharedDirs lists a project's shared directories by project UUID.
 func (c *Client) SharedDirs(ctx context.Context, projectID string) ([]SharedDir, error) {
-	var body struct {
-		SharedDirs []SharedDir `json:"sharedDirs"`
-	}
-	if err := c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/shared-dirs", &body); err != nil {
+	// Decode loosely first and REQUIRE the key. StripSharedDir treats an empty
+	// list as proof of removal, so a hub that renamed this field would decode to
+	// zero entries and the verify would pass vacuously — the one failure it
+	// exists to catch. A moved route already fails loud (non-2xx), so this
+	// closes the only silent case.
+	var raw map[string]json.RawMessage
+	if err := c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/shared-dirs", &raw); err != nil {
 		return nil, err
 	}
-	return body.SharedDirs, nil
+	field, ok := raw["sharedDirs"]
+	if !ok {
+		return nil, &APIError{Msg: "shared-dirs response has no \"sharedDirs\" field; the hub API changed shape and lever cannot confirm what is mounted"}
+	}
+	var dirs []SharedDir
+	if err := json.Unmarshal(field, &dirs); err != nil {
+		return nil, &APIError{Msg: fmt.Sprintf("decoding sharedDirs: %v", err)}
+	}
+	return dirs, nil
 }
 
 // StripSharedDir removes one shared directory from a project, by project name

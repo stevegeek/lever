@@ -131,19 +131,28 @@ const agentRoleBaseline = "baseline"
 // either direction is costly: too eager breaks pre-#1089 pins, too shy hands
 // agents FULL authority on pins at or after scion#1090.
 //
-// Probed once per Client and cached: Start runs on every dispatch, and this
-// answer cannot change under a running instance (the binary is installed at
-// bring-up).
+// Only SUCCESSES are cached. A failed probe is retried on the next call: the
+// broker holds one Client for its whole life, so caching an error would let a
+// single jail hiccup on the first dispatch fail every later dispatch until the
+// broker restarts.
+//
+// Caching a success is safe only because a scion change restarts the broker —
+// brokerctl.ConfigHash covers the scion block for exactly that reason. Without
+// that, a cached "no --role" would outlive a pin bump and every agent would get
+// scion#1090's FULL default.
 func (c *Client) roleFlagSupported(ctx context.Context) (bool, error) {
-	c.roleProbe.Do(func() {
-		out, err := c.run(ctx, "", "start", "--help")
-		if err != nil {
-			c.roleProbeErr = err
-			return
-		}
-		c.roleSupported = strings.Contains(out, "--role")
-	})
-	return c.roleSupported, c.roleProbeErr
+	c.roleMu.Lock()
+	defer c.roleMu.Unlock()
+	if c.roleProbed {
+		return c.roleSupported, nil
+	}
+	out, err := c.run(ctx, "", "start", "--help")
+	if err != nil {
+		return false, err
+	}
+	c.roleSupported = strings.Contains(out, "--role")
+	c.roleProbed = true
+	return c.roleSupported, nil
 }
 
 type StartOpts struct {

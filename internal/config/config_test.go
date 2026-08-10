@@ -1323,3 +1323,33 @@ func TestConfigWithoutScionBlockStillLoads(t *testing.T) {
 		t.Fatalf("a config with no scion block must still load: %v", err)
 	}
 }
+
+func TestScionBinaryAndSourceRejectedInsideTree(t *testing.T) {
+	// The tree is the one place agents can write. A binary or checkout there
+	// would be installed as root as the engine every agent runs under, so a
+	// compromised agent could choose its own engine on the next bring-up.
+	for _, tc := range []struct{ name, body string }{
+		{"binary in tree", "scion:\n  binary: tree/dist/scion\n"},
+		{"source in tree", "scion:\n  source: tree/scion-src\n"},
+		{"binary deeper in tree", "scion:\n  binary: tree/workers/appa/scion\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"+tc.body)
+			_, err := Load(p)
+			if err == nil {
+				t.Fatal("expected rejection: path is inside the mounted tree")
+			}
+			if !strings.Contains(err.Error(), "inside the mounted tree") {
+				t.Errorf("error %q should explain why", err)
+			}
+		})
+	}
+}
+
+func TestScionBinaryOutsideTreeIsAccepted(t *testing.T) {
+	// The normal shape: built elsewhere, kept beside the config, outside the mount.
+	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: dist/scion-linux-amd64\n")
+	if _, err := Load(p); err != nil {
+		t.Fatalf("a binary outside the tree must load: %v", err)
+	}
+}

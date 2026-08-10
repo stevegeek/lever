@@ -796,7 +796,7 @@ func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
 	f := exec.NewFakeRunner()
 	scriptedMachine(f)
 	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "aarch64\n"})
-	f.Script("orb -m lever-jail sha256sum", exec.Result{Code: 1}) // not installed yet
+	f.Script("orb -m lever-jail /usr/bin/sha256sum", exec.Result{Code: 1}) // not installed yet
 	f.Script("bash -c", exec.Result{})
 	b := New(f, "lever-jail")
 

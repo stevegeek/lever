@@ -159,10 +159,23 @@ Baseline carries
 `project:read`, `agent:status:update`, `agent:token:refresh`, `project:agent:notify` and
 `agent:port:forward` — heartbeat, self-token-refresh, and read/enumeration, but **no**
 `agent:create`, `agent:lifecycle`, or `project:secret:read`. So a lever agent's token cannot
-create or lifecycle agents, or read project secrets; those verbs 403 on the missing scope. The
-ceiling is doubly held: a project's `max_agent_role` defaults to baseline, and `full` requires a
-hub-admin ceiling lever never grants. This posture is now enforced (not merely structural), so a
-`lever doctor` check can meaningfully assert the started role. The **known exception** remains
+create or lifecycle agents, or read project secrets; those verbs 403 on the missing scope.
+
+**That rests on lever stamping the role, and on nothing else.** An earlier version of this guide
+claimed the ceiling was "doubly held" by a project `max_agent_role` defaulting to baseline and a
+hub-admin ceiling. Neither half is true: Scion's `projectMax` defaults to **full** and narrows only
+when the `scion.io/max-agent-role` annotation is set, which lever does not set and which hub
+`default_max_agent_role` leaves empty in file/SQLite mode; the user ceiling is an explicit
+`userCeiling := AgentRoleFull` pass-through. So the explicit `--role baseline` on `scion start` is
+the **only** thing holding agents down, which is why lever probes the binary rather than trusting a
+default, and why a bring-up fails rather than guessing when it cannot tell.
+
+Two consequences worth stating rather than implying. A `scion resume` carries no role flag at all —
+harmless for a record that already exists, since the hub keeps the stored role, but a resume of a
+declared worker with **no** hub record falls through to creation and takes the hub default. And a
+long-lived broker caches what the installed Scion supports, so lever restarts the broker whenever
+the `scion` config block changes rather than letting that cache outlive the binary it describes.
+Setting the project annotation would close both structurally; that is not yet done. The **known exception** remains
 agent `DELETE`: at this pin scion still authorizes `performAgentDelete` only for user callers, so
 an agent's own token is not scope-checked on that path (create/lifecycle/read/token-refresh are all
 gated for agents; delete is the lone gap). A fix — a lifecycle-scope + project-isolation gate on

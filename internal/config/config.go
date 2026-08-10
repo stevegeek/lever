@@ -569,6 +569,24 @@ func Load(path string) (*App, error) {
 	if scionModes > 1 {
 		return nil, fmt.Errorf("config: scion.binary, scion.source and scion.version are mutually exclusive")
 	}
+	// Neither the prebuilt binary nor the source checkout may live inside the
+	// mounted tree. Whatever they point at is cross-compiled or installed as
+	// root at /usr/local/bin/scion and becomes the engine every agent runs
+	// under — and the tree is exactly the place agents CAN write. An in-tree
+	// path would let a compromised agent choose its own engine on the next
+	// bring-up.
+	for _, m := range []struct{ key, path string }{
+		{"scion.binary", app.Scion.Binary},
+		{"scion.source", app.Scion.Source},
+	} {
+		if m.path == "" {
+			continue
+		}
+		if rel, err := filepath.Rel(app.Tree, m.path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and it would be installed as the engine they run under",
+				m.key, m.path, app.Tree)
+		}
+	}
 	if r := app.Scion.AgentRole; r != "" && !slices.Contains(scionAgentRoles, r) {
 		return nil, fmt.Errorf("config: unknown scion.agent_role %q (valid: %s; omit it entirely to let scion choose)",
 			r, strings.Join(scionAgentRoles, ", "))

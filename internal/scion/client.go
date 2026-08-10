@@ -48,11 +48,13 @@ type Client struct {
 	agentRole      string
 	r              exec.Runner
 
-	// roleProbe caches the one-shot `start --help` capability check that decides
-	// whether --role is emitted. See Client.roleFlagSupported.
-	roleProbe     sync.Once
+	// roleMu guards the cached `start --help` capability check that decides
+	// whether --role is emitted. Only a successful probe is cached (roleProbed),
+	// so a transient failure is retried rather than remembered forever. See
+	// Client.roleFlagSupported.
+	roleMu        sync.Mutex
+	roleProbed    bool
 	roleSupported bool
-	roleProbeErr  error
 }
 
 func New(r exec.Runner, o Options) *Client {

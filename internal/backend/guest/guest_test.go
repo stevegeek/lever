@@ -164,7 +164,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "arm64\n"})
 			f.Script("go build", exec.Result{})
 			f.Script("bash -c", exec.Result{})
-			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", exec.Result{Code: 1})
+			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Code: 1})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			src := t.TempDir() // must exist for the stat check
 			stageFakeBuildOutput(t, "lever-jail")
@@ -393,7 +393,7 @@ func TestInstallIfChangedSkipsWhenGuestBinaryMatches(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			local, sum := stageBinary(t, "scion-bytes")
 			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum",
+			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum",
 				exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
@@ -420,7 +420,7 @@ func TestInstallIfChangedInstallsWhenGuestBinaryDiffersOrAbsent(t *testing.T) {
 			local, _ := stageBinary(t, "scion-bytes")
 			shape := prefixShapes("lever-jail")[0]
 			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", tc.guestDigest)
+			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", tc.guestDigest)
 			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
@@ -455,7 +455,7 @@ func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 			bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
 			f := exec.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "aarch64\n"})
-			f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", exec.Result{Code: 1})
+			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Code: 1})
 			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
@@ -520,7 +520,7 @@ func TestInstallIfChangedHashesTheGuestBinaryNotAMarker(t *testing.T) {
 	local, sum := stageBinary(t, "scion-bytes")
 	shape := prefixShapes("lever-jail")[0]
 	f := exec.NewFakeRunner()
-	f.Script(strings.Join(shape.userPrefix, " ")+" sha256sum", exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
+	f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
 	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {

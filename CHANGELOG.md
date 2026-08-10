@@ -7,24 +7,33 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-### Added
-- **`scion.agent_role` pins agent authority explicitly (scion#1089).** Upstream
-  replaced per-template scope lists with named role bundles (`none`,
-  `readonly`, `baseline`, `full`). Setting `agent_role: baseline` makes lever
-  stamp `scion start --role baseline`, so a later change to scion's default
-  cannot silently widen agent authority. Baseline means heartbeat and
-  self-token-refresh, with no agent create, lifecycle or secret scope — worker
-  dispatch runs host-side under the controller PAT, never an agent's own token.
-  Note the baseline bundle is wider than lever's previously documented three
-  scopes: it also grants `project:read` and `agent:port:forward`.
+### Security
+- **Agents are pinned to the `baseline` role automatically (scion#1089/#1090).**
+  Upstream replaced per-template scope lists with named role bundles, and then
+  **flipped the default for an unspecified role from `baseline` to `full`**
+  (scion `2181aff6`, #1090). On any pin at or after that commit, an agent
+  started without an explicit role receives agent create, agent lifecycle and
+  project-secret-read — breaking lever's core invariant that no agent holds hub
+  authority.
 
-  **Unset by default, and it has to stay that way for now.** `--role` does not
-  exist before scion#1089, and no commit carrying #1089 can currently be
-  fetched at all: scion `4c045fc8` added a root `AGENTS.md` beside the existing
-  `agents.md`, and `go mod download` rejects the case-insensitive filename
-  collision when it builds the module zip. The newest fetchable scion commit is
-  `3142df68`, which predates roles. lever cannot infer from an opaque commit
-  hash whether a pin carries the flag, so this is opt-in. An unknown value is
+  lever now decides by asking the scion **binary** whether it accepts
+  `start --role`, not by reasoning about the pin — a commit hash says nothing
+  about which side of #1090 it sits on. When roles exist, lever stamps
+  `baseline`; when they do not (pre-#1089), it omits the flag, which widens
+  nothing because the roles system is absent there. A probe that cannot answer
+  fails the start rather than guessing, since guessing wrong grants full
+  authority. The probe runs once per client, not once per dispatch.
+
+  Baseline means heartbeat and self-token-refresh, with no agent create,
+  lifecycle or secret scope — worker dispatch runs host-side under the
+  controller PAT, never an agent's own token. Note it is wider than lever's
+  previously documented three scopes: it also grants `project:read` and
+  `agent:port:forward`.
+
+### Added
+- **`scion.agent_role` overrides the role lever picks.** Rarely needed — the
+  default above is the safe one. Naming a role on a scion with no `--role` flag
+  is a hard error rather than a silent downgrade, and an unknown value is
   rejected at config load rather than as an opaque bring-up failure.
 
 ### Changed

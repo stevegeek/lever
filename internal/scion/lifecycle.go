@@ -119,6 +119,34 @@ const (
 )
 
 
+// agentRoleBaseline is the role lever wants for every agent: heartbeat and
+// self-token-refresh, with no agent create/lifecycle or secret scope. Worker
+// dispatch runs host-side under the controller PAT, never an agent's own token,
+// so nothing lever does needs more. Used whenever the installed scion supports
+// roles and the instance did not name one.
+const agentRoleBaseline = "baseline"
+
+// roleFlagSupported reports whether the installed scion accepts `start --role`
+// (scion#1089). It asks the binary rather than the pin, because a commit hash
+// says nothing about which features it carries — and getting this wrong in
+// either direction is costly: too eager breaks pre-#1089 pins, too shy hands
+// agents FULL authority on pins at or after scion#1090.
+//
+// Probed once per Client and cached: Start runs on every dispatch, and this
+// answer cannot change under a running instance (the binary is installed at
+// bring-up).
+func (c *Client) roleFlagSupported(ctx context.Context) (bool, error) {
+	c.roleProbe.Do(func() {
+		out, err := c.run(ctx, "", "start", "--help")
+		if err != nil {
+			c.roleProbeErr = err
+			return
+		}
+		c.roleSupported = strings.Contains(out, "--role")
+	})
+	return c.roleSupported, c.roleProbeErr
+}
+
 type StartOpts struct {
 	Worker  string
 	Task    string
@@ -201,19 +229,34 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	} else {
 		args = append(args, "--harness-auth", "oauth-token")
 	}
-	// Pin the agent role explicitly when the instance asked for one
-	// (scion#1089), so a future change to scion's default cannot silently widen
-	// agent authority. lever wants "baseline": heartbeat + self-token-refresh,
-	// no agent create/lifecycle or secret scope (worker dispatch runs host-side
-	// under the controller PAT, never an agent's own token).
+	// Pin the agent role whenever the installed scion understands roles at all.
 	//
-	// OPT-IN, not automatic. `--role` does not exist before #1089, so passing it
-	// unconditionally makes lever incompatible with every earlier pin, and lever
-	// cannot tell from an opaque commit hash whether a pin carries it. See
-	// config.ScionConfig.AgentRole for why nothing carrying #1089 is fetchable
-	// at all today.
-	if c.agentRole != "" {
-		args = append(args, "--role", c.agentRole)
+	// This CANNOT be decided from config alone. `--role` does not exist before
+	// scion#1089, so passing it unconditionally breaks every earlier pin — but
+	// scion#1090 then flipped the default role from baseline to FULL, so NOT
+	// passing it on a pin at or after that commit hands every agent
+	// create/lifecycle/secret-read authority. An opaque commit hash tells lever
+	// nothing about which side of that line a pin sits on, so it asks the
+	// binary (see roleFlagSupported) instead of trusting the operator to know.
+	//
+	// Pre-#1089 scion has no roles at all, so omitting the flag there widens
+	// nothing: agents get the old fixed scope set.
+	supported, err := c.roleFlagSupported(ctx)
+	switch {
+	case err != nil:
+		// Fail closed. This probe is a local exec of the binary we are about to
+		// run; if it cannot answer, `start` was not going to work either, and
+		// guessing risks silently granting full authority.
+		return fmt.Errorf("determining scion agent-role support: %w", err)
+	case supported:
+		role := c.agentRole
+		if role == "" {
+			role = agentRoleBaseline
+		}
+		args = append(args, "--role", role)
+	case c.agentRole != "":
+		return fmt.Errorf("scion.agent_role is %q but this scion has no --role flag "+
+			"(it predates scion#1089); remove the setting or move to a newer pin", c.agentRole)
 	}
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
@@ -226,8 +269,8 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	} else if o.Workspace != "" {
 		args = append(args, "--workspace", o.Workspace)
 	}
-	_, err := c.run(ctx, "", args...)
-	return err
+	_, runErr := c.run(ctx, "", args...)
+	return runErr
 }
 
 func (c *Client) Resume(ctx context.Context, worker, project string) error {

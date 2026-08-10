@@ -36,15 +36,35 @@ func TestListParsesAgents(t *testing.T) {
 	}
 }
 
-func TestStartArgv(t *testing.T) {
+// fakeScion scripts a runner for the Start tests. Start first probes
+// `scion start --help` to learn whether this scion understands --role
+// (scion#1089), so the probe needs its own scripted answer. The two keys do not
+// overlap as prefixes, which keeps FakeRunner's prefix match deterministic.
+func fakeScion(roleSupported bool) *exec.FakeRunner {
 	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+	help := "Flags:\n      --harness-auth string   Override auth method\n"
+	if roleSupported {
+		help += "      --role string   Agent authorization role\n"
+	}
+	f.Script("scion start --help", exec.Result{Stdout: help})
+	f.Script("scion -g", exec.Result{})
+	return f
+}
+
+// startArgv is the argv of the actual start call — the LAST call, since the
+// capability probe runs first.
+func startArgv(f *exec.FakeRunner) string {
+	return strings.Join(f.Calls[len(f.Calls)-1].Args, " ")
+}
+
+func TestStartArgv(t *testing.T) {
+	f := fakeScion(false)
 	c := New(f, Options{})
 	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "do x", Harness: "claude", Project: "/g/a", Image: "img:1", Workspace: "/lever"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startArgv(f)
 	for _, want := range []string{"-g /g/a", "start a do x", "--harness claude", "--harness-auth oauth-token", "--image img:1", "--workspace /lever"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
@@ -52,45 +72,107 @@ func TestStartArgv(t *testing.T) {
 	}
 }
 
-// An unset agent role must NOT emit --role. The flag does not exist before
-// scion#1089, so emitting it unconditionally makes lever incompatible with
-// every earlier pin — and no pin carrying #1089 is fetchable at all today
-// (scion's AGENTS.md/agents.md case collision breaks `go mod download`).
-func TestStartOmitsRoleFlagByDefault(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+// On a scion WITHOUT roles (pre-#1089) the flag must be omitted: emitting it
+// would make lever unable to start an agent at all on that pin. Nothing is
+// widened by omitting it, because the roles system does not exist there.
+func TestStartOmitsRoleFlagWhenUnsupported(t *testing.T) {
+	f := fakeScion(false)
 	c := New(f, Options{})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--role") {
-		t.Fatalf("argv %q must not carry --role when no role is configured", got)
+	if got := startArgv(f); strings.Contains(got, "--role") {
+		t.Fatalf("argv %q must not carry --role on a scion that has no such flag", got)
 	}
 }
 
-// A configured role IS stamped, so an instance whose pin has #1089 can pin
-// agent authority explicitly instead of inheriting scion's default.
+// THE SECURITY-CRITICAL CASE. On a scion WITH roles, lever must stamp baseline
+// even when the instance named no role. scion#1090 flipped the unspecified-role
+// default to FULL — agent create, lifecycle and project-secret-read — so
+// staying silent hands every agent hub authority and breaks lever's core
+// invariant. Detection is by capability probe, not by pin, because a commit
+// hash says nothing about which side of #1090 it sits on.
+func TestStartStampsBaselineWhenRolesSupported(t *testing.T) {
+	f := fakeScion(true)
+	c := New(f, Options{}) // no role configured
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := startArgv(f); !strings.Contains(got, "--role baseline") {
+		t.Fatalf("argv %q must stamp --role baseline; scion#1090 defaults an unspecified role to FULL", got)
+	}
+}
+
+// A configured role overrides the default, so an operator can widen or narrow
+// deliberately.
 func TestStartStampsConfiguredRole(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
-	c := New(f, Options{AgentRole: "baseline"})
+	f := fakeScion(true)
+	c := New(f, Options{AgentRole: "readonly"})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", APIKey: true}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
-	if !strings.Contains(got, "--role baseline") {
-		t.Fatalf("argv %q missing --role baseline", got)
+	got := startArgv(f)
+	if !strings.Contains(got, "--role readonly") {
+		t.Fatalf("argv %q missing the configured --role readonly", got)
+	}
+}
+
+// Asking for a role a scion cannot honour must fail loudly. Silently dropping
+// it would leave the operator believing authority is pinned when it is not.
+func TestStartRejectsConfiguredRoleWhenUnsupported(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{AgentRole: "baseline"})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"})
+	if err == nil {
+		t.Fatal("expected an error: the configured role cannot be honoured")
+	}
+	if !strings.Contains(err.Error(), "1089") {
+		t.Errorf("error should explain which scion change is missing, got %v", err)
+	}
+}
+
+// A probe that cannot answer must fail closed. Guessing "unsupported" would
+// silently omit the flag on a post-#1090 scion and grant FULL authority.
+func TestStartFailsClosedWhenProbeFails(t *testing.T) {
+	f := exec.NewFakeRunner() // nothing scripted: the probe errors
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"})
+	if err == nil {
+		t.Fatal("expected an error: agent-role support could not be determined")
+	}
+	if !strings.Contains(err.Error(), "agent-role support") {
+		t.Errorf("error should name the probe, got %v", err)
+	}
+}
+
+// The probe runs once per client, not once per dispatch: Start is on the hot
+// path for every worker the manager launches.
+func TestRoleProbeIsCachedAcrossStarts(t *testing.T) {
+	f := fakeScion(true)
+	c := New(f, Options{})
+	for i := 0; i < 3; i++ {
+		if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+	}
+	probes := 0
+	for _, call := range f.Calls {
+		if strings.Join(call.Args, " ") == "start --help" {
+			probes++
+		}
+	}
+	if probes != 1 {
+		t.Errorf("probed %d times across 3 starts, want 1", probes)
 	}
 }
 
 func TestStartWorkspaceSubdirEmitsRelativeFlag(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+	f := fakeScion(false)
 	c := New(f, Options{})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", WorkspaceSubdir: "workers/a"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startArgv(f)
 	if !strings.Contains(got, "--workspace workers/a") {
 		t.Fatalf("argv %q must contain --workspace workers/a", got)
 	}
@@ -100,21 +182,19 @@ func TestStartWorkspaceSubdirEmitsRelativeFlag(t *testing.T) {
 }
 
 func TestStartWorkspaceSubdirWinsOverWorkspace(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+	f := fakeScion(false)
 	c := New(f, Options{})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", Workspace: "/lever", WorkspaceSubdir: "workers/a"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startArgv(f)
 	if !strings.Contains(got, "--workspace workers/a") || strings.Contains(got, "--workspace /lever") {
 		t.Fatalf("subdir must take precedence over absolute workspace; argv %q", got)
 	}
 }
 
 func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+	f := fakeScion(false)
 	c := New(f, Options{})
 	// api-key mode: scion starts with --harness-auth api-key, satisfied by a
 	// placeholder ANTHROPIC_API_KEY (Hub secret); the real credential is the
@@ -123,7 +203,7 @@ func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Harness: "claude", Project: "/g/a", APIKey: true}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startArgv(f)
 	if !strings.Contains(got, "--harness-auth api-key") {
 		t.Fatalf("api-key Start argv %q must use --harness-auth api-key", got)
 	}
@@ -133,13 +213,12 @@ func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
 }
 
 func TestStartOmitsWorkspaceWhenEmpty(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+	f := fakeScion(false)
 	c := New(f, Options{})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--workspace") {
+	if got := startArgv(f); strings.Contains(got, "--workspace") {
 		t.Fatalf("argv %q should not contain --workspace when Workspace empty", got)
 	}
 }
@@ -219,7 +298,7 @@ func TestDeleteArgv(t *testing.T) {
 	if err := c.Delete(context.Background(), "scratch", "/lever"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := startArgv(f)
 	if want := "delete scratch -g /lever --non-interactive"; got != want {
 		t.Fatalf("argv = %q, want exactly %q", got, want)
 	}

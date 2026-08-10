@@ -26,7 +26,7 @@ name: hello-worker
 backend: orbstack
 tree: workspace          # a confined SUBDIR; the root itself is never mounted
 scion:
-  version: 68507153      # pin a scion commit; fetched + cross-compiled into the jail
+  version: 3142df68      # pin a scion commit; fetched + cross-compiled into the jail
   # (>= b4c9911d: workers mount only their subtree via relative --workspace, upstream PR #815)
 # api-key is the secure default (the real key never enters the container) but
 # needs a Console API key. This demo opts into subscription (your Claude OAuth

@@ -62,7 +62,7 @@ func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string
 			}
 			return exec.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
 		}
-		hasStart, hasServer := false, false
+		hasStart, hasServer, isProbe := false, false, false
 		for _, a := range args {
 			if a == "start" {
 				hasStart = true
@@ -70,6 +70,15 @@ func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string
 			if a == "server" {
 				hasServer = true
 			}
+			// `scion start --help` is the agent-role capability probe
+			// (internal/scion Client.roleFlagSupported), not an agent start.
+			if a == "--help" {
+				isProbe = true
+			}
+		}
+		if isProbe {
+			// Answer as a scion WITHOUT --role, matching the pins lever can fetch.
+			return exec.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
 		}
 		if hasStart && !hasServer { // agent start, not `scion server start`
 			r.startCalls++
@@ -216,6 +225,12 @@ func (r *agentLifecycleRunner) verb(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
+	// `start --help` is the agent-role capability probe (internal/scion
+	// Client.roleFlagSupported), not an agent start. It must not be counted as
+	// one, nor mutate this fake's tracked record.
+	if len(args) == 2 && args[0] == "start" && args[1] == "--help" {
+		return "role-probe"
+	}
 	if args[0] == "-g" && len(args) > 2 {
 		return args[2]
 	}
@@ -235,6 +250,9 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	}
 	r.ensureInit()
 	switch r.verb(args) {
+	case "role-probe":
+		// Answer as a scion WITHOUT --role, matching the pins lever can fetch.
+		return exec.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
 	case "list":
 		r.listCalls++
 		r.record(dir, env, name, args)

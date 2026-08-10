@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/stevegeek/lever/internal/exec"
 )
@@ -46,6 +47,12 @@ type Client struct {
 	hubTokenSource func() string
 	agentRole      string
 	r              exec.Runner
+
+	// roleProbe caches the one-shot `start --help` capability check that decides
+	// whether --role is emitted. See Client.roleFlagSupported.
+	roleProbe     sync.Once
+	roleSupported bool
+	roleProbeErr  error
 }
 
 func New(r exec.Runner, o Options) *Client {

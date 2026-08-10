@@ -344,20 +344,24 @@ type ScionConfig struct {
 	// vX.Y.Z tag) that lever fetches via the Go module system and cross-compiles
 	// into the jail — no vendored source tree. Mutually exclusive with Source.
 	Version string `yaml:"version"`
-	// AgentRole stamps `scion start --role <role>` on every agent lever starts,
-	// pinning agent authority explicitly instead of inheriting whatever scion's
-	// default happens to be (scion#1089). Empty ⇒ the flag is NOT passed.
+	// AgentRole OVERRIDES the role lever stamps on `scion start` (scion#1089).
+	// You do not need to set it: empty means lever picks `baseline` itself
+	// whenever the installed scion understands roles at all.
 	//
-	// Empty is the default ON PURPOSE. `--role` does not exist before scion#1089,
-	// so passing it unconditionally makes lever incompatible with every earlier
-	// pin — and today NO pin carrying #1089 can be fetched at all, because scion
-	// 4c045fc8 added a root AGENTS.md beside the existing agents.md and `go mod
-	// download` rejects the case-insensitive collision. Set this only once your
-	// pin actually has the flag; lever cannot infer that from an opaque commit.
+	// Leaving it empty is safe by construction, because lever probes the scion
+	// BINARY for the --role flag rather than guessing from the pin. That
+	// matters: scion#1090 flipped the default for an unspecified role from
+	// baseline to FULL — agent create, lifecycle AND project-secret-read — so
+	// staying silent on a recent pin would break lever's core invariant that no
+	// agent holds hub authority. A commit hash cannot tell lever which side of
+	// that change a pin sits on; the binary can.
 	//
-	// `baseline` is the value lever wants: heartbeat and self-token-refresh, no
-	// agent create/lifecycle/secret scope. `readonly` cannot heartbeat, so a live
-	// agent cannot run on it.
+	// Values are the scion#1089 bundles. `baseline` is what lever wants:
+	// heartbeat and self-token-refresh, no agent create/lifecycle/secret scope.
+	// `readonly` cannot heartbeat, so a live agent cannot run on it. `full`
+	// grants exactly the authority the jail model exists to withhold — set it
+	// only if you know why. Naming any role on a scion that has no --role flag
+	// is a hard error, never a silent downgrade.
 	AgentRole string `yaml:"agent_role"`
 }
 

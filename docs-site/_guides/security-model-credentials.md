@@ -144,17 +144,18 @@ host-only controller PAT — this is the per-agent token scion mints for status/
 2026-07-06 create/delete-unaudited vector is closed **structurally**, not by a runtime guard: the
 real hub always starts with `--dev-auth=false` (`internal/apply/run.go`, the `ServerStart(...,
 DevAuth: false)` call, hardcoded, no config field turns it on). Since scion's tiered-roles work
-(scion#1089, pin ≥ `91c26b34`) a named **role** determines an agent token's scopes. Set
-`scion.agent_role: baseline` and lever stamps `--role baseline` on every agent, manager and
-workers alike (`internal/scion/lifecycle.go`), so a later change to scion's own default cannot
-silently widen it.
+(scion#1089) a named **role** determines an agent token's scopes, and lever stamps `--role
+baseline` on every agent, manager and workers alike (`internal/scion/lifecycle.go`).
 
-**That setting is unset by default, and cannot be used yet.** No scion commit carrying #1089 is
-fetchable: `4c045fc8` added a root `AGENTS.md` beside the existing `agents.md`, and `go mod
-download` rejects the case-insensitive filename collision when it builds the module zip. The
-newest usable pin, `3142df68`, predates roles entirely. Until upstream removes one of those
-files, agents run on scion's own default role — which is also baseline, so the posture below
-holds, but lever is not the one pinning it. Baseline carries
+**Relying on Scion's own default would not be safe.** One PR after roles landed, `2181aff6`
+(#1090) flipped the default for an *unspecified* role from baseline to **full** — agent create,
+agent lifecycle and project-secret-read. So lever pins the role rather than inheriting it. It
+decides by asking the installed binary whether `start --role` exists, not by reasoning about
+the pinned commit: a hash says nothing about which side of #1090 it sits on. On a pre-#1089
+Scion the flag is omitted, which widens nothing because roles do not exist there; if the probe
+cannot answer, the start fails rather than guessing, because guessing wrong grants full
+authority. `scion.agent_role` overrides the choice for operators who need a different bundle.
+Baseline carries
 `project:read`, `agent:status:update`, `agent:token:refresh`, `project:agent:notify` and
 `agent:port:forward` — heartbeat, self-token-refresh, and read/enumeration, but **no**
 `agent:create`, `agent:lifecycle`, or `project:secret:read`. So a lever agent's token cannot

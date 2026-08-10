@@ -21,13 +21,17 @@ const maxBody = 64 << 10
 
 // curlScript runs one request from inside the jail. The Authorization header is
 // built HERE, from $SCION_HUB_TOKEN, so the shell expands it: a token embedded
-// in an argument value would not be re-expanded. The token still reaches the
-// jail through the runner's `env K=V` prefix, exactly as every scion CLI call
-// already passes it (internal/scion/lifecycle.go).
+// in an argument value would not be re-expanded. The token reaches the jail
+// through the runner's `env K=V` prefix, exactly as every scion CLI call
+// already passes it (internal/scion/lifecycle.go) — the same exposure, not a
+// wider one.
 //
 // -o - writes the body to stdout and -w appends a final line holding the status
-// code, so one stream carries both. --fail is deliberately NOT set: lever needs
-// the status for 404 and 403, not a bare non-zero exit.
+// code, so one stream carries both. curl expands the `\n` itself (verified live
+// against the jail). --fail is deliberately NOT set: curl exits 0 on a 4xx
+// without it, which is what lever wants — a 403 or 404 must arrive as a status
+// to act on, not as a bare non-zero exit indistinguishable from an unreachable
+// hub.
 const curlScript = `exec curl -sS --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' "$2"`
@@ -91,8 +95,12 @@ func splitCurlOutput(out string) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("curl wrote no status line: %q", snippet([]byte(out)))
 	}
 	body := []byte(out[:i])
+	// Say "too large" rather than truncate. A silently cut body reaches the
+	// caller as "decoding response: unexpected end of JSON input", which points
+	// at the wrong cause — and the doctor would render that as a red line
+	// blaming the hub's answer.
 	if len(body) > maxBody {
-		body = body[:maxBody]
+		return nil, 0, fmt.Errorf("response body exceeds %d bytes (is something other than the hub on this port?)", maxBody)
 	}
 	return bytes.TrimSpace(body), code, nil
 }

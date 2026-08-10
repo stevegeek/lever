@@ -184,6 +184,13 @@ func TestSharedDirsListsProjectMounts(t *testing.T) {
 	}
 }
 
+func TestClientWithoutTransportErrorsRatherThanPanics(t *testing.T) {
+	err := (&Client{}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
+	if err == nil || !strings.Contains(err.Error(), "no transport") {
+		t.Fatalf("want a plain error, got %v", err)
+	}
+}
+
 func TestGetSurfacesNonJSONBody(t *testing.T) {
 	// A wrong service on the hub port returns HTML, not scion's envelope.
 	f := stripScript()

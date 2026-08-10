@@ -14,8 +14,10 @@ package hubapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 )
 
 // Doer performs one hub request and returns the HTTP status and response body.
@@ -60,9 +62,17 @@ type project struct {
 	Slug string `json:"slug"`
 }
 
+// do issues one request, guarding against a Client built without a transport.
+func (c *Client) do(ctx context.Context, method, path string) (int, []byte, error) {
+	if c.T == nil {
+		return 0, nil, errors.New("hubapi: client has no transport")
+	}
+	return c.T.Do(ctx, method, path)
+}
+
 // get issues a GET and decodes a 2xx JSON body into out.
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	status, body, err := c.T.Do(ctx, http.MethodGet, path)
+	status, body, err := c.do(ctx, http.MethodGet, path)
 	if err != nil {
 		return err
 	}
@@ -114,7 +124,7 @@ func (c *Client) SharedDirs(ctx context.Context, projectID string) ([]SharedDir,
 	var body struct {
 		SharedDirs []SharedDir `json:"sharedDirs"`
 	}
-	if err := c.get(ctx, "/api/v1/projects/"+projectID+"/shared-dirs", &body); err != nil {
+	if err := c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/shared-dirs", &body); err != nil {
 		return nil, err
 	}
 	return body.SharedDirs, nil
@@ -147,8 +157,11 @@ func (c *Client) StripSharedDir(ctx context.Context, projectNameOrSlug, endpoint
 		return err
 	}
 
-	status, body, err := c.T.Do(ctx, http.MethodDelete,
-		"/api/v1/projects/"+id+"/shared-dirs/"+dir)
+	// The id comes from the hub, and dir is a lever constant, so escaping is
+	// belt-and-braces — but it keeps a hostile or buggy hub from choosing the
+	// URL's structure (a `?` or `#` in an id would silently change the request).
+	status, body, err := c.do(ctx, http.MethodDelete,
+		"/api/v1/projects/"+url.PathEscape(id)+"/shared-dirs/"+url.PathEscape(dir))
 	if err != nil {
 		return err
 	}

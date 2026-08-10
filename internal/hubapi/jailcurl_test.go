@@ -31,7 +31,7 @@ func jailCurl(r leverexec.Runner, token string) *JailCurl {
 	return &JailCurl{Runner: r, BaseURL: "http://127.0.0.1:8080", Token: func() string { return token }}
 }
 
-func TestJailCurlRunsInTheJailAndKeepsTheTokenOutOfArgv(t *testing.T) {
+func TestJailCurlRunsInTheJailAndPassesTheTokenAsEnv(t *testing.T) {
 	r := &scriptedRunner{res: leverexec.Result{Stdout: "{\"projects\":[]}\n200"}}
 	status, body, err := jailCurl(r, "pat-secret").Do(context.Background(), "GET", "/api/v1/projects")
 	if err != nil {
@@ -51,13 +51,15 @@ func TestJailCurlRunsInTheJailAndKeepsTheTokenOutOfArgv(t *testing.T) {
 	if r.call.Args[3] != "GET" || r.call.Args[4] != "http://127.0.0.1:8080/api/v1/projects" {
 		t.Errorf("method/url = %q %q", r.call.Args[3], r.call.Args[4])
 	}
-	// The PAT must travel in the environment, and the script must reference it
-	// by name. A token embedded in an argument would sit in the process list.
+	// The PAT travels in the environment, and the script references it by name.
+	// This is the same exposure every scion CLI call already accepts (the jail
+	// runner renders env as an `env K=V` argv prefix, and sh expands the value
+	// into curl's own argv): it is not narrower, but it must not be wider.
 	if r.call.Env["SCION_HUB_TOKEN"] != "pat-secret" {
 		t.Errorf("token must be passed as env, got env=%v", r.call.Env)
 	}
 	if strings.Contains(strings.Join(r.call.Args, " "), "pat-secret") {
-		t.Error("the PAT must not appear in argv")
+		t.Error("the token value must not be baked into the script lever constructs")
 	}
 	if !strings.Contains(r.call.Args[1], "$SCION_HUB_TOKEN") {
 		t.Error("the script must expand $SCION_HUB_TOKEN itself")
@@ -119,6 +121,16 @@ func TestJailCurlRejectsOutputWithoutAStatusLine(t *testing.T) {
 		if _, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x"); err == nil {
 			t.Errorf("output %q must fail, not report a status", out)
 		}
+	}
+}
+
+func TestJailCurlRejectsAnOversizedBody(t *testing.T) {
+	// Truncating would surface as "unexpected end of JSON input", which blames
+	// the hub's answer instead of the size. Say what actually happened.
+	r := &scriptedRunner{res: leverexec.Result{Stdout: strings.Repeat("x", maxBody+1) + "\n200"}}
+	_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("want an explicit too-large error, got %v", err)
 	}
 }
 

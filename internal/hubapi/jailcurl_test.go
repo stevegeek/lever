@@ -134,6 +134,42 @@ func TestJailCurlRejectsAnOversizedBody(t *testing.T) {
 	}
 }
 
+func TestJailCurlClassifiesUnparseableOutputAsAnswered(t *testing.T) {
+	// curl exited 0, so something answered. A plain error would make lever
+	// doctor print "hub not reachable" AND pass, hiding a wrong service on the
+	// hub port behind a green line.
+	for _, out := range []string{"body\nnot-a-code", strings.Repeat("x", maxBody+1) + "\n200"} {
+		r := &scriptedRunner{res: leverexec.Result{Stdout: out}}
+		_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Errorf("output %q: want an APIError so callers can tell it answered, got %T: %v", out, err, err)
+		}
+	}
+}
+
+func TestJailCurlClassifiesTransportFailureAsUnreachable(t *testing.T) {
+	// The complement: a refused connection, a missing curl and an absent PAT are
+	// NOT answers, so they must stay plain errors or doctor would turn a stopped
+	// instance into a finding.
+	for _, r := range []*scriptedRunner{
+		{res: leverexec.Result{Code: 7, Stderr: "curl: (7) Failed to connect"}, err: errors.New("exit status 7")},
+		{res: leverexec.Result{Code: curlNotFound, Stderr: "sh: curl: not found"}, err: errors.New("exit status 127")},
+	} {
+		_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			t.Errorf("a transport failure must not be an APIError, got %v", err)
+		}
+	}
+	noPAT := &scriptedRunner{res: leverexec.Result{Stdout: "\n200"}}
+	_, _, err := jailCurl(noPAT, "").Do(context.Background(), "GET", "/x")
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("an absent PAT must not be an APIError, got %v", err)
+	}
+}
+
 func TestJailCurlTrimsTrailingSlashOnBaseURL(t *testing.T) {
 	r := &scriptedRunner{res: leverexec.Result{Stdout: "\n200"}}
 	j := &JailCurl{Runner: r, BaseURL: "http://127.0.0.1:8080/", Token: func() string { return "t" }}

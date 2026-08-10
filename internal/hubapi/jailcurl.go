@@ -76,7 +76,11 @@ func (j *JailCurl) Do(ctx context.Context, method, path string) (int, []byte, er
 
 	body, status, perr := splitCurlOutput(res.Stdout)
 	if perr != nil {
-		return 0, nil, fmt.Errorf("%s %s: %w", method, path, perr)
+		// curl exited 0, so the request completed and SOMETHING answered — it
+		// just did not answer like the hub. That is an APIError, not a
+		// transport failure: a caller that distinguishes the two (lever doctor)
+		// must report this rather than pass it off as an unreachable hub.
+		return 0, nil, &APIError{Msg: fmt.Sprintf("%s %s: %v", method, path, perr)}
 	}
 	return status, body, nil
 }

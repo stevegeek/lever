@@ -29,6 +29,15 @@ import (
 // EffectiveJailPort()/ManagerCN()/ConfigHash feed the closures under test.
 func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps, *config.App, brokerctl.State, string) {
 	t.Helper()
+	// Never let a test spawn a real broker. os.Args[0] here is the TEST BINARY,
+	// and brokerServeCmd detaches the child with Setsid, so any spawn outlives
+	// the run unreaped — a full suite run once left 724 stray processes behind.
+	// `true` exits 0 immediately, so cmd.Start() still succeeds and the code
+	// path under test is unchanged.
+	prev := brokerSelfExe
+	brokerSelfExe = func() string { return "/usr/bin/true" }
+	t.Cleanup(func() { brokerSelfExe = prev })
+
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
 	if err != nil {

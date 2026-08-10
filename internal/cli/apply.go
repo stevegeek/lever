@@ -285,6 +285,18 @@ type brokerController struct {
 	runUID     string          // in-machine run uid for the broker child
 }
 
+// brokerSelfExe returns the executable Start re-execs as `broker serve`. It is a
+// var so tests can point it at an inert command.
+//
+// This seam is load-bearing, not cosmetic. In production os.Args[0] is the
+// lever binary and re-execing it is exactly right. Under `go test` os.Args[0]
+// is the TEST BINARY, so a spawn becomes `<pkg>.test broker serve …` — and
+// brokerServeCmd detaches the child with Setsid precisely so it outlives its
+// parent. Nothing then reaps it: the processes survive the run, accumulate
+// across runs, and re-spawn each other. A full suite run left 724 of them
+// behind before this seam existed.
+var brokerSelfExe = func() string { return os.Args[0] }
+
 // Start spawns `lever broker serve <config>` as a daemonized child (its own
 // session, via brokerServeCmd) so it outlives the apply invocation.
 //
@@ -315,7 +327,7 @@ func (bc *brokerController) Start(ctx context.Context) error {
 			}
 		}
 	}
-	cmd, logf, err := brokerServeCmd(os.Args[0], bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
+	cmd, logf, err := brokerServeCmd(brokerSelfExe(), bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
 	if err != nil {
 		return err
 	}

@@ -1283,3 +1283,43 @@ func TestAutoReenrolKnob(t *testing.T) {
 		t.Fatal("expected load error for invalid auto_reenrol")
 	}
 }
+
+func TestScionBinaryIsMutuallyExclusive(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"binary+source", "scion:\n  binary: ./dist/scion\n  source: ./scion-src\n"},
+		{"binary+version", "scion:\n  binary: ./dist/scion\n  version: abc123\n"},
+		{"source+version", "scion:\n  source: ./scion-src\n  version: abc123\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"+tc.body)
+			if _, err := Load(p); err == nil {
+				t.Fatal("expected a mutual-exclusion error")
+			}
+		})
+	}
+}
+
+func TestScionBinaryResolvesRelativeToInstanceDir(t *testing.T) {
+	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: dist/scion-linux-amd64\n")
+	a, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(a.Scion.Binary) {
+		t.Fatalf("scion.binary must resolve against the instance dir, got %q", a.Scion.Binary)
+	}
+	if !strings.HasSuffix(a.Scion.Binary, filepath.Join("dist", "scion-linux-amd64")) {
+		t.Fatalf("resolved path lost the configured suffix: %q", a.Scion.Binary)
+	}
+}
+
+func TestConfigWithoutScionBlockStillLoads(t *testing.T) {
+	// Most fixtures in this file declare no scion block, and config.Load runs
+	// for commands that never bring anything up (doctor, msg, attach).
+	// Requiring a mode here would break all of them; the missing mode is
+	// reported at bring-up instead.
+	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
+	if _, err := Load(p); err != nil {
+		t.Fatalf("a config with no scion block must still load: %v", err)
+	}
+}

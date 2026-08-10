@@ -7,8 +7,11 @@ package guest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,34 +155,81 @@ func (g Guest) GOARCH(ctx context.Context) (string, error) {
 // pins a commit/tag fetched via the Go module system.
 const scionModulePath = "github.com/GoogleCloudPlatform/scion"
 
-func (g Guest) EnsureScion(ctx context.Context, source, version string) error {
-	goBin := "go"
-	buildDir := source
-	if version != "" {
-		gb, dir, err := g.fetchScionModule(ctx, version)
+// scionDestPath is where scion is installed in the guest.
+const scionDestPath = "/usr/local/bin/scion"
+
+// ScionSpec names the one place lever should get scion from. At most one field
+// is set; config validation enforces that (internal/config). A struct rather
+// than positional strings because three same-typed parameters across two call
+// sites is a mis-ordering waiting to happen.
+type ScionSpec struct {
+	// Binary is a host-local, already-built linux binary, installed as-is. No
+	// Go toolchain, module cache or egress is needed on this host.
+	Binary string
+	// Source is a host checkout to cross-compile.
+	Source string
+	// Version pins a scion module version/commit to fetch and cross-compile.
+	Version string
+}
+
+// EnsureScion puts the configured scion into the guest at scionDestPath.
+func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
+	bin, err := g.resolveScionBinary(ctx, spec)
+	if err != nil {
+		return err
+	}
+	return g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath)
+}
+
+// resolveScionBinary produces a host-local scion binary for the guest's
+// architecture.
+//
+// It is the ONLY place that knows about Go. The Binary branch returns before
+// any toolchain is touched, which is what lets the machine hosting the jail
+// carry no Go, no module cache and no egress at all (issue #27).
+func (g Guest) resolveScionBinary(ctx context.Context, spec ScionSpec) (string, error) {
+	// Validate the spec BEFORE touching the guest, so a plainly wrong config
+	// fails without a round-trip and without depending on the guest being up.
+	if spec.Binary == "" && spec.Source == "" && spec.Version == "" {
+		return "", fmt.Errorf("no scion configured: set one of scion.binary, scion.source or scion.version")
+	}
+	if spec.Source != "" {
+		fi, err := os.Stat(spec.Source)
 		if err != nil {
-			return err
-		}
-		goBin, buildDir = gb, dir
-	} else {
-		fi, err := os.Stat(source)
-		if err != nil {
-			return fmt.Errorf("scion source %q: %w", source, err)
+			return "", fmt.Errorf("scion source %q: %w", spec.Source, err)
 		}
 		if !fi.IsDir() {
-			return fmt.Errorf("scion source %q is not a directory", source)
+			return "", fmt.Errorf("scion source %q is not a directory", spec.Source)
 		}
 	}
-	bin := filepath.Join(os.TempDir(), "lever-scion-"+g.Machine)
+
 	arch, err := g.GOARCH(ctx)
 	if err != nil {
-		return fmt.Errorf("detect guest architecture: %w", err)
+		return "", fmt.Errorf("detect guest architecture: %w", err)
 	}
+	if spec.Binary != "" {
+		if err := verifyELFArch(spec.Binary, arch); err != nil {
+			return "", err
+		}
+		return spec.Binary, nil
+	}
+
+	goBin := "go"
+	buildDir := spec.Source
+	if spec.Version != "" {
+		gb, dir, err := g.fetchScionModule(ctx, spec.Version)
+		if err != nil {
+			return "", err
+		}
+		goBin, buildDir = gb, dir
+	}
+
+	out := filepath.Join(os.TempDir(), "lever-scion-"+g.Machine)
 	if _, err := g.Host.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": arch},
-		goBin, "build", "-o", bin, "./cmd/scion"); err != nil {
-		return fmt.Errorf("cross-compile scion: %w", err)
+		goBin, "build", "-o", out, "./cmd/scion"); err != nil {
+		return "", fmt.Errorf("cross-compile scion: %w", err)
 	}
-	return g.InstallRootBinary(ctx, bin, "/usr/local/bin/scion")
+	return out, nil
 }
 
 // InstallRootBinary streams a host-local executable into the guest at destPath
@@ -214,6 +264,56 @@ func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string
 		shellSingleQuote(localPath), strings.Join(rootWords, " "), shellSingleQuote(inner))
 	if _, err := g.Host.Run(ctx, nil, "bash", "-c", install); err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
+	}
+	return nil
+}
+
+// markerPath is where the digest of the currently-installed binary is recorded,
+// beside the binary itself.
+func markerPath(destPath string) string { return destPath + ".sha256" }
+
+// hashFile returns the hex sha256 of a host-local file.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// InstallRootBinaryIfChanged installs localPath at destPath only when the guest
+// does not already hold that exact binary, then records the digest beside it.
+//
+// scion is 158MB and was otherwise re-streamed into the guest on every
+// bring-up, in every mode, whether or not it had changed.
+//
+// Two rules make the marker safe to trust:
+//   - It is written strictly AFTER the binary lands, so a crash between the two
+//     leaves it stale or absent and the next run reinstalls. Recording success
+//     first would strand a binary that never arrived.
+//   - An unreadable or absent marker means "unknown", which installs. Being
+//     wrong that way costs redundant work; the other way would skip a real
+//     install.
+func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) error {
+	want, err := hashFile(localPath)
+	if err != nil {
+		return fmt.Errorf("hashing %s: %w", localPath, err)
+	}
+	marker := markerPath(destPath)
+	if res, err := g.userRun(ctx, "cat", marker); err == nil && strings.TrimSpace(res.Stdout) == want {
+		return nil
+	}
+	if err := g.InstallRootBinary(ctx, localPath, destPath); err != nil {
+		return err
+	}
+	write := fmt.Sprintf("printf %%s %s > %s", shellSingleQuote(want), shellSingleQuote(marker))
+	if _, err := g.rootRun(ctx, "sh", "-c", write); err != nil {
+		return fmt.Errorf("recording %s: %w", marker, err)
 	}
 	return nil
 }

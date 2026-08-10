@@ -38,6 +38,11 @@ type Config struct {
 	// via the Go module system and cross-compiles into the jail (no vendored
 	// source tree). Mutually exclusive with ScionSource. Empty = none.
 	ScionVersion string
+	// ScionBinary is a host path to an already-built linux scion binary,
+	// installed into the guest as-is. Unlike ScionSource and ScionVersion it
+	// needs no Go toolchain, module cache or egress on the machine hosting the
+	// jail. Mutually exclusive with both. Empty = none.
+	ScionBinary string
 	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
 	// so the jail can reach ONLY the broker port on the host alias. Required for
 	// api-key mode: LLM traffic must flow broker→Anthropic, not

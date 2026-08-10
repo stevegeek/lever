@@ -154,12 +154,15 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 
 ### `scion`
 
-Provide **at most one** of `version` or `source` (they are mutually exclusive). Omit both to rely on a scion already present in the jail.
+Provide **at most one** of `version`, `source` or `binary` (they are mutually exclusive). Omit all three to rely on a scion already present in the jail.
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `version` | string | no | - | A scion module version/commit (a commit hash like `666333f9`, or a `vX.Y.Z` tag) fetched via the Go module system and cross-compiled into the jail at provision time. **No vendored source tree**, this is the recommended way to pin Scion. Requires a Go toolchain on the host. |
-| `source` | path | no | - | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. |
+| `source` | path | no | - | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. Requires a Go toolchain on the host, but no module fetch. |
+| `binary` | path | no | - | Path to an **already-built linux scion binary**, installed into the jail as-is. Unlike the two above it needs **no Go toolchain, no module cache and no egress** on the machine hosting the jail — build it on a workstation and ship it. Relative paths resolve against the config file's directory. lever checks the ELF header against the guest's architecture before installing, so a wrong-arch build fails immediately instead of as `exec format error` at manager start. **Its integrity is yours to guarantee**: unlike `version`, no module-proxy checksum stands behind it. |
+
+Whichever mode you use, lever records the installed binary's sha256 in the jail and skips the copy when it already matches, so an unchanged scion is not re-streamed on every `lever up`.
 
 ### `manager`
 

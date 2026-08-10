@@ -70,6 +70,16 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected if world-readable) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | already rejected absolute/`..` (unchanged). |
+| `scion.binary` | must be a regular ELF executable whose architecture matches the guest's, checked **before** anything is written into the jail. |
+
+**`scion.binary` is a trust decision, not only a convenience.** The bytes at that path are installed
+as root at `/usr/local/bin/scion` and become the engine every agent runs under. That sits inside the
+operator boundary this section describes — the config already names container images and mount
+paths, and `scion.source` already builds arbitrary host code — so it grants nothing new in kind.
+It does drop one property, and the drop is worth stating plainly: `scion.version` is fetched through
+the Go module proxy and is **checksum-verified** against `sum.golang.org`, whereas a `binary:`
+artifact carries no integrity guarantee lever can check. The architecture check catches an honest
+mistake, not a substituted file. Choosing `binary:` makes its provenance yours to guarantee.
 
 **What was already sound:** the execution plumbing is argv-clean, no shell injection in the hot
 paths; the single `bash -c` (scion install) correctly single-quote-escapes its interpolated values;

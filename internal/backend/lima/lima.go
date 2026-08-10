@@ -93,7 +93,11 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 		return err
 	}
 	if cfg.ScionSource != "" || cfg.ScionVersion != "" {
-		if err := l.Guest().EnsureScion(ctx, cfg.ScionSource, cfg.ScionVersion); err != nil {
+		if err := l.Guest().EnsureScion(ctx, guest.ScionSpec{
+			Binary:  cfg.ScionBinary,
+			Source:  cfg.ScionSource,
+			Version: cfg.ScionVersion,
+		}); err != nil {
 			return err
 		}
 	}

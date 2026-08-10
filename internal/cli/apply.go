@@ -455,6 +455,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		AllowedPorts:   allowed,
 		ScionSource:    app.Scion.Source,
 		ScionVersion:   app.Scion.Version,
+		ScionBinary:    app.Scion.Binary,
 		ClosedInternet: app.ClosedInternetEgress(),
 		Disk:           app.Disk,
 	}

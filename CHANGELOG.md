@@ -31,6 +31,15 @@ version bump moves the block under the new version heading.
   `agent:port:forward`.
 
 ### Added
+- **`scion.binary` accepts an already-built scion binary (#27).** `scion.source`
+  and `scion.version` both *compile* scion on the machine hosting the jail, on
+  every bring-up, so that host needs a Go toolchain, a ~1.3 GB module cache and
+  egress for module fetches. `scion.binary: ./dist/scion-linux-amd64` installs a
+  binary built elsewhere and needs none of them. It is mutually exclusive with
+  the other two, and is checked against the guest's architecture — via the ELF
+  header, before anything is written into the jail — so a workstation arch
+  mix-up fails with "binary is arm64, but the guest is amd64" rather than as
+  `exec format error` at manager start.
 - **`scion.agent_role` overrides the role lever picks.** Rarely needed — the
   default above is the safe one. Naming a role on a scion with no `--role` flag
   is a hard error rather than a silent downgrade, and an unknown value is
@@ -45,6 +54,13 @@ version bump moves the block under the new version heading.
   hub applies one-way DB migrations on first boot, and agent tokens minted at
   the old pin 403 on newly scope-gated read endpoints until they refresh.
   Snapshot the hub DB first. The examples stay pinned at `68507153`.
+
+### Changed
+- **scion is no longer re-streamed into the jail when it has not changed.** The
+  binary is 158 MB and was piped in on every `lever up`, in all modes. lever now
+  records its sha256 beside it in the guest and skips the copy when it matches.
+  The digest is written only after the binary lands, so an interrupted install
+  reinstalls next time instead of being recorded as done.
 
 ### Fixed
 - **New projects no longer carry scion's cross-agent `scratchpad` shared dir

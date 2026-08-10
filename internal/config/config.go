@@ -337,6 +337,11 @@ type Worker struct {
 }
 
 type ScionConfig struct {
+	// Binary is a host path to an already-built linux scion binary, installed
+	// into the jail as-is. Unlike Source and Version it needs no Go toolchain,
+	// module cache or egress on the machine hosting the jail — that host need
+	// not be a build host (issue #27). Mutually exclusive with both.
+	Binary string `yaml:"binary"`
 	// Source is a host path to a scion source checkout to cross-compile into the
 	// jail (local development). Mutually exclusive with Version.
 	Source string `yaml:"source"`
@@ -550,8 +555,19 @@ func Load(path string) (*App, error) {
 		app.Tree = abs
 	}
 	app.Scion.Source = resolvePath(app.Scion.Source, app.dir)
-	if app.Scion.Source != "" && app.Scion.Version != "" {
-		return nil, fmt.Errorf("config: scion.source and scion.version are mutually exclusive")
+	app.Scion.Binary = resolvePath(app.Scion.Binary, app.dir)
+	// At most one scion mode. NOT "exactly one": config.Load also runs for
+	// commands that never bring anything up (doctor, msg, attach), and a
+	// minimal config legitimately declares no scion block at all — the missing
+	// mode is reported at bring-up by resolveScionBinary instead.
+	scionModes := 0
+	for _, v := range []string{app.Scion.Binary, app.Scion.Source, app.Scion.Version} {
+		if v != "" {
+			scionModes++
+		}
+	}
+	if scionModes > 1 {
+		return nil, fmt.Errorf("config: scion.binary, scion.source and scion.version are mutually exclusive")
 	}
 	if r := app.Scion.AgentRole; r != "" && !slices.Contains(scionAgentRoles, r) {
 		return nil, fmt.Errorf("config: unknown scion.agent_role %q (valid: %s; omit it entirely to let scion choose)",

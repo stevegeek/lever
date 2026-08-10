@@ -20,8 +20,14 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/scion"
 )
+
+// scionScratchpadSharedDir is the shared directory scion stamps on every new
+// project (scion#925). It is mounted read-write into every agent of the
+// project, so lever removes it — see Deps.StripProjectSharedDirs.
+const scionScratchpadSharedDir = "scratchpad"
 
 // brokerServeCmd builds the detached `lever broker serve` command: its OWN
 // session (Setsid — survives the parent terminal/session, no controlling TTY),
@@ -520,6 +526,20 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// resumable scion agent record.
 		ScionProjectRegistered: func(ctx context.Context, wp string) (bool, error) {
 			return b.ScionProjectRegistered(ctx, wp)
+		},
+
+		// StripProjectSharedDirs declines scion's default cross-agent
+		// `scratchpad` mount for this project — see the Deps field doc for why
+		// it exists and why the removal must go through the hub. The hub is
+		// jail-local, but OrbStack forwards the jail's loopback to the host, so
+		// this host-side call reaches the same DefaultHubEndpoint the in-jail
+		// scion CLI uses. The PAT is read per call so a re-mint is picked up.
+		StripProjectSharedDirs: func(ctx context.Context, projectName string) error {
+			hc := &hubapi.Client{
+				BaseURL: scion.DefaultHubEndpoint,
+				Token:   func() string { t, _ := state.LoadControllerPAT(); return t },
+			}
+			return hc.StripSharedDir(ctx, projectName, scionScratchpadSharedDir)
 		},
 
 		StartBroker:          bc.Start,

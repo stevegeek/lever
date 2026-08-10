@@ -47,6 +47,19 @@ mechanism, viewed at the manager's wider scope. A compromised *manager* therefor
 whole-tree reach ([§7](/security-model/compromise/)); this isolation guarantee is about one *worker* reaching another worker's
 subdirectory, not about bounding the manager.
 
+**Scion's default shared directory is removed, because it would defeat this.** Since
+[scion#925](https://github.com/GoogleCloudPlatform/scion/pull/925), the hub stamps a `scratchpad`
+shared directory on every new project and mounts it **read-write into every agent of that project**,
+at `/scion-volumes/scratchpad`. That is a writable channel between the manager and every worker, and
+between any two workers — exactly the reach §4.1 denies. Lever's hub runs in file/SQLite mode, where
+the server-side default cannot be switched off: the setting lives in Scion's operational settings,
+which are Postgres-gated, the admin endpoint answers `501`, and the section has no `settings.yaml`
+key. So `lever apply` removes the directory from the hub's project record after registration, on
+both the fresh and the already-registered path, and a removal failure **fails the bring-up** rather
+than starting a fleet that silently shares a directory. `lever doctor` reports any shared directory
+the hub still mounts into every agent. Removing it per project is the only supported route today;
+lever has asked upstream for a hub-wide control.
+
 ### 4.2 No agent holds hub authority: dev-auth off, host-only controller PAT
 
 Cross-worker mount isolation would still be moot if a compromised agent could simply ask Scion's

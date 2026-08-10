@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
+	scionpkg "github.com/stevegeek/lever/internal/scion"
 )
 
 func newDoctorCmd(factory BackendFactory) *cobra.Command {
@@ -53,6 +57,22 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				scion = checkScionProject(st, b.MountDest())
 			}
 
+			// The hub is jail-local, but OrbStack forwards the jail's loopback
+			// to the host, so this host-side client reaches the same endpoint
+			// the in-jail scion CLI uses. A down hub is reported as "not
+			// checked", not as a finding — see checkProjectSharedDirs.
+			hc := &hubapi.Client{
+				BaseURL: scionpkg.DefaultHubEndpoint,
+				Token:   func() string { t, _ := state.LoadControllerPAT(); return t },
+			}
+			listSharedDirs := func(ctx context.Context, project string) ([]hubapi.SharedDir, error) {
+				id, err := hc.ProjectID(ctx, project)
+				if err != nil {
+					return nil, err
+				}
+				return hc.SharedDirs(ctx, id)
+			}
+
 			checks := []checkResult{
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
 				checkAgentCert(state, time.Now()),
@@ -63,6 +83,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				checkGoToolchain(app.Scion),
 				checkOperatorSkills(app, state.Dir),
 				checkDirectives(app, state),
+				checkProjectSharedDirs(cmd.Context(), filepath.Base(b.MountDest()), listSharedDirs),
 				scion,
 			}
 			failed := 0

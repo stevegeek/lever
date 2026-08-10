@@ -29,6 +29,22 @@ import (
 // project, so lever removes it — see Deps.StripProjectSharedDirs.
 const scionScratchpadSharedDir = "scratchpad"
 
+// hubJailTransport builds the Hub REST transport: curl, inside the jail,
+// carrying the controller PAT. Shared by apply's shared-dir strip and doctor's
+// shared-dir check so both address the same hub the in-jail scion CLI does.
+func hubJailTransport(jr leverexec.Runner, state brokerctl.State) *hubapi.JailCurl {
+	return &hubapi.JailCurl{
+		Runner:  jr,
+		BaseURL: scion.DefaultHubEndpoint,
+		Token:   func() string { t, _ := state.LoadControllerPAT(); return t },
+	}
+}
+
+// hubProjectKey is the name the hub knows a lever instance's project by: the
+// basename of its in-jail mount. ensureControllerPAT derives the same key for
+// `hub token create`, so the two stay consistent by construction.
+func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
+
 // brokerServeCmd builds the detached `lever broker serve` command: its OWN
 // session (Setsid — survives the parent terminal/session, no controlling TTY),
 // stdout+stderr appended to outLog (so a bind failure or panic is inspectable,
@@ -530,16 +546,15 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 
 		// StripProjectSharedDirs declines scion's default cross-agent
 		// `scratchpad` mount for this project — see the Deps field doc for why
-		// it exists and why the removal must go through the hub. The hub is
-		// jail-local, but OrbStack forwards the jail's loopback to the host, so
-		// this host-side call reaches the same DefaultHubEndpoint the in-jail
-		// scion CLI uses. The PAT is read per call so a re-mint is picked up.
+		// it exists and why the removal must go through the hub. The request
+		// runs IN THE JAIL, like every other scion interaction: the hub binds
+		// the jail's loopback, and the Lima template suppresses every
+		// guest→host port forward on purpose, so a host-side call could not
+		// reach it there at all. The PAT is read per call so a re-mint is
+		// picked up.
 		StripProjectSharedDirs: func(ctx context.Context, projectName string) error {
-			hc := &hubapi.Client{
-				BaseURL: scion.DefaultHubEndpoint,
-				Token:   func() string { t, _ := state.LoadControllerPAT(); return t },
-			}
-			return hc.StripSharedDir(ctx, projectName, scionScratchpadSharedDir)
+			hc := &hubapi.Client{T: hubJailTransport(jr, state)}
+			return hc.StripSharedDir(ctx, projectName, scion.DefaultHubEndpoint, scionScratchpadSharedDir)
 		},
 
 		StartBroker:          bc.Start,

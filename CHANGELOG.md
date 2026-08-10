@@ -32,10 +32,14 @@ version bump moves the block under the new version heading.
   the manager and every worker, which defeats lever's subtree isolation. On
   lever's file/SQLite hub the server-side default cannot be turned off, so
   `lever apply` now strips the directory from the hub's project record after
-  registration, on both the fresh and the already-registered path. A strip
-  failure fails apply rather than starting a fleet that silently shares a
-  directory. `lever doctor` gained a matching check that reports any shared
-  directory the hub mounts into every agent. The controller PAT now also
+  registration, on both the fresh and the already-registered path, then
+  re-reads the record to confirm it is gone — the hub answers `404` for "no
+  such shared dir", "no such project" and "no such route" alike, so the delete
+  status alone cannot prove the removal happened. A failure fails apply rather
+  than starting a fleet that silently shares a directory. The request runs
+  inside the jail, like every other scion call: the hub binds the jail's
+  loopback, and the Lima backend suppresses guest→host port forwarding by
+  design. `lever doctor` gained a matching check. The controller PAT now also
   carries `project:update`, which the shared-dirs endpoint requires.
 
 ## [0.13.0] - 2026-08-04

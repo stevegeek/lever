@@ -194,7 +194,8 @@ type Deps struct {
 	// where the server-side default cannot be turned off, so per-project removal
 	// is the only route. Runs on BOTH register paths (already-registered and
 	// freshly re-inited), because a project created before this step existed
-	// still carries the mount. nil ⇒ no-op (tests, broker-only VM gate).
+	// still carries the mount. nil ⇒ no-op (tests). The broker-only VM gate
+	// never reaches it at all: Plan filters KindRegisterProject out entirely.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
 	// Log surfaces a loud, user-facing progress/warning line during apply —
 	// currently just start-manager's resume-failed recovery notice ("resume

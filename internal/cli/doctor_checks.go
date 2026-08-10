@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -134,6 +135,13 @@ func checkScionProject(st backend.ScionProjectState, mountDest string) checkResu
 // Injected so the check is unit-testable without a hub.
 type sharedDirLister func(ctx context.Context, project string) ([]hubapi.SharedDir, error)
 
+// hubAnswered reports whether the hub replied and lever could not use the
+// reply, as opposed to lever never reaching the hub at all.
+func hubAnswered(err error) bool {
+	var apiErr *hubapi.APIError
+	return errors.As(err, &apiErr)
+}
+
 // checkProjectSharedDirs reports any directory the hub mounts into every agent
 // of the project. scion stamps a writable `scratchpad` on every new project
 // (scion#925), which is a read/write channel between the manager and every
@@ -141,8 +149,15 @@ type sharedDirLister func(ctx context.Context, project string) ([]hubapi.SharedD
 // entry here means the strip did not run, or something re-added one.
 //
 // An unreachable hub is NOT a finding: a stopped instance already shows up in
-// the broker check, and a second red line would only add noise. The detail says
-// the check was skipped, so a pass is never mistaken for a clean verdict.
+// the broker check, and a second red line would only add noise. Anything the
+// hub actually ANSWERED is different — a 403, a 401, or a project the hub does
+// not list means the check cannot do its job for a reason the operator must
+// fix, so that fails. The detail always states which case it was, so a pass is
+// never mistaken for a clean verdict.
+//
+// The check reads the hub's project record. An agent that started before the
+// directory was removed keeps its bind mount until it restarts, so a clean line
+// here is a statement about new agents.
 func checkProjectSharedDirs(ctx context.Context, project string, list sharedDirLister) checkResult {
 	const name = "project shared directories"
 	if list == nil {
@@ -150,10 +165,17 @@ func checkProjectSharedDirs(ctx context.Context, project string, list sharedDirL
 	}
 	dirs, err := list(ctx, project)
 	if err != nil {
-		return checkResult{name, true, "not checked (hub unreachable): " + err.Error(), ""}
+		if answered := hubAnswered(err); answered {
+			return checkResult{name, false,
+				"could not read the project's shared directories: " + err.Error(),
+				"the hub answered, so this is not a down instance — check the controller PAT " +
+					"(`.lever-state/`) and that the hub knows a project named " + project}
+		}
+		return checkResult{name, true, "not checked (hub not reachable): " + err.Error(), ""}
 	}
 	if len(dirs) == 0 {
-		return checkResult{name, true, "none — agents share no directory", ""}
+		return checkResult{name, true,
+			"none in the hub record — no directory is shared into newly started agents", ""}
 	}
 	var names []string
 	for _, d := range dirs {

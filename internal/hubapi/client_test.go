@@ -2,120 +2,146 @@ package hubapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// hubStub records the requests it serves so tests can assert the exact URLs and
-// auth header lever sends.
-type hubStub struct {
-	*httptest.Server
-	methods []string
-	paths   []string
-	auth    []string
+// reply is one canned response keyed by "METHOD /path".
+type reply struct {
+	status int
+	body   string
+	err    error
 }
 
-func newHubStub(t *testing.T, h func(w http.ResponseWriter, r *http.Request)) *hubStub {
-	t.Helper()
-	s := &hubStub{}
-	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.methods = append(s.methods, r.Method)
-		s.paths = append(s.paths, r.URL.Path)
-		s.auth = append(s.auth, r.Header.Get("Authorization"))
-		h(w, r)
-	}))
-	t.Cleanup(s.Close)
-	return s
+// fakeDoer answers from a script and records what was asked.
+type fakeDoer struct {
+	replies map[string]reply
+	// seq lets a key answer differently on successive calls (the DELETE then
+	// verify-read sequence).
+	seq   map[string][]reply
+	calls []string
 }
 
-func (s *hubStub) client(token string) *Client {
-	return &Client{BaseURL: s.URL, Token: func() string { return token }}
+func (f *fakeDoer) Do(_ context.Context, method, path string) (int, []byte, error) {
+	key := method + " " + path
+	f.calls = append(f.calls, key)
+	if rs, ok := f.seq[key]; ok && len(rs) > 0 {
+		r := rs[0]
+		f.seq[key] = rs[1:]
+		return r.status, []byte(r.body), r.err
+	}
+	r, ok := f.replies[key]
+	if !ok {
+		return 0, nil, fmt.Errorf("fakeDoer: unscripted call %s", key)
+	}
+	return r.status, []byte(r.body), r.err
 }
 
-const projectsBody = `{"projects":[
-  {"id":"11111111-1111-1111-1111-111111111111","name":"other","slug":"other"},
-  {"id":"22222222-2222-2222-2222-222222222222","name":"lever","slug":"lever-1"}
-],"totalCount":2}`
+const (
+	leverUUID    = "22222222-2222-2222-2222-222222222222"
+	projectsBody = `{"projects":[
+	  {"id":"11111111-1111-1111-1111-111111111111","name":"other","slug":"other"},
+	  {"id":"22222222-2222-2222-2222-222222222222","name":"lever","slug":"lever-1"}
+	],"totalCount":2}`
+)
+
+// stripScript is the happy path: list projects, DELETE succeeds, verify read
+// comes back clean.
+func stripScript() *fakeDoer {
+	return &fakeDoer{
+		replies: map[string]reply{
+			"GET /api/v1/projects": {status: 200, body: projectsBody},
+			"DELETE /api/v1/projects/" + leverUUID + "/shared-dirs/scratchpad": {status: 204},
+			"GET /api/v1/projects/" + leverUUID + "/shared-dirs":               {status: 200, body: `{"sharedDirs":[]}`},
+		},
+	}
+}
 
 func TestProjectIDMatchesNameOrSlug(t *testing.T) {
-	stub := newHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(projectsBody))
-	})
-	c := stub.client("pat-abc")
-
 	for _, key := range []string{"lever", "lever-1"} {
-		id, err := c.ProjectID(context.Background(), key)
+		c := &Client{T: stripScript()}
+		id, err := c.ProjectID(context.Background(), key, "hub")
 		if err != nil {
 			t.Fatalf("ProjectID(%q): %v", key, err)
 		}
-		if id != "22222222-2222-2222-2222-222222222222" {
+		if id != leverUUID {
 			t.Errorf("ProjectID(%q) = %q, want the lever project UUID", key, id)
 		}
 	}
-	if stub.auth[0] != "Bearer pat-abc" {
-		t.Errorf("Authorization = %q, want the controller PAT as a bearer token", stub.auth[0])
-	}
 }
 
-func TestProjectIDUnknownName(t *testing.T) {
-	stub := newHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(projectsBody))
-	})
-	if _, err := stub.client("t").ProjectID(context.Background(), "absent"); err == nil {
+func TestProjectIDUnknownNameNamesTheHub(t *testing.T) {
+	// When the jail reaches a hub but the wrong one, this error is the
+	// operator's only clue, so it must name the endpoint.
+	c := &Client{T: stripScript()}
+	_, err := c.ProjectID(context.Background(), "absent", "http://127.0.0.1:8080")
+	if err == nil {
 		t.Fatal("expected an error for a project the hub does not list")
 	}
+	if !strings.Contains(err.Error(), "http://127.0.0.1:8080") {
+		t.Errorf("error should name the hub endpoint, got %v", err)
+	}
 }
 
-func TestStripSharedDirDeletesByResolvedUUID(t *testing.T) {
-	stub := newHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		_, _ = w.Write([]byte(projectsBody))
-	})
-
-	if err := stub.client("t").StripSharedDir(context.Background(), "lever", "scratchpad"); err != nil {
+func TestStripSharedDirDeletesThenVerifies(t *testing.T) {
+	f := stripScript()
+	if err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad"); err != nil {
 		t.Fatalf("StripSharedDir: %v", err)
 	}
-
-	want := "/api/v1/projects/22222222-2222-2222-2222-222222222222/shared-dirs/scratchpad"
-	if len(stub.paths) != 2 || stub.paths[1] != want {
-		t.Fatalf("paths = %v, want a list then DELETE %s", stub.paths, want)
+	want := []string{
+		"GET /api/v1/projects",
+		"DELETE /api/v1/projects/" + leverUUID + "/shared-dirs/scratchpad",
+		"GET /api/v1/projects/" + leverUUID + "/shared-dirs",
 	}
-	if stub.methods[1] != http.MethodDelete {
-		t.Errorf("second call = %s, want DELETE", stub.methods[1])
+	if len(f.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", f.calls, want)
+	}
+	for i := range want {
+		if f.calls[i] != want[i] {
+			t.Fatalf("call %d = %q, want %q", i, f.calls[i], want[i])
+		}
 	}
 }
 
 func TestStripSharedDirIsIdempotent(t *testing.T) {
-	// The hub answers 404 when the project carries no such shared dir. A second
-	// apply must not fail over work the first one already did.
-	stub := newHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			http.Error(w, `{"error":"Shared directory not found"}`, http.StatusNotFound)
-			return
-		}
-		_, _ = w.Write([]byte(projectsBody))
-	})
-	if err := stub.client("t").StripSharedDir(context.Background(), "lever", "scratchpad"); err != nil {
-		t.Fatalf("a 404 DELETE must count as success, got %v", err)
+	// A second apply: the hub answers 404 because the dir is already gone. The
+	// verify read confirms it, so this is a success.
+	f := stripScript()
+	f.replies["DELETE /api/v1/projects/"+leverUUID+"/shared-dirs/scratchpad"] =
+		reply{status: 404, body: `{"error":"Shared directory not found"}`}
+	if err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad"); err != nil {
+		t.Fatalf("a 404 with a clean verify read must succeed, got %v", err)
+	}
+}
+
+func TestStripSharedDirFailsWhen404ButDirStillThere(t *testing.T) {
+	// The bug the verify read exists to catch: the hub answers 404 for "no such
+	// route" and for "no such project" too, so a moved endpoint would otherwise
+	// read as a successful strip while every agent keeps the writable mount.
+	f := stripScript()
+	f.replies["DELETE /api/v1/projects/"+leverUUID+"/shared-dirs/scratchpad"] = reply{status: 404}
+	f.replies["GET /api/v1/projects/"+leverUUID+"/shared-dirs"] =
+		reply{status: 200, body: `{"sharedDirs":[{"name":"scratchpad"}]}`}
+
+	err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
+	if err == nil {
+		t.Fatal("a 404 that did not actually remove the dir must fail")
+	}
+	if !strings.Contains(err.Error(), "still on project") {
+		t.Errorf("error should say the dir survived, got %v", err)
 	}
 }
 
 func TestStripSharedDirSurfacesForbidden(t *testing.T) {
-	// 403 means the PAT lacks project:update. That must fail loud — a silent
-	// pass would leave the cross-agent mount in place.
-	stub := newHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			http.Error(w, `{"error":"Forbidden"}`, http.StatusForbidden)
-			return
-		}
-		_, _ = w.Write([]byte(projectsBody))
-	})
-	err := stub.client("t").StripSharedDir(context.Background(), "lever", "scratchpad")
+	// 403 means the PAT lacks project:update. It must fail loud — a silent pass
+	// would leave the cross-agent mount in place.
+	f := stripScript()
+	f.replies["DELETE /api/v1/projects/"+leverUUID+"/shared-dirs/scratchpad"] =
+		reply{status: http.StatusForbidden, body: `{"error":"Forbidden"}`}
+	err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
 	if err == nil {
 		t.Fatal("expected an error on 403")
 	}
@@ -124,34 +150,46 @@ func TestStripSharedDirSurfacesForbidden(t *testing.T) {
 	}
 }
 
+func TestStripSharedDirSurfacesTransportFailure(t *testing.T) {
+	// The jail is down. Status 0 must never be read as a status.
+	f := stripScript()
+	f.replies["GET /api/v1/projects"] = reply{err: errors.New("connection refused")}
+	err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("transport failure must surface, got %v", err)
+	}
+}
+
+func TestStripSharedDirFailsWhenVerifyReadFails(t *testing.T) {
+	// A DELETE that looked fine but an unreadable verify must NOT pass: lever
+	// cannot claim the mount is gone if it could not look.
+	f := stripScript()
+	f.replies["GET /api/v1/projects/"+leverUUID+"/shared-dirs"] = reply{status: 500, body: "boom"}
+	err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
+	if err == nil || !strings.Contains(err.Error(), "verifying") {
+		t.Fatalf("an unreadable verify must fail, got %v", err)
+	}
+}
+
 func TestSharedDirsListsProjectMounts(t *testing.T) {
-	stub := newHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"sharedDirs":[{"name":"scratchpad","readOnly":false,"inWorkspace":false}]}`))
-	})
-	dirs, err := stub.client("t").SharedDirs(context.Background(), "22222222-2222-2222-2222-222222222222")
+	f := stripScript()
+	f.replies["GET /api/v1/projects/"+leverUUID+"/shared-dirs"] =
+		reply{status: 200, body: `{"sharedDirs":[{"name":"scratchpad","readOnly":false,"inWorkspace":false}]}`}
+	dirs, err := (&Client{T: f}).SharedDirs(context.Background(), leverUUID)
 	if err != nil {
 		t.Fatalf("SharedDirs: %v", err)
 	}
 	if len(dirs) != 1 || dirs[0].Name != "scratchpad" || dirs[0].ReadOnly {
 		t.Fatalf("dirs = %+v, want one writable scratchpad", dirs)
 	}
-	want := "/api/v1/projects/22222222-2222-2222-2222-222222222222/shared-dirs"
-	if stub.paths[0] != want {
-		t.Errorf("path = %q, want %q", stub.paths[0], want)
-	}
 }
 
-func TestNoTokenOmitsAuthHeader(t *testing.T) {
-	// An unminted PAT must not send an empty bearer header — the hub reads that
-	// as a malformed credential rather than as no credential.
-	stub := newHubStub(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(projectsBody))
-	})
-	c := &Client{BaseURL: stub.URL, Token: func() string { return "" }}
-	if _, err := c.ProjectID(context.Background(), "lever"); err != nil {
-		t.Fatalf("ProjectID: %v", err)
-	}
-	if stub.auth[0] != "" {
-		t.Errorf("Authorization = %q, want no header", stub.auth[0])
+func TestGetSurfacesNonJSONBody(t *testing.T) {
+	// A wrong service on the hub port returns HTML, not scion's envelope.
+	f := stripScript()
+	f.replies["GET /api/v1/projects"] = reply{status: 200, body: "<html>not scion</html>"}
+	_, err := (&Client{T: f}).ProjectID(context.Background(), "lever", "hub")
+	if err == nil || !strings.Contains(err.Error(), "decoding") {
+		t.Fatalf("a non-JSON body must fail loud, got %v", err)
 	}
 }

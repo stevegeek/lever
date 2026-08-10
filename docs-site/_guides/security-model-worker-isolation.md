@@ -55,10 +55,18 @@ between any two workers — exactly the reach §4.1 denies. Lever's hub runs in 
 the server-side default cannot be switched off: the setting lives in Scion's operational settings,
 which are Postgres-gated, the admin endpoint answers `501`, and the section has no `settings.yaml`
 key. So `lever apply` removes the directory from the hub's project record after registration, on
-both the fresh and the already-registered path, and a removal failure **fails the bring-up** rather
-than starting a fleet that silently shares a directory. `lever doctor` reports any shared directory
-the hub still mounts into every agent. Removing it per project is the only supported route today;
-lever has asked upstream for a hub-wide control.
+both the fresh and the already-registered path, then **re-reads the record to confirm it is gone**
+— the hub answers `404` for "no such shared dir", "no such project" and "no such route" alike, so
+the delete status on its own cannot prove the removal happened. A failure at either step **fails
+the bring-up** rather than starting a fleet that silently shares a directory. The request runs
+inside the jail, like every other Scion interaction: the hub binds the jail's loopback, and the
+Lima template suppresses guest→host forwarding on purpose, so a host-side call could not reach it
+there at all.
+
+`lever doctor` reports any shared directory the hub still records for the project. That check reads
+the hub record, so it describes newly started agents: an agent that started before the removal
+keeps its bind mount until it restarts. Removing the directory per project is the only supported
+route today; lever has asked upstream for a hub-wide control.
 
 ### 4.2 No agent holds hub authority: dev-auth off, host-only controller PAT
 

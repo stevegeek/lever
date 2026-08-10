@@ -222,6 +222,46 @@ func TestCheckProjectSharedDirsSkipsOnUnreachableHub(t *testing.T) {
 	}
 }
 
+func TestCheckProjectSharedDirsFailsWhenTheHubAnswered(t *testing.T) {
+	// A 403 (a PAT missing project:read) or a project the hub does not list is
+	// NOT a down instance. Reporting it as "not checked" would hide a real
+	// problem behind a pass, so anything the hub actually answered must fail.
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"forbidden", &hubapi.APIError{Status: 403, Msg: "GET /api/v1/projects: HTTP 403: Forbidden"}},
+		{"no such project", &hubapi.APIError{Msg: `no project named "lever" at hub http://127.0.0.1:8080`}},
+		{"undecodable body", &hubapi.APIError{Msg: "GET /api/v1/projects: decoding response: invalid character '<'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			list := func(context.Context, string) ([]hubapi.SharedDir, error) { return nil, tc.err }
+			r := checkProjectSharedDirs(context.Background(), "lever", list)
+			if r.ok {
+				t.Fatalf("an answer from the hub must not pass as skipped; got %+v", r)
+			}
+			if !strings.Contains(r.detail, tc.err.Error()) {
+				t.Errorf("detail should carry the hub's answer, got %q", r.detail)
+			}
+			if r.fix == "" {
+				t.Error("a finding must offer a fix")
+			}
+		})
+	}
+}
+
+func TestHubProjectKeyMatchesTheTokenMintKey(t *testing.T) {
+	// The hub knows the project by its in-jail mount basename. ensureControllerPAT
+	// derives the same key for `hub token create`; if these drift, the strip and
+	// the check both look up a project that does not exist.
+	if got := hubProjectKey("/lever"); got != "lever" {
+		t.Fatalf("hubProjectKey(/lever) = %q, want lever", got)
+	}
+	if hubProjectKey("/lever") != filepath.Base(jailProjectPath("/anything", "/lever")) {
+		t.Error("hubProjectKey must match the key ensureControllerPAT mints the PAT with")
+	}
+}
+
 func TestCheckScionProjectConsistent(t *testing.T) {
 	st := backend.ScionProjectState{
 		MarkerPresent: true,

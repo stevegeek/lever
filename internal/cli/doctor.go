@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -57,16 +56,13 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				scion = checkScionProject(st, b.MountDest())
 			}
 
-			// The hub is jail-local, but OrbStack forwards the jail's loopback
-			// to the host, so this host-side client reaches the same endpoint
-			// the in-jail scion CLI uses. A down hub is reported as "not
-			// checked", not as a finding — see checkProjectSharedDirs.
-			hc := &hubapi.Client{
-				BaseURL: scionpkg.DefaultHubEndpoint,
-				Token:   func() string { t, _ := state.LoadControllerPAT(); return t },
-			}
+			// Reads the hub through the jail, like apply's strip — a host-side
+			// call cannot reach the hub on the Lima backend. A down jail or hub
+			// is reported as "not checked", not as a finding; see
+			// checkProjectSharedDirs.
+			hc := &hubapi.Client{T: hubJailTransport(b.JailRunner(), state)}
 			listSharedDirs := func(ctx context.Context, project string) ([]hubapi.SharedDir, error) {
-				id, err := hc.ProjectID(ctx, project)
+				id, err := hc.ProjectID(ctx, project, scionpkg.DefaultHubEndpoint)
 				if err != nil {
 					return nil, err
 				}
@@ -83,7 +79,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				checkGoToolchain(app.Scion),
 				checkOperatorSkills(app, state.Dir),
 				checkDirectives(app, state),
-				checkProjectSharedDirs(cmd.Context(), filepath.Base(b.MountDest()), listSharedDirs),
+				checkProjectSharedDirs(cmd.Context(), hubProjectKey(b.MountDest()), listSharedDirs),
 				scion,
 			}
 			failed := 0

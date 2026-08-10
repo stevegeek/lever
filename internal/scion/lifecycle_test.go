@@ -45,10 +45,26 @@ func TestStartArgv(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	for _, want := range []string{"-g /g/a", "start a do x", "--harness claude", "--harness-auth oauth-token", "--image img:1", "--workspace /lever"} {
+	for _, want := range []string{"-g /g/a", "start a do x", "--harness claude", "--harness-auth oauth-token", "--role baseline", "--image img:1", "--workspace /lever"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
 		}
+	}
+}
+
+// Every lever agent is started with the baseline role (scion#1089): heartbeat
+// + self-token-refresh, no create/lifecycle/secret scope. Pinned explicitly so
+// a future scion default can't silently widen agent authority.
+func TestStartPinsBaselineRole(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	c := New(f, Options{})
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", APIKey: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if !strings.Contains(got, "--role baseline") {
+		t.Fatalf("argv %q missing --role baseline", got)
 	}
 }
 

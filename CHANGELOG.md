@@ -5,6 +5,43 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Changed
+- **Scion pin bumped `68507153` → `91c26b34` (163 commits), on pure upstream.**
+  Every patch lever previously carried on its scion fork is upstream by content
+  at this pin, so lever no longer needs the fork to run. Requires a full
+  `lever stop` + `lever up --fresh`, never a hub-binary swap: the hub applies
+  one-way DB migrations on first boot, and agent tokens minted at the old pin
+  403 on newly scope-gated read endpoints until they refresh. Snapshot the hub
+  DB before the cutover.
+- **Every agent now starts with an explicit `--role baseline` (scion#1089).**
+  Upstream replaced per-template scope lists with named role bundles. Baseline
+  means heartbeat and self-token-refresh, and carries no agent create,
+  lifecycle, or secret scope — worker dispatch runs host-side under the
+  controller PAT, never an agent's own token. Stamping the role explicitly
+  keeps a future change to scion's default from silently widening agent
+  authority. Note the baseline bundle is wider than lever's previously
+  documented three scopes: it also grants `project:read` and
+  `agent:port:forward`.
+
+### Fixed
+- **New projects no longer carry scion's cross-agent `scratchpad` shared dir
+  (scion#925).** Upstream stamps a writable `scratchpad` on every new project
+  and mounts it read-write into EVERY agent of that project — a channel between
+  the manager and every worker, which defeats lever's subtree isolation. On
+  lever's file/SQLite hub the server-side default cannot be turned off, so
+  `lever apply` now strips the directory from the hub's project record after
+  registration, on both the fresh and the already-registered path, then
+  re-reads the record to confirm it is gone — the hub answers `404` for "no
+  such shared dir", "no such project" and "no such route" alike, so the delete
+  status alone cannot prove the removal happened. A failure fails apply rather
+  than starting a fleet that silently shares a directory. The request runs
+  inside the jail, like every other scion call: the hub binds the jail's
+  loopback, and the Lima backend suppresses guest→host port forwarding by
+  design. `lever doctor` gained a matching check. The controller PAT now also
+  carries `project:update`, which the shared-dirs endpoint requires.
+
 ## [0.13.0] - 2026-08-04
 
 ### Fixed

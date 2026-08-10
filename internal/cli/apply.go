@@ -20,8 +20,30 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/scion"
 )
+
+// scionScratchpadSharedDir is the shared directory scion stamps on every new
+// project (scion#925). It is mounted read-write into every agent of the
+// project, so lever removes it — see Deps.StripProjectSharedDirs.
+const scionScratchpadSharedDir = "scratchpad"
+
+// hubJailTransport builds the Hub REST transport: curl, inside the jail,
+// carrying the controller PAT. Shared by apply's shared-dir strip and doctor's
+// shared-dir check so both address the same hub the in-jail scion CLI does.
+func hubJailTransport(jr leverexec.Runner, state brokerctl.State) *hubapi.JailCurl {
+	return &hubapi.JailCurl{
+		Runner:  jr,
+		BaseURL: scion.DefaultHubEndpoint,
+		Token:   func() string { t, _ := state.LoadControllerPAT(); return t },
+	}
+}
+
+// hubProjectKey is the name the hub knows a lever instance's project by: the
+// basename of its in-jail mount. ensureControllerPAT derives the same key for
+// `hub token create`, so the two stay consistent by construction.
+func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 
 // brokerServeCmd builds the detached `lever broker serve` command: its OWN
 // session (Setsid — survives the parent terminal/session, no controlling TTY),
@@ -98,7 +120,10 @@ const throwawayHubPort = 48080
 // controllerPATScopes is the EXACT scope set the controller PAT is minted
 // with. agent:message is deliberately omitted — the scion authz review found
 // every interactive verb, message included, gates on agent:attach.
-var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read"}
+// project:update is required for the post-register scratchpad-shared-dir strip
+// (scion#925): the shared-dirs REST endpoint gates on project ActionUpdate,
+// and agent:manage does NOT expand to project:update.
+var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read", "project:update"}
 
 // ensureControllerPAT backs Deps.EnsureControllerPAT, the "bootstrap-token"
 // apply step (internal/apply/run.go): mint the controller PAT that the real
@@ -517,6 +542,19 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// resumable scion agent record.
 		ScionProjectRegistered: func(ctx context.Context, wp string) (bool, error) {
 			return b.ScionProjectRegistered(ctx, wp)
+		},
+
+		// StripProjectSharedDirs declines scion's default cross-agent
+		// `scratchpad` mount for this project — see the Deps field doc for why
+		// it exists and why the removal must go through the hub. The request
+		// runs IN THE JAIL, like every other scion interaction: the hub binds
+		// the jail's loopback, and the Lima template suppresses every
+		// guest→host port forward on purpose, so a host-side call could not
+		// reach it there at all. The PAT is read per call so a re-mint is
+		// picked up.
+		StripProjectSharedDirs: func(ctx context.Context, projectName string) error {
+			hc := &hubapi.Client{T: hubJailTransport(jr, state)}
+			return hc.StripSharedDir(ctx, projectName, scion.DefaultHubEndpoint, scionScratchpadSharedDir)
 		},
 
 		StartBroker:          bc.Start,

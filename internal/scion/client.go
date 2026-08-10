@@ -14,10 +14,16 @@ import (
 	"github.com/stevegeek/lever/internal/exec"
 )
 
-// DefaultHubEndpoint is the host-side hub endpoint (loopback). Passed
-// explicitly as Options.HubEndpoint by host-side constructors — New applies
-// no default, and an empty HubEndpoint omits SCION_HUB_ENDPOINT entirely,
-// deferring to the scion binary's own default.
+// DefaultHubEndpoint is the hub endpoint on the loopback of whatever runs the
+// request. Every caller resolves it INSIDE the jail — the scion CLI through the
+// jail runner, internal/hubapi through curl — because the hub binds the jail's
+// loopback and the Lima backend suppresses guest→host port forwarding by
+// design. Do not treat it as host-reachable: that holds on OrbStack only, as an
+// implementation detail of its port forwarding.
+//
+// Passed explicitly as Options.HubEndpoint by host-side constructors — New
+// applies no default, and an empty HubEndpoint omits SCION_HUB_ENDPOINT
+// entirely, deferring to the scion binary's own default.
 const DefaultHubEndpoint = "http://127.0.0.1:8080"
 
 type Options struct {

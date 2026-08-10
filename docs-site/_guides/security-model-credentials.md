@@ -143,16 +143,24 @@ container, using that agent's own scion token (distinct from [§4.2](/security-m
 host-only controller PAT — this is the per-agent token scion mints for status/heartbeat use). The
 2026-07-06 create/delete-unaudited vector is closed **structurally**, not by a runtime guard: the
 real hub always starts with `--dev-auth=false` (`internal/apply/run.go`, the `ServerStart(...,
-DevAuth: false)` call, hardcoded, no config field turns it on); lever defines no hub-access-scope
-config anywhere (no `HubAccessScopes` or equivalent); and with dev-auth off, an agent token
-carries only `agent:status:update` / `agent:token:refresh` / `project:agent:notify` — scion grants
-the create/lifecycle scopes only in dev-auth mode. So a lever agent's token cannot create or
-lifecycle agents; those verbs 403 on the missing scope. Because that posture is structural rather
-than config-toggled, there is no runtime knob for a `lever doctor` check to guard — a check
-reading config would always trivially pass. The **known exception** is agent `DELETE`: scion does
-not yet apply an equivalent agent-identity scope check to that handler, so an agent's own
-(minimally-scoped) token can still call it. Closing that gap is a scion-side change, tracked
-separately, not something lever's controller-PAT model can guard from the outside. **Egress mode
+DevAuth: false)` call, hardcoded, no config field turns it on). Since scion's tiered-roles work
+(scion#1089, pin ≥ `91c26b34`) a named **role** determines an agent token's scopes, and lever
+starts every agent — manager and workers — with `--role baseline` (`internal/scion/lifecycle.go`,
+stamped explicitly so a future upstream default cannot silently widen it). Baseline carries
+`project:read`, `agent:status:update`, `agent:token:refresh`, `project:agent:notify` and
+`agent:port:forward` — heartbeat, self-token-refresh, and read/enumeration, but **no**
+`agent:create`, `agent:lifecycle`, or `project:secret:read`. So a lever agent's token cannot
+create or lifecycle agents, or read project secrets; those verbs 403 on the missing scope. The
+ceiling is doubly held: a project's `max_agent_role` defaults to baseline, and `full` requires a
+hub-admin ceiling lever never grants. This posture is now enforced (not merely structural), so a
+`lever doctor` check can meaningfully assert the started role. The **known exception** remains
+agent `DELETE`: at this pin scion still authorizes `performAgentDelete` only for user callers, so
+an agent's own token is not scope-checked on that path (create/lifecycle/read/token-refresh are all
+gated for agents; delete is the lone gap). A fix — a lifecycle-scope + project-isolation gate on
+`performAgentDelete`, under which a baseline agent's token is refused — is a pending upstream PR
+(GoogleCloudPlatform/scion#1097); the gap closes once it merges and the pin advances past it.
+Closing it is a scion-side change, not something lever's controller-PAT model can guard from the
+outside. **Egress mode
 gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically so the
 in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable
 identically under `open` or `closed`. The real (if narrow) bound is tenancy: this is a

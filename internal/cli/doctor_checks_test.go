@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
 )
 
 func okDial(string) error   { return nil }
@@ -161,6 +163,102 @@ func TestCheckToolBackendsSupervisedAbsolutePathMissing(t *testing.T) {
 	got := checkToolBackends(tools, func(string) error { return nil })
 	if got.ok {
 		t.Fatalf("supervised tool with a missing absolute-path command should fail the check")
+	}
+}
+
+func TestCheckProjectSharedDirsNone(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.SharedDir, error) { return nil, nil }
+	r := checkProjectSharedDirs(context.Background(), "lever", list)
+	if !r.ok {
+		t.Fatalf("no shared dirs => pass; got %+v", r)
+	}
+}
+
+func TestCheckProjectSharedDirsFlagsScratchpad(t *testing.T) {
+	// The scion#925 default: a writable dir mounted into every agent. It must
+	// fail the check, name itself, and offer a fix.
+	list := func(context.Context, string) ([]hubapi.SharedDir, error) {
+		return []hubapi.SharedDir{{Name: "scratchpad"}}, nil
+	}
+	r := checkProjectSharedDirs(context.Background(), "lever", list)
+	if r.ok {
+		t.Fatalf("a shared dir mounted into every agent must fail; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "scratchpad") || !strings.Contains(r.detail, "lever") {
+		t.Errorf("detail should name the dir and the project, got %q", r.detail)
+	}
+	if !strings.Contains(r.fix, "lever apply") {
+		t.Errorf("fix should point at the strip, got %q", r.fix)
+	}
+}
+
+func TestCheckProjectSharedDirsReadOnlyIsLabelled(t *testing.T) {
+	// A read-only entry is still a channel, so it still fails — but the operator
+	// needs to see that it is not writable before deciding what to do.
+	list := func(context.Context, string) ([]hubapi.SharedDir, error) {
+		return []hubapi.SharedDir{{Name: "refs", ReadOnly: true}}, nil
+	}
+	r := checkProjectSharedDirs(context.Background(), "lever", list)
+	if r.ok {
+		t.Fatalf("a read-only shared dir must still fail; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "read-only") {
+		t.Errorf("detail should label a read-only entry, got %q", r.detail)
+	}
+}
+
+func TestCheckProjectSharedDirsSkipsOnUnreachableHub(t *testing.T) {
+	// A stopped instance already fails the broker check. A second red line here
+	// would be noise, so an unreachable hub passes — but says it was skipped.
+	list := func(context.Context, string) ([]hubapi.SharedDir, error) {
+		return nil, errors.New("connection refused")
+	}
+	r := checkProjectSharedDirs(context.Background(), "lever", list)
+	if !r.ok {
+		t.Fatalf("an unreachable hub must not be a finding; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "not checked") {
+		t.Errorf("detail must say the check was skipped, got %q", r.detail)
+	}
+}
+
+func TestCheckProjectSharedDirsFailsWhenTheHubAnswered(t *testing.T) {
+	// A 403 (a PAT missing project:read) or a project the hub does not list is
+	// NOT a down instance. Reporting it as "not checked" would hide a real
+	// problem behind a pass, so anything the hub actually answered must fail.
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"forbidden", &hubapi.APIError{Status: 403, Msg: "GET /api/v1/projects: HTTP 403: Forbidden"}},
+		{"no such project", &hubapi.APIError{Msg: `no project named "lever" at hub http://127.0.0.1:8080`}},
+		{"undecodable body", &hubapi.APIError{Msg: "GET /api/v1/projects: decoding response: invalid character '<'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			list := func(context.Context, string) ([]hubapi.SharedDir, error) { return nil, tc.err }
+			r := checkProjectSharedDirs(context.Background(), "lever", list)
+			if r.ok {
+				t.Fatalf("an answer from the hub must not pass as skipped; got %+v", r)
+			}
+			if !strings.Contains(r.detail, tc.err.Error()) {
+				t.Errorf("detail should carry the hub's answer, got %q", r.detail)
+			}
+			if r.fix == "" {
+				t.Error("a finding must offer a fix")
+			}
+		})
+	}
+}
+
+func TestHubProjectKeyMatchesTheTokenMintKey(t *testing.T) {
+	// The hub knows the project by its in-jail mount basename. ensureControllerPAT
+	// derives the same key for `hub token create`; if these drift, the strip and
+	// the check both look up a project that does not exist.
+	if got := hubProjectKey("/lever"); got != "lever" {
+		t.Fatalf("hubProjectKey(/lever) = %q, want lever", got)
+	}
+	if hubProjectKey("/lever") != filepath.Base(jailProjectPath("/anything", "/lever")) {
+		t.Error("hubProjectKey must match the key ensureControllerPAT mints the PAT with")
 	}
 }
 

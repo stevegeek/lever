@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
+	scionpkg "github.com/stevegeek/lever/internal/scion"
 )
 
 func newDoctorCmd(factory BackendFactory) *cobra.Command {
@@ -53,6 +56,19 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				scion = checkScionProject(st, b.MountDest())
 			}
 
+			// Reads the hub through the jail, like apply's strip — a host-side
+			// call cannot reach the hub on the Lima backend. A down jail or hub
+			// is reported as "not checked", not as a finding; see
+			// checkProjectSharedDirs.
+			hc := &hubapi.Client{T: hubJailTransport(b.JailRunner(), state)}
+			listSharedDirs := func(ctx context.Context, project string) ([]hubapi.SharedDir, error) {
+				id, err := hc.ProjectID(ctx, project, scionpkg.DefaultHubEndpoint)
+				if err != nil {
+					return nil, err
+				}
+				return hc.SharedDirs(ctx, id)
+			}
+
 			checks := []checkResult{
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
 				checkAgentCert(state, time.Now()),
@@ -63,6 +79,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				checkGoToolchain(app.Scion),
 				checkOperatorSkills(app, state.Dir),
 				checkDirectives(app, state),
+				checkProjectSharedDirs(cmd.Context(), hubProjectKey(b.MountDest()), listSharedDirs),
 				scion,
 			}
 			failed := 0

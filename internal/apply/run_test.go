@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1991,6 +1992,84 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 		if strings.Contains(j, "init --non-interactive") || strings.Contains(j, "hub link") {
 			t.Errorf("scion init/hub-link must not run when already registered; call=%+v", c)
 		}
+	}
+}
+
+// TestRegisterStripsSharedDirsOnBothPaths pins scion#925 containment: the
+// default `scratchpad` shared dir is mounted read-write into EVERY agent of a
+// project, so register-project must strip it whether the registration was
+// already sound (early return) or was just re-inited. Missing it on the
+// already-registered path would leave every re-applied instance sharing a
+// writable directory between the manager and every worker.
+func TestRegisterStripsSharedDirsOnBothPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registered bool
+	}{
+		{"already registered", true},
+		{"fresh registration", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := t.TempDir()
+			f := exec.NewFakeRunner()
+			f.Script("scion", exec.Result{Stdout: "ok"})
+			app := &config.App{
+				Name: "hello", Backend: "orbstack", Tree: tree,
+				Manager: config.Manager{Image: "img"},
+			}
+			var stripCalls []string
+			deps := Deps{
+				JailUp:    func(context.Context, *config.App) error { return nil },
+				LoadImage: func(context.Context, string) error { return nil },
+				JailMount: "/lever",
+				Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+				ScionProjectRegistered: func(context.Context, string) (bool, error) {
+					return tc.registered, nil
+				},
+				StripProjectSharedDirs: func(_ context.Context, project string) error {
+					stripCalls = append(stripCalls, project)
+					return nil
+				},
+			}
+			if err := Run(context.Background(), app, deps); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			// The hub knows the project by the workspace basename — the same
+			// name ensureControllerPAT passes to `hub token create`.
+			if len(stripCalls) != 1 || stripCalls[0] != "lever" {
+				t.Fatalf("StripProjectSharedDirs calls = %+v, want [lever]", stripCalls)
+			}
+		})
+	}
+}
+
+// TestRegisterFailsWhenSharedDirStripFails pins the fail-loud contract: a strip
+// failure (a 403 from a PAT without project:update, say) must abort apply. The
+// alternative is a manager and workers that silently share a writable
+// directory while the operator believes they do not.
+func TestRegisterFailsWhenSharedDirStripFails(t *testing.T) {
+	tree := t.TempDir()
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		StripProjectSharedDirs: func(context.Context, string) error {
+			return errors.New("403 Forbidden")
+		},
+	}
+	err := Run(context.Background(), app, deps)
+	if err == nil {
+		t.Fatal("apply must fail when the shared-dir strip fails")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("error should carry the strip failure, got %v", err)
 	}
 }
 

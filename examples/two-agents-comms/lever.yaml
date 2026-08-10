@@ -2,7 +2,7 @@ name: two-agents-comms
 backend: orbstack
 tree: workspace
 scion:
-  version: 68507153   # pin a scion commit; fetched + cross-compiled into the jail
+  version: 91c26b34   # pin a scion commit; fetched + cross-compiled into the jail
   # (>= b4c9911d: workers mount only their subtree via relative --workspace, upstream PR #815)
 # api-key is the secure default (real key never in the container) but needs a
 # Console API key; this demo opts into subscription (your Claude OAuth token).

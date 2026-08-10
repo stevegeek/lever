@@ -118,6 +118,11 @@ const (
 	PhaseError     = "error"
 )
 
+// agentRoleBaseline is the scion agent role (scion#1089) every lever agent is
+// started with — heartbeat + self-token-refresh, no create/lifecycle/secret.
+// Requires scion pin >= 91c26b34 (the --role flag). See Client.Start.
+const agentRoleBaseline = "baseline"
+
 type StartOpts struct {
 	Worker  string
 	Task    string
@@ -200,6 +205,13 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	} else {
 		args = append(args, "--harness-auth", "oauth-token")
 	}
+	// Pin the agent role explicitly (scion#1089). Every lever agent — manager
+	// and workers — is baseline: it heartbeats and refreshes its own token but
+	// holds no agent create/lifecycle or secret scope (worker dispatch runs
+	// host-side under the controller PAT, never an agent's own token). Stamping
+	// it here rather than relying on scion's default (also baseline) keeps a
+	// future upstream default change from silently widening agent authority.
+	args = append(args, "--role", agentRoleBaseline)
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
 	}

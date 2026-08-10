@@ -186,6 +186,17 @@ type Deps struct {
 	// (fail-open — an observe failure must never turn into a hard apply
 	// failure, and zero/duplicate/torn registrations legitimately need it).
 	ScionProjectRegistered func(ctx context.Context, jailWorkspacePath string) (bool, error)
+	// StripProjectSharedDirs removes scion's default `scratchpad` shared dir
+	// from the hub's record of the named project (scion#925). The hub stamps it
+	// on every NEW project and mounts it read-write into EVERY agent of that
+	// project, which is a writable channel between the manager and every worker
+	// — the opposite of lever's subtree isolation. lever's hub runs file/SQLite,
+	// where the server-side default cannot be turned off, so per-project removal
+	// is the only route. Runs on BOTH register paths (already-registered and
+	// freshly re-inited), because a project created before this step existed
+	// still carries the mount. nil ⇒ no-op (tests). The broker-only VM gate
+	// never reaches it at all: Plan filters KindRegisterProject out entirely.
+	StripProjectSharedDirs func(ctx context.Context, projectName string) error
 	// Log surfaces a loud, user-facing progress/warning line during apply —
 	// currently just start-manager's resume-failed recovery notice ("resume
 	// failed … starting FRESH, previous session lost"), which MUST reach the
@@ -326,7 +337,7 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	// open, never a hard apply failure over an observe read.
 	if d.ScionProjectRegistered != nil {
 		if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
-			return nil
+			return stripProjectSharedDirs(ctx, d, jp)
 		}
 	}
 
@@ -370,7 +381,25 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	if err := d.Scion.InitProject(ctx, jp); err != nil {
 		return err
 	}
-	return d.Scion.HubLink(ctx, jp)
+	if err := d.Scion.HubLink(ctx, jp); err != nil {
+		return err
+	}
+	return stripProjectSharedDirs(ctx, d, jp)
+}
+
+// stripProjectSharedDirs declines scion's default cross-agent scratchpad mount
+// for the project registered at jailWorkspacePath. The hub knows the project by
+// the workspace basename — the same name ensureControllerPAT passes to `hub
+// token create` — so the two stay consistent by construction.
+//
+// A failure is fatal to apply. The alternative is starting a manager and
+// workers that share a writable directory while the operator believes they do
+// not, and a silent security regression is worse than a loud bring-up failure.
+func stripProjectSharedDirs(ctx context.Context, d Deps, jailWorkspacePath string) error {
+	if d.StripProjectSharedDirs == nil {
+		return nil
+	}
+	return d.StripProjectSharedDirs(ctx, path.Base(jailWorkspacePath))
 }
 
 // runMintManagerBootstrap runs the mint-manager-bootstrap step: mint the

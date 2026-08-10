@@ -53,6 +53,12 @@ type Config struct {
 // Backend is the contract the rest of Lever drives. Implementations must make
 // EnsureUp idempotent. RunUser/RunUID/HostAliasV4/JailRunner are valid after
 // EnsureUp (constructors may return sensible defaults before).
+//
+// JailRunner is the exception: it is safe to call BEFORE EnsureUp and on a
+// stopped machine, because it only builds a runner from cached fields and does
+// no I/O. Before EnsureUp the run user is unresolved, so the prefix defers to
+// the jail's login user — the same user ReadRunUser resolves. buildApplyDeps
+// and doctor both rely on that.
 type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
 	DockerHost() string    // endpoint the broker drives (valid after EnsureUp)

@@ -458,7 +458,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// it mid-apply (see scion.Options.HubTokenSource's doc: lazy, read at
 	// call time, wins over a static HubToken).
 	state := stateFor(configPath)
-	sc := brokerctl.HostScionClient(jr, state)
+	sc := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole)
 
 	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort())
 

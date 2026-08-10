@@ -144,9 +144,17 @@ host-only controller PAT — this is the per-agent token scion mints for status/
 2026-07-06 create/delete-unaudited vector is closed **structurally**, not by a runtime guard: the
 real hub always starts with `--dev-auth=false` (`internal/apply/run.go`, the `ServerStart(...,
 DevAuth: false)` call, hardcoded, no config field turns it on). Since scion's tiered-roles work
-(scion#1089, pin ≥ `91c26b34`) a named **role** determines an agent token's scopes, and lever
-starts every agent — manager and workers — with `--role baseline` (`internal/scion/lifecycle.go`,
-stamped explicitly so a future upstream default cannot silently widen it). Baseline carries
+(scion#1089, pin ≥ `91c26b34`) a named **role** determines an agent token's scopes. Set
+`scion.agent_role: baseline` and lever stamps `--role baseline` on every agent, manager and
+workers alike (`internal/scion/lifecycle.go`), so a later change to scion's own default cannot
+silently widen it.
+
+**That setting is unset by default, and cannot be used yet.** No scion commit carrying #1089 is
+fetchable: `4c045fc8` added a root `AGENTS.md` beside the existing `agents.md`, and `go mod
+download` rejects the case-insensitive filename collision when it builds the module zip. The
+newest usable pin, `3142df68`, predates roles entirely. Until upstream removes one of those
+files, agents run on scion's own default role — which is also baseline, so the posture below
+holds, but lever is not the one pinning it. Baseline carries
 `project:read`, `agent:status:update`, `agent:token:refresh`, `project:agent:notify` and
 `agent:port:forward` — heartbeat, self-token-refresh, and read/enumeration, but **no**
 `agent:create`, `agent:lifecycle`, or `project:secret:read`. So a lever agent's token cannot

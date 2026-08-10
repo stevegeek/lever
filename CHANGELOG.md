@@ -7,23 +7,35 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+- **`scion.agent_role` pins agent authority explicitly (scion#1089).** Upstream
+  replaced per-template scope lists with named role bundles (`none`,
+  `readonly`, `baseline`, `full`). Setting `agent_role: baseline` makes lever
+  stamp `scion start --role baseline`, so a later change to scion's default
+  cannot silently widen agent authority. Baseline means heartbeat and
+  self-token-refresh, with no agent create, lifecycle or secret scope — worker
+  dispatch runs host-side under the controller PAT, never an agent's own token.
+  Note the baseline bundle is wider than lever's previously documented three
+  scopes: it also grants `project:read` and `agent:port:forward`.
+
+  **Unset by default, and it has to stay that way for now.** `--role` does not
+  exist before scion#1089, and no commit carrying #1089 can currently be
+  fetched at all: scion `4c045fc8` added a root `AGENTS.md` beside the existing
+  `agents.md`, and `go mod download` rejects the case-insensitive filename
+  collision when it builds the module zip. The newest fetchable scion commit is
+  `3142df68`, which predates roles. lever cannot infer from an opaque commit
+  hash whether a pin carries the flag, so this is opt-in. An unknown value is
+  rejected at config load rather than as an opaque bring-up failure.
+
 ### Changed
-- **Scion pin bumped `68507153` → `91c26b34` (163 commits), on pure upstream.**
-  Every patch lever previously carried on its scion fork is upstream by content
-  at this pin, so lever no longer needs the fork to run. Requires a full
-  `lever stop` + `lever up --fresh`, never a hub-binary swap: the hub applies
-  one-way DB migrations on first boot, and agent tokens minted at the old pin
-  403 on newly scope-gated read endpoints until they refresh. Snapshot the hub
-  DB before the cutover.
-- **Every agent now starts with an explicit `--role baseline` (scion#1089).**
-  Upstream replaced per-template scope lists with named role bundles. Baseline
-  means heartbeat and self-token-refresh, and carries no agent create,
-  lifecycle, or secret scope — worker dispatch runs host-side under the
-  controller PAT, never an agent's own token. Stamping the role explicitly
-  keeps a future change to scion's default from silently widening agent
-  authority. Note the baseline bundle is wider than lever's previously
-  documented three scopes: it also grants `project:read` and
-  `agent:port:forward`.
+- **Scion `91c26b34` (163 commits) verified on pure upstream, but NOT shipped**
+  — the pin is unfetchable, see above. Every patch lever previously carried on
+  its scion fork is upstream by content at that commit, so the fork stops being
+  necessary as soon as the module can be fetched again. When it can, the
+  cutover needs a full `lever stop` + `lever up`, never a hub-binary swap: the
+  hub applies one-way DB migrations on first boot, and agent tokens minted at
+  the old pin 403 on newly scope-gated read endpoints until they refresh.
+  Snapshot the hub DB first. The examples stay pinned at `68507153`.
 
 ### Fixed
 - **New projects no longer carry scion's cross-agent `scratchpad` shared dir

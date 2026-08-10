@@ -65,7 +65,9 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// HubTokenSource lets suspend authenticate against the real,
 					// dev-auth-off hub with the controller PAT minted by a prior
 					// `lever apply`.
-					sc := brokerctl.HostScionClient(b.JailRunner(), state)
+					// Empty agent role: this client only calls Suspend, and only
+					// start emits --role.
+					sc := brokerctl.HostScionClient(b.JailRunner(), state, "")
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %v\n", serr)
 					}

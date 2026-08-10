@@ -48,7 +48,7 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 			// state gives this client the controller PAT (minted by a prior
 			// `lever apply`'s bootstrap-token step) via HubTokenSource, so `msg
 			// send` authenticates against the real, dev-auth-off hub.
-			sc := brokerctl.HostScionClient(b.JailRunner(), state)
+			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
 			if err := sc.Message(cmd.Context(), scion.MsgOpts{
 				To: "agent:" + slug, Body: strings.Join(args, " "), Interrupt: interrupt, Project: project,
 			}); err != nil {

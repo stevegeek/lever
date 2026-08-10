@@ -118,10 +118,6 @@ const (
 	PhaseError     = "error"
 )
 
-// agentRoleBaseline is the scion agent role (scion#1089) every lever agent is
-// started with — heartbeat + self-token-refresh, no create/lifecycle/secret.
-// Requires scion pin >= 91c26b34 (the --role flag). See Client.Start.
-const agentRoleBaseline = "baseline"
 
 type StartOpts struct {
 	Worker  string
@@ -205,13 +201,20 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	} else {
 		args = append(args, "--harness-auth", "oauth-token")
 	}
-	// Pin the agent role explicitly (scion#1089). Every lever agent — manager
-	// and workers — is baseline: it heartbeats and refreshes its own token but
-	// holds no agent create/lifecycle or secret scope (worker dispatch runs
-	// host-side under the controller PAT, never an agent's own token). Stamping
-	// it here rather than relying on scion's default (also baseline) keeps a
-	// future upstream default change from silently widening agent authority.
-	args = append(args, "--role", agentRoleBaseline)
+	// Pin the agent role explicitly when the instance asked for one
+	// (scion#1089), so a future change to scion's default cannot silently widen
+	// agent authority. lever wants "baseline": heartbeat + self-token-refresh,
+	// no agent create/lifecycle or secret scope (worker dispatch runs host-side
+	// under the controller PAT, never an agent's own token).
+	//
+	// OPT-IN, not automatic. `--role` does not exist before #1089, so passing it
+	// unconditionally makes lever incompatible with every earlier pin, and lever
+	// cannot tell from an opaque commit hash whether a pin carries it. See
+	// config.ScionConfig.AgentRole for why nothing carrying #1089 is fetchable
+	// at all today.
+	if c.agentRole != "" {
+		args = append(args, "--role", c.agentRole)
+	}
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
 	}

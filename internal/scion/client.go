@@ -32,6 +32,10 @@ type Options struct {
 	DevToken       string        // SCION_DEV_TOKEN
 	HubToken       string        // SCION_HUB_TOKEN (static; the controller PAT, P3)
 	HubTokenSource func() string // SCION_HUB_TOKEN (lazy; wins over HubToken — the mint-mid-apply case)
+	// AgentRole is passed as `scion start --role <role>` (scion#1089). Empty ⇒
+	// the flag is omitted, which is the default: it does not exist on earlier
+	// pins. See config.ScionConfig.AgentRole.
+	AgentRole string
 }
 
 type Client struct {
@@ -40,6 +44,7 @@ type Client struct {
 	devToken       string
 	hubToken       string
 	hubTokenSource func() string
+	agentRole      string
 	r              exec.Runner
 }
 
@@ -54,6 +59,7 @@ func New(r exec.Runner, o Options) *Client {
 		devToken:       o.DevToken,
 		hubToken:       o.HubToken,
 		hubTokenSource: o.HubTokenSource,
+		agentRole:      o.AgentRole,
 		r:              r,
 	}
 }

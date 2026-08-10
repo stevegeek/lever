@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -343,7 +344,26 @@ type ScionConfig struct {
 	// vX.Y.Z tag) that lever fetches via the Go module system and cross-compiles
 	// into the jail — no vendored source tree. Mutually exclusive with Source.
 	Version string `yaml:"version"`
+	// AgentRole stamps `scion start --role <role>` on every agent lever starts,
+	// pinning agent authority explicitly instead of inheriting whatever scion's
+	// default happens to be (scion#1089). Empty ⇒ the flag is NOT passed.
+	//
+	// Empty is the default ON PURPOSE. `--role` does not exist before scion#1089,
+	// so passing it unconditionally makes lever incompatible with every earlier
+	// pin — and today NO pin carrying #1089 can be fetched at all, because scion
+	// 4c045fc8 added a root AGENTS.md beside the existing agents.md and `go mod
+	// download` rejects the case-insensitive collision. Set this only once your
+	// pin actually has the flag; lever cannot infer that from an opaque commit.
+	//
+	// `baseline` is the value lever wants: heartbeat and self-token-refresh, no
+	// agent create/lifecycle/secret scope. `readonly` cannot heartbeat, so a live
+	// agent cannot run on it.
+	AgentRole string `yaml:"agent_role"`
 }
+
+// scionAgentRoles is the set of roles scion#1089 defines. Validated so a typo
+// fails at config load rather than as an opaque scion start error at bring-up.
+var scionAgentRoles = []string{"none", "readonly", "baseline", "full"}
 
 // Security holds opt-in image policy. Both default off (empty/false) for
 // backward compatibility; when set they apply to manager.image and every worker
@@ -528,6 +548,10 @@ func Load(path string) (*App, error) {
 	app.Scion.Source = resolvePath(app.Scion.Source, app.dir)
 	if app.Scion.Source != "" && app.Scion.Version != "" {
 		return nil, fmt.Errorf("config: scion.source and scion.version are mutually exclusive")
+	}
+	if r := app.Scion.AgentRole; r != "" && !slices.Contains(scionAgentRoles, r) {
+		return nil, fmt.Errorf("config: unknown scion.agent_role %q (valid: %s; omit it entirely to let scion choose)",
+			r, strings.Join(scionAgentRoles, ", "))
 	}
 	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
 	// SigningKey is a host-side path OUTSIDE the instance tree by design (the

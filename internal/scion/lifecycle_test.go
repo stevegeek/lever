@@ -45,20 +45,35 @@ func TestStartArgv(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	for _, want := range []string{"-g /g/a", "start a do x", "--harness claude", "--harness-auth oauth-token", "--role baseline", "--image img:1", "--workspace /lever"} {
+	for _, want := range []string{"-g /g/a", "start a do x", "--harness claude", "--harness-auth oauth-token", "--image img:1", "--workspace /lever"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
 		}
 	}
 }
 
-// Every lever agent is started with the baseline role (scion#1089): heartbeat
-// + self-token-refresh, no create/lifecycle/secret scope. Pinned explicitly so
-// a future scion default can't silently widen agent authority.
-func TestStartPinsBaselineRole(t *testing.T) {
+// An unset agent role must NOT emit --role. The flag does not exist before
+// scion#1089, so emitting it unconditionally makes lever incompatible with
+// every earlier pin — and no pin carrying #1089 is fetchable at all today
+// (scion's AGENTS.md/agents.md case collision breaks `go mod download`).
+func TestStartOmitsRoleFlagByDefault(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{})
 	c := New(f, Options{})
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--role") {
+		t.Fatalf("argv %q must not carry --role when no role is configured", got)
+	}
+}
+
+// A configured role IS stamped, so an instance whose pin has #1089 can pin
+// agent authority explicitly instead of inheriting scion's default.
+func TestStartStampsConfiguredRole(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{})
+	c := New(f, Options{AgentRole: "baseline"})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", APIKey: true}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

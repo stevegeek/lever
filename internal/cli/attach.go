@@ -76,7 +76,7 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			// AttachArgv (see internal/scion/lifecycle.go) embeds the resolved
 			// token into the exec'd argv itself, since the attach path bypasses
 			// this client's own env().
-			sc := brokerctl.HostScionClient(b.JailRunner(), state)
+			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
 			slug, project, err := attachTarget(app, b.MountDest(), argOrEmpty(args))
 			if err != nil {
 				return err

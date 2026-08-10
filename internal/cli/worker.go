@@ -63,7 +63,7 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			// restartManagerFresh reach through: a host-side scion client over the
 			// jail runner, authenticating with the controller PAT.
 			project := b.MountDest()
-			sc := brokerctl.HostScionClient(b.JailRunner(), state)
+			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
 			if err := sc.Delete(cmd.Context(), spec.Name, project); err != nil {
 				return fmt.Errorf("deleting worker %q scion record: %w", spec.Name, err)
 			}

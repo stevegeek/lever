@@ -231,6 +231,34 @@ func TestValidateRejectsScionSourceAndVersionTogether(t *testing.T) {
 	}
 }
 
+func TestScionAgentRoleValidation(t *testing.T) {
+	// A typo must fail at load, not as an opaque `scion start` error at
+	// bring-up, where an unknown --role value surfaces from deep in the hub.
+	bad := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n  agent_role: baselien\n")
+	if _, err := Load(bad); err == nil {
+		t.Fatal("expected error: unknown scion.agent_role")
+	}
+	for _, role := range []string{"baseline", "none", "readonly", "full"} {
+		p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n  agent_role: "+role+"\n")
+		if _, err := Load(p); err != nil {
+			t.Errorf("agent_role %q must load: %v", role, err)
+		}
+	}
+}
+
+func TestScionAgentRoleDefaultsToUnset(t *testing.T) {
+	// Unset is the default ON PURPOSE: --role exists on no pin lever can
+	// currently fetch, so a non-empty default would break every instance.
+	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n")
+	a, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Scion.AgentRole != "" {
+		t.Errorf("scion.agent_role = %q, want empty (flag omitted)", a.Scion.AgentRole)
+	}
+}
+
 func TestDefaultLLMAuthIsAPIKey(t *testing.T) {
 	a := &App{}
 	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {

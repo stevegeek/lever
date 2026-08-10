@@ -25,10 +25,15 @@ import (
 // SCION_HUB_ENDPOINT and defer to the scion binary's default) and a lazy
 // HubTokenSource that reads the controller PAT from state at call time — so a
 // PAT minted mid-apply is picked up live (see scion.Options.HubTokenSource).
-func HostScionClient(jr leverexec.Runner, st State) *scion.Client {
+//
+// agentRole is the instance's configured scion.agent_role; empty omits the
+// --role flag (see config.ScionConfig.AgentRole). It is threaded in rather than
+// read from config here so package scion stays a thin, config-free wrapper.
+func HostScionClient(jr leverexec.Runner, st State, agentRole string) *scion.Client {
 	return scion.New(jr, scion.Options{
 		HubEndpoint:    scion.DefaultHubEndpoint,
 		HubTokenSource: func() string { t, _ := st.LoadControllerPAT(); return t },
+		AgentRole:      agentRole,
 	})
 }
 
@@ -192,7 +197,7 @@ func decorateConfig(cfg *broker.Config, app *config.App, state State, be backend
 		// (host-side, operator identity) authenticate against the real,
 		// dev-auth-off hub with the controller PAT minted by `lever apply`'s
 		// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
-		cfg.Runtime = HostScionClient(jr, state)
+		cfg.Runtime = HostScionClient(jr, state, app.Scion.AgentRole)
 	}
 	cfg.Workers = WorkerSpecs(app, jailMount)
 	cfg.InstanceProject = jailMount

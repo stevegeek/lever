@@ -200,6 +200,17 @@ type Deps struct {
 	// still carries the mount. nil ⇒ no-op (tests). The broker-only VM gate
 	// never reaches it at all: Plan filters KindRegisterProject out entirely.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
+	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the project's
+	// scion registration when it no longer matches the real hub. Minting the
+	// controller PAT `hub link`s the project against a THROWAWAY hub on its own
+	// port; the register step's re-init would overwrite that, but it is skipped
+	// whenever the registration is already sound, so a re-mint on an established
+	// instance leaves the project pointing at a dead port. Every lever call
+	// passes the endpoint explicitly, so the breakage lands only where scion runs
+	// bare in the jail — `lever attach` (live failure 2026-08-11).
+	//
+	// nil ⇒ no-op (tests, broker-only VM gate).
+	RepairScionHubEndpoint func(ctx context.Context, jailWorkspacePath string) error
 	// VerifyAgentRole gates KEEPING an existing agent record. It returns a
 	// descriptive error when the hub's record for that agent stores no
 	// authorization role while the installed scion understands roles — the state
@@ -356,6 +367,14 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	// open, never a hard apply failure over an observe read.
 	if d.ScionProjectRegistered != nil {
 		if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
+			// Sound registration, so nothing below runs — but the recorded hub
+			// ENDPOINT can still be stale. Minting the controller PAT links the
+			// project against a throwaway hub on its own port, and that link
+			// survives precisely because this path skips the re-init. Repair it
+			// here, where the skip happens.
+			if err := repairScionHubEndpoint(ctx, d, jp); err != nil {
+				return err
+			}
 			return stripProjectSharedDirs(ctx, d, jp)
 		}
 	}
@@ -419,6 +438,16 @@ func stripProjectSharedDirs(ctx context.Context, d Deps, jailWorkspacePath strin
 		return nil
 	}
 	return d.StripProjectSharedDirs(ctx, path.Base(jailWorkspacePath))
+}
+
+// repairScionHubEndpoint points the project's recorded hub endpoint back at the
+// real hub. A no-op when the hook is unwired (tests) or the endpoint is already
+// right; see Deps.RepairScionHubEndpoint.
+func repairScionHubEndpoint(ctx context.Context, d Deps, jailWorkspacePath string) error {
+	if d.RepairScionHubEndpoint == nil {
+		return nil
+	}
+	return d.RepairScionHubEndpoint(ctx, jailWorkspacePath)
 }
 
 // runMintManagerBootstrap runs the mint-manager-bootstrap step: mint the

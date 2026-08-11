@@ -134,4 +134,13 @@ type Backend interface {
 	// re-apply no longer tears down a resumable scion agent record just to
 	// re-mint an identical registration.
 	ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error)
+	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the
+	// project-config registration(s) for workspacePath when it differs from
+	// endpoint. Minting the controller PAT links the project against a
+	// THROWAWAY hub on its own port, and the register step skips its re-init
+	// when the registration is already sound — so a re-mint would otherwise
+	// leave the project pointing at a hub that no longer exists. Only lever's
+	// own calls pass an explicit endpoint, so the damage lands on anything
+	// running scion bare in the jail (`lever attach` was the live case).
+	RepairScionHubEndpoint(ctx context.Context, workspacePath, endpoint string) error
 }

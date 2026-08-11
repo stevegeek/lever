@@ -55,6 +55,10 @@ func (s *stubBackend) RemoveScionProjectConfigs(_ context.Context, workspacePath
 	s.removeScionCalls = append(s.removeScionCalls, workspacePath)
 	return s.removeScionErr
 }
+func (s *stubBackend) RepairScionHubEndpoint(_ context.Context, _, _ string) error {
+	return nil
+}
+
 func (s *stubBackend) ScionProjectRegistered(_ context.Context, workspacePath string) (bool, error) {
 	s.registeredCalls = append(s.registeredCalls, workspacePath)
 	return s.registeredResult, s.registeredErr

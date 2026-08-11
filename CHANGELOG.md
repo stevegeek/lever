@@ -5,6 +5,30 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.15.1] - 2026-08-11
+
+### Fixed
+- **`lever attach` could dial a hub that no longer exists.** Minting the
+  controller PAT starts a THROWAWAY dev-auth hub on its own port and `hub
+  link`s the project against it, which persists that port into the jail's
+  project config. The register-project step's re-init would overwrite it, but
+  that path is deliberately skipped when the registration is already sound — so
+  re-minting a PAT on an established instance (the documented recovery for a
+  pre-0.14.0 PAT) left the project pointing at a dead port.
+
+  It stayed invisible because every lever call passes the hub endpoint
+  explicitly; `attach` is the one verb that **execs** scion instead, so it alone
+  fell back to that file. Bring-up, `doctor` and `up --no-attach` all passed
+  while `lever up` failed at the moment it handed over the terminal.
+
+  Both halves are fixed: `attach` now pins `SCION_HUB_ENDPOINT` alongside the
+  token, so it no longer depends on jail state lever does not own; and
+  register-project repairs a stale endpoint on the skip path, so the config
+  itself stops being wrong. A repair that cannot run fails the bring-up rather
+  than leaving the project pointing at a dead hub.
+
+  **If you hit this on 0.15.0**, upgrading fixes it on the next `lever apply`.
+
 ## [0.15.0] - 2026-08-11
 
 ### Upgrading

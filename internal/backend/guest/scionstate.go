@@ -124,3 +124,53 @@ func parseScionState(out string) backend.ScionProjectState {
 	}
 	return st
 }
+
+// RepairScionHubEndpoint rewrites the hub endpoint in every
+// ~/.scion/project-configs registration whose workspace_path == wp, when it
+// differs from endpoint. A no-op when nothing matches or every entry is already
+// correct; idempotent.
+//
+// It exists because minting the controller PAT runs a THROWAWAY dev-auth hub on
+// its own port and `hub link`s the project against it, which persists that
+// throwaway endpoint into the project config. The register-project step's
+// re-init would overwrite it, but that path is deliberately skipped when the
+// registration is already sound — so a re-mint on an established instance
+// leaves the project pointing at a hub that no longer exists.
+//
+// Only lever's own calls pass an explicit endpoint, so the damage surfaces
+// wherever scion runs bare in the jail. `lever attach` was the live case
+// (2026-08-11): it exec'd scion, read this file, and dialled the dead port.
+//
+// wp and endpoint are lever constants, never user input; both are single-quoted.
+func (g Guest) RepairScionHubEndpoint(ctx context.Context, wp, endpoint string) error {
+	if endpoint == "" {
+		return nil
+	}
+	if _, err := g.userRun(ctx, "bash", "-lc", scionHubEndpointRepairScript(wp, endpoint)); err != nil {
+		return fmt.Errorf("guest: repair scion hub endpoint for %s: %w", wp, err)
+	}
+	return nil
+}
+
+// scionHubEndpointRepairScript is the exact bash body RepairScionHubEndpoint
+// runs (shared with the real-bash test so the rewrite is exercised, not just
+// string-matched). It matches the endpoint line under the `hub:` block — the
+// only `endpoint:` key scion writes into a project settings.yaml — and rewrites
+// it in place, preserving the original indentation.
+func scionHubEndpointRepairScript(wp, endpoint string) string {
+	return `
+target=` + shellSingleQuote(wp) + `
+want=` + shellSingleQuote(endpoint) + `
+for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+  [ -e "$s" ] || continue
+  cur=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  [ "$cur" = "$target" ] || continue
+  have=$(grep -E '^[[:space:]]*endpoint:[[:space:]]*' "$s" 2>/dev/null | head -1 | sed 's/^[[:space:]]*endpoint:[[:space:]]*//')
+  [ -n "$have" ] || continue
+  [ "$have" = "$want" ] && continue
+  tmp="$s.lever-repair"
+  sed "s|^\([[:space:]]*\)endpoint:[[:space:]]*.*$|\1endpoint: $want|" "$s" > "$tmp" && mv "$tmp" "$s"
+  echo "REPAIRED $s $have -> $want"
+done
+`
+}

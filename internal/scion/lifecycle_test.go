@@ -395,3 +395,56 @@ func TestWaitAgentLiveRecordVanishesMidPollResetsToEmpty(t *testing.T) {
 		t.Fatalf("error must report the vanished (empty) last phase/container: %v", err)
 	}
 }
+
+// TestAttachArgvPinsTheHubEndpoint: attach EXECS scion rather than going through
+// Client.run, so it must carry the endpoint itself. Without it scion falls back
+// to the endpoint persisted in the jail's project config — state lever does not
+// own, and which the controller-PAT mint window can leave pointing at the
+// throwaway hub (live failure 2026-08-11: attach dialled 127.0.0.1:48080 and got
+// connection refused while every other verb worked).
+func TestAttachArgvPinsTheHubEndpoint(t *testing.T) {
+	c := New(exec.NewFakeRunner(), Options{HubEndpoint: "http://127.0.0.1:8080"})
+	argv := strings.Join(c.AttachArgv("a", "/g/a"), " ")
+	if !strings.Contains(argv, "SCION_HUB_ENDPOINT=http://127.0.0.1:8080") {
+		t.Fatalf("attach argv must pin the hub endpoint, got %q", argv)
+	}
+	if !strings.HasPrefix(argv, "env ") {
+		t.Fatalf("env assignments must lead the argv, got %q", argv)
+	}
+}
+
+// Both env assignments ride the same `env` prefix, and the scion command still
+// follows them.
+func TestAttachArgvCarriesTokenAndEndpointTogether(t *testing.T) {
+	c := New(exec.NewFakeRunner(), Options{
+		HubEndpoint:    "http://127.0.0.1:8080",
+		HubTokenSource: func() string { return "tok" },
+	})
+	argv := c.AttachArgv("a", "/g/a")
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "SCION_HUB_TOKEN=tok") || !strings.Contains(joined, "SCION_HUB_ENDPOINT=http://127.0.0.1:8080") {
+		t.Fatalf("both env assignments must be present, got %q", joined)
+	}
+	if i := indexOf(argv, "attach"); i < 0 || argv[i-1] != "scion" {
+		t.Fatalf("the scion attach command must follow the env prefix, got %q", joined)
+	}
+}
+
+func indexOf(argv []string, want string) int {
+	for i, a := range argv {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// With neither a token nor an endpoint there is no env prefix at all — the bare
+// scion invocation, as before.
+func TestAttachArgvHasNoEnvPrefixWhenNothingToPin(t *testing.T) {
+	c := New(exec.NewFakeRunner(), Options{})
+	argv := c.AttachArgv("a", "/g/a")
+	if argv[0] == "env" {
+		t.Fatalf("no env assignments means no env prefix, got %q", strings.Join(argv, " "))
+	}
+}

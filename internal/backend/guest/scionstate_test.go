@@ -293,3 +293,100 @@ func TestScionProjectRegisteredErrorsOnGuestFailure(t *testing.T) {
 		t.Fatal("expected an error when the guest command fails, got nil")
 	}
 }
+
+// writeHubProjectConfig writes a project settings.yaml shaped like scion's own:
+// a `hub:` block with an indented endpoint, plus a workspace_path.
+func writeHubProjectConfig(t *testing.T, home, name, workspacePath, endpoint string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".scion", "project-configs", name, ".scion")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "schema_version: \"1\"\nhub:\n    enabled: true\n    linked: true\n"
+	if endpoint != "" {
+		body += "    endpoint: " + endpoint + "\n"
+	}
+	body += "    project_id: 9514fed3\ncli:\n    autohelp: true\n"
+	if workspacePath != "" {
+		body += "workspace_path: " + workspacePath + "\n"
+	}
+	p := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func readFileString(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestScionHubEndpointRepairScript runs the ACTUAL bash body against a real
+// filesystem. The bug it closes: minting the controller PAT `hub link`s the
+// project against a THROWAWAY hub, persisting that port here, and the
+// register-project step skips its re-init when the registration is already
+// sound — so `lever attach`, which execs scion bare, dialled a dead port.
+func TestScionHubEndpointRepairScript(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	home := t.TempDir()
+	const real = "http://127.0.0.1:8080"
+
+	stale := writeHubProjectConfig(t, home, "lever__aaaa1111", "/lever", "http://127.0.0.1:48080")
+	already := writeHubProjectConfig(t, home, "lever__bbbb2222", "/lever", real)
+	otherWP := writeHubProjectConfig(t, home, "worker__cccc3333", "/lever/workers/worker", "http://127.0.0.1:48080")
+	noEndpoint := writeHubProjectConfig(t, home, "legacy__dddd4444", "/lever", "")
+
+	run := func() string {
+		t.Helper()
+		cmd := exec.Command("bash", "-lc", scionHubEndpointRepairScript("/lever", real))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("script failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	out := run()
+
+	if got := readFileString(t, stale); !strings.Contains(got, "    endpoint: "+real) {
+		t.Errorf("stale endpoint not repaired:\n%s", got)
+	}
+	if got := readFileString(t, stale); strings.Contains(got, "48080") {
+		t.Errorf("throwaway endpoint still present:\n%s", got)
+	}
+	// Indentation must survive: scion re-reads this as YAML.
+	if got := readFileString(t, stale); !strings.Contains(got, "hub:\n    enabled: true") {
+		t.Errorf("hub block shape broken:\n%s", got)
+	}
+	if !strings.Contains(out, "REPAIRED") {
+		t.Errorf("a repair should be reported, got %q", out)
+	}
+	// A different workspace_path is not ours to touch.
+	if got := readFileString(t, otherWP); !strings.Contains(got, "48080") {
+		t.Errorf("an entry for another workspace must be left alone:\n%s", got)
+	}
+	// Already-correct and endpoint-less entries are untouched.
+	if got := readFileString(t, already); strings.Count(got, "endpoint:") != 1 {
+		t.Errorf("already-correct entry was rewritten:\n%s", got)
+	}
+	if got := readFileString(t, noEndpoint); strings.Contains(got, "endpoint:") {
+		t.Errorf("an entry with no endpoint must not gain one:\n%s", got)
+	}
+
+	// Idempotent: a second run changes nothing and reports nothing.
+	before := readFileString(t, stale)
+	if out2 := run(); strings.Contains(out2, "REPAIRED") {
+		t.Errorf("second run should be a no-op, got %q", out2)
+	}
+	if readFileString(t, stale) != before {
+		t.Error("second run modified the file")
+	}
+}

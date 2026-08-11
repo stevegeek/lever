@@ -319,8 +319,21 @@ func (c *Client) Suspend(ctx context.Context, worker, project string) error {
 // authenticates; omitted entirely when no token is set.
 func (c *Client) AttachArgv(worker, project string) []string {
 	argv := append([]string{c.bin, "attach", worker}, projectFlag(project)...)
+	// Pin the ENDPOINT as well as the token. Attach is the one path that execs
+	// scion instead of going through Client.run, so without this it falls back
+	// to the endpoint persisted in the jail's project config — state lever does
+	// not own and which the controller-PAT mint window can leave pointing at the
+	// throwaway hub it started on 48080. Every other lever call already passes
+	// the endpoint explicitly, which is why attach was the only verb that broke.
+	var env []string
 	if tok := c.currentHubToken(); tok != "" {
-		argv = append([]string{"env", "SCION_HUB_TOKEN=" + tok}, argv...)
+		env = append(env, "SCION_HUB_TOKEN="+tok)
+	}
+	if c.hubEndpoint != "" {
+		env = append(env, "SCION_HUB_ENDPOINT="+c.hubEndpoint)
+	}
+	if len(env) > 0 {
+		argv = append(append([]string{"env"}, env...), argv...)
 	}
 	return argv
 }

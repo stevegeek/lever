@@ -2604,3 +2604,68 @@ func TestStartManagerVerifyAgentRolePassesThrough(t *testing.T) {
 		t.Errorf("resumeCalls = %d, want 1", r.resumeCalls)
 	}
 }
+
+// TestRegisterRepairsHubEndpointOnTheSkipPath: the skip path is exactly where a
+// stale hub endpoint survives. Minting the controller PAT `hub link`s the
+// project against a THROWAWAY hub on its own port; the destructive re-init
+// would overwrite that, but it is skipped whenever the registration is sound.
+// Live failure 2026-08-11: `lever attach` execs scion bare, read the project
+// config, and dialled the dead throwaway port while every other verb worked.
+func TestRegisterRepairsHubEndpointOnTheSkipPath(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	var repaired []string
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
+		RepairScionHubEndpoint: func(_ context.Context, wp string) error {
+			repaired = append(repaired, wp)
+			return nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(repaired) != 1 || repaired[0] != "/lever" {
+		t.Fatalf("RepairScionHubEndpoint calls = %+v, want [/lever]", repaired)
+	}
+}
+
+// A repair that cannot run must fail the bring-up rather than leave the project
+// pointing at a hub that no longer exists.
+func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: tree,
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		JailMount: "/lever",
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
+		RepairScionHubEndpoint: func(context.Context, string) error {
+			return fmt.Errorf("guest unreachable")
+		},
+	}
+	if err := Run(context.Background(), app, deps); err == nil {
+		t.Fatal("a failed endpoint repair must fail the bring-up")
+	}
+}

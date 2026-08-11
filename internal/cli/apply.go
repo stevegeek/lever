@@ -570,6 +570,13 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return hc.StripSharedDir(ctx, projectName, scion.DefaultHubEndpoint, scionScratchpadSharedDir)
 		},
 
+		// RepairScionHubEndpoint puts the project's recorded hub endpoint back to
+		// the real hub after a controller-PAT re-mint linked it at the throwaway
+		// one — see the Deps field doc.
+		RepairScionHubEndpoint: func(ctx context.Context, wp string) error {
+			return b.RepairScionHubEndpoint(ctx, wp, scion.DefaultHubEndpoint)
+		},
+
 		// VerifyAgentRole refuses to keep an agent whose hub record predates
 		// scion's roles — see the Deps field doc for why that is a promotion to
 		// full hub authority rather than a cosmetic gap. It fails CLOSED on

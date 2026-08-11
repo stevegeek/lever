@@ -186,6 +186,12 @@ func (b *Base) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
 	return b.Guest().RemoveScionProjectConfigs(ctx, wp)
 }
 
+// RepairScionHubEndpoint rewrites a stale hub endpoint in the project-config
+// registration(s) for wp — see backend.Backend for why one can be stale.
+func (b *Base) RepairScionHubEndpoint(ctx context.Context, wp, endpoint string) error {
+	return b.Guest().RepairScionHubEndpoint(ctx, wp, endpoint)
+}
+
 // ScionProjectRegistered reports whether workspacePath already has exactly one
 // valid scion registration, via the machine-only guest prefix. Read-only, no
 // EnsureUp.

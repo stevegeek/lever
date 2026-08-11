@@ -212,6 +212,12 @@ func decorateConfig(cfg *broker.Config, app *config.App, state State, be backend
 		cfg.VerifyAgentRole = func(ctx context.Context, agent string) error {
 			return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, projectKey, agent)
 		}
+		// /msg/list cuts the controller's fleet-wide notification feed down to
+		// one agent, and needs the hub's agent id to attribute events (see
+		// broker.Config.ResolveAgentID).
+		cfg.ResolveAgentID = func(ctx context.Context, agentSlug string) (string, error) {
+			return hc.AgentID(ctx, projectKey, scion.DefaultHubEndpoint, agentSlug)
+		}
 	}
 	cfg.Workers = WorkerSpecs(app, jailMount)
 	cfg.InstanceProject = jailMount

@@ -32,6 +32,43 @@ version bump moves the block under the new version heading.
   being protected into keeping. It fails closed on anything it cannot answer,
   including an unreadable record or an unanswerable capability probe.
 
+- **`/msg/list` no longer hands every agent the fleet's notification feed.**
+  `resolveListProject` returned the instance project for every caller and the
+  underlying `scion notifications` call is scoped by the hub to the authenticated
+  **user** — always the host controller PAT — so the project never scoped
+  anything. Any worker read the manager's and every sibling's events, and the
+  manager's documented `--worker <name>` selector was inert. lever now resolves
+  whose inbox the caller may read to an agent *slug*, resolves that to the hub's
+  agent id, and returns only the events the hub attributes to it. An event with
+  no `agentId` is dropped, and an id lever cannot resolve fails the request:
+  returning the raw feed is the leak this closes.
+
+- **Bootstrap staging followed agent-planted symlinks.** `wire.Stage` wrote
+  `bootstrap.json` with `MkdirAll`/`WriteFile`/`Chmod` — all of which resolve
+  symlinks — into a directory inside the agent's own read-write mount, as the
+  host operator. An agent that replaced its `.lever` with a symlink chose where
+  the host wrote, and chmod'd 0600: the instance root's `lever.yaml`, the
+  broker's `revocation.json` (which decodes as a zero `RevocationState`, undoing
+  `lever revoke`), the controller PAT. A lapsed leaf alone reaches it through the
+  auto-re-enrol healer, with no operator action at all. Staging now takes the
+  tree as a confinement anchor, runs through `os.Root`, and refuses a symlink at
+  the staging directory or at `bootstrap.json` even when it stays inside the
+  tree.
+
+- **A message body could not smuggle flags into `scion message`.** The body was
+  passed as a bare positional and cobra parses flags interspersed with
+  positionals, so a body of exactly `-b` bound to `--broadcast` and delivered to
+  every agent in the project — past the worker-to-worker deny, which had checked
+  only the recipient. `-a` widened it to every project on the hub. Flags now
+  precede a `--` terminator.
+
+- **The `--role` capability probe no longer memoises its answer.** It cached the
+  verdict for the client's lifetime, justified by `ConfigHash` bouncing the
+  broker on a scion change. That does not hold for `scion.source` and
+  `scion.binary`: both are *paths*, so replacing the artifact behind one leaves
+  the hash byte-identical and a long-lived broker keeps its verdict. A stale "no
+  `--role`" disarmed the stamp and the new pre-role guard together, silently.
+
 ### Added
 - **`lever doctor` reports agent records that store no role.** It reports them
   on *any* pin, so the bump above can be planned rather than discovered: on a

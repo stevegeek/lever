@@ -189,3 +189,33 @@ func TestVerifyAgentRoleFailsClosedOnAnUnanswerableProbe(t *testing.T) {
 		t.Fatal("an unanswerable capability probe must fail closed")
 	}
 }
+
+func TestAgentIDResolvesTheHubUUID(t *testing.T) {
+	c := &Client{T: agentsScript(`{"agents":[
+	  {"id":"uuid-1","slug":"assistant"},
+	  {"id":"uuid-2","slug":"scratch"}
+	]}`)}
+	got, err := c.AgentID(context.Background(), "lever", "hub", "scratch")
+	if err != nil {
+		t.Fatalf("AgentID: %v", err)
+	}
+	if got != "uuid-2" {
+		t.Fatalf("AgentID = %q, want uuid-2", got)
+	}
+}
+
+// An unknown agent must be an error, never "". A caller that read "" as "no
+// filter" would show one agent every other agent's events.
+func TestAgentIDRefusesAnUnknownAgent(t *testing.T) {
+	c := &Client{T: agentsScript(`{"agents":[{"id":"uuid-1","slug":"assistant"}]}`)}
+	if _, err := c.AgentID(context.Background(), "lever", "hub", "ghost"); err == nil {
+		t.Fatal("an agent the hub does not list must be an error")
+	}
+}
+
+func TestAgentIDRefusesARecordWithNoID(t *testing.T) {
+	c := &Client{T: agentsScript(`{"agents":[{"slug":"scratch"}]}`)}
+	if _, err := c.AgentID(context.Background(), "lever", "hub", "scratch"); err == nil {
+		t.Fatal("a record with no id must be an error, not an empty filter")
+	}
+}

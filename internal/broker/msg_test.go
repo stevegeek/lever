@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -73,27 +74,29 @@ func TestResolveMsgTarget(t *testing.T) {
 	}
 }
 
-func TestResolveListProject(t *testing.T) {
+func TestResolveListSubject(t *testing.T) {
 	cases := []struct {
 		name, caller, worker string
 		want                 string
 		wantErr              bool
 	}{
-		{"manager own inbox", "manager", "", "/lever", false},
-		{"manager reads worker", "manager", "scratch", "/lever", false},
+		// The subject is an agent SLUG. The manager's own is its scion slug, not
+		// its cert CN — the hub knows it only by the slug.
+		{"manager own inbox", "manager", "", "assistant", false},
+		{"manager reads worker", "manager", "scratch", "scratch", false},
 		{"manager unknown worker", "manager", "nope", "", true},
-		{"worker own inbox", "scratch", "", "/lever", false},
+		{"worker own inbox", "scratch", "", "scratch", false},
 		{"worker may not target others", "scratch", "worker", "", true},
 		{"unknown caller", "mallory", "", "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := msgBroker(true).resolveListProject(c.caller, c.worker)
+			got, err := msgBroker(true).resolveListSubject(c.caller, c.worker)
 			if c.wantErr != (err != nil) {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}
 			if err == nil && got != c.want {
-				t.Fatalf("project = %q, want %q", got, c.want)
+				t.Fatalf("subject = %q, want %q", got, c.want)
 			}
 		})
 	}
@@ -234,7 +237,10 @@ func TestMsgSend_unknownCaller(t *testing.T) {
 
 func TestMsgList_managerReadsWorker(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(true)
-	rt.events = []scion.Event{{"id": "1", "type": "test"}}
+	withAgentIDs(b)
+	// The event must be ATTRIBUTED to scratch: /msg/list now returns only the
+	// events the hub attributes to the subject agent.
+	rt.events = []scion.Event{{"id": "1", "type": "test", "agentId": "id-scratch"}}
 	rec := callWorker(t, b, "/msg/list", `{"worker":"scratch"}`, "manager")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
@@ -327,6 +333,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 	}
 
 	b2, rt2, audit2 := newMsgTestBroker(true)
+	withAgentIDs(b2)
 	rt2.inboxErr = errors.New(secret)
 	rec2 := callWorker(t, b2, "/msg/list", `{"worker":"scratch"}`, "manager")
 	if rec2.Code != 502 {
@@ -370,5 +377,107 @@ func TestWorkerList_deniesRevokedManager(t *testing.T) {
 	rec := callWorker(t, b, "/worker/list", `{}`, "manager")
 	if rec.Code != 403 {
 		t.Fatalf("revoked worker list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// The hub scopes `scion notifications` to the authenticated USER, and lever
+// always authenticates as the host controller PAT — so the raw feed carries
+// every agent's events. Handing that to a caller breaks the isolation the rest
+// of the model enforces, so /msg/list must cut it down to the one agent whose
+// inbox the caller may read.
+func msgListEvents(t *testing.T, b *Broker, rt *fakeMsgRuntime, body, cn string) []scion.Event {
+	t.Helper()
+	rec := callWorker(t, b, "/msg/list", body, cn)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var resp MsgListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp.Events
+}
+
+// fleetEvents is one event per agent, as the controller's feed really returns.
+func fleetEvents() []scion.Event {
+	return []scion.Event{
+		{"id": "e1", "agentId": "id-assistant", "message": "manager event"},
+		{"id": "e2", "agentId": "id-scratch", "message": "scratch event"},
+		{"id": "e3", "agentId": "id-worker", "message": "worker event"},
+		{"id": "e4", "message": "unattributed event"},
+	}
+}
+
+func withAgentIDs(b *Broker) {
+	b.resolveAgentID = func(_ context.Context, slug string) (string, error) {
+		switch slug {
+		case "assistant", "scratch", "worker":
+			return "id-" + slug, nil
+		}
+		return "", fmt.Errorf("unknown agent %q", slug)
+	}
+}
+
+func TestMsgList_workerSeesOnlyItsOwnEvents(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	withAgentIDs(b)
+	rt.events = fleetEvents()
+	got := msgListEvents(t, b, rt, `{"all":true}`, "scratch")
+	if len(got) != 1 || got[0]["id"] != "e2" {
+		t.Fatalf("a worker must see only its own events, got %+v", got)
+	}
+}
+
+func TestMsgList_managerSeesOnlyItsOwnEventsByDefault(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	withAgentIDs(b)
+	rt.events = fleetEvents()
+	got := msgListEvents(t, b, rt, `{"all":true}`, "manager")
+	if len(got) != 1 || got[0]["id"] != "e1" {
+		t.Fatalf("the manager's default inbox is its own, got %+v", got)
+	}
+}
+
+// The documented manager-only selector must now actually select.
+func TestMsgList_managerWorkerSelectorSelects(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	withAgentIDs(b)
+	rt.events = fleetEvents()
+	got := msgListEvents(t, b, rt, `{"all":true,"worker":"worker"}`, "manager")
+	if len(got) != 1 || got[0]["id"] != "e3" {
+		t.Fatalf("--worker must select that worker's events, got %+v", got)
+	}
+}
+
+// An event lever cannot attribute is dropped, not passed through: attribution is
+// the whole basis of the cut.
+func TestMsgList_dropsUnattributedEvents(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	withAgentIDs(b)
+	rt.events = []scion.Event{{"id": "e4", "message": "unattributed"}}
+	if got := msgListEvents(t, b, rt, `{"all":true}`, "scratch"); len(got) != 0 {
+		t.Fatalf("unattributed events must be dropped, got %+v", got)
+	}
+}
+
+// Without a way to attribute events, returning the raw feed would be the leak.
+func TestMsgList_failsClosedWhenAgentIDUnresolvable(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	b.resolveAgentID = func(context.Context, string) (string, error) {
+		return "", fmt.Errorf("hub unreachable")
+	}
+	rt.events = fleetEvents()
+	rec := callWorker(t, b, "/msg/list", `{"all":true}`, "scratch")
+	if rec.Code == 200 {
+		t.Fatalf("must fail closed, got 200: %s", rec.Body.String())
+	}
+}
+
+func TestMsgList_failsClosedWhenResolverUnwired(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(true)
+	rt.events = fleetEvents()
+	rec := callWorker(t, b, "/msg/list", `{"all":true}`, "scratch")
+	if rec.Code == 200 {
+		t.Fatalf("an unwired resolver must not fall back to the fleet feed, got 200: %s", rec.Body.String())
 	}
 }

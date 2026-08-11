@@ -100,6 +100,15 @@ type Config struct {
 	// `--role baseline` by the start itself. nil ⇒ no-op (tests, and a manual
 	// `broker serve` with no runtime wired).
 	VerifyAgentRole func(ctx context.Context, agent string) error
+	// ResolveAgentID maps an agent slug to its hub agent id. /msg/list needs it
+	// to cut the notification feed down to one agent: lever reads notifications
+	// with the host controller PAT, and the hub scopes that query to the
+	// authenticated USER, so the raw answer carries every agent's events. The id
+	// is what attributes each event.
+	//
+	// nil ⇒ /msg/list fails closed. Falling back to the unfiltered feed would be
+	// the leak this exists to close.
+	ResolveAgentID func(ctx context.Context, agentSlug string) (string, error)
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
@@ -170,12 +179,13 @@ type Broker struct {
 	apiKey      []byte
 	llmUpstream *url.URL
 
-	runtime     WorkerRuntime
-	verifyRole  func(ctx context.Context, agent string) error
-	tree        string
-	workers     map[string]WorkerSpec
-	brokerCAPEM string
-	brokerURL   string
+	runtime        WorkerRuntime
+	verifyRole     func(ctx context.Context, agent string) error
+	resolveAgentID func(ctx context.Context, agentSlug string) (string, error)
+	tree           string
+	workers        map[string]WorkerSpec
+	brokerCAPEM    string
+	brokerURL      string
 
 	instanceProject string
 	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
@@ -256,7 +266,7 @@ func New(c Config) *Broker {
 		revoked:  revoked,
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
-		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, tree: c.Tree, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, resolveAgentID: c.ResolveAgentID, tree: c.Tree, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
 		reenrolEvents:     make(chan string, reenrolQueueDepth),

@@ -9,6 +9,9 @@ import (
 
 // Agent mirrors the fields of a hub agent record that lever inspects.
 type Agent struct {
+	// ID is the hub's agent UUID. It is what notification records carry as
+	// `agentId`, so it is the only way to attribute an event to an agent.
+	ID   string
 	Slug string
 	Name string
 	// Role is the authorization role stored on the record when it was created
@@ -20,8 +23,9 @@ type Agent struct {
 
 // wireAgent decodes the subset of the hub's agent record lever reads. The hub
 // embeds its whole store.Agent in the list response, so this deliberately names
-// only the three fields rather than mirroring a large upstream struct.
+// only the fields lever uses rather than mirroring a large upstream struct.
 type wireAgent struct {
+	ID            string `json:"id"`
 	Slug          string `json:"slug"`
 	Name          string `json:"name"`
 	AppliedConfig *struct {
@@ -83,7 +87,7 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 			return nil, &APIError{Msg: fmt.Sprintf("decoding agents: %v", err)}
 		}
 		for _, a := range records {
-			rec := Agent{Slug: a.Slug, Name: a.Name}
+			rec := Agent{ID: a.ID, Slug: a.Slug, Name: a.Name}
 			if a.AppliedConfig != nil {
 				rec.Role = a.AppliedConfig.AgentRole
 			}
@@ -143,6 +147,25 @@ func VerifyAgentRole(ctx context.Context, rolesSupported func(context.Context) (
 		"and `scion resume` takes no --role flag, so lever cannot repair this for you.\n"+
 		"  Either delete the agent so lever recreates it (it stamps --role baseline, but the conversation is LOST), "+
 		"or pin a scion older than scion#1089 until you are ready to lose the session", agentName)
+}
+
+// AgentID resolves an agent slug (or name) to the hub's agent UUID — the id
+// notification records carry, and so the only way to attribute an event to an
+// agent. An agent the hub does not list is an error, never an empty id: a
+// caller that treated "" as "no filter" would show one agent another's events.
+func (c *Client) AgentID(ctx context.Context, projectNameOrSlug, endpointHint, agentSlug string) (string, error) {
+	agents, err := c.Agents(ctx, projectNameOrSlug, endpointHint)
+	if err != nil {
+		return "", err
+	}
+	rec, found := FindAgent(agents, agentSlug)
+	if !found {
+		return "", &APIError{Msg: fmt.Sprintf("hub lists no agent %q in project %q", agentSlug, projectNameOrSlug)}
+	}
+	if rec.ID == "" {
+		return "", &APIError{Msg: fmt.Sprintf("hub record for agent %q carries no id", agentSlug)}
+	}
+	return rec.ID, nil
 }
 
 // FindAgent returns the record for slug (or name), and whether one exists.

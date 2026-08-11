@@ -64,19 +64,26 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	return msgTarget{scionTo: "agent:" + spec.Name, project: b.instanceProject}, nil
 }
 
-// resolveListProject resolves which project inbox caller may read. Manager:
-// its own agent inbox (empty worker — jail-side `scion notifications` requires
-// -g; the bare/operator form is container-only) or any declared worker's.
-// Worker: its own only.
-func (b *Broker) resolveListProject(caller, worker string) (string, error) {
+// resolveListSubject resolves WHOSE inbox caller may read, as an agent slug.
+// Manager: its own (empty worker) or any declared worker's. Worker: its own
+// only.
+//
+// It returns a slug rather than a project because the project does not scope
+// anything. `scion notifications` is scoped by the hub to the authenticated
+// USER, and lever authenticates as the host controller PAT, so the same
+// fleet-wide feed comes back whatever -g says. handleMsgList turns this slug
+// into the agent id it filters on.
+func (b *Broker) resolveListSubject(caller, worker string) (string, error) {
 	if caller == b.manager {
 		if worker == "" {
-			return b.instanceProject, nil
+			// The manager's agent slug, NOT its cert CN: the hub knows it only
+			// by the slug (see Config.ManagerSlug).
+			return b.managerSlug, nil
 		}
 		if _, ok := b.workers[worker]; !ok {
 			return "", fmt.Errorf("unknown worker %q", worker)
 		}
-		return b.instanceProject, nil
+		return worker, nil
 	}
 	if _, ok := b.workers[caller]; !ok {
 		return "", fmt.Errorf("caller %q is not the manager or a declared worker", caller)
@@ -84,7 +91,29 @@ func (b *Broker) resolveListProject(caller, worker string) (string, error) {
 	if worker != "" {
 		return "", fmt.Errorf("a worker may only read its own inbox")
 	}
-	return b.instanceProject, nil
+	return caller, nil
+}
+
+// errText renders err for an audit line, naming the empty-id case that is not
+// an error but is still a refusal.
+func errText(err error) string {
+	if err == nil {
+		return "hub returned no id for it"
+	}
+	return err.Error()
+}
+
+// eventsForAgent keeps only the events the hub attributes to agentID. An event
+// carrying no agentId is DROPPED: attribution is the whole basis of the cut, so
+// something lever cannot attribute cannot be shown to anyone.
+func eventsForAgent(events []scion.Event, agentID string) []scion.Event {
+	kept := make([]scion.Event, 0, len(events))
+	for _, e := range events {
+		if id, _ := e["agentId"].(string); id != "" && id == agentID {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // MsgSendRequest, MsgListRequest and MsgListResponse are the /msg/* wire types.
@@ -153,7 +182,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	project, rerr := b.resolveListProject(caller, req.Worker)
+	subject, rerr := b.resolveListSubject(caller, req.Worker)
 	if rerr != nil {
 		b.audit("msg", caller, "deny", "list "+req.Worker+": "+rerr.Error())
 		http.Error(w, rerr.Error(), http.StatusForbidden)
@@ -162,12 +191,26 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	if !b.runtimeReady(w) {
 		return
 	}
-	events, err := b.runtime.Inbox(r.Context(), !req.All, project)
+	// Resolve BEFORE reading: without an id to attribute events to there is no
+	// safe answer, and returning the raw feed is the leak (see
+	// Config.ResolveAgentID).
+	if b.resolveAgentID == nil {
+		b.audit("msg", caller, "error", "list: agent id resolver not wired")
+		http.Error(w, "inbox unavailable", http.StatusBadGateway)
+		return
+	}
+	subjectID, err := b.resolveAgentID(r.Context(), subject)
+	if err != nil || subjectID == "" {
+		b.audit("msg", caller, "error", "list: resolving agent id for "+subject+": "+errText(err))
+		http.Error(w, "inbox unavailable", http.StatusBadGateway)
+		return
+	}
+	events, err := b.runtime.Inbox(r.Context(), !req.All, b.instanceProject)
 	if err != nil {
 		b.audit("msg", caller, "error", "list: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	b.audit("msg", caller, "allow", "list "+req.Worker)
-	writeJSON(w, MsgListResponse{Events: events})
+	b.audit("msg", caller, "allow", "list "+subject)
+	writeJSON(w, MsgListResponse{Events: eventsForAgent(events, subjectID)})
 }

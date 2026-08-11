@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
@@ -68,6 +69,12 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				}
 				return hc.SharedDirs(ctx, id)
 			}
+			listAgentRoles := func(ctx context.Context, project string) ([]hubapi.Agent, error) {
+				return hc.Agents(ctx, project, scionpkg.DefaultHubEndpoint)
+			}
+			// The role check needs the scion IN THE JAIL, which is the binary
+			// that will actually resolve the stored role — not the host's.
+			rolesSupported := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole).RolesSupported
 
 			checks := []checkResult{
 				checkBrokerAlive(state, app.EffectiveJailPort(), tcpDial),
@@ -80,6 +87,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 				checkOperatorSkills(app, state.Dir),
 				checkDirectives(app, state),
 				checkProjectSharedDirs(cmd.Context(), hubProjectKey(b.MountDest()), listSharedDirs),
+				checkAgentRoles(cmd.Context(), hubProjectKey(b.MountDest()), rolesSupported, listAgentRoles),
 				scion,
 			}
 			failed := 0

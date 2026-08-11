@@ -197,6 +197,22 @@ type Deps struct {
 	// still carries the mount. nil ⇒ no-op (tests). The broker-only VM gate
 	// never reaches it at all: Plan filters KindRegisterProject out entirely.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
+	// VerifyAgentRole gates KEEPING an existing agent record. It returns a
+	// descriptive error when the hub's record for that agent stores no
+	// authorization role while the installed scion understands roles — the state
+	// a pin bump across scion#1089 leaves behind, because the role is written on
+	// the create path only and is immutable after.
+	//
+	// That combination is not benign: scion#1102 resolves an unset stored role
+	// to `full` (agent create, agent lifecycle, project-secret-read) at dispatch
+	// and, since scion#1101, on every token refresh. `scion resume` carries no
+	// --role flag, so resuming such a record silently promotes it past the
+	// ceiling every other control in lever's model assumes. Refusing is the only
+	// honest answer: lever cannot repair the record either, since the hub
+	// exposes no route to set a stored role.
+	//
+	// nil ⇒ no-op (tests, and the broker-only VM gate).
+	VerifyAgentRole func(ctx context.Context, project, agent string) error
 	// Log surfaces a loud, user-facing progress/warning line during apply —
 	// currently just start-manager's resume-failed recovery notice ("resume
 	// failed … starting FRESH, previous session lost"), which MUST reach the
@@ -523,6 +539,25 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 		return fmt.Errorf("start-manager: observing agents: %w", lerr)
 	}
 	rec := scion.FindAgent(agents, app.Name)
+
+	// Refuse to KEEP a record whose stored role the installed scion would read
+	// as `full` (see Deps.VerifyAgentRole). Only the phases below keep the
+	// record: rec == nil creates one, and the default branch deletes and
+	// recreates it, both of which stamp a role themselves.
+	//
+	// This returns rather than falling into recoverDeleteAndCreate on purpose.
+	// That recovery discards the conversation, and refusing here exists to give
+	// the operator the choice — losing the session is one of the two ways out,
+	// not something a guard may take on their behalf.
+	if rec != nil && d.VerifyAgentRole != nil {
+		switch rec.Phase {
+		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
+			if err := d.VerifyAgentRole(ctx, path.Base(jp), app.Name); err != nil {
+				return fmt.Errorf("start-manager: %w", err)
+			}
+		}
+	}
+
 	switch {
 	case rec == nil:
 		if err := startManagerCreate(ctx, d, boot, opts); err != nil {

@@ -711,3 +711,89 @@ func TestCheckClaudeVersion(t *testing.T) {
 		t.Fatalf("inspect error should fail the check")
 	}
 }
+
+// rolesYes/rolesNo stand in for the scion capability probe.
+func rolesYes(context.Context) (bool, error) { return true, nil }
+func rolesNo(context.Context) (bool, error)  { return false, nil }
+
+func TestCheckAgentRolesAllStored(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.Agent, error) {
+		return []hubapi.Agent{{Slug: "assistant", Role: "baseline"}}, nil
+	}
+	r := checkAgentRoles(context.Background(), "lever", rolesYes, list)
+	if !r.ok {
+		t.Fatalf("every record carries a role => pass; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "baseline") {
+		t.Errorf("detail should say what the records hold, got %q", r.detail)
+	}
+}
+
+// The live hazard: this scion reads an unset stored role as full.
+func TestCheckAgentRolesFlagsUnrolledOnRolesAwareScion(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.Agent, error) {
+		return []hubapi.Agent{{Slug: "assistant"}, {Slug: "scratch", Role: "baseline"}}, nil
+	}
+	r := checkAgentRoles(context.Background(), "lever", rolesYes, list)
+	if r.ok {
+		t.Fatalf("an unrolled record on a roles-aware scion must fail; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "assistant") || strings.Contains(r.detail, "scratch") {
+		t.Errorf("detail should name only the unrolled record, got %q", r.detail)
+	}
+	if !strings.Contains(r.fix, "delete") {
+		t.Errorf("fix should state the only route, got %q", r.fix)
+	}
+}
+
+// Pre-scion#1089 the same records are harmless, so this must not cry wolf —
+// but it is the one place an operator can learn a bump will promote them.
+func TestCheckAgentRolesWarnsAheadOfABumpWithoutFailing(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.Agent, error) {
+		return []hubapi.Agent{{Slug: "assistant"}}, nil
+	}
+	r := checkAgentRoles(context.Background(), "lever", rolesNo, list)
+	if !r.ok {
+		t.Fatalf("unrolled records on a pre-roles scion are normal; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "assistant") {
+		t.Errorf("detail should still name the record, got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "scion#1089") {
+		t.Errorf("detail should say what a bump would do, got %q", r.detail)
+	}
+}
+
+func TestCheckAgentRolesUnreachableHubIsNotAFinding(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.Agent, error) {
+		return nil, errors.New("jail is down")
+	}
+	r := checkAgentRoles(context.Background(), "lever", rolesYes, list)
+	if !r.ok {
+		t.Fatalf("a down instance already shows in the broker check; got %+v", r)
+	}
+}
+
+func TestCheckAgentRolesHubAnsweredIsAFinding(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.Agent, error) {
+		return nil, &hubapi.APIError{Status: 403, Msg: "forbidden"}
+	}
+	r := checkAgentRoles(context.Background(), "lever", rolesYes, list)
+	if r.ok {
+		t.Fatalf("a hub that answered 403 must fail the check; got %+v", r)
+	}
+}
+
+func TestCheckAgentRolesProbeFailureIsNotChecked(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.Agent, error) {
+		return []hubapi.Agent{{Slug: "assistant"}}, nil
+	}
+	probeErr := func(context.Context) (bool, error) { return false, errors.New("scion not installed") }
+	r := checkAgentRoles(context.Background(), "lever", probeErr, list)
+	if !r.ok {
+		t.Fatalf("an unanswerable probe is not a finding here; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "not checked") {
+		t.Errorf("detail should say it could not check, got %q", r.detail)
+	}
+}

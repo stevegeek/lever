@@ -14,6 +14,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/scion"
 )
@@ -197,7 +198,20 @@ func decorateConfig(cfg *broker.Config, app *config.App, state State, be backend
 		// (host-side, operator identity) authenticate against the real,
 		// dev-auth-off hub with the controller PAT minted by `lever apply`'s
 		// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
-		cfg.Runtime = HostScionClient(jr, state, app.Scion.AgentRole)
+		sc := HostScionClient(jr, state, app.Scion.AgentRole)
+		cfg.Runtime = sc
+		// Worker resume meets the same pre-role record hazard as the manager's
+		// (see broker.Config.VerifyAgentRole). The hub read rides the same jail
+		// runner and controller PAT as every other lever hub call.
+		hc := &hubapi.Client{T: &hubapi.JailCurl{
+			Runner:  jr,
+			BaseURL: scion.DefaultHubEndpoint,
+			Token:   func() string { t, _ := state.LoadControllerPAT(); return t },
+		}}
+		projectKey := filepath.Base(jailMount)
+		cfg.VerifyAgentRole = func(ctx context.Context, agent string) error {
+			return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, projectKey, agent)
+		}
 	}
 	cfg.Workers = WorkerSpecs(app, jailMount)
 	cfg.InstanceProject = jailMount

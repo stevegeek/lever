@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/broker"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
@@ -160,5 +161,33 @@ func TestBrokerReusable(t *testing.T) {
 	}
 	if brokerReusable(broker.EpochResponse{}, "v", "h") {
 		t.Fatal("an old broker (no identity fields) must force a restart")
+	}
+}
+
+// TestVerifyManagerRoleGuardsUpsFastPaths: `up` resumes a suspended manager and
+// no-ops a running one WITHOUT calling apply.Run, so the pre-role record guard
+// has to be invoked on those paths explicitly. This pins that it is wired to
+// the same Deps hook, keyed by the hub's project name (the mount basename).
+func TestVerifyManagerRoleGuardsUpsFastPaths(t *testing.T) {
+	var gotProject, gotAgent string
+	deps := apply.Deps{
+		VerifyAgentRole: func(_ context.Context, project, agent string) error {
+			gotProject, gotAgent = project, agent
+			return errors.New("no stored role")
+		},
+	}
+	err := verifyManagerRole(context.Background(), deps, "/lever", "assistant")
+	if err == nil {
+		t.Fatal("the guard's refusal must reach the caller")
+	}
+	if gotProject != "lever" || gotAgent != "assistant" {
+		t.Errorf("guard called with (%q, %q), want (\"lever\", \"assistant\")", gotProject, gotAgent)
+	}
+}
+
+// A Deps without the hook (tests, broker-only gate) must not break `up`.
+func TestVerifyManagerRoleNilHookIsANoOp(t *testing.T) {
+	if err := verifyManagerRole(context.Background(), apply.Deps{}, "/lever", "assistant"); err != nil {
+		t.Fatalf("nil hook must be a no-op, got %v", err)
 	}
 }

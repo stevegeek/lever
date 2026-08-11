@@ -143,6 +143,15 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 			break
 		}
 	}
+	// The healer bounces an agent through resume, so it meets the same pre-role
+	// record hazard as an operator-driven resume (see Config.VerifyAgentRole).
+	// Abandoning the heal is the safe answer: a lapsed leaf costs that agent its
+	// brokered tools, while healing it into full hub authority costs the
+	// instance its containment.
+	if err = b.checkAgentRole(ctx, slug); err != nil {
+		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
+		return
+	}
 	var verb string
 	switch phase {
 	case scion.PhaseRunning:

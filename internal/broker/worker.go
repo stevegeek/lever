@@ -196,6 +196,13 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. Run `lever worker purge "+spec.Name+"` to start it fresh with a new task, or dispatch with no task to resume.", http.StatusConflict)
 		return
 	}
+	// Refuse a record whose stored role this scion would read as full, BEFORE
+	// staging anything (see Config.VerifyAgentRole).
+	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
+		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
 	// ensureFreshBootstrap for the manager): a worker resumed after its
 	// leaf/ticket lifetime re-enrols on boot, and the previously staged
@@ -322,7 +329,20 @@ func (b *Broker) handleWorkerSuspend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
-	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error { return b.runtime.Resume(ctx, s.Name, b.instanceProject) })
+	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error {
+		if err := b.checkAgentRole(ctx, s.Name); err != nil {
+			return err
+		}
+		return b.runtime.Resume(ctx, s.Name, b.instanceProject)
+	})
+}
+
+// checkAgentRole runs the pre-role record guard for one agent, if wired.
+func (b *Broker) checkAgentRole(ctx context.Context, agent string) error {
+	if b.verifyRole == nil {
+		return nil
+	}
+	return b.verifyRole(ctx, agent)
 }
 
 func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {

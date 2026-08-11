@@ -91,6 +91,17 @@ func upDecision(phase string, fresh bool) upAction {
 	}
 }
 
+// verifyManagerRole runs apply's pre-role record guard (see
+// apply.Deps.VerifyAgentRole) on the `up` paths that keep an existing manager
+// record WITHOUT calling apply.Run. project is the in-jail mount root; the hub
+// knows the project by its basename, exactly as apply's own call does.
+func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name string) error {
+	if deps.VerifyAgentRole == nil {
+		return nil
+	}
+	return deps.VerifyAgentRole(ctx, hubProjectKey(project), name)
+}
+
 func newUpCmd(bf BackendFactory) *cobra.Command {
 	var fresh, noAttach bool
 	c := &cobra.Command{
@@ -144,10 +155,25 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 					return err
 				}
 			case upResume:
+				// `up` resumes a suspended manager ITSELF, without going through
+				// apply.Run, so apply's pre-role record guard would not run on
+				// the commonest path of all (stop suspends; up resumes). Run it
+				// here for the same reason apply does.
+				if err := verifyManagerRole(cmd.Context(), deps, project, app.Name); err != nil {
+					return err
+				}
 				if err := sc.Resume(cmd.Context(), app.Name, project); err != nil {
 					return err
 				}
 			case upNone:
+				// A running manager is not exempt: it refreshes its own token
+				// periodically, and scion#1101 re-derives scopes from the stored
+				// role on every refresh, so an unrolled record acquires full
+				// authority without ever restarting. `lever attach` still
+				// reaches the manager if the operator needs it while deciding.
+				if err := verifyManagerRole(cmd.Context(), deps, project, app.Name); err != nil {
+					return err
+				}
 			}
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)

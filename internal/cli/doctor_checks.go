@@ -192,6 +192,80 @@ func checkProjectSharedDirs(ctx context.Context, project string, list sharedDirL
 			"`DELETE /api/v1/projects/<project-uuid>/shared-dirs/<name>` against the hub"}
 }
 
+// agentRoleLister returns the hub's agent records for a project. Injected so
+// the check is unit-testable without a hub.
+type agentRoleLister func(ctx context.Context, project string) ([]hubapi.Agent, error)
+
+// checkAgentRoles reports agent records that store no authorization role.
+//
+// The role is written when an agent is CREATED (scion#1089) and is immutable
+// after, so a record made by an older scion carries none — and scion#1102
+// resolves an unset stored role to FULL, at dispatch and on every token
+// refresh. `scion resume` takes no --role flag, so nothing repairs such a
+// record: the only route is to delete the agent and lose its conversation.
+//
+// That makes the verdict depend on the installed scion, not just the records.
+// On a roles-aware scion an unrolled record is a live promotion and fails. On
+// an older one the same record is harmless — failing there would cry wolf on
+// every pre-#1089 instance — but this is the one place an operator can learn,
+// BEFORE bumping the pin, that the bump will promote them.
+//
+// An unreachable hub is not a finding (the broker check already covers a
+// stopped instance); a hub that ANSWERED unusably is, exactly as for shared
+// directories.
+func checkAgentRoles(ctx context.Context, project string, rolesSupported func(context.Context) (bool, error), list agentRoleLister) checkResult {
+	const name = "agent authorization roles"
+	if list == nil || rolesSupported == nil {
+		return checkResult{name, true, "not checked", ""}
+	}
+	agents, err := list(ctx, project)
+	if err != nil {
+		if hubAnswered(err) {
+			return checkResult{name, false,
+				"could not read the hub's agent records: " + err.Error(),
+				"the hub answered, so this is not a down instance — check the controller PAT " +
+					"(`.lever-state/`) and that the hub knows a project named " + project}
+		}
+		return checkResult{name, true, "not checked (hub not reachable): " + err.Error(), ""}
+	}
+	if len(agents) == 0 {
+		return checkResult{name, true, "no agent records yet", ""}
+	}
+
+	var unrolled, held []string
+	for _, a := range agents {
+		if a.Role == "" {
+			unrolled = append(unrolled, a.Slug)
+			continue
+		}
+		held = append(held, a.Slug+"="+a.Role)
+	}
+	if len(unrolled) == 0 {
+		return checkResult{name, true,
+			fmt.Sprintf("%d record(s), all carry a stored role: %s", len(agents), strings.Join(held, ", ")), ""}
+	}
+
+	// Only now does the installed scion matter, so only now is it probed — a
+	// scion that cannot answer must not turn a clean instance into a finding.
+	roles, perr := rolesSupported(ctx)
+	if perr != nil {
+		return checkResult{name, true,
+			fmt.Sprintf("not checked (cannot tell whether this scion understands roles: %v); %d record(s) store none: %s",
+				perr, len(unrolled), strings.Join(unrolled, ", ")), ""}
+	}
+	if !roles {
+		return checkResult{name, true,
+			fmt.Sprintf("%d record(s) store no role: %s — harmless on this scion, which predates roles (scion#1089), "+
+				"but a pin at or after scion#1102 resolves an unset role to FULL, and `lever up` will then refuse to resume them",
+				len(unrolled), strings.Join(unrolled, ", ")), ""}
+	}
+	return checkResult{name, false,
+		fmt.Sprintf("%d record(s) store no role while this scion resolves that to FULL hub authority: %s",
+			len(unrolled), strings.Join(unrolled, ", ")),
+		"a stored role is immutable and `scion resume` cannot set one — delete each agent so lever recreates it with " +
+			"--role baseline (its conversation is LOST), or pin a scion older than scion#1089"}
+}
+
 // braceList renders names as a shell brace-expansion hint ({a,b}) for the fix
 // text, or the bare name for a single entry.
 func braceList(names []string) string {

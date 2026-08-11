@@ -5,6 +5,7 @@
 package broker
 
 import (
+	"context"
 	"log/slog"
 	"net/url"
 	"sync"
@@ -88,6 +89,17 @@ type Config struct {
 	Workers     []WorkerSpec
 	BrokerCAPEM string
 	BrokerURL   string
+	// VerifyAgentRole refuses to RESUME a worker whose hub record stores no
+	// authorization role while the installed scion resolves that to full hub
+	// authority (see hubapi.VerifyAgentRole). A worker created by a scion older
+	// than scion#1089 carries no role, the role is immutable after creation, and
+	// `scion resume` cannot set one — so resuming such a record grants it agent
+	// create, lifecycle and secret-read.
+	//
+	// Only the resume paths consult it: a freshly started worker is stamped
+	// `--role baseline` by the start itself. nil ⇒ no-op (tests, and a manual
+	// `broker serve` with no runtime wired).
+	VerifyAgentRole func(ctx context.Context, agent string) error
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
@@ -153,6 +165,7 @@ type Broker struct {
 	llmUpstream *url.URL
 
 	runtime     WorkerRuntime
+	verifyRole  func(ctx context.Context, agent string) error
 	workers     map[string]WorkerSpec
 	brokerCAPEM string
 	brokerURL   string
@@ -236,7 +249,7 @@ func New(c Config) *Broker {
 		revoked:  revoked,
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
-		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
 		reenrolEvents:     make(chan string, reenrolQueueDepth),

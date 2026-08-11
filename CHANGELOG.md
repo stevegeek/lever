@@ -5,6 +5,57 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.15.0] - 2026-08-11
+
+### Security
+- **A pin bump can no longer promote an existing agent to full hub authority.**
+  0.14.0 made lever stamp `--role baseline` on every agent it *starts*. That
+  covers creation and nothing else: Scion writes the role into the agent record
+  on the create path only, it is immutable afterwards, and `scion resume` takes
+  no `--role` flag. An agent record created by a Scion older than scion#1089
+  therefore stores **no role at all** — and scion#1102 resolves an unset stored
+  role to `full` (agent create, agent lifecycle, project-secret-read), at
+  dispatch and, since scion#1101, on every token refresh.
+
+  Bumping a pin across that boundary silently promoted every pre-existing agent,
+  the manager included. `lever apply` now reads the hub's record before keeping
+  an agent and **fails the bring-up** when the record stores no role while the
+  installed Scion understands roles. An already-`running` agent is not exempt:
+  it refreshes its own token on the same rule.
+
+  lever cannot repair the record — the hub exposes no route to set a stored role
+  — so the refusal is the whole remedy. The ways out are to delete the agent and
+  let lever recreate it with `--role baseline`, **losing its conversation**, or
+  to stay on a pin older than scion#1089. The guard deliberately does not fall
+  into apply's delete-and-recreate recovery: that recovery is what destroys the
+  session, so taking it automatically would spend the very thing the operator is
+  being protected into keeping. It fails closed on anything it cannot answer,
+  including an unreadable record or an unanswerable capability probe.
+
+### Added
+- **`lever doctor` reports agent records that store no role.** It reports them
+  on *any* pin, so the bump above can be planned rather than discovered: on a
+  Scion that predates roles the line passes with an explicit warning that a
+  later pin will refuse these records, and on a roles-aware Scion it fails,
+  naming each record. An unreachable hub stays "not checked"; a hub that
+  answered unusably (403, unknown project) is a finding, matching the
+  shared-directories check.
+
+### Fixed
+- **Docs: `scion.agent_role` was missing from the configuration reference.** The
+  one key that overrides the role lever stamps was documented only in the
+  security model.
+
+### Changed
+- **Docs: upstream closed the hub-wide scratchpad gap.** scion#1103 answered
+  lever's scion#1098 with a `project_defaults.default_scratchpad` key that works
+  in file/SQLite mode, so the worker-isolation guide no longer claims the
+  section has no `settings.yaml` key. The key acts at project creation time
+  only, so lever's per-project removal stays. Two traps found while verifying it
+  are recorded there: Scion reads the top-level `project_defaults` section only
+  when the same `settings.yaml` also carries a `server:` section, and the commit
+  carrying the key is not fetchable through the Go module proxy.
+
 ## [0.14.0] - 2026-08-10
 
 ### Security

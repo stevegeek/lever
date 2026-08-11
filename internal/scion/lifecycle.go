@@ -155,6 +155,15 @@ func (c *Client) roleFlagSupported(ctx context.Context) (bool, error) {
 	return c.roleSupported, nil
 }
 
+// RolesSupported reports whether the installed scion understands agent roles.
+//
+// Exported for the pre-role record guard (internal/apply's VerifyAgentRole),
+// which must know whether an EXISTING record's empty stored role is merely
+// "this scion has no roles" or "this scion will read that as full".
+func (c *Client) RolesSupported(ctx context.Context) (bool, error) {
+	return c.roleFlagSupported(ctx)
+}
+
 type StartOpts struct {
 	Worker  string
 	Task    string

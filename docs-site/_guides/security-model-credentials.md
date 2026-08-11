@@ -176,15 +176,24 @@ default. And a long-lived broker caches what the installed Scion supports, so le
 broker whenever the `scion` config block changes rather than letting that cache outlive the binary
 it describes. Setting the project annotation would close both structurally; that is not yet done.
 
-The third is a **pin-bump hazard, and lever does not yet guard it**. The role is written into the
-agent record on the *create* path only, and it is immutable afterwards. An agent record created on
-a Scion older than scion#1089 therefore stores no role at all — and on a Scion at or after
-[scion#1102](https://github.com/GoogleCloudPlatform/scion/pull/1102) the hub resolves an unset
-stored role to **full**, both at dispatch and, since
+The third is a **pin-bump hazard, and lever refuses rather than absorb it**. The role is written
+into the agent record on the *create* path only, and it is immutable afterwards. An agent record
+created on a Scion older than scion#1089 therefore stores no role at all — and on a Scion at or
+after [scion#1102](https://github.com/GoogleCloudPlatform/scion/pull/1102) the hub resolves an
+unset stored role to **full**, both at dispatch and, since
 [scion#1101](https://github.com/GoogleCloudPlatform/scion/pull/1101), on every token refresh.
-Advancing a pin across that boundary silently promotes every pre-existing agent, because resume
-neither re-stamps the role nor fails. Until lever detects it, check the hub's agent records before
-such a bump, and repair or recreate any that carry no role. The **known exception** remains
+Advancing a pin across that boundary would otherwise promote every pre-existing agent in silence,
+because resume neither re-stamps the role nor fails.
+
+So `lever apply` reads the hub's record before it keeps an agent, and **fails the bring-up** when
+the record stores no role while the installed Scion understands roles — including for an agent
+already `running`, which refreshes its own token on the same rule. It cannot repair the record:
+`scion resume` has no `--role` flag and the hub exposes no route to set a stored role, so the only
+ways out are to delete the agent and let lever recreate it with `--role baseline`, losing its
+conversation, or to stay on a pin older than scion#1089. Refusing hands that choice to the
+operator rather than taking it: the recovery that would "fix" the record is the same delete that
+destroys the session. `lever doctor` reports unrolled records on *any* pin, so the bump can be
+planned before it is attempted. The **known exception** remains
 agent `DELETE`: at this pin scion still authorizes `performAgentDelete` only for user callers, so
 an agent's own token is not scope-checked on that path (create/lifecycle/read/token-refresh are all
 gated for agents; delete is the lone gap). A fix — a lifecycle-scope + project-isolation gate on

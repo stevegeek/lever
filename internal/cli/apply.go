@@ -570,6 +570,17 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 			return hc.StripSharedDir(ctx, projectName, scion.DefaultHubEndpoint, scionScratchpadSharedDir)
 		},
 
+		// VerifyAgentRole refuses to keep an agent whose hub record predates
+		// scion's roles — see the Deps field doc for why that is a promotion to
+		// full hub authority rather than a cosmetic gap. It fails CLOSED on
+		// every question it cannot answer: not knowing whether the installed
+		// scion has roles, or not being able to read the record, is exactly the
+		// state in which guessing hands out authority.
+		VerifyAgentRole: func(ctx context.Context, projectName, agentName string) error {
+			return hubapi.VerifyAgentRole(ctx, sc.RolesSupported,
+				&hubapi.Client{T: hubJailTransport(jr, state)}, projectName, agentName)
+		},
+
 		StartBroker:          bc.Start,
 		BrokerHealthy:        bc.Healthy,
 		MintManagerBootstrap: bc.Mint,

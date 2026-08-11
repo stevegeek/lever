@@ -2508,3 +2508,99 @@ func TestLoadImageStepPruneErrorIsNonFatal(t *testing.T) {
 		t.Fatalf("runStep: a prune failure must be non-fatal, got %v", err)
 	}
 }
+
+// preRoleRefusal is what VerifyAgentRole returns for a record created before
+// scion#1089: it stores no role, and a roles-aware scion reads that as `full`.
+var preRoleRefusal = fmt.Errorf("agent %q has no stored role", "hello")
+
+// TestStartManagerRefusesPreRoleRecordOnResume: the guard must stop the apply
+// BEFORE the resume, and must not fall into the delete+create recovery — that
+// recovery is what destroys the conversation, so a refusal that triggered it
+// would cost the very thing the operator is being protected into keeping.
+func TestStartManagerRefusesPreRoleRecordOnResume(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	deps := Deps{
+		JailUp:          func(context.Context, *config.App) error { return nil },
+		LoadImage:       func(context.Context, string) error { return nil },
+		Scion:           scion.New(r, scion.Options{}),
+		VerifyAgentRole: func(context.Context, string, string) error { return preRoleRefusal },
+	}
+	err := Run(context.Background(), app, deps)
+	if err == nil {
+		t.Fatal("a record with no stored role must fail the bring-up on a roles-aware scion")
+	}
+	if !strings.Contains(err.Error(), "no stored role") {
+		t.Errorf("error should carry the guard's reason, got %v", err)
+	}
+	if r.resumeCalls != 0 {
+		t.Errorf("resumeCalls = %d, want 0 (the guard runs BEFORE the resume)", r.resumeCalls)
+	}
+	if r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 (refusing must never discard the session)", r.deleteCalls, r.startCalls)
+	}
+}
+
+// TestStartManagerRefusesPreRoleRecordWhenRunning: the no-op branch is not
+// exempt. A running agent refreshes its own token, and scion#1101 re-derives
+// scopes from the stored role on every refresh, so an unrolled RUNNING record
+// is promoted just the same.
+func TestStartManagerRefusesPreRoleRecordWhenRunning(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 6 seconds"}
+	deps := Deps{
+		JailUp:          func(context.Context, *config.App) error { return nil },
+		LoadImage:       func(context.Context, string) error { return nil },
+		Scion:           scion.New(r, scion.Options{}),
+		VerifyAgentRole: func(context.Context, string, string) error { return preRoleRefusal },
+	}
+	if err := Run(context.Background(), app, deps); err == nil {
+		t.Fatal("a running record with no stored role must fail the bring-up too")
+	}
+}
+
+// TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent: a fresh create stamps
+// `--role baseline` itself, so there is nothing to refuse. Gating it would
+// brick every first bring-up.
+func TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	called := 0
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(r, scion.Options{}),
+		VerifyAgentRole: func(context.Context, string, string) error {
+			called++
+			return preRoleRefusal
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called != 0 {
+		t.Errorf("VerifyAgentRole called %d times, want 0 (no record to keep)", called)
+	}
+	if r.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1", r.startCalls)
+	}
+}
+
+// TestStartManagerVerifyAgentRolePassesThrough: a record that DOES store a role
+// is left entirely alone — the guard is invisible on a healthy instance.
+func TestStartManagerVerifyAgentRolePassesThrough(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	deps := Deps{
+		JailUp:          func(context.Context, *config.App) error { return nil },
+		LoadImage:       func(context.Context, string) error { return nil },
+		Scion:           scion.New(r, scion.Options{}),
+		VerifyAgentRole: func(context.Context, string, string) error { return nil },
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.resumeCalls != 1 {
+		t.Errorf("resumeCalls = %d, want 1", r.resumeCalls)
+	}
+}

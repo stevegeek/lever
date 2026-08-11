@@ -101,7 +101,10 @@ type bootTracker struct {
 // CLI, which stages directly into the tree since start-manager's Step.Target
 // is the manager's slug, not the tree dir — see jailPath/Plan).
 func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
-	return wire.Stage(filepath.Join(treeDir, ".lever"), m)
+	// treeDir is the confinement anchor: it is the mount point, the one
+	// component an agent cannot replace. Everything below it is agent-writable,
+	// so wire.Stage refuses to follow a symlink planted at `.lever`.
+	return wire.Stage(treeDir, ".lever", m)
 }
 
 // Deps are the executor's collaborators, injected so Run is testable offline.

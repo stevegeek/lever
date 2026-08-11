@@ -64,7 +64,10 @@ func TestHostMsgSendToManager(t *testing.T) {
 		t.Fatalf("want exactly 1 scion call, got %d: %+v", len(fr.Calls), fr.Calls)
 	}
 	gotArgv := append([]string{fr.Calls[0].Name}, fr.Calls[0].Args...)
-	wantArgv := []string{"scion", "message", "agent:assistant", "hello there", "-g", "/lever"}
+	// Flags first, then `--`, then the two agent-controlled positionals — see
+	// scion.Client.Message: an unterminated body of "-b" would bind to scion's
+	// broadcast flag and fan the message out past the recipient check.
+	wantArgv := []string{"scion", "message", "-g", "/lever", "--", "agent:assistant", "hello there"}
 	if len(gotArgv) != len(wantArgv) {
 		t.Fatalf("argv = %v, want %v", gotArgv, wantArgv)
 	}

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/stevegeek/lever/internal/exec"
 )
@@ -47,14 +46,6 @@ type Client struct {
 	hubTokenSource func() string
 	agentRole      string
 	r              exec.Runner
-
-	// roleMu guards the cached `start --help` capability check that decides
-	// whether --role is emitted. Only a successful probe is cached (roleProbed),
-	// so a transient failure is retried rather than remembered forever. See
-	// Client.roleFlagSupported.
-	roleMu        sync.Mutex
-	roleProbed    bool
-	roleSupported bool
 }
 
 func New(r exec.Runner, o Options) *Client {

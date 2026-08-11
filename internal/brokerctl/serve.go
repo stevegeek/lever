@@ -223,6 +223,9 @@ func decorateConfig(cfg *broker.Config, app *config.App, state State, be backend
 	// there; workers carry their dir in WorkerSpec.BootstrapDir).
 	cfg.AutoReenrol = string(app.EffectiveAutoReenrol())
 	cfg.ManagerBootstrapDir = filepath.Join(app.Tree, ".lever")
+	// Confinement anchor for every bootstrap.json the broker stages (see
+	// broker.Config.Tree): the mount point, which no agent can replace.
+	cfg.Tree = app.Tree
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
 	cfg.WorkerToWorker = app.WorkerToWorkerMessaging()

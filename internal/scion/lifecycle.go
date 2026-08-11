@@ -131,28 +131,24 @@ const agentRoleBaseline = "baseline"
 // either direction is costly: too eager breaks pre-#1089 pins, too shy hands
 // agents FULL authority on pins at or after scion#1090.
 //
-// Only SUCCESSES are cached. A failed probe is retried on the next call: the
-// broker holds one Client for its whole life, so caching an error would let a
-// single jail hiccup on the first dispatch fail every later dispatch until the
-// broker restarts.
+// The answer is NOT cached, deliberately. This used to memoise a success for
+// the client's lifetime, on the argument that a scion change restarts the
+// broker because brokerctl.ConfigHash covers the scion block. That argument
+// does not hold for `scion.source` and `scion.binary`: those keys are PATHS, so
+// swapping the artifact they point at leaves the config hash byte-identical and
+// the long-lived broker keeps running. One stale "no --role" then disarms two
+// controls at once — every start omits the flag, and the pre-role record guard
+// (hubapi.VerifyAgentRole) returns early — handing agents scion#1090's FULL
+// default with no error and no audit line.
 //
-// Caching a success is safe only because a scion change restarts the broker —
-// brokerctl.ConfigHash covers the scion block for exactly that reason. Without
-// that, a cached "no --role" would outlive a pin bump and every agent would get
-// scion#1090's FULL default.
+// A probe is one local `scion start --help` on paths that already start or
+// resume a container, so the cost is noise next to what follows it.
 func (c *Client) roleFlagSupported(ctx context.Context) (bool, error) {
-	c.roleMu.Lock()
-	defer c.roleMu.Unlock()
-	if c.roleProbed {
-		return c.roleSupported, nil
-	}
 	out, err := c.run(ctx, "", "start", "--help")
 	if err != nil {
 		return false, err
 	}
-	c.roleSupported = strings.Contains(out, "--role")
-	c.roleProbed = true
-	return c.roleSupported, nil
+	return strings.Contains(out, "--role"), nil
 }
 
 // RolesSupported reports whether the installed scion understands agent roles.

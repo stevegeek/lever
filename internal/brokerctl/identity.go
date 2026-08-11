@@ -15,13 +15,13 @@ import (
 // on re-apply (#19) — so the hash must cover exactly the config a running
 // broker bakes in at start, and nothing else (a manager-image change must
 // NOT bounce the broker).
-// It also covers the scion block. The broker holds a long-lived scion.Client
-// that caches what the INSTALLED scion supports (the `--role` capability
-// probe). Leaving scion out let that cache outlive the binary it described: a
-// broker probed against a pre-#1089 scion kept omitting `--role` after a pin
-// bump installed a newer one, and scion#1090 defaults an unspecified role to
-// FULL — agent create, lifecycle and secret-read. Restarting the broker on any
-// scion change is the cheap, obviously-correct answer.
+// It also covers the scion block, so a declared scion change bounces the
+// broker. Note what that does NOT buy: `scion.source` and `scion.binary` are
+// PATHS, so replacing the artifact behind one leaves this hash byte-identical
+// and a running broker survives it. Nothing here can see that. It is why the
+// `--role` capability probe no longer memoises its answer (see
+// scion.Client.roleFlagSupported) instead of trusting a restart to invalidate
+// it — a stale "no --role" would hand every agent scion#1090's FULL default.
 func ConfigHash(app *config.App) string {
 	j, err := json.Marshal(struct {
 		Broker  config.Broker

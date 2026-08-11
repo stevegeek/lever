@@ -15,12 +15,24 @@ type Event map[string]any
 
 func (e Event) ID() string { id, _ := e["id"].(string); return id }
 
+// Message sends one message through `scion message`.
+//
+// Flags go FIRST and the two positionals sit behind a `--` terminator, because
+// both are agent-controlled. scion's message command takes single-token boolean
+// flags — `-b`/`--broadcast` (every running agent in the project) and
+// `-a`/`--all` (every project on the hub) — and cobra parses flags interspersed
+// with positionals by default. A body of exactly `-b` would therefore bind to
+// the broadcast flag instead of being the message, leaving the recipient as the
+// only positional: the send would fan out to every sibling agent, defeating the
+// worker-to-worker deny the broker applied on the recipient alone. `--` makes
+// the body inert as a flag whatever it contains.
 func (c *Client) Message(ctx context.Context, o MsgOpts) error {
-	args := []string{"message", o.To, o.Body}
+	args := []string{"message"}
 	if o.Interrupt {
 		args = append(args, "--interrupt")
 	}
 	args = append(args, projectFlag(o.Project)...)
+	args = append(args, "--", o.To, o.Body)
 	_, err := c.run(ctx, "", args...)
 	return err
 }

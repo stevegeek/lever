@@ -145,9 +145,12 @@ func TestStartFailsClosedWhenProbeFails(t *testing.T) {
 	}
 }
 
-// The probe runs once per client, not once per dispatch: Start is on the hot
-// path for every worker the manager launches.
-func TestRoleProbeIsCachedAcrossStarts(t *testing.T) {
+// The probe runs on EVERY start, not once per client. Memoising it let a stale
+// answer outlive the binary it described: `scion.source`/`scion.binary` are
+// paths, so swapping the artifact leaves brokerctl.ConfigHash identical and the
+// long-lived broker keeps running with its cached verdict. A stale "no --role"
+// disarms both the stamp and the pre-role record guard at once.
+func TestRoleProbeRunsOnEveryStart(t *testing.T) {
 	f := fakeScion(true)
 	c := New(f, Options{})
 	for i := 0; i < 3; i++ {
@@ -161,8 +164,8 @@ func TestRoleProbeIsCachedAcrossStarts(t *testing.T) {
 			probes++
 		}
 	}
-	if probes != 1 {
-		t.Errorf("probed %d times across 3 starts, want 1", probes)
+	if probes != 3 {
+		t.Errorf("probed %d times across 3 starts, want 3 (a memoised verdict can outlive the binary)", probes)
 	}
 }
 

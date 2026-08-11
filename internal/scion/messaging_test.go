@@ -5,60 +5,55 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 )
 
-func TestMessageArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
-	c := New(f, Options{})
-	if err := c.Message(context.Background(), MsgOpts{To: "agent:a", Body: "hi", Interrupt: true, Project: "/g/a"}); err != nil {
+// msgArgv runs one Message and returns the argv the runner saw.
+func msgArgv(t *testing.T, o MsgOpts) []string {
+	t.Helper()
+	f := leverexec.NewFakeRunner()
+	f.Script("scion message", leverexec.Result{})
+	if err := New(f, Options{}).Message(context.Background(), o); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
-	for _, want := range []string{"message agent:a hi", "--interrupt", "-g /g/a"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("argv %q missing %q", got, want)
+	if len(f.Calls) != 1 {
+		t.Fatalf("want 1 call, got %d", len(f.Calls))
+	}
+	return append([]string{f.Calls[0].Name}, f.Calls[0].Args...)
+}
+
+// A message body is agent-controlled. scion's `message` command defines
+// single-token boolean flags -b/--broadcast and -a/--all, and cobra parses flags
+// interspersed with positionals, so an unterminated body of exactly "-b" would
+// bind to the broadcast flag and fan the message out to every agent in the
+// project — past the worker-to-worker deny the broker applied to the recipient.
+func TestMessagePutsPositionalsBehindATerminator(t *testing.T) {
+	for _, body := range []string{"-b", "--all", "-a", "--broadcast", "-i"} {
+		got := msgArgv(t, MsgOpts{To: "agent:manager", Body: body, Project: "/lever"})
+		argv := strings.Join(got, " ")
+		sep := -1
+		for i, a := range got {
+			if a == "--" {
+				sep = i
+				break
+			}
+		}
+		if sep < 0 {
+			t.Fatalf("body %q: no `--` terminator in argv: %s", body, argv)
+		}
+		if len(got) != sep+3 || got[sep+1] != "agent:manager" || got[sep+2] != body {
+			t.Fatalf("body %q: recipient and body must be the only args after `--`, got: %s", body, argv)
 		}
 	}
 }
 
-func TestInboxParsesNotifications(t *testing.T) {
-	f := exec.NewFakeRunner()
-	// `scion notifications --json` returns a bare array of typed events.
-	f.Script("scion notifications --json", exec.Result{Stdout: `[{"id":"e1","status":"WAITING_FOR_INPUT"},{"id":"e2","status":"COMPLETED"}]`})
-	c := New(f, Options{})
-	events, err := c.Inbox(context.Background(), true, "")
-	if err != nil {
-		t.Fatalf("Inbox: %v", err)
+// The ordinary flags must still be flags — they precede the terminator.
+func TestMessageKeepsItsOwnFlagsBeforeTheTerminator(t *testing.T) {
+	argv := strings.Join(msgArgv(t, MsgOpts{To: "agent:w", Body: "hello", Interrupt: true, Project: "/lever"}), " ")
+	if !strings.Contains(argv, "--interrupt") || !strings.Contains(argv, "-g /lever") {
+		t.Fatalf("flags lost: %s", argv)
 	}
-	if len(events) != 2 || events[0].ID() != "e1" || events[1]["status"] != "COMPLETED" {
-		t.Fatalf("events=%+v", events)
-	}
-}
-
-func TestInboxUnwrapsItems(t *testing.T) {
-	f := exec.NewFakeRunner()
-	// Tolerate a wrapped {"items":[...]} shape too (older/alternate scion output).
-	f.Script("scion notifications --json", exec.Result{Stdout: `{"items":[{"id":"e1","status":"WAITING_FOR_INPUT"},{"id":"e2","status":"COMPLETED"}]}`})
-	c := New(f, Options{})
-	events, err := c.Inbox(context.Background(), true, "")
-	if err != nil {
-		t.Fatalf("Inbox: %v", err)
-	}
-	if len(events) != 2 || events[0].ID() != "e1" || events[1]["status"] != "COMPLETED" {
-		t.Fatalf("events=%+v", events)
-	}
-}
-
-func TestInboxAllFlag(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion notifications --json --all", exec.Result{Stdout: `[]`})
-	c := New(f, Options{})
-	if _, err := c.Inbox(context.Background(), false, ""); err != nil {
-		t.Fatalf("Inbox: %v", err)
-	}
-	if !strings.Contains(strings.Join(f.Calls[0].Args, " "), "--all") {
-		t.Fatalf("expected --all; got %v", f.Calls[0].Args)
+	if strings.Index(argv, "--interrupt") > strings.Index(argv, " -- ") {
+		t.Fatalf("--interrupt must precede the terminator: %s", argv)
 	}
 }

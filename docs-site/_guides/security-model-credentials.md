@@ -172,9 +172,11 @@ default, and why a bring-up fails rather than guessing when it cannot tell.
 
 Three consequences worth stating rather than implying. A `scion resume` carries no role flag at all,
 so a resume of a declared worker with **no** hub record falls through to creation and takes the hub
-default. And a long-lived broker caches what the installed Scion supports, so lever restarts the
-broker whenever the `scion` config block changes rather than letting that cache outlive the binary
-it describes. Setting the project annotation would close both structurally; that is not yet done.
+default. Setting the project annotation would close that structurally; that is not yet done. And
+the capability probe deliberately does **not** memoise its answer: `scion.source` and
+`scion.binary` name *paths*, so swapping the artifact behind one leaves lever's broker-identity
+hash byte-identical and a long-lived broker survives it. A remembered "no `--role`" would then
+disarm the stamp and the check below at once, with no error and no audit line.
 
 The third is a **pin-bump hazard, and lever refuses rather than absorb it**. The role is written
 into the agent record on the *create* path only, and it is immutable afterwards. An agent record

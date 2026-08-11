@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -139,10 +140,38 @@ func (b *Broker) stageFreshTicket(cn, dir string) error {
 		return fmt.Errorf("%w: %w", errStepTicket, err)
 	}
 	bs := wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
-	if err := wire.Stage(dir, bs); err != nil {
+	root, rel, err := b.stagingPath(dir)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errStepStage, err)
+	}
+	if err := wire.Stage(root, rel, bs); err != nil {
 		return fmt.Errorf("%w: %w", errStepStage, err)
 	}
 	return nil
+}
+
+// stagingPath splits an absolute staging directory into the confinement anchor
+// wire.Stage needs and the path below it. The anchor is the instance tree: it is
+// the mount point, so an agent cannot replace it, while everything under it is
+// agent-writable.
+//
+// With no tree wired (a Broker built directly in a test) it falls back to the
+// staging directory's parent. That still refuses a symlink planted at `.lever`
+// itself — the reachable attack, since that is the name inside an agent's own
+// workspace — but not one planted at an ancestor. Production always sets Tree
+// (brokerctl.decorateConfig), which is what closes the ancestor case too.
+func (b *Broker) stagingPath(dir string) (root, rel string, err error) {
+	if b.tree == "" {
+		return filepath.Dir(dir), filepath.Base(dir), nil
+	}
+	rel, err = filepath.Rel(b.tree, dir)
+	if err != nil {
+		return "", "", fmt.Errorf("staging dir %q is not under the instance tree %q: %w", dir, b.tree, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("staging dir %q escapes the instance tree %q", dir, b.tree)
+	}
+	return b.tree, rel, nil
 }
 
 // stageErrorBody maps a stageFreshTicket step error to its 500 response body.

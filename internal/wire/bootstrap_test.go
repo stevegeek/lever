@@ -11,14 +11,15 @@ import (
 // envelope field intact and decodable against the same tags — the single staging
 // path shared by the host (manager enrolment) and the broker (worker dispatch).
 func TestStageRoundTrips(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), ".lever")
+	root := t.TempDir()
+	dir := filepath.Join(root, ".lever")
 	want := Bootstrap{
 		Ticket:    "tkt-stage",
 		BrokerCA:  "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
 		BrokerURL: "https://broker.local:8461",
 		AgentCN:   "worker.example",
 	}
-	if err := Stage(dir, want); err != nil {
+	if err := Stage(root, ".lever", want); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
 	p := filepath.Join(dir, "bootstrap.json")
@@ -47,7 +48,8 @@ func TestStageRoundTrips(t *testing.T) {
 // wider-mode bootstrap.json must still land at 0600. (The broker re-stages a
 // fresh ticket on every resume/re-enrol over the existing file.)
 func TestStageReChmodsOnOverwrite(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), ".lever")
+	root := t.TempDir()
+	dir := filepath.Join(root, ".lever")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +57,7 @@ func TestStageReChmodsOnOverwrite(t *testing.T) {
 	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Stage(dir, Bootstrap{Ticket: "t"}); err != nil {
+	if err := Stage(root, ".lever", Bootstrap{Ticket: "t"}); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
 	fi, err := os.Stat(p)

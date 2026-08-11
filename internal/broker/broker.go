@@ -103,6 +103,12 @@ type Config struct {
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
+	// Tree is the host path to the instance tree: the confinement anchor for
+	// staging enrolment material. Everything below it is agent-writable and the
+	// broker writes there as the operator, so wire.Stage confines every write to
+	// this root and refuses agent-planted symlinks. Empty ⇒ the staging
+	// directory's parent is used instead (tests); see Broker.stagingPath.
+	Tree string
 	// ManagerBootstrapDir is the host path to <tree>/.lever — where the
 	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
 	// Empty disables manager healing (audited as an error on lapse).
@@ -166,6 +172,7 @@ type Broker struct {
 
 	runtime     WorkerRuntime
 	verifyRole  func(ctx context.Context, agent string) error
+	tree        string
 	workers     map[string]WorkerSpec
 	brokerCAPEM string
 	brokerURL   string
@@ -249,7 +256,7 @@ func New(c Config) *Broker {
 		revoked:  revoked,
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
-		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, tree: c.Tree, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
 		reenrolEvents:     make(chan string, reenrolQueueDepth),

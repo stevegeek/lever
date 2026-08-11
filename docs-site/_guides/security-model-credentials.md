@@ -170,17 +170,27 @@ when the `scion.io/max-agent-role` annotation is set, which lever does not set a
 the **only** thing holding agents down, which is why lever probes the binary rather than trusting a
 default, and why a bring-up fails rather than guessing when it cannot tell.
 
-Two consequences worth stating rather than implying. A `scion resume` carries no role flag at all —
-harmless for a record that already exists, since the hub keeps the stored role, but a resume of a
-declared worker with **no** hub record falls through to creation and takes the hub default. And a
-long-lived broker caches what the installed Scion supports, so lever restarts the broker whenever
-the `scion` config block changes rather than letting that cache outlive the binary it describes.
-Setting the project annotation would close both structurally; that is not yet done. The **known exception** remains
+Three consequences worth stating rather than implying. A `scion resume` carries no role flag at all,
+so a resume of a declared worker with **no** hub record falls through to creation and takes the hub
+default. And a long-lived broker caches what the installed Scion supports, so lever restarts the
+broker whenever the `scion` config block changes rather than letting that cache outlive the binary
+it describes. Setting the project annotation would close both structurally; that is not yet done.
+
+The third is a **pin-bump hazard, and lever does not yet guard it**. The role is written into the
+agent record on the *create* path only, and it is immutable afterwards. An agent record created on
+a Scion older than scion#1089 therefore stores no role at all — and on a Scion at or after
+[scion#1102](https://github.com/GoogleCloudPlatform/scion/pull/1102) the hub resolves an unset
+stored role to **full**, both at dispatch and, since
+[scion#1101](https://github.com/GoogleCloudPlatform/scion/pull/1101), on every token refresh.
+Advancing a pin across that boundary silently promotes every pre-existing agent, because resume
+neither re-stamps the role nor fails. Until lever detects it, check the hub's agent records before
+such a bump, and repair or recreate any that carry no role. The **known exception** remains
 agent `DELETE`: at this pin scion still authorizes `performAgentDelete` only for user callers, so
 an agent's own token is not scope-checked on that path (create/lifecycle/read/token-refresh are all
 gated for agents; delete is the lone gap). A fix — a lifecycle-scope + project-isolation gate on
-`performAgentDelete`, under which a baseline agent's token is refused — is a pending upstream PR
-(GoogleCloudPlatform/scion#1097); the gap closes once it merges and the pin advances past it.
+`performAgentDelete`, under which a baseline agent's token is refused — merged upstream on
+2026-08-10 as [scion#1097](https://github.com/GoogleCloudPlatform/scion/pull/1097) (`9282f01f`);
+the gap closes on this instance once the pin advances past it.
 Closing it is a scion-side change, not something lever's controller-PAT model can guard from the
 outside. **Egress mode
 gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically so the

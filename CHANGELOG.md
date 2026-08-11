@@ -7,6 +7,64 @@ version bump moves the block under the new version heading.
 
 ## [0.15.0] - 2026-08-11
 
+### Upgrading
+
+Replace the host binary, then run `lever init` to re-scaffold the operator
+skills — `lever doctor` reports them stale until you do.
+
+**If you are not moving your `scion` pin, that is the whole upgrade.** The
+pre-role guard is silent on a Scion older than scion#1089, because there are no
+role-derived scopes to widen there. `lever doctor`'s new **agent authorization
+roles** line tells you where you stand on any pin, so check it before planning a
+bump.
+
+**Three changes can fail a bring-up that used to succeed:**
+
+1. **`manager.credential_file` must now be `0600`-tight.** A `0640`/`0660` token
+   was previously accepted; it now fails at apply. `chmod 600` it.
+
+2. **Config validation is stricter.** Two workers whose `dir`s overlap (the same
+   subtree, or one an ancestor of the other), and a worker named `manager`, are
+   now rejected at load. Rename or re-scope them.
+
+3. **A controller PAT minted before 0.14.0 lacks `project:update`**, so the
+   scratchpad strip fails with `HTTP 403: Insufficient permissions`. Delete
+   `.lever-state/controller.pat` and run **`lever apply`** — *not* `lever up`,
+   whose phase probe deliberately refuses to guess on an authentication failure
+   and exits before reaching the re-mint step. Apply re-mints the PAT with the
+   current scope set.
+
+**Crossing scion#1089 needs a decision first.** Every agent record created by an
+older Scion stores no role, and this release refuses to resume one rather than
+let scion#1102 resolve it to `full`. lever cannot repair the record: the role is
+written on the create path only, is immutable after, `scion resume` takes no
+`--role` flag, and the hub exposes no route to set one. So either delete each
+agent and let lever recreate it with `--role baseline` — **losing its
+conversation** — or stamp the role onto the stored records yourself, with the
+hub stopped:
+
+```sh
+scion server stop                       # in the jail; apply restarts it
+cp ~/.scion/hub.db ~/.scion/hub.db.bak  # keep a way back
+python3 - <<'EOF'
+import json, os, sqlite3
+db = sqlite3.connect(os.path.expanduser("~/.scion/hub.db"))
+for agent_id, slug, applied in list(db.execute("select id, slug, applied_config from agents")):
+    config = json.loads(applied) if applied else {}
+    if config.get("agentRole"):
+        continue
+    config["agentRole"] = "baseline"
+    db.execute("update agents set applied_config = ? where id = ?", (json.dumps(config), agent_id))
+    print(f"{slug}: stored no role -> baseline")
+db.commit()
+EOF
+```
+
+`baseline` is what lever stamps on a fresh create, so this only ever narrows
+what a record resolves to — it cannot widen one, and a record that already
+stores a role is left alone. Re-run `lever apply` afterwards and confirm with
+`lever doctor` that every record now carries a role.
+
 ### Security
 - **A pin bump can no longer promote an existing agent to full hub authority.**
   0.14.0 made lever stamp `--role baseline` on every agent it *starts*. That

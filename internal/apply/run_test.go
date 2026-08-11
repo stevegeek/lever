@@ -2624,10 +2624,10 @@ func TestRegisterRepairsHubEndpointOnTheSkipPath(t *testing.T) {
 	}
 	var repaired []string
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		JailUp:                 func(context.Context, *config.App) error { return nil },
+		LoadImage:              func(context.Context, string) error { return nil },
+		JailMount:              "/lever",
+		Scion:                  scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
 		ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
 		RepairScionHubEndpoint: func(_ context.Context, wp string) error {
 			repaired = append(repaired, wp)
@@ -2656,10 +2656,10 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 		Manager: config.Manager{Image: "img"},
 	}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		JailUp:                 func(context.Context, *config.App) error { return nil },
+		LoadImage:              func(context.Context, string) error { return nil },
+		JailMount:              "/lever",
+		Scion:                  scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
 		ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
 		RepairScionHubEndpoint: func(context.Context, string) error {
 			return fmt.Errorf("guest unreachable")

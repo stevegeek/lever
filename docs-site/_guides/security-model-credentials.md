@@ -96,9 +96,11 @@ The capability model itself — identities, minting, delegation, revocation — 
   processing a tool call (`internal/broker/gateway.go`), then sets `X-Lever-Caller` itself from the
   verified CN, a jail agent cannot forge broker-internal context.
 - **The admin surface is loopback-only.** `/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`
-  are unauthenticated and protected solely by binding to loopback, enforced twice and fail-closed
-  (`resolveAdminAddr` rejects any non-loopback bind; `ServeListeners`). The jail reaches the broker only
-  via the *separate* mTLS jail listener, never the admin port.
+  are unauthenticated and protected solely by binding to loopback. `brokerctl.bindListeners` binds it
+  at `127.0.0.1`, and `Broker.ServeListeners` then **refuses to serve** unless the listener it was
+  handed reports a loopback address — the one enforcement point, fail-closed, so any future caller
+  that binds the admin listener elsewhere is rejected rather than trusted. The jail reaches the
+  broker only via the *separate* mTLS jail listener, never the admin port.
 - **`/bootstrap` is single-use.** The first manager-enrolment ticket latches the broker; every later
   `/bootstrap` returns 403 (`internal/broker/bootstrap.go`). `apply` tolerates that 403 so re-apply is
   idempotent, but the latch bounds manager-identity minting to one per broker process.

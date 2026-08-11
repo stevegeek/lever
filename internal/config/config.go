@@ -653,6 +653,9 @@ func (a *App) Validate() error {
 			return err
 		}
 	}
+	if err := a.validateWorkerDirsDisjoint(); err != nil {
+		return err
+	}
 	if err := a.validateBroker(); err != nil {
 		return err
 	}
@@ -660,6 +663,48 @@ func (a *App) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// managerAlias is the literal name the broker's operator-directive channel
+// resolves to the manager, independent of broker.manager_identity (see
+// broker.resolveDirectiveAgent). Reserved for that reason.
+const managerAlias = "manager"
+
+// validateWorkerDirsDisjoint rejects two workers whose dirs overlap — the same
+// subtree, or one an ancestor of the other.
+//
+// Sibling isolation rests on each worker mounting only its own subtree: a
+// sibling's directory is "simply not a mount source". An overlap voids that for
+// the pair. The outer worker reads and writes the inner one's whole workspace,
+// which includes the fresh, UNSPENT enrolment ticket the broker stages at
+// <dir>/.lever/bootstrap.json on every resume — redeem it first and the outer
+// worker enrols as the inner worker's CN, taking its capability grants.
+func (a *App) validateWorkerDirsDisjoint() error {
+	for i, outer := range a.Workers {
+		for j, inner := range a.Workers {
+			if i >= j {
+				continue
+			}
+			if pathOverlaps(outer.Dir, inner.Dir) {
+				return fmt.Errorf("config: workers %q (dir %q) and %q (dir %q) overlap — one is the other, or contains it; "+
+					"each worker must mount a subtree no other worker can reach, or it can read its sibling's workspace and steal the enrolment ticket staged there",
+					outer.Name, outer.Dir, inner.Name, inner.Dir)
+			}
+		}
+	}
+	return nil
+}
+
+// pathOverlaps reports whether two relative paths name the same directory or one
+// contains the other. Comparison is component-wise on cleaned paths, so
+// "workers/x" does not "contain" the unrelated "workers/xy".
+func pathOverlaps(a, b string) bool {
+	ca, cb := filepath.Clean(a), filepath.Clean(b)
+	if ca == cb {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(ca, cb+sep) || strings.HasPrefix(cb, ca+sep)
 }
 
 // validateWorker validates a single worker declaration: name shape, collisions
@@ -673,6 +718,15 @@ func (a *App) validateWorker(g Worker) error {
 	}
 	if g.Name == a.ManagerCN() {
 		return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
+	}
+	if g.Name == managerAlias {
+		// The directive channel resolves the literal "manager" to the manager
+		// whatever broker.manager_identity says (broker.resolveDirectiveAgent),
+		// so a worker holding that name is silently shadowed: an operator
+		// directive aimed at the worker is delivered to the most privileged
+		// agent instead. The ManagerCN check above does not cover it, because a
+		// custom manager_identity moves the CN off this word.
+		return fmt.Errorf("config: worker name %q is reserved — it is the alias the operator-directive channel resolves to the manager, so a worker of that name could never be addressed", g.Name)
 	}
 	if g.Name == a.Name {
 		// The manager's scion agent slug IS the app name (apply dispatches

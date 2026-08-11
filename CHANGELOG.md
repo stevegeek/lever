@@ -69,6 +69,29 @@ version bump moves the block under the new version heading.
   the hash byte-identical and a long-lived broker keeps its verdict. A stale "no
   `--role`" disarmed the stamp and the new pre-role guard together, silently.
 
+- **Overlapping worker `dir`s are rejected at config load.** Validation checked
+  each worker's dir in isolation, so two workers could declare the same subtree,
+  or one could declare an ancestor of another, and both passed. That voids
+  sibling isolation for the pair: the outer worker reads and writes the inner
+  one's whole workspace, including the fresh, unspent enrolment ticket the
+  broker stages there on every resume — redeem it first and it enrols as the
+  inner worker's CN, taking its capability grants. Comparison is component-wise
+  on cleaned paths, so `workers/x` and `workers/xy` stay legal.
+
+- **A worker may no longer be named `manager`.** The operator-directive channel
+  resolves that literal name to the manager whatever `broker.manager_identity`
+  is set to, so a worker holding it was silently shadowed and a directive aimed
+  at the worker was delivered to the most privileged agent. The existing
+  collision checks did not cover it, because a custom `manager_identity` moves
+  the manager's CN off that word.
+
+- **`manager.credential_file` must now be `0600`-tight.** It rejected only
+  world-readable modes, so a `0640` OAuth token — the longest-lived,
+  highest-value secret lever handles in subscription mode — was accepted, read,
+  and projected into every agent container, while `lever doctor` was already
+  failing the same file. It now rejects any group or other bit, matching
+  `api_key_file`, the controller PAT and the staged bootstrap.
+
 ### Added
 - **`lever doctor` reports agent records that store no role.** It reports them
   on *any* pin, so the bump above can be planned rather than discovered: on a
@@ -82,6 +105,17 @@ version bump moves the block under the new version heading.
 - **Docs: `scion.agent_role` was missing from the configuration reference.** The
   one key that overrides the role lever stamps was documented only in the
   security model.
+
+- **Docs: two security claims the code did not make good on.** The
+  worker-isolation guide said the controller PAT was "re-minted, not blindly
+  reused" and that lever re-runs the mint window when the hub rejects it — no
+  such path exists. `lever apply` short-circuits on any PAT already on disk,
+  never validates it, and only `lever destroy` clears it; a rejected PAT is a
+  hard bring-up failure the operator resolves. The credentials guide claimed the
+  admin listener's loopback bind was "enforced twice" and cited
+  `resolveAdminAddr`, a function deleted in this range; the live enforcement is
+  a single fail-closed check in `Broker.ServeListeners`, which now reads as
+  such so nobody adding a second bind path assumes a helper still guards it.
 
 ### Changed
 - **Docs: upstream closed the hub-wide scratchpad gap.** scion#1103 answered

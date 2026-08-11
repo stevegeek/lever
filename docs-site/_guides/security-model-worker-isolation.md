@@ -110,9 +110,14 @@ alone 403s on `start`, since scion gates every interactive verb, including `star
 - **Persisted host-side only**, `0600`, under `.lever-state/` — never written into the mounted
   tree, never set as a container environment variable or Scion hub secret, so there is no path by
   which an agent inside the jail can read it.
-- **Re-minted, not blindly reused, across restarts.** The PAT persists across `stop`→`up`; if the
-  hub rejects it, lever re-runs the agent-free throwaway-hub window rather than ever re-enabling
-  dev-auth on a hub that already has agents.
+- **Minted once and reused verbatim.** The PAT persists across `stop`→`up`, and `lever apply`
+  short-circuits on any PAT already on disk: it is never validated against the hub, and nothing
+  re-mints it. Only `lever destroy` clears it. So a PAT the hub no longer accepts — after the hub
+  database is reset, after the jail is deleted out of band rather than with `lever destroy`, or
+  after a lever upgrade widened the scope set — is a **hard bring-up failure** the operator has to
+  resolve, by clearing `.lever-state/controller.pat` (which re-runs the agent-free mint window on
+  the next apply) or by destroying the instance. lever does not re-enable dev-auth on a hub that
+  already has agents to recover automatically, and re-minting is not attempted behind your back.
 - **Injected only into lever's own host-side Scion client calls**, as the `SCION_HUB_TOKEN`
   environment variable, by the capability broker and by `lever attach`/`lever msg`/`lever stop`.
 

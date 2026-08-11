@@ -896,8 +896,14 @@ func defaultReadCred(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info.Mode().Perm()&0o004 != 0 {
-		return "", fmt.Errorf("credential file %s is world-readable (%#o) — restrict it to 0600", path, info.Mode().Perm())
+	// Group bits count, not just world. This is the manager's LLM credential in
+	// subscription mode — the longest-lived, highest-value secret lever handles
+	// — and every other credential in the system (api_key_file, the controller
+	// PAT, the staged bootstrap) is held to exactly 0600. `lever doctor` already
+	// FAILS a group-readable credential file; accepting one here let apply read
+	// it and project it into every agent container while doctor called it broken.
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("credential file %s is group- or world-accessible (%#o) — restrict it to 0600", path, info.Mode().Perm())
 	}
 	if info.Size() > maxCredentialBytes {
 		return "", fmt.Errorf("credential file %s is %d bytes — too large to be a credential", path, info.Size())

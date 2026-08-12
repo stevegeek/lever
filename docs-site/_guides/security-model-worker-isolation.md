@@ -79,9 +79,12 @@ it does not remove one from a project the hub already records. So it narrows wha
 to do, and never replaces it — any instance registered before the key was set still needs the
 delete, and lever still verifies the record either way. Two caveats if you set it yourself: Scion
 reads the top-level `project_defaults` section only when the same `settings.yaml` also carries a
-top-level `server:` section, and ignores it silently otherwise; and at the time of writing the
-commit carrying the key cannot be fetched through the Go module proxy, so `scion.version` cannot
-reach it — only [`scion.source` or `scion.binary`](/reference/config/) can.
+top-level `server:` section, and ignores it silently otherwise; and the key first shipped in a
+window when Scion could not be fetched through the Go module proxy at all — a root `AGENTS.md`
+sat beside the existing `agents.md`, and the proxy cannot build a zip for two names differing only
+in case. [scion#1153](https://github.com/GoogleCloudPlatform/scion/pull/1153) merged the two files
+on 2026-08-12, so `scion.version` reaches any commit from there on; anything earlier still needs
+[`scion.source` or `scion.binary`](/reference/config/).
 
 `lever doctor` reports any shared directory the hub still records for the project. That check reads
 the hub record, so it describes newly started agents: an agent that started before the removal

@@ -2,7 +2,7 @@ package scion
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -160,26 +160,63 @@ func (c *Client) ServerStop(ctx context.Context) error {
 	return nil
 }
 
-// SecretSet stores a Hub secret. scion (>= da49e14) requires the value to be
-// base64-encoded on input ("value must be base64-encoded", HTTP 400 otherwise)
-// and decodes it for projection to the agent. We pass the raw secret and encode
-// here. (Earlier vendored scion took the raw value verbatim — encoding is
-// version-specific; verified against da49e14 on 2026-06-17.)
+// SecretSet stores a Hub secret that is ALWAYS projected into the agent
+// container. It goes through `hub env set --secret`, not `hub secret set`:
+// both write the same secret row (scion's cmd/hub_env.go redirects --secret to
+// the Secret API with type=environment, target=key), but only the env form can
+// set the injection mode. scion normalises an unset mode to as_needed, and
+// since scion #944 (221d2eaf, 2026-08-01) an as_needed value is filtered out of
+// the projected container env — so the secret would sit in the Hub and never
+// reach the agent. The flags exist from 5f56069e (2026-02-11), well below
+// lever's minimum supported pin.
+//
+// The value goes over in PLAINTEXT. scion's secret API base64-decodes a value
+// by default, but since ce96122c (#1111, 2026-08-10) the CLI stamps
+// encoding=raw on every non-@file value, so the argument is stored verbatim.
+// Encoding it here would store the base64 TEXT and hand the agent a corrupt
+// credential — which is why this needs a pin of ce96122c or later. An older
+// pin fails loudly at apply, and errBase64Pin explains it.
 func (c *Client) SecretSet(ctx context.Context, key, value string) error {
-	enc := base64.StdEncoding.EncodeToString([]byte(value))
-	_, err := c.run(ctx, "", "hub", "secret", "set", key, enc)
+	_, err := c.runSecret(ctx, "", value, "hub", "env", "set", "--secret", "--always", key, value)
+	return secretSetErr(key, err)
+}
+
+// secretSetErr reports the cause rather than the symptom: the hub rejects a
+// plaintext value only on a pin that predates the CLI's encoding=raw flip.
+func secretSetErr(key string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "value must be base64-encoded") {
+		return fmt.Errorf("%w (setting %s): %v", errBase64Pin, key, err)
+	}
 	return err
 }
+
+// errBase64Pin names the pin floor rather than the symptom: the hub rejects a
+// plaintext secret only on a scion older than ce96122c, where the CLI did not
+// yet mark values raw.
+var errBase64Pin = errors.New(
+	"scion rejected a plaintext secret value: this scion pin predates ce96122c " +
+		"(#1111, 2026-08-10) — raise scion.source/binary to that commit or later, " +
+		"or scion.version to dbf52f22 or later (commits between 4c045fc8 and " +
+		"dbf52f22 cannot be fetched through the Go module proxy at all)")
 
 // EnvSet sets a NON-secret Hub env var scoped to one agent's project. Unlike
 // SecretSet (encrypted, user-scoped), this is a plain value scoped to the agent
 // by running `hub env set --project` with the agent's project dir as cwd (bare
 // --project infers the project from the working directory), so it does not leak
 // to other agents in the instance. Used to convey LEVER_LLM_AUTH=api-key so an
-// agent's pre-start hook enters api-key mode (scion projects Hub env into the
-// container before pre-start hooks run, so the hook sees it). projectDir must be
-// a registered project's dir (run after register-project / InitProject).
+// agent's pre-start hook enters api-key mode.
+//
+// --always is load-bearing for the same reason as in SecretSet: without it the
+// variable is stored as_needed and never projected. LEVER_LLM_AUTH is not a
+// key any harness declares as required, so scion's env-gather second pass never
+// asks for it either — as_needed here means "never delivered".
+//
+// projectDir must be a registered project's dir (run after register-project /
+// InitProject).
 func (c *Client) EnvSet(ctx context.Context, projectDir, key, value string) error {
-	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", key+"="+value)
+	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", "--always", key+"="+value)
 	return err
 }

@@ -5,6 +5,108 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.16.0] - 2026-08-13
+
+A correctness release. Every credential lever plants in the Scion Hub was
+either undeliverable or corrupt on a current `scion` pin, and the two defects
+cancelled each other, so nothing looked wrong until one was fixed alone.
+
+### Upgrading
+
+**Check your `scion` pin first.** The credential step needs `ce96122c`
+(2026-08-10) or later. For `scion.version` the usable floor is `dbf52f22`
+(2026-08-12): every commit from `4c045fc8` to `dbf52f22` carried both
+`AGENTS.md` and `agents.md`, which the Go module proxy cannot fetch at all.
+`scion.source` and `scion.binary` take the `ce96122c` floor directly. On an
+older scion the credential step fails with `value must be base64-encoded`, and
+lever names the pin rather than the symptom.
+
+**Then check that the manager reads `running`** (`lever doctor`) before you run
+`lever apply`. The credential step itself only rewrites two Hub rows and touches
+no agent — but `apply` runs the whole plan, and `start-manager` on a record that
+is not running takes the resume path, which recovers by deleting and recreating
+the agent if the resume fails. That loses the conversation (lever#3). This
+upgrade does not make that more likely; it is simply the wrong moment to
+discover it.
+
+**Nothing reaches a running agent until it restarts.** A container keeps the
+environment it was given at create time, so an agent that is up now is
+unaffected — for better and for worse. Picking up the corrected rows needs
+`lever stop` + `lever up`, which is the resume path above.
+
+**On a pre-`221d2eaf` scion this release changes nothing you can observe.**
+`as_needed` was not yet filtered there, so the values were already being
+delivered.
+
+A failed credential step is not a clean rollback point in api-key mode: it
+writes `LEVER_LLM_AUTH` before the placeholder, so an old pin leaves the first
+value updated and the second not. Subscription instances write one value and are
+unaffected. In both cases downgrading to 0.15.1 and re-applying restores the
+previous state, because the injection mode is recomputed on every write.
+
+### Fixed
+- **Hub values lever plants for an agent were never delivered to it.** Both
+  `SecretSet` and `EnvSet` wrote to the Hub without an injection mode, and scion
+  normalises an unset mode to `as_needed` — which
+  [scion#944](https://github.com/GoogleCloudPlatform/scion/pull/944)
+  (`221d2eaf`, 2026-08-01) started filtering out of the projected container
+  environment. The values sat in the Hub and never reached the agent. Both calls
+  now pass `--always`.
+
+  What this breaks, on any pin from `221d2eaf` on — note the first case covers
+  every shipped example and any instance with a `credential_file`:
+
+  - **`llm_auth: subscription` cannot bring an agent up either.** scion's claude
+    harness declares `CLAUDE_CODE_OAUTH_TOKEN` as the required credential for
+    auth type `oauth-token`, exactly as it declares `ANTHROPIC_API_KEY` for
+    `api-key`, so an undelivered token fails the same pre-start gate.
+  - **`llm_auth: api-key` cannot bring an agent up.** The placeholder
+    `ANTHROPIC_API_KEY` that satisfies scion's start-time auth gate never
+    arrives, so the harness provisioner finds no credential and the container
+    aborts during pre-start (`Pre-start provisioning is required; aborting
+    startup`). `lever up` reports it as `step start-manager: … failed to start
+    agent via Hub`; a retry then reports `409 agent name is already in use by a
+    stopped container`, because the first attempt leaves the crashed container
+    behind. Reported as lever#28.
+  - **`LEVER_LLM_AUTH=api-key` never reaches the agent's pre-start hook**, so
+    the hook does not enter api-key mode. This half was silent: unlike the
+    placeholder, `LEVER_LLM_AUTH` is not a key any harness declares as required,
+    so scion's env-gather second pass never asks for it either.
+
+  `SecretSet` now routes through `hub env set --secret --always` rather than
+  `hub secret set`. Both write the same Hub secret row — scion's `--secret` flag
+  redirects to the Secret API with `type=environment` — but `hub secret set`
+  exposes no injection-mode flag at all, so it cannot express the requirement.
+  The flags date from `5f56069e` (2026-02-11), well below lever's minimum
+  supported pin.
+
+- **Credentials were stored base64-encoded on a current scion, so the agent
+  would have received a corrupt one.** lever base64-encoded every secret value
+  because scion's secret API decoded it. `ce96122c`
+  ([scion#1111](https://github.com/GoogleCloudPlatform/scion/pull/1111),
+  2026-08-10) flipped that: the CLI now stamps `encoding=raw` on any value that
+  did not come from `@file`, so the hub stores the argument verbatim. lever now
+  sends plaintext.
+
+  This is why the `--always` fix above could not ship on its own. The two
+  defects were cancelling: the value in the Hub was the base64 *text* of the
+  credential, and `as_needed` meant it was never delivered. Injecting it without
+  fixing the encoding would have started delivering a credential that fails
+  every model call — visible only as a 401 from inside the container.
+
+  **`scion` must now be `ce96122c` or later.** An older pin rejects a plaintext
+  value with `value must be base64-encoded`; lever catches that and names the
+  pin floor rather than the symptom. The shipped examples move from `3142df68`
+  to `e82a2a08`: `3142df68` sits in the worst window — after `as_needed`
+  enforcement, before the encoding flip.
+
+- **Secret redaction followed the argv change.** `redactArgs` matched the exact
+  five-token `hub secret set KEY VALUE` shape, so the new argv would have put
+  the secret value — now plaintext — into any error message scion returned. It
+  masks both secret-bearing shapes, and a credential write additionally scrubs
+  the literal value from the whole error, which position-based masking cannot do
+  for a value that parses as a flag.
+
 ## [0.15.1] - 2026-08-11
 
 ### Fixed

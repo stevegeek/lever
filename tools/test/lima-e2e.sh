@@ -107,7 +107,9 @@ write_config() {
   cat > "$INST/lever.yaml" <<EOF
 name: $NAME
 scion:
-  version: ${SCION_VERSION:-68507153}
+  # Must stay >= ce96122c: a pre-enforcement pin cannot catch the as_needed
+  # injection or plaintext-encoding regressions this suite exists for.
+  version: ${SCION_VERSION:-e82a2a08}
 backend: lima
 $egressline
 tree: workspace

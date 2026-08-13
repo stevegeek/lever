@@ -28,7 +28,8 @@ mount with a containment guard (rejecting `..`/symlink escape), which Scion reso
 project root and mounts as exactly that subtree (an absolute `--workspace` instead mounts that
 exact host path — Scion branches on `filepath.IsAbs`). Merged upstream in
 [scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815); requires a `scion.version`
-pin of `b4c9911d` or later (the shipped examples pin it). Live-validated 2026-07-10 on the
+pin of `b4c9911d` or later (the shipped examples pin `e82a2a08`, which is higher — lever's
+credential writes need `ce96122c` or later). Live-validated 2026-07-10 on the
 pre-merge fork implementation of the same guard (worker `scratch` mounted
 `/lever/workers/scratch`, not `/lever`); the upstream implementation has not yet been
 live-revalidated.

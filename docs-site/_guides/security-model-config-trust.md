@@ -84,7 +84,8 @@ mistake, not a substituted file. Choosing `binary:` makes its provenance yours t
 **What was already sound:** the execution plumbing is argv-clean, no shell injection in the hot
 paths; the single `bash -c` (scion install) correctly single-quote-escapes its interpolated values;
 `jailPath` never fabricates an in-jail path for an out-of-tree target; the credential value is
-base64'd and redacted in error output at its one call site.
+scrubbed from error output at its one call site (by literal match, so a value that parses as a
+flag is masked too — it travels as plaintext argv since Scion stopped base64-decoding it).
 
 ### 5.4 The manager holds no worker-dispatch authority
 

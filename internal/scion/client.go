@@ -7,8 +7,10 @@ package scion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/exec"
@@ -111,17 +113,69 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 	return strings.TrimSpace(out), nil
 }
 
-// redactArgs renders args for a user-visible error/log, masking secret values.
-// It detects the `hub secret set <KEY> <VALUE>` shape and replaces <VALUE> with
-// "***" (keeping <KEY> visible). All other commands render verbatim.
-func redactArgs(args []string) string {
-	if len(args) == 5 && args[0] == "hub" && args[1] == "secret" && args[2] == "set" {
-		redacted := make([]string, len(args))
-		copy(redacted, args)
-		redacted[4] = "***"
-		return strings.Join(redacted, " ")
+// runSecret is run for a command whose argv carries a credential. It scrubs the
+// literal value from the whole error — argv and scion's own output alike —
+// which position-based redaction cannot do: a value starting with "-" parses as
+// a flag, and cobra echoes an unknown flag back in its error text.
+// Callers that pass a credential MUST use this rather than run.
+func (c *Client) runSecret(ctx context.Context, dir, secret string, args ...string) (string, error) {
+	out, err := c.run(ctx, dir, args...)
+	// Short values would scrub unrelated text; nothing lever treats as a
+	// credential is that short.
+	if err != nil && len(secret) >= 8 {
+		return "", errors.New(strings.ReplaceAll(err.Error(), secret, "***"))
 	}
-	return strings.Join(args, " ")
+	return out, err
+}
+
+// redactArgs renders args for a user-visible error/log, masking secret values by
+// position. It is the backstop under runSecret, and the only defence for a
+// caller that forgets it. Two shapes carry a secret: `hub secret set` and the
+// `--secret` form of `hub env set` (which writes the same Hub row). All other
+// commands render verbatim.
+//
+// It masks every positional after the first, and treats a lone KEY=VALUE
+// positional as key plus value. That over-masks a command with a separated flag
+// value (`--type file`), which is the safe direction: a missed mask puts a
+// credential in an error message. It cannot mask a value that looks like a
+// flag — hence runSecret.
+func redactArgs(args []string) string {
+	if !carriesSecret(args) {
+		return strings.Join(args, " ")
+	}
+	out := make([]string, len(args))
+	copy(out, args)
+
+	var pos []int
+	for i := 3; i < len(out); i++ {
+		if !strings.HasPrefix(out[i], "-") {
+			pos = append(pos, i)
+		}
+	}
+	if len(pos) == 1 {
+		if k, _, ok := strings.Cut(out[pos[0]], "="); ok {
+			out[pos[0]] = k + "=***"
+		} else {
+			out[pos[0]] = "***"
+		}
+	}
+	for _, i := range pos[min(len(pos), 1):] {
+		out[i] = "***"
+	}
+	return strings.Join(out, " ")
+}
+
+func carriesSecret(args []string) bool {
+	if len(args) < 4 || args[0] != "hub" || args[2] != "set" {
+		return false
+	}
+	switch args[1] {
+	case "secret":
+		return true
+	case "env":
+		return slices.Contains(args, "--secret")
+	}
+	return false
 }
 
 var bannerRE = regexp.MustCompile(`(?i)WARNING:.*development auth.*`)

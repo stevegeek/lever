@@ -1562,8 +1562,8 @@ func TestRunCredentialStep(t *testing.T) {
 	for _, c := range f.Calls {
 		j += strings.Join(c.Args, " ") + "|"
 	}
-	// secret value is base64-encoded (scion >= da49e14): b64("sk-ant-raw")
-	if want := "hub secret set CLAUDE_CODE_OAUTH_TOKEN c2stYW50LXJhdw=="; !strings.Contains(j, want) {
+	// plaintext: scion stores the argument verbatim since ce96122c.
+	if want := "hub env set --secret --always CLAUDE_CODE_OAUTH_TOKEN sk-ant-raw"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
 	}
 }
@@ -1635,11 +1635,13 @@ func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 	var startArgv string
 	for _, c := range f.Calls {
 		argv := strings.Join(c.Args, " ")
-		if argv == "hub env set --project LEVER_LLM_AUTH=api-key" {
+		// --always on both: without it scion stores the value as_needed and
+		// never projects it into the container, so the harness auth gate fails.
+		if argv == "hub env set --project --always LEVER_LLM_AUTH=api-key" {
 			sawEnvSet = true
 		}
 		// SecretSet base64-encodes the value, so match on the verb + key, not value.
-		if len(c.Args) >= 4 && c.Args[0] == "hub" && c.Args[1] == "secret" && c.Args[2] == "set" && c.Args[3] == "ANTHROPIC_API_KEY" {
+		if strings.HasPrefix(argv, "hub env set --secret --always ANTHROPIC_API_KEY ") {
 			sawPlaceholder = true
 		}
 		if c.Name == "scion" && strings.Contains(argv, " start ") {

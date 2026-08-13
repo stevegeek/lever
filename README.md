@@ -135,7 +135,8 @@ The honest gaps — things you should know before relying on it:
   `workers/<name>` subtree via Scion's relative `--workspace` (resolved against the project root
   with a containment guard), merged upstream in
   [scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815). Requires a `scion.version`
-  pin of `b4c9911d` or later — the shipped examples pin it.
+  pin of `b4c9911d` or later. The shipped examples pin higher still (`e82a2a08`), because
+lever's credential writes need `ce96122c` or later; see [config reference](docs-site/_reference/config.md).
 
 Docs: [getting-started](docs-site/_guides/getting-started.md), [capabilities](docs-site/_guides/capabilities.md),
 [operations](docs-site/_guides/operations.md), [CLI](docs-site/_reference/cli.md),

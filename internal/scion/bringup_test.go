@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -20,12 +21,58 @@ func TestEnvSetArgvAndProjectScope(t *testing.T) {
 		t.Fatalf("want 1 call, got %d", len(f.Calls))
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	if got != "hub env set --project LEVER_LLM_AUTH=api-key" {
+	// --always is load-bearing: an as_needed var is never projected into the
+	// container (scion #944), and no harness declares LEVER_LLM_AUTH, so the
+	// env-gather second pass never asks for it either.
+	if got != "hub env set --project --always LEVER_LLM_AUTH=api-key" {
 		t.Errorf("args = %q", got)
 	}
 	// Project scope is conveyed by the working directory (bare --project infers it).
 	if f.Calls[0].Dir != "/jail/work" {
 		t.Errorf("cwd = %q, want /jail/work (project scope)", f.Calls[0].Dir)
+	}
+}
+
+// TestSecretSetIsAlwaysInjected pins the two properties a Hub secret needs to
+// reach the agent intact: an explicit injection mode, and a plaintext value.
+// `hub secret set` cannot express the mode at all, so the call goes through the
+// --secret form of `hub env set`, which writes the same row.
+func TestSecretSetIsAlwaysInjected(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	if err := c.SecretSet(context.Background(), "ANTHROPIC_API_KEY", "sk-ant-placeholder"); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	want := "hub env set --secret --always ANTHROPIC_API_KEY sk-ant-placeholder"
+	if got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "hub secret set") {
+		t.Error("hub secret set cannot set an injection mode; the secret would never be projected")
+	}
+}
+
+// TestSecretSetOldPinErrorNamesTheCause turns scion's 400 into the actual
+// problem, which is the pin, not the value.
+func TestSecretSetOldPinErrorNamesTheCause(t *testing.T) {
+	// scion's real wording, traced through APIError.Error() and the CLI wrapper.
+	raw := errors.New("scion hub env set --secret --always K ***: " +
+		"Error: failed to set secret: invalid_request: value must be base64-encoded (status: 400)")
+	err := secretSetErr("ANTHROPIC_API_KEY", raw)
+	if !errors.Is(err, errBase64Pin) {
+		t.Fatalf("err = %v, want errBase64Pin", err)
+	}
+	if !strings.Contains(err.Error(), "ce96122c") {
+		t.Errorf("error should name the pin floor: %q", err)
+	}
+	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Errorf("error should name the key: %q", err)
+	}
+	other := errors.New("scion hub env set: connection refused")
+	if got := secretSetErr("K", other); got != other {
+		t.Errorf("unrelated errors must pass through unchanged, got %v", got)
 	}
 }
 
@@ -46,8 +93,9 @@ func TestBringupArgv(t *testing.T) {
 		"init --machine --non-interactive",
 		"config set --global image_registry scionlocal",
 		"server start --web-port 8080 --dev-auth=false",
-		// value is base64-encoded (scion >= da49e14 requires it): b64("sk-ant-rawtoken")
-		"hub secret set CLAUDE_CODE_OAUTH_TOKEN c2stYW50LXJhd3Rva2Vu",
+		// plaintext: scion stamps encoding=raw since ce96122c, so an encoded
+		// value would be stored verbatim.
+		"hub env set --secret --always CLAUDE_CODE_OAUTH_TOKEN sk-ant-rawtoken",
 	} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing %q in %q", want, j)

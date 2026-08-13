@@ -2,8 +2,11 @@ name: multi-project
 backend: orbstack
 tree: workspace
 scion:
-  version: 3142df68   # pin a scion commit; fetched + cross-compiled into the jail
-  # (>= b4c9911d: workers mount only their subtree via relative --workspace, upstream PR #815)
+  version: e82a2a08   # pin a scion commit; fetched + cross-compiled into the jail
+  # (`version:` needs >= dbf52f22, 2026-08-12 — from ce96122c the CLI stores
+  # secret values verbatim, which lever requires, and dbf52f22 is the first
+  # commit after that which the Go module proxy can fetch. Also >= b4c9911d:
+  # workers mount only their subtree via relative --workspace, upstream #815)
 # api-key is the secure default (real key never in the container) but needs a
 # Console API key; this demo opts into subscription (your Claude OAuth token).
 broker:

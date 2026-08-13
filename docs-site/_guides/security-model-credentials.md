@@ -109,7 +109,11 @@ The capability model itself — identities, minting, delegation, revocation — 
   placeholder `ANTHROPIC_API_KEY` (`sk-ant-placeholder…`) as a Hub secret. It is not a real key: claude
   sends it as `x-api-key`, which the broker `/llm` proxy **overwrites** with the real Console key
   host-side. Projecting it to every container is safe precisely because the instance is uniformly
-  api-key (§6.1).
+  api-key (§6.1). lever writes it with `hub env set --secret --always`, not `hub secret set`: both
+  create the same Hub secret row, but only the `env` form can set the injection mode, and a secret
+  stored with scion's default (`as_needed`) is filtered out of the container environment
+  ([scion#944](https://github.com/GoogleCloudPlatform/scion/pull/944)) — present in the Hub, never
+  delivered. The same `--always` applies to the non-secret `LEVER_LLM_AUTH` variable.
 - **Operator directives authenticate the requester; they mint no capability.** A separate,
   operator-signed channel lets an agent verify that an instruction genuinely came from the human
   operator (its own SSH signing key, held to a similar host-side trust posture as the credentials

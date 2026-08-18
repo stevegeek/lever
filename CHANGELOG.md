@@ -5,6 +5,209 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.17.0] - 2026-08-16
+
+### Added
+- **Remote access (`lever remote`)** — talk to the manager, and attach to any
+  running agent, from a phone over Tailscale. A new host-side reverse proxy
+  (`internal/remoteproxy`) fronts the Scion hub's web UI: it injects a
+  dedicated, narrowly-scoped remote PAT (`agent:read`, `agent:list`,
+  `project:read`, `agent:attach` — no create/delete/manage/secret scope) on
+  every forwarded request, strips any client-supplied `Authorization`/
+  `Cookie`/`Tailscale-*` header before forwarding, and strips the hub's own
+  session cookie from every response, so the client never holds a hub
+  credential of its own. Origin and `Sec-Fetch-Site` checks reject cross-site
+  browser requests; an optional `remote.allowed_users` pins the tailnet
+  identity (`Tailscale-User-Login`, set only by `tailscale serve`) allowed to
+  connect. Every request is appended to a host-side audit log
+  (`.lever-state/remote-audit.jsonl`).
+  - **Accepted step-1 posture:** the full hub UI is exposed to the tailnet —
+    whoever reaches the proxy gets the same interactive power over the jail
+    interior (agents, mounted tree, LLM spend) as the operator's phone. The
+    host stays VM-protected regardless; no agent gains any new capability;
+    directives remain the only *authenticated* operator override (remote chat
+    arrives as an ordinary unauthenticated `user:` turn, same as `lever msg
+    send`). See the new remote-access guide (`docs-site/_guides/remote-access.md`)
+    for the full threat-model recap and setup.
+  - New config block `remote:` (`enabled`, `port` default 8445, `base_url`,
+    `allowed_users`); new CLI `lever remote serve|status`; lifecycle wired into
+    `apply`/`stop` like the broker daemon. **Requires the `orbstack` backend**
+    — `remote.enabled: true` on any other backend is rejected at config load,
+    because the Lima path is not live-validated yet. This closes a trap:
+    without the check, a `lima` + `remote.enabled` config loaded fine and
+    `apply` returned 0 while the proxy child silently died into `remote.log`.
+    `lever remote serve` keeps the same check at runtime too, as
+    belt-and-braces defense-in-depth.
+  - **`remote.base_url` configures the proxy only; it is never passed to the
+    hub.** Scion's `--base-url` is not a web-only flag: the hub adopts it as
+    its own agent-facing endpoint and injects it into every agent container as
+    `SCION_HUB_ENDPOINT`/`SCION_HUB_URL`. A jailed agent cannot reach a tailnet
+    name (no DNS for it inside the jail, and lever's egress drops `100.64/10`),
+    so forwarding it handed every agent a hub address it could never call back
+    on — breaking status updates, notifications, and the ~10-hourly agent token
+    refresh. It also failed silently: Scion rewrites a LOOPBACK hub endpoint to
+    the container-reachable `host.containers.internal` form that lever's pasta
+    `--map-host-loopback` mapping serves, and a non-loopback endpoint skips
+    that rewrite entirely. lever therefore starts the hub with `--enable-web`
+    alone. The SPA does not need the flag — it builds every URL relative — and
+    its only other consumers (the session cookie's `Secure` flag, the OAuth
+    redirect URI) are unreachable here, since the proxy strips the hub's
+    session cookie and injects a PAT rather than running an OAuth login.
+    Regression-tested at the level that matters: the test asserts the endpoint
+    AGENTS receive, not the flags lever emits — argv-shaped tests passed
+    throughout the bug.
+  - **A `scion.version:` pin now actually serves the UI.** Upstream tracks only
+    `web/dist/client/.gitkeep` and `.gitignore`s the built output, so a binary
+    compiled from a fetched module (or a `source:` checkout that was never
+    `make web`-ed) has an EMPTY embedded asset filesystem: `--enable-web`
+    served Scion's bare "Web UI Not Available — built without embedded web
+    assets" page, and `GET /assets/main.js` 404ed. The fetched Go module does
+    carry the full npm project, so when `remote.enabled`, lever now runs
+    `npm ci && npm run build` **on the host** against that same source tree and
+    starts the hub with `--web-assets-dir` pointing at the staged output. One
+    pin, one download: the SPA is built from exactly the tree the pinned binary
+    was compiled from, so the two cannot disagree.
+    - Host-side for the same reason scion itself is cross-compiled host-side —
+      the guest carries no toolchain, and giving it one would also hand the
+      jail npm's registry egress.
+    - **Cached per pin.** The build directory is keyed by a digest of scion's
+      web sources (build inputs only — `node_modules`, `dist` and the
+      npm-generated `public/assets`+`public/shoelace` are excluded, or a
+      `source:` checkout's key would change on every build). An unchanged pin
+      re-applies in milliseconds with no npm run; a `source:` edit rebuilds,
+      keyed by content rather than by a pin string. Cache lives under
+      `~/Library/Caches/lever/scion-web/` (macOS) or `~/.cache/lever/scion-web/`
+      (Linux); staged into the guest at `/usr/local/share/scion/web`, and
+      re-staging is skipped when the guest already holds that digest.
+    - **Sizes, and no auto-prune.** The staged payload is ~3.3MB: vite's
+      sourcemaps are stripped from it, being 71% of the build output (8.2MB of
+      11.5MB at pin `e82a2a08`) and existing to debug a SPA lever does not
+      develop. The host cache is ~210MB per distinct pin and lever never prunes
+      it — several remote-enabled instances share that cache, so deleting "the
+      pins I am not using" on every apply would have two instances on different
+      pins thrashing each other's builds. Deleting the cache (or any `<digest>`
+      in it) is always safe.
+    - **New prerequisite: node >= 20 + npm on the host**, but only for
+      `remote.enabled` instances on `version:`/`source:`. A new `lever doctor`
+      check reports it, and `lever apply` fails early and by name — before
+      copying any sources — rather than letting a missing toolchain surface as
+      the "Web UI Not Available" page in a browser hours later. The message
+      names the asdf/mise dead-shim case explicitly (it exits 126 with no
+      useful text), the same trap the existing `go toolchain` check covers.
+    - **`scion.binary:` is exempt**, deliberately and not as an error: lever has
+      no source to build the SPA from, and an operator-built binary may already
+      embed one (upstream's `make all` does). lever builds nothing and passes no
+      `--web-assets-dir`, so those embedded assets keep serving — Scion treats
+      any non-empty value as an override that REPLACES the embedded filesystem
+      rather than falling back to it, so a flag pointing at an unstaged path
+      would be worse than no flag at all. One predicate
+      (`config.App.ScionWebAssets`) drives the build, the staging and the flag
+      so the three cannot disagree.
+  - **The browser gets a hub session from a local OIDC provider lever runs
+    itself, with NO endpoint that can mint one.** The injected PAT opens the
+    hub's API but cannot open its UI shell: Scion's web layer authenticates a
+    browser by a `scion_sess` cookie alone and never reads `Authorization`
+    (`pkg/hub/web.go` sessionAuthMiddleware), so with dev-auth off and no
+    external IdP the SPA sat at 401. `lever remote serve` now also serves a
+    minimal OIDC provider on its own host loopback port (`remote.login_port`,
+    default 8447) and performs the login SERVER-SIDE: it GETs the hub's
+    `/auth/login/oidc` with its own cookie jar without following the redirect,
+    mints an authorization code **by an in-process function call**, GETs the
+    hub's own callback with that code, and keeps the session cookie host-side.
+    - **`/authorize` is a registered route that returns 404, permanently, and
+      every hit is audited.** Scion's OIDC login validates NOTHING — no
+      `id_token` is requested or parsed, no JWKS fetched, no PKCE, no nonce, no
+      client secret, and the discovery document's issuer is never compared to
+      the configured one — so whoever can obtain an authorization code can have
+      the hub mint them a session as any identity. The whole security of this
+      rests on codes being creatable only in-process, on the host, at the same
+      trust level as `remote.pat`. That matters because the provider IS
+      reachable from inside the jail: the hub only accepts a loopback issuer
+      (it validates `issuer_url` at startup and refuses to start otherwise), so
+      a logic-free forwarder in the guest carries guest `127.0.0.1:8446` to
+      the provider's host port — and lever maps guest loopback into every agent netns at
+      `169.254.1.2`. An agent therefore reaches discovery, `/token` and
+      `/userinfo`, none of which yields anything without a code. A working
+      `/authorize` would have turned that into "any jailed agent can become a
+      hub user". The route exists, rather than simply being absent, so its
+      absence cannot read as an oversight somebody later "finishes"; discovery
+      advertises `https://lever.invalid/authorize` (Scion requires the field to
+      be present but never dials it), and `lever doctor` checks both that
+      discovery is served and that `/authorize` still 404s.
+    - **Codes are bound and single-use**: 32 bytes from `crypto/rand`, bound to
+      the login attempt's `state`, `redirect_uri` and `client_id`, consumed on
+      presentation whatever the outcome, 60-second TTL.
+    - **The session never widens the phone's reach.** It is attached to
+      UI-shell requests only; everything under `/api/v1` keeps riding the
+      narrow remote PAT, since Scion's `sessionToBearerMiddleware` passes a
+      request through untouched when it carries an `Authorization` header. The
+      cookie stays host-side and the hub's `Set-Cookie` is still stripped from
+      every response.
+    - **The identity asserted is the one the proxy already verified** — the
+      Tailscale login matched against `allowed_users` — so the hub's user row
+      names the operator who connected, and two operators get two sessions.
+      `admin_emails` is never set, so users are created at Scion's `member`
+      role. Sessions are obtained lazily, shared by concurrent requests (a page
+      load opens several connections at once), and renewed transparently when
+      the hub stops honoring one — a restarted hub costs one silent re-login,
+      not a login page the operator cannot complete.
+    - **The guest half**: a ~90-line stdlib forwarder, cross-compiled for the
+      guest's architecture from source embedded in lever and installed with the
+      same hash-skip as the scion binary. It carries no logic beyond
+      forwarding, and refuses a non-loopback listen address. Enabling remote
+      access therefore also needs a **Go toolchain on the host** — already true
+      for `scion.version:`/`source:`, newly true for `binary:`.
+    - **The hub restarts once, on change only.** Scion reads `oidc_login` at
+      startup, so `lever apply` writes the block into the guest's
+      `~/.scion/settings.yaml` and restarts the hub when that file actually
+      changed; an unchanged config restarts nothing, since a restart drops
+      every agent's hub connection for its duration. lever refuses to add a
+      `server:` key beside an unmigrated legacy `server.yaml`, which would
+      silently make Scion ignore that file entirely.
+  - **The proxy reaches the hub THROUGH its own jail**, not over a host port.
+    The hub binds `127.0.0.1:8080` INSIDE the jail; a host-side address that
+    appears to reach it is an artifact of OrbStack's port forwarding, landing
+    on whichever machine claimed the port — not necessarily this instance's.
+    The proxy now runs `nc 127.0.0.1 8080` in its own jail and adapts that
+    child process to a connection (real deadlines, HTTP keep-alive, and the
+    hub's WebSocket attach streams all carried), which is the same
+    everything-goes-through-the-jail rule `internal/hubapi` already followed.
+    Consequence: **several remote-enabled instances can now run on one host**,
+    each proxy reaching its own hub instead of contending for one forwarded
+    port. Each still needs its own `remote.port` and its own `tailscale serve`
+    mapping. A dial that fails reports why — jail down, `nc` missing from the
+    guest, hub refusing the connection — in `remote.log` and in a new `error`
+    field on the audit line, rather than as a bare `502`. A hub that accepts
+    the connection but never sends headers is bounded at 45s, so a wedged
+    machine yields that same diagnosable 502 instead of a request that hangs
+    forever; the bound is on headers only, so streamed transcripts and
+    attach streams are unaffected.
+- **`netcat-openbsd` is now a declared jail prereq**, beside `curl`, in the
+  guest provisioning package list. Both were already present in the base
+  image, so this installs nothing new on an existing guest (the `dpkg -s`
+  guard still passes and apt still never re-runs) — it names the dependency so
+  a future base image cannot drop it and break a lever feature silently. `curl`
+  carries every hub call from inside the jail; `netcat-openbsd` carries the
+  remote proxy's hub dial.
+  - `lever doctor` gains a "remote access" check when enabled: proxy pid
+    alive and actually listening, the PAT present at `0600`, and an
+    end-to-end `GET /healthz` **through** the proxy returning 200 — proving
+    the whole chain (loopback listener, origin/identity gates, PAT
+    injection, hub) actually works, not just that a process is running.
+  - **Deviation: PAT expiry is not checked.** The hub's default token
+    lifetime is 90 days; lever has no cheap way to read a token's remaining
+    lifetime back from the hub in v1, so neither `doctor` nor `status` warns
+    before it lapses. If remote access starts failing auth for no other
+    reason, re-mint by deleting `.lever-state/remote.pat` and re-running
+    `lever apply`.
+  - **Upgrading an existing instance:** the first `apply` after flipping
+    `remote.enabled: true` on an instance that was already bootstrapped
+    reopens a brief, jail-loopback-only, dev-auth-on mint window to mint the
+    remote PAT — the same shape as the documented controller-PAT re-mint
+    repair. On a fresh bootstrap with `remote.enabled` already set, this
+    happens in the same window as the controller-PAT mint; no extra window
+    opens.
+
 ## [0.16.0] - 2026-08-13
 
 A correctness release. Every credential lever plants in the Scion Hub was

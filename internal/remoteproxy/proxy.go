@@ -69,19 +69,63 @@ type Config struct {
 	ServeHost string
 	// AllowedUsers, when non-empty, pins Tailscale-User-Login values.
 	AllowedUsers []string
+	// Session supplies the hub web session for the UI SHELL — and only the
+	// shell. nil disables session injection entirely (API-only proxying,
+	// which is what every test that doesn't care about the UI wants).
+	//
+	// scion's web layer authenticates a browser by cookie alone: it never
+	// reads Authorization (pkg/hub/web.go sessionAuthMiddleware), so the
+	// injected PAT cannot open the shell. Its API layer is the other way
+	// round: sessionToBearerMiddleware passes a request through untouched
+	// when it already carries an Authorization header, so /api/v1 keeps
+	// riding the NARROW remote PAT. Attaching the session to /api/v1 too
+	// would silently widen what the phone can do to whatever the session's
+	// hub user may do — which is why the session is never sent there (see
+	// isAPIPath, enforced both at the gate and in Rewrite).
+	Session SessionSource
 	// Audit receives one line per decision; nil disables (tests).
 	Audit func(line AuditLine)
+}
+
+// SessionSource hands out hub web sessions per verified operator, and takes
+// them back when the hub stops honoring them. *LoginDriver implements it; the
+// interface exists so the proxy can be exercised without a hub.
+type SessionSource interface {
+	// Cookie returns the scion_sess value for an operator login, logging in
+	// on first use. Callers may race; implementations must share one attempt.
+	Cookie(ctx context.Context, login string) (string, error)
+	// Invalidate drops a session the hub rejected, so the next call logs in
+	// again. The cookie value identifies WHICH session is being dropped, so a
+	// late request cannot discard one a concurrent renewal just installed.
+	Invalidate(login, cookie string)
+}
+
+// apiPathPrefix is the hub's REST surface. Everything else the proxy forwards
+// — the SPA shell, its assets, /auth/me — is the "web shell" the session
+// cookie is for.
+const apiPathPrefix = "/api/v1"
+
+// isAPIPath reports whether p is a hub API request rather than a UI-shell one.
+// Exact match as well as prefix: "/api/v1" itself is the API, and a path like
+// "/api/v1x" is not.
+func isAPIPath(p string) bool {
+	return p == apiPathPrefix || strings.HasPrefix(p, apiPathPrefix+"/")
 }
 
 // AuditLine is emitted once per request, regardless of outcome. It never
 // carries the PAT value.
 type AuditLine struct {
-	Time     time.Time `json:"time"`
-	TSLogin  string    `json:"ts_login,omitempty"`
-	Method   string    `json:"method"`
-	Path     string    `json:"path"`
-	Decision string    `json:"decision"` // "allow" | "deny-origin" | "deny-user" | "deny-no-pat"
-	Status   int       `json:"status,omitempty"`
+	Time    time.Time `json:"time"`
+	TSLogin string    `json:"ts_login,omitempty"`
+	Method  string    `json:"method"`
+	Path    string    `json:"path"`
+	// Decision is the outcome. Proxied requests use "allow", "deny-origin",
+	// "deny-user", "deny-no-pat" or "deny-no-session"; the login path adds
+	// "oidc-session"/"oidc-session-failed" (see login.go) and the provider's
+	// own "oidc-discovery", "oidc-token", "oidc-userinfo", their -refused
+	// forms, "oidc-not-found", and "deny-authorize" (see oidc.go).
+	Decision string `json:"decision"`
+	Status   int    `json:"status,omitempty"`
 	// Error records why an allowed request never got an answer from the hub
 	// (set only on the 502 path). The transport's own diagnosis lands here
 	// rather than in the client's response body: the operator needs to know
@@ -112,6 +156,19 @@ var secFetchSiteAllowed = []string{"same-origin", "same-site", "none"}
 type ctxState struct {
 	pat  string
 	line *AuditLine
+	// cookie is the hub session injected on THIS attempt, empty for API
+	// requests and whenever Config.Session is unset.
+	cookie string
+	// retry is set by ModifyResponse when the hub rejected that session, and
+	// read by the gate (to log in again) and by sessionRetryWriter (to
+	// swallow the rejection instead of showing the operator a login page).
+	// ModifyResponse runs BEFORE ReverseProxy writes anything to the
+	// ResponseWriter, which is what makes one flag enough for both.
+	retry bool
+	// retryable records that this attempt may be repeated: the first attempt
+	// of a shell request whose method carries no body. It stops a retry loop
+	// (the second attempt sets it false) and keeps a POST from being replayed.
+	retryable bool
 }
 
 type ctxStateKey struct{}
@@ -141,11 +198,19 @@ func NewHandler(cfg Config) http.Handler {
 					pr.Out.Header.Del(k)
 				}
 			}
-			var pat string
+			var pat, cookie string
 			if s := stateFrom(pr.In); s != nil {
-				pat = s.pat
+				pat, cookie = s.pat, s.cookie
 			}
 			pr.Out.Header.Set("Authorization", "Bearer "+pat)
+			// The hub session opens the UI shell, which the PAT cannot. It is
+			// re-checked against the path here as well as at the gate: this is
+			// the single funnel every upstream request passes through, so the
+			// "an API call never rides the session" property holds even if a
+			// future caller populates the cookie somewhere it shouldn't.
+			if cookie != "" && !isAPIPath(pr.In.URL.Path) {
+				pr.Out.Header.Set("Cookie", sessionCookieName+"="+cookie)
+			}
 			pr.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -155,9 +220,20 @@ func NewHandler(cfg Config) http.Handler {
 			// this removes every Set-Cookie value regardless of how many
 			// the hub sent or what case it used.
 			resp.Header.Del("Set-Cookie")
-			if s := stateFrom(resp.Request); s != nil && s.line != nil && cfg.Audit != nil {
-				s.line.Status = resp.StatusCode
-				cfg.Audit(*s.line)
+			if s := stateFrom(resp.Request); s != nil {
+				if s.retryable && sessionRejected(resp) {
+					// The hub does not know this session (it restarted, or the
+					// session lapsed). Say so, and audit nothing: the gate
+					// replaces the session and repeats the request, and that
+					// attempt is the one that answers the operator. The login
+					// itself is audited by the driver.
+					s.retry = true
+					return nil
+				}
+				if s.line != nil && cfg.Audit != nil {
+					s.line.Status = resp.StatusCode
+					cfg.Audit(*s.line)
+				}
 			}
 			return nil
 		},
@@ -268,7 +344,116 @@ func NewHandler(cfg Config) http.Handler {
 		// not here, so the line carries the real status instead of the
 		// zero value.
 		state := &ctxState{pat: pat, line: &line}
-		r = r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
-		rp.ServeHTTP(w, r)
+
+		// The UI shell needs a hub session; /api/v1 must NOT get one (see
+		// Config.Session). Obtaining it is lazy — the first shell request of
+		// the proxy's life performs the login, and an instance nobody opens a
+		// browser at never logs in at all.
+		if cfg.Session != nil && !isAPIPath(r.URL.Path) {
+			cookie, err := cfg.Session.Cookie(r.Context(), line.TSLogin)
+			if err != nil {
+				deny(http.StatusBadGateway, "deny-no-session", "hub login failed — see .lever-state/remote.log")
+				return
+			}
+			state.cookie = cookie
+			// Only a bodiless method may be repeated: the retry below re-runs
+			// the request, and a body has already been consumed by then.
+			state.retryable = r.Method == http.MethodGet || r.Method == http.MethodHead
+		}
+
+		if !state.retryable {
+			r = r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
+			rp.ServeHTTP(w, r)
+			return
+		}
+
+		// Retryable shell request: hold the response back just long enough to
+		// learn whether the hub accepted the session. If it did (the normal
+		// case), everything streams through untouched.
+		first := r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
+		rp.ServeHTTP(&sessionRetryWriter{ResponseWriter: w, state: state}, first)
+		if !state.retry {
+			return
+		}
+		// The hub rejected the session. Replace it and answer the request
+		// properly, rather than letting the operator's browser land on a
+		// login page it cannot complete (the login is server-side; the SPA's
+		// login button leads to an authorization endpoint that does not
+		// resolve, by design — see Provider.handleAuthorize).
+		cfg.Session.Invalidate(line.TSLogin, state.cookie)
+		cookie, err := cfg.Session.Cookie(r.Context(), line.TSLogin)
+		if err != nil {
+			deny(http.StatusBadGateway, "deny-no-session", "hub login failed — see .lever-state/remote.log")
+			return
+		}
+		// retryable is deliberately not set: one retry, then the hub's answer
+		// stands whatever it is.
+		again := &ctxState{pat: pat, line: &line, cookie: cookie}
+		rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 	})
 }
+
+// sessionRejected reports whether the hub's answer means "I do not know this
+// session". scion says it two ways, depending on what it took the request for:
+// a 401 for anything it reads as programmatic, and a 302 to its login page for
+// anything it reads as a browser navigation (pkg/hub/web.go
+// sessionAuthMiddleware). Nothing else is treated as a session problem — in
+// particular a 403 is the hub refusing an ACTION, which a new session would
+// not change.
+func sessionRejected(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	if resp.StatusCode != http.StatusFound {
+		return false
+	}
+	loc := resp.Header.Get("Location")
+	return strings.HasPrefix(loc, "/auth/login") || strings.HasPrefix(loc, "/login")
+}
+
+// sessionRetryWriter withholds a response the gate is about to replace.
+//
+// ReverseProxy calls ModifyResponse before it writes anything to the
+// ResponseWriter, so by the time WriteHeader lands here the decision to retry
+// is already made. On a retry the status, headers and body are all dropped —
+// the client sees only the second attempt — and on everything else this is a
+// pass-through: headers were written straight into the real ResponseWriter's
+// map all along, so nothing is copied and a streamed body still streams.
+type sessionRetryWriter struct {
+	http.ResponseWriter
+	state   *ctxState
+	swallow bool
+}
+
+func (w *sessionRetryWriter) WriteHeader(status int) {
+	if w.state.retry {
+		// Clear the hub's rejection headers (Location, Content-Type, …) so
+		// the retry writes into a clean response rather than inheriting them.
+		clear(w.ResponseWriter.Header())
+		w.swallow = true
+		return
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *sessionRetryWriter) Write(p []byte) (int, error) {
+	if w.swallow {
+		return len(p), nil
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *sessionRetryWriter) Flush() {
+	if w.swallow {
+		return
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the real writer for everything
+// this wrapper does not override — deadlines, and the Hijack that carries the
+// hub's WebSocket upgrades. An upgrade cannot be swallowed anyway: it arrives
+// as a 101, which is not a session rejection.
+func (w *sessionRetryWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

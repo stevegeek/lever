@@ -173,6 +173,19 @@ func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath strin
 	return b.Guest().InstallRootBinary(ctx, localPath, destPath)
 }
 
+// EnsureHubLogin provisions the guest half of the remote-access login path
+// (loopback forwarder + the hub's oidc_login block), reporting whether the
+// hub's configuration changed — see backend.Backend.
+func (b *Base) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool, error) {
+	return b.Guest().EnsureHubLogin(ctx, spec)
+}
+
+// DisableHubLogin converges the guest's remote-access login path off — see
+// backend.Backend.
+func (b *Base) DisableHubLogin(ctx context.Context) error {
+	return b.Guest().DisableHubLogin(ctx)
+}
+
 // ReadScionProjectState reads scion's registration state from the machine for
 // `lever doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
 // machine-only guest prefix, so it needs no EnsureUp.

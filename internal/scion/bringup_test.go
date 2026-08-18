@@ -226,19 +226,20 @@ func TestServerStopArgv(t *testing.T) {
 }
 
 // notRunningRunner simulates `scion server stop` failing because no server is
-// running (a real non-nil error from the runner, marker text in Stderr — the
-// FakeRunner only errors on unscripted commands and can't carry a custom
+// running (a real non-nil error from the runner, scion's own text in Stderr —
+// the FakeRunner only errors on unscripted commands and can't carry a custom
 // error message, so this small wrapper mirrors the alreadyUpRunner pattern in
 // internal/apply/run_test.go), falling through to the wrapped FakeRunner for
 // everything else.
 type notRunningRunner struct {
 	*exec.FakeRunner
+	stderr string
 }
 
 func (r *notRunningRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
 	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "stop" {
 		r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
-		return exec.Result{Code: 1, Stderr: "Error: server already exists / not running"}, fmt.Errorf("exit status 1")
+		return exec.Result{Code: 1, Stderr: r.stderr}, fmt.Errorf("exit status 1")
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
@@ -247,13 +248,54 @@ func (r *notRunningRunner) Run(ctx context.Context, env map[string]string, name 
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
+// TestServerStopTolerantOfNotRunning uses scion's REAL wording, which is the
+// whole point of the test.
+//
+// It previously used a hand-written "Error: server already exists / not
+// running", which passed on the "already exists" substring — so it asserted
+// the tolerance while proving nothing about what scion actually says. A live
+// apply found the gap: `scion server stop` on a stopped daemon says "server
+// daemon is not running" (cmd/server_daemon.go), matching neither arm of
+// AlreadyRunning, and the error failed the whole apply.
 func TestServerStopTolerantOfNotRunning(t *testing.T) {
-	f := &notRunningRunner{FakeRunner: exec.NewFakeRunner()}
-	c := New(f, Options{})
-	if err := c.ServerStop(context.Background()); err != nil {
-		t.Fatalf("ServerStop should tolerate not-running: %v", err)
+	// Both shapes scion emits: the bare stop message, and the restart variant
+	// that appends a hint.
+	for _, stderr := range []string{
+		"Error: server daemon is not running",
+		"Error: server daemon is not running\n\nUse 'scion server start' to start it",
+	} {
+		f := &notRunningRunner{FakeRunner: exec.NewFakeRunner(), stderr: stderr}
+		c := New(f, Options{})
+		if err := c.ServerStop(context.Background()); err != nil {
+			t.Fatalf("ServerStop must tolerate scion's own not-running answer %q: %v", stderr, err)
+		}
+		if len(f.Calls) != 1 {
+			t.Fatalf("want 1 call, got %d", len(f.Calls))
+		}
 	}
-	if len(f.Calls) != 1 {
-		t.Fatalf("want 1 call, got %d", len(f.Calls))
+}
+
+// A stop that fails for any OTHER reason is still a failure: tolerance is for
+// "there was nothing to stop", not for "the stop did not work".
+func TestServerStopReportsRealFailures(t *testing.T) {
+	f := &notRunningRunner{FakeRunner: exec.NewFakeRunner(), stderr: "Error: permission denied"}
+	c := New(f, Options{})
+	if err := c.ServerStop(context.Background()); err == nil {
+		t.Fatal("ServerStop swallowed a real failure")
+	}
+}
+
+// AlreadyRunning must NOT learn the not-running wording: it also guards
+// ServerStart, where a daemon reported as not running means the start failed.
+func TestAlreadyRunningDoesNotCoverNotRunning(t *testing.T) {
+	err := fmt.Errorf("scion server start: Error: server daemon is not running")
+	if AlreadyRunning(err) {
+		t.Fatal("AlreadyRunning matched a not-running error — a failed start would be swallowed as success")
+	}
+	if !notRunning(err) {
+		t.Fatal("notRunning did not match scion's wording")
+	}
+	if notRunning(fmt.Errorf("agent 'x' is not running (phase: stopped)")) {
+		t.Fatal("notRunning matched an AGENT-level message; it must only cover the daemon")
 	}
 }

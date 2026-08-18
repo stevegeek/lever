@@ -19,6 +19,27 @@ func AlreadyRunning(err error) bool {
 	return strings.Contains(s, "already running") || strings.Contains(s, "already exists")
 }
 
+// notRunning reports whether err is scion refusing to act on the SERVER daemon
+// because it is not running — `scion server stop` with nothing to stop
+// (cmd/server_daemon.go: "server daemon is not running").
+//
+// A predicate of its own rather than another arm of AlreadyRunning, because
+// AlreadyRunning also guards ServerStart, where "not running" must stay a real
+// failure: a start that reports the daemon is not running has not started it.
+//
+// It matches the full "server daemon is not running", not a bare "not running"
+// or even "daemon is not running". Both looser forms swallow messages about
+// OTHER things: scion says "agent 'x' is not running (phase: …)" at the agent
+// level, and "broker daemon is not running" for the runtime broker
+// (cmd/broker.go), so a future caller wrapping `runtime-broker start` with
+// this would get exactly the silent success this predicate exists to prevent.
+func notRunning(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "server daemon is not running")
+}
+
 // hubReadyAttempts/hubReadyInterval are package vars so tests can shrink them.
 var hubReadyAttempts = 30
 var hubReadyInterval = 1 * time.Second
@@ -195,13 +216,22 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	return c.waitHubReady(ctx)
 }
 
-// ServerStop stops the workstation daemon. Tolerates the "not running" case
-// (AlreadyRunning's message set also covers scion's not-running wording) so
-// callers can call it unconditionally during teardown. NOTE (live): if the
-// pinned scion build lacks `server stop`, callers should fall back to a
-// jail-process kill; this stays the seam either way.
+// ServerStop stops the workstation daemon, tolerating a daemon that is not
+// running so callers can call it unconditionally — during teardown, and as the
+// stop half of a restart.
+//
+// That tolerance is notRunning's, NOT AlreadyRunning's. This comment used to
+// claim AlreadyRunning covered scion's not-running wording; it does not, and a
+// live apply proved it: `scion server stop` against a stopped daemon exits
+// non-zero with "server daemon is not running", which contains neither
+// "already running" nor "already exists", so the error propagated and failed
+// the whole apply. Do not fold the two predicates back together — see
+// notRunning for why.
+//
+// NOTE (live): if the pinned scion build lacks `server stop`, callers should
+// fall back to a jail-process kill; this stays the seam either way.
 func (c *Client) ServerStop(ctx context.Context) error {
-	if _, err := c.run(ctx, "", "server", "stop"); err != nil && !AlreadyRunning(err) {
+	if _, err := c.run(ctx, "", "server", "stop"); err != nil && !AlreadyRunning(err) && !notRunning(err) {
 		return err
 	}
 	return nil

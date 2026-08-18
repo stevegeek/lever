@@ -110,6 +110,24 @@ type Backend interface {
 	// destPath as root (used by the acceptance gate to place lever-agent). The
 	// transport is the backend's root prefix, so callers stay backend-agnostic.
 	InstallGuestBinary(ctx context.Context, localPath, destPath string) error
+	// EnsureHubLogin provisions the guest half of the remote-access login
+	// path: the loopback forwarder that lets the hub see lever's host-side
+	// OIDC provider as a LOCAL issuer (scion refuses to start on any other
+	// kind), and the `oidc_login` block in the guest's ~/.scion/settings.yaml.
+	//
+	// It reports whether the hub's configuration changed. scion reads that
+	// file once, at startup, so a change means a running hub is still serving
+	// the old configuration and the caller must restart it — while an
+	// unchanged one restarts nothing, which is what stops a re-apply from
+	// bouncing the hub and every agent's connection to it.
+	EnsureHubLogin(ctx context.Context, spec HubLogin) (bool, error)
+	// DisableHubLogin converges that provisioning OFF: it stops and removes
+	// the guest-side forwarder and drops the `oidc_login` block. Called
+	// whenever remote access is not enabled, so an instance that turned it
+	// back off does not keep an unauthenticated jail→host loopback bridge
+	// running for a feature that is gone. Idempotent, and cheap when there is
+	// nothing to remove.
+	DisableHubLogin(ctx context.Context) error
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	// Stop powers the machine off but keeps its disk intact — distinct from

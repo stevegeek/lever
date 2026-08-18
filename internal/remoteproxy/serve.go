@@ -38,62 +38,134 @@ type ServeConfig struct {
 	// Serve runs. Passing the same path here just means Serve co-owns the
 	// file's lifecycle rather than leaving it entirely to the caller.
 	AuditPath string
+	// Provider, when non-nil, is the local OIDC provider, served on its OWN
+	// loopback listener (127.0.0.1:Provider.Port()) for the life of the
+	// serve.
+	//
+	// A second listener rather than extra routes on the proxy's own, because
+	// the two have opposite audiences: the proxy answers the operator's
+	// browser through `tailscale serve`, while the provider answers the hub's
+	// back channel, which arrives from inside the jail through the guest
+	// forwarder. One shared listener would publish the provider's endpoints
+	// to the tailnet and the proxy's to the jail — each reachable by a caller
+	// that has no business with it.
+	Provider *Provider
 }
 
 // Serve runs the proxy until ctx is cancelled: bind 127.0.0.1:<Port> (fail
-// closed on any non-loopback listen address), open the audit JSONL (append,
-// 0600) when AuditPath is set, write the pid file, and serve cfg.Handler.
-// On ctx.Done it shuts the server down gracefully, removes the pid file, and
-// returns. Mirrors brokerctl.Serve's bind → pid → serve → remove-pid
-// ordering (internal/brokerctl/serve.go).
+// closed on any non-loopback listen address), bind the provider's own
+// loopback port when one is configured, open the audit JSONL (append, 0600)
+// when AuditPath is set, write the pid file, and serve. On ctx.Done it shuts
+// both servers down gracefully, removes the pid file, and returns. Mirrors
+// brokerctl.Serve's bind → pid → serve → remove-pid ordering
+// (internal/brokerctl/serve.go).
 func Serve(ctx context.Context, cfg ServeConfig) error {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Port))
+	ln, err := listenLoopback(cfg.Port)
 	if err != nil {
-		return fmt.Errorf("remoteproxy: bind: %w", err)
+		return err
 	}
-	// Fail closed on anything but a loopback bind. The Handler's
-	// Tailscale-User-Login gate is only as strong as "nothing but
-	// `tailscale serve` can reach this listener" (see proxy.go's package
-	// doc): a non-loopback listener would let any LAN/tailnet peer reach it
-	// directly and set that header itself, bypassing the gate entirely.
-	if ta, ok := ln.Addr().(*net.TCPAddr); !ok || !isLoopbackAddr(ta) {
-		_ = ln.Close()
-		return fmt.Errorf("remoteproxy: listener must be loopback, got %s", ln.Addr())
+	// Both listeners are bound before anything else, so a port collision
+	// fails the serve outright instead of leaving a proxy up whose login path
+	// can never work.
+	var provLn net.Listener
+	if cfg.Provider != nil {
+		provLn, err = listenLoopback(cfg.Provider.Port())
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
 	}
 
 	if cfg.AuditPath != "" {
 		_, auditCloser, err := OpenAudit(cfg.AuditPath)
 		if err != nil {
-			_ = ln.Close()
+			closeListeners(ln, provLn)
 			return fmt.Errorf("remoteproxy: open audit: %w", err)
 		}
 		defer auditCloser.Close()
 	}
 
 	if err := writePIDFile(cfg.PIDPath); err != nil {
-		_ = ln.Close()
+		closeListeners(ln, provLn)
 		return err
 	}
 	defer removePIDFile(cfg.PIDPath)
 
-	srv := newServer(cfg.Handler)
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	servers := []*http.Server{newServer(cfg.Handler)}
+	serveErr := make(chan error, 2)
+	go func() { serveErr <- servers[0].Serve(ln) }()
+	if provLn != nil {
+		prov := newServer(cfg.Provider.Handler())
+		servers = append(servers, prov)
+		go func() { serveErr <- prov.Serve(provLn) }()
+	}
+
+	shutdownAll := func() error {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var first error
+		for _, s := range servers {
+			if err := s.Shutdown(shutdownCtx); err != nil && first == nil {
+				first = fmt.Errorf("remoteproxy: shutdown: %w", err)
+			}
+		}
+		return first
+	}
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("remoteproxy: shutdown: %w", err)
+		if err := shutdownAll(); err != nil {
+			return err
 		}
-		<-serveErr // wait for srv.Serve to actually return before the listener is considered released
+		// Wait for every Serve to actually return before the listeners are
+		// considered released.
+		for range servers {
+			<-serveErr
+		}
 		return nil
 	case err := <-serveErr:
+		// One of them stopped on its own. Take the other down too: a proxy
+		// with no provider cannot log in, and a provider with no proxy serves
+		// nobody, so half-running is never the state to leave behind.
+		_ = shutdownAll()
+		for range servers[1:] {
+			<-serveErr
+		}
 		if err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("remoteproxy: serve: %w", err)
 		}
 		return nil
+	}
+}
+
+// listenLoopback binds 127.0.0.1:<port> and fails closed on anything but a
+// loopback address.
+//
+// The proxy's Tailscale-User-Login gate is only as strong as "nothing but
+// `tailscale serve` can reach this listener" (see proxy.go's package doc): a
+// non-loopback listener would let any LAN/tailnet peer reach it directly and
+// set that header itself, bypassing the gate. The provider's listener carries
+// the same requirement for a different reason — off loopback it would be an
+// unauthenticated identity endpoint on the network.
+func listenLoopback(port int) (net.Listener, error) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return nil, fmt.Errorf("remoteproxy: bind: %w", err)
+	}
+	if ta, ok := ln.Addr().(*net.TCPAddr); !ok || !isLoopbackAddr(ta) {
+		_ = ln.Close()
+		return nil, fmt.Errorf("remoteproxy: listener must be loopback, got %s", ln.Addr())
+	}
+	return ln, nil
+}
+
+// closeListeners closes every non-nil listener, for the failure paths between
+// binding and serving.
+func closeListeners(lns ...net.Listener) {
+	for _, ln := range lns {
+		if ln != nil {
+			_ = ln.Close()
+		}
 	}
 }
 

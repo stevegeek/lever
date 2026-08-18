@@ -27,10 +27,19 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 	// (→ OUTPUT default ACCEPT) for the resolve+rebuild window. The ruleset is a
 	// pure function of (alias, ports, closed) and is unchanged on a normal
 	// re-apply, so leave the working chain intact and skip the rebuild. (A fresh
-	// machine, the open/subscription posture, or a genuine egress-config change all
-	// have no active DROP and fall through to a full rebuild — and a fresh apply has
-	// no running container to leak. Changing egress config on a live closed instance
-	// requires `lever down` + `up`, not a re-apply.)
+	// machine and the open/subscription posture both have no active DROP and fall
+	// through to a full rebuild — and a fresh apply has no running container to
+	// leak.)
+	//
+	// NOTE what the skip does NOT do: it tests only that the chain is closed and
+	// carries a parseable alias. It never compares the LIVE ruleset against the
+	// desired one, so a genuine egress-config change — a new manager.allow_ports
+	// entry, or the remote-access login port (config.App.EffectiveAllowedPorts) —
+	// is NOT applied to a live closed instance. That needs `lever down` + `up`,
+	// which is the documented requirement; it is not, as an earlier version of
+	// this comment claimed, something the skip detects and falls through for.
+	// Making it apply a missing ACCEPT in place (inserting, never flushing, so
+	// the I2 property holds) is a change of its own.
 	if closedInternet {
 		if alias, ok := g.existingClosedAlias(ctx); ok {
 			return alias, "", false, nil

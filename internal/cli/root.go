@@ -9,7 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/exec"
 )
 
-const Version = "0.16.0"
+const Version = "0.17.0"
 
 // BackendFactory builds a named backend for a given machine name.
 type BackendFactory func(name, machine string) (backend.Backend, error)
@@ -79,7 +79,7 @@ func NewRootWithBackend(bf BackendFactory) *cobra.Command { return newHostRootWi
 func newHostRootWith(bf BackendFactory) *cobra.Command {
 	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)"}
 	root.AddCommand(versionCmd())
-	root.AddCommand(newProvisionCmd(bf), newDestroyCmd(bf), newStopCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newReloadCmd(bf), newAttachCmd(bf), newHostMsgCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf), newBackendsCmd(), newInitCmd(), newDirectiveCmd(), newWorkerCmd(bf))
+	root.AddCommand(newProvisionCmd(bf), newDestroyCmd(bf), newStopCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newReloadCmd(bf), newAttachCmd(bf), newHostMsgCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf), newBackendsCmd(), newInitCmd(), newDirectiveCmd(), newWorkerCmd(bf), newRemoteCmd(bf))
 	return root
 }
 

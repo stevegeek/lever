@@ -2,21 +2,29 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/remoteproxy"
+	scionpkg "github.com/stevegeek/lever/internal/scion"
 )
 
 // checkResult is one diagnostic outcome. detail is shown in both the pass and
@@ -58,6 +66,258 @@ func checkBrokerAlive(st brokerctl.State, jailPort int, dial dialFunc) checkResu
 		return checkResult{name, false, fmt.Sprintf("pid %d is alive but nothing is listening on %s", pid, addr), "inspect .lever-state/broker.log, then restart with `lever apply`"}
 	}
 	return checkResult{name, true, fmt.Sprintf("pid %d, serving on %s", pid, addr), ""}
+}
+
+// remoteHealthzProbe issues GET /healthz against the local remote-access
+// proxy and returns the response status code. A package-level var so tests
+// can inject a fake outcome (mirrors goVersionProbe/claudeVersionProbe).
+//
+// tsLogin, when non-empty, is sent as Tailscale-User-Login. The proxy's own
+// allowed_users gate (remoteproxy.Handler) trusts that header exactly as
+// `tailscale serve` would set it for a real request; doctor runs host-side,
+// already as trusted as the remote.pat file it just read, so it sets this to
+// the first configured allowed user rather than let a pinned instance 403
+// its own liveness probe. An unpinned instance (allowed_users empty) sends
+// no header at all, matching an ordinary curl/native-client request.
+var remoteHealthzProbe = func(port int, tsLogin string) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/healthz", port), nil)
+	if err != nil {
+		return 0, err
+	}
+	if tsLogin != "" {
+		req.Header.Set("Tailscale-User-Login", tsLogin)
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// loginProbeResult is what remoteLoginProbe observes about the local OIDC
+// provider the proxy serves for the hub's login path.
+type loginProbeResult struct {
+	discovery int    // status of GET /.well-known/openid-configuration
+	authorize int    // status of GET /authorize — 404 is the ONLY healthy answer
+	authzURL  string // the authorization_endpoint discovery advertises
+}
+
+// remoteLoginProbe inspects the local OIDC provider on its loopback port. A
+// package-level var so tests can inject an outcome (like remoteHealthzProbe).
+//
+// It checks the two things that can silently break the login path — discovery
+// not being served at all, and the security property the whole design rests
+// on: that there is no authorization endpoint. Nothing legitimate ever calls
+// /authorize (the proxy drives the login server-side and mints codes
+// in-process), so anything but a 404 means this build can mint an
+// authorization code over HTTP, on a port every jailed agent can reach.
+var remoteLoginProbe = func(port int) (loginProbeResult, error) {
+	client := http.Client{Timeout: 3 * time.Second}
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	var out loginProbeResult
+
+	resp, err := client.Get(base + "/.well-known/openid-configuration")
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	out.discovery = resp.StatusCode
+	var doc struct {
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&doc); err == nil {
+		out.authzURL = doc.AuthorizationEndpoint
+	}
+
+	aresp, err := client.Get(base + "/authorize")
+	if err != nil {
+		return out, err
+	}
+	defer aresp.Body.Close()
+	out.authorize = aresp.StatusCode
+	return out, nil
+}
+
+// remoteJailLoginScript asks the hub, FROM INSIDE THE JAIL, to start an OIDC
+// login, and prints "<status> <redirect-url>".
+//
+// -o /dev/null because nothing in the answer's body matters; curl computes
+// %{redirect_url} for a 3xx without following it, which is what lets one
+// request report both the status and where the hub is sending the browser.
+// No Authorization header: the login route is public, and doctor is asking
+// what an unauthenticated browser would get.
+//
+// Absolute path for curl. This runs as the jail's RUN USER, whose PATH has
+// run-user-writable directories ahead of /usr/bin — a shim there could answer
+// for a login path that does not work.
+const remoteJailLoginScript = `exec /usr/bin/curl -sS --connect-timeout 5 --max-time 20 ` +
+	`-o /dev/null -w '%{http_code} %{redirect_url}' "$1"`
+
+// remoteJailLoginProbe runs that request and parses its answer. A
+// package-level var so tests can inject an outcome.
+var remoteJailLoginProbe = func(ctx context.Context, jr leverexec.Runner, hubURL string) (status int, redirect string, err error) {
+	res, err := jr.Run(ctx, nil, "sh", "-c", remoteJailLoginScript, "_", hubURL+"/auth/login/oidc")
+	if err != nil {
+		return 0, "", fmt.Errorf("%v: %s", err, strings.TrimSpace(res.Stderr))
+	}
+	fields := strings.Fields(res.Stdout)
+	if len(fields) == 0 {
+		return 0, "", fmt.Errorf("no answer from the hub")
+	}
+	status, err = strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, "", fmt.Errorf("unparseable answer %q", strings.TrimSpace(res.Stdout))
+	}
+	if len(fields) > 1 {
+		redirect = fields[1]
+	}
+	return status, redirect, nil
+}
+
+// isLoopbackURL reports whether raw addresses the local machine — the test
+// that matters for an authorization endpoint, since loopback is what the jail
+// is given a route to.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// checkRemoteLoginPath asks the hub to start a login and reads what comes
+// back. It is the ONLY check here that exercises the guest half.
+//
+// One request proves the whole chain, because of what the hub has to do to
+// answer it: getOIDCAuthURL fetches the provider's discovery document before
+// it can build a redirect (pkg/hub/oauth.go), and that fetch goes to
+// http://127.0.0.1:<login_port> in the GUEST — through the forwarder lever
+// installed, to the provider in the proxy process on the host. So a 302 to
+// lever's dead authorization endpoint means: the hub read the oidc_login
+// block, the forwarder is running, and the provider answered. A host-side
+// probe of the provider proves none of that, and would stay green while the
+// browser got a 502.
+//
+// Honest limit: the hub caches discovery for an hour, so a 302 proves the
+// chain worked at the time of the FIRST login since the hub started — not
+// that it is reachable this second. The forwarder dying after that (a guest
+// reboot, say) surfaces on the next cold login, not here.
+func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner) (detail string, fix string, ok bool) {
+	if jr == nil {
+		return "", "", true // no jail transport wired (tests)
+	}
+	status, redirect, err := remoteJailLoginProbe(ctx, jr, scionpkg.DefaultHubEndpoint)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("could not ask the hub to start a login from inside the jail: %v", err),
+			"is the machine up? `lever apply`", false
+	case status == http.StatusBadRequest:
+		return "the hub does not have lever's OIDC login configured (it refused to start one)",
+			"run `lever apply` — it writes the oidc_login block into the jail's ~/.scion/settings.yaml and restarts the hub so it is read", false
+	case status == http.StatusInternalServerError:
+		return "the hub could not reach lever's login provider (it failed to build an authorization URL)",
+			"the jail cannot reach the provider on the host: re-run `lever apply` to reinstall and restart the forwarder. " +
+				"On `egress: closed`, a login port granted since the instance came up needs `lever down` + `lever up` — a live " +
+				"closed chain is deliberately never rebuilt in place (internal/backend/guest.ApplyEgress, the I2 property)", false
+	case status != http.StatusFound:
+		return fmt.Sprintf("the hub answered %d when asked to start a login, want 302", status),
+			"inspect .lever-state/remote.log", false
+	case !strings.HasPrefix(redirect, remoteproxy.DeadAuthorizationEndpoint):
+		return fmt.Sprintf("the hub starts logins against %q, not lever's provider", redirect),
+			"another OIDC provider is configured in the jail's ~/.scion/settings.yaml — remove it and re-run `lever apply`", false
+	}
+	return "login path reaches the provider through the jail", "", true
+}
+
+// checkRemote verifies the remote-access proxy (`lever remote`) when
+// configured on: the recorded process is alive and actually listening on
+// EffectiveRemotePort (the same pid/dial split as checkBrokerAlive), the
+// injected PAT is present and not group/other-accessible, and an end-to-end
+// GET /healthz THROUGH the proxy returns 200 — proving the whole chain
+// (loopback listener -> origin/identity gates -> PAT injection -> hub)
+// actually works, not just that a process happens to be running.
+//
+// Disabled is a pass, not a warning: remote access is opt-in and most
+// instances never turn it on. PAT EXPIRY is deliberately not checked here —
+// the hub stores it and lever has no cheap read for it in v1; the repair
+// (delete remote.pat, then `lever apply`) is the same shape as the
+// documented controller-PAT re-mint, default expiry 90d (see the
+// remote-access guide).
+func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, dial dialFunc, jr leverexec.Runner) checkResult {
+	const name = "remote access"
+	if !app.RemoteEnabled() {
+		return checkResult{name, true, "disabled", ""}
+	}
+	const applyFix = "run `lever apply`"
+	pid, found, alive := remotePIDStatus(state.RemotePID())
+	switch {
+	case !found:
+		return checkResult{name, false, "no remote.pid — the proxy was never started (or was cleanly stopped)", applyFix}
+	case !alive:
+		return checkResult{name, false, fmt.Sprintf("remote.pid names pid %d, but that process is gone (stale pid file)", pid), applyFix}
+	}
+	port := app.EffectiveRemotePort()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	if err := dial(addr); err != nil {
+		return checkResult{name, false, fmt.Sprintf("pid %d is alive but nothing is listening on %s", pid, addr), "inspect .lever-state/remote.log, then restart with `lever apply`"}
+	}
+	fi, err := os.Stat(state.RemotePAT())
+	switch {
+	case err != nil:
+		return checkResult{name, false, "remote.pat is missing", applyFix}
+	case fi.Mode().Perm()&0o077 != 0:
+		return checkResult{name, false, fmt.Sprintf("remote.pat has mode %04o (group/other-accessible, want 0600)", fi.Mode().Perm()), "chmod 600 " + state.RemotePAT()}
+	}
+	status, err := remoteHealthzProbe(port, firstOrEmpty(app.Remote.AllowedUsers))
+	if err != nil {
+		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect .lever-state/remote.log — the hub may be down, or the proxy misconfigured"}
+	}
+	if status != http.StatusOK {
+		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect .lever-state/remote.log and .lever-state/remote-audit.jsonl"}
+	}
+	loginPort := app.EffectiveRemoteLoginPort()
+	login, err := remoteLoginProbe(loginPort)
+	switch {
+	case err != nil:
+		return checkResult{name, false, fmt.Sprintf("the login provider on 127.0.0.1:%d is unreachable: %v", loginPort, err),
+			"inspect .lever-state/remote.log — without it the hub cannot log the browser in, and the web UI stays at 401"}
+	case login.discovery != http.StatusOK:
+		return checkResult{name, false, fmt.Sprintf("the login provider answered %d to OIDC discovery, want 200", login.discovery),
+			"inspect .lever-state/remote.log"}
+	case login.authorize != http.StatusNotFound:
+		// Loud on purpose: a provider that answers /authorize can mint an
+		// authorization code over HTTP, and every jailed agent can reach that
+		// port through the guest forwarder (lever maps guest loopback into
+		// each agent's netns). See remoteproxy.Provider.handleAuthorize.
+		return checkResult{name, false, fmt.Sprintf("the login provider answered %d to GET /authorize, want 404 — it must have NO authorization endpoint", login.authorize),
+			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
+	case isLoopbackURL(login.authzURL):
+		// The property, not one port: an authorization endpoint anywhere on
+		// loopback is one the JAIL can reach (guest loopback is mapped into
+		// every agent netns), and reaching one means minting a code. lever's
+		// advertised endpoint names a host that does not resolve.
+		return checkResult{name, false, fmt.Sprintf("OIDC discovery advertises an authorization endpoint on loopback (%s), which the jail can reach", login.authzURL),
+			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
+	}
+	if detail, fix, ok := checkRemoteLoginPath(ctx, jr); !ok {
+		return checkResult{name, false, detail, fix}
+	}
+	return checkResult{name, true, fmt.Sprintf("pid %d, serving on %s, PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", pid, addr, loginPort), ""}
+}
+
+// firstOrEmpty returns the first element of ss, or "" when ss is empty.
+func firstOrEmpty(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	return ss[0]
 }
 
 // checkToolBackends verifies every broker tool is reachable/spawnable up
@@ -373,6 +633,47 @@ func checkGoToolchain(scion config.ScionConfig) checkResult {
 			`put a REAL Go toolchain on PATH (not just an asdf/mise shim), e.g. export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"; ` + "`go version` should print"}
 	}
 	return checkResult{name, true, strings.TrimSpace(out), ""}
+}
+
+// nodeToolchainProbe resolves and validates node+npm for the scion web-asset
+// build, returning the node version. A package-level var so tests can inject a
+// fake outcome (mirrors goVersionProbe).
+//
+// It probes inside the build's own cache directory, and creates that directory
+// to do so. A version manager that resolves node by walking UP for a project
+// file (asdf, mise) gives different answers in different directories, so a
+// probe run in the user's project — which may have its own .tool-versions —
+// would not be evidence about the build, which runs elsewhere. Same reason
+// fetchScionModule resolves the real go binary rather than trusting a shim.
+var nodeToolchainProbe = func() (string, error) {
+	root, err := guest.WebBuildCacheRoot()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", fmt.Errorf("create web build cache %s: %w", root, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return guest.CheckNodeToolchain(ctx, leverexec.RealRunner{}, root)
+}
+
+// checkNodeToolchain verifies node+npm can build scion's web UI when the
+// instance serves it (`remote.enabled` on a source/version scion). Without
+// this, a missing or broken toolchain surfaces either as a failed `lever apply`
+// deep in npm or — worse, before the build existed — as scion's bare "Web UI
+// Not Available" page in the browser, long after the cause. No UI to build =>
+// no node needed => pass.
+func checkNodeToolchain(app *config.App) checkResult {
+	const name = "node toolchain"
+	if !app.ScionWebAssets() {
+		return checkResult{name, true, "scion web UI build not required", ""}
+	}
+	version, err := nodeToolchainProbe()
+	if err != nil {
+		return checkResult{name, false, err.Error(), guest.NodeToolchainFix}
+	}
+	return checkResult{name, true, "node " + strings.TrimSpace(version), ""}
 }
 
 // checkOperatorSkills verifies the framework skills scaffolded by `lever init`

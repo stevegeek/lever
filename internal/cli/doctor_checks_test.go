@@ -14,7 +14,9 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/remoteproxy"
 )
 
 func okDial(string) error   { return nil }
@@ -690,6 +692,228 @@ func TestCheckDirectivesBrokerRunningSocketAbsent(t *testing.T) {
 	}
 }
 
+// writeRemoteDoctorConfig writes a minimal lever.yaml on the orbstack
+// backend with remoteBlock appended raw (e.g. "remote:\n  enabled: true\n"),
+// or omitted entirely when remoteBlock is "". Mirrors writeDirectivesConfig's
+// pattern.
+func writeRemoteDoctorConfig(t *testing.T, remoteBlock string) *config.App {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, config.CanonicalName)
+	body := "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n" + remoteBlock
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+// writeRemotePID records pid at st.RemotePID(), creating the state dir.
+// Mirrors writeBrokerPID for the proxy's own pid file.
+func writeRemotePID(t *testing.T, st brokerctl.State, pid int) {
+	t.Helper()
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeRemotePAT writes a remote.pat file at the given mode, creating the
+// state dir first.
+func writeRemotePAT(t *testing.T, st brokerctl.State, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.RemotePAT(), []byte("scion_pat_x"), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCheckRemoteDisabled covers the default, opt-in-only state: remote
+// access unconfigured is a pass — most instances never turn it on.
+func TestCheckRemoteDisabled(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "")
+	st := brokerctl.StateDir(t.TempDir())
+	r := checkRemote(context.Background(), app, st, okDial, nil)
+	if !r.ok {
+		t.Fatalf("remote disabled must pass: %+v", r)
+	}
+	if !strings.Contains(r.detail, "disabled") {
+		t.Fatalf("detail should say disabled: %q", r.detail)
+	}
+}
+
+func TestCheckRemoteNoPIDFile(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	st := brokerctl.StateDir(t.TempDir()) // no remote.pid — never started
+	r := checkRemote(context.Background(), app, st, okDial, nil)
+	if r.ok {
+		t.Fatal("enabled but never started (no remote.pid) must fail")
+	}
+	if !strings.Contains(r.fix, "lever apply") {
+		t.Fatalf("fix should point at lever apply: %q", r.fix)
+	}
+}
+
+func TestCheckRemotePATMissing(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	st := brokerctl.StateDir(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	// remote.pat intentionally left absent.
+	r := checkRemote(context.Background(), app, st, okDial, nil)
+	if r.ok {
+		t.Fatal("missing remote.pat must fail")
+	}
+	if !strings.Contains(r.fix, "lever apply") {
+		t.Fatalf("fix should point at lever apply: %q", r.fix)
+	}
+}
+
+// A remote.pat that exists but is group/other-accessible must fail too —
+// same posture as checkCredentialFile.
+func TestCheckRemotePATBadPermissions(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	st := brokerctl.StateDir(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	writeRemotePAT(t, st, 0o644)
+	r := checkRemote(context.Background(), app, st, okDial, nil)
+	if r.ok {
+		t.Fatal("a group/other-readable remote.pat must fail")
+	}
+	if strings.Contains(r.detail, "scion_pat_x") {
+		t.Fatalf("detail leaked the PAT value: %q", r.detail)
+	}
+}
+
+func TestCheckRemoteHealthz500(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	st := brokerctl.StateDir(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	writeRemotePAT(t, st, 0o600)
+
+	saved := remoteHealthzProbe
+	t.Cleanup(func() { remoteHealthzProbe = saved })
+	remoteHealthzProbe = func(int, string) (int, error) { return 500, nil }
+
+	r := checkRemote(context.Background(), app, st, okDial, nil)
+	if r.ok {
+		t.Fatal("a non-200 from the healthz probe must fail")
+	}
+	if !strings.Contains(r.detail, "500") {
+		t.Fatalf("detail should mention the bad status: %q", r.detail)
+	}
+}
+
+// stubHealthyLoginProbe makes the local OIDC provider look healthy: discovery
+// served, and NO authorization endpoint (the 404 that the whole design rests
+// on — see remoteproxy.Provider.handleAuthorize).
+func stubHealthyLoginProbe(t *testing.T) {
+	t.Helper()
+	saved := remoteLoginProbe
+	t.Cleanup(func() { remoteLoginProbe = saved })
+	remoteLoginProbe = func(int) (loginProbeResult, error) {
+		return loginProbeResult{discovery: 200, authorize: 404, authzURL: "https://lever.invalid/authorize"}, nil
+	}
+	savedJail := remoteJailLoginProbe
+	t.Cleanup(func() { remoteJailLoginProbe = savedJail })
+	remoteJailLoginProbe = func(context.Context, leverexec.Runner, string) (int, string, error) {
+		return 302, remoteproxy.DeadAuthorizationEndpoint, nil
+	}
+}
+
+// enabled+all-green: pid alive, port listening, PAT present at 0600, the
+// end-to-end healthz probe returns 200, and the login provider is serving
+// discovery with no authorization endpoint.
+func TestCheckRemoteHealthy(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	st := brokerctl.StateDir(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	writeRemotePAT(t, st, 0o600)
+
+	saved := remoteHealthzProbe
+	t.Cleanup(func() { remoteHealthzProbe = saved })
+	remoteHealthzProbe = func(int, string) (int, error) { return 200, nil }
+	stubHealthyLoginProbe(t)
+
+	r := checkRemote(context.Background(), app, st, okDial, nil)
+	if !r.ok {
+		t.Fatalf("pid alive + listening + PAT present + healthz 200 must pass: %+v", r)
+	}
+}
+
+// TestCheckRemoteFlagsALiveAuthorizeEndpoint is doctor's copy of the
+// /authorize decision: a provider that answers anything but 404 there can mint
+// an authorization code over HTTP, on a port every jailed agent reaches
+// through the guest forwarder. Nothing legitimate calls it — the proxy drives
+// the login server-side and mints in-process.
+func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	st := brokerctl.StateDir(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	writeRemotePAT(t, st, 0o600)
+	savedHealthz := remoteHealthzProbe
+	t.Cleanup(func() { remoteHealthzProbe = savedHealthz })
+	remoteHealthzProbe = func(int, string) (int, error) { return 200, nil }
+	saved := remoteLoginProbe
+	t.Cleanup(func() { remoteLoginProbe = saved })
+
+	for _, tc := range []struct {
+		name  string
+		probe loginProbeResult
+		want  string
+	}{
+		{"authorize answers", loginProbeResult{discovery: 200, authorize: 302, authzURL: "https://lever.invalid/authorize"}, "/authorize"},
+		{"discovery advertises a loopback authorize endpoint", loginProbeResult{discovery: 200, authorize: 404, authzURL: "http://127.0.0.1:8446/authorize"}, "on loopback"},
+		{"discovery advertises localhost by name", loginProbeResult{discovery: 200, authorize: 404, authzURL: "http://localhost:9999/authorize"}, "on loopback"},
+		{"discovery is not served", loginProbeResult{discovery: 500, authorize: 404}, "discovery"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteLoginProbe = func(int) (loginProbeResult, error) { return tc.probe, nil }
+			r := checkRemote(context.Background(), app, st, okDial, nil)
+			if r.ok {
+				t.Fatalf("%s must fail the check", tc.name)
+			}
+			if !strings.Contains(r.detail, tc.want) {
+				t.Fatalf("detail = %q, want it to name %q", r.detail, tc.want)
+			}
+		})
+	}
+}
+
+// The proxy's own AllowedUsers gate (remoteproxy.Handler) trusts whatever
+// Tailscale-User-Login header a request carries. doctor's liveness probe
+// runs host-side — already as trusted as the PAT file it just read — so it
+// must send the first configured allowed_users entry, or a pinned instance
+// would 403 its own doctor check even when everything is actually healthy.
+func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"steve@example.com\", \"other@example.com\"]\n")
+	st := brokerctl.StateDir(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	writeRemotePAT(t, st, 0o600)
+
+	var gotLogin string
+	saved := remoteHealthzProbe
+	t.Cleanup(func() { remoteHealthzProbe = saved })
+	remoteHealthzProbe = func(_ int, tsLogin string) (int, error) {
+		gotLogin = tsLogin
+		return 200, nil
+	}
+	stubHealthyLoginProbe(t)
+
+	if r := checkRemote(context.Background(), app, st, okDial, nil); !r.ok {
+		t.Fatalf("expected pass, got %+v", r)
+	}
+	if gotLogin != "steve@example.com" {
+		t.Fatalf("probe should carry the first allowed_users entry, got %q", gotLogin)
+	}
+}
+
 func TestCheckClaudeVersion(t *testing.T) {
 	saved := claudeVersionProbe
 	t.Cleanup(func() { claudeVersionProbe = saved })
@@ -795,5 +1019,126 @@ func TestCheckAgentRolesProbeFailureIsNotChecked(t *testing.T) {
 	}
 	if !strings.Contains(r.detail, "not checked") {
 		t.Errorf("detail should say it could not check, got %q", r.detail)
+	}
+}
+
+// checkNodeToolchain is the guard that keeps a missing node from surfacing as
+// scion's bare "Web UI Not Available" page in the browser, hours and one
+// context-switch away from the cause.
+func TestCheckNodeToolchainNotRequired(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		app  *config.App
+	}{
+		{"remote off", &config.App{Scion: config.ScionConfig{Version: "e82a2a08"}}},
+		// No scion source to build the SPA from; the operator's own binary may
+		// already embed it.
+		{"binary mode", &config.App{
+			Scion:  config.ScionConfig{Binary: "/host/scion"},
+			Remote: config.Remote{Enabled: true},
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := checkNodeToolchain(c.app)
+			if !r.ok {
+				t.Fatalf("no web UI to build => pass; got %+v", r)
+			}
+			if !strings.Contains(r.detail, "not required") {
+				t.Fatalf("detail should say a build isn't required: %q", r.detail)
+			}
+		})
+	}
+}
+
+func TestCheckNodeToolchainProbeOK(t *testing.T) {
+	orig := nodeToolchainProbe
+	defer func() { nodeToolchainProbe = orig }()
+	nodeToolchainProbe = func() (string, error) { return "v25.9.0", nil }
+
+	r := checkNodeToolchain(&config.App{
+		Scion:  config.ScionConfig{Version: "e82a2a08"},
+		Remote: config.Remote{Enabled: true},
+	})
+	if !r.ok {
+		t.Fatalf("a working node on PATH must pass; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "v25.9.0") {
+		t.Fatalf("detail should report the node version: %q", r.detail)
+	}
+}
+
+func TestCheckNodeToolchainProbeError(t *testing.T) {
+	orig := nodeToolchainProbe
+	defer func() { nodeToolchainProbe = orig }()
+	nodeToolchainProbe = func() (string, error) {
+		return "", errors.New("node/npm toolchain not usable: node --version: exit status 126")
+	}
+
+	r := checkNodeToolchain(&config.App{
+		Scion:  config.ScionConfig{Source: "/Users/stephen/ai/scion"},
+		Remote: config.Remote{Enabled: true},
+	})
+	if r.ok {
+		t.Fatal("a broken node (e.g. a dead asdf shim) must fail the check")
+	}
+	if !strings.Contains(r.detail, "126") {
+		t.Fatalf("detail should name the underlying error: %q", r.detail)
+	}
+	if !strings.Contains(r.fix, "PATH") {
+		t.Fatalf("fix should point at PATH: %q", r.fix)
+	}
+}
+
+// TestCheckRemoteLoginPathProvesTheGuestHalf: the host-side provider probe can
+// be perfectly green while the browser gets a 502, because it never touches
+// the guest forwarder or the hub's own oidc_login block. Asking the HUB to
+// start a login is what exercises both — it has to fetch discovery through the
+// forwarder before it can answer.
+func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
+	saved := remoteJailLoginProbe
+	t.Cleanup(func() { remoteJailLoginProbe = saved })
+	jr := leverexec.NewFakeRunner()
+
+	for _, tc := range []struct {
+		name     string
+		status   int
+		redirect string
+		err      error
+		ok       bool
+		want     string
+	}{
+		{"healthy", 302, remoteproxy.DeadAuthorizationEndpoint + "?client_id=lever-remote", nil, true, "reaches the provider"},
+		{"hub has no oidc_login", 400, "", nil, false, "does not have lever's OIDC login configured"},
+		{"forwarder down", 500, "", nil, false, "could not reach lever's login provider"},
+		{"another IdP configured", 302, "https://accounts.google.example/o/oauth2/auth", nil, false, "not lever's provider"},
+		{"jail unreachable", 0, "", errors.New("machine not found"), false, "from inside the jail"},
+		{"unexpected status", 418, "", nil, false, "want 302"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteJailLoginProbe = func(context.Context, leverexec.Runner, string) (int, string, error) {
+				return tc.status, tc.redirect, tc.err
+			}
+			detail, _, ok := checkRemoteLoginPath(context.Background(), jr)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v (detail %q)", ok, tc.ok, detail)
+			}
+			if !strings.Contains(detail, tc.want) {
+				t.Fatalf("detail = %q, want it to mention %q", detail, tc.want)
+			}
+		})
+	}
+}
+
+// The probe must ask the hub the way an unauthenticated browser would, from
+// inside the jail, with an absolute curl path (the run user's PATH has
+// writable directories ahead of /usr/bin).
+func TestRemoteJailLoginScriptShape(t *testing.T) {
+	for _, want := range []string{"/usr/bin/curl", "-o /dev/null", "%{http_code} %{redirect_url}"} {
+		if !strings.Contains(remoteJailLoginScript, want) {
+			t.Fatalf("script missing %q:\n%s", want, remoteJailLoginScript)
+		}
+	}
+	if strings.Contains(remoteJailLoginScript, "Authorization") {
+		t.Fatalf("the login route is public; sending a credential would test the wrong thing:\n%s", remoteJailLoginScript)
 	}
 }

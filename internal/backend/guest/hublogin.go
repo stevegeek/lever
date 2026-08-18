@@ -56,6 +56,26 @@ const (
 
 	// loginDisplayName is what scion's login page calls the provider.
 	loginDisplayName = "Lever remote access"
+
+	// operatorDisplayName names an operator in the hub's `server.auth` block.
+	//
+	// It exists to clear scion's first-run wizard, not to assert who is
+	// connected. The SPA redirects EVERY fresh load to /onboarding until
+	// `GET /api/v1/system/status` reports complete, and that is
+	// `Initialized && IdentitySet && RuntimeOK && HarnessesSeeded`
+	// (pkg/hub/system_handlers.go). IdentitySet is true only when
+	// `server.auth` carries a display_name, email or username — so a hub lever
+	// has fully set up still greets the operator with a setup wizard, on every
+	// load, because nothing ever named a user in that file.
+	//
+	// Writing it is inert: those three fields reach scion only as
+	// hub.DevUserConfig, which it reads under `if cfg.DevAuthToken != ""`
+	// (pkg/hub/server.go seedDevUser, and DevAuthMiddleware). lever runs
+	// --dev-auth=false, so this names the wizard's user and nothing else. It is
+	// deliberately NOT an operator's email: with remote.allowed_users set, each
+	// operator gets their own hub user keyed on their tailnet login
+	// (remoteproxy identityFor), and this field must not compete with that.
+	operatorDisplayName = "Lever"
 )
 
 // EnsureHubLogin puts the guest into the state lever's remote login needs:
@@ -471,16 +491,25 @@ func hubLoginSettings(existing []byte, spec backend.HubLogin, hasServerYAML bool
 	}); err != nil {
 		return nil, false, fmt.Errorf("guest: build the oidc_login block: %w", err)
 	}
+	changed := true
 	if cur := mapGet(server, "oidc_login"); cur != nil {
 		same, err := sameYAML(cur, &want)
 		if err != nil {
 			return nil, false, err
 		}
-		if same {
-			return existing, false, nil
-		}
+		changed = !same
 	}
-	mapSet(server, "oidc_login", &want)
+	if changed {
+		mapSet(server, "oidc_login", &want)
+	}
+	// Both writes feed one "changed": either alone must restart the hub, since
+	// scion reads the whole file once at startup.
+	if setOperatorDisplayName(server) {
+		changed = true
+	}
+	if !changed {
+		return existing, false, nil
+	}
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
@@ -494,6 +523,53 @@ func hubLoginSettings(existing []byte, spec backend.HubLogin, hasServerYAML bool
 		return nil, false, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
 	}
 	return buf.Bytes(), true, nil
+}
+
+// setOperatorDisplayName names an operator in `server.auth` when nothing there
+// names one already, and reports whether it wrote. See operatorDisplayName for
+// why this is needed and why it is inert.
+//
+// It only ever ADDS: an existing display_name, email or username is an
+// operator's own identity and is left exactly as it is, so this cannot rename
+// a user on a re-apply. `auth` holds unrelated keys too (user_access_mode), so
+// the block is merged into, never replaced.
+func setOperatorDisplayName(server *yaml.Node) bool {
+	auth := mapGet(server, "auth")
+	if auth != nil {
+		if auth.Kind != yaml.MappingNode {
+			// Not a shape lever can reason about — leave it for the operator.
+			return false
+		}
+		for _, k := range []string{"display_name", "email", "username"} {
+			if n := mapGet(auth, k); n != nil && n.Value != "" {
+				return false
+			}
+		}
+	} else {
+		auth = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		mapSet(server, "auth", auth)
+	}
+	mapSet(auth, "display_name", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: operatorDisplayName})
+	return true
+}
+
+// clearOperatorDisplayName undoes setOperatorDisplayName and only that: it
+// removes `server.auth.display_name` when it still holds the exact value lever
+// wrote, then drops an `auth` mapping that is left empty. Any other value, or
+// any other key beside it, is an operator's own and stays.
+func clearOperatorDisplayName(server *yaml.Node) bool {
+	auth := mapGet(server, "auth")
+	if auth == nil || auth.Kind != yaml.MappingNode {
+		return false
+	}
+	if n := mapGet(auth, "display_name"); n == nil || n.Value != operatorDisplayName {
+		return false
+	}
+	mapDelete(auth, "display_name")
+	if len(auth.Content) == 0 {
+		mapDelete(server, "auth")
+	}
+	return true
 }
 
 // hubLoginSettingsWithout returns the settings content with lever's
@@ -514,10 +590,20 @@ func hubLoginSettingsWithout(existing []byte) ([]byte, bool, error) {
 		return existing, false, nil
 	}
 	server := mapGet(root, "server")
-	if server == nil || server.Kind != yaml.MappingNode || mapGet(server, "oidc_login") == nil {
+	if server == nil || server.Kind != yaml.MappingNode {
 		return existing, false, nil
 	}
-	mapDelete(server, "oidc_login")
+	changed := false
+	if mapGet(server, "oidc_login") != nil {
+		mapDelete(server, "oidc_login")
+		changed = true
+	}
+	if clearOperatorDisplayName(server) {
+		changed = true
+	}
+	if !changed {
+		return existing, false, nil
+	}
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)

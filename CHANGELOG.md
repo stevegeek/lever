@@ -164,6 +164,18 @@ version bump moves the block under the new version heading.
       every agent's hub connection for its duration. lever refuses to add a
       `server:` key beside an unmigrated legacy `server.yaml`, which would
       silently make Scion ignore that file entirely.
+    - **The UI lands on the dashboard, not a setup wizard.** The same write
+      names an operator in `server.auth.display_name`. Scion's SPA redirects
+      every fresh load to `/onboarding` until `GET /api/v1/system/status`
+      reports complete, and that requires `IdentitySet` — true only when
+      `server.auth` names a display_name, email or username. A hub lever had
+      fully provisioned therefore greeted the operator with a first-run wizard
+      on every load. The value is inert: those fields reach Scion only as
+      `hub.DevUserConfig`, which it reads under `if cfg.DevAuthToken != ""`,
+      and lever runs `--dev-auth=false`. lever only ever ADDS it — an existing
+      identity is an operator's own and is never overwritten or renamed — and
+      turning remote access off removes it only while it still holds lever's
+      exact value.
   - **The proxy reaches the hub THROUGH its own jail**, not over a host port.
     The hub binds `127.0.0.1:8080` INSIDE the jail; a host-side address that
     appears to reach it is an artifact of OrbStack's port forwarding, landing

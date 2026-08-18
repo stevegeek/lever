@@ -386,3 +386,127 @@ func TestLoginForwardScriptReplacesAForwarderWithStaleArguments(t *testing.T) {
 		t.Fatalf("the script never confirms the port answers:\n%s", final)
 	}
 }
+
+// authBlock digs out server.auth.
+func authBlock(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	m := unmarshalSettings(t, b)
+	server, ok := m["server"].(map[string]any)
+	if !ok {
+		t.Fatalf("no `server:` mapping in:\n%s", b)
+	}
+	auth, _ := server["auth"].(map[string]any)
+	return auth
+}
+
+// TestHubLoginSettingsNamesAnOperator: without a name in `server.auth`, scion's
+// system status never reports complete and the SPA bounces every fresh load to
+// /onboarding — a setup wizard for a machine lever has already set up.
+func TestHubLoginSettingsNamesAnOperator(t *testing.T) {
+	out, changed, err := hubLoginSettings(nil, testHubLogin(), false)
+	if err != nil || !changed {
+		t.Fatalf("hubLoginSettings: changed=%v err=%v", changed, err)
+	}
+	if got := authBlock(t, out)["display_name"]; got != operatorDisplayName {
+		t.Fatalf("server.auth.display_name = %v, want %q:\n%s", got, operatorDisplayName, out)
+	}
+	// Not an operator's email: allowed_users gives each operator their own hub
+	// user, and this field must not compete with that.
+	if _, ok := authBlock(t, out)["email"]; ok {
+		t.Fatalf("an email was invented:\n%s", out)
+	}
+}
+
+// TestHubLoginSettingsKeepsAnOperatorsOwnIdentity: this only ever adds. Any one
+// of the three fields already naming someone means lever writes nothing, so a
+// re-apply cannot rename a user.
+func TestHubLoginSettingsKeepsAnOperatorsOwnIdentity(t *testing.T) {
+	for _, existing := range []string{
+		"server:\n  auth:\n    display_name: Stephen\n",
+		"server:\n  auth:\n    email: me@example.com\n",
+		"server:\n  auth:\n    username: stephen\n",
+	} {
+		out, _, err := hubLoginSettings([]byte(existing), testHubLogin(), false)
+		if err != nil {
+			t.Fatalf("%s: %v", existing, err)
+		}
+		if got := authBlock(t, out)["display_name"]; got == operatorDisplayName {
+			t.Fatalf("lever overwrote an operator's identity:\n%s", out)
+		}
+	}
+	// An `auth` block carrying only unrelated keys still gets named, and keeps
+	// them: the block is merged into, never replaced.
+	out, _, err := hubLoginSettings([]byte("server:\n  auth:\n    user_access_mode: open\n"), testHubLogin(), false)
+	if err != nil {
+		t.Fatalf("hubLoginSettings: %v", err)
+	}
+	auth := authBlock(t, out)
+	if auth["display_name"] != operatorDisplayName || auth["user_access_mode"] != "open" {
+		t.Fatalf("auth block = %v:\n%s", auth, out)
+	}
+}
+
+// TestHubLoginSettingsIdentityAloneIsAChange: the two writes share one
+// "changed" because scion reads the whole file once at startup, so a settings
+// file with a correct oidc_login but no operator must still restart the hub.
+func TestHubLoginSettingsIdentityAloneIsAChange(t *testing.T) {
+	full, _, err := hubLoginSettings(nil, testHubLogin(), false)
+	if err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	stripped, changed, err := hubLoginSettingsWithout(full)
+	if err != nil || !changed {
+		t.Fatalf("strip: changed=%v err=%v", changed, err)
+	}
+	// Put oidc_login back but leave the operator unnamed.
+	withOIDCOnly, _, err := hubLoginSettings(stripped, testHubLogin(), false)
+	if err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	if authBlock(t, withOIDCOnly)["display_name"] != operatorDisplayName {
+		t.Fatalf("the identity was not restored alongside oidc_login:\n%s", withOIDCOnly)
+	}
+}
+
+// TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote: turning remote access
+// off removes lever's own value, and nothing that looks like a person's.
+func TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote(t *testing.T) {
+	with, _, err := hubLoginSettings([]byte("server:\n  user_access_mode: open\n"), testHubLogin(), false)
+	if err != nil {
+		t.Fatalf("hubLoginSettings: %v", err)
+	}
+	out, changed, err := hubLoginSettingsWithout(with)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	if auth := authBlock(t, out); auth != nil {
+		t.Fatalf("an emptied auth block was left behind: %v\n%s", auth, out)
+	}
+
+	// An operator's own identity survives the removal, and so does an unrelated
+	// key sitting beside lever's.
+	mine, _, err := hubLoginSettings([]byte("server:\n  auth:\n    display_name: Stephen\n"), testHubLogin(), false)
+	if err != nil {
+		t.Fatalf("hubLoginSettings: %v", err)
+	}
+	out, _, err = hubLoginSettingsWithout(mine)
+	if err != nil {
+		t.Fatalf("hubLoginSettingsWithout: %v", err)
+	}
+	if authBlock(t, out)["display_name"] != "Stephen" {
+		t.Fatalf("removal took an operator's identity with it:\n%s", out)
+	}
+
+	keep, _, err := hubLoginSettings([]byte("server:\n  auth:\n    user_access_mode: open\n"), testHubLogin(), false)
+	if err != nil {
+		t.Fatalf("hubLoginSettings: %v", err)
+	}
+	out, _, err = hubLoginSettingsWithout(keep)
+	if err != nil {
+		t.Fatalf("hubLoginSettingsWithout: %v", err)
+	}
+	auth := authBlock(t, out)
+	if _, named := auth["display_name"]; named || auth["user_access_mode"] != "open" {
+		t.Fatalf("auth block = %v:\n%s", auth, out)
+	}
+}

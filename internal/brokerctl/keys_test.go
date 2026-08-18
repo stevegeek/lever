@@ -92,6 +92,37 @@ func TestLoadControllerPATWrongPerms(t *testing.T) {
 	}
 }
 
+func TestRemotePATRoundTrip(t *testing.T) {
+	s := State{Dir: t.TempDir()}
+	if tok, err := s.LoadRemotePAT(); err != nil || tok != "" {
+		t.Fatalf("absent PAT: got (%q, %v), want (\"\", nil)", tok, err)
+	}
+	if err := s.SaveRemotePAT("scion_pat_test"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(s.RemotePAT())
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("remote.pat perms: %v %v", fi, err)
+	}
+	tok, err := s.LoadRemotePAT()
+	if err != nil || tok != "scion_pat_test" {
+		t.Fatalf("got (%q, %v)", tok, err)
+	}
+}
+
+func TestLoadRemotePATRejectsLoosePerms(t *testing.T) {
+	s := State{Dir: t.TempDir()}
+	if err := s.SaveRemotePAT("scion_pat_test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(s.RemotePAT(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadRemotePAT(); err == nil {
+		t.Fatal("want perm error, got nil")
+	}
+}
+
 func TestDirectivesRoundTripAndAbsentIsZero(t *testing.T) {
 	st := StateDir(t.TempDir())
 	ds, err := st.LoadDirectives()

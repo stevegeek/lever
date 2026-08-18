@@ -48,6 +48,16 @@ var (
 // host-initiated control channel into the jail (e.g. Lima's SSH, seen by the guest
 // as the alias IP) answer through the alias DROP below, without granting the guest
 // any NEW outbound (see rule 1b's comment for why this doesn't widen containment).
+// allowedPorts is config.App.EffectiveAllowedPorts() on every config-driven
+// path (`lever apply`/`up`); the low-level `lever provision --allow-port`
+// takes its list straight from the flag, since it runs without a config at
+// all. In the config-driven case that set is: the
+// broker's jail port, the operator's manager.allow_ports, and — while remote
+// access is on — the local OIDC provider's host port, which the guest's login
+// forwarder dials. That last one surprises people: the forwarder is the only
+// jail→host consumer besides the broker, and this allowlist is the one place
+// that fact is enforced, so a missing grant shows up as a hung discovery fetch
+// rather than as anything mentioning firewalls.
 func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool) []Rule {
 	ports := append([]int(nil), allowedPorts...)
 	sort.Ints(ports)

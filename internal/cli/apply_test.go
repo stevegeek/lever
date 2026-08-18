@@ -3,10 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
@@ -266,6 +270,32 @@ func TestBuildApplyDepsWiresRearmBootstrap(t *testing.T) {
 	}
 }
 
+// TestBuildApplyDepsWiresRemoteProxy mirrors TestBuildApplyDepsWiresRearmBootstrap:
+// it only pins that buildApplyDeps wires non-nil StartRemoteProxy/StopRemoteProxy
+// funcs. Start's live spawn behavior is covered by the
+// TestRemoteControllerStart* tests below; StopRemoteProxy's real kill
+// mechanism is covered in internal/brokerctl (it's a thin passthrough here).
+func TestBuildApplyDepsWiresRemoteProxy(t *testing.T) {
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := &stubBackend{}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if deps.StartRemoteProxy == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.StartRemoteProxy")
+	}
+	if deps.StopRemoteProxy == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.StopRemoteProxy")
+	}
+}
+
 func TestApplyDryRunDiscoversConfig(t *testing.T) {
 	dir := instanceDir(t, "demo")
 	t.Chdir(dir)
@@ -313,6 +343,142 @@ func TestBrokerServeCmdIsDetachedAndLogged(t *testing.T) {
 	}
 }
 
+func TestRemoteServeCmdIsDetachedAndLogged(t *testing.T) {
+	dir := t.TempDir()
+	// A non-existent .lever-state subdir mirrors a fresh apply: remoteServeCmd
+	// must MkdirAll the log's parent, or the open (and Start) fails.
+	out := filepath.Join(dir, ".lever-state", "remote.log")
+	cmd, f, err := remoteServeCmd("/usr/local/bin/lever", "/x/lever.yaml", out)
+	if err != nil {
+		t.Fatalf("remoteServeCmd: %v", err)
+	}
+	defer f.Close()
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("remote proxy child must be Setsid (own session)")
+	}
+	if cmd.Args[len(cmd.Args)-3] != "remote" || cmd.Args[len(cmd.Args)-2] != "serve" {
+		t.Fatalf("argv = %v, want ...remote serve <config>", cmd.Args)
+	}
+	if cmd.Args[len(cmd.Args)-1] != "/x/lever.yaml" {
+		t.Fatalf("argv config path = %q, want %q", cmd.Args[len(cmd.Args)-1], "/x/lever.yaml")
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("out log not created: %v", err)
+	}
+}
+
+// TestRemoteControllerStartReusesAlreadyServingProxy proves the idempotence
+// shortcut required by the Task 8 contract ("re-apply with a live proxy does
+// NOT spawn a second one"): with a live pid recorded (self-signal-0 trick —
+// the test process's own pid is always alive, same as
+// TestRemoteStatusReportsLivePidAndListener in remote_test.go) AND something
+// actually listening on the configured port, Start must not spawn.
+// brokerSelfExe is pointed at a nonexistent binary so a WRONGLY-taken spawn
+// branch fails loudly (cmd.Start() errors) instead of silently succeeding —
+// same "prove the branch, not just the observable" shape as
+// TestStartBrokerReusesMatchingBrokerIdentity's directory-as-pidfile trick in
+// apply_closures_test.go.
+func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
+	prev := brokerSelfExe
+	brokerSelfExe = func() string { return "/no/such/lever-binary" }
+	t.Cleanup(func() { brokerSelfExe = prev })
+
+	dir := t.TempDir()
+	state := brokerctl.StateDir(dir)
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: port}
+	if err := rc.Start(context.Background()); err != nil {
+		t.Fatalf("Start on an already-serving proxy must reuse (nil), got: %v", err)
+	}
+}
+
+// TestRemoteControllerStartRespawnsStalePID proves the second idempotence
+// case: "re-apply after a killed proxy respawns it". A pid file naming a
+// process that is definitely not running (the doctor checks' own
+// implausibly-high-pid convention — see TestCheckBrokerAliveStalePID) must
+// fall through to a fresh spawn, not a false "already serving".
+// brokerSelfExe points at `true` so the spawn succeeds harmlessly (exits 0
+// immediately, no lingering process) — mirrors
+// buildDepsAgainstFakeBroker's broker-spawn tests in apply_closures_test.go.
+//
+// That stand-in never listens, so Start's post-spawn liveness wait
+// legitimately fails: what this asserts is the SPAWN DECISION, and the
+// not-listening error is the proof the spawn happened and was then checked.
+// (A nil here would mean the liveness check had been lost.)
+func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
+	prev := brokerSelfExe
+	brokerSelfExe = func() string { return "/usr/bin/true" }
+	t.Cleanup(func() { brokerSelfExe = prev })
+	shortenRemoteProxyStartWait(t)
+
+	dir := t.TempDir()
+	state := brokerctl.StateDir(dir)
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state.RemotePID(), []byte("2147483646\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: 48997}
+	err := rc.Start(context.Background())
+	if err == nil {
+		t.Fatal("a stand-in that never listens must not report the proxy as serving")
+	}
+	if !strings.Contains(err.Error(), "not listening") {
+		t.Fatalf("Start after a killed proxy must respawn and then check it, got: %v", err)
+	}
+	if _, serr := os.Stat(state.RemoteLog()); serr != nil {
+		t.Fatalf("remote.log not created by the respawn: %v", serr)
+	}
+}
+
+// shortenRemoteProxyStartWait keeps the spawn tests fast: they use a stand-in
+// that never binds, so they always pay the full wait.
+func shortenRemoteProxyStartWait(t *testing.T) {
+	t.Helper()
+	timeout, interval := remoteProxyStartTimeout, remoteProxyStartInterval
+	t.Cleanup(func() { remoteProxyStartTimeout, remoteProxyStartInterval = timeout, interval })
+	remoteProxyStartTimeout, remoteProxyStartInterval = 50*time.Millisecond, 5*time.Millisecond
+}
+
+// TestRemoteControllerStartSpawnsWhenNeverStarted covers the third
+// precondition: no remote.pid at all (a fresh instance, or remote access
+// just enabled) must spawn, exactly like the stale-pid case.
+func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
+	prev := brokerSelfExe
+	brokerSelfExe = func() string { return "/usr/bin/true" }
+	t.Cleanup(func() { brokerSelfExe = prev })
+	shortenRemoteProxyStartWait(t)
+
+	dir := t.TempDir()
+	state := brokerctl.StateDir(dir) // no remote.pid at all
+
+	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: 48996}
+	// As above: the stand-in never binds, so the spawn is proved by the
+	// liveness check's complaint rather than by a nil.
+	err := rc.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not listening") {
+		t.Fatalf("Start with no prior proxy must spawn and then check it, got: %v", err)
+	}
+	if _, serr := os.Stat(state.RemoteLog()); serr != nil {
+		t.Fatalf("remote.log not created by the spawn: %v", serr)
+	}
+}
+
 // callIndex returns the index of the first call in calls satisfying pred, or
 // -1 if none matches. Helper for the ordered-call assertions below.
 func callIndex(calls []leverexec.Call, pred func(leverexec.Call) bool) int {
@@ -351,7 +517,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
 	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
 
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, false); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -428,12 +594,272 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	// Second call: PAT already persisted → no-op. In particular, no second
 	// throwaway server start (the agent-free mint window opens at most once).
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, false); err != nil {
 		t.Fatalf("second ensureControllerPAT: %v", err)
 	}
 	if len(f.Calls) != callsAfterFirst {
 		t.Fatalf("second call made %d new runner call(s), want 0 (must be a no-op): %+v",
 			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
+	}
+}
+
+// scriptPATMintChain registers the throwaway-window call chain shared by every
+// ensureControllerPAT test below (server start → list poll → init → hub link →
+// server stop → dev-token resolve/rm), everything except the "hub token
+// create" calls themselves — those differ per test by --name/token, so each
+// test scripts them individually via scriptTokenCreate.
+func scriptPATMintChain(f *leverexec.FakeRunner) {
+	f.Script("scion server start", leverexec.Result{})
+	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll, run inside ServerStart
+	f.Script("scion init", leverexec.Result{})
+	f.Script("scion hub link", leverexec.Result{})
+	f.Script("scion server stop", leverexec.Result{})
+	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
+}
+
+// scriptTokenCreate registers a distinct "hub token create --project lever
+// --name <name>" response so the fake runner can tell the controller and
+// remote mints apart (they differ only by --name, which lands right after
+// --project in the argv scion.Client.HubTokenCreate builds).
+func scriptTokenCreate(f *leverexec.FakeRunner, name, token string) {
+	f.Script("scion hub token create --project lever --name "+name, leverexec.Result{Stdout: "Token: " + token + "\n"})
+}
+
+// countCalls returns how many recorded calls satisfy pred.
+func countCalls(calls []leverexec.Call, pred func(leverexec.Call) bool) int {
+	n := 0
+	for _, c := range calls {
+		if pred(c) {
+			n++
+		}
+	}
+	return n
+}
+
+// tokenCreateCallFor returns the "scion hub token create" call whose --name
+// flag equals name, so a test can inspect ITS --scopes argv directly rather
+// than assuming which of possibly several token-create calls is which.
+func tokenCreateCallFor(t *testing.T, calls []leverexec.Call, name string) leverexec.Call {
+	t.Helper()
+	for _, c := range calls {
+		if !callHasPrefix(c, "scion hub token create") {
+			continue
+		}
+		for i, a := range c.Args {
+			if a == "--name" && i+1 < len(c.Args) && c.Args[i+1] == name {
+				return c
+			}
+		}
+	}
+	t.Fatalf("no hub token create call with --name %s found; calls=%+v", name, calls)
+	return leverexec.Call{}
+}
+
+// scopesArg returns the literal value of a hub-token-create call's --scopes
+// flag (the exact argv element, not a substring of the joined command line —
+// a Contains check on the joined string passes even when extra scopes are
+// appended, since the expected prefix is still present).
+func scopesArg(t *testing.T, c leverexec.Call) string {
+	t.Helper()
+	for i, a := range c.Args {
+		if a == "--scopes" && i+1 < len(c.Args) {
+			return c.Args[i+1]
+		}
+	}
+	t.Fatalf("no --scopes flag in call args=%+v", c.Args)
+	return ""
+}
+
+// TestEnsurePATsMintsBothInOneWindow: fresh state, remoteEnabled=true — both
+// the controller and remote PATs are missing, so ONE throwaway dev-auth
+// window mints both (see ensureControllerPAT's doc: minting both in one
+// window preserves the agent-free-window property on first bootstrap).
+func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
+	tree := t.TempDir()
+	state := brokerctl.StateDir(t.TempDir())
+	const jailMount = "/lever"
+
+	f := leverexec.NewFakeRunner()
+	scriptPATMintChain(f)
+	scriptTokenCreate(f, "lever-controller", "pat-controller-1")
+	scriptTokenCreate(f, "lever-remote", "pat-remote-1")
+
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, true); err != nil {
+		t.Fatalf("ensureControllerPAT: %v", err)
+	}
+
+	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
+		t.Fatalf("scion server start calls = %d, want 1 (one shared window)", n)
+	}
+	// The throwaway mint hub must never gain the web flags even though
+	// remoteEnabled is true here: EnableWeb/BaseURL are for the REAL,
+	// dev-auth-OFF hub the scion-server apply step starts right after this
+	// one (internal/apply/run.go) — this hub is a dev-auth-ON, agent-free
+	// bootstrap window that must stay unreachable/no-SPA regardless of the
+	// remote-access setting.
+	for _, c := range f.Calls {
+		if callHasPrefix(c, "scion server start") {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "--enable-web") || strings.Contains(joined, "--base-url") {
+				t.Fatalf("throwaway mint hub must not carry web flags: %q", joined)
+			}
+		}
+	}
+	// ServerStop is called both explicitly (post-mint cleanup) and via the
+	// deferred kill (belt-and-braces against a partial start) — see
+	// ensureControllerPAT's doc; TestEnsureControllerPATMintsThenNoOps checks
+	// existence for the same reason, not an exact count.
+	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server stop") }); n < 1 {
+		t.Fatalf("scion server stop calls = %d, want at least 1", n)
+	}
+	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 2 {
+		t.Fatalf("scion hub token create calls = %d, want 2 (controller + remote)", n)
+	}
+
+	// Exact-match the minted scopes (not a Contains/prefix check — that would
+	// silently pass even if an extra scope, e.g. agent:manage, were appended
+	// to remotePATScopes; see remotePATScopes's doc for why that must never
+	// happen for the remote-proxy token).
+	controllerCall := tokenCreateCallFor(t, f.Calls, "lever-controller")
+	if got, want := scopesArg(t, controllerCall), "agent:manage,agent:attach,project:read,project:update"; got != want {
+		t.Fatalf("controller mint --scopes = %q, want %q", got, want)
+	}
+	remoteCall := tokenCreateCallFor(t, f.Calls, "lever-remote")
+	if got, want := scopesArg(t, remoteCall), "agent:read,agent:list,project:read,agent:attach"; got != want {
+		t.Fatalf("remote mint --scopes = %q, want %q", got, want)
+	}
+
+	ctok, err := state.LoadControllerPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctok != "pat-controller-1" {
+		t.Fatalf("persisted controller PAT = %q, want %q", ctok, "pat-controller-1")
+	}
+	rtok, err := state.LoadRemotePAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rtok != "pat-remote-1" {
+		t.Fatalf("persisted remote PAT = %q, want %q", rtok, "pat-remote-1")
+	}
+	for _, path := range []string{state.ControllerPAT(), state.RemotePAT()} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("%s not written: %v", path, err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s perm = %#o, want 0600", path, perm)
+		}
+	}
+}
+
+// TestEnsurePATsRemoteOnlyWindowWhenControllerExists: the controller PAT was
+// already minted (a pre-existing instance), remoteEnabled=true and the remote
+// PAT is missing (remote.enabled flipped on later). A window still opens —
+// this is the "later-enable" repair case documented alongside the
+// controller-PAT re-mint shape — but it mints ONLY the remote token; the
+// controller PAT is left untouched.
+func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
+	tree := t.TempDir()
+	state := brokerctl.StateDir(t.TempDir())
+	const jailMount = "/lever"
+	if err := state.SaveControllerPAT("pat-controller-existing"); err != nil {
+		t.Fatal(err)
+	}
+
+	f := leverexec.NewFakeRunner()
+	scriptPATMintChain(f)
+	scriptTokenCreate(f, "lever-remote", "pat-remote-2")
+	// Deliberately NOT scripting "--name lever-controller": if the code
+	// mistakenly re-mints the controller PAT, the fake runner errors on the
+	// unscripted command and fails the test.
+
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, true); err != nil {
+		t.Fatalf("ensureControllerPAT: %v", err)
+	}
+
+	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
+		t.Fatalf("scion server start calls = %d, want 1 (remote-only window still opens)", n)
+	}
+	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
+		t.Fatalf("scion hub token create calls = %d, want 1 (remote only)", n)
+	}
+
+	ctok, err := state.LoadControllerPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctok != "pat-controller-existing" {
+		t.Fatalf("controller PAT = %q, want unchanged %q", ctok, "pat-controller-existing")
+	}
+	rtok, err := state.LoadRemotePAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rtok != "pat-remote-2" {
+		t.Fatalf("persisted remote PAT = %q, want %q", rtok, "pat-remote-2")
+	}
+}
+
+// TestEnsurePATsNoWindowWhenNothingMissing: both PATs already persisted —
+// nothing to mint, so no dev-auth window opens at all (zero scion calls).
+func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
+	tree := t.TempDir()
+	state := brokerctl.StateDir(t.TempDir())
+	const jailMount = "/lever"
+	if err := state.SaveControllerPAT("pat-controller-existing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SaveRemotePAT("pat-remote-existing"); err != nil {
+		t.Fatal(err)
+	}
+
+	f := leverexec.NewFakeRunner() // no scripts: any call is an error
+
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, true); err != nil {
+		t.Fatalf("ensureControllerPAT: %v", err)
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("scion calls = %d, want 0 (nothing missing, no window): %+v", len(f.Calls), f.Calls)
+	}
+}
+
+// TestEnsurePATsRemoteDisabledUnchanged: remoteEnabled=false on a fresh
+// state reproduces the exact pre-remote behavior — one controller mint, no
+// lever-remote token, no remote.pat written.
+func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
+	tree := t.TempDir()
+	state := brokerctl.StateDir(t.TempDir())
+	const jailMount = "/lever"
+
+	f := leverexec.NewFakeRunner()
+	scriptPATMintChain(f)
+	scriptTokenCreate(f, "lever-controller", "pat-controller-3")
+	// Deliberately NOT scripting "--name lever-remote": remoteEnabled=false
+	// must never touch it.
+
+	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, false); err != nil {
+		t.Fatalf("ensureControllerPAT: %v", err)
+	}
+
+	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
+		t.Fatalf("scion hub token create calls = %d, want 1 (controller only)", n)
+	}
+	ctok, err := state.LoadControllerPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctok != "pat-controller-3" {
+		t.Fatalf("persisted controller PAT = %q, want %q", ctok, "pat-controller-3")
+	}
+	rtok, err := state.LoadRemotePAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rtok != "" {
+		t.Fatalf("remote PAT = %q, want empty (remote disabled, never minted)", rtok)
 	}
 }
 
@@ -568,5 +994,73 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	}
 	if got := f.Calls[iReal2].Env["SCION_HUB_TOKEN"]; got != "pat-e2e-round-trip" {
 		t.Fatalf("2nd apply's real hub server-start env SCION_HUB_TOKEN = %q, want %q (reused PAT not threaded)", got, "pat-e2e-round-trip")
+	}
+}
+
+// TestRemoteProxyStartFailsLoudlyWhenItNeverBinds is the regression test for a
+// silent success: a proxy that died on a deterministic bind error (its port
+// already taken — which OrbStack's mirroring of a guest listener can do) left
+// `lever apply` printing "is up" and exiting 0, with the operator's next
+// signal a 502 in a browser.
+func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
+	savedTimeout, savedInterval := remoteProxyStartTimeout, remoteProxyStartInterval
+	t.Cleanup(func() { remoteProxyStartTimeout, remoteProxyStartInterval = savedTimeout, savedInterval })
+	remoteProxyStartTimeout, remoteProxyStartInterval = 50*time.Millisecond, 5*time.Millisecond
+
+	dir := t.TempDir()
+	state := brokerctl.StateDir(dir)
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// What the proxy actually wrote in the live failure.
+	logLine := "Error: remoteproxy: bind: listen tcp 127.0.0.1:8446: bind: address already in use"
+	if err := os.WriteFile(state.RemoteLog(), []byte("remote proxy \"x\" serving\n"+logLine+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A port nothing is listening on.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	rc := &remoteController{state: state, configPath: filepath.Join(dir, "lever.yaml"), port: port}
+	err = rc.awaitListening()
+	if err == nil {
+		t.Fatal("a proxy that never bound was reported as started")
+	}
+	// The cause lives only in that log — this process never sees the child's
+	// stderr — so the error has to carry it.
+	if !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("error does not quote the log's reason: %v", err)
+	}
+	if !strings.Contains(err.Error(), state.RemoteLog()) {
+		t.Fatalf("error does not name the log: %v", err)
+	}
+
+	// And a proxy that IS listening passes.
+	ln2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Skipf("could not re-bind %d: %v", port, err)
+	}
+	defer func() { _ = ln2.Close() }()
+	if err := rc.awaitListening(); err != nil {
+		t.Fatalf("a listening proxy must pass: %v", err)
+	}
+}
+
+func TestLastLogLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "remote.log")
+	if got := lastLogLine(filepath.Join(dir, "absent.log")); got != "" {
+		t.Fatalf("absent file = %q, want empty", got)
+	}
+	if err := os.WriteFile(path, []byte("first\nlast line\n\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastLogLine(path); got != "last line" {
+		t.Fatalf("lastLogLine = %q, want the final non-empty line", got)
 	}
 }

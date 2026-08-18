@@ -39,6 +39,15 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 						if rerr := removeControllerPAT(st); rerr != nil {
 							cmd.PrintErrf("warning: removing stale controller PAT: %v\n", rerr)
 						}
+						// Same reasoning applies to the remote-access PAT: it is minted
+						// against the same jail hub DB, so it goes stale the moment the
+						// DB dies with the machine. Left behind, ensureControllerPAT's
+						// needRemote check would see it as still-present and skip the
+						// re-mint on the next `up`, leaving the remote proxy injecting a
+						// token the fresh hub has never issued.
+						if rerr := removeRemotePAT(st); rerr != nil {
+							cmd.PrintErrf("warning: removing stale remote PAT: %v\n", rerr)
+						}
 					}
 				}
 			} else {
@@ -74,6 +83,17 @@ func clearStagedRuntimeState(app *config.App) {
 // removal failure is returned so the caller can warn.
 func removeControllerPAT(st brokerctl.State) error {
 	if err := os.Remove(st.ControllerPAT()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// removeRemotePAT deletes the persisted remote-access PAT (see the caller's
+// comment for why destroy must — same reasoning as removeControllerPAT, same
+// error-handling shape). A missing PAT (remote never enabled) is not an
+// error; any other removal failure is returned so the caller can warn.
+func removeRemotePAT(st brokerctl.State) error {
+	if err := os.Remove(st.RemotePAT()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

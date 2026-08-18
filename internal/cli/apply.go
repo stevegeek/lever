@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -74,6 +76,147 @@ func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (
 	return cmd, f, nil
 }
 
+// remoteServeCmd builds the detached `lever remote serve <config>` command:
+// its own session (Setsid — survives the parent terminal/session), stdout+
+// stderr appended to outLog. Mirrors brokerServeCmd exactly (see its doc)
+// minus the broker's jail-alias/run-user env: the proxy resolves its own jail
+// identity lazily, on its first dial (jailPrefixFn in remote.go), so it needs
+// nothing here beyond the parent's environment — which exec.Command inherits
+// by default when Env is left nil, and which is where the jail transport
+// binary is found on PATH.
+func remoteServeCmd(self, configPath, outLog string) (*exec.Cmd, *os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(outLog), 0o700); err != nil {
+		return nil, nil, fmt.Errorf("remote proxy out log dir: %w", err)
+	}
+	f, err := os.OpenFile(outLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("remote proxy out log: %w", err)
+	}
+	cmd := exec.Command(self, "remote", "serve", configPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout = f
+	cmd.Stderr = f
+	return cmd, f, nil
+}
+
+// remoteController owns the apply-time remote-proxy lifecycle: spawning the
+// detached `lever remote serve` child, exactly like brokerController.Start
+// spawns `lever broker serve` (same Setsid pattern via remoteServeCmd).
+//
+// The SPAWN is fire-and-forget — the proxy exposes no HTTP identity endpoint
+// like the broker's /epoch to health-poll against — but Start does not return
+// until the proxy has bound its listener, or the wait has run out. So a
+// startup failure (the backend gate in `remote serve` refusing a non-orbstack
+// config; a port already taken) fails the apply step synchronously, with the
+// last line of state.RemoteLog() quoted into the error. See awaitListening for
+// why that check exists: without it, a proxy that died on a deterministic bind
+// error left `lever apply` reporting success.
+type remoteController struct {
+	state      brokerctl.State
+	configPath string
+	port       int // app.EffectiveRemotePort()
+}
+
+func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", rc.port) }
+
+// Start spawns `lever remote serve <config>` as a daemonized child so it
+// outlives the apply invocation.
+//
+// Idempotent: if a proxy is already alive AND actually listening on the
+// configured port, reuse it rather than spawning a duplicate — a duplicate
+// would fail to bind and die, clobbering remote.pid with a dead pid, the
+// same failure mode brokerController.Start's #19 reuse shortcut guards
+// against for the broker. Reuse is decided by the same pidfile+TCP-dial
+// check `lever remote status` already uses (remotePIDStatus + tcpDial): a
+// live-but-not-yet-listening pid (a startup race) or a stale/absent pid both
+// fall through to a fresh spawn — which is what makes a re-apply after a
+// killed proxy respawn it.
+func (rc *remoteController) Start(ctx context.Context) error {
+	if _, found, alive := remotePIDStatus(rc.state.RemotePID()); found && alive {
+		if err := tcpDial(rc.addr()); err == nil {
+			return nil // already serving
+		}
+	}
+	cmd, logf, err := remoteServeCmd(brokerSelfExe(), rc.configPath, rc.state.RemoteLog())
+	if err != nil {
+		return err
+	}
+	// Keep the log fd owned by the child; close our copy after Start.
+	defer logf.Close()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("lever remote serve: %w", err)
+	}
+	return rc.awaitListening()
+}
+
+// remoteProxyStartTimeout/Interval bound the wait for the spawned proxy to
+// bind. Package vars so tests run fast. Generous against a loaded host, and
+// still far below anything a human would notice: both listeners are host
+// loopback binds that happen before the proxy touches the jail.
+var (
+	remoteProxyStartTimeout  = 5 * time.Second
+	remoteProxyStartInterval = 50 * time.Millisecond
+)
+
+// awaitListening waits for the spawned proxy to actually bind, and reports
+// what the log says when it does not.
+//
+// The spawn itself is fire-and-forget, like the broker's — but "started" and
+// "serving" are not the same thing, and the difference was invisible: a proxy
+// that died on a deterministic bind error (a port already taken) left `lever
+// apply` printing "is up" and exiting 0, with the operator's next signal a 502
+// in a browser. A failure that reproduces on every apply must fail the apply.
+//
+// The log's tail is quoted into the error because the cause is always there
+// and nowhere else — the child owns that file, and this process never sees its
+// stderr.
+func (rc *remoteController) awaitListening() error {
+	deadline := time.Now().Add(remoteProxyStartTimeout)
+	for {
+		if err := tcpDial(rc.addr()); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(remoteProxyStartInterval)
+	}
+	if tail := lastLogLine(rc.state.RemoteLog()); tail != "" {
+		return fmt.Errorf("the remote proxy started but is not listening on %s: %s (see %s)",
+			rc.addr(), tail, rc.state.RemoteLog())
+	}
+	return fmt.Errorf("the remote proxy started but is not listening on %s — see %s",
+		rc.addr(), rc.state.RemoteLog())
+}
+
+// lastLogLine returns the final non-empty line of path, or "". Only the tail is
+// read: a long-lived proxy's log can be large, and the failure that matters is
+// always the last thing it wrote before exiting.
+func lastLogLine(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	const tailBytes = 4 << 10
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	off := max(fi.Size()-tailBytes, 0)
+	buf := make([]byte, min(fi.Size()-off, tailBytes))
+	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+		return ""
+	}
+	lines := strings.Split(string(buf), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
 // removeJailFileScript guards a jail-side rm: it only removes a REGULAR file
 // at $1 (a directory at $1 is left untouched — a stray in-repo git-mode
 // project, not a stale marker) and is a no-op if $1 is already absent.
@@ -125,27 +268,53 @@ const throwawayHubPort = 48080
 // and agent:manage does NOT expand to project:update.
 var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read", "project:update"}
 
+// remotePATScopes is the EXACT scope set the remote-access PAT is minted
+// with: interactive (attach gates every interactive verb, message included)
+// plus read/list — and nothing that can create, delete, or reconfigure.
+// The remote proxy injects this token; it must never carry agent:manage,
+// agent:create/delete, project:update, or any secret scope.
+var remotePATScopes = []string{"agent:read", "agent:list", "project:read", "agent:attach"}
+
 // ensureControllerPAT backs Deps.EnsureControllerPAT, the "bootstrap-token"
-// apply step (internal/apply/run.go): mint the controller PAT that the real
-// hub — started dev-auth-OFF by the scion-server step right after this one —
-// is driven with.
+// apply step (internal/apply/run.go). It owns TWO mints that both need the
+// same throwaway dev-auth window: the controller PAT that the real hub —
+// started dev-auth-OFF by the scion-server step right after this one — is
+// driven with, and (when remote access is configured on) the narrower
+// remote-access PAT the remote proxy injects on the operator's behalf.
 //
-// Idempotent: a PAT already persisted in state short-circuits to nil (it
-// survives `down`→`up`; clearStagedRuntimeState only wipes tree/.lever/*, see
-// the P3 plan's Global Constraints). Otherwise this opens an agent-free mint
-// window: start a throwaway dev-auth-ON hub on throwawayHubPort, `scion init`
-// + `hub link` the project tree, mint a PAT scoped to exactly
-// controllerPATScopes, persist it 0600, stop the throwaway hub, and
-// best-effort delete scion's residual dev-token file so it doesn't linger as
-// an open admin credential once the real hub takes over. The throwaway and
-// real hub share the same jail ~/.scion DB BY CONSTRUCTION (both `scion
-// server start` invocations run in the same jail home) — no data-dir control
-// point is needed for the minted project + PAT to carry over.
+// Idempotent per token: a PAT already persisted in state short-circuits its
+// own mint (survives `down`→`up`; clearStagedRuntimeState only wipes
+// tree/.lever/*, see the P3 plan's Global Constraints). If NEITHER token is
+// missing this is a complete no-op — no window opens at all.
+//
+// Why one window: the dev-auth mint window is the sensitive part (a
+// throwaway hub with auth off, reachable from the jail loopback only, but
+// still an open admin surface while it's up). Minting both tokens in the
+// SAME window on a fresh bootstrap — the common case, remote.enabled set
+// from the start — preserves the "agent-free window, opened once" property
+// instead of opening it twice. If the controller PAT already exists and
+// remote is enabled later (instance upgraded, remote.enabled flipped on
+// after first bring-up), a second window opens for the remote mint alone;
+// that is the same brief, jail-loopback-only repair shape already documented
+// for a controller-PAT re-mint (delete state + `lever apply`).
+//
+// This opens the window by: start a throwaway dev-auth-ON hub on
+// throwawayHubPort, `scion init` + `hub link` the project tree (idempotent —
+// they already run on every controller re-mint against an existing project;
+// the same tolerance covers a remote-only mint), mint whichever PAT(s) are
+// missing scoped to exactly controllerPATScopes / remotePATScopes, persist
+// each 0600, stop the throwaway hub, and best-effort delete scion's residual
+// dev-token file so it doesn't linger as an open admin credential once the
+// real hub takes over. The throwaway and real hub share the same jail
+// ~/.scion DB BY CONSTRUCTION (both `scion server start` invocations run in
+// the same jail home) — no data-dir control point is needed for the minted
+// project + PAT(s) to carry over.
 //
 // jr/tree/jailMount are passed explicitly (rather than closing over
 // app/b) purely so this function is unit-testable with fakes; jr is the same
 // jail exec.Runner buildApplyDeps already has (this function needs no other
-// backend access).
+// backend access). remoteEnabled is App.RemoteEnabled() — plumbed as a bool
+// rather than closing over *config.App for the same testability reason.
 //
 // Live-validated against scion 37a54a8e: `scion server start` runs workstation
 // (combined) mode where --port is inert and --web-port binds the Hub API
@@ -153,9 +322,13 @@ var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read
 // --scopes`, and the scopes agent:manage/agent:attach/project:read all exist;
 // the residual dev-token is at the jail user's ~/.scion/dev-token (resolved
 // in-jail below, not assumed).
-func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerctl.State, tree, jailMount string) error {
-	if tok, _ := state.LoadControllerPAT(); tok != "" {
-		return nil // already minted; survives down→up
+func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerctl.State, tree, jailMount string, remoteEnabled bool) error {
+	ctok, _ := state.LoadControllerPAT()
+	rtok, _ := state.LoadRemotePAT()
+	needController := ctok == ""
+	needRemote := remoteEnabled && rtok == ""
+	if !needController && !needRemote {
+		return nil // nothing to mint; no dev-auth window
 	}
 	tw := scion.New(jr, scion.Options{HubEndpoint: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)})
 	// Register the kill BEFORE ServerStart so a partial start — e.g. a throwaway
@@ -176,14 +349,26 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 	}
 	// scion's `hub token create` requires --project (name or ID) and --name.
 	// The project is registered from jp, so its scion project name is jp's
-	// basename (jailMount is a constant mount root, so this is stable). The
-	// PAT's label is fixed — one controller PAT per instance.
-	pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-controller", controllerPATScopes)
-	if err != nil {
-		return fmt.Errorf("bootstrap-token: hub token create: %w", err)
+	// basename (jailMount is a constant mount root, so this is stable). Each
+	// PAT's label is fixed — one controller PAT and (when enabled) one remote
+	// PAT per instance.
+	if needController {
+		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-controller", controllerPATScopes)
+		if err != nil {
+			return fmt.Errorf("bootstrap-token: hub token create: %w", err)
+		}
+		if err := state.SaveControllerPAT(pat); err != nil {
+			return fmt.Errorf("bootstrap-token: persisting controller PAT: %w", err)
+		}
 	}
-	if err := state.SaveControllerPAT(pat); err != nil {
-		return fmt.Errorf("bootstrap-token: persisting controller PAT: %w", err)
+	if needRemote {
+		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-remote", remotePATScopes)
+		if err != nil {
+			return fmt.Errorf("bootstrap-token: remote token create: %w", err)
+		}
+		if err := state.SaveRemotePAT(pat); err != nil {
+			return fmt.Errorf("bootstrap-token: persisting remote PAT: %w", err)
+		}
 	}
 	if err := tw.ServerStop(ctx); err != nil {
 		// Best-effort: the deferred ServerStop above retries at return, and a
@@ -448,14 +633,14 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	if err != nil {
 		return apply.Deps{}, nil, nil, err
 	}
-	allowed := append([]int{app.EffectiveJailPort()}, app.Manager.AllowPorts...)
 	cfg := backend.Config{
 		MachineName:    machine,
 		ProjectTree:    app.Tree,
-		AllowedPorts:   allowed,
+		AllowedPorts:   app.EffectiveAllowedPorts(),
 		ScionSource:    app.Scion.Source,
 		ScionVersion:   app.Scion.Version,
 		ScionBinary:    app.Scion.Binary,
+		ScionWebUI:     app.ScionWebAssets(),
 		ClosedInternet: app.ClosedInternetEgress(),
 		Disk:           app.Disk,
 	}
@@ -499,6 +684,17 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		runUID:     b.RunUID(),
 	}
 
+	// rc owns the remote-proxy lifecycle (see remoteController's doc). It
+	// only ever runs when app.RemoteEnabled() (the remote-proxy apply step
+	// — see internal/apply/plan.go) or, in the disabled direction, when
+	// Run's own converge-off reconciliation calls StopRemoteProxy — see
+	// internal/apply/run.go.
+	rc := &remoteController{
+		state:      state,
+		configPath: configPath,
+		port:       app.EffectiveRemotePort(),
+	}
+
 	return apply.Deps{
 		// JailUp is a no-op: buildApplyDeps already brought the jail up
 		// (idempotent; resolves user/uid). The apply executor's jail-up step
@@ -534,9 +730,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 
 		// EnsureControllerPAT backs the "bootstrap-token" apply step (see
 		// ensureControllerPAT's doc above): mint the controller PAT the real,
-		// dev-auth-off hub is driven with, once, in an agent-free window.
+		// dev-auth-off hub is driven with, and (when remote access is
+		// configured on) the narrower remote-access PAT, in one agent-free
+		// window.
 		EnsureControllerPAT: func(ctx context.Context) error {
-			return ensureControllerPAT(ctx, jr, state, app.Tree, b.MountDest())
+			return ensureControllerPAT(ctx, jr, state, app.Tree, b.MountDest(), app.RemoteEnabled())
 		},
 
 		// RemoveScionProjectConfigs clears any stale ~/.scion/project-configs
@@ -604,6 +802,38 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// for the full rationale (re-arm the single-use latch on the create path,
 		// staging the result because only the controller has app.Tree in scope).
 		RearmBootstrap: bc.Rearm,
+
+		// StartRemoteProxy/StopRemoteProxy back the remote-proxy apply step
+		// (present only when app.RemoteEnabled() — see plan.go) and Run's
+		// own converge-to-off reconciliation when it's false (see run.go).
+		// StopRemoteProxy goes straight to brokerctl.State — no controller
+		// method needed, since teardown-by-pidfile carries no lifecycle
+		// state of its own (unlike Start's reuse probe).
+		StartRemoteProxy: rc.Start,
+		StopRemoteProxy:  func(context.Context) error { return state.StopRemoteProxy() },
+
+		// EnsureHubLogin provisions the guest half of the remote login path
+		// (see apply.Deps.EnsureHubLogin). It is a no-op with remote access
+		// off: no provider runs host-side then, so a forwarder would point at
+		// nothing and an oidc_login block would advertise a login that cannot
+		// complete. The guest reaches the host at the same alias the agents
+		// already use for the broker.
+		EnsureHubLogin: func(ctx context.Context) (bool, error) {
+			if !app.RemoteEnabled() {
+				return false, nil
+			}
+			return b.EnsureHubLogin(ctx, backend.HubLogin{
+				IssuerPort:  backend.GuestLoginIssuerPort,
+				HostPort:    app.EffectiveRemoteLoginPort(),
+				HostAddress: brokerHost,
+				ClientID:    remoteproxy.LoginClientID,
+			})
+		},
+
+		// DisableHubLogin removes the guest-side bridge when remote access is
+		// off — see apply.Deps.DisableHubLogin for why leaving it running is
+		// the part that matters.
+		DisableHubLogin: b.DisableHubLogin,
 
 		// Log surfaces start-manager's loud resume-failed recovery notice (see
 		// apply.Deps.Log) on the invoking command's stderr, mirroring how other

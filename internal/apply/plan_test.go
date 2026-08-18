@@ -121,6 +121,66 @@ func TestPlanIncludesBootstrapTokenOnceBeforeScionServer(t *testing.T) {
 	}
 }
 
+// TestPlanRemoteProxyAbsentWhenDisabled proves the default (remote.enabled
+// left off): the remote-proxy step must not appear, so `lever apply --dry-run`
+// never advertises a start step that won't run.
+func TestPlanRemoteProxyAbsentWhenDisabled(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+	}
+	kinds := planStepNames(Plan(app, PlanOpts{}))
+	if contains(kinds, "remote-proxy") {
+		t.Fatalf("plan must omit remote-proxy when remote is disabled: %v", kinds)
+	}
+}
+
+// TestPlanRemoteProxyPresentAndOrderedAfterScionServer proves the positive
+// case: with remote.enabled: true, the remote-proxy step must appear, and
+// strictly after scion-server (the proxy needs the hub up).
+func TestPlanRemoteProxyPresentAndOrderedAfterScionServer(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	kinds := planStepNames(Plan(app, PlanOpts{}))
+	rpIdx, scionIdx := -1, -1
+	for i, k := range kinds {
+		if k == "remote-proxy" {
+			rpIdx = i
+		}
+		if k == "scion-server" {
+			scionIdx = i
+		}
+	}
+	if rpIdx < 0 {
+		t.Fatalf("plan must include remote-proxy when remote is enabled: %v", kinds)
+	}
+	if scionIdx < 0 {
+		t.Fatalf("no scion-server step; kinds=%v", kinds)
+	}
+	if !(scionIdx < rpIdx) {
+		t.Fatalf("remote-proxy (idx %d) must come after scion-server (idx %d); kinds=%v", rpIdx, scionIdx, kinds)
+	}
+}
+
+// TestPlanBrokerOnlyOmitsRemoteProxyEvenWhenEnabled proves the VM-level
+// acceptance gate (which never invokes scion at all) excludes remote-proxy
+// even when the config enables remote access — the brokerOnlyKinds allowlist
+// governs, not RemoteEnabled().
+func TestPlanBrokerOnlyOmitsRemoteProxyEvenWhenEnabled(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	kinds := planStepNames(Plan(app, PlanOpts{BrokerOnly: true}))
+	if contains(kinds, "remote-proxy") {
+		t.Fatalf("broker-only plan must omit remote-proxy even when remote is enabled: %v", kinds)
+	}
+}
+
 func TestPlanIncludesCredentialWhenSet(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",

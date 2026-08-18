@@ -3,6 +3,7 @@ package lima
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -630,5 +631,83 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	if l.AliasV6 != "fd07::fe" {
 		t.Fatalf("skip path must not clobber a prior aliasV6; got %q", l.AliasV6)
+	}
+}
+
+// fakeScionCheckout writes the minimum of a scion checkout that the web-asset
+// path inspects: a web/ holding package.json.
+func fakeScionCheckout(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// scriptScionInstall scripts the host build + guest install of the scion binary
+// so a test can reach whatever runs AFTER it.
+func scriptScionInstall(t *testing.T, f *exec.FakeRunner, machine string) {
+	t.Helper()
+	f.Script("go build", exec.Result{})
+	f.Script("bash -c", exec.Result{})
+	// A digest mismatch, so the install streams rather than skipping.
+	f.Script("limactl shell "+machine+" /usr/bin/sha256sum", exec.Result{Code: 1})
+	p := filepath.Join(os.TempDir(), "lever-scion-"+machine)
+	if err := os.WriteFile(p, []byte("fake-scion-"+machine), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(p) })
+}
+
+// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. Each
+// backend keeps its OWN copy of that struct literal, and this pair has drifted
+// before — ScionBinary was added to both literals while the guard around them
+// was updated in neither (see backend.Config.HasScion) — so both backends pin
+// it, and both assert the negative too.
+func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	f := exec.NewFakeRunner()
+	scriptedVM(f)
+	scriptScionInstall(t, f, "lever-x")
+	l := New(f, "lever-x")
+
+	err := l.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-x", ProjectTree: "/Users/x/tree",
+		ScionSource: fakeScionCheckout(t), ScionWebUI: true,
+	})
+	// node is deliberately not scripted: the web build stops at its toolchain
+	// probe, which is only reachable if ScionWebUI was threaded through.
+	if err == nil || !strings.Contains(err.Error(), "node/npm toolchain not usable") {
+		t.Fatalf("want the web-asset build attempted; got %v", err)
+	}
+}
+
+func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	f := exec.NewFakeRunner()
+	scriptedVM(f)
+	scriptScionInstall(t, f, "lever-x")
+	l := New(f, "lever-x")
+
+	if err := l.EnsureUp(context.Background(), backend.Config{
+		MachineName: "lever-x", ProjectTree: "/Users/x/tree",
+		ScionSource: fakeScionCheckout(t),
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "npm" || c.Name == "node" {
+			t.Fatalf("an instance that serves no UI must not need node: %v %v", c.Name, c.Args)
+		}
 	}
 }

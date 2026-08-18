@@ -43,6 +43,13 @@ type Config struct {
 	// needs no Go toolchain, module cache or egress on the machine hosting the
 	// jail. Mutually exclusive with both. Empty = none.
 	ScionBinary string
+	// ScionWebUI additionally builds scion's SPA on the host and stages it into
+	// the guest, so a `version:`/`source:` scion can serve the web UI. Off by
+	// default: the assets need node+npm on the host and are dead weight for an
+	// instance that never serves a UI. Set from config.App.ScionWebAssets — the
+	// backend obeys it rather than re-deriving it, so the flag lever passes to
+	// the hub and the assets lever staged cannot disagree.
+	ScionWebUI bool
 	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
 	// so the jail can reach ONLY the broker port on the host alias. Required for
 	// api-key mode: LLM traffic must flow broker→Anthropic, not

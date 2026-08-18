@@ -166,10 +166,11 @@ const scionModulePath = "github.com/GoogleCloudPlatform/scion"
 // scionDestPath is where scion is installed in the guest.
 const scionDestPath = "/usr/local/bin/scion"
 
-// ScionSpec names the one place lever should get scion from. At most one field
-// is set; config validation enforces that (internal/config). A struct rather
-// than positional strings because three same-typed parameters across two call
-// sites is a mis-ordering waiting to happen.
+// ScionSpec names the one place lever should get scion from. At most one of
+// Binary/Source/Version is set; config validation enforces that
+// (internal/config). A struct rather than positional strings because three
+// same-typed parameters across two call sites is a mis-ordering waiting to
+// happen.
 type ScionSpec struct {
 	// Binary is a host-local, already-built linux binary, installed as-is. No
 	// Go toolchain, module cache or egress is needed on this host.
@@ -178,15 +179,26 @@ type ScionSpec struct {
 	Source string
 	// Version pins a scion module version/commit to fetch and cross-compile.
 	Version string
+	// WebUI additionally builds scion's SPA on the host and stages it into the
+	// guest, so the hub can serve the web UI (see webassets.go). A field on the
+	// spec rather than a parameter on EnsureScion so the two backends' copies of
+	// the provisioning block stay one struct literal: that block has drifted
+	// before — Binary was added to both literals while the guard around them was
+	// updated in neither (see backend.Config.HasScion).
+	WebUI bool
 }
 
-// EnsureScion puts the configured scion into the guest at scionDestPath.
+// EnsureScion puts the configured scion into the guest at scionDestPath, plus
+// its web assets when the spec asks for them.
 func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 	bin, err := g.resolveScionBinary(ctx, spec)
 	if err != nil {
 		return err
 	}
-	return g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath)
+	if err := g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath); err != nil {
+		return err
+	}
+	return g.EnsureScionWebAssets(ctx, spec)
 }
 
 // resolveScionBinary produces a host-local scion binary for the guest's

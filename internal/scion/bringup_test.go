@@ -135,6 +135,80 @@ func TestServerStartArgvWithoutPort(t *testing.T) {
 	}
 }
 
+// TestServerStartEmitsEnableWebOnly pins the whole web argv: --enable-web
+// and nothing else. The absence of --base-url is the point — scion turns
+// that flag into the agents' hub endpoint, which no jail agent can reach
+// (see ServerOpts.EnableWeb). internal/apply proves the consequence.
+func TestServerStartEmitsEnableWebOnly(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true}
+	if err := c.ServerStart(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) == 0 {
+		t.Fatal("expected at least one call")
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	want := "server start --web-port 8080 --dev-auth=false --enable-web"
+	if got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+}
+
+// A `version:` pin has NO embedded SPA (upstream tracks only
+// web/dist/client/.gitkeep), so the hub must be pointed at the assets lever
+// built and staged, or it serves its "Web UI Not Available" page.
+func TestServerStartEmitsWebAssetsDir(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true, WebAssetsDir: "/usr/local/share/scion/web"}
+	if err := c.ServerStart(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	want := "server start --web-port 8080 --dev-auth=false --enable-web --web-assets-dir=/usr/local/share/scion/web"
+	if got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+}
+
+// --web-assets-dir without --enable-web would be meaningless, and scion treats
+// any non-empty value as an override that REPLACES embedded assets rather than
+// falling back to them — so the flag never travels alone.
+func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	opts := ServerOpts{WebPort: 8080, DevAuth: false, WebAssetsDir: "/usr/local/share/scion/web"}
+	if err := c.ServerStart(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--web-assets-dir") {
+		t.Errorf("args = %q, must not carry --web-assets-dir without --enable-web", got)
+	}
+}
+
+func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	// A hub with remote disabled must not serve the SPA: EnableWeb left at
+	// its zero value must not appear in the argv.
+	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) == 0 {
+		t.Fatal("expected at least one call")
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if strings.Contains(got, "--enable-web") || strings.Contains(got, "--base-url") {
+		t.Errorf("args = %q, must not contain web flags when EnableWeb is unset", got)
+	}
+}
+
 func TestServerStopArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})

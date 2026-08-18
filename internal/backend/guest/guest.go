@@ -67,7 +67,15 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// the mirrors and hangs. The first EnsureUp (fresh VM, no chain yet) installs
 	// everything; subsequent ones find the packages present and skip apt entirely,
 	// needing no guest DNS. `dpkg -s <pkgs>` succeeds iff ALL are installed.
-	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman; }`); err != nil {
+	//
+	// curl is how lever's own hub calls run inside the jail (internal/hubapi/
+	// jailcurl.go); netcat-openbsd is how the remote-access proxy dials the hub
+	// through the jail (internal/remoteproxy/jaildial.go). Both are in the
+	// Debian base image today, so naming them here changes nothing on an
+	// existing guest — the guard still passes and apt still never runs. They
+	// are named so a future base image cannot drop one and break a lever
+	// feature silently.
+	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns curl netcat-openbsd iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl netcat-openbsd iptables podman; }`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
 	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships

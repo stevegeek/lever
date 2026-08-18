@@ -1,0 +1,274 @@
+// Package remoteproxy is the host-side seam between the operator's tailnet
+// and the jail hub's web UI. Auth is INJECTED here (the phone never holds a
+// hub credential), which is exactly why network provenance alone must never
+// authenticate a browser-borne cross-site request: any website open on a
+// tailnet device can make the browser send requests that arrive "from the
+// tailnet". The origin rules below are therefore load-bearing security, not
+// CORS hygiene. An unconfigured ServeHost fails closed: every request is
+// refused, Origin-bearing or not, rather than let an accidental
+// empty-string match decide. The hub also mints a fresh session cookie on
+// every cookie-less request; that cookie is stripped from every response
+// before it reaches the client, for the same reason — it would be an
+// alternate, lever-unmanaged credential if it ever left the host.
+//
+// Precondition: this handler is safe to expose ONLY behind a loopback
+// listener reached exclusively through `tailscale serve` (or equivalent) —
+// the sole trustworthy source of a Tailscale-User-Login value. Every
+// inbound Tailscale-* header is stripped before forwarding to the hub, so a
+// client can never forge identity to the HUB; but the AllowedUsers check
+// performed HERE still trusts whatever the listener's front-end set on the
+// request. A directly reachable listener (LAN, a localhost port-forward, or
+// a DNS rebind to the loopback address) lets any caller set
+// Tailscale-User-Login itself and take the header-free allow path with the
+// injected PAT. Enforcing the loopback bind is the caller's job (see the
+// remote-serve CLI wiring). See the 2026-08-16 remote-agent-access design
+// spec.
+package remoteproxy
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"slices"
+	"strings"
+	"time"
+)
+
+// Config wires a Handler. All fields required unless noted.
+type Config struct {
+	// Target is the hub base URL AS SEEN FROM THE JAIL, e.g.
+	// "http://127.0.0.1:8080" — the same address every other lever hub call
+	// uses (scion.DefaultHubEndpoint). It is the URL, not the route: with
+	// DialContext set, only the Host header and path come from here.
+	Target *url.URL
+	// DialContext, when non-nil, is how the proxy reaches Target. `lever
+	// remote serve` sets JailDial, so each instance reaches its OWN guest hub
+	// through its own jail instead of a host port that at most one instance
+	// could own. Nil uses the default net dialer (tests).
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	// ResponseHeaderTimeout bounds the wait for the hub's response HEADERS.
+	// 0 uses DefaultResponseHeaderTimeout; tests lower it. It does not bound
+	// the body, so a streamed response and an upgraded connection are
+	// unaffected — the timer stops once the headers land. Only meaningful
+	// alongside DialContext, which is when this package owns the Transport.
+	ResponseHeaderTimeout time.Duration
+	// PAT returns the remote PAT at call time (lazy, like HubTokenSource) —
+	// a PAT minted mid-apply is picked up without restart. Empty = 503.
+	PAT func() string
+	// ServeHost is the public origin's host (e.g. "mac.tail1234.ts.net").
+	// Requests with an Origin header for any other host are rejected. An
+	// empty ServeHost fails closed: EVERY request is refused, Origin-bearing
+	// or not — an unconfigured host can never legitimately match, so treat
+	// "unconfigured" as "deny all" rather than risk a silent empty-string
+	// match (an Origin that parses to an empty host, e.g. "null", would
+	// otherwise compare equal to an empty ServeHost).
+	ServeHost string
+	// AllowedUsers, when non-empty, pins Tailscale-User-Login values.
+	AllowedUsers []string
+	// Audit receives one line per decision; nil disables (tests).
+	Audit func(line AuditLine)
+}
+
+// AuditLine is emitted once per request, regardless of outcome. It never
+// carries the PAT value.
+type AuditLine struct {
+	Time     time.Time `json:"time"`
+	TSLogin  string    `json:"ts_login,omitempty"`
+	Method   string    `json:"method"`
+	Path     string    `json:"path"`
+	Decision string    `json:"decision"` // "allow" | "deny-origin" | "deny-user" | "deny-no-pat"
+	Status   int       `json:"status,omitempty"`
+	// Error records why an allowed request never got an answer from the hub
+	// (set only on the 502 path). The transport's own diagnosis lands here
+	// rather than in the client's response body: the operator needs to know
+	// that, say, the jail has no nc, and the remote client must not.
+	Error string `json:"error,omitempty"`
+}
+
+// DefaultResponseHeaderTimeout bounds the wait for the hub's response
+// headers when Config leaves it unset. Generous on purpose: it is a
+// last-resort guard against a wedged jail, not a latency budget. The hub
+// answers a healthy request in milliseconds, and the slowest legitimate case
+// — a cold hub still starting inside a machine that just came up — is far
+// under this.
+const DefaultResponseHeaderTimeout = 45 * time.Second
+
+// secFetchSiteAllowed are the only Sec-Fetch-Site values a same-origin or
+// same-site request can carry. Anything else — including values the Fetch
+// Metadata spec hasn't defined yet — is refused: an allowlist, not a
+// denylist of "cross-site", so an unrecognized value fails closed instead
+// of silently passing.
+var secFetchSiteAllowed = []string{"same-origin", "same-site", "none"}
+
+// ctxState carries the one-time-read PAT and the in-flight AuditLine from
+// the gate (which decides "allow") to the ReverseProxy hooks (which inject
+// the PAT and, once the real upstream status is known, complete the audit
+// call). Threaded through the request context because Rewrite/ModifyResponse/
+// ErrorHandler only see *http.Request/*http.Response, not the gate's locals.
+type ctxState struct {
+	pat  string
+	line *AuditLine
+}
+
+type ctxStateKey struct{}
+
+// NewHandler returns the full middleware+proxy stack.
+func NewHandler(cfg Config) http.Handler {
+	stateFrom := func(r *http.Request) *ctxState {
+		s, _ := r.Context().Value(ctxStateKey{}).(*ctxState)
+		return s
+	}
+
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(cfg.Target)
+			// Strip any client-supplied identity — the injected PAT is the
+			// only identity the hub ever sees. The Cookie header in
+			// particular must never reach the hub's cookie→bearer bridge,
+			// or a client-supplied scion_sess would be honored as an
+			// alternate credential. Tailscale-* headers are stripped too:
+			// the AllowedUsers gate trusts them (under the loopback-bind
+			// precondition documented above), but the hub must never see a
+			// client-supplied identity claim of its own.
+			pr.Out.Header.Del("Authorization")
+			pr.Out.Header.Del("Cookie")
+			for k := range pr.Out.Header {
+				if strings.HasPrefix(strings.ToLower(k), "tailscale-") {
+					pr.Out.Header.Del(k)
+				}
+			}
+			var pat string
+			if s := stateFrom(pr.In); s != nil {
+				pat = s.pat
+			}
+			pr.Out.Header.Set("Authorization", "Bearer "+pat)
+			pr.SetXForwarded()
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			// The hub mints a fresh session cookie on every cookie-less
+			// request. The client must never hold a hub credential, cookie
+			// included. Header.Del operates on the canonicalized key, so
+			// this removes every Set-Cookie value regardless of how many
+			// the hub sent or what case it used.
+			resp.Header.Del("Set-Cookie")
+			if s := stateFrom(resp.Request); s != nil && s.line != nil && cfg.Audit != nil {
+				s.line.Status = resp.StatusCode
+				cfg.Audit(*s.line)
+			}
+			return nil
+		},
+	}
+	if cfg.DialContext != nil {
+		// The standard Transport with only its dial replaced. Not a
+		// hand-rolled RoundTripper: httputil.ReverseProxy leans on
+		// http.Transport's own 101/upgrade handling to carry the hub's
+		// WebSocket attach streams, and that is not part of the RoundTripper
+		// contract.
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.DialContext = cfg.DialContext
+		// A jail dial has no host-side socket to proxy. Leaving Proxy set
+		// would let an HTTP_PROXY in the operator's environment silently
+		// redirect hub traffic — carrying the injected PAT — off the host.
+		t.Proxy = nil
+		// Nothing else bounds getting a response out of the hub. The jail
+		// dial returns as soon as the child starts, so a wedged machine or a
+		// hung jail transport binary would otherwise hold the request open
+		// forever: no answer, no audit line, and a live child — the exact
+		// diagnosable-502 this transport exists to produce, lost. This bounds
+		// the headers only, so streamed bodies and upgraded connections run
+		// as long as they like.
+		t.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
+		if t.ResponseHeaderTimeout == 0 {
+			t.ResponseHeaderTimeout = DefaultResponseHeaderTimeout
+		}
+		rp.Transport = t
+	}
+
+	// The upstream round trip can fail outright (hub down/unreachable),
+	// which bypasses ModifyResponse entirely. Complete the audit call here
+	// too, so "exactly one AuditLine per request" holds on this path as
+	// well.
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if s := stateFrom(r); s != nil && s.line != nil {
+			s.line.Status = http.StatusBadGateway
+			if err != nil {
+				s.line.Error = err.Error()
+			}
+			switch {
+			case cfg.Audit != nil:
+				cfg.Audit(*s.line)
+			case err != nil:
+				// No audit sink wired: the cause still must not vanish, or a
+				// 502 says nothing about whether the jail, the hub, or the
+				// PAT is at fault.
+				fmt.Fprintf(os.Stderr, "lever: warning: remote proxy upstream: %v\n", err)
+			}
+		}
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		line := AuditLine{Time: time.Now().UTC(), TSLogin: r.Header.Get("Tailscale-User-Login"), Method: r.Method, Path: r.URL.Path}
+		deny := func(status int, decision, msg string) {
+			line.Decision, line.Status = decision, status
+			if cfg.Audit != nil {
+				cfg.Audit(line)
+			}
+			http.Error(w, msg, status)
+		}
+
+		// Fail closed on an unconfigured ServeHost: it can never
+		// legitimately match a request's Origin, so refuse everything
+		// rather than let an accidental empty-string comparison decide.
+		// Applies regardless of whether this particular request carries an
+		// Origin header at all.
+		if cfg.ServeHost == "" {
+			deny(http.StatusForbidden, "deny-origin", "remote host not configured")
+			return
+		}
+
+		if origins := r.Header.Values("Origin"); len(origins) > 0 {
+			if len(origins) > 1 {
+				deny(http.StatusForbidden, "deny-origin", "multiple Origin headers refused")
+				return
+			}
+			u, err := url.Parse(origins[0])
+			if err != nil || u.Host == "" || !strings.EqualFold(u.Host, cfg.ServeHost) {
+				deny(http.StatusForbidden, "deny-origin", "cross-origin request refused")
+				return
+			}
+		}
+		if sfs := r.Header.Values("Sec-Fetch-Site"); len(sfs) > 0 {
+			if len(sfs) > 1 {
+				deny(http.StatusForbidden, "deny-origin", "multiple Sec-Fetch-Site headers refused")
+				return
+			}
+			if !slices.ContainsFunc(secFetchSiteAllowed, func(v string) bool { return strings.EqualFold(v, sfs[0]) }) {
+				deny(http.StatusForbidden, "deny-origin", "cross-site request refused")
+				return
+			}
+		}
+		if len(cfg.AllowedUsers) > 0 && !slices.Contains(cfg.AllowedUsers, line.TSLogin) {
+			deny(http.StatusForbidden, "deny-user", "tailscale identity not allowed")
+			return
+		}
+		pat := cfg.PAT() // read once; reused below for both the check and the injected header
+		if pat == "" {
+			deny(http.StatusServiceUnavailable, "deny-no-pat", "remote PAT missing — run `lever apply` to mint it")
+			return
+		}
+
+		line.Decision = "allow"
+		// Status is filled in by ModifyResponse/ErrorHandler once the
+		// upstream round trip completes; the audit call happens there too,
+		// not here, so the line carries the real status instead of the
+		// zero value.
+		state := &ctxState{pat: pat, line: &line}
+		r = r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
+		rp.ServeHTTP(w, r)
+	})
+}

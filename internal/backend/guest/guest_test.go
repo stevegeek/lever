@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -537,6 +538,76 @@ func TestInstallIfChangedHashesTheGuestBinaryNotAMarker(t *testing.T) {
 	for _, c := range f.Calls {
 		if strings.Contains(strings.Join(c.Args, " "), ".sha256") {
 			t.Errorf("no marker file may be written; got %+v", c)
+		}
+	}
+}
+
+// aptPrereqScript returns the root apt-prereq script EnsureRuntimes runs first.
+func aptPrereqScript(t *testing.T) string {
+	t.Helper()
+	shape := prefixShapes("lever-x")[0]
+	f := exec.NewFakeRunner()
+	f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
+	f.Script(strings.Join(shape.userPrefix, " "), exec.Result{})
+	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-x"}
+	if err := g.EnsureRuntimes(context.Background(), "stephen"); err != nil {
+		t.Fatalf("EnsureRuntimes: %v", err)
+	}
+	return f.Calls[0].Args[len(f.Calls[0].Args)-1]
+}
+
+// pkgsAfter reads the package list that follows marker in a shell command,
+// stopping at the first token that is shell syntax rather than a package name.
+func pkgsAfter(t *testing.T, script, marker string) []string {
+	t.Helper()
+	_, rest, ok := strings.Cut(script, marker)
+	if !ok {
+		t.Fatalf("script does not contain %q: %s", marker, script)
+	}
+	var pkgs []string
+	for _, tok := range strings.Fields(rest) {
+		if i := strings.IndexAny(tok, ">;&|{}"); i >= 0 {
+			if i > 0 {
+				pkgs = append(pkgs, tok[:i])
+			}
+			break
+		}
+		pkgs = append(pkgs, tok)
+	}
+	return pkgs
+}
+
+// TestAptPrereqsGuardMatchesInstallList: the dpkg presence guard and the
+// apt-get install list must name exactly the same packages.
+//
+// A package in the install list but missing from the guard never reaches a
+// guest that already has the others — the guard passes and apt is skipped. A
+// package in the guard but missing from the install list is worse: the guard
+// can never pass, so every EnsureUp re-runs apt, which (see the comment above
+// the script) does not merely cost time — once lever's egress chain is up,
+// apt-get update cannot resolve the mirrors and hangs.
+func TestAptPrereqsGuardMatchesInstallList(t *testing.T) {
+	script := aptPrereqScript(t)
+	guard := pkgsAfter(t, script, "dpkg -s ")
+	install := pkgsAfter(t, script, "apt-get install -y -qq ")
+	if len(guard) == 0 {
+		t.Fatal("parsed no packages out of the dpkg guard")
+	}
+	if !slices.Equal(guard, install) {
+		t.Fatalf("guard and install lists differ:\n guard   = %v\n install = %v", guard, install)
+	}
+}
+
+// TestAptPrereqsDeclareLeverToolDependencies: lever runs these inside the jail
+// itself, so a base image that stopped shipping one would break a lever feature
+// with no other signal. curl carries every hub call (internal/hubapi/
+// jailcurl.go); netcat-openbsd is how the remote-access proxy dials the hub
+// through the jail (internal/remoteproxy/jaildial.go).
+func TestAptPrereqsDeclareLeverToolDependencies(t *testing.T) {
+	guard := pkgsAfter(t, aptPrereqScript(t), "dpkg -s ")
+	for _, pkg := range []string{"curl", "netcat-openbsd"} {
+		if !slices.Contains(guard, pkg) {
+			t.Errorf("%q is not declared in the guest prereqs (%v) — lever runs it in the jail", pkg, guard)
 		}
 	}
 }

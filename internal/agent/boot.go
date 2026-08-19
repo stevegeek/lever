@@ -121,7 +121,7 @@ func Boot(ctx context.Context, c BootConfig) error {
 	// presents these itself, but we keep them: they're harmless (nothing on loopback
 	// negotiates TLS) and other in-container tooling may still read NODE_EXTRA_CA_CERTS.
 	// The gateway sidecar owns the rotating leaf; these paths are just informational.
-	overlay := IdentityEnvOverlay(c.IDDir)
+	overlay := HarnessEnvOverlay(c.IDDir)
 	// api-key mode: obtain a capability(llm) token and inject the Anthropic env vars.
 	// Fail closed: a partial overlay without a valid token is worse than a failed boot.
 	if c.LLMAuth == LLMAuthAPIKey && c.RequestLLMToken != nil {

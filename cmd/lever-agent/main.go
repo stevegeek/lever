@@ -429,7 +429,7 @@ func renewOnce(opts renewOpts) error {
 		if err != nil {
 			return fmt.Errorf("renew: parse CN for llm token: %w", err)
 		}
-		overlay := agent.IdentityEnvOverlay(opts.idDir)
+		overlay := agent.HarnessEnvOverlay(opts.idDir)
 		if err := agent.RefreshLLMToken(ctx, bURL, renewed, cn, requestLLMToken, overlay); err != nil {
 			return err
 		}

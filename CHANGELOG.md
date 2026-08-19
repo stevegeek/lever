@@ -7,6 +7,21 @@ version bump moves the block under the new version heading.
 
 ## [0.17.0] - 2026-08-16
 
+### Fixed
+- **Agents now run Claude Code's classic renderer**, via
+  `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` in the env overlay lever writes.
+  Claude Code renders fullscreen by default, drawing on the terminal's
+  alternate screen, which by definition has no scrollback. Every route to a
+  lever agent is a PTY onto the container's tmux — `lever attach`, or Scion's
+  web terminal over `lever remote` — and in both, fullscreen rendering destroys
+  the scrollback the operator actually scrolls: tmux copy-mode cannot see
+  alternate-screen content, and a browser terminal scrolls its own buffer,
+  which holds the shell output sitting *behind* the alternate screen rather
+  than the conversation. The operator cannot fix it from inside the session
+  either — `/tui default` relaunches the process, and Claude Code refuses to
+  relaunch a session carrying a `--system-prompt` replacement, which is exactly
+  what Scion's harness passes. Takes effect on the next agent start.
+
 ### Added
 - **Remote access (`lever remote`)** — talk to the manager, and attach to any
   running agent, from a phone over Tailscale. A new host-side reverse proxy

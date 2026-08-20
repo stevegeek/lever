@@ -183,8 +183,9 @@ type Deps struct {
 	// EnsureAgentTemplate backs the agent-template step: put lever's overlay
 	// template in front of scion's stock `default` so newly provisioned agents
 	// do NOT launch with `--system-prompt '# Placeholder'`, which replaces
-	// Claude Code's entire built-in system prompt. It takes the jail-side
-	// project dir (project scope is the only settings scope that wins) and
+	// Claude Code's entire built-in system prompt. projectDir is JAIL-side —
+	// the scion client behind it runs in the jail, where the host tree exists
+	// only at the mount point (project scope is the only settings scope that wins) and
 	// reports whether it changed anything. nil ⇒ skip (tests, and the
 	// broker-only VM gate).
 	//
@@ -361,7 +362,7 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 	case KindRegisterProject:
 		return runRegisterProject(ctx, app, s, d)
 	case KindAgentTemplate:
-		return runAgentTemplate(ctx, s, d)
+		return runAgentTemplate(ctx, app, s, d)
 	case KindMintManagerBootstrap:
 		return runMintManagerBootstrap(ctx, s, d, boot)
 	case KindStartManager:
@@ -458,11 +459,13 @@ func runRemoteProxy(ctx context.Context, d Deps) error {
 // runAgentTemplate runs the agent-template step. Logs on change only: it is a
 // provisioning-time change the operator cannot otherwise see, and silence on a
 // no-op keeps a re-apply quiet.
-func runAgentTemplate(ctx context.Context, s Step, d Deps) error {
+func runAgentTemplate(ctx context.Context, app *config.App, s Step, d Deps) error {
 	if d.EnsureAgentTemplate == nil {
 		return nil // tests / broker-only gate
 	}
-	changed, err := d.EnsureAgentTemplate(ctx, s.Target)
+	// The JAIL-side path, not the host one: the scion client behind this closure
+	// runs inside the jail, where the host tree is visible only at the mount.
+	changed, err := d.EnsureAgentTemplate(ctx, jailPath(s.Target, app.Tree, d.JailMount))
 	if err != nil {
 		return err
 	}

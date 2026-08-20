@@ -3244,3 +3244,31 @@ func TestScionServerRestartsAHubThatIsAlreadyStopped(t *testing.T) {
 		t.Fatalf("stop=%v start=%v, want the restart to stop (tolerantly) and then start", stopped, started)
 	}
 }
+
+// TestAgentTemplateGetsTheJailPath: the closure behind EnsureAgentTemplate runs
+// `scion config` INSIDE the jail, where the host tree exists only at the mount
+// point. Passing the host path made a live apply fail with "cannot change
+// directory to /Users/…: No such file or directory" — caught only because the
+// step runs before start-manager and aborted the whole apply.
+func TestAgentTemplateGetsTheJailPath(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/Users/someone/instance/workspace",
+		Manager: config.Manager{Image: "img"},
+	}
+	var got string
+	if err := runAgentTemplate(context.Background(),
+		app,
+		Step{Kind: KindAgentTemplate, Target: app.Tree},
+		Deps{
+			JailMount: "/lever",
+			EnsureAgentTemplate: func(_ context.Context, projectDir string) (bool, error) {
+				got = projectDir
+				return false, nil
+			},
+		}); err != nil {
+		t.Fatalf("runAgentTemplate: %v", err)
+	}
+	if got != "/lever" {
+		t.Fatalf("projectDir = %q, want the jail path %q — the host path does not exist inside the jail", got, "/lever")
+	}
+}

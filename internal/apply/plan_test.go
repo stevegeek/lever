@@ -73,7 +73,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, string(s.Kind))
 	}
-	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -276,5 +276,30 @@ func TestPlanLoadsDistinctWorkerImages(t *testing.T) {
 		if loads[i] != want[i] {
 			t.Fatalf("load[%d]=%q want %q (all=%v)", i, loads[i], want[i], loads)
 		}
+	}
+}
+
+// TestPlanAgentTemplateIsOrdered pins the two constraints the agent-template
+// step sits between, which the flat want-list above states only positionally.
+// It must run AFTER register-project, because its settings half writes at
+// project scope and the project has to exist; and BEFORE start-manager, because
+// an agent's system prompt is staged when its home is provisioned and never
+// re-staged — a template written afterwards would miss the very agent this
+// apply creates.
+func TestPlanAgentTemplateIsOrdered(t *testing.T) {
+	app := &config.App{Name: "demo", Backend: "orbstack", Tree: "/t", Manager: config.Manager{Image: "img"}}
+	idx := map[string]int{}
+	for i, s := range Plan(app, PlanOpts{}) {
+		idx[string(s.Kind)] = i
+	}
+	at, ok := idx["agent-template"]
+	if !ok {
+		t.Fatal("default plan must include agent-template")
+	}
+	if rp := idx["register-project"]; at < rp {
+		t.Errorf("agent-template (%d) must run AFTER register-project (%d): project-scope settings need the project", at, rp)
+	}
+	if sm := idx["start-manager"]; at > sm {
+		t.Errorf("agent-template (%d) must run BEFORE start-manager (%d): the prompt is staged at provisioning and never re-staged", at, sm)
 	}
 }

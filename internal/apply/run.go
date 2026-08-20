@@ -180,6 +180,19 @@ type Deps struct {
 	// an unauthenticated jail→host loopback bridge alive for a feature that no
 	// longer exists. nil ⇒ skip (tests, and the broker-only VM gate).
 	DisableHubLogin func(ctx context.Context) error
+	// EnsureAgentTemplate backs the agent-template step: put lever's overlay
+	// template in front of scion's stock `default` so newly provisioned agents
+	// do NOT launch with `--system-prompt '# Placeholder'`, which replaces
+	// Claude Code's entire built-in system prompt. It takes the jail-side
+	// project dir (project scope is the only settings scope that wins) and
+	// reports whether it changed anything. nil ⇒ skip (tests, and the
+	// broker-only VM gate).
+	//
+	// Provisioning-time only, by nature: scion stages an agent's system prompt
+	// once, when its home is created, and never re-stages it. So this governs
+	// agents created from now on; an agent that already exists keeps whatever
+	// it was provisioned with until its staged input is changed in place.
+	EnsureAgentTemplate func(ctx context.Context, projectDir string) (bool, error)
 	// StartRemoteProxy backs the remote-proxy step (present only when
 	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
 	// the daemonized `lever remote serve` proxy. nil ⇒ skip (tests, and any
@@ -347,6 +360,8 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		return runCredential(ctx, s, d)
 	case KindRegisterProject:
 		return runRegisterProject(ctx, app, s, d)
+	case KindAgentTemplate:
+		return runAgentTemplate(ctx, s, d)
 	case KindMintManagerBootstrap:
 		return runMintManagerBootstrap(ctx, s, d, boot)
 	case KindStartManager:
@@ -438,6 +453,23 @@ func runRemoteProxy(ctx context.Context, d Deps) error {
 		return nil // tests / dry paths
 	}
 	return d.StartRemoteProxy(ctx)
+}
+
+// runAgentTemplate runs the agent-template step. Logs on change only: it is a
+// provisioning-time change the operator cannot otherwise see, and silence on a
+// no-op keeps a re-apply quiet.
+func runAgentTemplate(ctx context.Context, s Step, d Deps) error {
+	if d.EnsureAgentTemplate == nil {
+		return nil // tests / broker-only gate
+	}
+	changed, err := d.EnsureAgentTemplate(ctx, s.Target)
+	if err != nil {
+		return err
+	}
+	if changed {
+		logf(d, "lever: agents will no longer be launched with scion's placeholder system prompt (new agents only; existing ones keep the prompt they were provisioned with)")
+	}
+	return nil
 }
 
 // runLoadImage runs the load-image step: skip the multi-GB re-import when the

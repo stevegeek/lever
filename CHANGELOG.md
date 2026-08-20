@@ -8,6 +8,27 @@ version bump moves the block under the new version heading.
 ## [0.17.0] - 2026-08-16
 
 ### Fixed
+- **Agents no longer launch with Scion's placeholder system prompt.** Scion's
+  stock `default` template ships a `system-prompt.md` reading `# Placeholder`,
+  and its claude harness declares `system_prompt_flag: "--system-prompt"` —
+  which *replaces* Claude Code's built-in system prompt (the additive form is
+  `--append-system-prompt`). Every agent provisioned from that template ran with
+  the tool's entire behavioural contract replaced by two words. `lever apply`
+  now installs an overlay template (`~/.scion/templates/lever/`) whose
+  `system-prompt.md` is empty and points the project's `default_template` at
+  it; Scion emits the flag only when the staged prompt is non-empty, so no flag
+  is passed at all. Because the overlay is not named `default`, Scion still
+  prepends the stock template as a base layer, so `agents.md`, `home/` and
+  `skills/` keep tracking upstream — and the one directory Scion force-rewrites
+  on every hub start is left alone.
+  - **New agents only.** Scion stages an agent's system prompt once, when its
+    home is provisioned, and never re-stages it. An agent that already exists
+    keeps the prompt it was created with until its staged
+    `.scion/harness/inputs/system-prompt.md` is emptied in place — which is safe
+    to do live and costs no conversation.
+  - lever claims `default_template` only while it is still Scion's own
+    `default`; a template the operator chose is never overridden.
+
 - **Agents now run Claude Code's classic renderer**, via
   `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` in the env overlay lever writes.
   Claude Code renders fullscreen by default, drawing on the terminal's

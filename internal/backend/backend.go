@@ -121,6 +121,12 @@ type Backend interface {
 	// unchanged one restarts nothing, which is what stops a re-apply from
 	// bouncing the hub and every agent's connection to it.
 	EnsureHubLogin(ctx context.Context, spec HubLogin) (bool, error)
+	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
+	// reporting whether it wrote anything. The overlay exists to suppress
+	// scion's stock placeholder system prompt, which would otherwise REPLACE
+	// Claude Code's built-in one for every agent provisioned from the default
+	// template. See guest.EnsureLeverTemplate for the full reasoning.
+	EnsureLeverTemplate(ctx context.Context) (bool, error)
 	// DisableHubLogin converges that provisioning OFF: it stops and removes
 	// the guest-side forwarder and drops the `oidc_login` block. Called
 	// whenever remote access is not enabled, so an instance that turned it

@@ -180,6 +180,12 @@ func (b *Base) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool,
 	return b.Guest().EnsureHubLogin(ctx, spec)
 }
 
+// EnsureLeverTemplate creates lever's overlay agent template in the guest —
+// see backend.Backend.
+func (b *Base) EnsureLeverTemplate(ctx context.Context) (bool, error) {
+	return b.Guest().EnsureLeverTemplate(ctx)
+}
+
 // DisableHubLogin converges the guest's remote-access login path off — see
 // backend.Backend.
 func (b *Base) DisableHubLogin(ctx context.Context) error {

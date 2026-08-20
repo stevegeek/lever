@@ -140,6 +140,27 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 	return err
 }
 
+// ConfigGetProject reads an effective scion config key as resolved FOR a
+// project — the merge of embedded defaults, the machine settings, and the
+// project's own, in that precedence.
+func (c *Client) ConfigGetProject(ctx context.Context, projectDir, key string) (string, error) {
+	return c.run(ctx, projectDir, "config", "get", key)
+}
+
+// ConfigSetProject sets a scion config key at PROJECT scope, resolved from
+// projectDir as the working directory.
+//
+// Project scope, not global, because it is the only one that wins: settings are
+// merged with koanf in the order embedded defaults → machine
+// (~/.scion/settings.yaml) → project, so a later file overrides an earlier one
+// (pkg/config/settings_v1.go LoadVersionedSettings). Scion writes
+// `default_template: default` into the project's own settings at registration,
+// which would defeat the same key set globally.
+func (c *Client) ConfigSetProject(ctx context.Context, projectDir, key, value string) error {
+	_, err := c.run(ctx, projectDir, "config", "set", key, value)
+	return err
+}
+
 // ServerOpts configures `scion server start`.
 type ServerOpts struct {
 	// WebPort, when > 0, sets the port the Hub API is reachable on (--web-port).

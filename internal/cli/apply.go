@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
@@ -627,6 +628,26 @@ func (bc *brokerController) Rearm(ctx context.Context) (apply.BootstrapMaterial,
 	return m, nil
 }
 
+// leverMayClaimTemplate reports whether lever may point default_template at its
+// own overlay, given the value currently in effect.
+//
+// Only scion's stock "default" is lever's to take. Anything else is either
+// already lever's (idempotence — `config set` cannot report whether it changed
+// anything, so this is also what keeps a re-apply quiet) or a template the
+// operator chose deliberately, which lever must not silently override.
+//
+// An EMPTY value is not a claim: it means the key is unset, and scion's own
+// fallback is "default" (pkg/agent/provision.go), so leaving it alone would
+// leave the placeholder in place.
+func leverMayClaimTemplate(current string) bool {
+	switch strings.TrimSpace(current) {
+	case "default", "":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)
@@ -834,6 +855,40 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// off — see apply.Deps.DisableHubLogin for why leaving it running is
 		// the part that matters.
 		DisableHubLogin: b.DisableHubLogin,
+
+		// EnsureAgentTemplate puts lever's overlay template in front of scion's
+		// stock `default` — see apply.Deps.EnsureAgentTemplate, and
+		// guest.EnsureLeverTemplate for WHY an empty system prompt is the fix.
+		//
+		// The two halves are ordered file-then-setting deliberately. Pointing
+		// default_template at a template that does not exist yet would fail
+		// every provision in between; the reverse order is inert, because a
+		// template nothing selects is just an unused directory. So a failure
+		// after the first half leaves the guest in a working state, and the
+		// next apply converges it.
+		//
+		// The setting is read before it is written so an operator who has
+		// deliberately chosen their own template keeps it: lever only claims
+		// default_template while it is still scion's own default. Reading it
+		// also keeps a re-apply quiet, since `config set` cannot report whether
+		// it changed anything.
+		EnsureAgentTemplate: func(ctx context.Context, projectDir string) (bool, error) {
+			wrote, err := b.EnsureLeverTemplate(ctx)
+			if err != nil {
+				return false, err
+			}
+			cur, err := sc.ConfigGetProject(ctx, projectDir, "default_template")
+			if err != nil {
+				return false, fmt.Errorf("read default_template: %w", err)
+			}
+			if !leverMayClaimTemplate(cur) {
+				return wrote, nil
+			}
+			if err := sc.ConfigSetProject(ctx, projectDir, "default_template", guest.LeverTemplateName); err != nil {
+				return false, fmt.Errorf("set default_template: %w", err)
+			}
+			return true, nil
+		},
 
 		// Log surfaces start-manager's loud resume-failed recovery notice (see
 		// apply.Deps.Log) on the invoking command's stderr, mirroring how other

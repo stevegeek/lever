@@ -304,3 +304,26 @@ func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
 		t.Fatalf("AllowedPorts = %v, want exactly %v — the grant must add one port, not widen the alias", on.AllowedPorts, want)
 	}
 }
+
+// TestLeverMayClaimTemplate pins which default_template values lever will take
+// over. The two that matter in opposite directions: scion's stock "default" is
+// the whole point of the overlay and MUST be claimed, while a template the
+// operator chose must never be silently replaced.
+func TestLeverMayClaimTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		current string
+		want    bool
+		why     string
+	}{
+		{"default", true, "scion's stock default is exactly what ships the placeholder prompt"},
+		{"", true, "unset falls back to \"default\" in scion, so the placeholder still applies"},
+		{"  default  ", true, "surrounding whitespace is not a deliberate choice"},
+		{"lever", false, "already ours — a re-apply must not report a change"},
+		{"my-template", false, "an operator's own choice is not lever's to override"},
+		{"Default", false, "template names are resolved as directory names, and case matters"},
+	} {
+		if got := leverMayClaimTemplate(tc.current); got != tc.want {
+			t.Errorf("leverMayClaimTemplate(%q) = %v, want %v — %s", tc.current, got, tc.want, tc.why)
+		}
+	}
+}

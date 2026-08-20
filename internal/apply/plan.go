@@ -23,6 +23,7 @@ const (
 	KindScionServer          StepKind = "scion-server"
 	KindCredential           StepKind = "credential"
 	KindRegisterProject      StepKind = "register-project"
+	KindAgentTemplate        StepKind = "agent-template"
 	KindMintManagerBootstrap StepKind = "mint-manager-bootstrap"
 	KindStartManager         StepKind = "start-manager"
 	// KindRemoteProxy daemonizes `lever remote serve` (see Deps.StartRemoteProxy).
@@ -107,6 +108,11 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 		steps = append(steps, Step{Kind: KindCredential, Target: a.Manager.CredentialFile})
 	}
 	steps = append(steps, Step{Kind: KindRegisterProject, Target: a.Tree})
+	// Suppress scion's placeholder system prompt before anything can be
+	// provisioned from it (see Deps.EnsureAgentTemplate). AFTER register-project
+	// because the settings half writes at PROJECT scope, which needs the project
+	// to exist; BEFORE start-manager because provisioning reads the template.
+	steps = append(steps, Step{Kind: KindAgentTemplate, Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: KindMintManagerBootstrap, Target: a.Tree})
 	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name, Detail: a.ManagerImage()})

@@ -1189,4 +1189,10 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the old proxy was LEAKED: still serving the previous port with the previous config, and remote.pid no longer names it")
 	}
+	// The other half of "unstoppable": the stop must also drop remote.pid, so
+	// nothing later mistakes a process lever no longer controls for the live
+	// proxy. (Here the respawn fails, so nothing rewrites the file.)
+	if _, err := os.Stat(state.RemotePID()); err == nil {
+		t.Fatal("remote.pid still names the stopped proxy — `lever remote status` and the next apply both read it as the live one")
+	}
 }

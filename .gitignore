@@ -36,3 +36,8 @@ image/lever-claude/scionhook/
 /lever-tool-todo
 /weather-stub
 /dist/
+
+# Agent tooling scratch: task briefs, review packages, generated diffs.
+# Process artifacts, not project history — the findings that matter land in
+# commit messages, the CHANGELOG, or a real note under docs/.
+.superpowers/

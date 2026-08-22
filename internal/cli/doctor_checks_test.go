@@ -800,6 +800,10 @@ func TestCheckRemoteHealthz500(t *testing.T) {
 	saved := remoteHealthzProbe
 	t.Cleanup(func() { remoteHealthzProbe = saved })
 	remoteHealthzProbe = func(int, string) (int, error) { return 500, nil }
+	// Everything healthz depends on is green, so the 500 is the only failure
+	// left to report. Stubbed rather than left real: the login probes talk to
+	// loopback ports, and a test must never reach a proxy running on this host.
+	stubHealthyLoginProbe(t)
 
 	r := checkRemote(context.Background(), app, st, okDial, nil)
 	if r.ok {
@@ -844,6 +848,52 @@ func TestCheckRemoteHealthy(t *testing.T) {
 	r := checkRemote(context.Background(), app, st, okDial, nil)
 	if !r.ok {
 		t.Fatalf("pid alive + listening + PAT present + healthz 200 must pass: %+v", r)
+	}
+}
+
+// TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz pins the ORDER of the two
+// probes, because the order decides what an operator reads at 2am.
+//
+// /healthz is not an API path, so the proxy opens a hub web session before it
+// forwards the request (remoteproxy.NewHandler's session gate) — a broken
+// login chain makes healthz answer 502 as well. With healthz probed first,
+// doctor reported "GET /healthz returned 502 — inspect remote.log" and never
+// reached checkRemoteLoginPath, so the operator lost the one message that says
+// what to DO (a login port granted since the instance came up needs `lever
+// down` + `lever up`). The cause must win over the symptom.
+func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
+	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	st := brokerctl.StateDir(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	writeRemotePAT(t, st, 0o600)
+
+	// The host-side provider is healthy; the GUEST half is not — the hub
+	// cannot reach the provider through the forwarder, and answers 500.
+	stubHealthyLoginProbe(t)
+	remoteJailLoginProbe = func(context.Context, leverexec.Runner, string) (int, string, error) {
+		return 500, "", nil
+	}
+	// What the live proxy answers while the login chain is broken.
+	healthzProbed := false
+	saved := remoteHealthzProbe
+	t.Cleanup(func() { remoteHealthzProbe = saved })
+	remoteHealthzProbe = func(int, string) (int, error) {
+		healthzProbed = true
+		return 502, nil
+	}
+
+	r := checkRemote(context.Background(), app, st, okDial, leverexec.NewFakeRunner())
+	if r.ok {
+		t.Fatal("a hub that cannot reach the login provider must fail the check")
+	}
+	if !strings.Contains(r.detail, "could not reach lever's login provider") {
+		t.Fatalf("detail = %q, want the login-path diagnosis rather than the healthz symptom", r.detail)
+	}
+	if !strings.Contains(r.fix, "lever down") {
+		t.Fatalf("fix = %q, want the actionable egress remediation", r.fix)
+	}
+	if healthzProbed {
+		t.Fatal("healthz was probed before the login diagnosis: its 502 is a CONSEQUENCE of the broken login, and reporting it shadows the cause")
 	}
 }
 

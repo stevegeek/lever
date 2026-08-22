@@ -239,10 +239,19 @@ func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner) (detail stri
 // checkRemote verifies the remote-access proxy (`lever remote`) when
 // configured on: the recorded process is alive and actually listening on
 // EffectiveRemotePort (the same pid/dial split as checkBrokerAlive), the
-// injected PAT is present and not group/other-accessible, and an end-to-end
-// GET /healthz THROUGH the proxy returns 200 — proving the whole chain
-// (loopback listener -> origin/identity gates -> PAT injection -> hub)
-// actually works, not just that a process happens to be running.
+// injected PAT is present and not group/other-accessible, the login path the
+// proxy depends on is intact, and — last — an end-to-end GET /healthz THROUGH
+// the proxy returns 200, proving the whole chain (loopback listener ->
+// origin/identity gates -> hub web session -> PAT injection -> hub) actually
+// works, not just that a process happens to be running.
+//
+// /healthz is deliberately the LAST probe. It is not an API path, so the proxy
+// opens a hub web session before forwarding it: the probe therefore drives a
+// full server-side OIDC handshake, and fails 502 whenever the login path is
+// broken. Running it ahead of the login checks reported that 502 instead of
+// the specific, actionable failure. Side effect worth knowing: `lever doctor`
+// performs a REAL login, so the hub creates (or reuses) a user row for
+// allowed_users[0], exactly as an operator's first browser visit would.
 //
 // Disabled is a pass, not a warning: remote access is opt-in and most
 // instances never turn it on. PAT EXPIRY is deliberately not checked here —
@@ -275,13 +284,14 @@ func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, di
 	case fi.Mode().Perm()&0o077 != 0:
 		return checkResult{name, false, fmt.Sprintf("remote.pat has mode %04o (group/other-accessible, want 0600)", fi.Mode().Perm()), "chmod 600 " + state.RemotePAT()}
 	}
-	status, err := remoteHealthzProbe(port, firstOrEmpty(app.Remote.AllowedUsers))
-	if err != nil {
-		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect .lever-state/remote.log — the hub may be down, or the proxy misconfigured"}
-	}
-	if status != http.StatusOK {
-		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect .lever-state/remote.log and .lever-state/remote-audit.jsonl"}
-	}
+	// The login checks run BEFORE the end-to-end /healthz probe, and that
+	// order is load-bearing. /healthz is not an API path, so the proxy opens a
+	// hub web session for it (remoteproxy.NewHandler's `cfg.Session != nil &&
+	// !isAPIPath` gate) — a broken login chain therefore makes healthz answer
+	// 502 too. Probing healthz first SHADOWED the precise diagnosis: the
+	// operator was told "GET /healthz returned 502 — inspect remote.log" when
+	// the one actionable message ("a login port granted since the instance came
+	// up needs `lever down` + `lever up`") was the very next check.
 	loginPort := app.EffectiveRemoteLoginPort()
 	login, err := remoteLoginProbe(loginPort)
 	switch {
@@ -308,6 +318,16 @@ func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, di
 	}
 	if detail, fix, ok := checkRemoteLoginPath(ctx, jr); !ok {
 		return checkResult{name, false, detail, fix}
+	}
+
+	// Last, because it depends on everything above: this is the only probe
+	// that goes end to end through the proxy to the hub.
+	status, err := remoteHealthzProbe(port, firstOrEmpty(app.Remote.AllowedUsers))
+	if err != nil {
+		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect .lever-state/remote.log — the hub may be down, or the proxy misconfigured"}
+	}
+	if status != http.StatusOK {
+		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect .lever-state/remote.log and .lever-state/remote-audit.jsonl"}
 	}
 	return checkResult{name, true, fmt.Sprintf("pid %d, serving on %s, PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", pid, addr, loginPort), ""}
 }

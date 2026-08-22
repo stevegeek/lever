@@ -82,10 +82,9 @@ type ServeConfig struct {
 // closed on any non-loopback listen address), bind the provider's own
 // loopback port when one is configured, open the audit JSONL (append, 0600)
 // when AuditPath is set, write the pid file, record what this process is
-// serving (Stamp), and serve. On ctx.Done it shuts
-// both servers down gracefully, removes the pid file, and returns. Mirrors
-// brokerctl.Serve's bind → pid → serve → remove-pid ordering
-// (internal/brokerctl/serve.go).
+// serving (Stamp), and serve. On ctx.Done it shuts both servers down
+// gracefully, removes the pid file, and returns. Mirrors brokerctl.Serve's
+// bind → pid → serve → remove-pid ordering (internal/brokerctl/serve.go).
 func Serve(ctx context.Context, cfg ServeConfig) error {
 	ln, err := listenLoopback(cfg.Port)
 	if err != nil {

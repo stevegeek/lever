@@ -376,6 +376,33 @@ of your own: if your own phone is compromised, its Tailscale identity is exactly
 would present too. Leave it empty to allow anyone who can reach the proxy through your tailnet at
 all (the default — often fine for a single-operator tailnet).
 
+## Never use `tailscale funnel`
+
+Publish the proxy with `tailscale serve`, which is reachable **only from your tailnet**.
+`tailscale funnel` is the same command shape and publishes to the **public internet** — and
+nothing in lever can refuse it, because a funnelled request arrives looking like any other.
+
+The consequence is not a lesser version of tailnet access, it is the whole thing: the proxy
+injects a credential on every forwarded request, so an unauthenticated stranger gets the same
+interactive power over the jail interior as your phone — reading agent transcripts and attaching
+to a running agent's terminal. `allowed_users` is not a backstop either. It is empty by default,
+and even when set it pins a Tailscale login that a funnelled request simply does not carry, which
+is a 403 only for as long as the header stays absent.
+
+The host stays VM-protected either way — this is exposure of the jail interior, not of your Mac.
+That is the same posture the threat-model section describes for the tailnet; funnel just removes
+the tailnet from it.
+
+## The asset build runs on the host
+
+With `remote.enabled: true`, `lever apply` builds Scion's web UI **on the host** (`npm ci &&
+npm run build`), outside the jail, as the user running lever — so it executes whatever install
+and build scripts that dependency tree defines, with your filesystem access. The inputs are
+pinned: the source is the Scion commit `scion.version` names, fetched through the Go module proxy
+and checksum-verified, and `npm ci` installs from its committed lockfile. That bounds *which*
+code runs, not *what it can do*. If that is not a trade you want, `scion.binary` mode skips the
+build entirely (and serves no web UI).
+
 ## Audit log
 
 Every request the proxy handles — allowed or denied — is appended as one JSON line to

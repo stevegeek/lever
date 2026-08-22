@@ -5,64 +5,10 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
-## [0.17.0] - 2026-08-16
-
-### Fixed (apply/remote lifecycle)
-- **`lever apply` now restarts the remote proxy when its config changed.** The
-  proxy reads the `remote:` block once and caches all of it in the handler it
-  builds at startup — ServeHost from `base_url`, the allowed-user set by value,
-  the bound ports — so a running proxy keeps enforcing the config it was born
-  with. Start's reuse shortcut compared only "pid alive + port accepting", so
-  editing `remote:` and re-applying reported success while changing nothing.
-  Found live: enabling `allowed_users` left the old process serving, and
-  identity-free requests kept returning 200. A running proxy is now reused only
-  when a stamp beside `remote.pid` records the same lever version AND the same
-  remote config; otherwise apply stops it and spawns a replacement. This is what
-  `brokerController.Start` has always done via the broker's `/epoch` — the proxy
-  has no such endpoint and must not grow one, since it fronts the hub.
-
-### Changed
-- **Agent image bakes Claude Code 2.1.239** (was 2.1.226). Needs an image
-  rebuild to take effect, then `lever apply` and — for a running manager —
-  `lever stop && lever up`.
-
-### Fixed
-- **Agents no longer launch with Scion's placeholder system prompt.** Scion's
-  stock `default` template ships a `system-prompt.md` reading `# Placeholder`,
-  and its claude harness declares `system_prompt_flag: "--system-prompt"` —
-  which *replaces* Claude Code's built-in system prompt (the additive form is
-  `--append-system-prompt`). Every agent provisioned from that template ran with
-  the tool's entire behavioural contract replaced by two words. `lever apply`
-  now installs an overlay template (`~/.scion/templates/lever/`) whose
-  `system-prompt.md` is empty and points the project's `default_template` at
-  it; Scion emits the flag only when the staged prompt is non-empty, so no flag
-  is passed at all. Because the overlay is not named `default`, Scion still
-  prepends the stock template as a base layer, so `agents.md`, `home/` and
-  `skills/` keep tracking upstream — and the one directory Scion force-rewrites
-  on every hub start is left alone.
-  - **New agents only.** Scion stages an agent's system prompt once, when its
-    home is provisioned, and never re-stages it. An agent that already exists
-    keeps the prompt it was created with until its staged
-    `.scion/harness/inputs/system-prompt.md` is emptied in place — which is safe
-    to do live and costs no conversation.
-  - lever claims `default_template` only while it is still Scion's own
-    `default`; a template the operator chose is never overridden.
-
-- **Agents now run Claude Code's classic renderer**, via
-  `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` in the env overlay lever writes.
-  Claude Code renders fullscreen by default, drawing on the terminal's
-  alternate screen, which by definition has no scrollback. Every route to a
-  lever agent is a PTY onto the container's tmux — `lever attach`, or Scion's
-  web terminal over `lever remote` — and in both, fullscreen rendering destroys
-  the scrollback the operator actually scrolls: tmux copy-mode cannot see
-  alternate-screen content, and a browser terminal scrolls its own buffer,
-  which holds the shell output sitting *behind* the alternate screen rather
-  than the conversation. The operator cannot fix it from inside the session
-  either — `/tui default` relaunches the process, and Claude Code refuses to
-  relaunch a session carrying a `--system-prompt` replacement, which is exactly
-  what Scion's harness passes. Takes effect on the next agent start.
+## [0.17.0] - 2026-08-22
 
 ### Added
+
 - **Remote access (`lever remote`)** — talk to the manager, and attach to any
   running agent, from a phone over Tailscale. A new host-side reverse proxy
   (`internal/remoteproxy`) fronts the Scion hub's web UI: it injects a
@@ -274,6 +220,84 @@ version bump moves the block under the new version heading.
     repair. On a fresh bootstrap with `remote.enabled` already set, this
     happens in the same window as the controller-PAT mint; no extra window
     opens.
+
+### Changed
+
+- **Agent image bakes Claude Code 2.1.239** (was 2.1.226). Needs an image
+  rebuild to take effect, then `lever apply` and — for a running manager —
+  `lever stop && lever up`.
+
+### Fixed
+
+- **The proxy validates the `Host` header** (DNS-rebinding defence). The origin
+  gate checked `Origin` and `Sec-Fetch-Site`, but both are only present when the
+  client chooses to send them, and binding to loopback is no defence when
+  loopback is what a rebind targets: a page on an attacker's own name, rebound
+  to `127.0.0.1`, is same-origin to the browser, so it sends no `Origin`,
+  `Sec-Fetch-Site: same-origin`, and any header it likes — including a forged
+  `Tailscale-User-Login` — and reads a reply carrying the injected PAT's
+  authority. The proxy now answers only to the tailnet name in `base_url`, or
+  to loopback on its own port (for `lever doctor`'s health probe). Found by an
+  independent review of this branch and reproduced against a live proxy.
+- **Teardown stops the remote proxy** and removes its stamp. `destroy` stopped
+  the broker but not the proxy, so a full teardown left two loopback listeners
+  running and a later bring-up *reused* the pre-teardown process, whose cached
+  jail prefix names a machine that no longer exists.
+- **Turning remote access off converges even after a failed attempt.** The
+  guest settings edit was gated on having found the login forwarder binary,
+  which the same script removes first — so one failed edit left the
+  `oidc_login` block in the guest permanently, with no verb that removed it.
+- **Scion config values are read from stdout alone.** Scion's settings loader
+  writes warnings to stderr, and lever folded both streams together; a warning
+  prepended to `config get default_template` made lever read it as an
+  operator's own template choice and silently skip the placeholder-prompt fix,
+  while `apply` logged that it had applied it.
+- **`lever apply` now restarts the remote proxy when its config changed.** The
+  proxy reads the `remote:` block once and caches all of it in the handler it
+  builds at startup — ServeHost from `base_url`, the allowed-user set by value,
+  the bound ports — so a running proxy keeps enforcing the config it was born
+  with. Start's reuse shortcut compared only "pid alive + port accepting", so
+  editing `remote:` and re-applying reported success while changing nothing.
+  Found live: enabling `allowed_users` left the old process serving, and
+  identity-free requests kept returning 200. A running proxy is now reused only
+  when a stamp beside `remote.pid` records the same lever version AND the same
+  remote config; otherwise apply stops it and spawns a replacement. This is what
+  `brokerController.Start` has always done via the broker's `/epoch` — the proxy
+  has no such endpoint and must not grow one, since it fronts the hub.
+- **Agents no longer launch with Scion's placeholder system prompt.** Scion's
+  stock `default` template ships a `system-prompt.md` reading `# Placeholder`,
+  and its claude harness declares `system_prompt_flag: "--system-prompt"` —
+  which *replaces* Claude Code's built-in system prompt (the additive form is
+  `--append-system-prompt`). Every agent provisioned from that template ran with
+  the tool's entire behavioural contract replaced by two words. `lever apply`
+  now installs an overlay template (`~/.scion/templates/lever/`) whose
+  `system-prompt.md` is empty and points the project's `default_template` at
+  it; Scion emits the flag only when the staged prompt is non-empty, so no flag
+  is passed at all. Because the overlay is not named `default`, Scion still
+  prepends the stock template as a base layer, so `agents.md`, `home/` and
+  `skills/` keep tracking upstream — and the one directory Scion force-rewrites
+  on every hub start is left alone.
+  - **New agents only.** Scion stages an agent's system prompt once, when its
+    home is provisioned, and never re-stages it. An agent that already exists
+    keeps the prompt it was created with until its staged
+    `.scion/harness/inputs/system-prompt.md` is emptied in place — which is safe
+    to do live and costs no conversation.
+  - lever claims `default_template` only while it is still Scion's own
+    `default`; a template the operator chose is never overridden.
+
+- **Agents now run Claude Code's classic renderer**, via
+  `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` in the env overlay lever writes.
+  Claude Code renders fullscreen by default, drawing on the terminal's
+  alternate screen, which by definition has no scrollback. Every route to a
+  lever agent is a PTY onto the container's tmux — `lever attach`, or Scion's
+  web terminal over `lever remote` — and in both, fullscreen rendering destroys
+  the scrollback the operator actually scrolls: tmux copy-mode cannot see
+  alternate-screen content, and a browser terminal scrolls its own buffer,
+  which holds the shell output sitting *behind* the alternate screen rather
+  than the conversation. The operator cannot fix it from inside the session
+  either — `/tui default` relaunches the process, and Claude Code refuses to
+  relaunch a session carrying a `--system-prompt` replacement, which is exactly
+  what Scion's harness passes. Takes effect on the next agent start.
 
 ## [0.16.0] - 2026-08-13
 

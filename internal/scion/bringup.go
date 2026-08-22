@@ -174,8 +174,30 @@ type ServerOpts struct {
 	// DevAuth is always emitted explicitly (--dev-auth=true|false) so the real
 	// hub is never left on the (dev-auth-on) default by omission.
 	DevAuth bool
-	// EnableWeb serves the hub's embedded SPA (--enable-web). Only the
-	// remote-access feature turns this on; a headless hub stays API-only.
+	// EnableWeb passes --enable-web. lever sets it only for remote access —
+	// but it does NOT follow that a headless hub stays API-only, and reading
+	// it that way is a mistake with teeth.
+	//
+	// scion applies WORKSTATION DEFAULTS to every `server start` that is not
+	// --hosted, and one of them is `if !cmd.Flags().Changed("enable-web") {
+	// enableWeb = true }` (cmd/server_config.go applyWorkstationDefaults).
+	// Omitting the flag therefore enables the web frontend exactly as passing
+	// it does — the daemon even re-emits a bare --enable-web into its own
+	// --foreground child argv (cmd/server_daemon.go buildDaemonStartArgs runs
+	// AFTER the defaults are applied). Only an explicit --enable-web=false
+	// would turn it off.
+	//
+	// lever must never pass that. With web disabled the Hub API stops being
+	// mounted on the web server and binds cfg.Hub.Port — 9810 — instead
+	// (cmd/server_foreground.go, the `if !enableWeb` branch), while lever's
+	// whole model puts the Hub API on --web-port 8080: the broker, the agents'
+	// SCION_HUB_ENDPOINT, `lever doctor` and the remote proxy all dial it
+	// there. WebPort's "the Hub API is mounted on the web server's port" is
+	// true only because the web frontend is on.
+	//
+	// So what this field actually decides is WebAssetsDir below, which is only
+	// ever passed alongside it. Turning remote access off does not take the
+	// SPA away; it takes away the assets lever staged for it, and the login.
 	//
 	// There is deliberately NO --base-url here, even though the remote
 	// feature knows its public tailnet origin. scion's --base-url is not a
@@ -216,6 +238,16 @@ type ServerOpts struct {
 
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises
 // and returns.
+//
+// These options describe a START, not a desired state. A daemon that is
+// already running keeps the argv it was started with: scion refuses with
+// "server is already running (PID: n)" rather than reconfiguring anything
+// (cmd/server_daemon.go runServerStartOrDaemon), and this call tolerates that
+// refusal so a re-apply is cheap (see below). So an option that lives only in
+// the argv — WebAssetsDir — changes nothing until something stops the daemon
+// first. A caller that needs one to take effect must ServerStop, and
+// internal/apply does exactly that, on both the on- and the off-transition of
+// remote access.
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	args := []string{"server", "start"}
 	if o.WebPort > 0 {

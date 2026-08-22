@@ -195,8 +195,13 @@ func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})
 	c := New(f, Options{})
-	// A hub with remote disabled must not serve the SPA: EnableWeb left at
-	// its zero value must not appear in the argv.
+	// EnableWeb left at its zero value must not appear in the argv. Note what
+	// that does and does not buy: it is NOT how a hub is made API-only —
+	// scion's workstation defaults enable the frontend for any start that does
+	// not say otherwise, and lever needs them to (see ServerOpts.EnableWeb).
+	// What it buys is that --web-assets-dir never travels with it, so the hub
+	// falls back to its own embedded assets rather than a directory lever
+	// stages only while remote access is on.
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
 		t.Fatal(err)
 	}

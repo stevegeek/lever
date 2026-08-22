@@ -164,11 +164,12 @@ type AuditLine struct {
 }
 
 // maxAuditFieldLen caps how much caller-chosen text any single audit field
-// carries. Every field of an AuditLine except Decision and Status is copied
-// from the request, and both sinks that write remote-audit.jsonl take input a
-// caller controls: the provider is reachable from anything inside the jail,
-// and the proxy's own gate audits every DENIAL too, which happens before any
-// identity check has passed. JSON encoding already makes an odd value
+// carries. Path, Method and TSLogin are copied from the request on both sinks
+// that write remote-audit.jsonl, and both sinks are reachable by someone whose
+// text that is: the provider by anything inside the jail, and the proxy's gate
+// by anything that reaches the listener — the gate audits every DENIAL too, so
+// its line is written before any identity check has passed. (Error is lever's
+// own wording, and Time, Decision and Status are not the caller's at all.) JSON encoding already makes an odd value
 // unambiguous — this bound is about the operator's disk. One request may carry
 // close to a megabyte of request line and headers (http.Server's default
 // MaxHeaderBytes), so without a cap a few thousand of them append gigabytes to

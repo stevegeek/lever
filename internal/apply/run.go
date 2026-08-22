@@ -341,14 +341,24 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 		//
 		// The SPA lever staged into the guest for the hub also stays
 		// (guest.ScionWebAssetsDir; EnsureScionWebAssets simply skips once
-		// app.ScionWebAssets() is false). Kept on purpose: nothing serves it —
-		// the restart above drops --web-assets-dir from the hub's argv — and
-		// nothing goes stale, since stagedWebDigest re-stages on a digest
-		// mismatch if remote access is turned back on at a different scion
-		// pin. What is left is roughly 3MB of root-owned files inside the VM,
-		// the sourcemaps having been excluded from the payload
-		// (guest.webAssetsExclude), which is not worth a delete path of its
-		// own on every apply of every remote-off instance.
+		// app.ScionWebAssets() is false), and that is deliberate on three
+		// counts:
+		//
+		//   - Nothing lever starts reads it. With remote access off lever
+		//     passes no --web-assets-dir at all (hubServerOpts), and the
+		//     restart above takes the flag out of a running hub's argv. Note
+		//     this is NOT the same as the hub having no UI: scion's
+		//     workstation defaults keep the web frontend on either way (see
+		//     scion.ServerOpts.EnableWeb).
+		//   - It cannot go stale. stagedWebDigest compares digests, so turning
+		//     remote access back on at the SAME pin reuses the staged tree and
+		//     re-stages nothing, while a different pin re-stages.
+		//   - What is left is small. The payload excludes vite's sourcemaps
+		//     (guest.webAssetsExclude measures them at 8.2MB of 11.5MB), so
+		//     this is single-digit MB of root-owned files inside the VM — not
+		//     worth a delete path of its own, run on every apply of every
+		//     remote-off instance, whose failure mode is 404ing a UI the hub
+		//     is still serving.
 	}
 	return nil
 }
@@ -380,21 +390,34 @@ func stopRemoteProxyIfConfigured(ctx context.Context, d Deps) error {
 // Note what the restart does NOT do: it does not stop the hub serving a web
 // UI. scion's workstation defaults enable the web frontend whenever the flag
 // is not explicitly set, and lever depends on that — the Hub API is only on
-// 8080 BECAUSE the frontend is on (see scion.ServerOpts.EnableWeb). What comes
-// back is the same hub with no login and scion's own embedded assets.
+// 8080 BECAUSE the frontend is on (see scion.ServerOpts.EnableWeb). What the
+// restart takes away is the login, and --web-assets-dir with it; what the
+// frontend then serves depends on the scion pin and is not this function's
+// business.
 //
 // Gated on a real change for the reason the ON path is gated: a restart drops
 // every agent's connection to the hub. An apply that finds the guest already
 // converged must be silent, and DisableHubLogin reports false forever after the
 // block is gone.
 //
-// The signal is that CHANGE, not the running hub's argv — scion offers no way
-// to read the latter (`server status` reports web-component HEALTH, which is
-// 200 whether or not --enable-web was passed: cmd/server_daemon.go
-// runServerStatus). One consequence, stated because it is easy to assume
-// otherwise: an apply that fails BETWEEN the guest edit and the restart leaves
-// the old hub running until the next real change or a `lever stop` + `up`. The
-// ON path has the identical residual.
+// Inferring the transition from guest state is a CHOICE, not the only option.
+// scion does persist the daemon's launch argv: cmd/server_daemon.go calls
+// daemon.SaveArgs, which writes <globalDir>/server-args.json, and
+// --web-assets-dir is in it verbatim. Reading it would be authoritative and
+// would generalise — a changed web port or assets dir is invisible to guest
+// leftovers. lever does not, for two reasons: it needs a guest file read this
+// path does not otherwise make, and the file is not a statement about what is
+// RUNNING, since daemon.RemoveArgs has no production caller in the pinned
+// module and the file therefore outlives the daemon that wrote it. Worth
+// revisiting if this path ever needs the generality. (`scion server status` is
+// not the alternative: its web field reports component HEALTH, 200 whether or
+// not --enable-web was passed — cmd/server_daemon.go runServerStatus.)
+//
+// The price of that choice, stated because it is easy to assume otherwise: if
+// the settings edit succeeds and the restart then FAILS, the next apply finds
+// nothing left to remove, reports no change, and does not restart — so the hub
+// goes on serving the removed oidc_login from memory. The repair is `lever
+// stop` followed by `lever up`. The ON path has the identical residual.
 //
 // Skipped when this plan does not manage the hub — BrokerOnly, the VM
 // acceptance gate, whose machine need not carry a scion binary at all. The

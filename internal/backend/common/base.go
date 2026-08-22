@@ -186,9 +186,9 @@ func (b *Base) EnsureLeverTemplate(ctx context.Context) (bool, error) {
 	return b.Guest().EnsureLeverTemplate(ctx)
 }
 
-// DisableHubLogin converges the guest's remote-access login path off — see
-// backend.Backend.
-func (b *Base) DisableHubLogin(ctx context.Context) error {
+// DisableHubLogin converges the guest's remote-access login path off,
+// reporting whether the hub's configuration changed — see backend.Backend.
+func (b *Base) DisableHubLogin(ctx context.Context) (bool, error) {
 	return b.Guest().DisableHubLogin(ctx)
 }
 

@@ -133,7 +133,14 @@ type Backend interface {
 	// back off does not keep an unauthenticated jail→host loopback bridge
 	// running for a feature that is gone. Idempotent, and cheap when there is
 	// nothing to remove.
-	DisableHubLogin(ctx context.Context) error
+	//
+	// Like EnsureHubLogin it reports whether the HUB's configuration changed —
+	// here, whether the `oidc_login` block was still there to remove. A hub
+	// that is already running read that block at startup and is still
+	// advertising the login, so the caller restarts it. The forwarder is not
+	// part of the answer: no hub ever reads it, and a restart is too expensive
+	// to spend on a change the hub cannot see. See guest.DisableHubLogin.
+	DisableHubLogin(ctx context.Context) (bool, error)
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	// Stop powers the machine off but keeps its disk intact — distinct from

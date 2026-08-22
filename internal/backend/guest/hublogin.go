@@ -118,16 +118,27 @@ func (g Guest) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool,
 // host listener that lands there would be reachable from inside it. Stopping
 // the proxy is not enough; the bridge has to go too.
 //
-// It is one root round trip on the common path — every apply of every instance
-// with remote access off pays it — so the whole decision lives in the guest
-// script, and the settings edit only happens when that script actually found a
-// forwarder to remove. An instance that never had one does nothing but ask.
+// It reports whether it removed HUB CONFIGURATION — the `oidc_login` block, or
+// the `display_name` lever wrote beside it. That is the OFF path's half of the
+// signal EnsureHubLogin gives the ON path, and it is there for the same reason:
+// the hub reads that file once, at startup, so a hub that is already running
+// was started FROM the file this just edited and goes on advertising a login
+// whose provider has gone. Only a restart replaces that, and only the caller
+// can order one (internal/apply.Run).
 //
-// No hub restart: a leftover block naming a provider that no longer answers
-// cannot log anyone in, and scion re-reads the file on its next start anyway.
-func (g Guest) DisableHubLogin(ctx context.Context) error {
+// The forwarder is deliberately NOT part of that answer. No hub ever reads it,
+// and a restart drops every agent's connection to the hub — so the signal has
+// to mean "the hub is serving something this apply took away", not merely
+// "something was removed".
+//
+// Every apply of every instance with remote access off pays for both halves, so
+// both have to be quiet when there is nothing to do: the guest script exits
+// early on a missing binary, and hubLoginSettingsWithout reports
+// (unchanged, false) for every "nothing there" shape. A converged instance
+// costs two round trips, writes nothing, and reports false.
+func (g Guest) DisableHubLogin(ctx context.Context) (bool, error) {
 	if _, err := g.rootRun(ctx, "bash", "-c", disableLoginForwardScript); err != nil {
-		return fmt.Errorf("guest: stop the login forwarder: %w", err)
+		return false, fmt.Errorf("guest: stop the login forwarder: %w", err)
 	}
 	// The settings edit is NOT gated on having found the binary. It used to be,
 	// and that made the failure permanent: the script `rm -f`s the binary
@@ -163,26 +174,34 @@ rm -f ` + LoginForwardPath + `
 echo "FOUND 1"
 `
 
-// removeHubLoginSettings drops the oidc_login block from the guest's settings.
+// removeHubLoginSettings drops the oidc_login block from the guest's settings,
+// and reports whether it wrote the file.
 //
 // Fail-soft on a file it cannot parse or read: by the time this runs the
 // forwarder is already gone, so what is left is a block naming a dead
 // provider — not worth failing an apply whose only instruction was to turn
-// remote access off.
-func (g Guest) removeHubLoginSettings(ctx context.Context) error {
+// remote access off. Each of those paths reports "no change", which is the
+// honest answer: nothing was removed, so nothing the hub is serving changed.
+// A failed WRITE is different, and stays fatal — the file was there, lever
+// meant to edit it, and reporting no change would tell the caller the guest is
+// converged when it is not.
+func (g Guest) removeHubLoginSettings(ctx context.Context) (bool, error) {
 	res, err := g.userRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	existing, _, err := parseScionSettingsRead(res.Stdout)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	updated, changed, err := hubLoginSettingsWithout(existing)
 	if err != nil || !changed {
-		return nil
+		return false, nil
 	}
-	return g.writeScionSettings(ctx, updated)
+	if err := g.writeScionSettings(ctx, updated); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ensureLoginForwarder builds the forwarder for the guest's architecture,

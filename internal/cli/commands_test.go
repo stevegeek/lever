@@ -24,6 +24,7 @@ type stubBackend struct {
 	hubLoginErr       error
 	hubLoginCalls     []backend.HubLogin
 	hubLoginDisabled  int            // DisableHubLogin call count
+	hubLoginRemoved   bool           // DisableHubLogin's "the hub config changed" answer
 	leverTemplates    int            // EnsureLeverTemplate call count
 	upCfg             backend.Config // the Config the last EnsureUp received
 }
@@ -61,7 +62,10 @@ func (s *stubBackend) EnsureHubLogin(_ context.Context, spec backend.HubLogin) (
 	s.hubLoginCalls = append(s.hubLoginCalls, spec)
 	return s.hubLoginChanged, s.hubLoginErr
 }
-func (s *stubBackend) DisableHubLogin(context.Context) error { s.hubLoginDisabled++; return nil }
+func (s *stubBackend) DisableHubLogin(context.Context) (bool, error) {
+	s.hubLoginDisabled++
+	return s.hubLoginRemoved, nil
+}
 func (s *stubBackend) EnsureLeverTemplate(context.Context) (bool, error) {
 	s.leverTemplates++
 	return true, nil

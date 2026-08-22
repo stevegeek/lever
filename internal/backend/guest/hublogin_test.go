@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/exec"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -315,6 +316,83 @@ func TestHubLoginSettingsWithoutRemovesOnlyTheBlock(t *testing.T) {
 		if err != nil || changed || string(got) != content {
 			t.Fatalf("%s: got %q changed=%v err=%v, want an untouched no-op", name, got, changed, err)
 		}
+	}
+}
+
+// TestDisableHubLoginReportsOnlyWhatTheHubWasServing pins the OFF path's
+// restart signal, which is the whole reason DisableHubLogin returns a bool at
+// all: internal/apply.Run restarts the hub — dropping every agent's connection
+// to it — when this says true.
+//
+// So the answer has to track ONE thing: did this call remove configuration the
+// running hub was started from? The `oidc_login` block is that; the forwarder
+// is not, since no hub ever reads it. Getting the second case wrong is not a
+// theoretical cost — it is a hub bounce, and every agent reconnecting, on an
+// apply that changed nothing the hub can see.
+func TestDisableHubLoginReportsOnlyWhatTheHubWasServing(t *testing.T) {
+	withBlock, _, err := hubLoginSettings([]byte("version: 1\nserver:\n  user_access_mode: open\n"), testHubLogin(), false)
+	if err != nil {
+		t.Fatalf("hubLoginSettings: %v", err)
+	}
+	const clean = "version: 1\nserver:\n  user_access_mode: open\n"
+
+	for _, tc := range []struct {
+		name     string
+		forwards string // what the guest disable script reports
+		settings string // what the guest's settings file holds
+		want     bool
+		why      string
+	}{
+		{"block present", "FOUND 0\n", string(withBlock), true,
+			"the hub was started from a file that declared a login, and it is still serving it"},
+		{"already converged", "FOUND 0\n", clean, false,
+			"a re-apply with remote access already off must not bounce the hub"},
+		{"forwarder but no block", "FOUND 1\n", clean, false,
+			"removing the forwarder changes nothing the hub reads, so it cannot be worth a restart"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := exec.NewFakeRunner()
+			f.Script("orb -u root -m m bash -c", exec.Result{Stdout: tc.forwards})
+			f.Script("orb -m m /bin/bash -c", exec.Result{Stdout: "LEGACY 0\n" + tc.settings})
+			f.Script("bash -c", exec.Result{})
+			g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
+
+			changed, err := g.DisableHubLogin(context.Background())
+			if err != nil {
+				t.Fatalf("DisableHubLogin: %v", err)
+			}
+			if changed != tc.want {
+				t.Fatalf("changed = %v, want %v — %s", changed, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// TestDisableHubLoginReportsNoChangeWhenItCannotRead: the read paths are
+// fail-soft (an apply told only to turn remote access off should not die on an
+// unreadable settings file), and "no change" is the honest answer for them —
+// nothing was removed, so nothing the hub is serving changed. Reporting true
+// here would restart the hub every apply on any guest whose settings lever
+// cannot parse.
+func TestDisableHubLoginReportsNoChangeWhenItCannotRead(t *testing.T) {
+	for name, read := range map[string]exec.Result{
+		"unparseable output": {Stdout: "not the LEGACY header at all\n"},
+		"not yaml":           {Stdout: "LEGACY 0\n\tthis: [is not\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := exec.NewFakeRunner()
+			f.Script("orb -u root -m m bash -c", exec.Result{Stdout: "FOUND 1\n"})
+			f.Script("orb -m m /bin/bash -c", read)
+			g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
+
+			changed, err := g.DisableHubLogin(context.Background())
+			if err != nil {
+				t.Fatalf("DisableHubLogin: %v", err)
+			}
+			if changed {
+				t.Fatal("an unreadable settings file reported a change, so every apply would restart the hub")
+			}
+		})
 	}
 }
 

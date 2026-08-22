@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3157,7 +3158,7 @@ func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
 			LoadImage:       func(context.Context, string) error { return nil },
 			Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
 			EnsureHubLogin:  func(context.Context) (bool, error) { ensured++; return false, nil },
-			DisableHubLogin: func(context.Context) error { disabled++; return nil },
+			DisableHubLogin: func(context.Context) (bool, error) { disabled++; return false, nil },
 		}
 		if err := Run(context.Background(), app, deps); err != nil {
 			t.Fatalf("Run: %v", err)
@@ -3176,6 +3177,102 @@ func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
 	}
 	if ensured != 1 {
 		t.Fatalf("remote on: EnsureHubLogin called %d times, want 1", ensured)
+	}
+}
+
+// TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState is the OFF
+// half of TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged, and it
+// exists because the two halves were asymmetric: turning remote access off
+// converged the guest and left the RUNNING hub exactly as it was — still
+// serving a login whose provider had just been removed, still serving the SPA
+// out of a staged directory. The scion-server step cannot repair that, because
+// `scion server start` returns on an already-running daemon without touching
+// its argv, so the state was never converged by any number of applies.
+//
+// Both directions are asserted, and the second is the expensive one to get
+// wrong: a restart drops every agent's connection to the hub, so an apply that
+// found nothing to remove must not stop anything and must not say anything.
+func TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState(t *testing.T) {
+	run := func(t *testing.T, changed bool) (server, logs []string) {
+		t.Helper()
+		f := exec.NewFakeRunner()
+		f.Script("scion", exec.Result{Stdout: "ok"})
+		// Remote access off — the config this whole path is about.
+		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+			Manager: config.Manager{Image: "img"}}
+		deps := Deps{
+			JailUp:          func(context.Context, *config.App) error { return nil },
+			LoadImage:       func(context.Context, string) error { return nil },
+			Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+			DisableHubLogin: func(context.Context) (bool, error) { return changed, nil },
+			Log:             func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		}
+		if err := Run(context.Background(), app, deps); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		for _, c := range f.Calls {
+			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" {
+				server = append(server, strings.Join(c.Args, " "))
+			}
+		}
+		return server, logs
+	}
+
+	// The guest still carried the login: the hub is stopped and started again.
+	// The order is the assertion — the step's own start comes first (and is
+	// tolerated by a running daemon), then the stop, then the start that
+	// actually replaces the argv. And what comes back carries no web flags:
+	// dropping --web-assets-dir is the visible half of the convergence, since
+	// the directory it named has been deleted.
+	const plain = "server start --web-port 8080 --dev-auth=false"
+	server, logs := run(t, true)
+	want := []string{plain, "server stop", plain}
+	if !slices.Equal(server, want) {
+		t.Fatalf("server calls = %q, want %q — the hub was not restarted after the login was removed", server, want)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "restarting the hub") {
+		t.Fatalf("logs = %q, want one line saying the hub is being restarted", logs)
+	}
+
+	// Nothing left to remove: an apply must be completely quiet.
+	server, logs = run(t, false)
+	if !slices.Equal(server, []string{plain}) {
+		t.Fatalf("server calls = %q, want just the step's own start — a converged instance bounced the hub and every agent's connection to it", server)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("logs = %q, want none: a re-apply with remote access already off has nothing to report", logs)
+	}
+}
+
+// TestRemoteOffSkipsTheHubRestartWhenThePlanDoesNotManageTheHub: the VM
+// acceptance gate runs BrokerOnly, and its machine need not carry a scion
+// binary at all (init-machine is one of the steps that plan drops). The guest
+// still converges there — the forwarder is a bridge into the jail and comes
+// down on every apply — but ordering a hub restart would fail an apply that
+// was never driving scion in the first place.
+func TestRemoteOffSkipsTheHubRestartWhenThePlanDoesNotManageTheHub(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"}}
+	disabled := 0
+	deps := Deps{
+		BrokerOnly:      true,
+		JailUp:          func(context.Context, *config.App) error { return nil },
+		LoadImage:       func(context.Context, string) error { return nil },
+		Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		DisableHubLogin: func(context.Context) (bool, error) { disabled++; return true, nil },
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if disabled != 1 {
+		t.Fatalf("DisableHubLogin called %d times, want 1 — the jail→host bridge must come down on this path too", disabled)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "scion" {
+			t.Fatalf("the broker-only plan drove scion: %q", strings.Join(c.Args, " "))
+		}
 	}
 }
 

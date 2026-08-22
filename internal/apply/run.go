@@ -179,7 +179,13 @@ type Deps struct {
 	// false, so an instance that turned remote access back off does not keep
 	// an unauthenticated jail→host loopback bridge alive for a feature that no
 	// longer exists. nil ⇒ skip (tests, and the broker-only VM gate).
-	DisableHubLogin func(ctx context.Context) error
+	//
+	// It reports "changed" on the same terms EnsureHubLogin does, and Run acts
+	// on it the same way: a change means a hub that is already running was
+	// started from state this call has now removed, so it is restarted. See
+	// disableHubLogin for what counts as a change and why the forwarder does
+	// not.
+	DisableHubLogin func(ctx context.Context) (bool, error)
 	// EnsureAgentTemplate backs the agent-template step: put lever's overlay
 	// template in front of scion's stock `default` so newly provisioned agents
 	// do NOT launch with `--system-prompt '# Placeholder'`, which replaces
@@ -293,7 +299,11 @@ func logf(d Deps, format string, args ...any) {
 // rest run in the jail via Deps.Scion.
 func Run(ctx context.Context, app *config.App, d Deps) error {
 	var boot bootTracker
-	for _, step := range Plan(app, PlanOpts{BrokerOnly: d.BrokerOnly}) {
+	// The plan is kept, not just ranged over: the converge-to-off reconciliation
+	// below needs to know whether this run manages the hub at all (see
+	// disableHubLogin).
+	steps := Plan(app, PlanOpts{BrokerOnly: d.BrokerOnly})
+	for _, step := range steps {
 		if err := runStep(ctx, app, step, d, &boot); err != nil {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
 		}
@@ -316,10 +326,8 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 		// loopback port beside lever's own broker listeners. Left running
 		// after the feature is off, it keeps that port bridged into the jail
 		// for whatever binds it next. See Deps.DisableHubLogin.
-		if d.DisableHubLogin != nil {
-			if err := d.DisableHubLogin(ctx); err != nil {
-				return fmt.Errorf("hub login: %w", err)
-			}
+		if err := disableHubLogin(ctx, app, d, steps); err != nil {
+			return fmt.Errorf("hub login: %w", err)
 		}
 	}
 	return nil
@@ -332,6 +340,75 @@ func stopRemoteProxyIfConfigured(ctx context.Context, d Deps) error {
 		return nil
 	}
 	return d.StopRemoteProxy(ctx)
+}
+
+// disableHubLogin converges the guest half of the login path off, and restarts
+// the hub when that removed something the running hub was started FROM.
+//
+// The restart is the OFF path's half of runScionServer's. Two pieces of the
+// hub's remote-access state are fixed at startup and nowhere else: it reads
+// `oidc_login` once, from the settings file (pkg/config/hub_config.go), and it
+// takes --web-assets-dir from the argv it was started with. So a hub left
+// running by an earlier apply goes on offering a login whose provider has
+// gone, and goes on serving its SPA out of the directory lever staged for
+// remote access — one lever stops maintaining the moment remote access is off
+// — for as long as that process lives. The scion-server step cannot fix
+// either: `scion server start` refuses on an already-running daemon and the
+// client tolerates the refusal, which is what makes a re-apply cheap. Nothing
+// short of a restart replaces the argv.
+//
+// Note what the restart does NOT do: it does not stop the hub serving a web
+// UI. scion's workstation defaults enable the web frontend whenever the flag
+// is not explicitly set, and lever depends on that — the Hub API is only on
+// 8080 BECAUSE the frontend is on (see scion.ServerOpts.EnableWeb). What comes
+// back is the same hub with no login and scion's own embedded assets.
+//
+// Gated on a real change for the reason the ON path is gated: a restart drops
+// every agent's connection to the hub. An apply that finds the guest already
+// converged must be silent, and DisableHubLogin reports false forever after the
+// block is gone.
+//
+// The signal is that CHANGE, not the running hub's argv — scion offers no way
+// to read the latter (`server status` reports web-component HEALTH, which is
+// 200 whether or not --enable-web was passed: cmd/server_daemon.go
+// runServerStatus). One consequence, stated because it is easy to assume
+// otherwise: an apply that fails BETWEEN the guest edit and the restart leaves
+// the old hub running until the next real change or a `lever stop` + `up`. The
+// ON path has the identical residual.
+//
+// Skipped when this plan does not manage the hub — BrokerOnly, the VM
+// acceptance gate, whose machine need not carry a scion binary at all. The
+// guest still converges there; a hub left from an earlier full apply keeps its
+// flags, and since the guest state that signals the change is now gone, it
+// keeps them until a stop + up rather than until the next apply. That check is
+// also what makes d.Scion safe to dereference below without a nil guard: the
+// scion-server step ran earlier in this same Run and dereferenced it first.
+func disableHubLogin(ctx context.Context, app *config.App, d Deps, steps []Step) error {
+	if d.DisableHubLogin == nil {
+		return nil
+	}
+	changed, err := d.DisableHubLogin(ctx)
+	if err != nil {
+		return err
+	}
+	if !changed || !planHas(steps, KindScionServer) {
+		return nil
+	}
+	logf(d, "lever: remote access is off — restarting the hub so it stops offering the remote login")
+	if err := d.Scion.ServerStop(ctx); err != nil {
+		return fmt.Errorf("restart the hub: %w", err)
+	}
+	return d.Scion.ServerStart(ctx, hubServerOpts(app))
+}
+
+// planHas reports whether the plan includes a step of this kind.
+func planHas(steps []Step, kind StepKind) bool {
+	for _, s := range steps {
+		if s.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // runStep is the thin dispatch over StepKind: it routes each step to its
@@ -415,6 +492,16 @@ func runScionServer(ctx context.Context, app *config.App, d Deps) error {
 			}
 		}
 	}
+	return d.Scion.ServerStart(ctx, hubServerOpts(app))
+}
+
+// hubServerOpts is the ONE description of how lever starts the hub for a given
+// config. Both starts share it — this step's, and the restart disableHubLogin
+// orders when remote access has just been turned off — because the whole point
+// of that restart is to replace an argv that no longer matches the config. Two
+// copies of this could disagree, and the restart would then re-apply the very
+// flags it exists to drop.
+func hubServerOpts(app *config.App) scion.ServerOpts {
 	opts := scion.ServerOpts{
 		WebPort:   8080,
 		DevAuth:   false,
@@ -427,7 +514,7 @@ func runScionServer(ctx context.Context, app *config.App, d Deps) error {
 		// worse than passing no flag at all.
 		opts.WebAssetsDir = guest.ScionWebAssetsDir
 	}
-	return d.Scion.ServerStart(ctx, opts)
+	return opts
 }
 
 // runBrokerUp runs the broker-up step: start the host broker (+ first-party

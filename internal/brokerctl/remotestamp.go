@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -48,31 +50,85 @@ func RemoteConfigHash(app *config.App) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// remoteStampContent is the stamp's on-disk form: version and config hash on
-// one line. Plain text rather than JSON because a corrupt or truncated file
-// must read as "not what we want" and trigger a restart, which any parse of
-// this shape does for free.
-func remoteStampContent(version, hash string) string {
-	return version + "\n" + hash + "\n"
+// remoteStampContent is the stamp's on-disk form: the lever version, the
+// remote config hash, and the pid of the proxy the stamp describes, one per
+// line. Plain text rather than JSON because a corrupt or truncated file must
+// read as "not what we want" and trigger a restart, which any parse of this
+// shape does for free.
+func remoteStampContent(version, hash string, pid int) string {
+	return version + "\n" + hash + "\n" + strconv.Itoa(pid) + "\n"
 }
 
-// WriteRemoteStamp records what a freshly spawned proxy is running.
-// Best-effort by design: a stamp that cannot be written makes the NEXT apply
-// see a mismatch and restart the proxy, which is safe — the failure mode is a
-// redundant restart, never a stale process kept alive.
+// remoteProxyPID reads the pid recorded in remote.pid — the file the proxy
+// process writes for itself once its listeners are bound
+// (remoteproxy.writePIDFile). Both stamp operations key off THIS number rather
+// than os.Getpid(), so the stamp is only ever a statement about the process
+// that currently owns the pid file, whoever wrote it.
+func (s State) remoteProxyPID() (int, error) {
+	b, err := os.ReadFile(s.RemotePID())
+	if err != nil {
+		return 0, fmt.Errorf("brokerctl: the remote stamp describes the pid in %s: %w", s.RemotePID(), err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("brokerctl: %s does not contain a pid", s.RemotePID())
+	}
+	return pid, nil
+}
+
+// WriteRemoteStamp records what the proxy that owns remote.pid is running.
+//
+// Two properties make the stamp trustworthy, and both were once missing:
+//
+//   - The RUNNING PROXY writes it. remoteproxy.Serve calls this through
+//     ServeConfig.Stamp as soon as its listeners are bound, so every
+//     `lever remote serve` — apply's detached child and an operator's
+//     hand-started one alike — leaves a stamp for the config IT loaded.
+//     Before that, only apply wrote the stamp while ANY serve wrote
+//     remote.pid. The state dir is keyed on the config file's DIRECTORY
+//     (StateDir), so a second config file beside lever.yaml shares both files:
+//     a proxy started by hand against it inherited the stamp a previous apply
+//     had left, satisfying all three reuse conditions — alive, listening,
+//     stamp matching — while the live process went on enforcing the other
+//     config's allowed_users, and apply reported success.
+//   - It names its pid. A stamp is compared against remote.pid, so a proxy
+//     that takes over the pid file WITHOUT stamping — an older lever that
+//     never learned to, a future starter that forgets — invalidates the match
+//     instead of inheriting it. The two files describe one process, or the
+//     stamp does not match. It also means a stamp left behind after the proxy
+//     exits is inert: removePIDFile takes remote.pid with it.
+//
+// Any failure removes the stamp rather than leaving one that describes a
+// process that is not there. Callers treat a write failure as a warning (see
+// remoteproxy.Serve), and no stamp is the only safe residue: an absent stamp
+// costs the next apply a redundant restart, a stale one costs it the check.
 func (s State) WriteRemoteStamp(version, hash string) error {
-	return os.WriteFile(s.RemoteStamp(), []byte(remoteStampContent(version, hash)), 0o600)
+	pid, err := s.remoteProxyPID()
+	if err != nil {
+		_ = os.Remove(s.RemoteStamp())
+		return err
+	}
+	if err := os.WriteFile(s.RemoteStamp(), []byte(remoteStampContent(version, hash, pid)), 0o600); err != nil {
+		_ = os.Remove(s.RemoteStamp())
+		return err
+	}
+	return nil
 }
 
-// RemoteStampMatches reports whether the running proxy was started with this
-// binary version AND this remote config. Any doubt — absent file, unreadable,
-// truncated, different content — is false, so apply restarts.
+// RemoteStampMatches reports whether the proxy that owns remote.pid was
+// started by this binary version with this remote config. Any doubt — no pid
+// file, a garbage pid, an absent, unreadable, truncated or differing stamp —
+// is false, so apply restarts the proxy.
 func (s State) RemoteStampMatches(version, hash string) bool {
+	pid, err := s.remoteProxyPID()
+	if err != nil {
+		return false
+	}
 	b, err := os.ReadFile(s.RemoteStamp())
 	if err != nil {
 		return false
 	}
 	// Compare trimmed so a trailing-newline difference is not a spurious
 	// mismatch, while any real difference still is.
-	return strings.TrimSpace(string(b)) == strings.TrimSpace(remoteStampContent(version, hash))
+	return strings.TrimSpace(string(b)) == strings.TrimSpace(remoteStampContent(version, hash, pid))
 }

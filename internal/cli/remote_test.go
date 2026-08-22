@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // writeRemoteConfig writes a minimal canonical lever.yaml into dir, with
@@ -118,6 +121,93 @@ func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "remote.enabled") || strings.Contains(err.Error(), "orbstack") {
 		t.Fatalf("gate checks should have passed; got a gate error instead of a bind error: %v", err)
+	}
+}
+
+// freeRemotePort claims a loopback port from the kernel and releases it, so a
+// serve test binds something free rather than the real 8445/8447 a live
+// instance on this host may be holding.
+func freeRemotePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestRemoteServeStampsTheConfigItLoaded is the "stale but matching" defect,
+// end to end. `lever apply` reuses a live proxy when remote.pid names a live
+// process, the port answers, and the state dir's stamp matches the config it
+// is applying — but this command is reachable by hand, remote.pid is written
+// by every serve, and the stamp used to be written only by apply. The state
+// dir is keyed on the config file's DIRECTORY, so a second config beside
+// lever.yaml shares both files: serving it used to inherit apply's stamp, and
+// apply then reported success while this process enforced the other config's
+// allowed_users.
+//
+// So `remote serve` must stamp what IT loaded, replacing any record it did not
+// write.
+func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
+	dir := t.TempDir()
+	p := writeRemoteConfig(t, dir, "orbstack", fmt.Sprintf(
+		"remote:\n  enabled: true\n  port: %d\n  login_port: %d\n  base_url: \"https://mac.tail1234.ts.net\"\n",
+		freeRemotePort(t), freeRemotePort(t)))
+	t.Chdir(dir)
+
+	state := brokerctl.StateDir(dir)
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The record a previous apply left, for a config this serve knows nothing
+	// about. remote.pid names this process because the command under test runs
+	// in it — exactly the file a hand-started proxy takes over.
+	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.WriteRemoteStamp("v-previous-apply", "hash-of-another-config"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := newRemoteServeCmd(defaultFactory)
+	cmd.SetArgs([]string{p})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := brokerctl.RemoteConfigHash(app)
+	deadline := time.Now().Add(5 * time.Second)
+	for !state.RemoteStampMatches(versionString(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("serve never recorded the config it loaded; output: %s", out.String())
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("serve exited early (%v); output: %s", err, out.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if state.RemoteStampMatches("v-previous-apply", "hash-of-another-config") {
+		t.Error("the previous apply's record survived — apply would reuse this proxy as if it were serving that config")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("remote serve returned %v on shutdown; output: %s", err, out.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote serve did not return after ctx cancel")
 	}
 }
 

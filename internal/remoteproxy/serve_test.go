@@ -96,6 +96,135 @@ func TestServeWritesAndRemovesPIDFile(t *testing.T) {
 	}
 }
 
+// TestServeStampsWhatThisProcessIsServing: apply decides whether to reuse a
+// live proxy by reading a host-side record, but the pid file it reads is
+// written by EVERY serve, so only the serving process can keep that record
+// honest. Serve must therefore call Stamp — after the bind and after the pid
+// file, because a record written before either would describe a proxy that
+// never served, and brokerctl keys its record on the pid it finds there.
+func TestServeStampsWhatThisProcessIsServing(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "remote.pid")
+	port := freePort(t)
+
+	type observation struct {
+		pid    string
+		listen bool
+	}
+	seen := make(chan observation, 4)
+	stamp := func() error {
+		b, _ := os.ReadFile(pidPath)
+		// Connect rather than request: the listener is bound by now, but
+		// Serve has not started handling on it yet.
+		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if err == nil {
+			_ = c.Close()
+		}
+		seen <- observation{pid: strings.TrimSpace(string(b)), listen: err == nil}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeConfig{Port: port, Handler: okHandler(), PIDPath: pidPath, Stamp: stamp})
+	}()
+
+	select {
+	case got := <-seen:
+		if got.pid != strconv.Itoa(os.Getpid()) {
+			t.Errorf("Stamp ran with pid file %q, want this process's pid %d — it must run AFTER the pid file is written",
+				got.pid, os.Getpid())
+		}
+		if !got.listen {
+			t.Error("Stamp ran before the port was bound — a proxy that never took the port must not leave a record")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve never called Stamp")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned error on shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after ctx cancel")
+	}
+	if len(seen) != 0 {
+		t.Errorf("Stamp ran %d extra times, want exactly once per serve", len(seen))
+	}
+}
+
+// TestServeDoesNotStampWhenTheBindFails: the losing proxy must leave the
+// incumbent's record alone. Without this ordering a second `lever remote
+// serve` — started by hand, or a duplicate spawn — would overwrite the record
+// of the proxy that actually holds the port and then die, and the next apply
+// would restart a perfectly good proxy (or worse, trust a record for a config
+// nothing is serving).
+func TestServeDoesNotStampWhenTheBindFails(t *testing.T) {
+	dir := t.TempDir()
+	port := freePort(t)
+	pidPath1 := filepath.Join(dir, "remote1.pid")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = Serve(ctx, ServeConfig{Port: port, Handler: okHandler(), PIDPath: pidPath1}) }()
+	waitFor(t, 2*time.Second, func() bool { return fileExists(pidPath1) })
+
+	var stamped bool
+	err := Serve(context.Background(), ServeConfig{
+		Port: port, Handler: okHandler(), PIDPath: filepath.Join(dir, "remote2.pid"),
+		Stamp: func() error { stamped = true; return nil },
+	})
+	if err == nil {
+		t.Fatal("second Serve on an already-bound port should error")
+	}
+	if stamped {
+		t.Error("a Serve that could not bind must not record anything about what is running")
+	}
+}
+
+// TestServeKeepsServingWhenStampFails: the record is bookkeeping for the next
+// apply, not a precondition for serving. Taking a working proxy down because a
+// small file could not be written would turn a cosmetic failure into an
+// outage; the cost of the warning path is one redundant restart later, which
+// is what brokerctl's write-or-remove contract guarantees.
+func TestServeKeepsServingWhenStampFails(t *testing.T) {
+	port := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeConfig{Port: port, Handler: okHandler(),
+			Stamp: func() error { return errors.New("state dir is read-only") }})
+	}()
+
+	var resp *http.Response
+	waitFor(t, 2*time.Second, func() bool {
+		r, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+		if err != nil {
+			return false
+		}
+		resp = r
+		return true
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 — a failed stamp must not affect serving", resp.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Serve returned %v after a failed stamp, want a clean shutdown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after ctx cancel")
+	}
+}
+
 func TestServeSecondOnSamePortErrors(t *testing.T) {
 	dir := t.TempDir()
 	port := freePort(t)

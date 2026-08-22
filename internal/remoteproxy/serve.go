@@ -29,6 +29,32 @@ type ServeConfig struct {
 	// once the listener is bound (so a pid file on disk means the proxy is,
 	// or was, actually listening) and removed on shutdown.
 	PIDPath string
+	// Stamp, when non-nil, records what THIS process is serving. Serve calls
+	// it once, after the listeners are bound and PIDPath is written, and
+	// before the first request can be handled.
+	//
+	// The running proxy has to be what writes that record, which is why this
+	// hook exists at all. `lever apply` decides whether to reuse a running
+	// proxy or restart it by comparing a host-side stamp
+	// (brokerctl.State.WriteRemoteStamp) — but apply is not the only thing
+	// that starts proxies, while the pid file it reads is written by every
+	// one of them. A proxy started by hand against a different config used to
+	// inherit the stamp apply had left, so apply reported success against a
+	// process enforcing a config it had never seen. Only the process itself
+	// knows what it is running.
+	//
+	// Ordering is part of the contract in both directions: after the bind, so
+	// a proxy that could not take the port leaves the incumbent's record
+	// alone; after the pid file, so an implementation may key its record on
+	// the pid it finds there (brokerctl's does).
+	//
+	// An error is a warning, not a failed serve — a proxy that is up and
+	// working must not be taken down over a bookkeeping file. That is only
+	// safe while the implementation leaves NO record behind when it fails:
+	// no stamp costs the next apply a redundant restart, a stale one costs it
+	// the whole check. brokerctl.State.WriteRemoteStamp removes the file on
+	// every failure path for this reason.
+	Stamp func() error
 	// AuditPath, when non-empty, is opened by Serve via OpenAudit for the
 	// life of the serve, guaranteeing the audit JSONL exists (0600) as soon
 	// as the proxy starts and is closed cleanly on shutdown. This is
@@ -55,7 +81,8 @@ type ServeConfig struct {
 // Serve runs the proxy until ctx is cancelled: bind 127.0.0.1:<Port> (fail
 // closed on any non-loopback listen address), bind the provider's own
 // loopback port when one is configured, open the audit JSONL (append, 0600)
-// when AuditPath is set, write the pid file, and serve. On ctx.Done it shuts
+// when AuditPath is set, write the pid file, record what this process is
+// serving (Stamp), and serve. On ctx.Done it shuts
 // both servers down gracefully, removes the pid file, and returns. Mirrors
 // brokerctl.Serve's bind → pid → serve → remove-pid ordering
 // (internal/brokerctl/serve.go).
@@ -90,6 +117,13 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		return err
 	}
 	defer removePIDFile(cfg.PIDPath)
+
+	if cfg.Stamp != nil {
+		if err := cfg.Stamp(); err != nil {
+			fmt.Fprintf(os.Stderr, "lever: warning: could not record what this proxy is serving: %v\n"+
+				"lever: the next `lever apply` will restart the proxy rather than reuse it\n", err)
+		}
+	}
 
 	// Each goroutine closes over its OWN *http.Server, never over the slice:
 	// appending the provider rewrites the slice header while the proxy's

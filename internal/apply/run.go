@@ -329,6 +329,13 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 		if err := disableHubLogin(ctx, app, d, steps); err != nil {
 			return fmt.Errorf("hub login: %w", err)
 		}
+		// One thing this convergence deliberately does NOT undo, said here so
+		// the two calls above are not read as an exhaustive teardown: lever's
+		// overlay agent template (~/.scion/templates/lever) and the project's
+		// default_template that selects it both stay. Neither is remote-access
+		// state — the overlay exists to keep scion's placeholder system prompt
+		// out of every agent it provisions (see Deps.EnsureAgentTemplate), and
+		// that matters exactly as much with remote access off.
 	}
 	return nil
 }

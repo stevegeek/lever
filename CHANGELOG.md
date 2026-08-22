@@ -5,6 +5,25 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+Landed just after the 0.17.1 cut, so they ship with the next release. Neither
+changes behaviour, and the 0.17.1 binaries are unaffected.
+
+- Corrected the converge-off rationale in `internal/apply/run.go`. It asserted
+  that Scion offers no way to read the running hub's argv; `daemon.SaveArgs`
+  writes `server-args.json`, which outlives the daemon (`RemoveArgs` has no
+  production callers). The comment now says lever infers the transition from
+  guest state *by choice*, gives both reasons, and names what reading the argv
+  would buy — a changed web port or assets dir, which the guest signal cannot
+  see. The half-failed-apply residual is stated with its repair.
+- Recorded the `EnableWeb` correction in the comment-drift note as its own
+  class: it never drifted, it made a claim about Scion that no local change can
+  invalidate and no local review will re-read. Added
+  `TestServerStartNeverDisablesTheWebFrontend`, which guards the dangerous half
+  — the flag must be OMITTED, never sent as `--enable-web=false`, since that
+  moves the Hub API off the web port.
+
 ## [0.17.1] - 2026-08-22
 
 A follow-up to 0.17.0, from two independent reviews of that release. No config

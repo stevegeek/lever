@@ -134,7 +134,8 @@ func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastRe
 // once and they all arrive before any session exists, so without this they
 // would each drive their own login — several hub users' worth of churn for one
 // page load. A failed attempt is NOT cached: the entry is dropped so the next
-// request retries (a hub that was still starting is the common cause).
+// request retries (a hub that was still starting is the common cause). A
+// PANICKING attempt is treated as a failed one — see errLoginPanicked.
 func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) {
 	d.mu.Lock()
 	if e, ok := d.sessions[login]; ok {
@@ -150,17 +151,47 @@ func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) 
 	d.sessions[login] = e
 	d.mu.Unlock()
 
-	e.cookie, e.err = d.login(ctx, login)
-	close(e.done)
-	if e.err != nil {
-		d.mu.Lock()
-		if d.sessions[login] == e {
-			delete(d.sessions, login)
+	// The entry is published now, so every other caller for this login is
+	// parked on e.done and only this goroutine can release them. That has to
+	// happen on EVERY exit path, panic included: the handshake runs inline on
+	// a request's own goroutine, net/http recovers a handler panic per
+	// connection, and the process therefore survives a panic that leaves this
+	// entry in d.sessions with its channel open. Every later request for that
+	// operator would then block until its own context expired — for the life
+	// of the process, since nothing else ever removes the entry.
+	//
+	// A panic leaves cookie and err at their zero values, which would hand
+	// waiters an empty string and a nil error: a non-session that reads as a
+	// session. Name it a failure instead, so waiters get an error and the
+	// eviction below lets the next request start a fresh attempt. The panic
+	// itself is not recovered — it keeps unwinding to net/http, which logs it
+	// with the stack trace that says what actually broke.
+	completed := false
+	defer func() {
+		if !completed {
+			e.err = errLoginPanicked
 		}
-		d.mu.Unlock()
-	}
+		close(e.done)
+		if e.err != nil {
+			d.mu.Lock()
+			if d.sessions[login] == e {
+				delete(d.sessions, login)
+			}
+			d.mu.Unlock()
+		}
+	}()
+
+	e.cookie, e.err = d.login(ctx, login)
+	completed = true
 	return e.cookie, e.err
 }
+
+// errLoginPanicked is what the waiters on a shared attempt are given when the
+// caller running it panicked. Deliberately says nothing about the panic value:
+// it is not this driver's to interpret, it is on its way up the winner's stack
+// already, and an audit line must never carry text this package has not
+// bounded itself.
+var errLoginPanicked = errors.New("remoteproxy: login: the shared login attempt panicked")
 
 // Invalidate drops a cached session, so the next request logs in again. It is
 // how a session the hub no longer accepts (it restarted, or the session

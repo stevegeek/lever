@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -659,5 +660,113 @@ func TestALoginNeedsANewCookieNotTheStateOne(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "state") {
 		t.Fatalf("error = %v, want it to name the unreplaced login-state cookie", err)
+	}
+}
+
+// TestAPanickingAttemptDoesNotWedgeTheDriver is the regression test for a
+// permanent wedge. The handshake runs inline on a request's own goroutine and
+// net/http recovers a handler panic per connection, so a panic under Cookie
+// leaves the PROCESS alive. Before the release was deferred it also left that
+// operator's single-flight entry in the map with its channel never closed, and
+// every later request for the same login then waited on a result that could
+// never arrive — until its own context expired, for the life of the process.
+//
+// The panic is injected through the audit sink because that is operator-owned
+// code called on this very goroutine (a closed log file is enough), but the
+// property under test is the release, not the sink.
+func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
+	p, _, _ := startProvider(t)
+	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
+	var attempts atomic.Int32
+	d := NewLoginDriver(LoginConfig{
+		Hub:      mustURL(t, hub.URL),
+		Provider: p,
+		Audit: func(AuditLine) {
+			if attempts.Add(1) == 1 {
+				panic("audit sink exploded")
+			}
+		},
+	})
+
+	const operator = "op@example.test"
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("the panic was swallowed: net/http's own recovery, and the stack trace it logs, is what names the real fault")
+			}
+		}()
+		_, _ = d.Cookie(context.Background(), operator)
+	}()
+
+	// A background context, so nothing but the driver itself can unblock this
+	// call: if the panicked attempt is still in the map, this never returns.
+	type result struct {
+		cookie string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		c, err := d.Cookie(context.Background(), operator)
+		done <- result{c, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil || r.cookie == "" {
+			t.Fatalf("the login after a panicking one failed: %q %v", r.cookie, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second login for the same operator never returned: the panicked attempt left its single-flight entry unreleased")
+	}
+	if logins, _ := hub.counts(); logins != 2 {
+		t.Fatalf("hub saw %d logins, want 2 (the panicked attempt, then a real retry)", logins)
+	}
+}
+
+// TestAPanickingAttemptReleasesTheWaitersOnIt covers the other half: the
+// callers that joined the attempt have no way out of their own, since the
+// goroutine running it is the only one that can close the channel they park
+// on. They must be released, and with an error — the zero cookie a panic
+// leaves behind would otherwise read as a perfectly good empty session.
+func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
+	p, _, _ := startProvider(t)
+	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
+	reached, release := make(chan struct{}), make(chan struct{})
+	hub.beforeCallback = func() { close(reached); <-release }
+	d := NewLoginDriver(LoginConfig{
+		Hub:      mustURL(t, hub.URL),
+		Provider: p,
+		Audit:    func(AuditLine) { panic("audit sink exploded") },
+	})
+
+	const operator = "op@example.test"
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		_, _ = d.Cookie(context.Background(), operator)
+	}()
+
+	// While the handshake is held at the hub's callback, take the entry a
+	// concurrent caller would be parked on (Cookie's waiting branch).
+	<-reached
+	d.mu.Lock()
+	e := d.sessions[operator]
+	d.mu.Unlock()
+	if e == nil {
+		t.Fatal("test bug: no in-flight entry while the handshake is held open")
+	}
+	close(release)
+	if r := <-panicked; r == nil {
+		t.Fatal("test bug: the sink did not panic, so nothing here was exercised")
+	}
+
+	// The panic has finished unwinding Cookie by now: the deferred release ran
+	// before this goroutine's own recover did.
+	select {
+	case <-e.done:
+	default:
+		t.Fatal("the attempt's channel is still open: every caller waiting on it stays parked for the life of the process")
+	}
+	if e.err == nil {
+		t.Fatal("a waiter would read the panicked attempt as a successful login carrying an empty session")
 	}
 }

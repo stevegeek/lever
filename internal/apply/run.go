@@ -329,13 +329,26 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 		if err := disableHubLogin(ctx, app, d, steps); err != nil {
 			return fmt.Errorf("hub login: %w", err)
 		}
-		// One thing this convergence deliberately does NOT undo, said here so
-		// the two calls above are not read as an exhaustive teardown: lever's
-		// overlay agent template (~/.scion/templates/lever) and the project's
-		// default_template that selects it both stay. Neither is remote-access
-		// state — the overlay exists to keep scion's placeholder system prompt
-		// out of every agent it provisions (see Deps.EnsureAgentTemplate), and
-		// that matters exactly as much with remote access off.
+		// Two things this convergence deliberately does NOT undo, said here so
+		// the calls above are not read as an exhaustive teardown.
+		//
+		// lever's overlay agent template (~/.scion/templates/lever) and the
+		// project's default_template that selects it both stay. Neither is
+		// remote-access state — the overlay exists to keep scion's placeholder
+		// system prompt out of every agent it provisions (see
+		// Deps.EnsureAgentTemplate), and that matters exactly as much with
+		// remote access off.
+		//
+		// The SPA lever staged into the guest for the hub also stays
+		// (guest.ScionWebAssetsDir; EnsureScionWebAssets simply skips once
+		// app.ScionWebAssets() is false). Kept on purpose: nothing serves it —
+		// the restart above drops --web-assets-dir from the hub's argv — and
+		// nothing goes stale, since stagedWebDigest re-stages on a digest
+		// mismatch if remote access is turned back on at a different scion
+		// pin. What is left is roughly 3MB of root-owned files inside the VM,
+		// the sourcemaps having been excluded from the payload
+		// (guest.webAssetsExclude), which is not worth a delete path of its
+		// own on every apply of every remote-off instance.
 	}
 	return nil
 }

@@ -5,6 +5,67 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.17.1] - 2026-08-22
+
+A follow-up to 0.17.0, from two independent reviews of that release. No config
+changes and no new surfaces — every entry is a defect in what 0.17.0 shipped.
+
+### Fixed
+
+- **A panic during login no longer wedges an operator out.** The single-flight
+  that stops concurrent requests racing the same handshake now releases on
+  every exit path. A panic previously left the entry published with its channel
+  open, so every later request for that operator blocked until its own context
+  expired — for the life of the process, since nothing removed the entry. The
+  panic is deliberately not recovered: it keeps unwinding to `net/http`, which
+  logs it with the stack trace that says what actually broke.
+- **Audit lines are bounded.** Caller-chosen fields — the request path and the
+  Tailscale login — were written whole, on the path that runs *before* any
+  identity check, so a few thousand long requests could append gigabytes.
+  Truncation is applied to the audited copy only; decisions are still made on
+  the original, because a truncated login would collide with every other login
+  sharing its first bytes.
+- **`lever apply` restarts the hub when remote access is turned off.** The hub
+  reads `oidc_login` once, at startup, so turning the feature off left it
+  offering a login whose provider was gone until something unrelated restarted
+  it. The ON path already restarted on change; the OFF path now does too.
+- **A hand-started proxy can no longer satisfy apply's reuse check.** The pid
+  file is written by any `lever remote serve`, while the stamp was written only
+  by apply — so a proxy started against a different config, on top of an old
+  stamp, looked like a match. The running proxy now stamps what it is actually
+  serving and names its own pid.
+- **`manager.allow_ports` refuses an entry naming the remote proxy port**,
+  instead of silently granting a jailed agent a route to it.
+- **A race in `lever remote serve`'s server list**, found while fixing the
+  above.
+- **`lever doctor` diagnoses the login path before probing `/healthz`.** The
+  health probe depends on the login working, so a broken login surfaced as a
+  vague healthz failure instead of the specific check that names the cause.
+
+### Documentation
+
+- **`ServerOpts.EnableWeb`'s doc was false**, and dangerously so: it claimed a
+  headless hub stays API-only. Scion turns `--enable-web` on for every
+  non-hosted `server start` that does not pass it, and with the web frontend
+  off the Hub API leaves the web port for `hub.port` — which would take an
+  instance down, since lever puts the broker, agents' `SCION_HUB_ENDPOINT`,
+  doctor and the proxy on that port. Corrected, with the dependency written
+  down for the first time.
+- The converge-off path now states what it deliberately does **not** undo (the
+  overlay agent template, and the staged SPA — nothing serves it once the
+  restart drops `--web-assets-dir`), and the residual it cannot close: an apply
+  that fails between the guest edit and the restart leaves the old hub running
+  until a real change or a `lever stop` + `up`.
+- `isAPIPath` reading the decoded path was checked against `net/http`'s
+  ServeMux and recorded as safe rather than changed.
+
+### Tests
+
+Filled the gaps the review named: a template test that mocked the function
+under test now runs the real script; the teardown verb, the removal of
+`oidc_login` with no forwarder left, and a live-but-not-listening proxy are all
+pinned.
+
 ## [0.17.0] - 2026-08-22
 
 ### Added

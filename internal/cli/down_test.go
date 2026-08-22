@@ -73,6 +73,36 @@ func TestRemoveControllerPATMissingIsNoop(t *testing.T) {
 	}
 }
 
+// TestRemoveRemotePAT: destroy must ALSO clear the persisted remote-access
+// PAT, for the same reason as the controller PAT (TestRemoveControllerPAT) —
+// it is minted against the same jail hub DB that dies with the machine.
+// Left behind, ensureControllerPAT's needRemote check sees a non-empty
+// remote.pat after a fresh `up` and skips the re-mint, so the remote proxy
+// would inject a token the new hub's DB has never heard of.
+func TestRemoveRemotePAT(t *testing.T) {
+	st := brokerctl.StateDir(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pat := st.RemotePAT()
+	if err := os.WriteFile(pat, []byte("stale-remote-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeRemotePAT(st); err != nil {
+		t.Fatalf("removeRemotePAT: %v", err)
+	}
+	if _, err := os.Stat(pat); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remote.pat should be removed, stat err = %v", err)
+	}
+}
+
+func TestRemoveRemotePATMissingIsNoop(t *testing.T) {
+	// No remote PAT staged (remote never enabled): destroy must not error.
+	if err := removeRemotePAT(brokerctl.StateDir(t.TempDir())); err != nil {
+		t.Fatalf("missing remote PAT must be a no-op, got %v", err)
+	}
+}
+
 // TestDestroyCallsTeardown verifies the renamed command (Use: "destroy")
 // still tears the jail down.
 func TestDestroyCallsTeardown(t *testing.T) {

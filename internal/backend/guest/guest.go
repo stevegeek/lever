@@ -67,7 +67,15 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// the mirrors and hangs. The first EnsureUp (fresh VM, no chain yet) installs
 	// everything; subsequent ones find the packages present and skip apt entirely,
 	// needing no guest DNS. `dpkg -s <pkgs>` succeeds iff ALL are installed.
-	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl iptables podman; }`); err != nil {
+	//
+	// curl is how lever's own hub calls run inside the jail (internal/hubapi/
+	// jailcurl.go); netcat-openbsd is how the remote-access proxy dials the hub
+	// through the jail (internal/remoteproxy/jaildial.go). Both are in the
+	// Debian base image today, so naming them here changes nothing on an
+	// existing guest — the guard still passes and apt still never runs. They
+	// are named so a future base image cannot drop one and break a lever
+	// feature silently.
+	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns curl netcat-openbsd iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl netcat-openbsd iptables podman; }`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
 	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships
@@ -158,10 +166,11 @@ const scionModulePath = "github.com/GoogleCloudPlatform/scion"
 // scionDestPath is where scion is installed in the guest.
 const scionDestPath = "/usr/local/bin/scion"
 
-// ScionSpec names the one place lever should get scion from. At most one field
-// is set; config validation enforces that (internal/config). A struct rather
-// than positional strings because three same-typed parameters across two call
-// sites is a mis-ordering waiting to happen.
+// ScionSpec names the one place lever should get scion from. At most one of
+// Binary/Source/Version is set; config validation enforces that
+// (internal/config). A struct rather than positional strings because three
+// same-typed parameters across two call sites is a mis-ordering waiting to
+// happen.
 type ScionSpec struct {
 	// Binary is a host-local, already-built linux binary, installed as-is. No
 	// Go toolchain, module cache or egress is needed on this host.
@@ -170,15 +179,26 @@ type ScionSpec struct {
 	Source string
 	// Version pins a scion module version/commit to fetch and cross-compile.
 	Version string
+	// WebUI additionally builds scion's SPA on the host and stages it into the
+	// guest, so the hub can serve the web UI (see webassets.go). A field on the
+	// spec rather than a parameter on EnsureScion so the two backends' copies of
+	// the provisioning block stay one struct literal: that block has drifted
+	// before — Binary was added to both literals while the guard around them was
+	// updated in neither (see backend.Config.HasScion).
+	WebUI bool
 }
 
-// EnsureScion puts the configured scion into the guest at scionDestPath.
+// EnsureScion puts the configured scion into the guest at scionDestPath, plus
+// its web assets when the spec asks for them.
 func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 	bin, err := g.resolveScionBinary(ctx, spec)
 	if err != nil {
 		return err
 	}
-	return g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath)
+	if err := g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath); err != nil {
+		return err
+	}
+	return g.EnsureScionWebAssets(ctx, spec)
 }
 
 // resolveScionBinary produces a host-local scion binary for the guest's

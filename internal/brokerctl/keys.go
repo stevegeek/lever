@@ -30,6 +30,18 @@ func (s State) PID() string           { return filepath.Join(s.Dir, "broker.pid"
 func (s State) Log() string           { return filepath.Join(s.Dir, "broker.log") }
 func (s State) OutLog() string        { return filepath.Join(s.Dir, "broker.out.log") }
 func (s State) ControllerPAT() string { return filepath.Join(s.Dir, "controller.pat") }
+func (s State) RemotePAT() string     { return filepath.Join(s.Dir, "remote.pat") }
+func (s State) RemotePID() string     { return filepath.Join(s.Dir, "remote.pid") }
+func (s State) RemoteLog() string     { return filepath.Join(s.Dir, "remote.log") }
+func (s State) RemoteAudit() string   { return filepath.Join(s.Dir, "remote-audit.jsonl") }
+
+// RemoteStamp records the binary version + remote config a RUNNING proxy was
+// started with, so apply can tell "already serving" from "serving something
+// else". The broker answers that question over HTTP (/epoch); the proxy has no
+// such endpoint and must not grow one — it fronts the hub, so any listener of
+// its own would be reachable by whatever reaches the proxy. A file beside
+// remote.pid keeps the answer host-side, where only lever writes it.
+func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
 
 // ToolLogDir is the directory holding per-supervised-tool logs.
 func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }
@@ -195,6 +207,41 @@ func (s State) LoadControllerPAT() (string, error) {
 	b, err := os.ReadFile(s.ControllerPAT())
 	if err != nil {
 		return "", fmt.Errorf("brokerctl: read controller.pat: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// SaveRemotePAT persists the proxy remote personal access token
+// (0600) under the state dir, creating the dir if needed.
+func (s State) SaveRemotePAT(tok string) error {
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return fmt.Errorf("brokerctl: state dir: %w", err)
+	}
+	if err := os.WriteFile(s.RemotePAT(), []byte(tok), 0o600); err != nil {
+		return fmt.Errorf("brokerctl: write remote.pat: %w", err)
+	}
+	return nil
+}
+
+// LoadRemotePAT reads the persisted remote PAT. An absent file
+// returns ("", nil) so callers can branch on "" meaning "need to mint".
+// A file present with permissions other than 0600 is treated as tampered
+// or misconfigured and returns an error (mirrors the api_key_file
+// defense-in-depth check in build.go).
+func (s State) LoadRemotePAT() (string, error) {
+	fi, err := os.Stat(s.RemotePAT())
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("brokerctl: remote.pat: %w", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		return "", fmt.Errorf("brokerctl: remote.pat must be 0600, got %#o", perm)
+	}
+	b, err := os.ReadFile(s.RemotePAT())
+	if err != nil {
+		return "", fmt.Errorf("brokerctl: read remote.pat: %w", err)
 	}
 	return strings.TrimSpace(string(b)), nil
 }

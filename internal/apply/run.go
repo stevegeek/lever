@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
@@ -163,6 +164,49 @@ type Deps struct {
 	// for the VM-level acceptance gate (which drives lever-agent directly and
 	// never invokes scion). Default false = full bring-up (unchanged).
 	BrokerOnly bool
+	// EnsureHubLogin brings the GUEST half of the remote-access login path up
+	// to date before the hub starts: the loopback forwarder that makes
+	// lever's host-side OIDC provider look local to the hub, and the
+	// `oidc_login` block in the guest's ~/.scion/settings.yaml. It reports
+	// whether that configuration changed, which is the signal to restart a
+	// hub that is already running — see runScionServer. It is the CLI's job
+	// to make this a no-op when remote access is off. nil ⇒ skip (tests, and
+	// the broker-only VM gate).
+	EnsureHubLogin func(ctx context.Context) (bool, error)
+	// DisableHubLogin converges the GUEST half of the login path off: stop and
+	// remove the forwarder, drop the `oidc_login` block. Like StopRemoteProxy
+	// it is NOT a Plan step — Run calls it whenever app.RemoteEnabled() is
+	// false, so an instance that turned remote access back off does not keep
+	// an unauthenticated jail→host loopback bridge alive for a feature that no
+	// longer exists. nil ⇒ skip (tests, and the broker-only VM gate).
+	DisableHubLogin func(ctx context.Context) error
+	// EnsureAgentTemplate backs the agent-template step: put lever's overlay
+	// template in front of scion's stock `default` so newly provisioned agents
+	// do NOT launch with `--system-prompt '# Placeholder'`, which replaces
+	// Claude Code's entire built-in system prompt. projectDir is JAIL-side —
+	// the scion client behind it runs in the jail, where the host tree exists
+	// only at the mount point (project scope is the only settings scope that wins) and
+	// reports whether it changed anything. nil ⇒ skip (tests, and the
+	// broker-only VM gate).
+	//
+	// Provisioning-time only, by nature: scion stages an agent's system prompt
+	// once, when its home is created, and never re-stages it. So this governs
+	// agents created from now on; an agent that already exists keeps whatever
+	// it was provisioned with until its staged input is changed in place.
+	EnsureAgentTemplate func(ctx context.Context, projectDir string) (bool, error)
+	// StartRemoteProxy backs the remote-proxy step (present only when
+	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
+	// the daemonized `lever remote serve` proxy. nil ⇒ skip (tests, and any
+	// config with remote disabled never reaches this step at all).
+	StartRemoteProxy func(ctx context.Context) error
+	// StopRemoteProxy tears the remote proxy down (by pidfile, tolerant of
+	// an absent or stale one). It is NOT called from a Plan step — Run calls
+	// it directly, unconditionally, whenever app.RemoteEnabled() is false,
+	// so a proxy left running from a prior apply (remote.enabled flipped
+	// back off since) converges to stopped rather than going on serving
+	// traffic the config no longer authorizes. nil ⇒ skip (tests, and
+	// configs that never enable remote in the first place).
+	StopRemoteProxy func(ctx context.Context) error
 	// RemoveJailFile removes a regular file at a jail-absolute path, through the
 	// jail's own filesystem view. Used for the stale `.scion` marker so the
 	// removal and the subsequent in-jail `scion init` cannot race across the
@@ -254,7 +298,40 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
 		}
 	}
+	// Converge the remote proxy OFF when the config disables it. Plan omits
+	// the remote-proxy step entirely in that case (see its RemoteEnabled
+	// guard) so dry-run output never shows a start step it won't take — but
+	// that also means the step loop above never reaches a proxy left running
+	// from a PRIOR apply (remote.enabled since flipped back off). Reconcile
+	// it here, unconditionally, so a config-off apply always converges to
+	// "not running" rather than leaving a stale proxy serving traffic the
+	// operator no longer intends to expose.
+	if !app.RemoteEnabled() {
+		if err := stopRemoteProxyIfConfigured(ctx, d); err != nil {
+			return fmt.Errorf("remote-proxy: %w", err)
+		}
+		// The GUEST half has to converge too, and for a sharper reason than
+		// the proxy does: the login forwarder is an unauthenticated TCP bridge
+		// from guest loopback — reachable from every agent's netns — to a host
+		// loopback port beside lever's own broker listeners. Left running
+		// after the feature is off, it keeps that port bridged into the jail
+		// for whatever binds it next. See Deps.DisableHubLogin.
+		if d.DisableHubLogin != nil {
+			if err := d.DisableHubLogin(ctx); err != nil {
+				return fmt.Errorf("hub login: %w", err)
+			}
+		}
+	}
 	return nil
+}
+
+// stopRemoteProxyIfConfigured calls Deps.StopRemoteProxy when wired; see its
+// doc for why this runs outside the step loop.
+func stopRemoteProxyIfConfigured(ctx context.Context, d Deps) error {
+	if d.StopRemoteProxy == nil {
+		return nil
+	}
+	return d.StopRemoteProxy(ctx)
 }
 
 // runStep is the thin dispatch over StepKind: it routes each step to its
@@ -279,18 +356,78 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 		}
 		return d.EnsureControllerPAT(ctx)
 	case KindScionServer:
-		return d.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false})
+		return runScionServer(ctx, app, d)
 	case KindCredential:
 		return runCredential(ctx, s, d)
 	case KindRegisterProject:
 		return runRegisterProject(ctx, app, s, d)
+	case KindAgentTemplate:
+		return runAgentTemplate(ctx, app, s, d)
 	case KindMintManagerBootstrap:
 		return runMintManagerBootstrap(ctx, s, d, boot)
 	case KindStartManager:
 		return stepStartManager(ctx, app, s, d, boot)
+	case KindRemoteProxy:
+		return runRemoteProxy(ctx, d)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
+}
+
+// runScionServer runs the scion-server step: bring the guest's login path up
+// to date, restart the hub if that changed its configuration, then start (or
+// confirm) the hub.
+//
+// The restart is what makes the login path take effect at all: scion reads
+// `oidc_login` once, at startup (pkg/config/hub_config.go), so a hub that was
+// already running when lever wrote the block goes on serving a configuration
+// with no login in it. It is conditional on an actual change, because a
+// restart drops every agent's connection to the hub for the length of one —
+// acceptable to turn remote access on, not acceptable on every apply.
+// A failure anywhere after EnsureHubLogin leaves the guest forwarder
+// installed and running with no hub behind it. That is deliberate, not an
+// oversight: the forwarder bridges guest loopback to the login port on the
+// HOST, where what binds is a lever provider inside some `lever remote serve`
+// — so the half-applied state reaches either nothing (the connection is
+// refused) or a provider, which hands out nothing without a code. (Two remote
+// instances left on the default host port would have the forwarder reach the
+// OTHER instance's provider; the consequence is a login that cannot complete,
+// not an exposure — and config validation asks each instance for its own
+// ports.) Tearing it down here would
+// also tear down a forwarder a previous, successful apply had legitimately
+// left running. The next apply converges it: EnsureHubLogin is idempotent, and
+// with remote access turned off DisableHubLogin removes it outright.
+func runScionServer(ctx context.Context, app *config.App, d Deps) error {
+	if d.EnsureHubLogin != nil {
+		changed, err := d.EnsureHubLogin(ctx)
+		if err != nil {
+			return fmt.Errorf("hub login: %w", err)
+		}
+		if changed {
+			logf(d, "lever: the hub's login configuration changed — restarting the hub so it is read")
+			// Stop-then-start, not `scion server restart`: scion's own restart
+			// refuses outright when the daemon is not running, and the hub
+			// being already down is an ordinary state here — after a `lever
+			// stop`, a VM reboot, or a crash. ServerStop tolerates that (see
+			// its doc); ServerStart below tolerates the opposite.
+			if err := d.Scion.ServerStop(ctx); err != nil {
+				return fmt.Errorf("hub login: restart the hub: %w", err)
+			}
+		}
+	}
+	opts := scion.ServerOpts{
+		WebPort:   8080,
+		DevAuth:   false,
+		EnableWeb: app.RemoteEnabled(),
+	}
+	if app.ScionWebAssets() {
+		// Same predicate the backend used to decide whether to stage the
+		// assets, so the flag can never point at a directory nothing put
+		// anything in — see ServerOpts.WebAssetsDir for why that case is
+		// worse than passing no flag at all.
+		opts.WebAssetsDir = guest.ScionWebAssetsDir
+	}
+	return d.Scion.ServerStart(ctx, opts)
 }
 
 // runBrokerUp runs the broker-up step: start the host broker (+ first-party
@@ -305,6 +442,35 @@ func runBrokerUp(ctx context.Context, d Deps) error {
 	}
 	if d.BrokerHealthy != nil {
 		return d.BrokerHealthy(ctx)
+	}
+	return nil
+}
+
+// runRemoteProxy runs the remote-proxy step: start (or confirm already
+// running) the daemonized `lever remote serve` proxy. Only reached when Plan
+// included the step, i.e. app.RemoteEnabled() — see Deps.StartRemoteProxy.
+func runRemoteProxy(ctx context.Context, d Deps) error {
+	if d.StartRemoteProxy == nil {
+		return nil // tests / dry paths
+	}
+	return d.StartRemoteProxy(ctx)
+}
+
+// runAgentTemplate runs the agent-template step. Logs on change only: it is a
+// provisioning-time change the operator cannot otherwise see, and silence on a
+// no-op keeps a re-apply quiet.
+func runAgentTemplate(ctx context.Context, app *config.App, s Step, d Deps) error {
+	if d.EnsureAgentTemplate == nil {
+		return nil // tests / broker-only gate
+	}
+	// The JAIL-side path, not the host one: the scion client behind this closure
+	// runs inside the jail, where the host tree is visible only at the mount.
+	changed, err := d.EnsureAgentTemplate(ctx, jailPath(s.Target, app.Tree, d.JailMount))
+	if err != nil {
+		return err
+	}
+	if changed {
+		logf(d, "lever: agents will no longer be launched with scion's placeholder system prompt (new agents only; existing ones keep the prompt they were provisioned with)")
 	}
 	return nil
 }

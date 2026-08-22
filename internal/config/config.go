@@ -6,7 +6,9 @@ import (
 	"cmp"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -403,6 +405,43 @@ type Operator struct {
 	DirectiveExpiryMax time.Duration `yaml:"directive_expiry_max"`
 }
 
+// Remote configures the opt-in remote-access proxy (`lever remote`): a
+// host-loopback reverse proxy that injects a dedicated narrow PAT and is
+// fronted by `tailscale serve`. Disabled by default; the hub web UI is only
+// enabled (--enable-web) when this is on. See
+// docs/superpowers/specs/2026-08-16-remote-agent-access-design.md.
+type Remote struct {
+	Enabled bool `yaml:"enabled"`
+	// Port is the host loopback port the proxy binds. Zero = 8445
+	// (EffectiveRemotePort). Must not collide with the broker's jail/admin
+	// ports — validated.
+	Port int `yaml:"port"`
+	// BaseURL is the public tailnet origin the operator reaches this
+	// instance on. It configures the PROXY, not the hub: its host becomes
+	// the proxy's ServeHost, which every Origin-bearing request must match
+	// (remoteproxy.Config.ServeHost). It is deliberately NOT forwarded to
+	// the hub as --base-url — that flag would also become the agents'
+	// SCION_HUB_ENDPOINT, which no jail agent can reach (see
+	// scion.ServerOpts.EnableWeb). Required while remote is enabled; must
+	// be an absolute https URL.
+	BaseURL string `yaml:"base_url"`
+	// AllowedUsers, when non-empty, pins requests to these Tailscale login
+	// names (Tailscale-User-Login header injected by `tailscale serve`).
+	AllowedUsers []string `yaml:"allowed_users"`
+	// LoginPort is the HOST loopback port the local OIDC provider binds.
+	//
+	// It is deliberately NOT the port the hub dials. The hub dials a guest
+	// loopback port (backend.GuestLoginIssuerPort), which a forwarder carries
+	// to this one — two numbers, because OrbStack mirrors a guest listener
+	// onto the host at the same number and one number for both halves left
+	// the provider unable to bind its own port. The guest half has no config
+	// key at all, so no configuration can make the two halves collide.
+	//
+	// Zero = 8447 (EffectiveRemoteLoginPort). Validated against the proxy
+	// port, the broker's listeners, and the guest port's host mirror.
+	LoginPort int `yaml:"login_port"`
+}
+
 type App struct {
 	Name     string      `yaml:"name"`
 	Backend  string      `yaml:"backend"`
@@ -414,6 +453,7 @@ type App struct {
 	Security Security    `yaml:"security"`
 	Broker   Broker      `yaml:"broker"`
 	Operator Operator    `yaml:"operator"`
+	Remote   Remote      `yaml:"remote"`
 	Disk     string      `yaml:"disk"` // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
 
 	dir     string // instance root (the config file's directory)
@@ -662,6 +702,9 @@ func (a *App) Validate() error {
 	if err := a.validateOperator(); err != nil {
 		return err
 	}
+	if err := a.validateRemote(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -776,6 +819,103 @@ func (a *App) validateOperator() error {
 	}
 	if a.EffectiveDirectiveExpiry() > a.EffectiveDirectiveExpiryMax() {
 		return fmt.Errorf("config: operator: directive_expiry %s exceeds directive_expiry_max %s", a.EffectiveDirectiveExpiry(), a.EffectiveDirectiveExpiryMax())
+	}
+	return nil
+}
+
+// validateRemote rejects a remote block that could not serve safely: an
+// unvalidated backend, a port colliding with the broker's listeners, a
+// missing or malformed base_url, or a blank allowed_users entry (which would
+// pin to nothing and read as "allow none" while acting as "allow this header
+// value" with an empty string). Skipped entirely while disabled, so a stale
+// port/base_url left from a previous config doesn't block loading until
+// remote is re-enabled.
+func (a *App) validateRemote() error {
+	if !a.Remote.Enabled {
+		return nil
+	}
+	if a.Backend != "orbstack" {
+		// NOT a reachability limit. The proxy dials the hub THROUGH the jail
+		// (remoteproxy.JailDial), which every backend supports and which needs
+		// no guest→host forwarding at all — that was the old rationale, and it
+		// no longer describes the transport. The gate stays only because the
+		// Lima path has never been live-validated; lifting it is a live-test
+		// question, not a code one.
+		//
+		// Rejecting at load time rather than at serve time closes a trap:
+		// without this check the config loads, `apply` returns 0, and the
+		// proxy child spawned by `lever remote serve` silently dies into
+		// remote.log. newRemoteServeCmd carries the same check at runtime
+		// (internal/cli/remote.go) as belt-and-braces defense-in-depth.
+		return fmt.Errorf("config: remote: requires the orbstack backend in v1 (the Lima path is not live-validated yet)")
+	}
+	rp := a.EffectiveRemotePort()
+	if rp == a.EffectiveJailPort() || rp == a.EffectiveAdminPort() {
+		return fmt.Errorf("config: remote: port %d collides with a broker listener", rp)
+	}
+	if rp == backend.GuestLoginIssuerPort {
+		// Same reason as login_port below: the container runtime mirrors the
+		// jail's login forwarder onto this host port, so whichever of lever's
+		// two host listeners names it cannot bind. The proxy's failure is loud
+		// now (apply waits for it to bind), but the guard belongs on both
+		// listeners, not just the one that met the failure first.
+		return fmt.Errorf("config: remote: port %d is the port the jail's login forwarder is mirrored onto "+
+			"by the container runtime, so the proxy cannot bind it — pick another", rp)
+	}
+	lp := a.EffectiveRemoteLoginPort()
+	if lp == a.EffectiveJailPort() || lp == a.EffectiveAdminPort() {
+		return fmt.Errorf("config: remote: login_port %d collides with a broker listener", lp)
+	}
+	if lp == rp {
+		// Two listeners, deliberately: the proxy answers the operator's
+		// browser through `tailscale serve`, the provider answers the hub's
+		// back channel from inside the jail. One port cannot be both.
+		return fmt.Errorf("config: remote: login_port %d collides with the proxy port", lp)
+	}
+	if lp == backend.GuestLoginIssuerPort {
+		// Not a host listener lever owns, but one it causes: OrbStack mirrors
+		// the guest forwarder onto the host at this number, so the provider
+		// could not bind here even though nothing in lever's own config says
+		// so. This was a live failure, not a theoretical one.
+		return fmt.Errorf("config: remote: login_port %d is the port the jail's login forwarder is mirrored onto "+
+			"by the container runtime, so the provider cannot bind it — pick another", lp)
+	}
+	if a.Remote.BaseURL == "" {
+		// base_url sets the proxy's ServeHost (remoteServeHost, internal/cli/
+		// remote.go); an empty ServeHost fails every request closed — the
+		// proxy would start and serve nothing at all. Reject that state at
+		// load time rather than let it "succeed" into a proxy that 403s
+		// 100% of traffic, which otherwise only surfaced later as a
+		// confusing doctor healthz failure pointing at remote.log.
+		return fmt.Errorf("config: remote: base_url is required when remote is enabled (without it the proxy refuses all requests)")
+	}
+	u, err := url.Parse(a.Remote.BaseURL)
+	if err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("config: remote: base_url %q must be an absolute https URL", a.Remote.BaseURL)
+	}
+	for _, au := range a.Remote.AllowedUsers {
+		if strings.TrimSpace(au) == "" {
+			return fmt.Errorf("config: remote: allowed_users contains an empty entry")
+		}
+	}
+	// Remote access needs a Go toolchain on the host: the guest-side login
+	// forwarder is cross-compiled for the guest's architecture at apply time
+	// (internal/backend/guest.EnsureHubLogin).
+	//
+	// Only `scion.binary:` is checked here, because that is the mode this
+	// requirement is NEW for — the other two already need Go to build scion
+	// itself, and their missing-toolchain diagnosis lives in `lever doctor`
+	// and in the build's own failure. Checking at config load rather than
+	// during apply is deliberate: EnsureHubLogin runs in the scion-server
+	// step, well after the bootstrap-token step has opened a mint window and
+	// touched the hub, and "your host has no compiler" is not something to
+	// discover half way through that.
+	if a.Scion.Binary != "" {
+		if _, err := exec.LookPath("go"); err != nil {
+			return fmt.Errorf("config: remote: remote access needs a Go toolchain on this host — it cross-compiles the " +
+				"guest's login forwarder at apply time — but `go` is not on PATH. Install Go (or put a REAL go on PATH, " +
+				"not just an asdf/mise shim), or set remote.enabled: false")
+		}
 	}
 	return nil
 }
@@ -1004,6 +1144,89 @@ func (a *App) EffectiveJailPort() int {
 // or DefaultBrokerAdminPort when unset (0).
 func (a *App) EffectiveAdminPort() int {
 	return cmp.Or(a.Broker.AdminPort, DefaultBrokerAdminPort)
+}
+
+// RemoteEnabled reports whether the remote-access proxy is configured on.
+func (a *App) RemoteEnabled() bool { return a.Remote.Enabled }
+
+// ScionWebAssets reports whether lever builds scion's SPA on the host and
+// stages it into the guest — and therefore also whether it passes
+// `--web-assets-dir` to the hub, and whether `lever doctor` needs a node
+// toolchain present.
+//
+// One predicate for all three, because they must not disagree. Passing the flag
+// when the assets were never staged is worse than not passing it: scion then
+// serves an empty directory instead of falling back to whatever it has embedded.
+//
+// Both halves matter. Remote off means no UI is served, so nothing needs
+// building. Binary mode means there is no scion source tree to build the SPA
+// from, and a binary the operator built themselves may already embed one — see
+// guest.ScionSpec.BuildsWebAssets, which this must agree with.
+func (a *App) ScionWebAssets() bool {
+	return a.RemoteEnabled() && a.Scion.Binary == "" && (a.Scion.Source != "" || a.Scion.Version != "")
+}
+
+// EffectiveRemotePort is the proxy's host loopback port: the configured
+// value, or 8445 — adjacent to the broker's 8443/8444 block.
+func (a *App) EffectiveRemotePort() int {
+	if a.Remote.Port > 0 {
+		return a.Remote.Port
+	}
+	return 8445
+}
+
+// EffectiveAllowedPorts is the complete set of HOST loopback ports the jail may
+// reach through the host alias — the egress allowlist's ACCEPT set
+// (internal/egress.BuildRules), and the only thing that decides whether a
+// jail→host dial succeeds.
+//
+// Three contributors, and the third is easy to miss:
+//
+//   - the broker's jail port, which every agent needs;
+//   - manager.allow_ports, the operator's own host tools;
+//   - the remote-access login port, when remote access is on. The guest's
+//     login forwarder exists solely to reach that host port, so without this
+//     grant the allowlist drops its dial — the forwarder listens, the hub's
+//     discovery fetch times out, and the browser gets a 502 with every process
+//     apparently healthy. That was a live failure, and the containment layer
+//     was right: an unallowlisted host port SHOULD be dropped. The grant is
+//     narrow (one port, only while remote.enabled) rather than any widening of
+//     the alias rule.
+//
+// One function so the three cannot disagree, and so a port that stops being
+// needed stops being granted: with remote access turned off the login port is
+// simply absent from the next rebuild, the same convergence the forwarder
+// itself gets from DisableHubLogin.
+func (a *App) EffectiveAllowedPorts() []int {
+	ports := append([]int{a.EffectiveJailPort()}, a.Manager.AllowPorts...)
+	if a.RemoteEnabled() {
+		ports = append(ports, a.EffectiveRemoteLoginPort())
+	}
+	// Deduplicate: an operator may well have listed the login port in
+	// manager.allow_ports already (that was the only way to reach it before
+	// this function granted it). A repeat is harmless to iptables — BuildRules
+	// would just emit the same ACCEPT twice — but a set is what this returns.
+	out := ports[:0:0]
+	for _, p := range ports {
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// EffectiveRemoteLoginPort is the HOST loopback port the local OIDC provider
+// binds: the configured value, or 8447.
+//
+// 8447, not 8446: 8446 is the guest-side issuer port
+// (backend.GuestLoginIssuerPort), which the container runtime mirrors onto the
+// host at the same number. The block reads 8443 jail, 8444 admin, 8445 proxy,
+// 8446 the jail's mirrored forwarder, 8447 the provider.
+func (a *App) EffectiveRemoteLoginPort() int {
+	if a.Remote.LoginPort > 0 {
+		return a.Remote.LoginPort
+	}
+	return 8447
 }
 
 // EffectiveAutoReenrol is the natural-lapse healer gate: the configured value,

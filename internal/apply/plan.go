@@ -23,8 +23,16 @@ const (
 	KindScionServer          StepKind = "scion-server"
 	KindCredential           StepKind = "credential"
 	KindRegisterProject      StepKind = "register-project"
+	KindAgentTemplate        StepKind = "agent-template"
 	KindMintManagerBootstrap StepKind = "mint-manager-bootstrap"
 	KindStartManager         StepKind = "start-manager"
+	// KindRemoteProxy daemonizes `lever remote serve` (see Deps.StartRemoteProxy).
+	// Plan emits it ONLY when a.RemoteEnabled() — see Plan's remote-proxy block
+	// — so dry-run output never advertises a start step that won't run. The
+	// converse (remote disabled, a stale proxy left running by a prior apply)
+	// is NOT this step's job: Run reconciles that itself, unconditionally,
+	// after the step loop — see Run's doc in run.go.
+	KindRemoteProxy StepKind = "remote-proxy"
 )
 
 // Step is one named bring-up operation. Kind drives the executor; Target/Detail
@@ -88,10 +96,23 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 		Step{Kind: KindBootstrapToken, Target: a.Tree},
 		Step{Kind: KindScionServer},
 	)
+	if a.RemoteEnabled() {
+		// The proxy reverse-proxies the hub's web API, so the hub must be
+		// confirmed up first — scion-server, just above (see
+		// Deps.StartRemoteProxy). Nothing later in the plan (credential,
+		// register-project, start-manager) is a dependency of the proxy, so
+		// this is the earliest correct placement.
+		steps = append(steps, Step{Kind: KindRemoteProxy})
+	}
 	if a.Manager.CredentialFile != "" {
 		steps = append(steps, Step{Kind: KindCredential, Target: a.Manager.CredentialFile})
 	}
 	steps = append(steps, Step{Kind: KindRegisterProject, Target: a.Tree})
+	// Suppress scion's placeholder system prompt before anything can be
+	// provisioned from it (see Deps.EnsureAgentTemplate). AFTER register-project
+	// because the settings half writes at PROJECT scope, which needs the project
+	// to exist; BEFORE start-manager because provisioning reads the template.
+	steps = append(steps, Step{Kind: KindAgentTemplate, Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: KindMintManagerBootstrap, Target: a.Tree})
 	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name, Detail: a.ManagerImage()})

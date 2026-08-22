@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
@@ -1568,6 +1571,418 @@ func TestRunCredentialStep(t *testing.T) {
 	}
 }
 
+// TestRunScionServerEmitsWebFlagsWhenRemoteEnabled pins the scion-server
+// step's threading of App.RemoteEnabled() (Task 5) into scion.ServerOpts:
+// with remote access configured on, the real hub's `server start` call must
+// carry --enable-web. It must NOT carry the tailnet base_url; the
+// consequence of that is asserted by the agent-endpoint test below.
+func TestRunScionServerEmitsWebFlagsWhenRemoteEnabled(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	j := ""
+	for _, c := range f.Calls {
+		j += strings.Join(c.Args, " ") + "|"
+	}
+	if want := "server start --web-port 8080 --dev-auth=false --enable-web|"; !strings.Contains(j, want) {
+		t.Fatalf("missing scion call %q in: %q", want, j)
+	}
+}
+
+// TestRunScionServerPointsTheHubAtStagedAssets is the end of the Task 13 wire:
+// a remote-enabled instance on a `version:` pin has no embedded SPA, so the
+// scion-server step must point the hub at the directory the backend staged.
+// The path is guest.ScionWebAssetsDir at both ends by construction — this pins
+// that the step actually emits it.
+func TestRunScionServerPointsTheHubAtStagedAssets(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Scion:   config.ScionConfig{Version: "e82a2a08"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	j := ""
+	for _, c := range f.Calls {
+		j += strings.Join(c.Args, " ") + "|"
+	}
+	if want := "--enable-web --web-assets-dir=" + guest.ScionWebAssetsDir + "|"; !strings.Contains(j, want) {
+		t.Fatalf("missing scion call %q in: %q", want, j)
+	}
+}
+
+// Binary mode builds no assets (no scion source to build them from), so the
+// flag must stay off: a non-empty value would make scion serve an empty
+// directory INSTEAD of whatever the operator embedded in their own binary.
+func TestRunScionServerOmitsAssetsDirForBinaryMode(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Scion:   config.ScionConfig{Binary: "/host/scion-linux-arm64"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, c := range f.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), "--web-assets-dir") {
+			t.Fatalf("binary mode must not claim staged assets: %v", c.Args)
+		}
+	}
+}
+
+// containerBridgeHost is the only host name that resolves to the machine's
+// loopback from inside an agent's netns: podman answers
+// host.containers.internal with 169.254.1.2, and lever's pasta
+// --map-host-loopback drop-in points that address at the machine
+// (internal/backend/guest/guest.go). An agents' hub endpoint naming anything
+// else is unreachable from the jail.
+const containerBridgeHost = "host.containers.internal"
+
+// agentHubEndpoint models the endpoint scion injects into EVERY agent
+// container as SCION_HUB_ENDPOINT/SCION_HUB_URL, given the `scion server
+// start` argv lever emits. The argv is the only input lever controls, so
+// this is what lets a test assert the outcome agents see instead of the
+// flags lever passed — asserting the flags is precisely what let a tailnet
+// base_url reach agents unnoticed.
+//
+// The load-bearing precondition is that lever runs scion in WORKSTATION mode:
+// it passes neither --hosted nor --enable-hub, so applyWorkstationDefaults
+// (cmd/server_config.go:25-41, called from both the daemon launcher and the
+// foreground runner whenever !hostedMode) force-sets enableHub = true. That is
+// what puts --base-url on the resolution path at all — resolveHubEndpoint's
+// !enableHub arm returns the project-settings endpoint and never consults the
+// flag. If lever ever starts passing --hosted, re-derive this whole model.
+//
+// Two scion rules then apply in order (read at pin 066eeba9):
+//
+//  1. cmd/server_foreground.go resolveHubEndpoint — --base-url wins
+//     outright; with the flag absent a combo server falls back to
+//     http://localhost:<web-port>. The other precedence arms (hub.endpoint
+//     in the global config, SCION_SERVER_BASE_URL, project settings) are
+//     all left unset by lever, and lever actively repairs the
+//     project-recorded endpoint back to loopback (Deps.RepairScionHubEndpoint).
+//  2. pkg/runtimebroker/hubenv.go applyContainerBridgeOverride — a LOOPBACK
+//     endpoint is rewritten onto the container bridge host, keeping its
+//     port. A non-loopback endpoint reaches the agent verbatim, with no
+//     rewrite at all.
+func agentHubEndpoint(t *testing.T, serverStart []string) string {
+	t.Helper()
+	flagVal := func(name string) string {
+		for i, a := range serverStart {
+			if a == name && i+1 < len(serverStart) {
+				return serverStart[i+1]
+			}
+			if v, ok := strings.CutPrefix(a, name+"="); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	endpoint := flagVal("--base-url")
+	if endpoint == "" {
+		port := flagVal("--web-port")
+		if port == "" {
+			port = "8080" // scion's default web port
+		}
+		endpoint = "http://localhost:" + port
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("hub endpoint %q does not parse: %v", endpoint, err)
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		u.Host = net.JoinHostPort(containerBridgeHost, u.Port())
+	}
+	return u.String()
+}
+
+// TestRunScionServerKeepsAgentHubEndpointJailReachable is the regression
+// test for the live bug where `--base-url <tailnet URL>` became the agents'
+// SCION_HUB_ENDPOINT: podman inspect on a remote-enabled instance showed
+// every agent carrying https://<name>.ts.net, a name the jail cannot
+// resolve and lever's egress drops, breaking status updates, notifications
+// and the ~10-hourly agent token refresh.
+//
+// It asserts the AGENT-FACING outcome rather than the argv, because the
+// argv-shaped tests passed throughout the bug. Turning remote access on
+// must not change what agents get: a container-bridge endpoint, exactly as
+// a headless instance produces.
+func TestRunScionServerKeepsAgentHubEndpointJailReachable(t *testing.T) {
+	serverStartArgs := func(t *testing.T, app *config.App) []string {
+		t.Helper()
+		f := exec.NewFakeRunner()
+		f.Script("scion", exec.Result{Stdout: "ok"})
+		deps := Deps{
+			JailUp:    func(context.Context, *config.App) error { return nil },
+			LoadImage: func(context.Context, string) error { return nil },
+			Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		}
+		if err := Run(context.Background(), app, deps); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		for _, c := range f.Calls {
+			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" && c.Args[1] == "start" {
+				return c.Args
+			}
+		}
+		t.Fatal("no `scion server start` call")
+		return nil
+	}
+
+	newApp := func(t *testing.T, remote config.Remote) *config.App {
+		return &config.App{
+			Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+			Manager: config.Manager{Image: "img"},
+			Remote:  remote,
+		}
+	}
+
+	headless := agentHubEndpoint(t, serverStartArgs(t, newApp(t, config.Remote{})))
+	if got, want := headless, "http://"+containerBridgeHost+":8080"; got != want {
+		t.Fatalf("headless agent hub endpoint = %q, want %q", got, want)
+	}
+
+	remote := agentHubEndpoint(t, serverStartArgs(t, newApp(t, config.Remote{
+		Enabled: true, BaseURL: "https://mac.tail.ts.net",
+	})))
+	if remote != headless {
+		t.Errorf("remote access changed the agents' hub endpoint: got %q, want %q (the jail resolves only %s; a tailnet host reaches nothing)",
+			remote, headless, containerBridgeHost)
+	}
+}
+
+// TestRunScionServerOmitsWebFlagsWhenRemoteDisabled is the inverse of the
+// above: with remote access left off (the default), the real hub's
+// `server start` call must NOT gain --enable-web or --base-url — a headless
+// hub must not serve the SPA.
+func TestRunScionServerOmitsWebFlagsWhenRemoteDisabled(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, c := range f.Calls {
+		if c.Name != "scion" {
+			continue
+		}
+		joined := strings.Join(c.Args, " ")
+		if strings.HasPrefix(joined, "server start") && (strings.Contains(joined, "--enable-web") || strings.Contains(joined, "--base-url")) {
+			t.Fatalf("server start must not carry web flags when remote is disabled: %q", joined)
+		}
+	}
+}
+
+// TestRunRemoteProxyStepInvokesStartWhenEnabled proves the remote-proxy
+// step's executor wiring: Plan only includes the step when
+// app.RemoteEnabled() (see plan_test.go), and runStep must invoke the
+// injected Deps.StartRemoteProxy for it — exactly once, exactly like every
+// other step's Deps func.
+func TestRunRemoteProxyStepInvokesStartWhenEnabled(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	var starts int
+	deps := Deps{
+		JailUp:           func(context.Context, *config.App) error { return nil },
+		LoadImage:        func(context.Context, string) error { return nil },
+		Scion:            scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		StartRemoteProxy: func(context.Context) error { starts++; return nil },
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if starts != 1 {
+		t.Fatalf("StartRemoteProxy calls = %d, want 1", starts)
+	}
+}
+
+// TestRunRemoteProxyStepOrderedAfterScionServer pins the ordering
+// requirement at the executor level (plan_test.go pins it at the Plan
+// level): the proxy needs the hub up, so its start must be observed
+// strictly after `scion server start` actually runs.
+func TestRunRemoteProxyStepOrderedAfterScionServer(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	var order []string
+	alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
+	sr := &serverStartOrderRunner{agentLifecycleRunner: alr, order: &order}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(sr, scion.Options{}),
+		StartRemoteProxy: func(context.Context) error {
+			order = append(order, "remote-proxy")
+			return nil
+		},
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ssIdx, rpIdx := -1, -1
+	for i, v := range order {
+		if v == "server-start" && ssIdx < 0 {
+			ssIdx = i
+		}
+		if v == "remote-proxy" && rpIdx < 0 {
+			rpIdx = i
+		}
+	}
+	if ssIdx < 0 || rpIdx < 0 {
+		t.Fatalf("expected both server-start and remote-proxy recorded; order=%v", order)
+	}
+	if !(ssIdx < rpIdx) {
+		t.Fatalf("remote-proxy must run after scion-server; order=%v", order)
+	}
+}
+
+// TestRunRemoteProxyStepSkipsCleanlyWhenNil mirrors
+// TestRunBootstrapTokenSkipsCleanlyWhenNil: a nil Deps.StartRemoteProxy (any
+// caller that hasn't wired the proxy controller) must not error even though
+// the step is present in the plan.
+func TestRunRemoteProxyStepSkipsCleanlyWhenNil(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		// StartRemoteProxy intentionally left nil.
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run must not fail when StartRemoteProxy is nil: %v", err)
+	}
+}
+
+// TestRunConvergesRemoteProxyOffWhenDisabled is the config-off idempotence
+// case (see the plan's Task 8 contract): Plan omits the remote-proxy step
+// entirely when remote is disabled, so Run itself — not a step — must call
+// Deps.StopRemoteProxy to converge a stale proxy (left running from a prior
+// apply with remote enabled) to stopped.
+func TestRunConvergesRemoteProxyOffWhenDisabled(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		// Remote left disabled (the zero value).
+	}
+	var stops int
+	deps := Deps{
+		JailUp:          func(context.Context, *config.App) error { return nil },
+		LoadImage:       func(context.Context, string) error { return nil },
+		Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		StopRemoteProxy: func(context.Context) error { stops++; return nil },
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stops != 1 {
+		t.Fatalf("StopRemoteProxy calls = %d, want 1", stops)
+	}
+}
+
+// TestRunDoesNotStopRemoteProxyWhenEnabled is the positive-case complement:
+// when remote IS enabled, Run must never call StopRemoteProxy — only the
+// remote-proxy step's StartRemoteProxy runs.
+func TestRunDoesNotStopRemoteProxyWhenEnabled(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
+	}
+	var stops int
+	deps := Deps{
+		JailUp:           func(context.Context, *config.App) error { return nil },
+		LoadImage:        func(context.Context, string) error { return nil },
+		Scion:            scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		StartRemoteProxy: func(context.Context) error { return nil },
+		StopRemoteProxy:  func(context.Context) error { stops++; return nil },
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stops != 0 {
+		t.Fatalf("StopRemoteProxy calls = %d, want 0 (remote is enabled)", stops)
+	}
+}
+
+// TestRunConvergeOffSkipsCleanlyWhenNil proves the nil-safe default: a
+// config that never enables remote, with StopRemoteProxy left unwired (every
+// pre-remote-access test, and any caller that doesn't need the proxy), must
+// not error.
+func TestRunConvergeOffSkipsCleanlyWhenNil(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:    func(context.Context, *config.App) error { return nil },
+		LoadImage: func(context.Context, string) error { return nil },
+		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		// StopRemoteProxy intentionally left nil.
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run must not fail when StopRemoteProxy is nil: %v", err)
+	}
+}
+
 func TestStartManagerPassesPrompt(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace", "workers", "worker"), 0o755)
@@ -2669,5 +3084,191 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 	}
 	if err := Run(context.Background(), app, deps); err == nil {
 		t.Fatal("a failed endpoint repair must fail the bring-up")
+	}
+}
+
+// TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged pins the
+// condition on the restart. scion reads `oidc_login` once, at startup, so a
+// hub that was already running when lever wrote the block would otherwise go
+// on serving a configuration with no login in it — and an unconditional
+// restart would drop every agent's hub connection on every apply.
+func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
+	run := func(t *testing.T, changed bool, ensureErr error) ([]exec.Call, error) {
+		t.Helper()
+		f := exec.NewFakeRunner()
+		f.Script("scion", exec.Result{Stdout: "ok"})
+		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+			Manager: config.Manager{Image: "img"},
+			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
+		deps := Deps{
+			JailUp:         func(context.Context, *config.App) error { return nil },
+			LoadImage:      func(context.Context, string) error { return nil },
+			Scion:          scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+			EnsureHubLogin: func(context.Context) (bool, error) { return changed, ensureErr },
+		}
+		return f.Calls, Run(context.Background(), app, deps)
+	}
+	stopped := func(calls []exec.Call) bool {
+		for _, c := range calls {
+			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" && c.Args[1] == "stop" {
+				return true
+			}
+		}
+		return false
+	}
+
+	calls, err := run(t, false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stopped(calls) {
+		t.Fatal("an unchanged login configuration restarted the hub — every apply would drop the agents' connections")
+	}
+
+	calls, err = run(t, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !stopped(calls) {
+		t.Fatal("a changed login configuration did not restart the hub, so scion would never read it")
+	}
+
+	// A failure to provision the guest half must fail the apply, not start a
+	// hub whose login path silently does not work.
+	if _, err := run(t, false, errors.New("no go toolchain")); err == nil {
+		t.Fatal("EnsureHubLogin's failure did not fail the apply")
+	}
+}
+
+// TestRemoteDisabledConvergesTheGuestLoginPathOff: the forwarder is an
+// unauthenticated bridge from guest loopback — reachable from every agent's
+// netns — to a host loopback port beside lever's broker listeners. Stopping
+// the proxy does not stop it, so an apply with remote access off must take it
+// down, every time, whether or not this instance ever had one.
+func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
+	run := func(t *testing.T, remote config.Remote) (disabled, ensured int) {
+		t.Helper()
+		f := exec.NewFakeRunner()
+		f.Script("scion", exec.Result{Stdout: "ok"})
+		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+			Manager: config.Manager{Image: "img"}, Remote: remote}
+		deps := Deps{
+			JailUp:          func(context.Context, *config.App) error { return nil },
+			LoadImage:       func(context.Context, string) error { return nil },
+			Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+			EnsureHubLogin:  func(context.Context) (bool, error) { ensured++; return false, nil },
+			DisableHubLogin: func(context.Context) error { disabled++; return nil },
+		}
+		if err := Run(context.Background(), app, deps); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return disabled, ensured
+	}
+
+	disabled, _ := run(t, config.Remote{})
+	if disabled != 1 {
+		t.Fatalf("remote off: DisableHubLogin called %d times, want 1 — the guest bridge outlives the feature otherwise", disabled)
+	}
+
+	disabled, ensured := run(t, config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"})
+	if disabled != 0 {
+		t.Fatalf("remote on: DisableHubLogin called %d times, want 0", disabled)
+	}
+	if ensured != 1 {
+		t.Fatalf("remote on: EnsureHubLogin called %d times, want 1", ensured)
+	}
+}
+
+// stoppedHubRunner answers `scion server stop` the way scion answers it when
+// nothing is running, and passes everything else to the agent-lifecycle runner
+// the other apply tests use, so a whole Run can complete around it.
+type stoppedHubRunner struct {
+	inner *agentLifecycleRunner
+}
+
+func (r *stoppedHubRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "stop" {
+		r.inner.FakeRunner.Calls = append(r.inner.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return exec.Result{Code: 1, Stderr: "Error: server daemon is not running"}, fmt.Errorf("exit status 1")
+	}
+	return r.inner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *stoppedHubRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestScionServerRestartsAHubThatIsAlreadyStopped is the regression test for a
+// live apply failure: the login configuration had changed, so the step went to
+// restart the hub, but the hub was already down — after a `lever stop`, a VM
+// reboot, a crashed hub, or an operator stopping it by hand. `scion server
+// stop` exits non-zero with "server daemon is not running", and that error
+// failed the whole apply, leaving the guest forwarder installed and running
+// with no hub at all.
+//
+// Restarting something that is already stopped must be a no-op followed by a
+// start.
+func TestScionServerRestartsAHubThatIsAlreadyStopped(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
+	runner := &stoppedHubRunner{inner: &agentLifecycleRunner{FakeRunner: f, slug: app.Name}}
+	deps := Deps{
+		JailUp:         func(context.Context, *config.App) error { return nil },
+		LoadImage:      func(context.Context, string) error { return nil },
+		Scion:          scion.New(runner, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		EnsureHubLogin: func(context.Context) (bool, error) { return true, nil },
+	}
+
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("apply failed on a hub that was already stopped: %v", err)
+	}
+	var stopped, started bool
+	for _, c := range f.Calls {
+		if c.Name != "scion" || len(c.Args) < 2 || c.Args[0] != "server" {
+			continue
+		}
+		switch c.Args[1] {
+		case "stop":
+			stopped = true
+		case "start":
+			started = true
+			if !stopped {
+				t.Fatal("the hub was started before the restart's stop leg ran")
+			}
+		}
+	}
+	if !stopped || !started {
+		t.Fatalf("stop=%v start=%v, want the restart to stop (tolerantly) and then start", stopped, started)
+	}
+}
+
+// TestAgentTemplateGetsTheJailPath: the closure behind EnsureAgentTemplate runs
+// `scion config` INSIDE the jail, where the host tree exists only at the mount
+// point. Passing the host path made a live apply fail with "cannot change
+// directory to /Users/…: No such file or directory" — caught only because the
+// step runs before start-manager and aborted the whole apply.
+func TestAgentTemplateGetsTheJailPath(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/Users/someone/instance/workspace",
+		Manager: config.Manager{Image: "img"},
+	}
+	var got string
+	if err := runAgentTemplate(context.Background(),
+		app,
+		Step{Kind: KindAgentTemplate, Target: app.Tree},
+		Deps{
+			JailMount: "/lever",
+			EnsureAgentTemplate: func(_ context.Context, projectDir string) (bool, error) {
+				got = projectDir
+				return false, nil
+			},
+		}); err != nil {
+		t.Fatalf("runAgentTemplate: %v", err)
+	}
+	if got != "/lever" {
+		t.Fatalf("projectDir = %q, want the jail path %q — the host path does not exist inside the jail", got, "/lever")
 	}
 }

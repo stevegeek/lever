@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -252,5 +253,77 @@ func TestBrokerHealthyReturnsOnOK(t *testing.T) {
 
 	if err := deps.BrokerHealthy(context.Background()); err != nil {
 		t.Fatalf("BrokerHealthy against a 200 /epoch: %v", err)
+	}
+}
+
+// TestEgressAllowlistCarriesTheLoginPort is the regression test for a live
+// failure: the guest's login forwarder exists solely to reach the provider's
+// HOST port, but nothing added that port to the egress allowlist, so the jail
+// dropped the dial. The forwarder listened, the hub's discovery fetch timed
+// out, and the browser got a 502 with every process apparently healthy.
+//
+// It asserts the port reaches the backend — the only thing that builds the
+// iptables ACCEPT rules — and that a non-remote instance does not gain it.
+func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
+	prev := brokerSelfExe
+	brokerSelfExe = func() string { return "/usr/bin/true" }
+	t.Cleanup(func() { brokerSelfExe = prev })
+
+	build := func(t *testing.T, remote bool) backend.Config {
+		t.Helper()
+		p := writeTmpConfig(t)
+		app, err := config.Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if remote {
+			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net"}
+		}
+		sb := &stubBackend{}
+		if _, _, _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, nil); err != nil {
+			t.Fatalf("buildApplyDeps: %v", err)
+		}
+		if !sb.up {
+			t.Fatal("EnsureUp was never called")
+		}
+		return sb.upCfg
+	}
+
+	off := build(t, false)
+	if slices.Contains(off.AllowedPorts, 8447) {
+		t.Fatalf("a non-remote instance was granted the login port: %v", off.AllowedPorts)
+	}
+
+	on := build(t, true)
+	if !slices.Contains(on.AllowedPorts, 8447) {
+		t.Fatalf("AllowedPorts = %v, want the login port 8447 — without it the jail drops the forwarder's dial to the host", on.AllowedPorts)
+	}
+	// The grant is narrow: turning remote access on adds exactly one port to
+	// what the instance already had, and widens nothing else.
+	if want := append(append([]int{}, off.AllowedPorts...), 8447); !slices.Equal(on.AllowedPorts, want) {
+		t.Fatalf("AllowedPorts = %v, want exactly %v — the grant must add one port, not widen the alias", on.AllowedPorts, want)
+	}
+}
+
+// TestLeverMayClaimTemplate pins which default_template values lever will take
+// over. The two that matter in opposite directions: scion's stock "default" is
+// the whole point of the overlay and MUST be claimed, while a template the
+// operator chose must never be silently replaced.
+func TestLeverMayClaimTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		current string
+		want    bool
+		why     string
+	}{
+		{"default", true, "scion's stock default is exactly what ships the placeholder prompt"},
+		{"", true, "unset falls back to \"default\" in scion, so the placeholder still applies"},
+		{"  default  ", true, "surrounding whitespace is not a deliberate choice"},
+		{"lever", false, "already ours — a re-apply must not report a change"},
+		{"my-template", false, "an operator's own choice is not lever's to override"},
+		{"Default", false, "template names are resolved as directory names, and case matters"},
+	} {
+		if got := leverMayClaimTemplate(tc.current); got != tc.want {
+			t.Errorf("leverMayClaimTemplate(%q) = %v, want %v — %s", tc.current, got, tc.want, tc.why)
+		}
 	}
 }

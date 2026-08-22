@@ -20,9 +20,18 @@ type stubBackend struct {
 	registeredResult  bool // ScionProjectRegistered return value
 	registeredErr     error
 	registeredCalls   []string // workspace paths passed to ScionProjectRegistered
+	hubLoginChanged   bool     // EnsureHubLogin's "the hub config changed" answer
+	hubLoginErr       error
+	hubLoginCalls     []backend.HubLogin
+	hubLoginDisabled  int            // DisableHubLogin call count
+	leverTemplates    int            // EnsureLeverTemplate call count
+	upCfg             backend.Config // the Config the last EnsureUp received
 }
 
-func (s *stubBackend) EnsureUp(context.Context, backend.Config) error { s.up = true; return nil }
+func (s *stubBackend) EnsureUp(_ context.Context, cfg backend.Config) error {
+	s.up, s.upCfg = true, cfg
+	return nil
+}
 func (s *stubBackend) DockerHost() string                             { return "unix:///x" }
 func (s *stubBackend) HostToolAlias() string                          { return "host.orb.internal" }
 func (s *stubBackend) MountDest() string                              { return "/lever" }
@@ -48,6 +57,15 @@ func (s *stubBackend) LoadImage(context.Context, string) error                  
 func (s *stubBackend) ImageLoaded(context.Context, string) bool                 { return false }
 func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
+func (s *stubBackend) EnsureHubLogin(_ context.Context, spec backend.HubLogin) (bool, error) {
+	s.hubLoginCalls = append(s.hubLoginCalls, spec)
+	return s.hubLoginChanged, s.hubLoginErr
+}
+func (s *stubBackend) DisableHubLogin(context.Context) error { s.hubLoginDisabled++; return nil }
+func (s *stubBackend) EnsureLeverTemplate(context.Context) (bool, error) {
+	s.leverTemplates++
+	return true, nil
+}
 func (s *stubBackend) ReadScionProjectState(context.Context) (backend.ScionProjectState, error) {
 	return s.scionState, s.scionErr
 }

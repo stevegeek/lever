@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stevegeek/lever/internal/backend"
 )
 
 func writeTmp(t *testing.T, body string) string {
@@ -1351,5 +1354,260 @@ func TestScionBinaryOutsideTreeIsAccepted(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: dist/scion-linux-amd64\n")
 	if _, err := Load(p); err != nil {
 		t.Fatalf("a binary outside the tree must load: %v", err)
+	}
+}
+
+// remote is unset by default: disabled, with the proxy port defaulting to
+// 8445 (adjacent to the broker's 8443/8444 block).
+func TestRemoteDefaults(t *testing.T) {
+	app, err := Load(writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if app.RemoteEnabled() {
+		t.Fatal("remote must default to disabled")
+	}
+	if got := app.EffectiveRemotePort(); got != 8445 {
+		t.Fatalf("EffectiveRemotePort() = %d, want 8445", got)
+	}
+	if got := app.EffectiveRemoteLoginPort(); got != 8447 {
+		t.Fatalf("EffectiveRemoteLoginPort() = %d, want 8447", got)
+	}
+}
+
+// The login provider gets its own loopback listener, so its port must not
+// collide with the proxy's, with either broker listener, or with the host
+// mirror of the GUEST issuer port — the container runtime publishes the jail's
+// forwarder there, which is what made the provider unable to bind in a live
+// run.
+func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
+	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+	for name, port := range map[string]int{
+		"jail port":                  8443,
+		"admin port":                 8444,
+		"proxy port":                 8445,
+		"mirrored guest issuer port": backend.GuestLoginIssuerPort,
+	} {
+		body := base + fmt.Sprintf("  login_port: %d\n", port)
+		_, err := Load(writeTmp(t, body))
+		if err == nil || !strings.Contains(err.Error(), "login_port") {
+			t.Fatalf("login_port on the %s: want a collision error, got %v", name, err)
+		}
+	}
+	// The SAME guard belongs on the proxy's own port: naming the mirrored
+	// guest port there is the identical live failure, just for the other of
+	// lever's two host listeners.
+	if _, err := Load(writeTmp(t, base+fmt.Sprintf("  port: %d\n", backend.GuestLoginIssuerPort))); err == nil ||
+		!strings.Contains(err.Error(), "mirrored") {
+		t.Fatalf("remote.port naming the guest forwarder's host mirror: want a collision error, got %v", err)
+	}
+
+	body := base + "  login_port: 9500\n"
+	app, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("a free login_port must load: %v", err)
+	}
+	if got := app.EffectiveRemoteLoginPort(); got != 9500 {
+		t.Fatalf("EffectiveRemoteLoginPort() = %d, want 9500", got)
+	}
+}
+
+// remote.port colliding with the broker's jail port (8443 default) must fail
+// validation — the proxy and the broker's mTLS listener can't share a port.
+func TestRemotePortCollisionRejected(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8443\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "remote") {
+		t.Fatalf("want remote port collision error, got %v", err)
+	}
+}
+
+// remote.port colliding with the broker's admin port must also fail.
+func TestRemotePortCollisionWithAdminPortRejected(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8444\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "remote") {
+		t.Fatalf("want remote port collision error, got %v", err)
+	}
+}
+
+// base_url, when set, must be an absolute https URL (the tailnet serve
+// hostname) — a bare word or non-https scheme is rejected.
+func TestRemoteBaseURLValidated(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"notaurl\"\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "base_url") {
+		t.Fatalf("want base_url error, got %v", err)
+	}
+}
+
+// A well-formed https base_url is accepted.
+func TestRemoteBaseURLAcceptsHTTPS(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+	app, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("a well-formed https base_url should be accepted: %v", err)
+	}
+	if app.Remote.BaseURL != "https://demo.tailnet.ts.net" {
+		t.Fatalf("base_url = %q, want unchanged", app.Remote.BaseURL)
+	}
+}
+
+// base_url is not merely format-checked when set, it is REQUIRED whenever
+// remote is enabled: an empty base_url means the proxy's ServeHost is empty,
+// and the proxy's own Origin gate fails closed on every request as a result
+// (see remoteproxy.Config.ServeHost) — an enabled-but-base_url-less config
+// can never actually serve anything. Reject it at load time instead of
+// letting it "succeed" into a proxy that refuses 100% of traffic, which
+// previously surfaced only much later as a confusing doctor healthz 403.
+func TestRemoteBaseURLRequiredWhenEnabled(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "base_url") {
+		t.Fatalf("want a base_url-required error, got %v", err)
+	}
+}
+
+// allowed_users entries must be non-empty strings: a blank entry would pin
+// to nothing while acting as "allow this header value" with an empty string.
+func TestRemoteAllowedUsersRejectsEmpty(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"ok@example.com\", \"\"]\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "allowed_users") {
+		t.Fatalf("want allowed_users error, got %v", err)
+	}
+}
+
+// A disabled remote block is not validated at all — a bad port/base_url
+// left over from a previous config doesn't block loading until re-enabled.
+func TestRemoteDisabledSkipsValidation(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: false\n  port: 8443\n  base_url: \"notaurl\"\n"
+	if _, err := Load(writeTmp(t, body)); err != nil {
+		t.Fatalf("a disabled remote block should not be validated: %v", err)
+	}
+}
+
+// An explicit port that doesn't collide is honoured by EffectiveRemotePort.
+func TestRemoteExplicitPortHonoured(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 9445\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+	app, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := app.EffectiveRemotePort(); got != 9445 {
+		t.Fatalf("EffectiveRemotePort() = %d, want 9445", got)
+	}
+}
+
+// remote.enabled on a lima backend must fail at config load: the Lima path is
+// not live-validated, and without this check `apply` returns 0 while the proxy
+// child silently dies into remote.log — a trap this closes at the source.
+// See newRemoteServeCmd's own runtime gate (internal/cli/remote.go), kept as
+// belt-and-braces defense-in-depth alongside this load-time check.
+//
+// The rejection must not blame guest→host forwarding. The proxy dials through
+// the jail now, so a reader chasing that reason would be chasing a problem
+// that cannot exist.
+func TestRemoteRequiresOrbstackBackend(t *testing.T) {
+	body := "name: x\nbackend: lima\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n"
+	_, err := Load(writeTmp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "orbstack") {
+		t.Fatalf("want an orbstack-required error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "forwarding") {
+		t.Fatalf("error must not cite guest→host forwarding as the reason, got %v", err)
+	}
+}
+
+// The same config on the orbstack backend must still load cleanly — the new
+// backend check must not reject the backend remote access actually supports.
+func TestRemoteOrbstackBackendAccepted(t *testing.T) {
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+	if _, err := Load(writeTmp(t, body)); err != nil {
+		t.Fatalf("orbstack + remote.enabled should load cleanly: %v", err)
+	}
+}
+
+// ScionWebAssets is the single predicate behind three decisions that must not
+// disagree: build the SPA, stage it into the guest, and pass --web-assets-dir.
+func TestScionWebAssets(t *testing.T) {
+	cases := []struct {
+		name string
+		app  App
+		want bool
+	}{
+		{"remote + version", App{
+			Scion:  ScionConfig{Version: "e82a2a08"},
+			Remote: Remote{Enabled: true},
+		}, true},
+		{"remote + source", App{
+			Scion:  ScionConfig{Source: "/Users/stephen/ai/scion"},
+			Remote: Remote{Enabled: true},
+		}, true},
+		{"remote off", App{Scion: ScionConfig{Version: "e82a2a08"}}, false},
+		// A prebuilt binary carries no source to build the SPA from, and may
+		// already embed one — claiming staged assets would replace it with 404s.
+		{"remote + binary", App{
+			Scion:  ScionConfig{Binary: "/host/scion-linux-arm64"},
+			Remote: Remote{Enabled: true},
+		}, false},
+		{"remote + no scion", App{Remote: Remote{Enabled: true}}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.app.ScionWebAssets(); got != c.want {
+				t.Fatalf("ScionWebAssets()=%v want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// Remote access cross-compiles the guest's login forwarder at apply time, so
+// it needs a Go toolchain. `scion.binary:` is the mode where that is a NEW
+// requirement (the others already need Go for scion itself), and the check is
+// at config load because the apply-time failure would land after the
+// bootstrap-token step has already touched the hub.
+func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "scion-linux")
+	if err := os.WriteFile(bin, []byte("not really a binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: " + bin +
+		"\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+
+	t.Setenv("PATH", "")
+	_, err := Load(writeTmp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "Go toolchain") {
+		t.Fatalf("want a load-time refusal naming the toolchain, got %v", err)
+	}
+
+	// With remote off, the same config is fine: nothing cross-compiles.
+	off := strings.Replace(body, "enabled: true", "enabled: false", 1)
+	if _, err := Load(writeTmp(t, off)); err != nil {
+		t.Fatalf("remote off must not need a toolchain: %v", err)
+	}
+}
+
+// The egress allowlist is the only thing that decides whether the jail may
+// dial a host port, so the login port has to be in it while remote access is
+// on — and gone again when it is off, so a grant never outlives the forwarder
+// it exists for.
+func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T) {
+	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager:\n  allow_ports: [3305]\n"
+	off, err := Load(writeTmp(t, base))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := off.EffectiveAllowedPorts(), []int{off.EffectiveJailPort(), 3305}; !slices.Equal(got, want) {
+		t.Fatalf("remote off: EffectiveAllowedPorts() = %v, want %v", got, want)
+	}
+
+	on, err := Load(writeTmp(t, base+"remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []int{on.EffectiveJailPort(), 3305, on.EffectiveRemoteLoginPort()}
+	if got := on.EffectiveAllowedPorts(); !slices.Equal(got, want) {
+		t.Fatalf("remote on: EffectiveAllowedPorts() = %v, want %v (the forwarder cannot reach the host without it)", got, want)
 	}
 }

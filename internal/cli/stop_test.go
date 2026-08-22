@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -126,6 +128,44 @@ func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 	if len(f.Calls) != 0 {
 		t.Fatalf("suspend must be skipped when ResolveRunUser errors, got calls: %+v", f.Calls)
 	}
+}
+
+// TestStopAlsoStopsRemoteProxy proves `lever stop` tears the remote-access
+// proxy down alongside the broker: a live pid recorded in remote.pid must be
+// killed and the pid file removed (brokerctl.State.StopRemoteProxy mirrors
+// StopBroker exactly — see its doc; the mechanism itself is unit-tested in
+// internal/brokerctl, this only pins that stop.go actually calls it).
+func TestStopAlsoStopsRemoteProxy(t *testing.T) {
+	dir := instanceDir(t, "demo")
+	t.Chdir(dir)
+
+	state := brokerctl.StateDir(dir)
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if err := os.WriteFile(state.RemotePID(), []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sb := &stubBackend{}
+	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := os.Stat(state.RemotePID()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remote.pid should be removed after stop, stat err = %v", err)
+	}
+	_ = cmd.Wait()
 }
 
 // TestStopWithExplicitMachineDoesNotStopBroker mirrors destroy's --machine

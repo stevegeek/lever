@@ -29,6 +29,21 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 						if serr := st.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}
+						// The remote proxy is a host-side daemon like the broker,
+						// and a verb documented as full teardown must stop it too.
+						// Leaving it running kept two loopback listeners and a
+						// `tailscale serve` front end pointed at a destroyed
+						// instance — and worse, a later `up` REUSED that process,
+						// whose cached jail prefix names the machine that no
+						// longer exists. Its stamp goes with it: nothing else
+						// removes it, and a stale stamp is what makes the reuse
+						// look legitimate.
+						if serr := st.StopRemoteProxy(); serr != nil {
+							cmd.PrintErrf("warning: stopping remote proxy: %v\n", serr)
+						}
+						if serr := os.Remove(st.RemoteStamp()); serr != nil && !os.IsNotExist(serr) {
+							cmd.PrintErrf("warning: removing the remote proxy stamp: %v\n", serr)
+						}
 						clearStagedRuntimeState(app)
 						// The controller PAT was minted against the hub DB that lives
 						// inside the jail; destroying the machine discards that DB, so
@@ -38,6 +53,15 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 						// it ("authentication failed" at readiness).
 						if rerr := removeControllerPAT(st); rerr != nil {
 							cmd.PrintErrf("warning: removing stale controller PAT: %v\n", rerr)
+						}
+						// Same reasoning applies to the remote-access PAT: it is minted
+						// against the same jail hub DB, so it goes stale the moment the
+						// DB dies with the machine. Left behind, ensureControllerPAT's
+						// needRemote check would see it as still-present and skip the
+						// re-mint on the next `up`, leaving the remote proxy injecting a
+						// token the fresh hub has never issued.
+						if rerr := removeRemotePAT(st); rerr != nil {
+							cmd.PrintErrf("warning: removing stale remote PAT: %v\n", rerr)
 						}
 					}
 				}
@@ -74,6 +98,17 @@ func clearStagedRuntimeState(app *config.App) {
 // removal failure is returned so the caller can warn.
 func removeControllerPAT(st brokerctl.State) error {
 	if err := os.Remove(st.ControllerPAT()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// removeRemotePAT deletes the persisted remote-access PAT (see the caller's
+// comment for why destroy must — same reasoning as removeControllerPAT, same
+// error-handling shape). A missing PAT (remote never enabled) is not an
+// error; any other removal failure is returned so the caller can warn.
+func removeRemotePAT(st brokerctl.State) error {
+	if err := os.Remove(st.RemotePAT()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

@@ -150,6 +150,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
 | `operator` | object | no | - | Optional operator-directives config: signer trust anchor, signing key, expiry policy (see below). Unset ⇒ directives disabled. |
+| `remote` | object | no | - | Optional remote-access proxy config: expose the hub web UI to a Tailscale tailnet (see below). Unset/`enabled: false` ⇒ remote access disabled. |
 | `disk` | string | no | `24GiB` | **Lima only** — guest disk size (e.g. `24GiB`, `40GiB`). Lima's own omitted-disk default is 100GiB, a grow-only qcow2 that can wedge a smaller host; lever caps it at a conservative `24GiB` by default. Applied only at jail **creation**; resizing an existing jail needs `limactl disk resize` or a recreate. Ignored by the OrbStack backend, which manages its own disk. |
 
 ### `scion`
@@ -177,12 +178,26 @@ as the guarantee, not the error message.
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `version` | string | no | - | A scion module version/commit (a commit hash like `e82a2a08`, or a `vX.Y.Z` tag) fetched via the Go module system and cross-compiled into the jail at provision time. **No vendored source tree**, this is the recommended way to pin Scion. Requires a Go toolchain on the host. |
-| `source` | path | no | - | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. Requires a Go toolchain on the host, but no module fetch. |
-| `binary` | path | no | - | Path to an **already-built linux scion binary**, installed into the jail as-is. Unlike the two above it needs **no Go toolchain, no module cache and no egress** on the machine hosting the jail — build it on a workstation and ship it. Relative paths resolve against the config file's directory. lever checks the ELF header against the guest's architecture before installing, so a wrong-arch build fails immediately instead of as `exec format error` at manager start. **Its integrity is yours to guarantee**: unlike `version`, no module-proxy checksum stands behind it. |
+| `version` | string | no | - | A scion module version/commit (a commit hash like `e82a2a08`, or a `vX.Y.Z` tag) fetched via the Go module system and cross-compiled into the jail at provision time. **No vendored source tree**, this is the recommended way to pin Scion. Requires a Go toolchain on the host — plus node >= 20 + npm when [`remote.enabled`](#remote), which builds the hub's web UI from the same fetched module (see below). |
+| `source` | path | no | - | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. Requires a Go toolchain on the host, but no module fetch. Also needs node >= 20 + npm when [`remote.enabled`](#remote); the web UI is rebuilt whenever you edit `web/`. |
+| `binary` | path | no | - | Path to an **already-built linux scion binary**, installed into the jail as-is. Unlike the two above it needs **no Go toolchain, no module cache and no egress** on the machine hosting the jail — and no node, since lever builds no web UI for it: with [`remote.enabled`](#remote) the hub serves whatever assets that binary embeds (upstream's `make all` embeds them), or its "Web UI Not Available" page if it embeds none — build it on a workstation and ship it. Relative paths resolve against the config file's directory. lever checks the ELF header against the guest's architecture before installing, so a wrong-arch build fails immediately instead of as `exec format error` at manager start. **Its integrity is yours to guarantee**: unlike `version`, no module-proxy checksum stands behind it. |
 | `agent_role` | string | no | - | Overrides the [role](https://github.com/GoogleCloudPlatform/scion/pull/1089) lever stamps on every `scion start`: `none`, `readonly`, `baseline` or `full`. **You do not need to set it.** Empty means lever picks `baseline` itself whenever the installed scion understands roles at all — it probes the binary for the `--role` flag rather than guessing from the pin, because [scion#1090](https://github.com/GoogleCloudPlatform/scion/pull/1090) flipped the default for an unspecified role from `baseline` to **full** (agent create, lifecycle and project-secret-read), and a commit hash cannot tell lever which side of that change a pin sits on. `readonly` cannot heartbeat, so a live agent cannot run on it. `full` grants exactly the hub authority the jail model exists to withhold. Naming a role on a scion that has no `--role` flag is a hard error, never a silent downgrade. |
 
 Whichever mode you use, lever records the installed binary's sha256 in the jail and skips the copy when it already matches, so an unchanged scion is not re-streamed on every `lever up`.
+
+**With [`remote.enabled`](#remote), `version:` and `source:` additionally need node >= 20 + npm on
+the host.** Neither mode has any web assets to serve: upstream tracks only
+`web/dist/client/.gitkeep` and `.gitignore`s the built output, so a binary compiled from either one
+serves Scion's "Web UI Not Available" page. The fetched module (or your checkout) does carry the
+full npm project, so lever runs `npm ci && npm run build` **on the host** from that same source
+tree and starts the hub with `--web-assets-dir` pointing at the staged result. The build is cached
+per pin under `~/Library/Caches/lever/scion-web/` (macOS) or `~/.cache/lever/scion-web/` (Linux) —
+**~210MB per distinct pin, never pruned, always safe to delete** — and staged into the guest at
+`/usr/local/share/scion/web` (~3.3MB; vite's sourcemaps are stripped from the staged payload), so
+an unchanged pin costs no npm run at all. `binary:` is exempt — lever has no source to build from, does not pass `--web-assets-dir`, and
+leaves whatever that binary embedded in charge. `lever doctor` reports the node toolchain, and
+`lever apply` fails by name when it is missing. See the [remote access
+guide](/remote-access/#2-make-sure-the-host-has-node).
 
 ### `manager`
 
@@ -328,6 +343,30 @@ posture in use. Never forward an SSH agent to the broker host for signing — a 
 signing oracle a compromised host could use to sign arbitrary directives.
 
 See [security-model.md](/security-model/) for the delivery/verification mechanism and threat model.
+
+### `remote`
+
+Optional config for **`lever remote`**: a host-side reverse proxy that exposes the Scion hub web UI
+(chat, transcript, xterm.js attach) to a Tailscale tailnet, injecting a dedicated PAT so the client
+never holds a credential. The whole block is optional and disabled by default — see the [remote
+access guide](/remote-access/) for the accepted security posture, setup steps, and repair.
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `enabled` | bool | no | `false` | Turns the proxy on. Also needs a **Go toolchain on the host** — it cross-compiles the guest's login forwarder at apply time; with `scion.binary:` (the only mode that did not already need one) a missing `go` is rejected at config load. Requires `backend: orbstack` — rejected at config load on any other backend, because the Lima path is not live-validated yet. This is not a reachability limit: the proxy dials the hub through the jail, so no guest→host forwarding is involved. Also requires **node >= 20 + npm on the host** with [`scion.version`](#scion) or `scion.source`: neither carries built web assets, so lever builds the UI host-side and stages it into the guest (`binary:` is exempt). `lever doctor` checks it. |
+| `port` | int | no | `8445` | Host loopback port the proxy binds. Must not collide with the broker's `jail_port`/`admin_port`, with `login_port`, or with `8446` (the host port the jail's login forwarder is mirrored onto) — all rejected at config load. Give each remote-enabled instance on the host its own port: the proxies reach their own jails, so only the host listeners are shared ground. |
+| `login_port` | int | no | `8447` | **Host** loopback port the local OIDC provider binds — the login path that gets the browser a hub session with no external identity provider and no dev-auth. The port the HUB dials is a different, fixed one inside the guest (`8446`, no config key): Scion validates `issuer_url` at hub startup and refuses to start unless it is loopback, so a forwarder listens there and carries the bytes to this port. The two must differ because the container runtime mirrors a guest listener onto the host at the same number — one number for both halves left the provider unable to bind. Rejected at config load if it collides with `port`, the broker's listeners, or `8446` (the guest forwarder's host mirror). A second remote-enabled instance needs its own value. See the [guide](/remote-access/#how-the-browser-is-logged-in). |
+| `base_url` | string (URL) | **yes when `enabled`** | - | The tailnet serve hostname, as an absolute `https://` URL, e.g. `https://myhost.tailxxxx.ts.net`. **Rejected at config load if empty while `enabled: true`**: the proxy matches every request's `Origin` against the host this resolves to, and an empty `base_url` would fail closed on every request — a proxy that could never serve anything, so lever refuses to load that config at all. It configures **only the proxy**; lever deliberately never passes it to the hub as `--base-url` (see the [guide](/remote-access/#the-tailnet-url-never-reaches-the-hub)). |
+| `allowed_users` | list of string | no | `[]` | Optional identity pinning: when non-empty, only these Tailscale login names (matched against the `Tailscale-User-Login` header `tailscale serve` sets) may reach the proxy. Empty ⇒ anyone reachable through the tailnet. A blank entry is rejected at config load. It also decides the identity the login path asserts to the hub, so the hub's user row names the operator who actually connected — with it unset, a placeholder identity is used instead. |
+
+```yaml
+remote:
+  enabled: true
+  base_url: "https://myhost.tailxxxx.ts.net"   # required whenever enabled — see above
+  # port: 8445                                 # optional; default shown
+  # login_port: 8447                           # optional; the local OIDC provider's HOST port
+  # allowed_users: ["you@github"]              # optional identity pinning
+```
 
 ## Conventions & derived values
 

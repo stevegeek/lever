@@ -102,6 +102,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 			Binary:  cfg.ScionBinary,
 			Source:  cfg.ScionSource,
 			Version: cfg.ScionVersion,
+			WebUI:   cfg.ScionWebUI,
 		}); err != nil {
 			return err
 		}

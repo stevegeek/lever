@@ -31,7 +31,7 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 | Command | What it does |
 |---|---|
 | `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each declared worker dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: files you've edited are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing (non-zero exit); `--adopt` records your customizations as an accepted baseline so doctor and `--check` treat them as OK — later drift past that baseline still fails doctor (tamper detection: agents can write these files, the baseline lives host-side). Re-run after upgrading lever or adding a worker. |
-| `lever doctor` | Run real health checks — broker alive and serving, every declared tool backend reachable/resolvable (external servers dialed, supervised commands resolved on the supervisor PATH), the agent image's baked Claude Code version, manager credential file presence/size/mode, no stray `.mcp.json` in the tree, usable Go toolchain, scion project-registration consistency, operator-skills scaffold current, operator directives configured (signer key count, admin socket present) — each failure printing a specific fix hint. Exits non-zero on any failure. `--machine`/`--backend` run the profile away from an instance root. |
+| `lever doctor` | Run real health checks — broker alive and serving, every declared tool backend reachable/resolvable (external servers dialed, supervised commands resolved on the supervisor PATH), the agent image's baked Claude Code version, manager credential file presence/size/mode, no stray `.mcp.json` in the tree, usable Go toolchain, scion project-registration consistency, operator-skills scaffold current, operator directives configured (signer key count, admin socket present), remote-access proxy when enabled (pid/listen, PAT presence + mode, an end-to-end `GET /healthz` through the proxy) — each failure printing a specific fix hint. Exits non-zero on any failure. `--machine`/`--backend` run the profile away from an instance root. |
 | `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → init-machine → config-registry → bootstrap-token, a throwaway dev-auth hub mints the controller PAT → scion-server, dev-auth off → credential → register-project, one registration for the tree → mint-manager-bootstrap → start-manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress rules). `--machine`, `--tree`, `--allow-port`. Idempotent; rarely needed directly — `up`/`apply` call it for you. |
 | `lever backends` | List the containment backends (orbstack, lima) and the guarantees each declares — the matrix config validation checks your `backend:` choice against. |
@@ -60,6 +60,20 @@ current directory (`doctor` and `msg` are cwd-based; `directive` isn't).
 | `lever directive list [--state active\|consumed\|revoked\|invalidated\|expired] [--key PATH] [CONFIG]` | List directives and their state. |
 | `lever directive revoke <id> [--key PATH] [CONFIG]` | Revoke a directive by id. |
 | `lever directive selftest [--key PATH] [CONFIG]` | Round-trip a self-signed test directive (sign → verify) against the configured `allowed_signers`, to catch misconfiguration before it's needed for real. |
+
+### Remote access
+
+Exposes the Scion hub web UI to a Tailscale tailnet through a host-side, credential-injecting
+reverse proxy — see the `remote:` block in the [config reference](/reference/config/) for the
+options, and the [remote access guide](/remote-access/) for the accepted security posture and full
+setup (including the one `tailscale serve` command lever asks you to run). Like most `lever`
+commands, `remote` subcommands resolve `[CONFIG]` from an explicit argument or the current
+directory.
+
+| Command | What it does |
+|---|---|
+| `lever remote serve [CONFIG]` | Run the proxy in the foreground. Normally `up`/`apply` daemonize this for you when `remote.enabled: true` (`lever stop` stops it alongside the rest of the instance); this is for debugging. Refuses to start with remote access disabled, or on a non-orbstack backend. |
+| `lever remote status [CONFIG]` | Proxy liveness (pid + listening), the serve URL from `base_url` (or the `tailscale serve` command to run, if `base_url` looks unset), and whether the remote PAT is present — never its value. |
 
 ## `lever-manager` — in-jail orchestration
 

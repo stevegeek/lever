@@ -34,6 +34,14 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 						if serr := state.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}
+						// Tear the remote-access proxy down alongside the
+						// broker: both are host-side daemons tied to the
+						// current instance (not an explicit --machine
+						// target), and idempotent, so this is safe even when
+						// no proxy was ever started (no remote.pid ⇒ no-op).
+						if serr := state.StopRemoteProxy(); serr != nil {
+							cmd.PrintErrf("warning: stopping remote proxy: %v\n", serr)
+						}
 					}
 				}
 			}

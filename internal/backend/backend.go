@@ -43,6 +43,13 @@ type Config struct {
 	// needs no Go toolchain, module cache or egress on the machine hosting the
 	// jail. Mutually exclusive with both. Empty = none.
 	ScionBinary string
+	// ScionWebUI additionally builds scion's SPA on the host and stages it into
+	// the guest, so a `version:`/`source:` scion can serve the web UI. Off by
+	// default: the assets need node+npm on the host and are dead weight for an
+	// instance that never serves a UI. Set from config.App.ScionWebAssets — the
+	// backend obeys it rather than re-deriving it, so the flag lever passes to
+	// the hub and the assets lever staged cannot disagree.
+	ScionWebUI bool
 	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
 	// so the jail can reach ONLY the broker port on the host alias. Required for
 	// api-key mode: LLM traffic must flow broker→Anthropic, not
@@ -103,6 +110,30 @@ type Backend interface {
 	// destPath as root (used by the acceptance gate to place lever-agent). The
 	// transport is the backend's root prefix, so callers stay backend-agnostic.
 	InstallGuestBinary(ctx context.Context, localPath, destPath string) error
+	// EnsureHubLogin provisions the guest half of the remote-access login
+	// path: the loopback forwarder that lets the hub see lever's host-side
+	// OIDC provider as a LOCAL issuer (scion refuses to start on any other
+	// kind), and the `oidc_login` block in the guest's ~/.scion/settings.yaml.
+	//
+	// It reports whether the hub's configuration changed. scion reads that
+	// file once, at startup, so a change means a running hub is still serving
+	// the old configuration and the caller must restart it — while an
+	// unchanged one restarts nothing, which is what stops a re-apply from
+	// bouncing the hub and every agent's connection to it.
+	EnsureHubLogin(ctx context.Context, spec HubLogin) (bool, error)
+	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
+	// reporting whether it wrote anything. The overlay exists to suppress
+	// scion's stock placeholder system prompt, which would otherwise REPLACE
+	// Claude Code's built-in one for every agent provisioned from the default
+	// template. See guest.EnsureLeverTemplate for the full reasoning.
+	EnsureLeverTemplate(ctx context.Context) (bool, error)
+	// DisableHubLogin converges that provisioning OFF: it stops and removes
+	// the guest-side forwarder and drops the `oidc_login` block. Called
+	// whenever remote access is not enabled, so an instance that turned it
+	// back off does not keep an unauthenticated jail→host loopback bridge
+	// running for a feature that is gone. Idempotent, and cheap when there is
+	// nothing to remove.
+	DisableHubLogin(ctx context.Context) error
 	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	// Stop powers the machine off but keeps its disk intact — distinct from

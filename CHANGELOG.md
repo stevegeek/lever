@@ -7,6 +7,11 @@ version bump moves the block under the new version heading.
 
 ## [0.17.0] - 2026-08-16
 
+### Changed
+- **Agent image bakes Claude Code 2.1.239** (was 2.1.226). Needs an image
+  rebuild to take effect, then `lever apply` and — for a running manager —
+  `lever stop && lever up`.
+
 ### Fixed
 - **Agents no longer launch with Scion's placeholder system prompt.** Scion's
   stock `default` template ships a `system-prompt.md` reading `# Placeholder`,

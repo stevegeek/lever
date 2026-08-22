@@ -1431,6 +1431,56 @@ func TestRemotePortCollisionWithAdminPortRejected(t *testing.T) {
 	}
 }
 
+// TestRemoteProxyPortInManagerAllowPortsRejected: manager.allow_ports opens a
+// jail→host ACCEPT on each port it lists, and the proxy's gate is only sound
+// because nothing but `tailscale serve` can reach its loopback listener.
+// Granting the jail that port means an agent can forge Tailscale-User-Login
+// and be handed the remote PAT, so the pair must not load at all.
+func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
+	base := "name: x\nbackend: orbstack\ntree: ./tree\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+
+	// The default proxy port, and an explicitly configured one: the check must
+	// follow EffectiveRemotePort, not the literal 8445.
+	for name, body := range map[string]string{
+		"default proxy port":  base + "manager:\n  allow_ports: [3101, 8445]\n",
+		"explicit proxy port": base + "  port: 9445\nmanager:\n  allow_ports: [9445]\n",
+	} {
+		_, err := Load(writeTmp(t, body))
+		if err == nil {
+			t.Fatalf("%s in manager.allow_ports must not load", name)
+		}
+		if !strings.Contains(err.Error(), "allow_ports") {
+			t.Errorf("%s: error must name manager.allow_ports, got %v", name, err)
+		}
+		if !strings.Contains(err.Error(), "remote.port") {
+			t.Errorf("%s: error must say what to do about it, got %v", name, err)
+		}
+	}
+
+	// The login port is the opposite case: the guest forwarder exists to reach
+	// it and EffectiveAllowedPorts grants it anyway, so an operator who listed
+	// it by hand (the only way to reach it before that grant existed) must not
+	// be locked out of loading.
+	ok := base + "  login_port: 8447\nmanager:\n  allow_ports: [8447]\n"
+	app, err := Load(writeTmp(t, ok))
+	if err != nil {
+		t.Fatalf("the login port in manager.allow_ports must still load: %v", err)
+	}
+	if !slices.Contains(app.EffectiveAllowedPorts(), 8447) {
+		t.Error("the login port must still be granted to the jail")
+	}
+	if slices.Contains(app.EffectiveAllowedPorts(), app.EffectiveRemotePort()) {
+		t.Error("no loadable config may grant the jail the proxy's port")
+	}
+
+	// With remote off there is no proxy to reach, and a stale allow_ports
+	// entry must not block loading — same rule as every other remote check.
+	off := "name: x\nbackend: orbstack\ntree: ./tree\nmanager:\n  allow_ports: [8445]\n"
+	if _, err := Load(writeTmp(t, off)); err != nil {
+		t.Fatalf("with remote disabled, port 8445 in allow_ports must load: %v", err)
+	}
+}
+
 // base_url, when set, must be an absolute https URL (the tailnet serve
 // hostname) — a bare word or non-https scheme is rejected.
 func TestRemoteBaseURLValidated(t *testing.T) {

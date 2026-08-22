@@ -824,12 +824,12 @@ func (a *App) validateOperator() error {
 }
 
 // validateRemote rejects a remote block that could not serve safely: an
-// unvalidated backend, a port colliding with the broker's listeners, a
-// missing or malformed base_url, or a blank allowed_users entry (which would
-// pin to nothing and read as "allow none" while acting as "allow this header
-// value" with an empty string). Skipped entirely while disabled, so a stale
-// port/base_url left from a previous config doesn't block loading until
-// remote is re-enabled.
+// unvalidated backend, a port colliding with the broker's listeners, a proxy
+// port the jail is allowed to dial, a missing or malformed base_url, or a
+// blank allowed_users entry (which would pin to nothing and read as "allow
+// none" while acting as "allow this header value" with an empty string).
+// Skipped entirely while disabled, so a stale port/base_url left from a
+// previous config doesn't block loading until remote is re-enabled.
 func (a *App) validateRemote() error {
 	if !a.Remote.Enabled {
 		return nil
@@ -861,6 +861,30 @@ func (a *App) validateRemote() error {
 		// listeners, not just the one that met the failure first.
 		return fmt.Errorf("config: remote: port %d is the port the jail's login forwarder is mirrored onto "+
 			"by the container runtime, so the proxy cannot bind it — pick another", rp)
+	}
+	if slices.Contains(a.Manager.AllowPorts, rp) {
+		// Not a bind collision like the checks above — a trust-boundary one.
+		// The proxy's gate rests on "only `tailscale serve` reaches this
+		// loopback listener", which is what makes it safe for the proxy to
+		// believe the Tailscale-User-Login header it is handed (see
+		// listenLoopback and the package doc's stated precondition in
+		// internal/remoteproxy). A port listed in manager.allow_ports gets an
+		// egress ACCEPT for jail→host on exactly that number
+		// (EffectiveAllowedPorts → internal/egress), so naming the proxy's port
+		// there hands every jailed agent a direct route to the gate: it sets
+		// the header itself and receives the injected remote PAT, which
+		// carries agent:attach on every agent in the project. That is the
+		// cross-agent escalation the per-agent netns closed in v0.7.0,
+		// re-opened by one line of config.
+		//
+		// remote.login_port is deliberately NOT rejected: the guest's login
+		// forwarder exists to reach it, EffectiveAllowedPorts grants it on
+		// purpose, and what answers there is the OIDC provider, which mints
+		// nothing without an in-process call (internal/remoteproxy/oidc.go).
+		return fmt.Errorf("config: remote: manager.allow_ports lists %d, which is the remote proxy's own port — "+
+			"that grant lets any jailed agent reach the proxy directly and forge the Tailscale-User-Login header "+
+			"it trusts, receiving the remote PAT (agent:attach on every agent in the project); remove %d from "+
+			"manager.allow_ports, or move the proxy with remote.port", rp, rp)
 	}
 	lp := a.EffectiveRemoteLoginPort()
 	if lp == a.EffectiveJailPort() || lp == a.EffectiveAdminPort() {

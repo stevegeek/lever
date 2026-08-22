@@ -250,8 +250,10 @@ func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner) (detail stri
 // full server-side OIDC handshake, and fails 502 whenever the login path is
 // broken. Running it ahead of the login checks reported that 502 instead of
 // the specific, actionable failure. Side effect worth knowing: `lever doctor`
-// performs a REAL login, so the hub creates (or reuses) a user row for
-// allowed_users[0], exactly as an operator's first browser visit would.
+// performs a REAL login, so the hub creates (or reuses) a user row for the
+// identity the probe carries — allowed_users[0], or lever's unnamed operator
+// when the list is empty (remoteproxy.identityFor) — exactly as that
+// operator's first browser visit would.
 //
 // Disabled is a pass, not a warning: remote access is opt-in and most
 // instances never turn it on. PAT EXPIRY is deliberately not checked here —

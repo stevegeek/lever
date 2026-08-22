@@ -114,6 +114,30 @@ const apiPathPrefix = "/api/v1"
 // isAPIPath reports whether p is a hub API request rather than a UI-shell one.
 // Exact match as well as prefix: "/api/v1" itself is the API, and a path like
 // "/api/v1x" is not.
+//
+// p is the DECODED path (r.URL.Path) and it is not cleaned. A 2026-08-22
+// review asked whether that could disagree with scion's own routing and let
+// the session cookie ride a request the hub then treats as API. It cannot, at
+// pin e82a2a08, where the API and the SPA share one http.ServeMux
+// (pkg/hub/web.go: MountHubAPI registers "/api/v1/", the SPA catch-all takes
+// "/"). Checked against net/http's ServeMux directly:
+//
+//   - it unescapes a literal segment before matching, so "/%61pi/v1/agents"
+//     does reach the API handler — and reads as API here too, precisely
+//     because this sees the decoded path. Matching on the ESCAPED path is what
+//     would disagree.
+//   - it cleans the escaped path and answers a redirect, rather than
+//     dispatching, whenever cleaning changes it. The shapes this function
+//     reads as shell — "//api/v1/agents", "/./api/v1/agents" — therefore never
+//     reach an API handler at all.
+//
+// The reverse mismatch exists ("/api/v1%2fagents" reads as API here and is
+// routed to the SPA there) and is harmless: it only WITHHOLDS a session.
+//
+// Were that ever to change, the cookie still could not widen what the phone
+// may do: scion's sessionToBearerMiddleware (pkg/hub/web.go) passes a request
+// through untouched when it already carries an Authorization header, Rewrite
+// always sets one, and nothing else under pkg/hub reads the session cookie.
 func isAPIPath(p string) bool {
 	return p == apiPathPrefix || strings.HasPrefix(p, apiPathPrefix+"/")
 }

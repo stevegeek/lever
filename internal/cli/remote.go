@@ -96,10 +96,13 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			})
 
 			handler := remoteproxy.NewHandler(remoteproxy.Config{
-				Target:       target,
-				DialContext:  dial,
-				PAT:          func() string { pat, _ := state.LoadRemotePAT(); return pat },
-				ServeHost:    remoteServeHost(app.Remote.BaseURL),
+				Target:      target,
+				DialContext: dial,
+				PAT:         func() string { pat, _ := state.LoadRemotePAT(); return pat },
+				ServeHost:   remoteServeHost(app.Remote.BaseURL),
+				// So the Host gate admits `lever doctor`'s loopback /healthz
+				// probe without widening the allowlist beyond this one port.
+				ListenPort:   app.EffectiveRemotePort(),
 				AllowedUsers: app.Remote.AllowedUsers,
 				Session:      login,
 				Audit:        auditFn,
@@ -140,8 +143,12 @@ const jailResolveTimeout = 15 * time.Second
 // Success is cached because resolving costs three commands into the machine
 // (`orb list`, `whoami`, `id -u`), which is real latency to pay per
 // connection, and the run user cannot change under a running machine. A
-// rebuilt jail with a different run user therefore needs a proxy restart;
-// `lever apply` restarts it anyway.
+// rebuilt jail with a different run user therefore needs a proxy restart — and
+// `lever apply` does NOT give you one: its reuse check compares the lever
+// version and the `remote:` block, neither of which a jail rebuild changes, so
+// a matching stamp keeps the old process and its stale prefix. Use `lever stop`
+// + `lever up` after rebuilding the jail. (Verified against
+// remoteController.Start; the comment used to claim the opposite.)
 //
 // Concurrent dials share one attempt rather than queueing behind each other:
 // a browser opens several connections at once, and a wedged machine would

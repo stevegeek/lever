@@ -29,6 +29,21 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 						if serr := st.StopBroker(); serr != nil {
 							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
 						}
+						// The remote proxy is a host-side daemon like the broker,
+						// and a verb documented as full teardown must stop it too.
+						// Leaving it running kept two loopback listeners and a
+						// `tailscale serve` front end pointed at a destroyed
+						// instance — and worse, a later `up` REUSED that process,
+						// whose cached jail prefix names the machine that no
+						// longer exists. Its stamp goes with it: nothing else
+						// removes it, and a stale stamp is what makes the reuse
+						// look legitimate.
+						if serr := st.StopRemoteProxy(); serr != nil {
+							cmd.PrintErrf("warning: stopping remote proxy: %v\n", serr)
+						}
+						if serr := os.Remove(st.RemoteStamp()); serr != nil && !os.IsNotExist(serr) {
+							cmd.PrintErrf("warning: removing the remote proxy stamp: %v\n", serr)
+						}
 						clearStagedRuntimeState(app)
 						// The controller PAT was minted against the hub DB that lives
 						// inside the jail; destroying the machine discards that DB, so

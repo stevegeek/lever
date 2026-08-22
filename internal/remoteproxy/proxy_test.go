@@ -46,7 +46,7 @@ func TestInjectsPATStripsClientAuth(t *testing.T) {
 	hub, got, _ := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Authorization", "Bearer attacker")
 	req.Header.Set("Cookie", "scion_sess=evil")
 	rw := httptest.NewRecorder()
@@ -66,7 +66,7 @@ func TestCrossOriginRejected(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Origin", "https://evil.example")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -82,7 +82,7 @@ func TestSameOriginAllowed(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Origin", "https://mac.ts.net")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -98,7 +98,7 @@ func TestSecFetchCrossSiteRejected(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -114,7 +114,7 @@ func TestHeaderFreeCurlAllowed(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil) // no Origin, no Sec-Fetch-Site
+	req := proxyRequest("GET", "/api/v1/agents", nil) // no Origin, no Sec-Fetch-Site
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != 200 {
@@ -143,7 +143,7 @@ func TestAllowedUsersPinning(t *testing.T) {
 			hub, _, hits := newFakeHub(t)
 			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 				ServeHost: "mac.ts.net", AllowedUsers: tc.allowed})
-			req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+			req := proxyRequest("GET", "/api/v1/agents", nil)
 			if tc.loginHdr != "" {
 				req.Header.Set("Tailscale-User-Login", tc.loginHdr)
 			}
@@ -167,7 +167,7 @@ func TestMissingPAT503(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != http.StatusServiceUnavailable {
@@ -196,17 +196,17 @@ func TestAuditLineNeverCarriesPAT(t *testing.T) {
 	// One request per decision path.
 	reqs := []*http.Request{
 		func() *http.Request {
-			r := httptest.NewRequest("GET", "/allow", nil)
+			r := proxyRequest("GET", "/allow", nil)
 			r.Header.Set("Tailscale-User-Login", "a@example.com")
 			return r
 		}(),
 		func() *http.Request {
-			r := httptest.NewRequest("GET", "/deny-origin", nil)
+			r := proxyRequest("GET", "/deny-origin", nil)
 			r.Header.Set("Origin", "https://evil.example")
 			return r
 		}(),
 		func() *http.Request {
-			r := httptest.NewRequest("GET", "/deny-user", nil)
+			r := proxyRequest("GET", "/deny-user", nil)
 			r.Header.Set("Tailscale-User-Login", "z@example.com")
 			return r
 		}(),
@@ -222,7 +222,7 @@ func TestAuditLineNeverCarriesPAT(t *testing.T) {
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { noPatLines = append(noPatLines, line) },
 	})
-	hNoPAT.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/deny-no-pat", nil))
+	hNoPAT.ServeHTTP(httptest.NewRecorder(), proxyRequest("GET", "/deny-no-pat", nil))
 
 	if len(lines) != 3 {
 		t.Fatalf("got %d audit lines for 3 requests, want 3 (one each)", len(lines))
@@ -256,7 +256,7 @@ func TestUpgradeRequestGetsRewrite(t *testing.T) {
 	hub, got, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/events/ws", nil)
+	req := proxyRequest("GET", "/events/ws", nil)
 	req.Header.Set("Origin", "https://mac.ts.net")
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
@@ -289,7 +289,7 @@ func TestStripsSetCookieFromHubResponse(t *testing.T) {
 
 	h := NewHandler(Config{Target: mustURL(t, s.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/", nil)
+	req := proxyRequest("GET", "/", nil)
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 
@@ -314,7 +314,7 @@ func TestOriginNullWithEmptyServeHostDenied(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: ""})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Origin", "null")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -336,7 +336,7 @@ func TestEmptyServeHostDeniesAnyOriginBearingRequest(t *testing.T) {
 			hub, _, hits := newFakeHub(t)
 			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 				ServeHost: ""})
-			req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+			req := proxyRequest("GET", "/api/v1/agents", nil)
 			req.Header.Set("Origin", o)
 			rw := httptest.NewRecorder()
 			h.ServeHTTP(rw, req)
@@ -359,7 +359,7 @@ func TestEmptyServeHostDeniesHeaderFreeRequestToo(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: ""})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil) // no Origin, no Sec-Fetch-Site
+	req := proxyRequest("GET", "/api/v1/agents", nil) // no Origin, no Sec-Fetch-Site
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 	if rw.Code != http.StatusForbidden {
@@ -380,7 +380,7 @@ func TestInboundTailscaleHeadersStrippedFromForward(t *testing.T) {
 	hub, got, _ := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Tailscale-User-Login", "admin@example.com")
 	req.Header.Set("Tailscale-Foo", "bar")
 	rw := httptest.NewRecorder()
@@ -414,7 +414,7 @@ func TestPATReadOnceProperty(t *testing.T) {
 		return ""
 	}
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: patFn, ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 
@@ -436,7 +436,7 @@ func TestSubdomainOriginRejected(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Origin", "https://evil.mac.ts.net")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -454,7 +454,7 @@ func TestSuffixOriginRejected(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Origin", "https://mac.ts.net.evil.example")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -473,7 +473,7 @@ func TestServeHostCaseInsensitiveMatch(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Origin", "https://MAC.TS.NET")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -499,7 +499,7 @@ func TestMultiValueAndLowercaseSetCookieStripped(t *testing.T) {
 
 	h := NewHandler(Config{Target: mustURL(t, s.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/", nil)
+	req := proxyRequest("GET", "/", nil)
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 
@@ -521,7 +521,7 @@ func TestMultipleOriginHeadersRejected(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Add("Origin", "https://mac.ts.net")
 	req.Header.Add("Origin", "https://evil.example")
 	rw := httptest.NewRecorder()
@@ -540,7 +540,7 @@ func TestMultipleSecFetchSiteHeadersRejected(t *testing.T) {
 	hub, _, hits := newFakeHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Add("Sec-Fetch-Site", "same-origin")
 	req.Header.Add("Sec-Fetch-Site", "cross-site")
 	rw := httptest.NewRecorder()
@@ -573,7 +573,7 @@ func TestSecFetchSiteAllowlist(t *testing.T) {
 			hub, _, hits := newFakeHub(t)
 			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 				ServeHost: "mac.ts.net"})
-			req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+			req := proxyRequest("GET", "/api/v1/agents", nil)
 			req.Header.Set("Sec-Fetch-Site", tc.value)
 			rw := httptest.NewRecorder()
 			h.ServeHTTP(rw, req)
@@ -607,7 +607,7 @@ func TestAuditLineCapturesUpstreamStatusOnAllow(t *testing.T) {
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { lines = append(lines, line) },
 	})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 
@@ -639,7 +639,7 @@ func TestAuditLineEmittedOnUpstreamFailure(t *testing.T) {
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { lines = append(lines, line) },
 	})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
 
@@ -679,7 +679,7 @@ func TestCustomDialContextIsUsed(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, network, hubAddr)
 		},
 	})
-	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Authorization", "Bearer attacker")
 	req.Header.Set("Cookie", "scion_sess=evil")
 	req.Header.Set("Tailscale-User-Login", "spoofed@example.com")
@@ -729,7 +729,7 @@ func TestTargetHostHeaderIsThePreservedHubAddress(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, network, hubAddr)
 		},
 	})
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/healthz", nil))
+	h.ServeHTTP(httptest.NewRecorder(), proxyRequest("GET", "/healthz", nil))
 	if gotHost != "127.0.0.1:8080" {
 		t.Fatalf("Host = %q, want the guest-side hub address", gotHost)
 	}
@@ -751,7 +751,7 @@ func TestDialFailureIsAudited(t *testing.T) {
 		},
 	})
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest("GET", "/healthz", nil))
+	h.ServeHTTP(rw, proxyRequest("GET", "/healthz", nil))
 
 	if rw.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rw.Code)
@@ -812,7 +812,7 @@ func TestSlowHubHeadersAreBounded(t *testing.T) {
 
 	rw := httptest.NewRecorder()
 	start := time.Now()
-	h.ServeHTTP(rw, httptest.NewRequest("GET", "/healthz", nil))
+	h.ServeHTTP(rw, proxyRequest("GET", "/healthz", nil))
 	elapsed := time.Since(start)
 
 	if rw.Code != http.StatusBadGateway {
@@ -860,7 +860,15 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 	proxy := httptest.NewServer(h)
 	defer proxy.Close()
 
-	resp, err := proxy.Client().Get(proxy.URL + "/api/v1/agents/x/transcript")
+	// Through a REAL listener, so Host is the loopback address httptest chose.
+	// Set it to the tailnet name the Config serves, which is what `tailscale
+	// serve` forwards — otherwise the Host gate refuses it (see hostAllowed).
+	req, err := http.NewRequest("GET", proxy.URL+"/api/v1/agents/x/transcript", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = testServeHost
+	resp, err := proxy.Client().Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -874,5 +882,66 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 	}
 	if got := string(body); got != "chunk0\nchunk1\nchunk2\nchunk3\n" {
 		t.Fatalf("streamed body = %q — the header timeout must not cut the body", got)
+	}
+}
+
+// testServeHost is the tailnet name every test's Config uses, and therefore the
+// Host that real traffic arrives with: `tailscale serve` forwards the client's
+// Host unchanged for a TCP backend.
+const testServeHost = "mac.ts.net"
+
+// proxyRequest builds a request as it ARRIVES at the proxy. It exists because
+// httptest.NewRequest defaults Host to "example.com", which is precisely the
+// shape hostAllowed now refuses — a request asking for a name this proxy does
+// not answer to. Tests that want to exercise a WRONG Host set req.Host
+// themselves, explicitly.
+func proxyRequest(method, target string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(method, target, body)
+	r.Host = testServeHost
+	return r
+}
+
+// TestHostGateRefusesDNSRebinding is the regression test for the hole an
+// independent review found and I reproduced against the live proxy: with no
+// Origin and no Sec-Fetch-Site, every other gate passes by default, so a
+// rebound page on the attacker's own name reached the hub with the injected
+// PAT's authority. The browser cannot lie here — it sends the name the victim
+// navigated to.
+func TestHostGateRefusesDNSRebinding(t *testing.T) {
+	hub, _, hits := newFakeHub(t)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+		ServeHost: testServeHost, ListenPort: 8445})
+
+	for _, tc := range []struct {
+		name, host string
+		want       int
+	}{
+		{"the tailnet name", testServeHost, 200},
+		{"loopback probe on the proxy's own port", "127.0.0.1:8445", 200},
+		{"ipv6 loopback probe", "[::1]:8445", 200},
+		{"localhost probe", "localhost:8445", 200},
+		{"a rebound attacker domain", "evil.example", 403},
+		{"a rebound attacker domain on our port", "evil.example:8445", 403},
+		{"loopback on a DIFFERENT port", "127.0.0.1:9999", 403},
+		{"the tailnet name as a suffix", "evil-mac.ts.net", 403},
+		{"the tailnet name as a prefix", "mac.ts.net.evil.test", 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := hits.Load()
+			req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+			req.Host = tc.host
+			// The rebind's full shape: no Origin, same-origin fetch metadata,
+			// and a forged identity header.
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			req.Header.Set("Tailscale-User-Login", "victim@example.com")
+			rw := httptest.NewRecorder()
+			h.ServeHTTP(rw, req)
+			if rw.Code != tc.want {
+				t.Fatalf("Host %q → %d, want %d", tc.host, rw.Code, tc.want)
+			}
+			if tc.want == 403 && hits.Load() != before {
+				t.Error("a refused request still reached the hub")
+			}
+		})
 	}
 }

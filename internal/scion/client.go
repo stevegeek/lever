@@ -104,6 +104,25 @@ func projectFlag(project string) []string {
 // run executes a scion subcommand in the given working directory and returns
 // trimmed combined stdout. dir "" uses the process cwd. Non-zero exit returns
 // an error with the dev-auth banner stripped for readability.
+// runValue is run for a command whose STDOUT is a value lever parses, not text
+// for a human. It returns stdout alone.
+//
+// `run` deliberately folds stderr into its result so an error message carries
+// everything scion said. For a value that is wrong: scion's settings loader
+// writes warnings to stderr (a legacy-format settings file, a deprecated key),
+// and `run` would prepend them to the value. A caller comparing the result
+// against an expected string then silently takes the wrong branch — for
+// `config get default_template`, that means lever decides the operator chose
+// their own template and skips the placeholder-prompt fix, while apply logs
+// that it applied it. Errors still carry both streams.
+func (c *Client) runValue(ctx context.Context, dir string, args ...string) (string, error) {
+	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
+	if err != nil {
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), clean(res.Stdout+res.Stderr))
+	}
+	return strings.TrimSpace(res.Stdout), nil
+}
+
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	out := res.Stdout + res.Stderr

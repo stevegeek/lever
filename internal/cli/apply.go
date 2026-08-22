@@ -148,16 +148,22 @@ func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", r
 // reachable by whatever reaches the proxy. Hence a host-side stamp file.
 func (rc *remoteController) Start(ctx context.Context) error {
 	if _, found, alive := remotePIDStatus(rc.state.RemotePID()); found && alive {
-		if err := tcpDial(rc.addr()); err == nil {
-			if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) {
-				return nil // already serving, with this binary and this config
-			}
-			// Serving the WRONG config. Stop it before spawning, or the new
-			// child cannot bind the port and dies into remote.log.
-			fmt.Fprintln(os.Stderr, "lever: the remote proxy predates this binary or its remote config changed — restarting it")
-			if err := rc.state.StopRemoteProxy(); err != nil {
-				return fmt.Errorf("restarting the remote proxy: %w", err)
-			}
+		if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) && tcpDial(rc.addr()) == nil {
+			return nil // already serving: this binary, this config, this port
+		}
+		// A live proxy that is NOT the one this config asks for. Stop it before
+		// spawning, or the replacement cannot bind and dies into remote.log.
+		//
+		// This decision is deliberately OUTSIDE the tcpDial check. Nesting it
+		// there — as the first version of this fix did — meant the ONE change
+		// that makes the dial fail, a changed `remote.port`, skipped the stop
+		// entirely: the old proxy kept serving the OLD port with the OLD
+		// config, `tailscale serve` still pointed at it, and the fresh spawn
+		// then OVERWROTE remote.pid, so no `lever` verb could ever stop the
+		// leaked process again. An independent review caught it.
+		fmt.Fprintln(os.Stderr, "lever: the remote proxy predates this binary or its remote config changed — restarting it")
+		if err := rc.state.StopRemoteProxy(); err != nil {
+			return fmt.Errorf("restarting the remote proxy: %w", err)
 		}
 	}
 	cmd, logf, err := remoteServeCmd(brokerSelfExe(), rc.configPath, rc.state.RemoteLog())
@@ -169,7 +175,7 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("lever remote serve: %w", err)
 	}
-	if err := rc.awaitListening(); err != nil {
+	if err := rc.awaitListening(cmd); err != nil {
 		return err
 	}
 	// Stamp only once the proxy is proven listening, so a stamp never claims a
@@ -202,9 +208,19 @@ var (
 // The log's tail is quoted into the error because the cause is always there
 // and nowhere else — the child owns that file, and this process never sees its
 // stderr.
-func (rc *remoteController) awaitListening() error {
+// child, when non-nil, is the process just spawned: a listener alone does not
+// prove OUR proxy is serving — some other process (including a leaked older
+// proxy) may hold the port, and concluding "listening" then would stamp a
+// config nothing is enforcing.
+func (rc *remoteController) awaitListening(child *exec.Cmd) error {
 	deadline := time.Now().Add(remoteProxyStartTimeout)
 	for {
+		if child != nil && child.Process != nil {
+			if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+				// The child is gone; whatever may be listening is not it.
+				break
+			}
+		}
 		if err := tcpDial(rc.addr()); err == nil {
 			return nil
 		}

@@ -144,7 +144,9 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 // project — the merge of embedded defaults, the machine settings, and the
 // project's own, in that precedence.
 func (c *Client) ConfigGetProject(ctx context.Context, projectDir, key string) (string, error) {
-	return c.run(ctx, projectDir, "config", "get", key)
+	// runValue, not run: the result is compared against an expected value, and
+	// scion's settings loader writes warnings to stderr. See runValue.
+	return c.runValue(ctx, projectDir, "config", "get", key)
 }
 
 // ConfigSetProject sets a scion config key at PROJECT scope, resolved from

@@ -31,7 +31,16 @@ import (
 // proxy restarts. Failing toward a restart is right for a component whose whole
 // job is refusing unauthorized requests.
 func RemoteConfigHash(app *config.App) string {
-	j, err := json.Marshal(app.Remote)
+	// Name and Backend are in here because the proxy captures them too, not
+	// just the `remote:` block: Name selects the JAIL it dials (remote.go
+	// machineName) and Backend gates which transport it uses. Renaming the
+	// instance would otherwise leave a running proxy fronting the OLD
+	// machine's hub while apply happily reused it.
+	j, err := json.Marshal(struct {
+		Remote  config.Remote
+		Name    string
+		Backend string
+	}{app.Remote, app.Name, app.Backend})
 	if err != nil {
 		return ""
 	}

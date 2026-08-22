@@ -1095,7 +1095,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	_ = ln.Close()
 
 	rc := &remoteController{state: state, configPath: filepath.Join(dir, "lever.yaml"), port: port}
-	err = rc.awaitListening()
+	err = rc.awaitListening(nil)
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
 	}
@@ -1114,7 +1114,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 		t.Skipf("could not re-bind %d: %v", port, err)
 	}
 	defer func() { _ = ln2.Close() }()
-	if err := rc.awaitListening(); err != nil {
+	if err := rc.awaitListening(nil); err != nil {
 		t.Fatalf("a listening proxy must pass: %v", err)
 	}
 }
@@ -1130,5 +1130,63 @@ func TestLastLogLine(t *testing.T) {
 	}
 	if got := lastLogLine(path); got != "last line" {
 		t.Fatalf("lastLogLine = %q, want the final non-empty line", got)
+	}
+}
+
+// TestRemoteControllerStartStopsOldProxyOnPortChange is the regression test for
+// the Critical an independent review found in the first version of the stamp
+// fix. The stop lived INSIDE the `tcpDial(rc.addr())` check, so the one config
+// change that makes that dial fail — a changed remote.port — skipped it: the
+// old proxy kept serving the OLD port with the OLD config (with `tailscale
+// serve` still pointing at it), and the fresh spawn then OVERWROTE remote.pid,
+// leaving no `lever` verb able to stop the leaked process.
+//
+// Here the recorded proxy is alive but nothing listens on the NEW port, which
+// is exactly that sequence.
+func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
+	prev := brokerSelfExe
+	brokerSelfExe = func() string { return "/no/such/lever-binary" }
+	t.Cleanup(func() { brokerSelfExe = prev })
+
+	dir := t.TempDir()
+	state := brokerctl.StateDir(dir)
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldProxy := exec.Command("/bin/sh", "-c", "sleep 30")
+	if err := oldProxy.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = oldProxy.Process.Kill(); _, _ = oldProxy.Process.Wait() })
+	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(oldProxy.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Stamp matches: this is a pure PORT move, so the old proxy is "ours" —
+	// it is simply serving somewhere else.
+	if err := state.WriteRemoteStamp("v-test", "hash-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing listens on the new port: bind one and close it to get a port
+	// that is certainly free.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: freePort,
+		version: "v-test", cfgHash: "hash-test"}
+	if err := rc.Start(context.Background()); err == nil {
+		t.Fatal("Start must not silently succeed here")
+	}
+
+	done := make(chan struct{})
+	go func() { _, _ = oldProxy.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old proxy was LEAKED: still serving the previous port with the previous config, and remote.pid no longer names it")
 	}
 }

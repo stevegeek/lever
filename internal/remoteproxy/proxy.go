@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,6 +68,11 @@ type Config struct {
 	// match (an Origin that parses to an empty host, e.g. "null", would
 	// otherwise compare equal to an empty ServeHost).
 	ServeHost string
+	// ListenPort is the loopback port this proxy binds. It exists so
+	// hostAllowed can admit a host-side probe (`lever doctor` dials
+	// 127.0.0.1:<port>/healthz) without widening the Host allowlist to every
+	// port. Zero admits the tailnet name only.
+	ListenPort int
 	// AllowedUsers, when non-empty, pins Tailscale-User-Login values.
 	AllowedUsers []string
 	// Session supplies the hub web session for the UI SHELL — and only the
@@ -307,6 +313,13 @@ func NewHandler(cfg Config) http.Handler {
 			return
 		}
 
+		// Host first: it is the only gate a header-free request cannot walk
+		// through. See hostAllowed.
+		if !hostAllowed(r.Host, cfg.ServeHost, cfg.ListenPort) {
+			deny(http.StatusForbidden, "deny-host", "unexpected Host")
+			return
+		}
+
 		if origins := r.Header.Values("Origin"); len(origins) > 0 {
 			if len(origins) > 1 {
 				deny(http.StatusForbidden, "deny-origin", "multiple Origin headers refused")
@@ -328,9 +341,19 @@ func NewHandler(cfg Config) http.Handler {
 				return
 			}
 		}
-		if len(cfg.AllowedUsers) > 0 && !slices.Contains(cfg.AllowedUsers, line.TSLogin) {
-			deny(http.StatusForbidden, "deny-user", "tailscale identity not allowed")
-			return
+		if len(cfg.AllowedUsers) > 0 {
+			// Duplicates are refused for the same reason Origin and
+			// Sec-Fetch-Site are: Header.Get returns only the FIRST value, so a
+			// second one is a header the gate silently ignores while something
+			// downstream might not.
+			if logins := r.Header.Values("Tailscale-User-Login"); len(logins) > 1 {
+				deny(http.StatusForbidden, "deny-user", "multiple Tailscale-User-Login headers refused")
+				return
+			}
+			if !slices.Contains(cfg.AllowedUsers, line.TSLogin) {
+				deny(http.StatusForbidden, "deny-user", "tailscale identity not allowed")
+				return
+			}
 		}
 		pat := cfg.PAT() // read once; reused below for both the check and the injected header
 		if pat == "" {
@@ -457,3 +480,52 @@ func (w *sessionRetryWriter) Flush() {
 // hub's WebSocket upgrades. An upgrade cannot be swallowed anyway: it arrives
 // as a 101, which is not a session rejection.
 func (w *sessionRetryWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// hostAllowed reports whether a request asked for a name this proxy answers to.
+//
+// This is the DNS-rebinding defence, and it is the ONE check that does not
+// depend on the client's goodwill. Origin and Sec-Fetch-Site are only present
+// when a browser chooses to send them, so a request without them passes both
+// gates by default. Binding to loopback is not a substitute either — loopback
+// is exactly what a rebind targets: an attacker page on http://evil.test:8445
+// whose DNS flips to 127.0.0.1 is, to the browser, SAME-ORIGIN with the proxy.
+// It then sends no Origin, `Sec-Fetch-Site: same-origin`, and any header it
+// likes (same-origin requests need no preflight), which before this check meant
+// a forged Tailscale-User-Login and a reply carrying the injected PAT's
+// authority. Verified live 2026-08-22 against the running proxy: `Host:
+// evil.example` + a forged identity returned 200 and real /auth/me data.
+//
+// A rebind cannot beat this because the browser sends the ATTACKER's name in
+// Host — the victim navigated to their domain — while everything legitimate
+// arrives as one of two names:
+//
+//   - serveHost, the tailnet name. `tailscale serve` forwards the client's Host
+//     unchanged for a TCP backend, so real phone traffic carries it verbatim.
+//   - loopback with the proxy's own port, for host-side probes: `lever doctor`
+//     dials http://127.0.0.1:<port>/healthz.
+//
+// Nothing downstream depends on the inbound value: the outbound Host is
+// rewritten by the director (see NewHandler).
+func hostAllowed(host, serveHost string, port int) bool {
+	if host == "" {
+		// HTTP/1.1 requires Host; Go rejects a request without one before
+		// this. Treat the impossible case as hostile.
+		return false
+	}
+	if strings.EqualFold(host, serveHost) {
+		return true
+	}
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		// No port in the header: only a bare serveHost match (above) counts.
+		return false
+	}
+	if p != strconv.Itoa(port) {
+		return false
+	}
+	switch strings.ToLower(strings.Trim(h, "[]")) {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	return false
+}

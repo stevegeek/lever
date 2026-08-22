@@ -126,13 +126,18 @@ func (g Guest) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool,
 // No hub restart: a leftover block naming a provider that no longer answers
 // cannot log anyone in, and scion re-reads the file on its next start anyway.
 func (g Guest) DisableHubLogin(ctx context.Context) error {
-	res, err := g.rootRun(ctx, "bash", "-c", disableLoginForwardScript)
-	if err != nil {
+	if _, err := g.rootRun(ctx, "bash", "-c", disableLoginForwardScript); err != nil {
 		return fmt.Errorf("guest: stop the login forwarder: %w", err)
 	}
-	if !strings.Contains(res.Stdout, "FOUND 1") {
-		return nil
-	}
+	// The settings edit is NOT gated on having found the binary. It used to be,
+	// and that made the failure permanent: the script `rm -f`s the binary
+	// BEFORE the settings edit runs, so if that edit ever failed (a transient
+	// guest error, the machine going away mid-command), the next apply found no
+	// binary, returned early, and the `oidc_login` block stayed in the guest
+	// forever — advertising a login for a provider that no longer runs, with no
+	// lever verb that removes it. Convergence must not depend on a step that
+	// already succeeded. removeHubLoginSettings is itself a quiet no-op when
+	// there is nothing to remove (see hubLoginSettingsWithout).
 	return g.removeHubLoginSettings(ctx)
 }
 

@@ -92,7 +92,7 @@ func TestSessionNeverRidesAnAPIRequest(t *testing.T) {
 
 	for _, path := range []string{"/api/v1", "/api/v1/agents", "/api/v1/agents/x/messages"} {
 		rw := httptest.NewRecorder()
-		h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, path, nil))
+		h.ServeHTTP(rw, proxyRequest(http.MethodGet, path, nil))
 		if rw.Code != http.StatusOK {
 			t.Fatalf("GET %s = %d", path, rw.Code)
 		}
@@ -120,7 +120,7 @@ func TestShellRequestCarriesTheSessionAndThePAT(t *testing.T) {
 		ServeHost: "mac.ts.net", Session: sess, AllowedUsers: []string{"op@example.test"}})
 
 	for _, path := range []string{"/", "/auth/me", "/assets/main.js"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req := proxyRequest(http.MethodGet, path, nil)
 		req.Header.Set("Tailscale-User-Login", "op@example.test")
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, req)
@@ -151,7 +151,7 @@ func TestClientSuppliedCookieIsReplacedNotMerged(t *testing.T) {
 	sess := &stubSession{cookie: "sess-value"}
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net", Session: sess})
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := proxyRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Cookie", "scion_sess=attacker; other=1")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -204,7 +204,7 @@ func TestStaleSessionIsRenewedAndTheRequestRetried(t *testing.T) {
 				Audit: func(l AuditLine) { audited = append(audited, l) }})
 
 			rw := httptest.NewRecorder()
-			h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/", nil))
+			h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
 
 			if rw.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200 — the retry's answer, not the hub's rejection", rw.Code)
@@ -242,7 +242,7 @@ func TestRetryHappensOnlyOnce(t *testing.T) {
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
 	if rw.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want the hub's 401 to stand after one retry", rw.Code)
 	}
@@ -264,7 +264,7 @@ func TestOnlyBodilessMethodsAreRetried(t *testing.T) {
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(http.MethodPost, "/upload", strings.NewReader("body")))
+	h.ServeHTTP(rw, proxyRequest(http.MethodPost, "/upload", strings.NewReader("body")))
 	if rw.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want the hub's answer", rw.Code)
 	}
@@ -286,7 +286,7 @@ func TestNonSessionFailuresArePassedThrough(t *testing.T) {
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
 	if rw.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 passed through", rw.Code)
 	}
@@ -309,7 +309,7 @@ func TestRedirectsThatAreNotLoginPagesPassThrough(t *testing.T) {
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
 	if rw.Code != http.StatusFound || rw.Header().Get("Location") != "/agents/manager" {
 		t.Fatalf("status = %d Location = %q, want the hub's own redirect", rw.Code, rw.Header().Get("Location"))
 	}
@@ -325,7 +325,7 @@ func TestLoginFailureIs502NotAPage(t *testing.T) {
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net", Session: sess, Audit: func(l AuditLine) { audited = append(audited, l) }})
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
 	if rw.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rw.Code)
 	}
@@ -344,7 +344,7 @@ func TestNoSessionSourceMeansNoCookie(t *testing.T) {
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
 		ServeHost: "mac.ts.net"})
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
 	if rw.Code != http.StatusOK {
 		t.Fatalf("status = %d", rw.Code)
 	}
@@ -384,7 +384,7 @@ func TestSessionAndProxyEndToEnd(t *testing.T) {
 		ServeHost: "mac.ts.net", AllowedUsers: []string{"op@example.test"}, Session: d})
 
 	get := func(path string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req := proxyRequest(http.MethodGet, path, nil)
 		req.Header.Set("Tailscale-User-Login", "op@example.test")
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, req)
@@ -424,7 +424,7 @@ func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 		ServeHost: "mac.ts.net", Session: d})
 
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
 	if rw.Code != http.StatusOK {
 		t.Fatalf("first request = %d", rw.Code)
 	}
@@ -436,7 +436,7 @@ func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 	hub.mu.Unlock()
 
 	rw2 := httptest.NewRecorder()
-	h.ServeHTTP(rw2, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rw2, proxyRequest(http.MethodGet, "/", nil))
 	if rw2.Code != http.StatusOK {
 		t.Fatalf("after the hub forgot the session = %d, want 200 via a fresh login", rw2.Code)
 	}

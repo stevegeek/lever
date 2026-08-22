@@ -115,7 +115,9 @@ func remoteServeCmd(self, configPath, outLog string) (*exec.Cmd, *os.File, error
 type remoteController struct {
 	state      brokerctl.State
 	configPath string
-	port       int // app.EffectiveRemotePort()
+	port       int    // app.EffectiveRemotePort()
+	version    string // this binary, for the reuse stamp
+	cfgHash    string // brokerctl.RemoteConfigHash(app), for the reuse stamp
 }
 
 func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", rc.port) }
@@ -123,19 +125,39 @@ func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", r
 // Start spawns `lever remote serve <config>` as a daemonized child so it
 // outlives the apply invocation.
 //
-// Idempotent: if a proxy is already alive AND actually listening on the
-// configured port, reuse it rather than spawning a duplicate — a duplicate
-// would fail to bind and die, clobbering remote.pid with a dead pid, the
-// same failure mode brokerController.Start's #19 reuse shortcut guards
-// against for the broker. Reuse is decided by the same pidfile+TCP-dial
-// check `lever remote status` already uses (remotePIDStatus + tcpDial): a
-// live-but-not-yet-listening pid (a startup race) or a stale/absent pid both
-// fall through to a fresh spawn — which is what makes a re-apply after a
-// killed proxy respawn it.
+// Idempotent: if a proxy is already alive, actually listening on the configured
+// port, AND running this binary with this remote config, reuse it rather than
+// spawning a duplicate — a duplicate would fail to bind and die, clobbering
+// remote.pid with a dead pid, the same failure mode brokerController.Start's
+// #19 reuse shortcut guards against for the broker. Liveness is the same
+// pidfile+TCP-dial check `lever remote status` uses (remotePIDStatus +
+// tcpDial): a live-but-not-yet-listening pid (a startup race) or a
+// stale/absent pid both fall through to a fresh spawn.
+//
+// The stamp check is the third condition, and it is NOT optional. The proxy
+// reads its config once and caches all of it in the handler it builds at
+// startup — ServeHost from base_url, the allowed-user set by value, the bound
+// ports — so a running proxy goes on enforcing the config it was born with.
+// Without this, editing `remote:` and re-applying reported success while
+// changing nothing: enabling `allowed_users` on the live instance left the old
+// process serving, and identity-free requests kept returning 200. A
+// security-relevant config change that is silently ignored is worse than one
+// that fails loudly. brokerController.Start has always compared version+hash
+// this way (via the broker's /epoch); the proxy has no such endpoint, and must
+// not grow one — it fronts the hub, so any listener of its own would be
+// reachable by whatever reaches the proxy. Hence a host-side stamp file.
 func (rc *remoteController) Start(ctx context.Context) error {
 	if _, found, alive := remotePIDStatus(rc.state.RemotePID()); found && alive {
 		if err := tcpDial(rc.addr()); err == nil {
-			return nil // already serving
+			if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) {
+				return nil // already serving, with this binary and this config
+			}
+			// Serving the WRONG config. Stop it before spawning, or the new
+			// child cannot bind the port and dies into remote.log.
+			fmt.Fprintln(os.Stderr, "lever: the remote proxy predates this binary or its remote config changed — restarting it")
+			if err := rc.state.StopRemoteProxy(); err != nil {
+				return fmt.Errorf("restarting the remote proxy: %w", err)
+			}
 		}
 	}
 	cmd, logf, err := remoteServeCmd(brokerSelfExe(), rc.configPath, rc.state.RemoteLog())
@@ -147,7 +169,16 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("lever remote serve: %w", err)
 	}
-	return rc.awaitListening()
+	if err := rc.awaitListening(); err != nil {
+		return err
+	}
+	// Stamp only once the proxy is proven listening, so a stamp never claims a
+	// process that never served. Best-effort: a write failure costs the next
+	// apply a redundant restart, never a stale process kept alive.
+	if err := rc.state.WriteRemoteStamp(rc.version, rc.cfgHash); err != nil {
+		fmt.Fprintf(os.Stderr, "lever: could not record the remote proxy stamp (%v) — the next apply will restart it\n", err)
+	}
+	return nil
 }
 
 // remoteProxyStartTimeout/Interval bound the wait for the spawned proxy to
@@ -714,6 +745,8 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		state:      state,
 		configPath: configPath,
 		port:       app.EffectiveRemotePort(),
+		version:    versionString(),
+		cfgHash:    brokerctl.RemoteConfigHash(app),
 	}
 
 	return apply.Deps{

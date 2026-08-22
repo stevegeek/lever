@@ -35,6 +35,14 @@ func (s State) RemotePID() string     { return filepath.Join(s.Dir, "remote.pid"
 func (s State) RemoteLog() string     { return filepath.Join(s.Dir, "remote.log") }
 func (s State) RemoteAudit() string   { return filepath.Join(s.Dir, "remote-audit.jsonl") }
 
+// RemoteStamp records the binary version + remote config a RUNNING proxy was
+// started with, so apply can tell "already serving" from "serving something
+// else". The broker answers that question over HTTP (/epoch); the proxy has no
+// such endpoint and must not grow one — it fronts the hub, so any listener of
+// its own would be reachable by whatever reaches the proxy. A file beside
+// remote.pid keeps the answer host-side, where only lever writes it.
+func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
+
 // ToolLogDir is the directory holding per-supervised-tool logs.
 func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }
 

@@ -7,6 +7,20 @@ version bump moves the block under the new version heading.
 
 ## [0.17.0] - 2026-08-16
 
+### Fixed (apply/remote lifecycle)
+- **`lever apply` now restarts the remote proxy when its config changed.** The
+  proxy reads the `remote:` block once and caches all of it in the handler it
+  builds at startup — ServeHost from `base_url`, the allowed-user set by value,
+  the bound ports — so a running proxy keeps enforcing the config it was born
+  with. Start's reuse shortcut compared only "pid alive + port accepting", so
+  editing `remote:` and re-applying reported success while changing nothing.
+  Found live: enabling `allowed_users` left the old process serving, and
+  identity-free requests kept returning 200. A running proxy is now reused only
+  when a stamp beside `remote.pid` records the same lever version AND the same
+  remote config; otherwise apply stops it and spawns a replacement. This is what
+  `brokerController.Start` has always done via the broker's `/epoch` — the proxy
+  has no such endpoint and must not grow one, since it fronts the hub.
+
 ### Changed
 - **Agent image bakes Claude Code 2.1.239** (was 2.1.226). Needs an image
   rebuild to take effect, then `lever apply` and — for a running manager —

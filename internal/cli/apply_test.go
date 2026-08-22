@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -399,9 +400,76 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: port}
+	// The stamp must MATCH, or Start correctly treats the running proxy as
+	// serving a different config and restarts it — which here would kill the
+	// test process, since remote.pid names it.
+	if err := state.WriteRemoteStamp("v-test", "hash-test"); err != nil {
+		t.Fatal(err)
+	}
+	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: port,
+		version: "v-test", cfgHash: "hash-test"}
 	if err := rc.Start(context.Background()); err != nil {
 		t.Fatalf("Start on an already-serving proxy must reuse (nil), got: %v", err)
+	}
+}
+
+// TestRemoteControllerStartRestartsOnConfigChange is the defect this stamp
+// exists for. The proxy reads `remote:` ONCE and caches it in the handler it
+// builds at startup, so a running proxy keeps enforcing the config it was born
+// with. Before the stamp, Start returned "already serving" on pid+port alone:
+// enabling allowed_users on the live instance left the old process running and
+// identity-free requests kept returning 200, while apply reported success.
+//
+// The running proxy is a real child process here, NOT this test's own pid: the
+// mismatch path kills what remote.pid names, and the self-pid trick used above
+// would kill the test. brokerSelfExe points at a nonexistent binary so the
+// respawn fails loudly — proving Start reached the spawn rather than reusing.
+func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
+	prev := brokerSelfExe
+	brokerSelfExe = func() string { return "/no/such/lever-binary" }
+	t.Cleanup(func() { brokerSelfExe = prev })
+
+	dir := t.TempDir()
+	state := brokerctl.StateDir(dir)
+	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := exec.Command("/bin/sh", "-c", "sleep 30")
+	if err := victim.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = victim.Process.Kill(); _, _ = victim.Process.Wait() })
+	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(victim.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	// Stamp records a DIFFERENT config from the one the controller wants.
+	if err := state.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
+		t.Fatal(err)
+	}
+	rc := &remoteController{state: state, configPath: "/x/lever.yaml",
+		port: ln.Addr().(*net.TCPAddr).Port, version: "v-test", cfgHash: "hash-NEW"}
+
+	if err := rc.Start(context.Background()); err == nil {
+		t.Fatal("Start reused a proxy running a DIFFERENT remote config — a changed allowed_users/base_url would be silently ignored")
+	}
+	// The stale proxy must be gone: leaving it alive would keep the old config
+	// serving AND hold the port, so the respawn could never bind.
+	//
+	// Reaped via Wait, not signal(0): a killed-but-unreaped child is a ZOMBIE,
+	// and signal 0 succeeds on a zombie because the process entry still exists
+	// — so the obvious check passes whether or not the kill worked.
+	done := make(chan struct{})
+	go func() { _, _ = victim.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("the stale proxy was left running — the respawn could never bind the port")
 	}
 }
 

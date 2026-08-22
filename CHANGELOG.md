@@ -5,6 +5,37 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.18.0] - 2026-08-22
+
+### Added
+
+- **Native chat now works out of the box.** lever writes
+  `server.message_broker.enabled: true` into the jail's `~/.scion/settings.yaml`
+  when the key is absent. Scion registers the `/api/v1/chat/*` routes by default
+  but wires the store behind them inside
+  `if MessageBroker != nil && MessageBroker.Enabled`, so with the key unset —
+  scion's own zero value — the web channel spoke never registers and native chat
+  answers `503 "Chat preferences not available"` on a hub whose chat UI is
+  present and inviting. The feature looked shipped and was inert.
+
+  Absent-only, never an override: an operator who has written `enabled: false`
+  has made a choice, and re-applying does not undo it. Same rule
+  `setOperatorDisplayName` already follows for a name the operator set.
+
+  **On upgrade**, the next `lever apply` restarts the hub to read the new key
+  and the guest gains an attachment store at `~/.scion/attachments`. To opt out,
+  set `server.message_broker.enabled: false` in the jail's settings before
+  applying.
+
+### Note for instance authors
+
+Scion delivers a chat message to an agent with a `channel` and `thread_id` in
+its envelope, and the agent is expected to answer with
+`scion message "<sender>" --channel <channel> --thread-id <thread_id>`. An agent
+that does not know this convention acts on the request and appears to ignore it,
+because the automatic per-turn mirror lands in the Messages inbox and carries no
+thread. Worth stating in your agent's instructions; lever does not scaffold it.
+
 ## [Unreleased]
 
 Landed just after the 0.17.1 cut, so they ship with the next release. Neither

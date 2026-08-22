@@ -588,3 +588,80 @@ func TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote(t *testing.T) {
 		t.Fatalf("auth block = %v:\n%s", auth, out)
 	}
 }
+
+// TestEnableMessageBroker covers the two halves of the contract: fill in the
+// key scion's chat store is gated on, and never overturn an operator's own
+// choice.
+func TestEnableMessageBroker(t *testing.T) {
+	tests := []struct {
+		name        string
+		server      string
+		wantChanged bool
+		wantEnabled string // "" = key must be absent
+	}{
+		{
+			name:        "absent key is filled in",
+			server:      "server:\n  auth:\n    display_name: Lever\n",
+			wantChanged: true,
+			wantEnabled: "true",
+		},
+		{
+			name:        "an explicit false is left alone",
+			server:      "server:\n  message_broker:\n    enabled: false\n",
+			wantChanged: false,
+			wantEnabled: "false",
+		},
+		{
+			name:        "an explicit true is already right, so nothing changes",
+			server:      "server:\n  message_broker:\n    enabled: true\n",
+			wantChanged: false,
+			wantEnabled: "true",
+		},
+		{
+			name:        "a block with other keys but no enabled is filled in",
+			server:      "server:\n  message_broker:\n    types: [inprocess]\n",
+			wantChanged: true,
+			wantEnabled: "true",
+		},
+		{
+			name:        "a shape lever cannot reason about is left for the operator",
+			server:      "server:\n  message_broker: \"on\"\n",
+			wantChanged: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var doc yaml.Node
+			if err := yaml.Unmarshal([]byte(tt.server), &doc); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			server := mapGet(doc.Content[0], "server")
+			if server == nil {
+				t.Fatal("no server key in the fixture")
+			}
+
+			if got := enableMessageBroker(server); got != tt.wantChanged {
+				t.Errorf("changed = %v, want %v", got, tt.wantChanged)
+			}
+
+			mb := mapGet(server, "message_broker")
+			if tt.wantEnabled == "" {
+				if mb != nil && mb.Kind == yaml.MappingNode && mapGet(mb, "enabled") != nil {
+					t.Error("enabled was written into a shape lever should not touch")
+				}
+				return
+			}
+			if mb == nil {
+				t.Fatal("message_broker block is missing")
+			}
+			n := mapGet(mb, "enabled")
+			if n == nil {
+				t.Fatal("enabled key is missing")
+			}
+			if n.Value != tt.wantEnabled {
+				t.Errorf("enabled = %q, want %q", n.Value, tt.wantEnabled)
+			}
+		})
+	}
+}

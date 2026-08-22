@@ -531,6 +531,9 @@ func hubLoginSettings(existing []byte, spec backend.HubLogin, hasServerYAML bool
 	if setOperatorDisplayName(server) {
 		changed = true
 	}
+	if enableMessageBroker(server) {
+		changed = true
+	}
 	if !changed {
 		return existing, false, nil
 	}
@@ -574,6 +577,37 @@ func setOperatorDisplayName(server *yaml.Node) bool {
 		mapSet(server, "auth", auth)
 	}
 	mapSet(auth, "display_name", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: operatorDisplayName})
+	return true
+}
+
+// enableMessageBroker fills in `server.message_broker.enabled` when the key is
+// absent, and reports whether it changed anything.
+//
+// Scion registers the /api/v1/chat/* ROUTES by default but wires the store
+// that backs them inside `if MessageBroker != nil && MessageBroker.Enabled`
+// (cmd/server_foreground.go). With the key absent — scion's own zero value —
+// the web channel spoke never registers, so native chat answers 503 "Chat
+// preferences not available" on a hub whose chat UI is present and inviting.
+// The feature looks shipped and is inert.
+//
+// Absent-only, never an override: an operator who has written `enabled: false`
+// has made a choice, and re-applying must not silently undo it. Same reason
+// setOperatorDisplayName leaves a name the operator already set.
+func enableMessageBroker(server *yaml.Node) bool {
+	mb := mapGet(server, "message_broker")
+	if mb != nil {
+		if mb.Kind != yaml.MappingNode {
+			// Not a shape lever can reason about — leave it for the operator.
+			return false
+		}
+		if n := mapGet(mb, "enabled"); n != nil && n.Value != "" {
+			return false
+		}
+	} else {
+		mb = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		mapSet(server, "message_broker", mb)
+	}
+	mapSet(mb, "enabled", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"})
 	return true
 }
 

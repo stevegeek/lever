@@ -214,6 +214,47 @@ func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
 	}
 }
 
+// TestServerStartNeverDisablesTheWebFrontend guards a dependency that lever
+// rested on for the whole remote-access arc without writing it down, and that
+// a plausible tidy-up would break: the flag must be OMITTED when lever does
+// not want the SPA, never sent as --enable-web=false.
+//
+// scion's workstation defaults enable the web frontend for any non-hosted
+// start that does not say otherwise, and lever needs exactly that. With the
+// frontend off, the Hub API is no longer mounted on the web server and binds
+// cfg.Hub.Port — 9810 — instead (cmd/server_foreground.go, the !enableWeb
+// branch), while the broker, every agent's SCION_HUB_ENDPOINT, `lever doctor`
+// and the remote proxy all dial 8080. So "converging" the flag the way
+// DevAuth is converged — explicitly, both ways, which is right for DevAuth —
+// would take the instance down at the next apply.
+//
+// A test rather than only a comment because the comment on ServerOpts.EnableWeb
+// asserted the opposite of the truth for the length of the branch, and prose is
+// one refactor away from being lost (docs/2026-08-18-comment-drift-remote-access.md).
+func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
+	for _, o := range []ServerOpts{
+		{},
+		{WebPort: 8080, DevAuth: false},
+		{WebPort: 8080, DevAuth: true},
+		{WebPort: 8080, EnableWeb: true},
+		{WebPort: 8080, EnableWeb: true, WebAssetsDir: "/usr/local/share/scion/web"},
+		{WebPort: 8080, WebAssetsDir: "/usr/local/share/scion/web"},
+	} {
+		f := exec.NewFakeRunner()
+		f.Script("scion", exec.Result{Stdout: "ok"})
+		if err := New(f, Options{}).ServerStart(context.Background(), o); err != nil {
+			t.Fatalf("%+v: %v", o, err)
+		}
+		if len(f.Calls) == 0 {
+			t.Fatalf("%+v: expected at least one call", o)
+		}
+		got := strings.Join(f.Calls[0].Args, " ")
+		if strings.Contains(got, "--enable-web=false") {
+			t.Fatalf("args = %q: this moves the Hub API off the web port and takes the instance down", got)
+		}
+	}
+}
+
 func TestServerStopArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})

@@ -7,9 +7,10 @@ of defect it describes and the next person to hit it will hit it the same way.
 
 ## The observation
 
-The feature produced **four doc comments that asserted behaviour the code
-beside them did not have**. Each was written truthfully and each became false
-later, when the function beneath it changed and the prose did not.
+The feature produced **five doc comments that asserted behaviour the code
+beside them did not have**. The first four were written truthfully and became
+false later, when the function beneath them changed and the prose did not. The
+fifth, found while fixing the branch's review findings, was never true.
 
 1. **`scion.ServerStop`** — its doc said "AlreadyRunning's message set also
    covers scion's not-running wording", and invited every caller to "call it
@@ -34,12 +35,39 @@ later, when the function beneath it changed and the prose did not.
    for the proxy to bind. The fix had landed thirty lines below the comment
    describing it.
 
-Two of the four caused a **live failure** rather than a review finding: (1)
+5. **`scion.ServerOpts.EnableWeb`** — its doc said "Only the remote-access
+   feature turns this on; a headless hub stays API-only". scion applies
+   workstation defaults to every `server start` that is not `--hosted`, and one
+   of them enables the web frontend whenever the flag was *not* explicitly set
+   (`cmd/server_config.go` `applyWorkstationDefaults`). So the hub serves a UI
+   with remote access off exactly as with it on, and the daemon re-emits a bare
+   `--enable-web` into its own `--foreground` child argv. The dangerous half is
+   the correction rather than the error: lever must **not** "converge" the flag
+   to false, because with the frontend off the Hub API stops being mounted on
+   the web server and binds `cfg.Hub.Port` — 9810 — instead
+   (`cmd/server_foreground.go`, the `!enableWeb` branch). That would move the
+   Hub API off 8080, where the broker, every agent's `SCION_HUB_ENDPOINT`,
+   `lever doctor` and the remote proxy all dial it. lever's whole model rested
+   on a scion default that nothing in the tree wrote down.
+
+Two of the five caused a **live failure** rather than a review finding: (1)
 failed the first live apply of the branch, and (2) presented as a hang with
 every process apparently healthy. A third, (3), then misdescribed the recovery
 for a fourth live bug (the missing egress grant for the login port), so the
 `lever down` + `lever up` requirement read as something the code detected and
-handled. The last, (4), was introduced by a fix in this same session.
+handled. (4) was introduced by a fix in this same session.
+
+(5) is a different animal, and worth naming as its own class. It did not
+drift — nothing in lever changed under it. It described what the flag meant to
+*lever* ("we set it only for remote access") and then asserted what *scion*
+does with it, which scion never did. A comment that states an upstream
+behaviour is a claim about a codebase nobody in this repo edits: no local
+change will ever invalidate it, and no local review will ever have reason to
+look at it again. It surfaced only because a fix was about to be built **on**
+the claim — a review finding said the hub "keeps `--enable-web`" when remote
+access is turned off — and the premise was checked against the pinned module
+before the fix was written. Had it been implemented as described, the
+"convergence" would have taken the instance down.
 
 ## Why it is worth a note
 

@@ -374,7 +374,7 @@ func loginErrorReason(location string) string {
 	if err != nil {
 		return ""
 	}
-	return truncatePath(u.Query().Get("error"))
+	return truncateAudit(u.Query().Get("error"))
 }
 
 func (d *LoginDriver) get(ctx context.Context, client *http.Client, rawURL string) (*http.Response, error) {

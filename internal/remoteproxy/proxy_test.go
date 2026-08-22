@@ -945,3 +945,106 @@ func TestHostGateRefusesDNSRebinding(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditFieldsAreBoundedOnEveryDecisionPath is the regression test for an
+// unbounded write to the operator's disk. Path, method and Tailscale-User-Login
+// are all chosen by the caller, and the gate audits DENIALS as well as allowed
+// requests — lines written before any identity check has passed. Without a cap,
+// anything that reaches the listener appends close to a megabyte per request
+// (http.Server's default MaxHeaderBytes) to remote-audit.jsonl, which sits in
+// the same state directory as the broker's own data. The provider's sink has
+// always bounded its path; this is the same file.
+func TestAuditFieldsAreBoundedOnEveryDecisionPath(t *testing.T) {
+	huge := strings.Repeat("A", 4096)
+	for _, tc := range []struct {
+		name     string
+		host     string
+		allowed  []string
+		pat      string
+		decision string
+	}{
+		{"denied before any identity check", "evil.example", nil, "scion_pat_x", "deny-host"},
+		{"denied by the allowlist", testServeHost, []string{"a@example.com"}, "scion_pat_x", "deny-user"},
+		{"denied for a missing PAT", testServeHost, nil, "", "deny-no-pat"},
+		{"allowed", testServeHost, nil, "scion_pat_x", "allow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub, _, _ := newFakeHub(t)
+			sink := &auditSink{}
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return tc.pat },
+				ServeHost: testServeHost, ListenPort: 8445, AllowedUsers: tc.allowed, Audit: sink.add})
+			req := httptest.NewRequest(huge, "/"+huge, nil)
+			req.Host = tc.host
+			req.Header.Set("Tailscale-User-Login", huge+"@example.com")
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			lines := sink.all()
+			if len(lines) != 1 {
+				t.Fatalf("%d audit lines, want exactly 1", len(lines))
+			}
+			l := lines[0]
+			if l.Decision != tc.decision {
+				t.Fatalf("decision = %q, want %q", l.Decision, tc.decision)
+			}
+			for _, f := range []struct{ name, value string }{
+				{"path", l.Path}, {"method", l.Method}, {"ts_login", l.TSLogin},
+			} {
+				if len(f.value) > maxAuditFieldLen+len("…") {
+					t.Errorf("audited %s is %d bytes, want at most %d", f.name, len(f.value), maxAuditFieldLen+len("…"))
+				}
+				if strings.Contains(f.value, huge) {
+					t.Errorf("audited %s carries the caller's text whole", f.name)
+				}
+			}
+		})
+	}
+}
+
+// TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy pins the split the bound
+// depends on: the audit line carries a truncated COPY of the tailnet login,
+// while every decision keeps using the value the front end actually sent.
+// Deciding on the truncated one would make any two logins sharing their first
+// maxAuditFieldLen bytes the same operator — one allowlist verdict and one hub
+// session between them.
+func TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy(t *testing.T) {
+	prefix := strings.Repeat("a", maxAuditFieldLen)
+	allowed := prefix + "-real@example.com"
+	twin := prefix + "-impostor@example.com"
+
+	hub, _, hits := newFakeHub(t)
+	sess := &stubSession{cookie: "sess-1"}
+	sink := &auditSink{}
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+		ServeHost: testServeHost, AllowedUsers: []string{allowed}, Session: sess, Audit: sink.add})
+
+	req := proxyRequest("GET", "/", nil)
+	req.Header.Set("Tailscale-User-Login", allowed)
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("the operator on the allowlist was refused: %d", rw.Code)
+	}
+
+	req = proxyRequest("GET", "/", nil)
+	req.Header.Set("Tailscale-User-Login", twin)
+	rw = httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("a login sharing the allowed one's first %d bytes was admitted: %d", maxAuditFieldLen, rw.Code)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("the hub was reached %d times, want 1 (only the allowed operator)", n)
+	}
+
+	// The hub session is keyed on the whole login too, so two operators can
+	// never end up sharing one.
+	if _, _, logins := sess.state(); len(logins) != 1 || logins[0] != allowed {
+		t.Fatalf("the hub login was performed for %q, want the untruncated %q", logins, allowed)
+	}
+	// What lands in the log is still the bounded copy.
+	for _, l := range sink.all() {
+		if len(l.TSLogin) > maxAuditFieldLen+len("…") {
+			t.Fatalf("audited ts_login is %d bytes, want at most %d", len(l.TSLogin), maxAuditFieldLen+len("…"))
+		}
+	}
+}

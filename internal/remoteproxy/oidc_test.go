@@ -360,8 +360,8 @@ func TestAuditPathIsBounded(t *testing.T) {
 	p, sink := newTestProvider(t, nil)
 	serveProvider(p, httptest.NewRequest(http.MethodGet, "/"+strings.Repeat("z", 4000), nil))
 	for _, l := range sink.all() {
-		if len(l.Path) > maxAuditPathLen+len("…") {
-			t.Fatalf("audited path length %d, want <= %d", len(l.Path), maxAuditPathLen)
+		if len(l.Path) > maxAuditFieldLen+len("…") {
+			t.Fatalf("audited path length %d, want <= %d", len(l.Path), maxAuditFieldLen)
 		}
 	}
 }

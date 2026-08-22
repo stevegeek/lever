@@ -139,6 +139,30 @@ type AuditLine struct {
 	Error string `json:"error,omitempty"`
 }
 
+// maxAuditFieldLen caps how much caller-chosen text any single audit field
+// carries. Every field of an AuditLine except Decision and Status is copied
+// from the request, and both sinks that write remote-audit.jsonl take input a
+// caller controls: the provider is reachable from anything inside the jail,
+// and the proxy's own gate audits every DENIAL too, which happens before any
+// identity check has passed. JSON encoding already makes an odd value
+// unambiguous — this bound is about the operator's disk. One request may carry
+// close to a megabyte of request line and headers (http.Server's default
+// MaxHeaderBytes), so without a cap a few thousand of them append gigabytes to
+// a file that lives in the same state directory as the broker's own data.
+const maxAuditFieldLen = 200
+
+// truncateAudit bounds one caller-chosen audit field. The ellipsis marks the
+// value as cut, so a truncated identity or path is never read as a whole one.
+// Callers must audit the truncated copy and DECIDE on the original: a
+// truncated login would collide with every other login sharing its first
+// maxAuditFieldLen bytes.
+func truncateAudit(v string) string {
+	if len(v) <= maxAuditFieldLen {
+		return v
+	}
+	return v[:maxAuditFieldLen] + "…"
+}
+
 // DefaultResponseHeaderTimeout bounds the wait for the hub's response
 // headers when Config leaves it unset. Generous on purpose: it is a
 // last-resort guard against a wedged jail, not a latency budget. The hub
@@ -294,7 +318,16 @@ func NewHandler(cfg Config) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		line := AuditLine{Time: time.Now().UTC(), TSLogin: r.Header.Get("Tailscale-User-Login"), Method: r.Method, Path: r.URL.Path}
+		// The identity the front end asserted, read once and used whole for
+		// every DECISION below (the allowlist, the hub login, the session
+		// cache key). The audit line gets bounded copies of it, of the path
+		// and of the method: all three are caller-chosen text, this line is
+		// written before any check has passed, and the provider's sink
+		// already bounds what it writes to the same file. Deciding on the
+		// truncated value instead would make every login sharing a
+		// maxAuditFieldLen-byte prefix the same operator.
+		login := r.Header.Get("Tailscale-User-Login")
+		line := AuditLine{Time: time.Now().UTC(), TSLogin: truncateAudit(login), Method: truncateAudit(r.Method), Path: truncateAudit(r.URL.Path)}
 		deny := func(status int, decision, msg string) {
 			line.Decision, line.Status = decision, status
 			if cfg.Audit != nil {
@@ -350,7 +383,7 @@ func NewHandler(cfg Config) http.Handler {
 				deny(http.StatusForbidden, "deny-user", "multiple Tailscale-User-Login headers refused")
 				return
 			}
-			if !slices.Contains(cfg.AllowedUsers, line.TSLogin) {
+			if !slices.Contains(cfg.AllowedUsers, login) {
 				deny(http.StatusForbidden, "deny-user", "tailscale identity not allowed")
 				return
 			}
@@ -373,7 +406,7 @@ func NewHandler(cfg Config) http.Handler {
 		// the proxy's life performs the login, and an instance nobody opens a
 		// browser at never logs in at all.
 		if cfg.Session != nil && !isAPIPath(r.URL.Path) {
-			cookie, err := cfg.Session.Cookie(r.Context(), line.TSLogin)
+			cookie, err := cfg.Session.Cookie(r.Context(), login)
 			if err != nil {
 				deny(http.StatusBadGateway, "deny-no-session", "hub login failed — see .lever-state/remote.log")
 				return
@@ -403,8 +436,8 @@ func NewHandler(cfg Config) http.Handler {
 		// login page it cannot complete (the login is server-side; the SPA's
 		// login button leads to an authorization endpoint that does not
 		// resolve, by design — see Provider.handleAuthorize).
-		cfg.Session.Invalidate(line.TSLogin, state.cookie)
-		cookie, err := cfg.Session.Cookie(r.Context(), line.TSLogin)
+		cfg.Session.Invalidate(login, state.cookie)
+		cookie, err := cfg.Session.Cookie(r.Context(), login)
 		if err != nil {
 			deny(http.StatusBadGateway, "deny-no-session", "hub login failed — see .lever-state/remote.log")
 			return

@@ -75,13 +75,6 @@ const (
 	// nowhere else, which is what proves the hub is configured against
 	// lever's provider rather than someone's real IdP.
 	DeadAuthorizationEndpoint = "https://lever.invalid/authorize"
-
-	// maxAuditPathLen caps how much of a requested path reaches the audit
-	// log. Anything inside the jail can probe this provider, and the path is
-	// attacker-chosen text; JSON encoding already makes it unambiguous, but
-	// there is no reason to let a prober write kilobytes into the operator's
-	// log per request.
-	maxAuditPathLen = 200
 )
 
 // Identity is the operator the provider asserts at /userinfo. The proxy fills
@@ -422,20 +415,12 @@ func (p *Provider) record(r *http.Request, decision string, status int, reason s
 	}
 	p.audit(AuditLine{
 		Time:     time.Now().UTC(),
-		Method:   r.Method,
-		Path:     truncatePath(r.URL.Path),
+		Method:   truncateAudit(r.Method),
+		Path:     truncateAudit(r.URL.Path),
 		Decision: decision,
 		Status:   status,
 		Error:    reason,
 	})
-}
-
-// truncatePath bounds attacker-chosen path text in the audit log.
-func truncatePath(p string) string {
-	if len(p) <= maxAuditPathLen {
-		return p
-	}
-	return p[:maxAuditPathLen] + "…"
 }
 
 // bearerToken extracts the token from an Authorization header value. The

@@ -91,9 +91,15 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 	defer removePIDFile(cfg.PIDPath)
 
-	servers := []*http.Server{newServer(cfg.Handler)}
+	// Each goroutine closes over its OWN *http.Server, never over the slice:
+	// appending the provider rewrites the slice header while the proxy's
+	// goroutine is already running, which is a genuine data race on that
+	// variable (caught by -race as soon as a test configured a provider). The
+	// slice is the shutdown list, and only this goroutine touches it.
+	proxySrv := newServer(cfg.Handler)
+	servers := []*http.Server{proxySrv}
 	serveErr := make(chan error, 2)
-	go func() { serveErr <- servers[0].Serve(ln) }()
+	go func() { serveErr <- proxySrv.Serve(ln) }()
 	if provLn != nil {
 		prov := newServer(cfg.Provider.Handler())
 		servers = append(servers, prov)

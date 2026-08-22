@@ -5,6 +5,27 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.18.1] - 2026-08-22
+
+### Changed
+
+- The scaffolded `lever-operator` skill now teaches the chat reply convention.
+  Its Messaging section said to "answer here", which is right only when the
+  message came from the session. A message delivered over a chat channel
+  carries `channel` and `thread_id` in its envelope and must be answered with
+  `scion message "<sender>" --channel <channel> --thread-id <thread_id>`; an
+  agent that does not know this acts on the request and appears to ignore it,
+  because the automatic per-turn mirror lands in a different surface and
+  carries no thread. Also states the `instruction` / `mention` distinction —
+  scion's protocol treats a mention as FYI — and that a chat message is still
+  owner-tier data, so an off-remit request is declined *in the thread* rather
+  than silently.
+
+  **Existing instances need `lever init` to pick this up**; the scaffold is
+  copied at init, not read from the binary at runtime.
+
+  This belongs with 0.18.0 and was cut minutes too late.
+
 ## [0.18.0] - 2026-08-22
 
 ### Added

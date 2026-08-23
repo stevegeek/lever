@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // directivePost posts {"id":id} to a directive route over the agent's own
 // mTLS channel and returns the raw JSON body on 200. Non-200 bodies are
 // deliberately terse (the broker's opaque contract) — surface them as-is.
 func directivePost(ctx context.Context, brokerURL string, client *http.Client, route, id string) (json.RawMessage, error) {
-	body, _ := json.Marshal(map[string]string{"id": id})
+	body, _ := json.Marshal(wire.DirectiveIDRequest{ID: id})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brokerURL+route, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -37,10 +39,10 @@ func directivePost(ctx context.Context, brokerURL string, client *http.Client, r
 // DirectiveConsume atomically consumes an operator directive over the
 // agent's mTLS channel. The returned JSON is the ONLY authoritative body.
 func DirectiveConsume(ctx context.Context, brokerURL string, client *http.Client, id string) (json.RawMessage, error) {
-	return directivePost(ctx, brokerURL, client, "/directive/consume", id)
+	return directivePost(ctx, brokerURL, client, wire.PathDirectiveConsume, id)
 }
 
 // DirectiveCheck reads a directive's status (target-gated, read-only).
 func DirectiveCheck(ctx context.Context, brokerURL string, client *http.Client, id string) (json.RawMessage, error) {
-	return directivePost(ctx, brokerURL, client, "/directive/check", id)
+	return directivePost(ctx, brokerURL, client, wire.PathDirectiveCheck, id)
 }

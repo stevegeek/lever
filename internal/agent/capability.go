@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // Client builds an mTLS http.Client presenting this identity's cert and trusting
@@ -35,11 +36,9 @@ func (id Identity) Client() (*http.Client, error) {
 // Request mints a capability token via the broker's /request endpoint. boundTo is
 // the caller (self-obtain) or another agent (delegation). Returns the base64url token.
 func Request(ctx context.Context, brokerURL string, client *http.Client, tool, op, boundTo string, constraints map[string]string) (string, error) {
-	var cr struct {
-		Token string `json:"token"`
-	}
-	in := map[string]any{"tool": tool, "op": op, "bound_to": boundTo, "constraints": constraints}
-	if err := httpjson.Post(ctx, client, brokerURL+"/request", in, &cr); err != nil {
+	var cr wire.CapResponse
+	in := wire.CapRequest{Tool: tool, Op: op, BoundTo: boundTo, Constraints: constraints}
+	if err := httpjson.Post(ctx, client, brokerURL+wire.PathRequest, in, &cr); err != nil {
 		return "", fmt.Errorf("agent: request: %w", err)
 	}
 	return cr.Token, nil

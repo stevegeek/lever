@@ -1,9 +1,6 @@
-package brokerctl
+package state
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -29,7 +26,7 @@ import (
 // Deliberately NOT brokerctl.ConfigHash: that covers Broker/Workers/Scion, none
 // of which the proxy reads, and a broker-only change must not bounce the proxy.
 //
-// Like ConfigHash, a marshal failure yields "" — a guaranteed mismatch, so the
+// Like brokerctl.ConfigHash, a marshal failure yields "" — a guaranteed mismatch, so the
 // proxy restarts. Failing toward a restart is right for a component whose whole
 // job is refusing unauthorized requests.
 func RemoteConfigHash(app *config.App) string {
@@ -38,16 +35,11 @@ func RemoteConfigHash(app *config.App) string {
 	// machineName) and Backend gates which transport it uses. Renaming the
 	// instance would otherwise leave a running proxy fronting the OLD
 	// machine's hub while apply happily reused it.
-	j, err := json.Marshal(struct {
+	return HashJSON(struct {
 		Remote  config.Remote
 		Name    string
 		Backend string
 	}{app.Remote, app.Name, app.Backend})
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(j)
-	return hex.EncodeToString(sum[:])
 }
 
 // remoteStampContent is the stamp's on-disk form: the lever version, the
@@ -65,13 +57,9 @@ func remoteStampContent(version, hash string, pid int) string {
 // than os.Getpid(), so the stamp is only ever a statement about the process
 // that currently owns the pid file, whoever wrote it.
 func (s State) remoteProxyPID() (int, error) {
-	b, err := os.ReadFile(s.RemotePID())
+	pid, err := ReadPID(s.RemotePID())
 	if err != nil {
-		return 0, fmt.Errorf("brokerctl: the remote stamp describes the pid in %s: %w", s.RemotePID(), err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		return 0, fmt.Errorf("brokerctl: %s does not contain a pid", s.RemotePID())
+		return 0, fmt.Errorf("state: the remote stamp describes the pid in %s: %w", s.RemotePID(), err)
 	}
 	return pid, nil
 }

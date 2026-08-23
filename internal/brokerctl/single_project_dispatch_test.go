@@ -33,6 +33,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // fakeWorkerRuntime is a minimal broker.WorkerRuntime fake local to this
@@ -168,11 +169,11 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registry.Select: %v", err)
 	}
-	state := StateDir(t.TempDir())
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
-	if err := decorateConfig(&cfg, app, state, be, "test"); err != nil {
+	if err := decorateConfig(&cfg, app, st, be, "test", ServeEnv{}); err != nil {
 		t.Fatalf("decorateConfig: %v", err)
 	}
 	if cfg.InstanceProject != jailMount {

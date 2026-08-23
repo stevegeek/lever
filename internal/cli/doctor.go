@@ -12,6 +12,7 @@ import (
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 func newDoctorCmd(factory BackendFactory) *cobra.Command {
@@ -74,7 +75,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 // runDoctorChecks evaluates every health check in report order. The order is
 // the order an operator reads: process liveness first, then the pieces each
 // later check depends on. Tests pin it.
-func runDoctorChecks(ctx context.Context, app *config.App, state brokerctl.State, b backend.Backend, probes doctorProbes) []checkResult {
+func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b backend.Backend, probes doctorProbes) []checkResult {
 	jr := b.JailRunner()
 	project := hubProjectKey(b.MountDest())
 
@@ -105,7 +106,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state brokerctl.State
 		func() checkResult { return checkMcpJsonInTree(app.Tree) },
 		func() checkResult { return checkGoToolchain(app.Scion, probes) },
 		func() checkResult { return checkNodeToolchain(app, probes) },
-		func() checkResult { return checkOperatorSkills(app, state.Dir) },
+		func() checkResult { return checkOperatorSkills(app, state) },
 		func() checkResult { return checkDirectives(app, state) },
 		func() checkResult { return checkRemote(ctx, app, state, probes, jr) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },

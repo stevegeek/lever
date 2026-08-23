@@ -31,6 +31,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // fakeMCP is a plain (non-captool) MCP server: it records the last body it
@@ -132,8 +133,8 @@ broker:
 		t.Fatalf("config.Load: %v", err)
 	}
 
-	state := StateDir(work)
-	kp, caInst, err := state.EnsureKeys()
+	st := state.ForConfig(work)
+	kp, caInst, err := EnsureKeys(st)
 	if err != nil {
 		t.Fatal(err)
 	}

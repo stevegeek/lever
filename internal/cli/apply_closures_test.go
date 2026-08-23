@@ -20,6 +20,7 @@ import (
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // buildDepsAgainstFakeBroker loads writeTmpConfig's app, points its broker
@@ -28,7 +29,7 @@ import (
 // fake instead of a real broker. srv MUST already be started (its port is read
 // from srv.URL). The returned app is the one buildApplyDeps captured, so its
 // EffectiveJailPort()/ManagerCN()/ConfigHash feed the closures under test.
-func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps, *config.App, brokerctl.State, string) {
+func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps, *config.App, state.State, string) {
 	t.Helper()
 	// Never let a test spawn a real broker. os.Args[0] here is the TEST BINARY,
 	// and brokerServeCmd detaches the child with Setsid, so any spawn outlives
@@ -96,12 +97,12 @@ func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	defer srv.Close()
 
 	var deps apply.Deps
-	var state brokerctl.State
-	deps, app, state, _ = buildDepsAgainstFakeBroker(t, srv)
+	var st state.State
+	deps, app, st, _ = buildDepsAgainstFakeBroker(t, srv)
 
 	// Seed broker.pid as a directory: the restart branch reads it via StopBroker
 	// and would error; the reuse branch never touches it.
-	if err := os.MkdirAll(state.PID(), 0o755); err != nil {
+	if err := os.MkdirAll(st.PID(), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -134,10 +135,10 @@ func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 	defer srv.Close()
 
 	var deps apply.Deps
-	var state brokerctl.State
-	deps, app, state, _ = buildDepsAgainstFakeBroker(t, srv)
+	var st state.State
+	deps, app, st, _ = buildDepsAgainstFakeBroker(t, srv)
 
-	if err := os.MkdirAll(state.PID(), 0o755); err != nil {
+	if err := os.MkdirAll(st.PID(), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

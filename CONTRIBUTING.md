@@ -18,9 +18,10 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/backend` | The containment `Backend` contract and the `Candidates` guarantee matrix. `common` (shared machinery for reach-the-guest backends), `guest` (the in-guest half of provisioning: argv-prefix transport, in-guest scripts, installing what `internal/provision` built, scion state and hub-login settings surgery), `lima`, `orbstack`, `registry` (name → constructor, jail argv). |
 | `internal/bridge` | Poll-based scion-event → events-file bridge the manager watches. |
 | `internal/broker` | The capability broker: enrol, request/delegate, MCP gateway, llm proxy, directives. `registry` (tool/operation registry and constraint mapping), `rules` (obtain/delegate policy). |
-| `internal/brokerctl` | Host-side controller for the broker daemon: state dir, keys, `serve`, tool supervisor, health. |
+| `internal/brokerctl` | Host-side controller for the broker daemon: keys, `serve`, tool supervisor, stop. |
 | `internal/cap` | Capability primitives: `ca` (instance CA, mTLS, rotation), `token` (Ed25519 capability tokens). |
 | `internal/cli` | Cobra commands for `lever` and `lever-manager`. |
+| `internal/daemon` | Pid-file and listener bookkeeping shared by the host-side daemons. |
 | `internal/config` | `lever.yaml` schema, loading and validation. |
 | `internal/egress` | Jail egress allowlist as iptables/ip6tables rules. |
 | `internal/exec` | The single seam to external commands (`Runner`, `FakeRunner`). |
@@ -31,6 +32,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy and local OIDC provider. |
 | `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys, the oidc_login block and YAML edit helpers). |
 | `internal/skills` | Framework-authored SKILL.md files scaffolded into instances. |
+| `internal/state` | The `.lever-state` directory layout and its file helpers: JSON state, 0600 secrets, pid files, the remote-proxy stamp. |
 | `internal/wire` | Agent⇄broker wire types (bootstrap material). |
 | `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |
 | `examples/` | Runnable instances used by docs and tests. |

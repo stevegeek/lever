@@ -7,8 +7,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,10 +14,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 func newRemoteCmd(bf BackendFactory) *cobra.Command {
@@ -55,7 +53,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			if app.Backend != "orbstack" {
 				return fmt.Errorf("remote access requires the orbstack backend in v1 (the Lima path is not live-validated yet)")
 			}
-			state := stateFor(path)
+			st := stateFor(path)
 
 			// The hub's address INSIDE the guest, which is where the dialer
 			// lands — so this is also the correct Host header. It is
@@ -65,7 +63,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			auditFn, auditCloser, err := remoteproxy.OpenAudit(state.RemoteAudit())
+			auditFn, auditCloser, err := remoteproxy.OpenAudit(st.RemoteAudit())
 			if err != nil {
 				return err
 			}
@@ -99,7 +97,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			handler := remoteproxy.NewHandler(remoteproxy.Config{
 				Target:      target,
 				DialContext: dial,
-				PAT:         func() string { pat, _ := state.LoadRemotePAT(); return pat },
+				PAT:         func() string { pat, _ := st.LoadRemotePAT(); return pat },
 				ServeHost:   remoteServeHost(app.Remote.BaseURL),
 				// So the Host gate admits `lever doctor`'s loopback /healthz
 				// probe without widening the allowlist beyond this one port.
@@ -117,7 +115,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			return remoteproxy.Serve(ctx, remoteproxy.ServeConfig{
 				Port:     port,
 				Handler:  handler,
-				PIDPath:  state.RemotePID(),
+				PIDPath:  st.RemotePID(),
 				Provider: provider,
 				// Record the config THIS process actually loaded, not the one
 				// whoever started it believes is running. `lever apply` reuses
@@ -128,7 +126,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 				// what stops a hand-started proxy from inheriting the record
 				// of an apply-started one. See ServeConfig.Stamp.
 				Stamp: func() error {
-					return state.WriteRemoteStamp(versionString(), brokerctl.RemoteConfigHash(app))
+					return st.WriteRemoteStamp(versionString(), state.RemoteConfigHash(app))
 				},
 			})
 		},
@@ -157,7 +155,7 @@ const jailResolveTimeout = 15 * time.Second
 // rebuilt jail with a different run user therefore needs a proxy restart — and
 // `lever apply` does NOT give you one: its reuse check compares the lever
 // version, the `remote:` block, the instance name and the backend
-// (brokerctl.RemoteConfigHash), none of which a jail rebuild changes, so a
+// (state.RemoteConfigHash), none of which a jail rebuild changes, so a
 // matching stamp keeps the old process and its stale prefix. Use `lever stop`
 // + `lever up` after rebuilding the jail. (Verified against
 // remoteController.Start; the comment used to claim the opposite.)
@@ -267,10 +265,10 @@ func newRemoteStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			state := stateFor(path)
+			st := stateFor(path)
 			port := app.EffectiveRemotePort()
 
-			pid, found, alive := remotePIDStatus(state.RemotePID())
+			pid, found, alive := state.PIDStatus(st.RemotePID())
 			switch {
 			case !found:
 				cmd.Println("proxy: not running (no remote.pid)")
@@ -305,7 +303,7 @@ func newRemoteStatusCmd() *cobra.Command {
 				cmd.Println("base_url not set — remote access needs both `remote.enabled: true` and `remote.base_url` (the tailnet serve hostname) set in lever.yaml; set both, then `lever apply`")
 			}
 
-			if _, err := os.Stat(state.RemotePAT()); err == nil {
+			if _, err := os.Stat(st.RemotePAT()); err == nil {
 				cmd.Println("remote PAT: present")
 			} else {
 				cmd.Println("remote PAT: absent — run `lever apply` to mint it")
@@ -313,30 +311,4 @@ func newRemoteStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
-}
-
-// remotePIDStatus reads the recorded proxy pid at path and reports whether
-// that process is currently alive. Same read-only signal-0 technique as
-// brokerctl.State.BrokerPIDStatus, duplicated here rather than shared
-// because that method is hardwired to the broker's own pid path, not an
-// arbitrary one.
-//
-//   - found=false: no pid file (proxy never started, or cleanly stopped).
-//   - found=true, alive=false: a stale pid file — the process is gone (or
-//     the file is garbage).
-//   - found=true, alive=true: the recorded process is running.
-func remotePIDStatus(path string) (pid int, found, alive bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false, false
-	}
-	pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0, true, false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return pid, true, false
-	}
-	return pid, true, proc.Signal(syscall.Signal(0)) == nil
 }

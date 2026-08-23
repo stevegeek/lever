@@ -1,4 +1,4 @@
-package brokerctl
+package state
 
 import (
 	"errors"
@@ -27,7 +27,7 @@ func runningProxyPID(t *testing.T, s State, pid int) {
 // every doubt reads as a mismatch (so the proxy restarts rather than serving a
 // config the operator has since changed).
 func TestRemoteStampRoundTripAndMismatch(t *testing.T) {
-	s := StateDir(t.TempDir())
+	s := ForConfig(t.TempDir())
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestRemoteConfigHashCoversWhatTheProxyCaptures(t *testing.T) {
 // remoteproxy.Serve now writes the stamp itself, and the stamp names its pid,
 // so a starter that takes the pid file without stamping cannot inherit one.
 func TestRemoteStampIsBoundToTheProxyThatOwnsThePIDFile(t *testing.T) {
-	s := StateDir(t.TempDir())
+	s := ForConfig(t.TempDir())
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestRemoteStampIsBoundToTheProxyThatOwnsThePIDFile(t *testing.T) {
 // only safe because a failure leaves NO stamp. An absent stamp costs the next
 // apply a redundant restart; a stale one costs it the check entirely.
 func TestWriteRemoteStampLeavesNoStaleRecordOnFailure(t *testing.T) {
-	s := StateDir(t.TempDir())
+	s := ForConfig(t.TempDir())
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

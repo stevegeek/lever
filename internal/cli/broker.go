@@ -13,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -31,8 +32,8 @@ func loadAppArg(args []string) (*config.App, error) {
 }
 
 // stateFor returns the broker state dir for an app (beside the config file).
-func stateFor(path string) brokerctl.State {
-	return brokerctl.StateDir(filepath.Dir(path))
+func stateFor(path string) state.State {
+	return state.ForConfig(filepath.Dir(path))
 }
 
 func newBrokerServeCmd() *cobra.Command {
@@ -52,7 +53,7 @@ func newBrokerServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			cmd.Printf("broker %q serving on 127.0.0.1:%d (admin :%d)\n", app.Name, app.EffectiveJailPort(), app.EffectiveAdminPort())
-			return brokerctl.Serve(ctx, app, stateFor(path), versionString())
+			return brokerctl.Serve(ctx, app, stateFor(path), versionString(), brokerctl.ServeEnvFromOS())
 		},
 	}
 }

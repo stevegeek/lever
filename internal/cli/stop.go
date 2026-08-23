@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // newStopCmd powers the jail machine off while keeping its disk, so a
@@ -25,12 +26,12 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// alone: stop preserves everything for a fast resume.
 			ia := loadInstanceApp()
 			var appName string
-			var state brokerctl.State // set alongside appName; valid whenever appName != ""
+			var st state.State // set alongside appName; valid whenever appName != ""
 			if ia.app != nil {
-				state = stateFor(ia.path)
+				st = stateFor(ia.path)
 				appName = ia.app.Name
 				if *machine == "" {
-					stopHostDaemons(cmd, state)
+					stopHostDaemons(cmd, st)
 				}
 			}
 			if *machine != "" {
@@ -57,13 +58,13 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-					// state was set alongside appName above; HostScionClient's
+					// st was set alongside appName above; HostScionClient's
 					// HubTokenSource lets suspend authenticate against the real,
 					// dev-auth-off hub with the controller PAT minted by a prior
 					// `lever apply`.
 					// Empty agent role: this client only calls Suspend, and only
 					// start emits --role.
-					sc := brokerctl.HostScionClient(b.JailRunner(), state, "")
+					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %v\n", serr)
 					}
@@ -86,11 +87,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 // the broker, then the remote-access proxy. Both are idempotent, so this is
 // safe even when no proxy was ever started (no remote.pid ⇒ no-op). Failures
 // are warnings: the VM-side teardown that follows must still run.
-func stopHostDaemons(cmd *cobra.Command, st brokerctl.State) {
-	if err := st.StopBroker(); err != nil {
+func stopHostDaemons(cmd *cobra.Command, st state.State) {
+	if err := brokerctl.StopBroker(st); err != nil {
 		cmd.PrintErrf("warning: stopping broker: %v\n", err)
 	}
-	if err := st.StopRemoteProxy(); err != nil {
+	if err := brokerctl.StopRemoteProxy(st); err != nil {
 		cmd.PrintErrf("warning: stopping remote proxy: %v\n", err)
 	}
 }

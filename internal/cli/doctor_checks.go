@@ -18,13 +18,13 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // checkResult is one diagnostic outcome. detail is shown in both the pass and
@@ -94,7 +94,7 @@ var doctorHTTPClient = &http.Client{Timeout: 3 * time.Second}
 // stateRel renders a state-dir file the way doctor's fix text names it:
 // relative to the instance root (".lever-state/remote.log"), never the
 // absolute path.
-func stateRel(st brokerctl.State, path string) string {
+func stateRel(st state.State, path string) string {
 	return filepath.Join(filepath.Base(st.Dir), filepath.Base(path))
 }
 
@@ -120,9 +120,9 @@ func checkListeningProcess(name, pidFile, what, logFile, startFix string, status
 
 // checkBrokerAlive verifies the recorded broker process is alive AND actually
 // listening on the jail port.
-func checkBrokerAlive(st brokerctl.State, jailPort int, p doctorProbes) checkResult {
+func checkBrokerAlive(st state.State, jailPort int, p doctorProbes) checkResult {
 	return checkListeningProcess("broker running", "broker.pid", "the broker", stateRel(st, st.Log()),
-		"run `lever apply` or `lever up`", st.BrokerPIDStatus, fmt.Sprintf("127.0.0.1:%d", jailPort), p.dial)
+		"run `lever apply` or `lever up`", func() (int, bool, bool) { return state.PIDStatus(st.PID()) }, fmt.Sprintf("127.0.0.1:%d", jailPort), p.dial)
 }
 
 // remoteHealthzProbe issues GET /healthz against the local remote-access
@@ -261,7 +261,7 @@ func isLoopbackURL(raw string) bool {
 // chain worked at the time of the FIRST login since the hub started — not
 // that it is reachable this second. The forwarder dying after that (a guest
 // reboot, say) surfaces on the next cold login, not here.
-func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner, st brokerctl.State, p doctorProbes) (detail string, fix string, ok bool) {
+func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner, st state.State, p doctorProbes) (detail string, fix string, ok bool) {
 	if jr == nil {
 		return "", "", true // no jail transport wired (tests)
 	}
@@ -313,26 +313,26 @@ func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner, st brokerctl
 // (delete remote.pat, then `lever apply`) is the same shape as the
 // documented controller-PAT re-mint, default expiry 90d (see the
 // remote-access guide).
-func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, p doctorProbes, jr leverexec.Runner) checkResult {
+func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorProbes, jr leverexec.Runner) checkResult {
 	const name = "remote access"
 	if !app.RemoteEnabled() {
 		return checkResult{name, true, "disabled", ""}
 	}
 	const applyFix = "run `lever apply`"
-	remoteLog := stateRel(state, state.RemoteLog())
+	remoteLog := stateRel(st, st.RemoteLog())
 	port := app.EffectiveRemotePort()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	alive := checkListeningProcess(name, "remote.pid", "the proxy", remoteLog, applyFix,
-		func() (int, bool, bool) { return remotePIDStatus(state.RemotePID()) }, addr, p.dial)
+		func() (int, bool, bool) { return state.PIDStatus(st.RemotePID()) }, addr, p.dial)
 	if !alive.ok {
 		return alive
 	}
-	fi, err := os.Stat(state.RemotePAT())
+	fi, err := os.Stat(st.RemotePAT())
 	switch {
 	case err != nil:
 		return checkResult{name, false, "remote.pat is missing", applyFix}
 	case fi.Mode().Perm()&0o077 != 0:
-		return checkResult{name, false, fmt.Sprintf("remote.pat has mode %04o (group/other-accessible, want 0600)", fi.Mode().Perm()), "chmod 600 " + state.RemotePAT()}
+		return checkResult{name, false, fmt.Sprintf("remote.pat has mode %04o (group/other-accessible, want 0600)", fi.Mode().Perm()), "chmod 600 " + st.RemotePAT()}
 	}
 	// The login checks run BEFORE the end-to-end /healthz probe, and that
 	// order is load-bearing. /healthz is not an API path, so the proxy opens a
@@ -366,7 +366,7 @@ func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, p 
 		return checkResult{name, false, fmt.Sprintf("OIDC discovery advertises an authorization endpoint on loopback (%s), which the jail can reach", login.authzURL),
 			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
 	}
-	if detail, fix, ok := checkRemoteLoginPath(ctx, jr, state, p); !ok {
+	if detail, fix, ok := checkRemoteLoginPath(ctx, jr, st, p); !ok {
 		return checkResult{name, false, detail, fix}
 	}
 
@@ -377,7 +377,7 @@ func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, p 
 		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect " + remoteLog + " — the hub may be down, or the proxy misconfigured"}
 	}
 	if status != http.StatusOK {
-		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect " + remoteLog + " and " + stateRel(state, state.RemoteAudit())}
+		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect " + remoteLog + " and " + stateRel(st, st.RemoteAudit())}
 	}
 	return checkResult{name, true, alive.detail + fmt.Sprintf(", PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", loginPort), ""}
 }
@@ -755,7 +755,7 @@ func checkNodeToolchain(app *config.App, p doctorProbes) checkResult {
 // Drift PAST an adopted baseline is called out separately: the scaffolds live
 // inside the agent-writable tree, so unexplained change there is the tamper
 // signal this check exists for.
-func checkOperatorSkills(app *config.App, stateDir string) checkResult {
+func checkOperatorSkills(app *config.App, stateDir state.State) checkResult {
 	const name = "operator skills"
 	results, err := syncSkills(app, stateDir, false, true)
 	if err != nil {
@@ -851,7 +851,7 @@ func checkOperatorSkills(app *config.App, stateDir string) checkResult {
 // verification), and — when the broker is actually up — a missing directive
 // socket (serve.go creates it at startup; its absence means directives can't
 // reach the broker even though everything else looks configured).
-func checkDirectives(app *config.App, st brokerctl.State) checkResult {
+func checkDirectives(app *config.App, st state.State) checkResult {
 	const name = "operator directives"
 	if !app.DirectivesEnabled() {
 		return checkResult{name, true, "not configured (operator.allowed_signers unset)", ""}
@@ -870,7 +870,7 @@ func checkDirectives(app *config.App, st brokerctl.State) checkResult {
 		return checkResult{name, false, "ssh-keygen not found on PATH (directive signing/verification shells out to it)",
 			"install the OpenSSH client tools so `ssh-keygen` resolves on PATH"}
 	}
-	_, found, alive := st.BrokerPIDStatus()
+	_, found, alive := state.PIDStatus(st.PID())
 	if !found || !alive {
 		return checkResult{name, true, fmt.Sprintf("allowed_signers: %d key(s); broker not running (socket check skipped)", n), ""}
 	}
@@ -918,7 +918,7 @@ const brokerLogTailBytes = 64 << 10
 // own log; a host-side CA check reads green throughout it (the CA is long-lived,
 // it's the leaf that died). So this scans broker.out.log for the exact
 // fingerprint rather than inspecting any cert file.
-func checkAgentCert(st brokerctl.State, now time.Time) checkResult {
+func checkAgentCert(st state.State, now time.Time) checkResult {
 	const name = "agent certificate"
 	latest, found, err := scanBrokerLogCertExpiry(st.OutLog())
 	switch {

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 func TestClearStagedRuntimeState(t *testing.T) {
@@ -53,7 +53,7 @@ func TestClearStagedRuntimeStateMissingIsNoop(t *testing.T) {
 // later `up` mints a fresh one — the old PAT is signed against the hub DB that
 // died with the machine, and reusing it fails the new hub's readiness auth.
 func TestRemoveControllerPAT(t *testing.T) {
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestRemoveControllerPAT(t *testing.T) {
 
 func TestRemoveControllerPATMissingIsNoop(t *testing.T) {
 	// No PAT staged: destroy must not error.
-	if err := removeIfPresent(brokerctl.StateDir(t.TempDir()).ControllerPAT()); err != nil {
+	if err := removeIfPresent(state.ForConfig(t.TempDir()).ControllerPAT()); err != nil {
 		t.Fatalf("missing PAT must be a no-op, got %v", err)
 	}
 }
@@ -83,7 +83,7 @@ func TestRemoveControllerPATMissingIsNoop(t *testing.T) {
 // remote.pat after a fresh `up` and skips the re-mint, so the remote proxy
 // would inject a token the new hub's DB has never heard of.
 func TestRemoveRemotePAT(t *testing.T) {
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestRemoveRemotePAT(t *testing.T) {
 
 func TestRemoveRemotePATMissingIsNoop(t *testing.T) {
 	// No remote PAT staged (remote never enabled): destroy must not error.
-	if err := removeIfPresent(brokerctl.StateDir(t.TempDir()).RemotePAT()); err != nil {
+	if err := removeIfPresent(state.ForConfig(t.TempDir()).RemotePAT()); err != nil {
 		t.Fatalf("missing remote PAT must be a no-op, got %v", err)
 	}
 }
@@ -121,8 +121,8 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	dir := instanceDir(t, "demo")
 	t.Chdir(dir)
 
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// A real child of this test, not the test's own pid: destroy kills
@@ -132,12 +132,12 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = proxy.Process.Kill(); _, _ = proxy.Process.Wait() })
-	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Written as bytes rather than through WriteRemoteStamp: what matters here
 	// is only that destroy REMOVES it, whatever it holds.
-	if err := os.WriteFile(state.RemoteStamp(), []byte("v0.17.0 deadbeef\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemoteStamp(), []byte("v0.17.0 deadbeef\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -164,10 +164,10 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the remote proxy outlived `lever destroy`: it keeps serving a destroyed instance, and the next `up` would reuse it")
 	}
-	if _, err := os.Stat(state.RemotePID()); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(st.RemotePID()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("remote.pid should be removed by destroy, stat err = %v", err)
 	}
-	if _, err := os.Stat(state.RemoteStamp()); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(st.RemoteStamp()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("remote.stamp should be removed by destroy — a surviving stamp is what makes a later `up` accept a stale proxy as current; stat err = %v", err)
 	}
 }

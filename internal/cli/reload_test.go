@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // reload must stop the running broker BEFORE it does anything else, so the
@@ -18,7 +18,7 @@ import (
 // before failing — StopBroker precedes buildApplyDeps.
 func TestReloadStopsBrokerBeforeApply(t *testing.T) {
 	p := writeTmpConfig(t)
-	stateDir := brokerctl.StateDir(filepath.Dir(p))
+	stateDir := state.ForConfig(filepath.Dir(p))
 	if err := os.MkdirAll(stateDir.Dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -13,17 +13,17 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
 // newDirectiveCmd is the operator's authenticated channel to a running agent:
 // send/list/revoke signed directives, plus a selftest that probes the
 // signing key against the broker's allowed_signers. Every subcommand talks
-// to the broker's 0600 UNIX-socket admin channel (brokerctl.State.DirectiveSock),
+// to the broker's 0600 UNIX-socket admin channel (state.State.DirectiveSock),
 // never the loopback admin port — filesystem permissions are the gate.
 func newDirectiveCmd() *cobra.Command {
 	c := &cobra.Command{Use: "directive", Short: "Send authenticated operator directives to an agent"}
@@ -49,14 +49,14 @@ func udsClient(sock string) *http.Client {
 // newBrokerServeCmd's path+app+stateFor sequence (broker.go) since directive
 // commands need all three: app for Name/Operator/expiry accessors, state for
 // DirectiveSock.
-func loadAppAndState(args []string) (*config.App, brokerctl.State, error) {
+func loadAppAndState(args []string) (*config.App, state.State, error) {
 	path, err := resolveConfigPath(argOrEmpty(args))
 	if err != nil {
-		return nil, brokerctl.State{}, err
+		return nil, state.State{}, err
 	}
 	app, err := config.Load(path)
 	if err != nil {
-		return nil, brokerctl.State{}, err
+		return nil, state.State{}, err
 	}
 	return app, stateFor(path), nil
 }

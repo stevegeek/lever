@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // workerInstanceDir writes a canonical lever.yaml declaring one worker ("scratch")
@@ -54,7 +54,7 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	// Seed the controller PAT so purge's scion delete client authenticates with
 	// it via HubTokenSource: guards the source wiring (a dropped source would
 	// delete anonymously against the dev-auth-off hub).
-	if err := brokerctl.StateDir(dir).SaveControllerPAT("pat-worker-purge"); err != nil {
+	if err := state.ForConfig(dir).SaveControllerPAT("pat-worker-purge"); err != nil {
 		t.Fatal(err)
 	}
 

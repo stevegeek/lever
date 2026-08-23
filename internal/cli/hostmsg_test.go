@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // hostMsgInstanceDir writes a canonical lever.yaml declaring a "scratch" worker
@@ -43,7 +43,7 @@ func TestHostMsgSendToManager(t *testing.T) {
 	// Seed the controller PAT so `msg send`'s scion client authenticates with
 	// it via HubTokenSource: guards that the source wiring survives (a dropped
 	// source would send anonymously against the dev-auth-off hub).
-	if err := brokerctl.StateDir(dir).SaveControllerPAT("pat-hostmsg-send"); err != nil {
+	if err := state.ForConfig(dir).SaveControllerPAT("pat-hostmsg-send"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -7,18 +7,20 @@ import (
 	"os/exec"
 	"syscall"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/state"
 )
 
 func TestStopBrokerNoPidFileIsNoop(t *testing.T) {
-	s := State{Dir: t.TempDir()}
-	if err := s.StopBroker(); err != nil {
+	s := state.State{Dir: t.TempDir()}
+	if err := StopBroker(s); err != nil {
 		t.Fatalf("StopBroker with no pid file must be a no-op, got %v", err)
 	}
 }
 
 func TestStopBrokerKillsProcessAndRemovesPidFile(t *testing.T) {
 	dir := t.TempDir()
-	s := State{Dir: dir}
+	s := state.State{Dir: dir}
 
 	// A real long-lived child stands in for the broker process.
 	cmd := exec.Command("sleep", "60")
@@ -32,7 +34,7 @@ func TestStopBrokerKillsProcessAndRemovesPidFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.StopBroker(); err != nil {
+	if err := StopBroker(s); err != nil {
 		t.Fatalf("StopBroker: %v", err)
 	}
 
@@ -50,14 +52,14 @@ func TestStopBrokerKillsProcessAndRemovesPidFile(t *testing.T) {
 
 func TestStopBrokerGarbagePidFileCleared(t *testing.T) {
 	dir := t.TempDir()
-	s := State{Dir: dir}
+	s := state.State{Dir: dir}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(s.PID(), []byte("not-a-pid\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StopBroker(); err != nil {
+	if err := StopBroker(s); err != nil {
 		t.Fatalf("StopBroker with garbage pid must not error, got %v", err)
 	}
 	if _, err := os.Stat(s.PID()); !errors.Is(err, os.ErrNotExist) {
@@ -66,8 +68,8 @@ func TestStopBrokerGarbagePidFileCleared(t *testing.T) {
 }
 
 func TestStopRemoteProxyNoPidFileIsNoop(t *testing.T) {
-	s := State{Dir: t.TempDir()}
-	if err := s.StopRemoteProxy(); err != nil {
+	s := state.State{Dir: t.TempDir()}
+	if err := StopRemoteProxy(s); err != nil {
 		t.Fatalf("StopRemoteProxy with no pid file must be a no-op, got %v", err)
 	}
 }
@@ -78,7 +80,7 @@ func TestStopRemoteProxyNoPidFileIsNoop(t *testing.T) {
 // real kill mechanism, not just its no-op paths.
 func TestStopRemoteProxyKillsProcessAndRemovesPidFile(t *testing.T) {
 	dir := t.TempDir()
-	s := State{Dir: dir}
+	s := state.State{Dir: dir}
 
 	// A real long-lived child stands in for the remote proxy process.
 	cmd := exec.Command("sleep", "60")
@@ -92,7 +94,7 @@ func TestStopRemoteProxyKillsProcessAndRemovesPidFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.StopRemoteProxy(); err != nil {
+	if err := StopRemoteProxy(s); err != nil {
 		t.Fatalf("StopRemoteProxy: %v", err)
 	}
 
@@ -108,14 +110,14 @@ func TestStopRemoteProxyKillsProcessAndRemovesPidFile(t *testing.T) {
 
 func TestStopRemoteProxyGarbagePidFileCleared(t *testing.T) {
 	dir := t.TempDir()
-	s := State{Dir: dir}
+	s := state.State{Dir: dir}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(s.RemotePID(), []byte("not-a-pid\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StopRemoteProxy(); err != nil {
+	if err := StopRemoteProxy(s); err != nil {
 		t.Fatalf("StopRemoteProxy with garbage pid must not error, got %v", err)
 	}
 	if _, err := os.Stat(s.RemotePID()); !errors.Is(err, os.ErrNotExist) {
@@ -128,7 +130,7 @@ func TestStopRemoteProxyGarbagePidFileCleared(t *testing.T) {
 // or pid file.
 func TestStopBrokerAndStopRemoteProxyAreIndependent(t *testing.T) {
 	dir := t.TempDir()
-	s := State{Dir: dir}
+	s := state.State{Dir: dir}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +152,7 @@ func TestStopBrokerAndStopRemoteProxyAreIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.StopRemoteProxy(); err != nil {
+	if err := StopRemoteProxy(s); err != nil {
 		t.Fatalf("StopRemoteProxy: %v", err)
 	}
 	_ = remoteCmd.Wait()

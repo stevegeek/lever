@@ -1,6 +1,8 @@
 package brokerctl
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +32,7 @@ func (s State) PID() string           { return filepath.Join(s.Dir, "broker.pid"
 func (s State) Log() string           { return filepath.Join(s.Dir, "broker.log") }
 func (s State) OutLog() string        { return filepath.Join(s.Dir, "broker.out.log") }
 func (s State) ControllerPAT() string { return filepath.Join(s.Dir, "controller.pat") }
+func (s State) SessionSecret() string { return filepath.Join(s.Dir, "session-secret") }
 func (s State) RemotePAT() string     { return filepath.Join(s.Dir, "remote.pat") }
 func (s State) RemotePID() string     { return filepath.Join(s.Dir, "remote.pid") }
 func (s State) RemoteLog() string     { return filepath.Join(s.Dir, "remote.log") }
@@ -209,6 +212,49 @@ func (s State) LoadControllerPAT() (string, error) {
 		return "", fmt.Errorf("brokerctl: read controller.pat: %w", err)
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// EnsureSessionSecret returns the hub's session-cookie signing key, generating
+// 32 random bytes hex-encoded and persisting them (0600) on first use. An
+// existing file is adopted verbatim (whitespace-trimmed) and NEVER rewritten —
+// rotating the key signs every browser session out, so rotation is the
+// operator's move: delete the file and the next apply generates a fresh one.
+// The 0600 gate mirrors LoadControllerPAT's; an empty file is an error rather
+// than a silent regeneration, because overwriting a file the operator placed
+// would violate the never-rewrite contract.
+func (s State) EnsureSessionSecret() (string, error) {
+	fi, err := os.Stat(s.SessionSecret())
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// Fall through to generate below.
+	case err != nil:
+		return "", fmt.Errorf("brokerctl: session-secret: %w", err)
+	default:
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			return "", fmt.Errorf("brokerctl: session-secret must be 0600, got %#o", perm)
+		}
+		b, rerr := os.ReadFile(s.SessionSecret())
+		if rerr != nil {
+			return "", fmt.Errorf("brokerctl: read session-secret: %w", rerr)
+		}
+		v := strings.TrimSpace(string(b))
+		if v == "" {
+			return "", errors.New("brokerctl: session-secret is empty — delete the file to generate a new key")
+		}
+		return v, nil
+	}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return "", fmt.Errorf("brokerctl: state dir: %w", err)
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("brokerctl: session-secret: %w", err)
+	}
+	v := hex.EncodeToString(raw[:])
+	if err := os.WriteFile(s.SessionSecret(), []byte(v+"\n"), 0o600); err != nil {
+		return "", fmt.Errorf("brokerctl: write session-secret: %w", err)
+	}
+	return v, nil
 }
 
 // SaveRemotePAT persists the proxy remote personal access token

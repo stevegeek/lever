@@ -191,6 +191,55 @@ func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
 	}
 }
 
+// The session-cookie signing key travels in the argv, equals form, so scion's
+// daemon persists it to server-args.json and a `scion server restart` replays
+// it — the whole point: sessions survive hub restarts.
+func TestServerStartEmitsSessionSecret(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	opts := ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"}
+	if err := c.ServerStart(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	want := "server start --web-port 8080 --dev-auth=false --session-secret=sessionsecrethex"
+	if got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+}
+
+// An empty SessionSecret omits the flag entirely (scion generates a per-boot
+// random key) — the throwaway mint-window hub takes this path.
+func TestServerStartOmitsSessionSecretWhenEmpty(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	c := New(f, Options{})
+	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--session-secret") {
+		t.Errorf("args = %q, must not carry --session-secret when unset", got)
+	}
+}
+
+// A failed start's error renders the argv, and the argv carries the secret —
+// ServerStart must scrub it (runSecret), because redactArgs only knows the
+// hub-secret-set argv shapes.
+func TestServerStartFailureRedactsSessionSecret(t *testing.T) {
+	// Nothing scripted: the fake fails every call, which drives run's error
+	// path — the one that renders the argv.
+	f := exec.NewFakeRunner()
+	c := New(f, Options{})
+	err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"})
+	if err == nil {
+		t.Fatal("want error from failed server start")
+	}
+	if strings.Contains(err.Error(), "sessionsecrethex") {
+		t.Fatal("server-start error leaks the session secret")
+	}
+}
+
 func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
 	f := exec.NewFakeRunner()
 	f.Script("scion", exec.Result{Stdout: "ok"})

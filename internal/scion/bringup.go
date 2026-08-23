@@ -234,6 +234,16 @@ type ServerOpts struct {
 	// so a wrong path REPLACES working embedded assets with 404s rather than
 	// falling back to them.
 	WebAssetsDir string
+	// SessionSecret, when non-empty, is the hub's session-cookie signing key
+	// (--session-secret). Without it scion generates a random key per boot and
+	// every hub restart signs every browser out of the web UI. The flag, not
+	// env SCION_SERVER_SESSION_SECRET, because the flag is the durable channel:
+	// scion's daemon persists its argv to ~/.scion/server-args.json and
+	// `scion server restart` replays it verbatim, while env would be lost.
+	// Like every argv-only option it applies at the next START (see below).
+	// Empty omits the flag (scion's per-boot random key) — the throwaway
+	// mint-window hub, whose sessions nobody keeps.
+	SessionSecret string
 }
 
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises
@@ -244,16 +254,21 @@ type ServerOpts struct {
 // "server is already running (PID: n)" rather than reconfiguring anything
 // (cmd/server_daemon.go runServerStartOrDaemon), and this call tolerates that
 // refusal so a re-apply is cheap (see below). So an option that lives only in
-// the argv — WebAssetsDir — changes nothing until something stops the daemon
-// first. A caller that needs one to take effect must ServerStop, and
-// internal/apply does exactly that, on both the on- and the off-transition of
-// remote access.
+// the argv — WebAssetsDir, SessionSecret — changes nothing until something
+// stops the daemon first. A caller that needs one to take effect must
+// ServerStop, and internal/apply does exactly that, on both the on- and the
+// off-transition of remote access.
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	args := []string{"server", "start"}
 	if o.WebPort > 0 {
 		args = append(args, "--web-port", strconv.Itoa(o.WebPort))
 	}
 	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
+	// Equals form, like --web-assets-dir below, so the argv matches scion's
+	// own daemon re-exec form.
+	if o.SessionSecret != "" {
+		args = append(args, "--session-secret="+o.SessionSecret)
+	}
 	if o.EnableWeb {
 		args = append(args, "--enable-web")
 		// Equals form: it is how scion's own daemon re-emits the flag when it
@@ -265,7 +280,11 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	}
 	// Idempotent: tolerate an already-running server on re-apply; waitHubReady
 	// then confirms the existing server is actually serving.
-	if _, err := c.run(ctx, "", args...); err != nil && !AlreadyRunning(err) {
+	//
+	// runSecret, not run: the argv carries the session secret, and run's error
+	// path renders argv verbatim (redactArgs only knows the hub-secret-set
+	// shapes). The scrub is textual, so AlreadyRunning still matches.
+	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && !AlreadyRunning(err) {
 		return err
 	}
 	return c.waitHubReady(ctx)

@@ -140,6 +140,56 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	}
 }
 
+// TestBuildApplyDepsEnsuresSessionSecret verifies the persist→thread chain for
+// the hub's session-cookie signing key: buildApplyDeps ensures
+// .lever-state/session-secret (0600, 64 hex) and threads its value into
+// Deps.HubSessionSecret — which internal/apply's scion-server step emits as
+// --session-secret= (pinned there). A second buildApplyDeps over the same
+// state dir must adopt the SAME value: rotation is delete-the-file, never
+// lever's doing. The secret never appears in a failure message — length and
+// equality only.
+func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
+	p := writeTmpConfig(t)
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := &stubBackend{}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+
+	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("buildApplyDeps: %v", err)
+	}
+	if len(deps.HubSessionSecret) != 64 {
+		t.Fatalf("Deps.HubSessionSecret length = %d, want 64 (32 bytes hex)", len(deps.HubSessionSecret))
+	}
+	state := stateFor(p)
+	fi, err := os.Stat(state.SessionSecret())
+	if err != nil {
+		t.Fatalf("session-secret not persisted: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("session-secret perms = %#o, want 0600", perm)
+	}
+	onDisk, err := state.EnsureSessionSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk != deps.HubSessionSecret {
+		t.Fatal("Deps.HubSessionSecret differs from the persisted file")
+	}
+
+	// Re-apply: same state dir, fresh deps — the persisted key is adopted.
+	deps2, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	if err != nil {
+		t.Fatalf("second buildApplyDeps: %v", err)
+	}
+	if deps2.HubSessionSecret != deps.HubSessionSecret {
+		t.Fatal("re-apply changed the session secret — must adopt, not rotate")
+	}
+}
+
 // TestBuildApplyDepsWiresRemoveScionProjectConfigs verifies buildApplyDeps
 // wires Deps.RemoveScionProjectConfigs straight through to the backend method
 // (which itself reaches the guest — see internal/backend/guest/scionstate.go),

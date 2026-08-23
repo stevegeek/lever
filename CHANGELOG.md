@@ -5,6 +5,28 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.19.0] - 2026-08-23
+
+### Added
+
+- **Web UI sessions now survive hub restarts.** Scion signs its session cookie
+  with a random per-boot key when none is configured, so every hub restart
+  signed every browser out — on a live instance, ~8 silent sign-outs in one
+  day, each a blank dashboard behind the remote proxy. lever now generates a
+  32-byte key on first apply, persists it at `.lever-state/session-secret`
+  (0600), and passes it to every hub start as `--session-secret=`. The flag,
+  not the env var, because scion's daemon persists its argv to
+  `~/.scion/server-args.json` and replays it on restart — the argv is the
+  durable channel.
+
+  **On upgrade**, the next hub restart adopts the key; the apply that
+  introduces it does not force one (a forced restart would drop every agent's
+  hub connection to cause the very logout it prevents). That next restart is
+  the last random-key logout — unless the operator pre-seeds
+  `.lever-state/session-secret` with the currently-live value first, in which
+  case there is none. lever never rewrites the file; deleting it is the
+  rotation mechanism, and the next apply generates a fresh key.
+
 ## [0.18.1] - 2026-08-22
 
 ### Changed

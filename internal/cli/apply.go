@@ -726,6 +726,14 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	state := stateFor(configPath)
 	sc := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole)
 
+	// The hub's session-cookie signing key: generated once, adopted verbatim
+	// on every later apply, never rotated by lever (see EnsureSessionSecret).
+	// Threaded into Deps so every hub start signs sessions with the same key.
+	sessionSecret, err := state.EnsureSessionSecret()
+	if err != nil {
+		return apply.Deps{}, nil, nil, err
+	}
+
 	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort())
 
 	// The jail's resolved host-alias IP (host.orb.internal as seen from the jail).
@@ -784,8 +792,9 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		PruneImages: func(ctx context.Context) error {
 			return b.PruneJailImages(ctx)
 		},
-		Scion:     sc,
-		JailMount: b.MountDest(),
+		Scion:            sc,
+		JailMount:        b.MountDest(),
+		HubSessionSecret: sessionSecret,
 
 		// RemoveJailFile removes a regular file at a jail-absolute path THROUGH
 		// the jail runner, so the removal shares the jail's own filesystem view

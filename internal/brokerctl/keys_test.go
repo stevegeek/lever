@@ -92,6 +92,101 @@ func TestLoadControllerPATWrongPerms(t *testing.T) {
 	}
 }
 
+// TestEnsureSessionSecretGeneratesOnce proves the generate-then-adopt cycle:
+// first call creates the file 0600 with a 64-hex value; a second call returns
+// the SAME value without rewriting the file (never-rotate — a rewrite would
+// sign every browser session out). Values are proven by length/shape, never
+// printed.
+func TestEnsureSessionSecretGeneratesOnce(t *testing.T) {
+	s := StateDir(t.TempDir())
+	v1, err := s.EnsureSessionSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v1) != 64 {
+		t.Fatalf("generated secret length = %d, want 64 (32 bytes hex)", len(v1))
+	}
+	fi, err := os.Stat(s.SessionSecret())
+	if err != nil {
+		t.Fatalf("session-secret not written: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("session-secret perms = %#o, want 0600", perm)
+	}
+	before, err := os.ReadFile(s.SessionSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, err := s.EnsureSessionSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2 != v1 {
+		t.Fatal("second EnsureSessionSecret returned a different value — must adopt, not rotate")
+	}
+	after, err := os.ReadFile(s.SessionSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("second EnsureSessionSecret rewrote the file — must adopt, not rotate")
+	}
+}
+
+// TestEnsureSessionSecretAdoptsExisting pins the pre-seed path: an operator
+// places the live hub's key in the file (possibly with trailing whitespace),
+// and lever adopts it trimmed, byte-for-byte untouched on disk.
+func TestEnsureSessionSecretAdoptsExisting(t *testing.T) {
+	s := StateDir(t.TempDir())
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seeded := []byte("operator-seeded-value\n")
+	if err := os.WriteFile(s.SessionSecret(), seeded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.EnsureSessionSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != "operator-seeded-value" {
+		t.Fatal("adopted value differs from the seeded one (want it whitespace-trimmed, otherwise verbatim)")
+	}
+	b, err := os.ReadFile(s.SessionSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != string(seeded) {
+		t.Fatal("EnsureSessionSecret rewrote an operator-seeded file")
+	}
+}
+
+func TestEnsureSessionSecretRejectsLoosePerms(t *testing.T) {
+	s := StateDir(t.TempDir())
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.SessionSecret(), []byte("whatever"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureSessionSecret(); err == nil {
+		t.Fatal("want perm error, got nil")
+	}
+}
+
+func TestEnsureSessionSecretRejectsEmptyFile(t *testing.T) {
+	s := StateDir(t.TempDir())
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.SessionSecret(), []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureSessionSecret(); err == nil {
+		t.Fatal("empty session-secret must error, not silently regenerate")
+	}
+}
+
 func TestRemotePATRoundTrip(t *testing.T) {
 	s := State{Dir: t.TempDir()}
 	if tok, err := s.LoadRemotePAT(); err != nil || tok != "" {

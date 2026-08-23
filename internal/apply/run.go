@@ -128,12 +128,23 @@ type Deps struct {
 	// size (the superseded copy goes untagged). A no-op when the load added a
 	// new image. Best-effort: a prune failure is logged, not fatal to the
 	// bring-up. nil ⇒ skip pruning (tests).
-	PruneImages   func(ctx context.Context) error
-	Scion         *scion.Client
-	ReadCred      func(path string) (string, error) // nil ⇒ defaultReadCred
-	JailMount     string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
-	StartBroker   func(ctx context.Context) error
-	BrokerHealthy func(ctx context.Context) error
+	PruneImages func(ctx context.Context) error
+	Scion       *scion.Client
+	ReadCred    func(path string) (string, error) // nil ⇒ defaultReadCred
+	JailMount   string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
+	// HubSessionSecret is the hub's session-cookie signing key, threaded into
+	// every hub start this package orders (hubServerOpts). The CLI ensures it
+	// host-side before Run (brokerctl.State.EnsureSessionSecret), so the same
+	// key survives hub restarts and browser sessions with it. An argv-only
+	// option: a hub already running keeps its old key until something restarts
+	// it, and introducing the secret does NOT order that restart itself — a
+	// restart drops every agent's hub connection and, with the old key random
+	// and in-memory, would force the very logout it exists to prevent; the
+	// next restart the hub was getting anyway adopts the key at no extra cost.
+	// "" omits the flag (tests; scion falls back to a per-boot random key).
+	HubSessionSecret string
+	StartBroker      func(ctx context.Context) error
+	BrokerHealthy    func(ctx context.Context) error
 	// EnsureControllerPAT runs the bootstrap-token step: the whole controller-PAT
 	// mint window as one injected op, keeping this package scion-agnostic (the
 	// CLI wires the real throwaway-hub → mint → persist → kill → delete-dev-token
@@ -441,7 +452,7 @@ func disableHubLogin(ctx context.Context, app *config.App, d Deps, steps []Step)
 	if err := d.Scion.ServerStop(ctx); err != nil {
 		return fmt.Errorf("restart the hub: %w", err)
 	}
-	return d.Scion.ServerStart(ctx, hubServerOpts(app))
+	return d.Scion.ServerStart(ctx, hubServerOpts(app, d.HubSessionSecret))
 }
 
 // planHas reports whether the plan includes a step of this kind.
@@ -535,7 +546,7 @@ func runScionServer(ctx context.Context, app *config.App, d Deps) error {
 			}
 		}
 	}
-	return d.Scion.ServerStart(ctx, hubServerOpts(app))
+	return d.Scion.ServerStart(ctx, hubServerOpts(app, d.HubSessionSecret))
 }
 
 // hubServerOpts is the ONE description of how lever starts the hub for a given
@@ -544,11 +555,12 @@ func runScionServer(ctx context.Context, app *config.App, d Deps) error {
 // of that restart is to replace an argv that no longer matches the config. Two
 // copies of this could disagree, and the restart would then re-apply the very
 // flags it exists to drop.
-func hubServerOpts(app *config.App) scion.ServerOpts {
+func hubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
 	opts := scion.ServerOpts{
-		WebPort:   8080,
-		DevAuth:   false,
-		EnableWeb: app.RemoteEnabled(),
+		WebPort:       8080,
+		DevAuth:       false,
+		EnableWeb:     app.RemoteEnabled(),
+		SessionSecret: sessionSecret,
 	}
 	if app.ScionWebAssets() {
 		// Same predicate the backend used to decide whether to stage the

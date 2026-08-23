@@ -1602,6 +1602,35 @@ func TestRunScionServerEmitsWebFlagsWhenRemoteEnabled(t *testing.T) {
 	}
 }
 
+// TestRunScionServerEmitsSessionSecret pins the scion-server step's threading
+// of Deps.HubSessionSecret into the real hub's argv: the equals-form flag with
+// the exact value, so the hub signs session cookies with the host-persisted
+// key instead of a per-boot random one.
+func TestRunScionServerEmitsSessionSecret(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("scion", exec.Result{Stdout: "ok"})
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img"},
+	}
+	deps := Deps{
+		JailUp:           func(context.Context, *config.App) error { return nil },
+		LoadImage:        func(context.Context, string) error { return nil },
+		Scion:            scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		HubSessionSecret: "sessionsecrethex",
+	}
+	if err := Run(context.Background(), app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	j := ""
+	for _, c := range f.Calls {
+		j += strings.Join(c.Args, " ") + "|"
+	}
+	if want := "server start --web-port 8080 --dev-auth=false --session-secret=sessionsecrethex|"; !strings.Contains(j, want) {
+		t.Fatalf("missing scion call %q in: %q", want, j)
+	}
+}
+
 // TestRunScionServerPointsTheHubAtStagedAssets is the end of the Task 13 wire:
 // a remote-enabled instance on a `version:` pin has no embedded SPA, so the
 // scion-server step must point the hub at the directory the backend staged.

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+
+	"github.com/stevegeek/lever/internal/mcp"
 )
 
 // Operation describes one operation a tool exposes.
@@ -134,11 +136,9 @@ func (r *Registry) Names() []string {
 }
 
 // MapParams builds the constraint-keyed parameter set the token layer verifies
-// against, from the request's actual MCP arguments. Arguments are identity-
-// mapped (constraint key == arg name); the operation's CaveatParam entries add
-// renamed bindings (constraint key -> the value of a differently-named arg). A
-// renamed arg that is absent produces no binding, so a token constraint on that
-// key then fails closed at verification. Errors if tool/op is unregistered.
+// against, from the request's actual MCP arguments, using the operation's
+// CaveatParam renames (see mcp.MapConstraintParams, which captool shares).
+// Errors if tool/op is unregistered.
 func (r *Registry) MapParams(tool, op string, args map[string]string) (map[string]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -150,16 +150,7 @@ func (r *Registry) MapParams(tool, op string, args map[string]string) (map[strin
 	if !ok {
 		return nil, fmt.Errorf("registry: tool %q has no operation %q", tool, op)
 	}
-	out := make(map[string]string, len(args)+len(o.CaveatParam))
-	for k, v := range args { // identity mapping (constraint key == arg name)
-		out[k] = v
-	}
-	for ck, argName := range o.CaveatParam { // renamed bindings
-		if v, ok := args[argName]; ok {
-			out[ck] = v
-		}
-	}
-	return out, nil
+	return mcp.MapConstraintParams(o.CaveatParam, args), nil
 }
 
 // ValidateConstraints returns an error if any (key,value) constraint requests a

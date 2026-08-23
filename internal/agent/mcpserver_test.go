@@ -192,7 +192,7 @@ func TestMCPDirectiveConsume404SurfacesAsToolCallError(t *testing.T) {
 	// The broker's opaque-404 contract (unknown id / wrong target / already
 	// consumed / expired / stale generation — all byte-identical) must reach
 	// the model as "not found" and nothing more, matching how the existing
-	// `request` case surfaces a broker error (mcpserver.go's writeRPCError),
+	// `request` case surfaces a broker error (mcp.Error),
 	// never a transport panic.
 	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) {
 		w.Header().Set("Content-Type", "application/json")

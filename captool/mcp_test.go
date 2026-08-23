@@ -79,3 +79,14 @@ func TestUnknownMethodIsJSONRPCError(t *testing.T) {
 		t.Fatalf("unknown method must be a JSON-RPC error, got %s", w.Body.String())
 	}
 }
+
+func TestOversizedBodyIsRejected(t *testing.T) {
+	big := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"pad":"` + strings.Repeat("a", 1<<20) + `"}}`
+	w := rpc(t, testServer(t), big, nil)
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	e, _ := resp["error"].(map[string]any)
+	if e == nil || e["message"] != "read error" {
+		t.Fatalf("oversized body not rejected: %s", w.Body.String())
+	}
+}

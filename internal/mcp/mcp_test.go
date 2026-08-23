@@ -1,4 +1,4 @@
-package broker
+package mcp
 
 import (
 	"encoding/json"
@@ -8,11 +8,11 @@ import (
 
 func TestParseAndToolsCallFields(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"TOK"}}}`)
-	method, msg, ok := parseJSONRPC(body)
+	method, msg, ok := Parse(body)
 	if !ok || method != "tools/call" {
 		t.Fatalf("parse: method=%q ok=%v", method, ok)
 	}
-	name, args, cap, ok := toolsCallFields(msg)
+	name, args, cap, ok := ToolsCall(msg)
 	if !ok || name != "read" || cap != "TOK" || args["table"] != "A" {
 		t.Fatalf("fields: name=%q cap=%q args=%v ok=%v", name, cap, args, ok)
 	}
@@ -23,8 +23,8 @@ func TestParseAndToolsCallFields(t *testing.T) {
 
 func TestStripCapabilityRemovesItFromArguments(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"TOK"}}}`)
-	_, msg, _ := parseJSONRPC(body)
-	out := stripCapability(msg)
+	_, msg, _ := Parse(body)
+	out := StripCapability(msg)
 	if strings.Contains(string(out), "_capability") {
 		t.Fatalf("stripped body still contains _capability: %s", out)
 	}
@@ -41,13 +41,13 @@ func TestStripCapabilityRemovesItFromArguments(t *testing.T) {
 // PASS after the fix.
 func TestToolsCallFieldsObjectArgCanonicallyEncoded(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":{"$ne":null},"_capability":"TOK"}}}`)
-	_, msg, ok := parseJSONRPC(body)
+	_, msg, ok := Parse(body)
 	if !ok {
-		t.Fatal("parseJSONRPC failed")
+		t.Fatal("Parse failed")
 	}
-	name, args, cap, ok := toolsCallFields(msg)
+	name, args, cap, ok := ToolsCall(msg)
 	if !ok {
-		t.Fatal("toolsCallFields returned ok=false")
+		t.Fatal("ToolsCall returned ok=false")
 	}
 	if name != "read" {
 		t.Fatalf("name = %q, want %q", name, "read")
@@ -74,13 +74,13 @@ func TestToolsCallFieldsObjectArgCanonicallyEncoded(t *testing.T) {
 // is canonical-JSON-encoded (e.g. 10 → "10"), NOT coerced to "".
 func TestToolsCallFieldsNumberArgCanonicallyEncoded(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"limit":10,"_capability":"TOK"}}}`)
-	_, msg, ok := parseJSONRPC(body)
+	_, msg, ok := Parse(body)
 	if !ok {
-		t.Fatal("parseJSONRPC failed")
+		t.Fatal("Parse failed")
 	}
-	_, args, cap, ok := toolsCallFields(msg)
+	_, args, cap, ok := ToolsCall(msg)
 	if !ok {
-		t.Fatal("toolsCallFields returned ok=false")
+		t.Fatal("ToolsCall returned ok=false")
 	}
 	if cap != "TOK" {
 		t.Fatalf("cap = %q, want %q", cap, "TOK")
@@ -99,13 +99,13 @@ func TestToolsCallFieldsNumberArgCanonicallyEncoded(t *testing.T) {
 // argument is still returned as-is (unchanged by the canonical encoding path).
 func TestToolsCallFieldsStringArgPassesThroughRaw(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"TOK"}}}`)
-	_, msg, ok := parseJSONRPC(body)
+	_, msg, ok := Parse(body)
 	if !ok {
-		t.Fatal("parseJSONRPC failed")
+		t.Fatal("Parse failed")
 	}
-	_, args, cap, ok := toolsCallFields(msg)
+	_, args, cap, ok := ToolsCall(msg)
 	if !ok {
-		t.Fatal("toolsCallFields returned ok=false")
+		t.Fatal("ToolsCall returned ok=false")
 	}
 	if cap != "TOK" {
 		t.Fatalf("cap = %q, want %q", cap, "TOK")
@@ -118,7 +118,7 @@ func TestToolsCallFieldsStringArgPassesThroughRaw(t *testing.T) {
 
 func TestAugmentToolsListSchemaInjectsCapability(t *testing.T) {
 	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","properties":{"table":{"type":"string"}}}}]}}`)
-	out := augmentToolsListSchema(resp)
+	out := AugmentToolsListSchema(resp)
 	var parsed map[string]any
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatal(err)

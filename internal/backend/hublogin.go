@@ -42,8 +42,9 @@ const GuestLoginIssuerPort = config.GuestLoginIssuerPort
 // the client_id the provider expects.
 //
 // It lives here rather than in package guest because the Backend interface
-// carries it and guest imports backend (never the other way round) — the same
-// reason ScionProjectState lives here.
+// carries it: the contract owns its types, and guest (an implementation
+// helper) imports the contract, never the other way round — the same reason
+// ScionProjectState lives here. See the package doc.
 type HubLogin struct {
 	// IssuerPort is the port the forwarder listens on INSIDE the guest, and
 	// the one the hub's issuer_url names. Always GuestLoginIssuerPort in

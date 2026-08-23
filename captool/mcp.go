@@ -15,8 +15,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	caller := r.Header.Get("X-Lever-Caller")
 	mcp.ServeHTTP(w, r, func(ctx context.Context, body []byte) []byte {
 		return mcp.Dispatch(ctx, body, mcp.Service{
-			Name:  s.name,
-			Tools: s.toolSchemas,
+			Name:    s.name,
+			Version: s.version,
+			Tools:   s.toolSchemas,
 			Call: func(_ context.Context, id any, msg map[string]any) []byte {
 				return s.handleToolsCall(id, msg, caller)
 			},

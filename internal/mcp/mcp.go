@@ -6,6 +6,7 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"io"
@@ -69,9 +70,12 @@ func CapabilityProperty() map[string]any {
 // tools/list schemas, and its tools/call implementation. Call receives the
 // request id and the whole decoded message and returns a framed reply.
 type Service struct {
-	Name  string
-	Tools func() []any
-	Call  func(ctx context.Context, id any, msg map[string]any) []byte
+	Name string
+	// Version is reported in the initialize reply's serverInfo; empty
+	// falls back to "dev".
+	Version string
+	Tools   func() []any
+	Call    func(ctx context.Context, id any, msg map[string]any) []byte
 }
 
 // Dispatch runs one JSON-RPC message through the standard MCP skeleton:
@@ -88,7 +92,7 @@ func Dispatch(ctx context.Context, body []byte, svc Service) []byte {
 		return Result(id, map[string]any{
 			"protocolVersion": ProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": svc.Name, "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": svc.Name, "version": cmp.Or(svc.Version, "dev")},
 		})
 	case "tools/list":
 		return Result(id, map[string]any{"tools": svc.Tools()})

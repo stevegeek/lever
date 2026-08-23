@@ -40,9 +40,10 @@ func (s *MCPServer) Handler() http.Handler {
 // the outbound broker call.
 func (s *MCPServer) Handle(ctx context.Context, msg []byte) []byte {
 	return mcp.Dispatch(ctx, msg, mcp.Service{
-		Name:  "lever-capability",
-		Tools: capabilityToolSchemas,
-		Call:  s.handleToolsCall,
+		Name:    "lever-capability",
+		Version: Version,
+		Tools:   capabilityToolSchemas,
+		Call:    s.handleToolsCall,
 	})
 }
 

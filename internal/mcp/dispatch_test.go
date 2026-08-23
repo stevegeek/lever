@@ -110,3 +110,19 @@ func TestMapConstraintParamsIdentityAndRename(t *testing.T) {
 		t.Fatalf("absent renamed arg produced a binding: %v", out)
 	}
 }
+
+func TestDispatchReportsServiceVersion(t *testing.T) {
+	ctx := context.Background()
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)
+	serverInfo := func(svc Service) map[string]any {
+		return decode(t, Dispatch(ctx, body, svc))["result"].(map[string]any)["serverInfo"].(map[string]any)
+	}
+	if got := serverInfo(testService())["version"]; got != "dev" {
+		t.Fatalf("empty Version: serverInfo.version = %v, want dev", got)
+	}
+	svc := testService()
+	svc.Version = "1.2.3"
+	if got := serverInfo(svc)["version"]; got != "1.2.3" {
+		t.Fatalf("serverInfo.version = %v, want 1.2.3", got)
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/httpjson"
 )
 
 // Renew rotates the agent's keypair and re-issues its cert under the broker's
@@ -19,13 +21,11 @@ func Renew(ctx context.Context, brokerURL string, id Identity) (Identity, error)
 	if err != nil {
 		return Identity{}, err
 	}
-	rr, err := postJSON[struct {
+	var rr struct {
 		Cert string `json:"cert"`
-	}](ctx, client, brokerURL+"/renew",
-		map[string]string{"csr": string(csrPEM)},
-		0, "agent: renew", false)
-	if err != nil {
-		return Identity{}, err
+	}
+	if err := httpjson.Post(ctx, client, brokerURL+"/renew", map[string]string{"csr": string(csrPEM)}, &rr); err != nil {
+		return Identity{}, fmt.Errorf("agent: renew: %w", err)
 	}
 	return Identity{CertPEM: []byte(rr.Cert), KeyPEM: keyPEM, CAPEM: id.CAPEM}, nil
 }

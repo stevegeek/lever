@@ -3,6 +3,7 @@ package agent
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -104,13 +105,11 @@ func (s *clientCertSource) reloadLocked() error {
 	return nil
 }
 
-// caPool builds a RootCAs pool from a PEM bundle. prefix tags the returned error
-// ("agent"/"gateway") so each caller keeps its existing error string; nothing
-// matches on those strings, so the prefix is purely for operator-facing clarity.
-func caPool(caPEM []byte, prefix string) (*x509.CertPool, error) {
+// caPool builds a RootCAs pool from a PEM bundle.
+func caPool(caPEM []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("%s: bad CA PEM", prefix)
+		return nil, errors.New("agent: bad CA PEM")
 	}
 	return pool, nil
 }
@@ -120,14 +119,13 @@ func caPool(caPEM []byte, prefix string) (*x509.CertPool, error) {
 // caPEM and presents the rotating agent leaf from idDir via a per-handshake
 // clientCertSource, with IdleConnTimeout capping pooled-connection reuse so a
 // rotated leaf reaches the broker well within its TTL. Mints eagerly so a broken
-// id-dir fails now, not on the first live handshake. prefix tags the bad-CA-PEM
-// error for the calling site.
-func reloadingTransport(idDir string, caPEM []byte, prefix string) (*http.Transport, error) {
+// id-dir fails now, not on the first live handshake.
+func reloadingTransport(idDir string, caPEM []byte) (*http.Transport, error) {
 	src, err := newClientCertSource(idDir)
 	if err != nil {
 		return nil, err
 	}
-	pool, err := caPool(caPEM, prefix)
+	pool, err := caPool(caPEM)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +151,7 @@ func reloadingTransport(idDir string, caPEM []byte, prefix string) (*http.Transp
 // often (same reasoning as the gateway).
 // Mints eagerly so a broken id-dir fails now, not on the first live handshake.
 func NewReloadingClient(idDir string, caPEM []byte) (*http.Client, error) {
-	tr, err := reloadingTransport(idDir, caPEM, "agent")
+	tr, err := reloadingTransport(idDir, caPEM)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +199,7 @@ func newGatewayProxy(brokerURL string, caPEM []byte, idDir string) (*httputil.Re
 	if err != nil {
 		return nil, fmt.Errorf("gateway: parse broker URL %q: %w", brokerURL, err)
 	}
-	tr, err := reloadingTransport(idDir, caPEM, "gateway")
+	tr, err := reloadingTransport(idDir, caPEM)
 	if err != nil {
 		return nil, err
 	}

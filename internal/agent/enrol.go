@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/stevegeek/lever/internal/httpjson"
 )
 
 // Identity is the agent's enrolled mTLS material (PEM).
@@ -51,7 +53,7 @@ func GenerateCSR(cn string) (csrPEM, keyPEM []byte, err error) {
 // caClient builds an HTTPS client that trusts caPEM (server-authenticated; the
 // agent has no client cert yet at enrol — /enrol uses VerifyClientCertIfGiven).
 func caClient(caPEM []byte) (*http.Client, error) {
-	pool, err := caPool(caPEM, "agent")
+	pool, err := caPool(caPEM)
 	if err != nil {
 		return nil, err
 	}
@@ -69,13 +71,11 @@ func Enrol(ctx context.Context, brokerURL string, caPEM []byte, ticket, cn strin
 	if err != nil {
 		return Identity{}, err
 	}
-	er, err := postJSON[struct {
+	var er struct {
 		Cert string `json:"cert"`
-	}](ctx, client, brokerURL+"/enrol",
-		map[string]string{"ticket": ticket, "csr": string(csrPEM)},
-		0, "agent: enrol", false)
-	if err != nil {
-		return Identity{}, err
+	}
+	if err := httpjson.Post(ctx, client, brokerURL+"/enrol", map[string]string{"ticket": ticket, "csr": string(csrPEM)}, &er); err != nil {
+		return Identity{}, fmt.Errorf("agent: enrol: %w", err)
 	}
 	return Identity{CertPEM: []byte(er.Cert), KeyPEM: keyPEM, CAPEM: caPEM}, nil
 }

@@ -124,20 +124,19 @@ func TestNewClientCertSourceFailsOnMissingIDDir(t *testing.T) {
 	}
 }
 
-// TestCAPoolRejectsBadPEM covers the shared helper's bad-CA branch (untested at
-// every call site before D2) and pins the caller-supplied error prefix.
+// TestCAPoolRejectsBadPEM covers the shared helper's bad-CA branch.
 func TestCAPoolRejectsBadPEM(t *testing.T) {
-	if _, err := caPool(nil, "agent"); err == nil {
+	if _, err := caPool(nil); err == nil {
 		t.Fatal("caPool must reject an empty CA PEM")
 	}
-	_, err := caPool([]byte("-----BEGIN CERTIFICATE-----\nnotpem\n-----END CERTIFICATE-----"), "gateway")
-	if err == nil || !strings.Contains(err.Error(), "gateway: bad CA PEM") {
-		t.Fatalf("caPool must reject a malformed CA PEM with the site prefix, got %v", err)
+	_, err := caPool([]byte("-----BEGIN CERTIFICATE-----\nnotpem\n-----END CERTIFICATE-----"))
+	if err == nil || !strings.Contains(err.Error(), "agent: bad CA PEM") {
+		t.Fatalf("caPool must reject a malformed CA PEM, got %v", err)
 	}
 }
 
 // TestReloadingTransportRejectsBadPEM proves the shared transport builder
-// propagates the bad-CA-PEM failure (with the caller's prefix) after a valid
+// propagates the bad-CA-PEM failure after a valid
 // id-dir mint.
 func TestReloadingTransportRejectsBadPEM(t *testing.T) {
 	caInst, err := ca.Generate()
@@ -146,7 +145,7 @@ func TestReloadingTransportRejectsBadPEM(t *testing.T) {
 	}
 	dir := t.TempDir()
 	writeLeaf(t, dir, caInst, time.Now())
-	_, err = reloadingTransport(dir, []byte("garbage"), "agent")
+	_, err = reloadingTransport(dir, []byte("garbage"))
 	if err == nil || !strings.Contains(err.Error(), "agent: bad CA PEM") {
 		t.Fatalf("reloadingTransport must reject a malformed CA PEM, got %v", err)
 	}

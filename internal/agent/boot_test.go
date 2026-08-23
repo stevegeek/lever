@@ -308,3 +308,20 @@ func assertBrokerToolArgv(t *testing.T, tool string, argv []string, brokerURL st
 		t.Errorf("broker tool %q MCPAdd argv must have --transport http sequence, got %v", tool, argv)
 	}
 }
+
+func TestLoadBootstrapNormalizesBrokerURL(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bootstrap.json")
+	if err := os.WriteFile(p, []byte(`{"broker_url":"https://broker:8443//"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := LoadBootstrap(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bs.BrokerURL != "https://broker:8443" {
+		t.Fatalf("BrokerURL = %q, want trailing slashes stripped", bs.BrokerURL)
+	}
+	if got := NormalizeBrokerURL("https://b/"); got != "https://b" {
+		t.Fatalf("NormalizeBrokerURL = %q", got)
+	}
+}

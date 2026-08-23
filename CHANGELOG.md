@@ -27,6 +27,22 @@ version bump moves the block under the new version heading.
   case there is none. lever never rewrites the file; deleting it is the
   rotation mechanism, and the next apply generates a fresh key.
 
+### Fixed
+
+- **The web UI's Sign-in button no longer dead-ends on a lever.invalid 404.**
+  The button navigates to `/auth/login/<provider>`, and the remote proxy
+  forwarded that, so the hub's 302 to the OIDC authorization endpoint — which
+  deliberately does not resolve; the proxy performs the whole login
+  server-side — reached the browser. The proxy's session-retry gate never saw
+  it: it recognises the hub *rejecting* a session (401, or a redirect back to
+  the login page), not a redirect pointing outward. The proxy now answers
+  `/auth/login` and `/auth/login/*` navigations itself: it runs the same
+  server-side login the retry gate uses, then 302s the browser back into the
+  app, honouring the SPA's `returnTo` target for in-app paths.
+  `/auth/callback/*` still reaches the hub. The path was unreachable while hub
+  sessions never lapsed; the session-secret change above makes lapses rare
+  again, but the button now works whenever it is shown.
+
 ## [0.18.1] - 2026-08-22
 
 ### Changed

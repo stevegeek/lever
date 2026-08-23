@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -442,5 +443,151 @@ func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 	}
 	if logins, _ := hub.counts(); logins != 2 {
 		t.Fatalf("%d logins, want 2 (one per session)", logins)
+	}
+}
+
+// TestSignInNavigationIsDrivenNotForwarded: the SPA's Sign-in button
+// navigates to /auth/login/<provider>, and the hub's answer to that is a 302
+// to the OIDC authorization endpoint — which deliberately does not resolve.
+// The proxy must answer the navigation itself: one driver run, then a 302
+// back into the app, and the hub never sees the request.
+func TestSignInNavigationIsDrivenNotForwarded(t *testing.T) {
+	hub := newRecordingHub(t)
+	sess := &stubSession{cookie: "sess-value"}
+	var audited []AuditLine
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+		ServeHost: "mac.ts.net", Session: sess, Audit: func(l AuditLine) { audited = append(audited, l) }})
+
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/auth/login/oidc", nil))
+	if rw.Code != http.StatusFound || rw.Header().Get("Location") != "/" {
+		t.Fatalf("status = %d Location = %q, want 302 to /", rw.Code, rw.Header().Get("Location"))
+	}
+	if n := len(hub.requests()); n != 0 {
+		t.Fatalf("%d request(s) reached the hub — a sign-in navigation must never be forwarded", n)
+	}
+	if handed, _, _ := sess.state(); handed != 1 {
+		t.Fatalf("driver ran %d time(s), want exactly 1", handed)
+	}
+	if len(audited) != 1 || audited[0].Decision != "login-redirect" {
+		t.Fatalf("audit = %+v, want one login-redirect line", audited)
+	}
+
+	// The bare path — the shell's own Sign-in link — is intercepted too.
+	rw2 := httptest.NewRecorder()
+	h.ServeHTTP(rw2, proxyRequest(http.MethodGet, "/auth/login", nil))
+	if rw2.Code != http.StatusFound || rw2.Header().Get("Location") != "/" {
+		t.Fatalf("bare path: status = %d Location = %q, want 302 to /", rw2.Code, rw2.Header().Get("Location"))
+	}
+	if n := len(hub.requests()); n != 0 {
+		t.Fatalf("%d request(s) reached the hub via the bare login path", n)
+	}
+}
+
+// TestSignInNavigationPreservesReturnTarget: the SPA's login page forwards
+// its own target as ?returnTo=<path>; the proxy honours an in-app path and
+// falls back to "/" for anything that could redirect off-origin.
+func TestSignInNavigationPreservesReturnTarget(t *testing.T) {
+	hub := newRecordingHub(t)
+	sess := &stubSession{cookie: "sess-value"}
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+		ServeHost: "mac.ts.net", Session: sess})
+
+	cases := []struct{ returnTo, want string }{
+		{"/agents/manager", "/agents/manager"},
+		{"/invite", "/invite"},
+		{"", "/"},
+		{"agents", "/"},              // not an absolute path
+		{"//evil.test/x", "/"},       // protocol-relative
+		{"/\\evil.test", "/"},        // backslash reads as a slash in browsers
+		{"https://evil.test/x", "/"}, // absolute URL
+		{"javascript:alert(1)", "/"}, // scheme smuggling
+	}
+	for _, c := range cases {
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/auth/login/oidc?returnTo="+url.QueryEscape(c.returnTo), nil))
+		if rw.Code != http.StatusFound || rw.Header().Get("Location") != c.want {
+			t.Fatalf("returnTo=%q: status = %d Location = %q, want 302 to %q",
+				c.returnTo, rw.Code, rw.Header().Get("Location"), c.want)
+		}
+	}
+	if n := len(hub.requests()); n != 0 {
+		t.Fatalf("%d request(s) reached the hub", n)
+	}
+}
+
+// TestCallbackIsForwardedNotIntercepted: /auth/callback/ is the hub's own to
+// receive — the login driver hands the hub its callback through the ordinary
+// upstream route, and intercepting it would break that handshake.
+func TestCallbackIsForwardedNotIntercepted(t *testing.T) {
+	hub := newRecordingHub(t)
+	sess := &stubSession{cookie: "sess-value"}
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+		ServeHost: "mac.ts.net", Session: sess})
+
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/auth/callback/oidc?code=x&state=y", nil))
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want the hub's own 200", rw.Code)
+	}
+	reqs := hub.requests()
+	if len(reqs) != 1 || reqs[0].URL.Path != "/auth/callback/oidc" {
+		t.Fatalf("hub saw %+v, want exactly the callback", reqs)
+	}
+}
+
+// TestSignInNavigationLoginFailureIs502: when the driver cannot log in, the
+// browser gets a clear failure — never the hub's outward redirect.
+func TestSignInNavigationLoginFailureIs502(t *testing.T) {
+	hub := newRecordingHub(t)
+	sess := &stubSession{err: errors.New("hub refused the callback (state_mismatch)")}
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+		ServeHost: "mac.ts.net", Session: sess})
+
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/auth/login/oidc", nil))
+	if rw.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rw.Code)
+	}
+	if loc := rw.Header().Get("Location"); loc != "" {
+		t.Fatalf("Location = %q, want none on a failed sign-in", loc)
+	}
+	if n := len(hub.requests()); n != 0 {
+		t.Fatalf("%d request(s) reached the hub", n)
+	}
+}
+
+// TestSignInEndToEndNeverLeaksTheDeadEndpoint drives the REAL login driver
+// against the scripted hub: the intercepted navigation triggers exactly one
+// handshake (the driver's own step-1 GET reaches the hub directly, not
+// through the handler — no recursion), the browser is sent to "/", and no
+// response ever carries the dead authorization endpoint.
+func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
+	p, _, _ := startProvider(t)
+	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
+	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p})
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+		ServeHost: "mac.ts.net", Session: d})
+
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/auth/login/oidc", nil))
+	if rw.Code != http.StatusFound || rw.Header().Get("Location") != "/" {
+		t.Fatalf("status = %d Location = %q, want 302 to /", rw.Code, rw.Header().Get("Location"))
+	}
+	if strings.Contains(rw.Header().Get("Location"), "lever.invalid") {
+		t.Fatal("the dead authorization endpoint reached the browser")
+	}
+	if logins, _ := hub.counts(); logins != 1 {
+		t.Fatalf("%d login handshake(s), want exactly 1", logins)
+	}
+
+	// The session the sign-in obtained is the one the shell now rides.
+	rw2 := httptest.NewRecorder()
+	h.ServeHTTP(rw2, proxyRequest(http.MethodGet, "/", nil))
+	if rw2.Code != http.StatusOK {
+		t.Fatalf("shell after sign-in = %d, want 200", rw2.Code)
+	}
+	if logins, _ := hub.counts(); logins != 1 {
+		t.Fatalf("shell request logged in again (%d handshakes) — the session was not reused", logins)
 	}
 }

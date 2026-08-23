@@ -142,6 +142,38 @@ func isAPIPath(p string) bool {
 	return p == apiPathPrefix || strings.HasPrefix(p, apiPathPrefix+"/")
 }
 
+// loginPathPrefix is the hub's login route (it routes /auth/login/, see
+// pkg/hub/web.go handleOAuthLogin). The SPA reaches it two ways: the shell's
+// Sign-in link navigates to the bare path, and the login page's provider
+// buttons to /auth/login/<provider>.
+const loginPathPrefix = "/auth/login"
+
+// isLoginPath reports whether p is the hub's login route, bare or with a
+// provider. Deliberately NOT the callback route: /auth/callback/ is the hub's
+// own to receive, and intercepting it would break the very handshake the
+// login driver performs.
+func isLoginPath(p string) bool {
+	return p == loginPathPrefix || strings.HasPrefix(p, loginPathPrefix+"/")
+}
+
+// loginReturnTarget picks where an intercepted sign-in navigation lands. The
+// SPA's login page carries its own target as ?returnTo=<path>; that is
+// preserved. Anything but an in-app absolute path falls back to "/": the
+// value is caller-chosen text headed for a Location header, and an absolute
+// or protocol-relative URL ("//evil.test", "/\evil.test" — browsers read a
+// backslash as a slash there) would make the proxy an open redirect on its
+// own origin.
+func loginReturnTarget(v string) string {
+	if !strings.HasPrefix(v, "/") ||
+		strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/\\") {
+		return "/"
+	}
+	if u, err := url.Parse(v); err != nil || u.Scheme != "" || u.Host != "" {
+		return "/"
+	}
+	return v
+}
+
 // AuditLine is emitted once per request, regardless of outcome. It never
 // carries the PAT value.
 type AuditLine struct {
@@ -150,7 +182,9 @@ type AuditLine struct {
 	Method  string    `json:"method"`
 	Path    string    `json:"path"`
 	// Decision is the outcome. Proxied requests use "allow", "deny-origin",
-	// "deny-user", "deny-no-pat" or "deny-no-session"; the login path adds
+	// "deny-user", "deny-no-pat" or "deny-no-session"; an intercepted
+	// sign-in navigation uses "login-redirect" (see NewHandler); the login
+	// path adds
 	// "oidc-session"/"oidc-session-failed" (see login.go) and the provider's
 	// own "oidc-discovery", "oidc-token", "oidc-userinfo", their -refused
 	// forms, "oidc-not-found", and "deny-authorize" (see oidc.go).
@@ -425,6 +459,31 @@ func NewHandler(cfg Config) http.Handler {
 		// not here, so the line carries the real status instead of the
 		// zero value.
 		state := &ctxState{pat: pat, line: &line}
+
+		// A browser navigation to the hub's login route is answered HERE,
+		// never forwarded: the hub would 302 it to the OIDC authorization
+		// endpoint, which deliberately does not resolve
+		// (DeadAuthorizationEndpoint) — the whole login is driven server-side
+		// instead (see login.go). Run that driver, then send the browser back
+		// into the app; if the session it hands out is a stale cached one,
+		// the shell GETs that follow heal it through the retry below. The
+		// driver cannot recurse into this branch: its own step 1 GETs
+		// /auth/login/oidc with its own client, dialled straight at the hub.
+		// /auth/callback/ is NOT intercepted — the hub must keep receiving
+		// its own callbacks (isLoginPath excludes it).
+		if cfg.Session != nil && isLoginPath(r.URL.Path) &&
+			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			if _, err := cfg.Session.Cookie(r.Context(), login); err != nil {
+				deny(http.StatusBadGateway, "deny-no-session", "hub login failed — see .lever-state/remote.log")
+				return
+			}
+			line.Decision, line.Status = "login-redirect", http.StatusFound
+			if cfg.Audit != nil {
+				cfg.Audit(line)
+			}
+			http.Redirect(w, r, loginReturnTarget(r.URL.Query().Get("returnTo")), http.StatusFound)
+			return
+		}
 
 		// The UI shell needs a hub session; /api/v1 must NOT get one (see
 		// Config.Session). Obtaining it is lazy — the first shell request of

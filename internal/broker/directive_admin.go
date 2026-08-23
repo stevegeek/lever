@@ -11,6 +11,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // adminEnvelopeSkew bounds the freshness window opsig.ParseEnvelope enforces
@@ -72,11 +73,11 @@ func (a *directiveAudit) append(event string, kvs map[string]any) {
 // disabled.
 func (b *Broker) DirectiveAdminHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/directive/send", b.directiveRoute(http.MethodPost, b.handleDirectiveSend))
-	mux.HandleFunc("/directive/resolve", b.directiveRoute(http.MethodGet, b.handleDirectiveResolve))
-	mux.HandleFunc("/directive/list", b.directiveRoute(http.MethodPost, b.handleDirectiveList))
-	mux.HandleFunc("/directive/revoke", b.directiveRoute(http.MethodPost, b.handleDirectiveRevoke))
-	mux.HandleFunc("/directive/selftest", b.directiveRoute(http.MethodPost, b.handleDirectiveSelftest))
+	mux.HandleFunc(wire.PathDirectiveSend, b.directiveRoute(http.MethodPost, b.handleDirectiveSend))
+	mux.HandleFunc(wire.PathDirectiveResolve, b.directiveRoute(http.MethodGet, b.handleDirectiveResolve))
+	mux.HandleFunc(wire.PathDirectiveList, b.directiveRoute(http.MethodPost, b.handleDirectiveList))
+	mux.HandleFunc(wire.PathDirectiveRevoke, b.directiveRoute(http.MethodPost, b.handleDirectiveRevoke))
+	mux.HandleFunc(wire.PathDirectiveSelftest, b.directiveRoute(http.MethodPost, b.handleDirectiveSelftest))
 	return mux
 }
 
@@ -98,11 +99,6 @@ func (b *Broker) directiveRoute(method string, h http.HandlerFunc) http.HandlerF
 	}
 }
 
-type directiveSubmitRequest struct {
-	Statement string `json:"statement"` // base64/std of the EXACT signed bytes
-	Signature string `json:"signature"` // base64/std of the armored ssh signature
-}
-
 // decodeSignedStatement decodes the {statement,signature} JSON envelope
 // shared by send and selftest: 256 KiB body cap, then base64/std of both
 // fields. On any failure it writes 400 "bad request" and returns ok=false;
@@ -110,7 +106,7 @@ type directiveSubmitRequest struct {
 // sites — send and selftest deliberately handle verify failures differently
 // (opaque message vs. verbatim error).
 func decodeSignedStatement(w http.ResponseWriter, r *http.Request) (raw, sig []byte, ok bool) {
-	var req directiveSubmitRequest
+	var req wire.DirectiveSubmitRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return nil, nil, false
@@ -204,7 +200,7 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	}
 	b.audit("directive", "operator", "allow", "send "+st.DirectiveID, "target", st.TargetAgent.CN, "kind", st.Action.Kind)
 	b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": delivered})
-	writeJSON(w, map[string]any{"id": st.DirectiveID, "delivered": delivered})
+	writeJSON(w, wire.DirectiveSendResponse{ID: st.DirectiveID, Delivered: delivered})
 }
 
 // directiveSlug maps a target CN to its scion message slug: the manager CN
@@ -233,15 +229,6 @@ func (b *Broker) resolveDirectiveAgent(name string) (cn, slug string, ok bool) {
 	return "", "", false
 }
 
-// DirectiveResolveResponse is the /directive/resolve wire reply: the target
-// agent's current CN, scion slug and directive generation. Exported so the
-// lever CLI decodes against this one declaration instead of its own copy.
-type DirectiveResolveResponse struct {
-	CN         string `json:"cn"`
-	Slug       string `json:"slug"`
-	Generation int    `json:"generation"`
-}
-
 // handleDirectiveResolve is UNSIGNED: the UDS socket's 0600 perms are the
 // gate, and the response carries no authority (an operator still has to sign
 // a statement against the reported generation to act on it).
@@ -257,16 +244,11 @@ func (b *Broker) handleDirectiveResolve(w http.ResponseWriter, r *http.Request) 
 		b.dirAudit.append("resolve", map[string]any{"agent": agent, "cn": cn, "generation": 0})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "agent not yet enrolled"})
+		_ = json.NewEncoder(w).Encode(wire.ErrorResponse{Error: "agent not yet enrolled"})
 		return
 	}
 	b.dirAudit.append("resolve", map[string]any{"agent": agent, "cn": cn, "generation": gen})
-	writeJSON(w, DirectiveResolveResponse{CN: cn, Slug: slug, Generation: gen})
-}
-
-type directiveEnvelopeRequest struct {
-	Envelope  string `json:"envelope"`  // base64/std of the EXACT signed bytes
-	Signature string `json:"signature"` // base64/std of the armored ssh signature
+	writeJSON(w, wire.DirectiveResolveResponse{CN: cn, Slug: slug, Generation: gen})
 }
 
 // verifyAdminEnvelope decodes, verifies (NamespaceAdmin), and parses a signed
@@ -274,7 +256,7 @@ type directiveEnvelopeRequest struct {
 // it audits and writes the HTTP response itself and returns ok=false; callers
 // must return immediately when ok is false.
 func (b *Broker) verifyAdminEnvelope(w http.ResponseWriter, r *http.Request, op, wantOp string) (opsig.Envelope, bool) {
-	var req directiveEnvelopeRequest
+	var req wire.DirectiveEnvelopeRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return opsig.Envelope{}, false
@@ -314,7 +296,7 @@ func (b *Broker) handleDirectiveList(w http.ResponseWriter, r *http.Request) {
 	recs := b.directives.List(time.Now())
 	b.audit("directive", "operator", "allow", "list")
 	b.dirAudit.append("list", map[string]any{"count": len(recs)})
-	writeJSON(w, map[string]any{"directives": recs})
+	writeJSON(w, wire.DirectiveListResponse[DirectiveRecord]{Directives: recs})
 }
 
 func (b *Broker) handleDirectiveRevoke(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +308,7 @@ func (b *Broker) handleDirectiveRevoke(w http.ResponseWriter, r *http.Request) {
 	revoked := b.directives.RevokeDirective(id)
 	b.audit("directive", "operator", "allow", "revoke "+id)
 	b.dirAudit.append("revoked", map[string]any{"id": id, "ok": revoked})
-	writeJSON(w, map[string]bool{"revoked": revoked})
+	writeJSON(w, wire.DirectiveRevokeResponse{Revoked: revoked})
 }
 
 // handleDirectiveSelftest verifies+parses ONLY (no store, no delivery, no
@@ -349,5 +331,5 @@ func (b *Broker) handleDirectiveSelftest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	b.dirAudit.append("selftest", map[string]any{"ok": true})
-	writeJSON(w, map[string]bool{"ok": true})
+	writeJSON(w, wire.DirectiveSelftestResponse{OK: true})
 }

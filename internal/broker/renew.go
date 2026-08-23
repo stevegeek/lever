@@ -4,18 +4,9 @@ import (
 	"crypto"
 	"encoding/json"
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// RenewRequest carries a fresh CSR (new keypair). Its CN is IGNORED; the renewed
-// cert always carries the caller's authenticated CN.
-type RenewRequest struct {
-	CSR string `json:"csr"`
-}
-
-// RenewResponse carries the renewed client cert PEM.
-type RenewResponse struct {
-	Cert string `json:"cert"`
-}
 
 // csrPublicKey parses a PEM CSR (self-signature verified by parseCSR — the
 // only proof-of-possession check on /renew) and returns its public key.
@@ -39,7 +30,7 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req RenewRequest
+	var req wire.RenewRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("renew", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -63,6 +54,6 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 	// without this its generation stays 0 and no operator directive can target
 	// it. Never bumps an existing generation — that is reserved for re-enrolment.
 	b.directives.EnsureGeneration(caller)
-	writeJSON(w, RenewResponse{Cert: string(certPEM)})
+	writeJSON(w, wire.RenewResponse{Cert: string(certPEM)})
 	b.audit("renew", caller, "allow", "")
 }

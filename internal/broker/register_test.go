@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/stevegeek/lever/internal/wire"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,9 +21,9 @@ func TestRegisterAddsTool(t *testing.T) {
 		Name: "calendar", Backend: "http://127.0.0.1:3202",
 		Operations: map[string]registry.Operation{"list": {Name: "list"}},
 	})
-	body, _ := json.Marshal(RegisterRequest{
+	body, _ := json.Marshal(wire.RegisterRequest{
 		Name: "calendar", Backend: "http://127.0.0.1:3202",
-		Operations: []OperationSpec{{Name: "list"}},
+		Operations: []wire.OperationSpec{{Name: "list"}},
 	})
 	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -43,9 +44,9 @@ func TestRegisterSetsFirstParty(t *testing.T) {
 		Name: "db", Backend: "http://127.0.0.1:3201", FirstParty: true,
 		Operations: map[string]registry.Operation{"read": {Name: "read"}},
 	})
-	body, _ := json.Marshal(RegisterRequest{
+	body, _ := json.Marshal(wire.RegisterRequest{
 		Name: "db", Backend: "http://127.0.0.1:3201", FirstParty: true,
-		Operations: []OperationSpec{{Name: "read"}},
+		Operations: []wire.OperationSpec{{Name: "read"}},
 	})
 	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -62,11 +63,11 @@ func TestRegisterSetsFirstParty(t *testing.T) {
 func TestRegisterResponseCarriesPubKeyAndEpoch(t *testing.T) {
 	b := New(testConfig(t))
 	b.BumpEpoch() // epoch now 1
-	body, _ := json.Marshal(RegisterRequest{Name: "db", Backend: "http://127.0.0.1:3201", Operations: []OperationSpec{{Name: "read"}}})
+	body, _ := json.Marshal(wire.RegisterRequest{Name: "db", Backend: "http://127.0.0.1:3201", Operations: []wire.OperationSpec{{Name: "read"}}})
 	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	b.handleRegister(w, r)
-	var resp RegisterResponse
+	var resp wire.RegisterResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("body=%s err=%v", w.Body.String(), err)
 	}
@@ -82,7 +83,7 @@ func TestRegisterResponseCarriesPubKeyAndEpoch(t *testing.T) {
 
 func TestRegisterRejectsInvalid(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(RegisterRequest{Name: "", Backend: "x"}) // empty name
+	body, _ := json.Marshal(wire.RegisterRequest{Name: "", Backend: "x"}) // empty name
 	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	b.handleRegister(w, r)

@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"github.com/stevegeek/lever/internal/wire"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,7 +30,7 @@ func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
 
 func TestProvisionIssuesTicketForManager(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
+	body, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()
@@ -37,7 +38,7 @@ func TestProvisionIssuesTicketForManager(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	var resp ProvisionResponse
+	var resp wire.ProvisionResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +49,7 @@ func TestProvisionIssuesTicketForManager(t *testing.T) {
 
 func TestProvisionRejectsNonManager(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
+	body, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "analyst") // not the manager
 	w := httptest.NewRecorder()
@@ -60,7 +61,7 @@ func TestProvisionRejectsNonManager(t *testing.T) {
 
 func TestProvisionRejectsUnknownWorker(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Worker: "ghost"})
+	body, _ := json.Marshal(wire.ProvisionRequest{Worker: "ghost"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()
@@ -72,7 +73,7 @@ func TestProvisionRejectsUnknownWorker(t *testing.T) {
 
 func TestProvisionRejectsNoCert(t *testing.T) {
 	b := New(testConfig(t))
-	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
+	body, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body)) // no r.TLS
 	w := httptest.NewRecorder()
 	b.handleProvision(w, r)
@@ -84,7 +85,7 @@ func TestProvisionRejectsNoCert(t *testing.T) {
 func TestProvisionDeniesRevokedManager(t *testing.T) {
 	b := New(testConfig(t))
 	b.Revoke("manager")
-	body, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
+	body, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()

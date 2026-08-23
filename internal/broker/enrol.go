@@ -5,18 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// EnrolRequest is the body of POST /enrol (no client cert; ticket-authorised).
-type EnrolRequest struct {
-	Ticket string `json:"ticket"`
-	CSR    string `json:"csr"` // PEM CSR; CN must equal the ticket's worker
-}
-
-// EnrolResponse carries the signed client cert PEM.
-type EnrolResponse struct {
-	Cert string `json:"cert"`
-}
 
 // csrCommonName parses a PEM CSR (self-signature verified by parseCSR) and
 // returns its subject CommonName.
@@ -37,7 +28,7 @@ func csrCommonName(csrPEM []byte) (string, error) {
 // Redeem is called with the CSR's CN as the worker, so a mismatch fails and does
 // NOT burn the ticket.
 func (b *Broker) handleEnrol(w http.ResponseWriter, r *http.Request) {
-	var req EnrolRequest
+	var req wire.EnrolRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("enrol", "", "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -67,6 +58,6 @@ func (b *Broker) handleEnrol(w http.ResponseWriter, r *http.Request) {
 	// directives are bound to (CN, generation), so anything targeted at a
 	// previous holder of a recycled slug is invalidated here.
 	b.directives.BumpGeneration(cn)
-	writeJSON(w, EnrolResponse{Cert: string(certPEM)})
+	writeJSON(w, wire.EnrolResponse{Cert: string(certPEM)})
 	b.audit("enrol", cn, "allow", "")
 }

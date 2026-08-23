@@ -3,17 +3,9 @@ package broker
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// ProvisionRequest is the body of POST /provision (manager only).
-type ProvisionRequest struct {
-	Worker string `json:"worker"`
-}
-
-// ProvisionResponse carries the one-time enrolment ticket.
-type ProvisionResponse struct {
-	Ticket string `json:"ticket"`
-}
 
 // handleProvision issues a single-use enrolment ticket for a worker. Only the
 // configured manager identity may call it, and only for a configured worker. No
@@ -30,7 +22,7 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req ProvisionRequest
+	var req wire.ProvisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("provision", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -47,6 +39,6 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, ProvisionResponse{Ticket: tk})
+	writeJSON(w, wire.ProvisionResponse{Ticket: tk})
 	b.audit("provision", caller, "allow", req.Worker)
 }

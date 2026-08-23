@@ -1,6 +1,10 @@
 package broker
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
+)
 
 // handleTools returns the broker's registered tool names to an authenticated
 // agent (mTLS). It is the FULL catalog, not policy-filtered: an agent may call a
@@ -25,5 +29,5 @@ func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, n)
 	}
-	writeJSON(w, map[string][]string{"tools": out})
+	writeJSON(w, wire.ToolsResponse{Tools: out})
 }

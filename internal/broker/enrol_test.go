@@ -3,13 +3,14 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/stevegeek/lever/internal/wire"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
 func enrolReq(ticket string, csrPEM []byte) *http.Request {
-	body, _ := json.Marshal(EnrolRequest{Ticket: ticket, CSR: string(csrPEM)})
+	body, _ := json.Marshal(wire.EnrolRequest{Ticket: ticket, CSR: string(csrPEM)})
 	return httptest.NewRequest("POST", "/enrol", bytes.NewReader(body)) // no client cert
 }
 
@@ -22,7 +23,7 @@ func TestEnrolSignsCertForMatchingWorker(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	var resp EnrolResponse
+	var resp wire.EnrolResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}

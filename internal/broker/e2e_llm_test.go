@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"github.com/stevegeek/lever/internal/wire"
 	"io"
 	"net/http"
 	"strings"
@@ -66,26 +67,26 @@ func TestE2ELLMProxyOverRealMTLS(t *testing.T) {
 
 	// Provision worker (manager) → ticket.
 	managerClient := agentClient(t, b, signedCert(t, b, "manager"))
-	provBody, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
+	provBody, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
 	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	defer provResp.Body.Close()
-	var prov ProvisionResponse
+	var prov wire.ProvisionResponse
 	if err := json.NewDecoder(provResp.Body).Decode(&prov); err != nil || prov.Ticket == "" {
 		t.Fatalf("provision: decode=%v ticket=%q", err, prov.Ticket)
 	}
 
 	// Enrol worker (certless) → signed cert + own key → mTLS client.
 	csrPEM, keyPEM := csrWithKey(t, "worker")
-	enrolBody, _ := json.Marshal(EnrolRequest{Ticket: prov.Ticket, CSR: string(csrPEM)})
+	enrolBody, _ := json.Marshal(wire.EnrolRequest{Ticket: prov.Ticket, CSR: string(csrPEM)})
 	enrolResp, err := agentClient(t, b, tls.Certificate{}).Post(srv.URL+"/enrol", "application/json", bytes.NewReader(enrolBody))
 	if err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	defer enrolResp.Body.Close()
-	var enr EnrolResponse
+	var enr wire.EnrolResponse
 	if err := json.NewDecoder(enrolResp.Body).Decode(&enr); err != nil || enr.Cert == "" {
 		t.Fatalf("enrol: decode=%v cert empty=%v", err, enr.Cert == "")
 	}
@@ -96,7 +97,7 @@ func TestE2ELLMProxyOverRealMTLS(t *testing.T) {
 	workerClient := agentClient(t, b, workerCert)
 
 	// Worker self-mints a capability(llm) token via /request (the lever-agent flow).
-	capBody, _ := json.Marshal(CapRequest{Tool: ReservedLLMTool, Op: ReservedLLMOp})
+	capBody, _ := json.Marshal(wire.CapRequest{Tool: ReservedLLMTool, Op: ReservedLLMOp})
 	capResp, err := workerClient.Post(srv.URL+"/request", "application/json", bytes.NewReader(capBody))
 	if err != nil {
 		t.Fatalf("request llm token: %v", err)
@@ -106,7 +107,7 @@ func TestE2ELLMProxyOverRealMTLS(t *testing.T) {
 		body, _ := io.ReadAll(capResp.Body)
 		t.Fatalf("request llm token: status=%d body=%s", capResp.StatusCode, body)
 	}
-	var cap CapResponse
+	var cap wire.CapResponse
 	if err := json.NewDecoder(capResp.Body).Decode(&cap); err != nil || cap.Token == "" {
 		t.Fatalf("request llm token: decode=%v token empty=%v", err, cap.Token == "")
 	}

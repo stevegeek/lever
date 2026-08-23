@@ -2,6 +2,8 @@ package broker
 
 import (
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // handleBootstrap mints the manager's single-use enrolment ticket. Loopback-only
@@ -28,5 +30,5 @@ func (b *Broker) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("bootstrap", b.manager, "allow", "")
-	writeJSON(w, map[string]string{"ticket": ticket})
+	writeJSON(w, wire.BootstrapResponse{Ticket: ticket})
 }

@@ -299,7 +299,7 @@ type Broker struct {
 	// AutoReenrol gates the broker's natural-lapse auto-re-enrol healer: which
 	// agents it heals after an mTLS leaf ages out naturally (our CA's cert,
 	// valid in every way but time — never a revoked or epoch-stale identity).
-	// all (default) | manager | off. See the recovery-arc design (#22).
+	// all (default) | manager | off. See #22.
 	AutoReenrol AutoReenrolMode `yaml:"auto_reenrol"`
 }
 
@@ -378,7 +378,7 @@ var scionAgentRoles = []string{"none", "readonly", "baseline", "full"}
 
 // Security holds opt-in image policy. Both default off (empty/false) for
 // backward compatibility; when set they apply to manager.image and every worker
-// image. See security-model-config-trust.md §5.
+// image. See docs-site/_guides/security-model-config-trust.md §5.
 type Security struct {
 	// AllowedImageRegistries restricts where images may come from: an image is
 	// allowed iff it equals, or is prefixed by "<entry>/", one of these entries
@@ -456,8 +456,7 @@ type App struct {
 	Remote   Remote      `yaml:"remote"`
 	Disk     string      `yaml:"disk"` // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
 
-	dir     string // instance root (the config file's directory)
-	treeRel string // tree as the confined relative subdir (before joining to dir)
+	dir string // instance root (the config file's directory)
 }
 
 // validateBackend rejects a config's backend unless lever can run it. The set
@@ -478,7 +477,7 @@ func validateBackend(name string) error {
 // instance root (package.json / Cargo.toml style). It is resolved from the
 // current directory ONLY — there is deliberately no walk-up discovery, so a
 // `lever.yaml` planted in a parent directory can never be picked up. See
-// security-model-config-trust.md §5.
+// docs-site/_guides/security-model-config-trust.md §5.
 const CanonicalName = "lever.yaml"
 
 // nameRE constrains an instance/worker name: it becomes a jail machine name
@@ -585,11 +584,10 @@ func Load(path string) (*App, error) {
 	// mounted — it holds the config and the boot prompt, which must stay out of
 	// the agent-writable mount (a compromised agent could otherwise rewrite the
 	// config the host trusts on the next bring-up). So `tree: .` (root == mount)
-	// is rejected. See security-model-config-trust.md §5.
+	// is rejected. See docs-site/_guides/security-model-config-trust.md §5.
 	if !confinedRel(app.Tree) {
 		return nil, fmt.Errorf("config: tree %q must be a relative subdirectory inside the instance root (not %q, not absolute, no \"..\")", app.Tree, ".")
 	}
-	app.treeRel = app.Tree
 	app.Tree = filepath.Join(app.dir, app.Tree)
 	if abs, err := filepath.Abs(app.Tree); err == nil {
 		app.Tree = abs
@@ -947,7 +945,7 @@ func (a *App) validateRemote() error {
 // validateNonGitTree refuses a tree that is ITSELF a git repository (has its
 // own .git). R4's sibling isolation assumes a non-git tree; per-worker git
 // workflows are deferred (spec §13). It deliberately does not walk up to
-// ancestors: the pinned Scion's --workspace guard (P2 Task 5) plain-mounts
+// ancestors: the pinned Scion's --workspace guard plain-mounts
 // the exact tree dir, so an ancestor .git elsewhere in the checkout is never
 // exposed and is harmless — a plain subdirectory inside a larger git repo is
 // fine.
@@ -955,7 +953,7 @@ func (a *App) validateNonGitTree() error {
 	if treeIsGitRepo(a.Tree) {
 		return fmt.Errorf("config: tree %q is itself a git repository; lever targets non-git trees "+
 			"(per-worker git workflows are deferred, spec §13). A plain subdirectory inside a larger "+
-			"git repo is fine — point tree at a non-git directory (or a subdir) instead.", a.Tree)
+			"git repo is fine — point tree at a non-git directory (or a subdir) instead", a.Tree)
 	}
 	return nil
 }

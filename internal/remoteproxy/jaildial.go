@@ -147,7 +147,7 @@ func startJailConn(dialCtx context.Context, prefix []string, addr, host, port st
 	// conn would keep it reachable for as long as the child lives, which is
 	// exactly when the cleanup registered further down needs it collectable.
 	w := &childWait{done: make(chan struct{})}
-	c := &jailConn{cmd: cmd, in: inW, out: outR, stderr: stderr, prefix: prefix, addr: addr,
+	c := &jailConn{in: inW, out: outR, stderr: stderr, prefix: prefix, addr: addr,
 		cancel: cancel, wait: w}
 	go func() {
 		w.err = cmd.Wait() // written before done closes; read only after
@@ -191,7 +191,6 @@ func endChild(cmd *exec.Cmd) error {
 
 // jailConn adapts a running `<prefix> nc host port` child to net.Conn.
 type jailConn struct {
-	cmd    *exec.Cmd
 	in     *os.File // parent → child stdin
 	out    *os.File // child stdout → parent
 	stderr *capBuffer

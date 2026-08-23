@@ -1,8 +1,10 @@
 // Package hubapi is a minimal client for the scion Hub REST API.
 //
 // lever drives scion through its CLI. This package covers only the hub
-// operations the CLI does not expose — today, removing a project's shared
-// directories (see StripSharedDir). Keep it that way: reach for the CLI first.
+// operations the CLI does not expose — today, listing a project's agents and
+// verifying their stored role (see Agents, VerifyAgentRole) and removing a
+// project's shared directories (see StripSharedDir). Keep it that way: reach
+// for the CLI first.
 //
 // Requests run INSIDE the jail (see JailCurl), never from the host. The hub
 // binds the jail's loopback, and lever's Lima template suppresses every

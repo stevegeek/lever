@@ -3,6 +3,7 @@ package captool
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func serverBoundTo(t *testing.T, kp token.KeyPair, ran *bool) *Server {
 			Name: "read", CaveatParam: map[string]string{"table": "table", "filter": "filter"},
 			Backstop: func(_ ValidatedContext, a map[string]string) error {
 				if a["table"] == "C" {
-					return ErrBackstop
+					return errors.New("backstop denied")
 				}
 				return nil
 			},

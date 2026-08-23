@@ -15,7 +15,7 @@ import (
 // plain subdirectory of a larger git repo (e.g. this repo's own shipped
 // example/testdata fixtures, or a deployment tree nested under an operator's
 // monorepo checkout) is fine: the pinned Scion's `--workspace` git guard
-// (P2 Task 5) plain-mounts the exact dir Scion is given, so an ancestor's
+// plain-mounts the exact dir Scion is given, so an ancestor's
 // `.git` is never exposed into the mount. Only the tree's own `.git` matters.
 func treeIsGitRepo(dir string) bool {
 	_, err := os.Lstat(filepath.Join(filepath.Clean(dir), ".git"))

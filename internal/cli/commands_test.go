@@ -41,7 +41,6 @@ func (s *stubBackend) Teardown(context.Context) error                 { s.down =
 func (s *stubBackend) Stop(context.Context) error                     { s.stopped = true; return nil }
 func (s *stubBackend) Profile() backend.Profile                       { return backend.Profile{Name: "stub"} }
 func (s *stubBackend) HostAliasV4() string                            { return "" }
-func (s *stubBackend) MachineName() string                            { return "lever-stub" }
 func (s *stubBackend) RunUser() string                                { return "stub" }
 func (s *stubBackend) RunUID() string                                 { return "501" }
 func (s *stubBackend) ResolveRunUser(context.Context) error           { return s.resolveRunUserErr }
@@ -88,7 +87,7 @@ func (s *stubBackend) ScionProjectRegistered(_ context.Context, workspacePath st
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {
 	sb := &stubBackend{}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"provision", "--machine", "lever-jail", "--tree", "/tmp/tree", "--allow-port", "3305"})
@@ -101,7 +100,7 @@ func TestUpCommandCallsEnsureUp(t *testing.T) {
 }
 
 func TestDoctorPrintsProfile(t *testing.T) {
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return &stubBackend{}, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return &stubBackend{}, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"doctor", "--machine", "lever-jail"})
@@ -119,7 +118,7 @@ func TestFactoryReceivesConfiguredBackendName(t *testing.T) {
 		gotName = name
 		return &stubBackend{}, nil
 	}
-	root := NewRootWithBackend(bf)
+	root := newHostRootWith(bf)
 	root.SetArgs([]string{"doctor", "--machine", "lever-x", "--backend", "orbstack"})
 	var out bytes.Buffer
 	root.SetOut(&out)

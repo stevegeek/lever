@@ -74,7 +74,7 @@ func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	root.SetArgs([]string{"attach", "scratch"})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -99,7 +99,7 @@ func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	root.SetArgs([]string{"attach"})
 	var out bytes.Buffer
 	root.SetOut(&out)

@@ -36,7 +36,7 @@ func (s *Server) Register(ctx context.Context) error {
 		ops = append(ops, registerOp{Name: o.Name, CaveatParam: o.CaveatParam})
 	}
 	body, _ := json.Marshal(registerBody{Name: s.name, Backend: s.backend, Operations: ops, FirstParty: true})
-	req, err := http.NewRequestWithContext(ctx, "POST", s.adminURL+"/register", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.adminURL+"/register", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func (s *Server) freshEpoch(ctx context.Context) int {
 	}
 	s.mu.Unlock()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", s.adminURL+"/epoch", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.adminURL+"/epoch", nil)
 	if err == nil {
 		if resp, derr := http.DefaultClient.Do(req); derr == nil {
 			defer resp.Body.Close()

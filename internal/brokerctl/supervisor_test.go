@@ -13,6 +13,13 @@ import (
 
 // Uses /bin/sh indirectly? No — no shell. We launch a real, simple command that
 // exits 0 quickly to prove argv assembly + lifecycle, then a long-running one.
+// trackedCount returns the number of currently-tracked child processes.
+func trackedCount(s *Supervisor) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.cmds)
+}
+
 func TestSupervisorStartsConfiguredToolsWithFlags(t *testing.T) {
 	// `true` ignores args and exits 0; we only assert Start doesn't error and the
 	// process is launched with our injected flags appended (argv inspection via a
@@ -47,7 +54,7 @@ func TestSupervisorStartCleansUpOnPartialFailure(t *testing.T) {
 		t.Fatal("Start must error when a tool has no command")
 	}
 	// After a failed Start, no processes remain tracked (cleaned up).
-	if n := s.trackedCount(); n != 0 {
+	if n := trackedCount(s); n != 0 {
 		t.Fatalf("Start left %d processes tracked after partial-failure cleanup", n)
 	}
 	s.Stop() // must be safe to call again (no-op)
@@ -62,7 +69,7 @@ func TestSupervisorSkipsExternalTools(t *testing.T) {
 		t.Fatalf("Start with only external tools must succeed (nothing to spawn): %v", err)
 	}
 	defer s.Stop()
-	if n := s.trackedCount(); n != 0 {
+	if n := trackedCount(s); n != 0 {
 		t.Fatalf("tracked = %d, want 0 (external tools are fronted, not spawned)", n)
 	}
 }
@@ -77,7 +84,7 @@ func TestSupervisorMixedSpawnsOnlySupervised(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer s.Stop()
-	if n := s.trackedCount(); n != 1 {
+	if n := trackedCount(s); n != 1 {
 		t.Fatalf("tracked = %d, want 1 (only the supervised tool spawns)", n)
 	}
 }

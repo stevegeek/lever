@@ -31,7 +31,7 @@ const llmSentinelBackend = "lever:llm-proxy"
 // request/delegation policy (from manager+worker grants), the pre-loaded tool
 // registry (config-authoritative envelopes; caveat_param is the config-declared
 // guard, the tool re-supplies it at /register), the agent list, and TTLs. The
-// caller supplies the keys/CA/tickets (EnsureKeys, Task 3).
+// caller supplies the keys/CA/tickets (EnsureKeys).
 func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca.TicketStore) (broker.Config, error) {
 	pol := rules.NewPolicy()
 	addGrants := func(cn string, obtain []config.Grant, delegate []config.DelegateGrant) {

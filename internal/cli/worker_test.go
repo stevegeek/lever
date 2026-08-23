@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,7 +61,7 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	f := leverexec.NewFakeRunner()
 	f.Script("scion", leverexec.Result{Stdout: "ok"})
 	sb := &stubBackend{runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -86,7 +88,7 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	}
 
 	// The staged bootstrap is gone.
-	if _, err := os.Stat(bootstrap); !os.IsNotExist(err) {
+	if _, err := os.Stat(bootstrap); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("bootstrap.json must be removed, stat err = %v", err)
 	}
 	// The HostWorkspace and its work product survive.
@@ -115,7 +117,7 @@ func TestWorkerPurgeRequiresForce(t *testing.T) {
 
 	f := leverexec.NewFakeRunner() // no scripts: any scion call errors loudly
 	sb := &stubBackend{runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -139,7 +141,7 @@ func TestWorkerPurgeUnknownWorker(t *testing.T) {
 
 	f := leverexec.NewFakeRunner()
 	sb := &stubBackend{runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)

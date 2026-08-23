@@ -1,6 +1,8 @@
 package brokerctl
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -204,7 +206,7 @@ func TestWriteRemoteStampLeavesNoStaleRecordOnFailure(t *testing.T) {
 	if err := s.WriteRemoteStamp("v1", "h1"); err == nil {
 		t.Error("writing a stamp with no readable proxy pid must fail")
 	}
-	if _, err := os.Stat(s.RemoteStamp()); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.RemoteStamp()); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("a failed write must remove the previous stamp, not leave it describing a process nothing can identify")
 	}
 }

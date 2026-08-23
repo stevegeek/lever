@@ -56,7 +56,7 @@ func (s State) EnsureKeys() (token.KeyPair, *ca.CA, error) {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return token.KeyPair{}, nil, fmt.Errorf("brokerctl: state dir: %w", err)
 	}
-	// Biscuit keypair.
+	// Capability-token signing keypair.
 	var kp token.KeyPair
 	if _, err := os.Stat(s.BrokerKey()); errors.Is(err, os.ErrNotExist) {
 		gen, gerr := token.Generate()

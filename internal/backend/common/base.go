@@ -88,7 +88,6 @@ func (b *Base) HostAliasV4() string { return b.AliasV4 }
 func (b *Base) MountDest() string { return MountDest }
 
 // MachineName returns the jail machine name this backend targets.
-func (b *Base) MachineName() string { return b.Machine }
 
 // RunUser returns the in-jail run user resolved by EnsureUp (valid after EnsureUp).
 func (b *Base) RunUser() string { return b.User }

@@ -1,7 +1,7 @@
 package broker
 
 // e2e_llm_test.go exercises the api-key /llm proxy over real mTLS: a live
-// httptest.Server with the broker CA's ServerTLSConfig, a real enrolled worker
+// httptest.Server with the broker CA's ServerTLSConfigSource, a real enrolled worker
 // cert, a capability(llm) token the worker mints for itself via /request, and a
 // fake upstream that records what the proxy forwarded. The unit tests in
 // llmproxy_test.go fake req.TLS with httptest recorders; this proves the full

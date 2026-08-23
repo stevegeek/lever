@@ -89,7 +89,7 @@ func newRevokeCmd() *cobra.Command {
 // adminPost POSTs to the running broker's loopback admin port (from config).
 func adminPost(ctx context.Context, app *config.App, path string, body []byte) error {
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), path)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

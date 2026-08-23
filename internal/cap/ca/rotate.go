@@ -2,8 +2,6 @@ package ca
 
 import (
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"sync"
 	"time"
@@ -74,17 +72,6 @@ func (s *ServerCertSource) mintLocked() error {
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return fmt.Errorf("ca: server keypair: %w", err)
-	}
-	if pair.Leaf == nil { // older Go leaves Leaf unparsed
-		block, _ := pem.Decode(certPEM)
-		if block == nil {
-			return fmt.Errorf("ca: minted cert PEM is invalid")
-		}
-		leaf, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return fmt.Errorf("ca: parse minted leaf: %w", err)
-		}
-		pair.Leaf = leaf
 	}
 	s.cert = &pair
 	return nil

@@ -1,4 +1,4 @@
-// Mint/Verify for the capability token: a compact Ed25519-signed struct that
+// Package token is Mint/Verify for the capability token: a compact Ed25519-signed struct that
 // binds one (tool, operation) capability to a single agent identity, with
 // optional parameter constraints, a hard expiry, and a mint epoch (revocation
 // floor). It replaced a biscuit/Datalog token: the only biscuit-specific
@@ -7,7 +7,6 @@
 // verification path. A typed signed struct carries everything actually relied
 // upon (bound agent, capability match, equality constraints, expiry, epoch)
 // with one fewer dependency and no policy interpreter.
-
 package token
 
 import (

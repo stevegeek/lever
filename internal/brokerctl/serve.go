@@ -2,7 +2,9 @@ package brokerctl
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -57,7 +59,7 @@ func writePIDFile(state State) error {
 // warning, not fatal (the process is exiting anyway); an already-absent file
 // is fine.
 func removePIDFile(state State) {
-	if err := os.Remove(state.PID()); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(state.PID()); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "lever: warning: could not remove %s: %v\n", state.PID(), err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,7 +38,7 @@ func main() {
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call> ...")
+		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call>")
 	}
 	switch argv[1] {
 	case "boot":
@@ -125,7 +126,7 @@ func cmdBoot(args []string) error {
 	if err := agent.Boot(ctx, cfg); err != nil {
 		return err
 	}
-	// G2: emit the renew sidecar so scion auto-refreshes the cert and (in api-key
+	// Emit the renew sidecar so scion auto-refreshes the cert and (in api-key
 	// mode) the LLM token. Skip in enrol-only mode — the bare VM acceptance gate
 	// has no long-running container to run sidecars in.
 	if !*enrolOnly {
@@ -219,7 +220,7 @@ func writeClaudeSettingsEnv(path string) func(map[string]string) error {
 			if err := json.Unmarshal(b, &settings); err != nil {
 				return fmt.Errorf("settings %s: parse existing: %w", path, err)
 			}
-		} else if !os.IsNotExist(err) {
+		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("settings %s: read: %w", path, err)
 		}
 		env, _ := settings["env"].(map[string]any)
@@ -333,8 +334,8 @@ func writeRenewServices(homeDir, idDir, bootstrapPath, settingsPath, llmAuth str
 //
 // PAIRING WITH BOOT.GO: boot.go calls MCPAdd("lever-capability", "lever-agent",
 // "serve-capability"). Claude Code interprets this as a command-mode MCP server
-// and spawns "lever-agent serve-capability" reading/writing stdio JSON-RPC. Task 8
-// validates this transport live in the acceptance run.
+// and spawns "lever-agent serve-capability" reading/writing stdio JSON-RPC. The
+// acceptance run validates this transport live.
 func cmdServeCapability(args []string) error {
 	fs := flag.NewFlagSet("serve-capability", flag.ContinueOnError)
 	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json (for broker URL)")
@@ -378,7 +379,7 @@ func cmdServeCapability(args []string) error {
 			continue
 		}
 		rec := httptest.NewRecorder()
-		req, err := http.NewRequest("POST", "/", bytes.NewReader(line))
+		req, err := http.NewRequest(http.MethodPost, "/", bytes.NewReader(line))
 		if err != nil {
 			continue
 		}

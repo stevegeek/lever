@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -16,18 +17,23 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
-// scrubProxyHeaders drops client-supplied forwarding/identity headers before a
-// broker-side reverse proxy forwards a jail request upstream. Shared by the
-// MCP gateway and llm-proxy Directors. Forwarding/identity headers ONLY —
-// never credential headers (Authorization/x-api-key): the llm Director calls
-// this after injecting the real Console key, so a widened scrub would strip
-// it. The agent-side loopback gateway (internal/agent/gateway.go) is a
+// rewriteUpstream is the shared ProxyRequest rewrite for the broker-side
+// reverse proxies (MCP gateway and llm-proxy): route to target, pin the
+// outbound Host, and drop client-supplied forwarding/identity headers.
+// ReverseProxy.Rewrite hands us an Out request that already lacks the inbound
+// X-Forwarded-* headers, so only Cookie needs scrubbing; X-Forwarded-For is
+// re-set to the immediate client IP (the pre-Rewrite behaviour) without the
+// inbound chain. Forwarding/identity headers ONLY — never credential headers
+// (Authorization/x-api-key): the llm proxy injects the real Console key after
+// this runs. The agent-side loopback gateway (internal/agent/gateway.go) is a
 // different trust context and intentionally does not scrub.
-func scrubProxyHeaders(h http.Header) {
-	h.Del("Cookie")
-	h.Del("X-Forwarded-For")
-	h.Del("X-Forwarded-Host")
-	h.Del("X-Forwarded-Proto")
+func rewriteUpstream(pr *httputil.ProxyRequest, target *url.URL) {
+	pr.SetURL(target)
+	pr.Out.Host = target.Host
+	pr.Out.Header.Del("Cookie")
+	if ip, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil {
+		pr.Out.Header.Set("X-Forwarded-For", ip)
+	}
 }
 
 // gatewayHandler returns the gated MCP reverse-proxy for one registered tool
@@ -52,22 +58,19 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("broker: tool %q bad backend %q: %w", toolName, t.Backend, err)
 	}
-	rp := httputil.NewSingleHostReverseProxy(target)
-	base := rp.Director
-	rp.Director = func(req *http.Request) {
-		remainder := req.URL.Path // post-StripPrefix, before the backend-path join
-		base(req)
+	rp := &httputil.ReverseProxy{}
+	rp.Rewrite = func(pr *httputil.ProxyRequest) {
+		remainder := pr.In.URL.Path // post-StripPrefix, before the backend-path join
+		rewriteUpstream(pr, target)
 		// A backend that carries its own path (e.g. qmd's "[::1]:3101/mcp") must
 		// receive that path EXACTLY when the MCP client hits the tool root: the
 		// default join turns "/mcp"+"/" into "/mcp/", which a strict streamable-
 		// HTTP endpoint 404s. Collapse a bare-root remainder to the backend path.
 		// Path-less backends (the common case) are untouched.
 		if (remainder == "" || remainder == "/") && target.Path != "" && target.Path != "/" {
-			req.URL.Path = target.Path
-			req.URL.RawPath = ""
+			pr.Out.URL.Path = target.Path
+			pr.Out.URL.RawPath = ""
 		}
-		req.Host = target.Host
-		scrubProxyHeaders(req.Header)
 	}
 	// Rewrite tools/list responses to advertise _capability.
 	rp.ModifyResponse = func(resp *http.Response) error {

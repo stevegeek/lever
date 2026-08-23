@@ -79,16 +79,6 @@ func (c *CA) SignPublicKey(pub crypto.PublicKey, cn string) ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
-// IssueServerCert mints a short-lived (24h) server cert for the given hostname
-// or IP address. If host parses as an IP, the SAN is placed in IPAddresses so
-// Go's TLS stack can validate it; otherwise it is placed in DNSNames.
-func (c *CA) IssueServerCert(host string) (certPEM, keyPEM []byte, err error) {
-	if ip := net.ParseIP(host); ip != nil {
-		return c.issue(host, x509.ExtKeyUsageServerAuth, nil, []net.IP{ip})
-	}
-	return c.issue(host, x509.ExtKeyUsageServerAuth, []string{host}, nil)
-}
-
 // IssueServerCertSANs mints a server cert carrying BOTH the given DNS names and
 // IP-address SANs, with cn as the Subject CommonName. The broker uses this so an
 // agent can reach it by hostname (host.orb.internal) OR by its resolved alias IP

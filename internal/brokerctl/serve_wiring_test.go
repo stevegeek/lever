@@ -1,6 +1,8 @@
 package brokerctl
 
 import (
+	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -217,7 +219,7 @@ func TestBindListenersNoSocketWhenDirectivesDisabled(t *testing.T) {
 	if dirLn != nil {
 		t.Error("dirLn is non-nil with directives disabled, want nil (no channel)")
 	}
-	if _, err := os.Stat(state.DirectiveSock()); !os.IsNotExist(err) {
+	if _, err := os.Stat(state.DirectiveSock()); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("directive socket exists with directives disabled: %v", err)
 	}
 }

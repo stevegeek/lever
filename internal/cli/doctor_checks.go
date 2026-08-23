@@ -693,7 +693,11 @@ func checkNodeToolchain(app *config.App) checkResult {
 	}
 	version, err := nodeToolchainProbe()
 	if err != nil {
-		return checkResult{name, false, err.Error(), guest.NodeToolchainFix}
+		fix := ""
+		if errors.Is(err, guest.ErrNodeToolchain) {
+			fix = guest.NodeToolchainFix
+		}
+		return checkResult{name, false, err.Error(), fix}
 	}
 	return checkResult{name, true, "node " + strings.TrimSpace(version), ""}
 }

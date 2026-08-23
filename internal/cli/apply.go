@@ -52,7 +52,7 @@ func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 // session (Setsid — survives the parent terminal/session, no controlling TTY),
 // stdout+stderr appended to outLog (so a bind failure or panic is inspectable,
 // not discarded), and the env the broker needs to issue its cert + reach the
-// jail. The pid file is written by the serve process itself (Task 1), not here.
+// jail. The pid file is written by the serve process itself, not here.
 func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (*exec.Cmd, *os.File, error) {
 	// On a fresh apply the state dir (.lever-state) does not exist yet — it's
 	// created by EnsureKeys inside the spawned child, too late for this open —
@@ -208,18 +208,16 @@ var (
 // The log's tail is quoted into the error because the cause is always there
 // and nowhere else — the child owns that file, and this process never sees its
 // stderr.
-// child, when non-nil, is the process just spawned: a listener alone does not
+// child is the (started) process just spawned: a listener alone does not
 // prove OUR proxy is serving — some other process (including a leaked older
 // proxy) may hold the port, and concluding "listening" then would stamp a
 // config nothing is enforcing.
 func (rc *remoteController) awaitListening(child *exec.Cmd) error {
 	deadline := time.Now().Add(remoteProxyStartTimeout)
 	for {
-		if child != nil && child.Process != nil {
-			if err := child.Process.Signal(syscall.Signal(0)); err != nil {
-				// The child is gone; whatever may be listening is not it.
-				break
-			}
+		if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+			// The child is gone; whatever may be listening is not it.
+			break
 		}
 		if err := tcpDial(rc.addr()); err == nil {
 			return nil
@@ -305,7 +303,7 @@ func jailProjectPath(tree, jailMount string) string {
 // binds :48080). ServerStart emits --web-port, so the throwaway lands here,
 // physically isolated from the real dev-auth-OFF hub the scion-server apply step
 // starts on 8080 right after. The throwaway's dev-auth window is agent-free +
-// jail-loopback only (the "agent-free window" — see the P3 plan).
+// jail-loopback only (the "agent-free window").
 const throwawayHubPort = 48080
 
 // controllerPATScopes is the EXACT scope set the controller PAT is minted
@@ -332,7 +330,7 @@ var remotePATScopes = []string{"agent:read", "agent:list", "project:read", "agen
 //
 // Idempotent per token: a PAT already persisted in state short-circuits its
 // own mint (survives `down`→`up`; clearStagedRuntimeState only wipes
-// tree/.lever/*, see the P3 plan's Global Constraints). If NEITHER token is
+// tree/.lever/*). If NEITHER token is
 // missing this is a complete no-op — no window opens at all.
 //
 // Why one window: the dev-auth mint window is the sensitive part (a
@@ -421,7 +419,7 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 	if err := tw.ServerStop(ctx); err != nil {
 		// Best-effort: the deferred ServerStop above retries at return, and a
 		// live run against a scion build without `server stop` needs a
-		// jail-pid-kill fallback instead (see ServerStop's doc comment) — a P4
+		// jail-pid-kill fallback instead (see ServerStop's doc comment) — a
 		// live-validation item, not implemented here.
 		_ = err
 	}
@@ -480,19 +478,8 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 	return c
 }
 
-// buildApplyDeps wires the live dependencies for apply.Run.
-// It eagerly calls EnsureUp so the backend resolves the in-machine
-// run-user and UID before the JailRunner and scion.Client are constructed.
-// JailUp is therefore a no-op in the returned Deps — the jail is already
-// confirmed up and the user/uid are known.
-// configPath is the resolved config file path; it is passed to `lever broker
-// serve` and used to locate the broker state dir.
-// cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
-// user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
-// that never exercise a Log-emitting path), in which case Log falls back to
-// stderr.
 // brokerReusable reports whether a running broker's /epoch identity matches
-// this binary + this broker config, i.e. whether apply's M2 shortcut may keep
+// this binary + this broker config, i.e. whether apply's broker-reuse shortcut may keep
 // it (#19). A broker predating the identity fields reports them empty —
 // mismatch — so old brokers are always restarted rather than trusted.
 func brokerReusable(got broker.EpochResponse, wantVersion, wantHash string) bool {
@@ -544,7 +531,7 @@ var brokerSelfExe = func() string { return os.Args[0] }
 func (bc *brokerController) Start(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if req, err := http.NewRequestWithContext(probeCtx, "GET", bc.adminURL+"/epoch", nil); err == nil {
+	if req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, bc.adminURL+"/epoch", nil); err == nil {
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			var er broker.EpochResponse
 			decodeErr := json.NewDecoder(resp.Body).Decode(&er)
@@ -577,7 +564,7 @@ func (bc *brokerController) Healthy(ctx context.Context) error {
 	deadline := time.Now().Add(10 * time.Second)
 	epochURL := bc.adminURL + "/epoch"
 	for {
-		req, err := http.NewRequestWithContext(ctx, "GET", epochURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, epochURL, nil)
 		if err != nil {
 			return err
 		}
@@ -605,7 +592,7 @@ func (bc *brokerController) Healthy(ctx context.Context) error {
 // apply.ErrBootstrapLatched so the mint step tolerates it on an idempotent
 // re-apply against the same broker process.
 func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", bc.adminURL+"/bootstrap", bytes.NewReader(nil))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, bc.adminURL+"/bootstrap", bytes.NewReader(nil))
 	if err != nil {
 		return apply.BootstrapMaterial{}, err
 	}
@@ -655,24 +642,24 @@ func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, 
 // staging code path). Staging happens HERE (not in apply/run.go) because
 // start-manager's Step.Target is the manager's slug, not the tree dir — this
 // controller is the only place that has app.Tree in scope.
-func (bc *brokerController) Rearm(ctx context.Context) (apply.BootstrapMaterial, error) {
+func (bc *brokerController) Rearm(ctx context.Context) error {
 	if err := bc.state.StopBroker(); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
+		return fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
 	}
 	if err := bc.Start(ctx); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("restarting the broker to re-arm its bootstrap latch: %w", err)
+		return fmt.Errorf("restarting the broker to re-arm its bootstrap latch: %w", err)
 	}
 	if err := bc.Healthy(ctx); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("waiting for the re-armed broker to become healthy: %w", err)
+		return fmt.Errorf("waiting for the re-armed broker to become healthy: %w", err)
 	}
 	m, err := bc.Mint(ctx)
 	if err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("minting bootstrap material from the re-armed broker: %w", err)
+		return fmt.Errorf("minting bootstrap material from the re-armed broker: %w", err)
 	}
 	if err := apply.StageBootstrapMaterial(bc.app.Tree, m); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("staging re-armed bootstrap material: %w", err)
+		return fmt.Errorf("staging re-armed bootstrap material: %w", err)
 	}
-	return m, nil
+	return nil
 }
 
 // leverMayClaimTemplate reports whether lever may point default_template at its
@@ -695,6 +682,17 @@ func leverMayClaimTemplate(current string) bool {
 	}
 }
 
+// buildApplyDeps wires the live dependencies for apply.Run.
+// It eagerly calls EnsureUp so the backend resolves the in-machine
+// run-user and UID before the JailRunner and scion.Client are constructed.
+// JailUp is therefore a no-op in the returned Deps — the jail is already
+// confirmed up and the user/uid are known.
+// configPath is the resolved config file path; it is passed to `lever broker
+// serve` and used to locate the broker state dir.
+// cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
+// user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
+// that never exercise a Log-emitting path), in which case Log falls back to
+// stderr.
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)

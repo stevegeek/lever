@@ -4,15 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
 	"github.com/stevegeek/lever/internal/cap/token"
 )
-
-// ErrBackstop is the conventional error an Operation.Backstop returns to deny.
-var ErrBackstop = errors.New("captool: backstop denied")
 
 // handleToolsCall is the gated path: independent token verification + backstop.
 func (s *Server) handleToolsCall(w http.ResponseWriter, id any, msg map[string]any, caller string) {

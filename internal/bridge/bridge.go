@@ -15,14 +15,11 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// Inboxer is the slice of the scion client the bridge needs (so it's testable
-// with a fake). *scion.Client satisfies it.
+// Inboxer is the slice of an inbox source the bridge needs (so it's testable
+// with a fake).
 type Inboxer interface {
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
-
-// compile-time proof the real client satisfies Inboxer.
-var _ Inboxer = (*scion.Client)(nil)
 
 type Bridge struct {
 	in   Inboxer

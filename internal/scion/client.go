@@ -31,9 +31,7 @@ const DefaultHubEndpoint = "http://127.0.0.1:8080"
 type Options struct {
 	Bin            string        // default "scion"
 	HubEndpoint    string        // SCION_HUB_ENDPOINT
-	DevToken       string        // SCION_DEV_TOKEN
-	HubToken       string        // SCION_HUB_TOKEN (static; the controller PAT, P3)
-	HubTokenSource func() string // SCION_HUB_TOKEN (lazy; wins over HubToken — the mint-mid-apply case)
+	HubTokenSource func() string // SCION_HUB_TOKEN (lazy: the controller PAT is minted mid-apply)
 	// AgentRole is passed as `scion start --role <role>` (scion#1089). Empty ⇒
 	// the flag is omitted, which is the default: it does not exist on earlier
 	// pins. See config.ScionConfig.AgentRole.
@@ -43,8 +41,6 @@ type Options struct {
 type Client struct {
 	bin            string
 	hubEndpoint    string
-	devToken       string
-	hubToken       string
 	hubTokenSource func() string
 	agentRole      string
 	r              exec.Runner
@@ -58,35 +54,25 @@ func New(r exec.Runner, o Options) *Client {
 	return &Client{
 		bin:            bin,
 		hubEndpoint:    o.HubEndpoint,
-		devToken:       o.DevToken,
-		hubToken:       o.HubToken,
 		hubTokenSource: o.HubTokenSource,
 		agentRole:      o.AgentRole,
 		r:              r,
 	}
 }
 
-// currentHubToken resolves the controller PAT: the lazy source (read at call
-// time, for the mint-mid-apply case where the token isn't known at New())
-// wins over the static value.
+// currentHubToken resolves the controller PAT from the lazy source (read at
+// call time: the token isn't known at New() — it is minted mid-apply).
 func (c *Client) currentHubToken() string {
 	if c.hubTokenSource != nil {
 		return c.hubTokenSource()
 	}
-	return c.hubToken
+	return ""
 }
-
-// HubToken exposes the resolved controller PAT so callers outside this
-// package (e.g. the attach exec path) can embed it themselves.
-func (c *Client) HubToken() string { return c.currentHubToken() }
 
 func (c *Client) env() map[string]string {
 	m := map[string]string{"SCION_HUB_ENABLED": "true"}
 	if c.hubEndpoint != "" {
 		m["SCION_HUB_ENDPOINT"] = c.hubEndpoint
-	}
-	if c.devToken != "" {
-		m["SCION_DEV_TOKEN"] = c.devToken
 	}
 	if tok := c.currentHubToken(); tok != "" {
 		m["SCION_HUB_TOKEN"] = tok

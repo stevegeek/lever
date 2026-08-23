@@ -419,7 +419,7 @@ func TestRemoteServeCmdIsDetachedAndLogged(t *testing.T) {
 }
 
 // TestRemoteControllerStartReusesAlreadyServingProxy proves the idempotence
-// shortcut required by the Task 8 contract ("re-apply with a live proxy does
+// shortcut ("re-apply with a live proxy does
 // NOT spawn a second one"): with a live pid recorded (self-signal-0 trick —
 // the test process's own pid is always alive, same as
 // TestRemoteStatusReportsLivePidAndListener in remote_test.go) AND something
@@ -684,7 +684,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	// scion requires --project (name/ID) and --name; project name is the jail
 	// mount's basename ("lever"). Exact scopes string — no agent:message (every
-	// interactive verb, message included, gates on agent:attach; see the P3 plan).
+	// interactive verb, message included, gates on agent:attach).
 	tokenArgs := strings.Join(f.Calls[iToken].Args, " ")
 	if !strings.Contains(tokenArgs, "--project lever") {
 		t.Fatalf("hub token create args = %q, want --project lever", tokenArgs)
@@ -981,7 +981,7 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	}
 }
 
-// TestApplyBootstrapTokenThenLockedHubEndToEnd is Task 6's end-to-end proof:
+// TestApplyBootstrapTokenThenLockedHubEndToEnd is the end-to-end proof:
 // it drives the REAL ensureControllerPAT (behind Deps.EnsureControllerPAT, as
 // wired by buildApplyDeps) followed by the REAL-hub scion-server start —
 // exactly the "bootstrap-token" then "scion-server" step sequence runStep
@@ -1144,8 +1144,16 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
+	// A live stand-in for the spawned proxy: awaitListening gives up early
+	// once the child is gone, so it must outlive the test.
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+
 	rc := &remoteController{state: state, configPath: filepath.Join(dir, "lever.yaml"), port: port}
-	err = rc.awaitListening(nil)
+	err = rc.awaitListening(child)
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
 	}
@@ -1164,7 +1172,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 		t.Skipf("could not re-bind %d: %v", port, err)
 	}
 	defer func() { _ = ln2.Close() }()
-	if err := rc.awaitListening(nil); err != nil {
+	if err := rc.awaitListening(child); err != nil {
 		t.Fatalf("a listening proxy must pass: %v", err)
 	}
 }

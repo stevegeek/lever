@@ -1,6 +1,7 @@
 package token
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -32,9 +33,13 @@ func TestKeyPairSaveLoadRoundTrip(t *testing.T) {
 		t.Error("derived public key differs from original")
 	}
 
-	pubOnly, err := LoadPublicKey(pub)
+	pubHex, err := os.ReadFile(pub)
 	if err != nil {
-		t.Fatalf("load public: %v", err)
+		t.Fatalf("read public: %v", err)
+	}
+	pubOnly, err := DecodePublicKey(string(pubHex))
+	if err != nil {
+		t.Fatalf("decode public: %v", err)
 	}
 	if !pubOnly.Equal(kp.Public) {
 		t.Error("loaded public key differs")
@@ -71,7 +76,7 @@ func TestSavePrivateIsNotWorldReadable(t *testing.T) {
 	if err := kp.SavePrivate(p); err != nil {
 		t.Fatal(err)
 	}
-	info, err := osStat(p)
+	info, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
 	}

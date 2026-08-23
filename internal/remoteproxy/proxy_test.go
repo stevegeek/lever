@@ -276,8 +276,7 @@ func TestUpgradeRequestGetsRewrite(t *testing.T) {
 	}
 }
 
-// TestStripsSetCookieFromHubResponse covers behavior-contract point 9 (from
-// the Task 1 spike): the hub mints a fresh scion_sess cookie on every
+// TestStripsSetCookieFromHubResponse: the hub mints a fresh scion_sess cookie on every
 // cookie-less request; the phone must never receive it, since a leaked
 // scion_sess would be an alternate, lever-unmanaged credential.
 func TestStripsSetCookieFromHubResponse(t *testing.T) {
@@ -863,7 +862,7 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 	// Through a REAL listener, so Host is the loopback address httptest chose.
 	// Set it to the tailnet name the Config serves, which is what `tailscale
 	// serve` forwards — otherwise the Host gate refuses it (see hostAllowed).
-	req, err := http.NewRequest("GET", proxy.URL+"/api/v1/agents/x/transcript", nil)
+	req, err := http.NewRequest(http.MethodGet, proxy.URL+"/api/v1/agents/x/transcript", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -308,7 +308,7 @@ func TestDirectiveAdminRoutesReject405OnWrongMethod(t *testing.T) {
 // the lone GET route — enrolled agent resolves to (cn, slug, generation).
 func TestDirectiveResolveHappyPath(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager") // generation 0 -> 1 (as enrol would)
+	b.directives.BumpGeneration("manager") // generation 0 -> 1 (as enrol would)
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 	resp, err := client.Get("http://unix/directive/resolve?agent=manager")
@@ -354,7 +354,7 @@ func TestDirectiveSendAndSelftestRejectMalformedBodies(t *testing.T) {
 	}
 }
 
-// --- A7: forwarding-header scrub in the two reverse-proxy Directors ---
+// --- A7: forwarding-header scrub in the two reverse-proxy Rewrites ---
 
 // spoofedHeaders is what a jail agent could set to smuggle identity/session
 // context upstream through the broker's reverse proxies.
@@ -382,9 +382,9 @@ func headerRecordingUpstream(t *testing.T, got *forwardedHeaders, respBody strin
 
 // assertForwardingHeadersScrubbed pins the scrub property: Cookie,
 // X-Forwarded-Host, and X-Forwarded-Proto never reach the upstream, and the
-// inbound X-Forwarded-For chain is dropped. Note ReverseProxy re-adds the
-// immediate client IP as X-Forwarded-For AFTER the Director runs, so the
-// pinned property for XFF is "spoofed chain absent", not "header absent".
+// inbound X-Forwarded-For chain is dropped. Note rewriteUpstream re-sets the
+// immediate client IP as X-Forwarded-For, so the pinned property for XFF is
+// "spoofed chain absent", not "header absent".
 func assertForwardingHeadersScrubbed(t *testing.T, got forwardedHeaders) {
 	t.Helper()
 	if got.cookie != "" {

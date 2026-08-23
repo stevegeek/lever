@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,7 +110,7 @@ func TestSyncSkillsCheckModeReportsWithoutWriting(t *testing.T) {
 			t.Fatalf("want missing, got %+v", r)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(tree, ".claude")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(tree, ".claude")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("check mode must not write")
 	}
 }

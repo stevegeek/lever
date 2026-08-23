@@ -2,6 +2,7 @@ package ca
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -47,7 +48,7 @@ func TestSaveKeyIsNotWorldReadable(t *testing.T) {
 	if err := c.SaveKey(p); err != nil {
 		t.Fatal(err)
 	}
-	info, err := osStat(p)
+	info, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
 	}

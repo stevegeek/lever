@@ -13,8 +13,6 @@ import "sort"
 type Candidate struct {
 	Name    string
 	Profile Profile
-	// Note is a one-line human summary shown by `lever backends`.
-	Note string
 }
 
 // Candidates lists every backend Lever can run.
@@ -28,7 +26,6 @@ var Candidates = []Candidate{
 			EgressEnforcedAt: "jail netns iptables/ip6tables",
 			VersionFragile:   true, // depends on OrbStack --isolated behaviours
 		},
-		Note: "reference backend; macOS + Apple Silicon; the validated substrate today",
 	},
 	{
 		Name: "lima",
@@ -39,7 +36,6 @@ var Candidates = []Candidate{
 			EgressEnforcedAt: "jail netns iptables/ip6tables",
 			VersionFragile:   true, // depends on Lima's portForwards/mount behaviours
 		},
-		Note: "VM jail via Lima: macOS (vz) and Linux (QEMU/KVM); the non-OrbStack path",
 	},
 }
 

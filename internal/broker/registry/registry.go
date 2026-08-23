@@ -198,14 +198,7 @@ func (r *Registry) ValidateConstraints(tool, op string, constraints map[string]s
 		if !restricted {
 			continue
 		}
-		found := false
-		for _, a := range allowed {
-			if a == v {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(allowed, v) {
 			return fmt.Errorf("registry: tool %q forbids %s=%q", tool, k, v)
 		}
 	}

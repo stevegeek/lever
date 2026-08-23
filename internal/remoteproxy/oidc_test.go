@@ -79,6 +79,11 @@ func mintTestCode(t *testing.T, p *Provider) string {
 // agent could mint a code, have the hub exchange it, and receive a hub web
 // session as any identity it asserts. Do not "finish" this route. The login is
 // driven server-side and mints codes by calling Provider.Mint directly.
+// authorizeIsPermanently404 names the decision handleAuthorize enforces, so
+// the grep that finds "/authorize" in this package also finds the reason it
+// 404s.
+const authorizeIsPermanently404 = "/authorize must never be implemented: it would be an HTTP code-minting endpoint reachable from inside the jail"
+
 func TestAuthorizeIsPermanently404(t *testing.T) {
 	p, sink := newTestProvider(t, nil)
 	for _, target := range []string{

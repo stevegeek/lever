@@ -37,8 +37,8 @@ func TestOperatorDirectiveEndToEndAdversarial(t *testing.T) {
 
 	// Simulate both agents having enrolled: enrolment is what starts a
 	// directive generation, and the send handler binds to the current one.
-	b.Directives().BumpGeneration("manager") // -> gen 1
-	b.Directives().BumpGeneration("worker")  // -> gen 1
+	b.directives.BumpGeneration("manager") // -> gen 1
+	b.directives.BumpGeneration("worker")  // -> gen 1
 
 	// consume posts an id to the mTLS /directive/consume as the given agent.
 	consume := func(client *http.Client, id string) (int, []byte) {
@@ -102,7 +102,7 @@ func TestOperatorDirectiveEndToEndAdversarial(t *testing.T) {
 	}
 
 	// ---- Phase 5: PROPERTY 2 — no path lets injected/forged input act ----
-	before := len(b.Directives().List(time.Now()))
+	before := len(b.directives.List(time.Now()))
 
 	// (a) An attacker who can reach the admin channel but lacks the operator
 	// key: sign with a different key that is NOT in allowed_signers.
@@ -138,13 +138,13 @@ func TestOperatorDirectiveEndToEndAdversarial(t *testing.T) {
 		t.Fatalf("phase5d: cross-instance send = %d, want 400", code)
 	}
 
-	if after := len(b.Directives().List(time.Now())); after != before {
+	if after := len(b.directives.List(time.Now())); after != before {
 		t.Fatalf("phase5: store changed under attack (%d -> %d); nothing forged/injected may persist", before, after)
 	}
 
 	// ---- Phase 6: recycled-slug — re-enrolment bumps the generation, so a
 	// directive for the old generation can never reach the new occupant ----
-	b.Directives().BumpGeneration("manager") // -> gen 2 (manager "re-enrolled")
+	b.directives.BumpGeneration("manager") // -> gen 2 (manager "re-enrolled")
 	idOld := "e2e00000-0000-4000-8000-000000000060"
 	if code, _ := postSend(t, admin, priv, directiveStatement(idOld, "manager", 1, toolAction)); code != http.StatusConflict {
 		t.Fatalf("phase6: stale-generation send = %d, want 409", code)

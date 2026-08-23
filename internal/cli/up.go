@@ -204,7 +204,7 @@ func firstLine(s string) string {
 // It must NOT be `scion stop`: stop leaves a stopped record behind, and
 // start-manager treats a stopped record as resumable — it would RESUME the
 // old conversation with `claude --continue`, defeating the entire point of
-// `--fresh` (see resume-branch-review.md finding I2).
+// `--fresh`.
 func restartManagerFresh(ctx context.Context, sc *scion.Client, name, project string) error {
 	return sc.Delete(ctx, name, project)
 }

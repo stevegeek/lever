@@ -110,10 +110,3 @@ func toolLogName(name string) string {
 	}, name)
 	return safe + ".log"
 }
-
-// trackedCount returns the number of currently-tracked child processes (test aid).
-func (s *Supervisor) trackedCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.cmds)
-}

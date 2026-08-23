@@ -36,7 +36,7 @@ func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
 
-	root := newManagerRootWith()
+	root := NewManagerRoot()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"msg", "send", "hello", "--to", "scratch", "--interrupt"})
@@ -64,7 +64,7 @@ func TestMsgSend_bodyIsJoinedArgs(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
 
-	root := newManagerRootWith()
+	root := NewManagerRoot()
 	root.SetOut(&bytes.Buffer{})
 	root.SetArgs([]string{"msg", "send", "--to", "scratch", "hello", "there"})
 	if err := root.Execute(); err != nil {
@@ -90,7 +90,7 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 		})
 	})
 
-	root := newManagerRootWith()
+	root := NewManagerRoot()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"msg", "list", "--worker", "scratch", "--all"})
@@ -118,7 +118,7 @@ func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
 	})
 
-	root := newManagerRootWith()
+	root := NewManagerRoot()
 	root.SetOut(&bytes.Buffer{})
 	root.SetArgs([]string{"msg", "list"})
 	if err := root.Execute(); err != nil {
@@ -140,7 +140,7 @@ func TestMsgList_malformedResponseIsAnError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"events": "not-an-array"}`))
 	})
 
-	root := newManagerRootWith()
+	root := NewManagerRoot()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&bytes.Buffer{})
@@ -162,7 +162,7 @@ func TestMsgList_emptyInboxPrintsFallback(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
 	})
 
-	root := newManagerRootWith()
+	root := NewManagerRoot()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"msg", "list"})

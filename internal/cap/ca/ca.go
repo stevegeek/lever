@@ -16,9 +16,6 @@ import (
 	"time"
 )
 
-// osStat is a package indirection so tests can assert file permissions.
-var osStat = os.Stat
-
 // CA is a self-signed certificate authority.
 type CA struct {
 	Cert    *x509.Certificate

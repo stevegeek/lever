@@ -18,46 +18,24 @@ import (
 // buffered channel and return).
 type LapseFunc func(cn string)
 
-// ServerTLSConfig builds a TLS config that verifies a client cert *if one is
-// presented* (so the certless /enrol handshake can occur) and otherwise serves
-// with the given server cert/key. Per-route enforcement uses RequireAgent.
-func (c *CA) ServerTLSConfig(serverCertPEM, serverKeyPEM []byte) (*tls.Config, error) {
-	return c.ServerTLSConfigLapse(serverCertPEM, serverKeyPEM, nil)
-}
-
-// ServerTLSConfigLapse is ServerTLSConfig with a natural-lapse observation
-// hook (nil = no observation, identical enforcement).
-func (c *CA) ServerTLSConfigLapse(serverCertPEM, serverKeyPEM []byte, onLapse LapseFunc) (*tls.Config, error) {
-	serverCert, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("ca: server keypair: %w", err)
-	}
-	cfg := c.clientVerifyConfig(onLapse)
-	cfg.Certificates = []tls.Certificate{serverCert}
-	return cfg, nil
-}
-
-// ServerTLSConfigSource is ServerTLSConfig with a rotating serving cert: the
+// ServerTLSConfigSource builds a TLS config that serves a rotating cert (the
 // source re-mints before expiry, so a broker running past certTTL keeps
-// serving a valid cert instead of failing every handshake. onLapse (may be
-// nil) observes natural-lapse client certs — see LapseFunc.
-func (c *CA) ServerTLSConfigSource(src *ServerCertSource, onLapse LapseFunc) *tls.Config {
-	cfg := c.clientVerifyConfig(onLapse)
-	cfg.GetCertificate = src.GetCertificate
-	return cfg
-}
-
-// clientVerifyConfig builds the shared client-auth posture: certless
-// connections are allowed (per-route RequireAgent gates identity), presented
-// certs are FULLY verified by verifyClientCert. ClientAuth is RequestClientCert
-// (not VerifyClientCertIfGiven) because the stdlib's own verification cannot
+// serving a valid cert instead of failing every handshake) and verifies a
+// client cert *if one is presented* (so the certless /enrol handshake can
+// occur). Per-route enforcement uses RequireAgent. onLapse (may be nil)
+// observes natural-lapse client certs — see LapseFunc.
+//
+// Client-auth posture: certless connections are allowed (per-route
+// RequireAgent gates identity), presented certs are FULLY verified by
+// verifyClientCert. ClientAuth is RequestClientCert (not
+// VerifyClientCertIfGiven) because the stdlib's own verification cannot
 // distinguish "expired but ours" from "invalid" — verification is ours, in
 // VerifyConnection, with identical accept/reject outcomes plus the lapse
 // observation. Consequently VerifiedChains is never populated; identity comes
 // from PeerCertificates[0] (AgentFromConnState), which is safe precisely
 // because VerifyConnection has verified the chain on every cert-bearing
 // connection before any request is served.
-func (c *CA) clientVerifyConfig(onLapse LapseFunc) *tls.Config {
+func (c *CA) ServerTLSConfigSource(src *ServerCertSource, onLapse LapseFunc) *tls.Config {
 	pool := x509.NewCertPool()
 	pool.AddCert(c.Cert)
 	return &tls.Config{
@@ -65,6 +43,7 @@ func (c *CA) clientVerifyConfig(onLapse LapseFunc) *tls.Config {
 		ClientCAs:        pool, // informational (CertificateRequest hints); verification is VerifyConnection's
 		MinVersion:       tls.VersionTLS12,
 		VerifyConnection: c.verifyClientCert(pool, onLapse),
+		GetCertificate:   src.GetCertificate,
 	}
 }
 
@@ -132,7 +111,7 @@ func (c *CA) verifyClientCert(pool *x509.CertPool, onLapse LapseFunc) func(tls.C
 // AgentFromConnState returns the agent identity (client cert CommonName) from
 // an mTLS connection. The cert in PeerCertificates has ALWAYS been verified by
 // the time a request handler runs: every server config built by this package
-// installs VerifyConnection (clientVerifyConfig), which rejects the handshake
+// installs VerifyConnection (ServerTLSConfigSource), which rejects the handshake
 // for any presented cert that does not verify against the instance CA. Fails
 // closed if no client cert is present.
 func AgentFromConnState(cs tls.ConnectionState) (string, error) {

@@ -101,7 +101,7 @@ func TestUpDecision(t *testing.T) {
 // `scion delete`, NOT `scion stop`. `scion stop` would leave a stopped record
 // that start-manager's observe-first switch (internal/apply/run.go) treats as
 // resumable — resuming it with `claude --continue` would restore the very
-// conversation `--fresh` asked to discard (resume-branch-review.md I2).
+// conversation `--fresh` asked to discard.
 func TestRestartManagerFreshIssuesDelete(t *testing.T) {
 	f := leverexec.NewFakeRunner()
 	f.Script("scion", leverexec.Result{Stdout: "ok"})
@@ -145,7 +145,7 @@ func TestFirstLine(t *testing.T) {
 	}
 }
 
-// brokerReusable (#19): apply's M2 shortcut may only keep a running broker
+// brokerReusable (#19): apply's broker-reuse shortcut may only keep a running broker
 // whose /epoch identity matches this binary AND this broker config. A broker
 // predating the fields reports them empty — always a mismatch.
 func TestBrokerReusable(t *testing.T) {

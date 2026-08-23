@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,7 +29,7 @@ import (
 // come from OIDC. It comes from ONE property: an authorization code can only
 // be created by an in-process call to Provider.Mint, inside the host-side
 // proxy, at the same trust level as the remote PAT file sitting beside it.
-// There is no HTTP route that mints one — see authorizeIsPermanently404.
+// There is no HTTP route that mints one — see handleAuthorize.
 //
 // Everything the hub reaches (discovery, /token, /userinfo) is also reachable
 // from inside the jail, because the guest-side forwarder that gives the hub a
@@ -70,7 +71,7 @@ const (
 	// /auth/login/oidc then 500s) but nothing ever dials it: the proxy drives
 	// the whole login server-side. It names a host that cannot resolve, so it
 	// can never be mistaken for a live endpoint, and it deliberately does NOT
-	// point at this provider's own /authorize — see authorizeIsPermanently404.
+	// point at this provider's own /authorize — see handleAuthorize.
 	// Exported so `lever doctor` can assert that the hub redirects HERE and
 	// nowhere else, which is what proves the hub is configured against
 	// lever's provider rather than someone's real IdP.
@@ -264,11 +265,6 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// authorizeIsPermanently404 is a named anchor for the decision above, so the
-// grep that finds "/authorize" in this package also finds the reason it 404s.
-// Referenced by TestAuthorizeIsPermanently404.
-const authorizeIsPermanently404 = "/authorize must never be implemented: it would be an HTTP code-minting endpoint reachable from inside the jail"
-
 func (p *Provider) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	p.record(r, "oidc-not-found", http.StatusNotFound, "")
 	http.NotFound(w, r)
@@ -427,30 +423,10 @@ func (p *Provider) record(r *http.Request, decision string, status int, reason s
 // scheme match is case-insensitive per RFC 7235; the token is returned as-is.
 func bearerToken(header string) (string, bool) {
 	const prefix = "bearer "
-	if len(header) <= len(prefix) || !equalFoldASCII(header[:len(prefix)], prefix) {
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return "", false
 	}
 	return header[len(prefix):], true
-}
-
-// equalFoldASCII compares two equal-length ASCII strings case-insensitively.
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range len(a) {
-		x, y := a[i], b[i]
-		if 'A' <= x && x <= 'Z' {
-			x += 'a' - 'A'
-		}
-		if 'A' <= y && y <= 'Z' {
-			y += 'a' - 'A'
-		}
-		if x != y {
-			return false
-		}
-	}
-	return true
 }
 
 // randomSecret returns secretBytes of crypto/rand entropy, hex-encoded.

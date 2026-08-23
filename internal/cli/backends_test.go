@@ -9,7 +9,7 @@ import (
 )
 
 func TestBackendsCommandListsEveryCandidate(t *testing.T) {
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return &stubBackend{}, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return &stubBackend{}, nil })
 	root.SetArgs([]string{"backends"})
 	var out bytes.Buffer
 	root.SetOut(&out)

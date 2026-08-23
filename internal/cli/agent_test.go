@@ -33,7 +33,7 @@ func TestAgentStart_callsBroker(t *testing.T) {
 	// Override the two package seams for the test:
 	oldCall := workerCallFn
 	workerCallFn = func(ctx context.Context, endpoint string, body any) (workerResult, error) {
-		return postWorker(ctx, srv.Client(), srv.URL, endpoint, body)
+		return postBroker[workerResult](ctx, srv.Client(), srv.URL, endpoint, body)
 	}
 	defer func() { workerCallFn = oldCall }()
 

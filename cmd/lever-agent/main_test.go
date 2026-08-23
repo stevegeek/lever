@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -117,7 +118,7 @@ func TestWriteRenewServicesNoBootstrapIsNoop(t *testing.T) {
 	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), missing, "", "subscription"); err != nil {
 		t.Fatalf("writeRenewServices: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("services file should not exist for a non-brokered agent; stat err = %v", err)
 	}
 }
@@ -138,7 +139,7 @@ func TestWriteRenewServicesEmptyBrokerURLIsNoop(t *testing.T) {
 	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), bootstrap, "", "api-key"); err != nil {
 		t.Fatalf("writeRenewServices: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("services file should not exist for a brokerless bootstrap; stat err = %v", err)
 	}
 }
@@ -370,14 +371,19 @@ func newRenewTestBroker(t *testing.T) (*httptest.Server, *ca.CA) {
 		GrantTTL:        time.Hour,
 		ServerName:      "127.0.0.1",
 	})
-	certPEM, keyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	src, err := caInst.NewServerCertSource("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsCfg, err := caInst.ServerTLSConfig(certPEM, keyPEM)
+	tlsCfg := caInst.ServerTLSConfigSource(src, nil)
+	// httptest.StartTLS injects its own self-signed cert when Certificates is
+	// empty, and the TLS stack only consults GetCertificate for SNI-bearing
+	// hellos — an IP-dialled client sends none. Pin the source's cert.
+	srvCert, err := src.GetCertificate(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	tlsCfg.Certificates = []tls.Certificate{*srvCert}
 	srv := httptest.NewUnstartedServer(b.JailHandler())
 	srv.TLS = tlsCfg
 	srv.StartTLS()

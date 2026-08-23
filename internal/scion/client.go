@@ -1,7 +1,27 @@
 // Package scion is the single seam to the `scion` CLI. It builds argv + env and
 // delegates execution to an injected exec.Runner, mirroring the Ruby ScionClient
-// so every method is unit-testable with a fake runner. Anything that names a
-// scion subcommand or endpoint lives HERE and nowhere else.
+// so every method is unit-testable with a fake runner.
+//
+// # What lives where
+//
+// Scion knowledge is split by KIND, across three places:
+//
+//   - This package owns everything about RUNNING scion: subcommand names,
+//     flags, env vars (SCION_HUB_ENDPOINT, SCION_HUB_TOKEN), the hub's default
+//     port, and every predicate over scion's OUTPUT wording (AlreadyRunning,
+//     IsBrokerUnavailable, IsAgentAbsent, the unexported notRunning and
+//     secretSetErr). No other package may match scion's error text; a caller
+//     that needs a new classification adds a predicate here.
+//   - internal/scion/layout owns scion's ON-DISK shape: the ~/.scion paths,
+//     the settings.yaml key names, the oidc_login block and the YAML edit
+//     helpers. It is pure data, with no runner, so provisioning code can use
+//     it without this package.
+//   - internal/hubapi owns the hub's REST surface, for what the CLI does not
+//     expose.
+//
+// internal/backend/guest writes scion's files inside a jail and
+// internal/provision/scionbin builds the scion binary; both take their paths
+// and keys from layout and know nothing of scion's verbs.
 package scion
 
 import (

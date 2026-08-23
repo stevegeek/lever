@@ -43,6 +43,10 @@ const (
 	// only the `default` entry on every server start
 	// (config.UpdateDefaultTemplates); any other name is left alone.
 	TemplatesRel = Dir + "/templates"
+
+	// DevTokenRel is the residual dev-auth admin token scion writes on first
+	// start (<scionDir>/dev-token). lever deletes it once apply is done.
+	DevTokenRel = Dir + "/dev-token"
 )
 
 // ProjectMarker is the in-tree marker scion writes under a registered

@@ -14,6 +14,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -659,7 +660,7 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	// So the removal must go THROUGH the jail's own filesystem view — the
 	// same view the subsequent in-jail init uses — which is what
 	// d.RemoveJailFile does.
-	if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
+	if err := d.RemoveJailFile(ctx, path.Join(jp, layout.ProjectMarker)); err != nil {
 		return err
 	}
 	// Clear any stale project-config registration(s) for this workspace path

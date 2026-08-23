@@ -101,7 +101,7 @@ func TestOIDCLoginNodeKeys(t *testing.T) {
 }
 
 func TestPathsHangOffDir(t *testing.T) {
-	for _, p := range []string{SettingsRel, ServerYAMLRel, ProjectConfigsRel, TemplatesRel} {
+	for _, p := range []string{SettingsRel, ServerYAMLRel, ProjectConfigsRel, TemplatesRel, DevTokenRel} {
 		if !strings.HasPrefix(p, Dir+"/") {
 			t.Fatalf("%q is not under %s", p, Dir)
 		}

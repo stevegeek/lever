@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/stevegeek/lever/internal/scion/layout"
 	"gopkg.in/yaml.v3"
 )
 
@@ -87,7 +88,7 @@ func WriteSidecarSpecs(c SidecarConfig) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(c.HomeDir, ".scion")
+	dir := filepath.Join(c.HomeDir, layout.Dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("scion dir %s: %w", dir, err)
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -360,7 +361,7 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state state.S
 		_ = tw.ServerStop(ctx)
 		if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
 			if h := strings.TrimSpace(home.Stdout); h != "" {
-				_ = removeJailFile(ctx, jr, h+"/.scion/dev-token")
+				_ = removeJailFile(ctx, jr, h+"/"+layout.DevTokenRel)
 			}
 		}
 	}()

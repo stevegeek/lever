@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/provision/loginfwd"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"gopkg.in/yaml.v3"
@@ -80,7 +79,7 @@ const (
 // configuration and the caller must restart it. An unchanged config restarts
 // nothing, which is what keeps a re-apply from bouncing the hub (and every
 // agent's connection to it) for no reason.
-func (g Guest) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool, error) {
+func (g Guest) EnsureHubLogin(ctx context.Context, spec HubLogin) (bool, error) {
 	if spec.IssuerPort <= 0 || spec.HostPort <= 0 || spec.HostAddress == "" || spec.ClientID == "" {
 		return false, fmt.Errorf("guest: hub login: issuer port, host port, host address and client id are all required")
 	}
@@ -200,7 +199,7 @@ func (g Guest) removeHubLoginSettings(ctx context.Context) (bool, error) {
 // ensureLoginForwarder builds the forwarder for the guest's architecture,
 // installs it if the guest does not already hold those exact bytes, and makes
 // sure it is running with the arguments this spec asks for.
-func (g Guest) ensureLoginForwarder(ctx context.Context, spec backend.HubLogin) error {
+func (g Guest) ensureLoginForwarder(ctx context.Context, spec HubLogin) error {
 	arch, err := g.GOARCH(ctx)
 	if err != nil {
 		return fmt.Errorf("guest: detect guest architecture: %w", err)
@@ -260,7 +259,7 @@ const loginForwardMatch = "^" + LoginForwardPath
 // resolves on the guest run-user's PATH, which has run-user-writable
 // directories ahead of /usr/bin. bash's own /dev/tcp is used for the liveness
 // probe precisely because it is a builtin — there is no netcat to shadow.
-func loginForwardScript(spec backend.HubLogin, force bool) string {
+func loginForwardScript(spec HubLogin, force bool) string {
 	argv := fmt.Sprintf("%s -listen 127.0.0.1:%d -target %s:%d",
 		LoginForwardPath, spec.IssuerPort, spec.HostAddress, spec.HostPort)
 	listening := fmt.Sprintf("(exec 3<>/dev/tcp/127.0.0.1/%d) 2>/dev/null", spec.IssuerPort)
@@ -295,7 +294,7 @@ exit 1
 
 // ensureHubLoginSettings writes the oidc_login block into the guest's
 // ~/.scion/settings.yaml, and reports whether the file changed.
-func (g Guest) ensureHubLoginSettings(ctx context.Context, spec backend.HubLogin) (bool, error) {
+func (g Guest) ensureHubLoginSettings(ctx context.Context, spec HubLogin) (bool, error) {
 	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
 		// Deliberately fatal rather than "assume empty": treating an
@@ -375,7 +374,7 @@ var writeScionSettingsScript = fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/
 // comparing the block that is there against the block lever wants: a
 // re-serialisation that only moves whitespace must not read as a change, or
 // every apply would restart the hub.
-func hubSettingsConverged(existing []byte, spec backend.HubLogin, hasServerYAML bool) ([]byte, bool, error) {
+func hubSettingsConverged(existing []byte, spec HubLogin, hasServerYAML bool) ([]byte, bool, error) {
 	doc, err := layout.ParseSettings(existing)
 	if err != nil {
 		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
@@ -580,4 +579,29 @@ func encodeSettings(doc *yaml.Node) ([]byte, error) {
 		return nil, fmt.Errorf("guest: render %s: %w", layout.SettingsRel, err)
 	}
 	return out, nil
+}
+
+// HubLogin is what the guest needs in order to serve lever's remote-access
+// login path: the two ports of the bridge, how the guest reaches the host, and
+// the client_id the provider expects. The Backend interface names it through
+// the backend.HubLogin alias.
+type HubLogin struct {
+	// IssuerPort is the port the forwarder listens on INSIDE the guest, and
+	// the one the hub's issuer_url names. Always config.GuestLoginIssuerPort
+	// in production; a field rather than a direct reference to the constant so
+	// tests can vary it.
+	IssuerPort int
+	// HostPort is the port the provider binds ON THE HOST, and the one the
+	// forwarder dials there. Operator-settable (remote.login_port), because
+	// it shares the host's loopback space with the broker and the proxy.
+	// Never equal to IssuerPort — see config.GuestLoginIssuerPort.
+	HostPort int
+	// HostAddress is how the GUEST reaches the host, e.g. "host.orb.internal"
+	// or its resolved IPv4 — the same alias lever's agents already use to
+	// reach the host broker.
+	HostAddress string
+	// ClientID is the client_id lever's provider expects
+	// (remoteproxy.LoginClientID). Named rather than derived, so both ends of
+	// the contract are explicit.
+	ClientID string
 }

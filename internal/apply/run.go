@@ -12,6 +12,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -65,6 +66,11 @@ func isBrokerUnavailable(err error) bool {
 		strings.Contains(s, "no runtime broker available") ||
 		strings.Contains(s, "deadline exceeded")
 }
+
+// DefaultHubPort is the port the real hub binds inside the jail — the port
+// half of scion.DefaultHubEndpoint (pinned equal by a test). It belongs next to
+// that endpoint in package scion; it lives here until scion exports it.
+const DefaultHubPort = 8080
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
 // api-key instances. It is NOT a real credential: it exists only to satisfy
@@ -553,7 +559,7 @@ func runScionServer(ctx context.Context, app *config.App, d Deps) error {
 // flags it exists to drop.
 func hubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
 	opts := scion.ServerOpts{
-		WebPort:       8080,
+		WebPort:       DefaultHubPort,
 		DevAuth:       false,
 		EnableWeb:     app.RemoteEnabled(),
 		SessionSecret: sessionSecret,
@@ -1050,17 +1056,19 @@ func resumeOrRecover(ctx context.Context, d Deps, boot *bootTracker, name, jp st
 // `scion resume` hits the identical runtime-broker race as `scion start` (see
 // isBrokerUnavailable's doc), so both need the same absorbing retry.
 func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
-	var err error
-	for attempt := 0; attempt < brokerStartAttempts; attempt++ {
-		err = action()
-		if err == nil || !isBrokerUnavailable(err) {
-			return err
+	var last error
+	err := retry.Until(ctx, brokerStartAttempts, brokerStartInterval, func() (bool, error) {
+		last = action()
+		if last == nil {
+			return true, nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(brokerStartInterval):
+		if !isBrokerUnavailable(last) {
+			return false, last
 		}
+		return false, nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return last // the transient error itself, as before the shared loop
 	}
 	return err
 }

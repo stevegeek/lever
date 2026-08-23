@@ -76,10 +76,7 @@ func expiredStatement(id, cn string, gen int, action opsig.Action) opsig.Stateme
 }
 
 // postDirectiveID POSTs {"id": id} to path on url and returns the response
-// status and raw body bytes. Deliberately builds the request body as an
-// inline map rather than referencing the not-yet-implemented
-// directiveIDRequest type, so this test file compiles and RUNS against the
-// unregistered-route mux during the RED phase.
+// status and raw body bytes.
 func postDirectiveID(t *testing.T, client *http.Client, url, path, id string) (int, []byte) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"id": id})

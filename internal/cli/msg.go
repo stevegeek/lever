@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // msgCallFn is the active broker caller (seam for tests), mirroring workerCallFn.
@@ -45,8 +46,8 @@ func msgSend() *cobra.Command {
 	c := &cobra.Command{Use: "send BODY", Args: cobra.MinimumNArgs(1), Short: "Send a message to an agent/user",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := strings.Join(args, " ")
-			if _, err := msgCallFn(cmd.Context(), "/msg/send",
-				broker.MsgSendRequest{To: to, Body: body, Interrupt: interrupt}); err != nil {
+			if _, err := msgCallFn(cmd.Context(), wire.PathMsgSend,
+				wire.MsgSendRequest{To: to, Body: body, Interrupt: interrupt}); err != nil {
 				return err
 			}
 			cmd.Printf("Sent to %s.\n", to)
@@ -63,7 +64,7 @@ func msgList() *cobra.Command {
 	var all bool
 	c := &cobra.Command{Use: "list", Short: "Read the typed event inbox",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			raw, err := msgCallFn(cmd.Context(), "/msg/list", broker.MsgListRequest{All: all, Worker: worker})
+			raw, err := msgCallFn(cmd.Context(), wire.PathMsgList, wire.MsgListRequest{All: all, Worker: worker})
 			if err != nil {
 				return err
 			}

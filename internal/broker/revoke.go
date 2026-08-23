@@ -3,6 +3,8 @@ package broker
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // handleBumpEpoch raises the epoch floor (revoke-all). Admin/loopback only.
@@ -22,9 +24,7 @@ func (b *Broker) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct {
-		Agent string `json:"agent"`
-	}
+	var req wire.RevokeRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil || req.Agent == "" {
 		b.audit("revoke", "", "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)

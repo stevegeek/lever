@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // Identity is the agent's enrolled mTLS material (PEM).
@@ -71,10 +72,8 @@ func Enrol(ctx context.Context, brokerURL string, caPEM []byte, ticket, cn strin
 	if err != nil {
 		return Identity{}, err
 	}
-	var er struct {
-		Cert string `json:"cert"`
-	}
-	if err := httpjson.Post(ctx, client, brokerURL+"/enrol", map[string]string{"ticket": ticket, "csr": string(csrPEM)}, &er); err != nil {
+	var er wire.EnrolResponse
+	if err := httpjson.Post(ctx, client, brokerURL+wire.PathEnrol, wire.EnrolRequest{Ticket: ticket, CSR: string(csrPEM)}, &er); err != nil {
 		return Identity{}, fmt.Errorf("agent: enrol: %w", err)
 	}
 	return Identity{CertPEM: []byte(er.Cert), KeyPEM: keyPEM, CAPEM: caPEM}, nil

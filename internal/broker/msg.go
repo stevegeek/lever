@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // msgTarget is a resolved, policy-approved message destination: the scion
@@ -116,20 +117,8 @@ func eventsForAgent(events []scion.Event, agentID string) []scion.Event {
 	return kept
 }
 
-// MsgSendRequest, MsgListRequest and MsgListResponse are the /msg/* wire types.
-// Exported so the lever CLI marshals/decodes against these one declarations
-// instead of ad-hoc maps and anonymous structs.
-type MsgSendRequest struct {
-	To        string `json:"to"`
-	Body      string `json:"body"`
-	Interrupt bool   `json:"interrupt"`
-}
-
-type MsgListRequest struct {
-	All    bool   `json:"all"`
-	Worker string `json:"worker"`
-}
-
+// MsgListResponse is the /msg/list reply. It stays here (not in internal/wire)
+// because its payload is the host-side scion event type.
 type MsgListResponse struct {
 	Events []scion.Event `json:"events"`
 }
@@ -142,7 +131,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req MsgSendRequest
+	var req wire.MsgSendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -168,7 +157,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "send->"+tgt.scionTo)
-	writeJSON(w, map[string]bool{"ok": true})
+	writeJSON(w, wire.MsgSendResponse{OK: true})
 }
 
 func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +165,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req MsgListRequest
+	var req wire.MsgListRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)

@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/bridge"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 var errMissingEventsFile = errors.New("watch: --events-file is required")
@@ -21,7 +22,7 @@ type brokerInboxer struct{}
 func newBrokerInboxer() brokerInboxer { return brokerInboxer{} }
 
 func (brokerInboxer) Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error) {
-	raw, err := msgCallFn(ctx, "/msg/list", map[string]any{"all": !unread, "worker": project})
+	raw, err := msgCallFn(ctx, wire.PathMsgList, wire.MsgListRequest{All: !unread, Worker: project})
 	if err != nil {
 		return nil, err
 	}

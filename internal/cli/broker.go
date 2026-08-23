@@ -1,17 +1,19 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func newBrokerCmd() *cobra.Command {
@@ -65,7 +67,7 @@ func newBrokerBumpEpochCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return adminPost(cmd.Context(), app, "/bump-epoch", nil)
+			return adminPost(cmd.Context(), app, wire.PathBumpEpoch, nil)
 		},
 	}
 }
@@ -81,25 +83,25 @@ func newRevokeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return adminPost(cmd.Context(), app, "/revoke", []byte(fmt.Sprintf(`{"agent":%q}`, agent)))
+			return adminPost(cmd.Context(), app, wire.PathRevoke, wire.RevokeRequest{Agent: agent})
 		},
 	}
 }
 
-// adminPost POSTs to the running broker's loopback admin port (from config).
-func adminPost(ctx context.Context, app *config.App, path string, body []byte) error {
+// adminClient talks to the broker's loopback admin port. The port is local, so
+// a short timeout bounds a wedged broker instead of hanging the CLI.
+var adminClient = &http.Client{Timeout: 10 * time.Second}
+
+// adminPost POSTs body as JSON to the running broker's loopback admin port
+// (from config), discarding the response body.
+func adminPost(ctx context.Context, app *config.App, path string, body any) error {
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return err
+	err := httpjson.Post(ctx, adminClient, url, body, nil)
+	if code := httpjson.Status(err); code != 0 {
+		return fmt.Errorf("broker admin returned %d", code)
 	}
-	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("contacting broker admin (is `lever broker serve` running?): %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("broker admin returned %d", resp.StatusCode)
 	}
 	return nil
 }

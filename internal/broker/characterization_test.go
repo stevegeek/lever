@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/pem"
+	"github.com/stevegeek/lever/internal/wire"
 	"io"
 	"log/slog"
 	"net/http"
@@ -156,7 +157,7 @@ func TestDirectiveCertlessDenyAuditsEmptyCallerAndError(t *testing.T) {
 func TestRequestPolicyDenyDetailFullStringWithCoercionAndDelegation(t *testing.T) {
 	cfg, audit := coarseConfig(t, false) // nobody holds the {utilities,*} grant
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
 		Tool: "utilities", Op: "get_weather", BoundTo: "analyst", // manager delegating
 	}))
 	r.TLS = leafFor(t, b, "manager")
@@ -180,7 +181,7 @@ func TestRequestUnregisteredOpDenyDetailFullString(t *testing.T) {
 	cfg, audit := auditConfig(t)
 	cfg.Rules.AllowDelegate("manager", "db", "drop", "worker") // grant for an op the registry lacks
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
 		Tool: "db", Op: "drop", BoundTo: "worker",
 	}))
 	r.TLS = leafFor(t, b, "manager")
@@ -223,7 +224,7 @@ func TestRenewRejectsTamperedCSRSignature(t *testing.T) {
 	cfg, audit := auditConfig(t)
 	b := New(cfg)
 	csr := tamperCSRSignature(t, makeCSRForCN(t, "worker"))
-	body, _ := json.Marshal(RenewRequest{CSR: string(csr)})
+	body, _ := json.Marshal(wire.RenewRequest{CSR: string(csr)})
 	r := httptest.NewRequest("POST", "/renew", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "worker")
 	w := httptest.NewRecorder()
@@ -242,7 +243,7 @@ func TestRenewAndEnrolRejectGarbageCSRPEM(t *testing.T) {
 	t.Run("renew", func(t *testing.T) {
 		cfg, audit := auditConfig(t)
 		b := New(cfg)
-		body, _ := json.Marshal(RenewRequest{CSR: "not a pem"})
+		body, _ := json.Marshal(wire.RenewRequest{CSR: "not a pem"})
 		r := httptest.NewRequest("POST", "/renew", bytes.NewReader(body))
 		r.TLS = leafFor(t, b, "worker")
 		w := httptest.NewRecorder()
@@ -320,7 +321,7 @@ func TestDirectiveResolveHappyPath(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("resolve status = %d, want 200 (%s)", resp.StatusCode, body)
 	}
-	var got DirectiveResolveResponse
+	var got wire.DirectiveResolveResponse
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode resolve response: %v (%s)", err, body)
 	}

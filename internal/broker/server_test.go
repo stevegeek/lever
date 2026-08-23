@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/stevegeek/lever/internal/wire"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -60,10 +61,10 @@ func TestAdminHandlerRegisterAddsTool(t *testing.T) {
 	})
 	h := b.AdminHandler()
 
-	body, _ := json.Marshal(RegisterRequest{
+	body, _ := json.Marshal(wire.RegisterRequest{
 		Name:       "calendar",
 		Backend:    "http://127.0.0.1:3203",
-		Operations: []OperationSpec{{Name: "list"}},
+		Operations: []wire.OperationSpec{{Name: "list"}},
 	})
 	r := httptest.NewRequest("POST", "/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()

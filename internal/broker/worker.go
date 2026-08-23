@@ -49,21 +49,8 @@ func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
 	return s, ok
 }
 
-type workerStartRequest struct {
-	Worker string `json:"worker"`
-	Task   string `json:"task"`
-}
-
-// WorkerResponse is the wire envelope for the single-worker endpoints
-// (/worker/start|stop|suspend|resume). Exported so the lever CLI decodes the
-// broker's reply against this one declaration instead of its own copy.
-type WorkerResponse struct {
-	Worker string `json:"worker"`
-	Phase  string `json:"phase"`
-}
-
-// WorkerListResponse is the wire envelope for /worker/list. Exported for the
-// same single-source reason as WorkerResponse.
+// WorkerListResponse is the wire envelope for /worker/list. It stays here
+// (not in internal/wire) because its payload is the host-side scion record.
 type WorkerListResponse struct {
 	Agents []scion.Agent `json:"agents"`
 }
@@ -183,7 +170,7 @@ func stageErrorBody(err error) string {
 }
 
 func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
-	var req workerStartRequest
+	var req wire.WorkerStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -204,7 +191,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		// ignored here — the task-mismatch 409 guard on the resume path covers
 		// only the non-running branch (a running worker's task is likewise fixed,
 		// and there is nothing to resume). To run a new task, purge then re-dispatch.
-		writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 	case phase != "":
 		b.resumeExistingWorker(w, r, spec, phase, req.Task)
 	default:
@@ -258,7 +245,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		return
 	}
 	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
-	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // startFreshWorker provisions an absent worker: mint a one-use ticket, stage the
@@ -294,7 +281,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		return
 	}
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
-	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // workerLiveAttempts/workerLiveInterval bound waitWorkerLive's post-start poll.
@@ -326,9 +313,7 @@ func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 }
 
 func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {
-	var req struct {
-		Worker string `json:"worker"`
-	}
+	var req wire.WorkerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -346,7 +331,7 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 		phase = "unknown"
 	}
 	b.audit("worker", b.manager, "allow", r.URL.Path+" "+spec.Name)
-	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: phase})
+	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: phase})
 }
 
 func (b *Broker) handleWorkerStop(w http.ResponseWriter, r *http.Request) {

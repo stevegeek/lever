@@ -102,7 +102,7 @@ type bootTracker struct {
 // the ONE staging code path, shared by the mint-manager-bootstrap step and
 // start-manager's create-path re-arm (Deps.RearmBootstrap, implemented by the
 // CLI, which stages directly into the tree since start-manager's Step.Target
-// is the manager's slug, not the tree dir — see jailPath/Plan).
+// is the manager's slug, not the tree dir — see JailPath/Plan).
 func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 	// treeDir is the confinement anchor: it is the mount point, the one
 	// component an agent cannot replace. Everything below it is agent-writable,
@@ -111,10 +111,13 @@ func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 }
 
 // Deps are the executor's collaborators, injected so Run is testable offline.
-// JailUp/LoadImage are host-side (backend.EnsureUp, docker-save|podman-load);
-// Scion runs IN the jail (built on a JailRunner).
+// LoadImage and friends are host-side (docker-save|podman-load); Scion runs IN
+// the jail (built on a JailRunner). Every func field except ReadCred is
+// REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
+// so a wiring gap fails loudly instead of silently skipping a step. The CLI
+// wires all of them (buildApplyDeps); tests fill the ones they do not assert
+// on with inert implementations.
 type Deps struct {
-	JailUp    func(ctx context.Context, app *config.App) error
 	LoadImage func(ctx context.Context, imageRef string) error
 	// ImageLoaded reports whether the jail already holds imageRef at the same
 	// image ID as the host, letting the load-image step skip a redundant
@@ -122,14 +125,13 @@ type Deps struct {
 	// re-apply (including the first-boot retry loop, which re-runs the WHOLE
 	// plan on any step failure) from re-importing every image each time. It is
 	// fail-open by construction (false on any uncertainty), so a wrong answer
-	// costs a redundant load, never a wrongly-skipped one. nil ⇒ always load
-	// (tests, pre-guard behavior).
+	// costs a redundant load, never a wrongly-skipped one.
 	ImageLoaded func(ctx context.Context, imageRef string) bool
 	// PruneImages reclaims dangling images from the jail after a load, so a
 	// rebuilt image does not ratchet the grow-only jail disk up by a full image
 	// size (the superseded copy goes untagged). A no-op when the load added a
 	// new image. Best-effort: a prune failure is logged, not fatal to the
-	// bring-up. nil ⇒ skip pruning (tests).
+	// bring-up.
 	PruneImages func(ctx context.Context) error
 	Scion       *scion.Client
 	ReadCred    func(path string) (string, error) // nil ⇒ defaultReadCred
@@ -151,9 +153,7 @@ type Deps struct {
 	// mint window as one injected op, keeping this package scion-agnostic (the
 	// CLI wires the real throwaway-hub → mint → persist → kill → delete-dev-token
 	// logic — see plan.go's bootstrap-token Step doc). It MUST be idempotent: if
-	// a valid PAT is already persisted, no-op. nil ⇒ skip (dev-auth-open mode —
-	// unit tests / legacy — the scion-server step still runs, just without a
-	// pre-minted SCION_HUB_TOKEN to lock the real hub against).
+	// a valid PAT is already persisted, no-op.
 	EnsureControllerPAT func(ctx context.Context) error
 	// WaitBrokerReady blocks until the scion runtime broker is registered AND
 	// online, right before start-manager acts. The workstation daemon brings up
@@ -162,7 +162,7 @@ type Deps struct {
 	// broker's async registration — the flakiness that made first-boot need a
 	// second `up`. The implementation is fail-soft (returns nil on timeout), so
 	// it never fails the bring-up on its own; the start path's broker-unavailable
-	// retry still backstops it. nil ⇒ skip the gate (tests / legacy).
+	// retry still backstops it.
 	WaitBrokerReady      func(ctx context.Context, project string) error
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 	// RearmBootstrap restarts the broker (re-arming its single-use /bootstrap
@@ -170,28 +170,22 @@ type Deps struct {
 	// and capability tokens survive the restart), then mints AND STAGES fresh
 	// bootstrap material exactly like the mint-manager-bootstrap step. Called
 	// by start-manager's create path when no fresh material was minted this
-	// apply (the mint step tolerated a spent latch). nil => the create path
-	// proceeds without re-arm (tests; and resume paths never need it).
+	// apply (the mint step tolerated a spent latch).
 	RearmBootstrap func(ctx context.Context) error
-	// BrokerOnly reduces the bring-up to {jail-up, broker-up, mint-manager-bootstrap}
-	// for the VM-level acceptance gate (which drives lever-agent directly and
-	// never invokes scion). Default false = full bring-up (unchanged).
-	BrokerOnly bool
 	// EnsureHubLogin brings the GUEST half of the remote-access login path up
 	// to date before the hub starts: the loopback forwarder that makes
 	// lever's host-side OIDC provider look local to the hub, and the
 	// `oidc_login` block in the guest's ~/.scion/settings.yaml. It reports
 	// whether that configuration changed, which is the signal to restart a
 	// hub that is already running — see runScionServer. It is the CLI's job
-	// to make this a no-op when remote access is off. nil ⇒ skip (tests, and
-	// the broker-only VM gate).
+	// to make this a no-op when remote access is off.
 	EnsureHubLogin func(ctx context.Context) (bool, error)
 	// DisableHubLogin converges the GUEST half of the login path off: stop and
 	// remove the forwarder, drop the `oidc_login` block. Like StopRemoteProxy
 	// it is NOT a Plan step — Run calls it whenever app.RemoteEnabled() is
 	// false, so an instance that turned remote access back off does not keep
 	// an unauthenticated jail→host loopback bridge alive for a feature that no
-	// longer exists. nil ⇒ skip (tests, and the broker-only VM gate).
+	// longer exists.
 	//
 	// It reports "changed" on the same terms EnsureHubLogin does, and Run acts
 	// on it the same way: a change means a hub that is already running was
@@ -205,8 +199,7 @@ type Deps struct {
 	// Claude Code's entire built-in system prompt. projectDir is JAIL-side —
 	// the scion client behind it runs in the jail, where the host tree exists
 	// only at the mount point (project scope is the only settings scope that wins) and
-	// reports whether it changed anything. nil ⇒ skip (tests, and the
-	// broker-only VM gate).
+	// reports whether it changed anything.
 	//
 	// Provisioning-time only, by nature: scion stages an agent's system prompt
 	// once, when its home is created, and never re-stages it. So this governs
@@ -215,31 +208,28 @@ type Deps struct {
 	EnsureAgentTemplate func(ctx context.Context, projectDir string) (bool, error)
 	// StartRemoteProxy backs the remote-proxy step (present only when
 	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
-	// the daemonized `lever remote serve` proxy. nil ⇒ skip (tests, and any
-	// config with remote disabled never reaches this step at all).
+	// the daemonized `lever remote serve` proxy (a config with remote disabled
+	// never reaches this step at all).
 	StartRemoteProxy func(ctx context.Context) error
 	// StopRemoteProxy tears the remote proxy down (by pidfile, tolerant of
 	// an absent or stale one). It is NOT called from a Plan step — Run calls
 	// it directly, unconditionally, whenever app.RemoteEnabled() is false,
 	// so a proxy left running from a prior apply (remote.enabled flipped
 	// back off since) converges to stopped rather than going on serving
-	// traffic the config no longer authorizes. nil ⇒ skip (tests, and
-	// configs that never enable remote in the first place).
+	// traffic the config no longer authorizes.
 	StopRemoteProxy func(ctx context.Context) error
 	// RemoveJailFile removes a regular file at a jail-absolute path, through the
 	// jail's own filesystem view. Used for the stale `.scion` marker so the
 	// removal and the subsequent in-jail `scion init` cannot race across the
 	// host/guest VirtioFS boundary (a host-side unlink is not promptly visible
-	// to the guest's directory cache). Must NOT remove directories. nil ⇒ fall
-	// back to a host-side remove (tests, broker-only VM gate).
+	// to the guest's directory cache). Must NOT remove directories.
 	RemoveJailFile func(ctx context.Context, jailPath string) error
 	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
 	// registration(s) whose workspace_path == jailWorkspacePath, BEFORE the
 	// register-project step re-inits. Without this, every apply
 	// mints a fresh registration via `scion init` and the old ones accumulate
 	// (the `lever doctor` "duplicate registrations" finding) — this is the
-	// removal counterpart to RemoveJailFile's marker-race fix above. nil ⇒
-	// no-op (tests, broker-only VM gate).
+	// removal counterpart to RemoveJailFile's marker-race fix above.
 	RemoveScionProjectConfigs func(ctx context.Context, jailWorkspacePath string) error
 	// ScionProjectRegistered observes whether jailWorkspacePath already has
 	// exactly one valid scion registration (one project-configs entry + the
@@ -248,7 +238,7 @@ type Deps struct {
 	// skip marker removal, RemoveScionProjectConfigs, and `scion init`/`hub
 	// link` entirely, so a re-apply does not tear down (and orphan) a
 	// resumable scion agent record just to re-mint an identical registration.
-	// nil, or a query error, falls through to the destructive path unchanged
+	// A query error falls through to the destructive path unchanged
 	// (fail-open — an observe failure must never turn into a hard apply
 	// failure, and zero/duplicate/torn registrations legitimately need it).
 	ScionProjectRegistered func(ctx context.Context, jailWorkspacePath string) (bool, error)
@@ -260,8 +250,15 @@ type Deps struct {
 	// where the server-side default cannot be turned off, so per-project removal
 	// is the only route. Runs on BOTH register paths (already-registered and
 	// freshly re-inited), because a project created before this step existed
-	// still carries the mount. nil ⇒ no-op (tests). The broker-only VM gate
-	// never reaches it at all: Plan filters KindRegisterProject out entirely.
+	// still carries the mount. The broker-only VM gate never reaches it at
+	// all: Plan filters KindRegisterProject out entirely.
+	//
+	// A failure is fatal to apply. The alternative is starting a manager and
+	// workers that share a writable directory while the operator believes
+	// they do not, and a silent security regression is worse than a loud
+	// bring-up failure. The hub knows the project by the workspace basename
+	// — the same name ensureControllerPAT passes to `hub token create` — so
+	// the two stay consistent by construction.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
 	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the project's
 	// scion registration when it no longer matches the real hub. Minting the
@@ -271,8 +268,6 @@ type Deps struct {
 	// instance leaves the project pointing at a dead port. Every lever call
 	// passes the endpoint explicitly, so the breakage lands only where scion runs
 	// bare in the jail — `lever attach` (live failure 2026-08-11).
-	//
-	// nil ⇒ no-op (tests, broker-only VM gate).
 	RepairScionHubEndpoint func(ctx context.Context, jailWorkspacePath string) error
 	// VerifyAgentRole gates KEEPING an existing agent record. It returns a
 	// descriptive error when the hub's record for that agent stores no
@@ -287,35 +282,68 @@ type Deps struct {
 	// ceiling every other control in lever's model assumes. Refusing is the only
 	// honest answer: lever cannot repair the record either, since the hub
 	// exposes no route to set a stored role.
-	//
-	// nil ⇒ no-op (tests, and the broker-only VM gate).
 	VerifyAgentRole func(ctx context.Context, project, agent string) error
 	// Log surfaces a loud, user-facing progress/warning line during apply —
 	// currently just start-manager's resume-failed recovery notice ("resume
 	// failed … starting FRESH, previous session lost"), which MUST reach the
-	// user rather than vanish into a swallowed return value. nil ⇒ no-op
-	// (tests, and any caller that doesn't need it). buildApplyDeps wires this
-	// to the invoking cobra command's PrintErrf, mirroring how other user-
-	// facing warnings already surface (see cli/stop.go, cli/down.go).
+	// user rather than vanish into a swallowed return value. buildApplyDeps
+	// wires this to the invoking cobra command's PrintErrf, mirroring how
+	// other user-facing warnings already surface (see cli/stop.go,
+	// cli/down.go).
 	Log func(format string, args ...any)
 }
 
-// logf calls d.Log if set, else no-ops. Small seam so call sites don't need a
-// nil-check of their own for the (optional) Deps.Log field.
-func logf(d Deps, format string, args ...any) {
-	if d.Log != nil {
-		d.Log(format, args...)
+// check returns an error naming the first required collaborator left nil.
+// ReadCred is the one optional field (nil ⇒ defaultReadCred).
+func (d Deps) check() error {
+	required := []struct {
+		name string
+		nil_ bool
+	}{
+		{"LoadImage", d.LoadImage == nil},
+		{"ImageLoaded", d.ImageLoaded == nil},
+		{"PruneImages", d.PruneImages == nil},
+		{"Scion", d.Scion == nil},
+		{"StartBroker", d.StartBroker == nil},
+		{"BrokerHealthy", d.BrokerHealthy == nil},
+		{"EnsureControllerPAT", d.EnsureControllerPAT == nil},
+		{"WaitBrokerReady", d.WaitBrokerReady == nil},
+		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
+		{"RearmBootstrap", d.RearmBootstrap == nil},
+		{"EnsureHubLogin", d.EnsureHubLogin == nil},
+		{"DisableHubLogin", d.DisableHubLogin == nil},
+		{"EnsureAgentTemplate", d.EnsureAgentTemplate == nil},
+		{"StartRemoteProxy", d.StartRemoteProxy == nil},
+		{"StopRemoteProxy", d.StopRemoteProxy == nil},
+		{"RemoveJailFile", d.RemoveJailFile == nil},
+		{"RemoveScionProjectConfigs", d.RemoveScionProjectConfigs == nil},
+		{"ScionProjectRegistered", d.ScionProjectRegistered == nil},
+		{"StripProjectSharedDirs", d.StripProjectSharedDirs == nil},
+		{"RepairScionHubEndpoint", d.RepairScionHubEndpoint == nil},
+		{"VerifyAgentRole", d.VerifyAgentRole == nil},
+		{"Log", d.Log == nil},
 	}
+	for _, r := range required {
+		if r.nil_ {
+			return fmt.Errorf("apply: Deps.%s is not set", r.name)
+		}
+	}
+	return nil
 }
 
-// Run executes the bring-up Plan for app. jail-up/load-image are host-side; the
-// rest run in the jail via Deps.Scion.
-func Run(ctx context.Context, app *config.App, d Deps) error {
+// Run executes the bring-up Plan for app. load-image is host-side; the rest
+// run in the jail via Deps.Scion. The jail itself is already up: the CLI
+// brings it up before it can build Deps at all (buildApplyDeps needs the
+// jail's run user for the JailRunner), so there is no jail-up step.
+func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
+	if err := d.check(); err != nil {
+		return err
+	}
 	var boot bootTracker
 	// The plan is kept, not just ranged over: the converge-to-off reconciliation
 	// below needs to know whether this run manages the hub at all (see
 	// disableHubLogin).
-	steps := Plan(app, PlanOpts{BrokerOnly: d.BrokerOnly})
+	steps := Plan(app, opts)
 	for _, step := range steps {
 		if err := runStep(ctx, app, step, d, &boot); err != nil {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
@@ -330,7 +358,7 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 	// "not running" rather than leaving a stale proxy serving traffic the
 	// operator no longer intends to expose.
 	if !app.RemoteEnabled() {
-		if err := stopRemoteProxyIfConfigured(ctx, d); err != nil {
+		if err := d.StopRemoteProxy(ctx); err != nil {
 			return fmt.Errorf("remote-proxy: %w", err)
 		}
 		// The GUEST half has to converge too, and for a sharper reason than
@@ -374,15 +402,6 @@ func Run(ctx context.Context, app *config.App, d Deps) error {
 		//     is still serving.
 	}
 	return nil
-}
-
-// stopRemoteProxyIfConfigured calls Deps.StopRemoteProxy when wired; see its
-// doc for why this runs outside the step loop.
-func stopRemoteProxyIfConfigured(ctx context.Context, d Deps) error {
-	if d.StopRemoteProxy == nil {
-		return nil
-	}
-	return d.StopRemoteProxy(ctx)
 }
 
 // disableHubLogin converges the guest half of the login path off, and restarts
@@ -440,9 +459,6 @@ func stopRemoteProxyIfConfigured(ctx context.Context, d Deps) error {
 // also what makes d.Scion safe to dereference below without a nil guard: the
 // scion-server step ran earlier in this same Run and dereferenced it first.
 func disableHubLogin(ctx context.Context, app *config.App, d Deps, steps []Step) error {
-	if d.DisableHubLogin == nil {
-		return nil
-	}
 	changed, err := d.DisableHubLogin(ctx)
 	if err != nil {
 		return err
@@ -450,7 +466,7 @@ func disableHubLogin(ctx context.Context, app *config.App, d Deps, steps []Step)
 	if !changed || !planHas(steps, KindScionServer) {
 		return nil
 	}
-	logf(d, "lever: remote access is off — restarting the hub so it stops offering the remote login")
+	d.Log("lever: remote access is off — restarting the hub so it stops offering the remote login")
 	if err := d.Scion.ServerStop(ctx); err != nil {
 		return fmt.Errorf("restart the hub: %w", err)
 	}
@@ -473,8 +489,6 @@ func planHas(steps []Step, kind StepKind) bool {
 // arm is a hard error so a Plan emitting an unknown kind fails loudly.
 func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTracker) error {
 	switch s.Kind {
-	case KindJailUp:
-		return d.JailUp(ctx, app)
 	case KindBrokerUp:
 		return runBrokerUp(ctx, d)
 	case KindLoadImage:
@@ -484,9 +498,6 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 	case KindConfigRegistry:
 		return d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
 	case KindBootstrapToken:
-		if d.EnsureControllerPAT == nil {
-			return nil // dev-auth-open mode (unit tests / legacy) — skip
-		}
 		return d.EnsureControllerPAT(ctx)
 	case KindScionServer:
 		return runScionServer(ctx, app, d)
@@ -501,7 +512,8 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 	case KindStartManager:
 		return stepStartManager(ctx, app, s, d, boot)
 	case KindRemoteProxy:
-		return runRemoteProxy(ctx, d)
+		// Only reached when Plan included the step, i.e. app.RemoteEnabled().
+		return d.StartRemoteProxy(ctx)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
@@ -531,21 +543,19 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 // left running. The next apply converges it: EnsureHubLogin is idempotent, and
 // with remote access turned off DisableHubLogin removes it outright.
 func runScionServer(ctx context.Context, app *config.App, d Deps) error {
-	if d.EnsureHubLogin != nil {
-		changed, err := d.EnsureHubLogin(ctx)
-		if err != nil {
-			return fmt.Errorf("hub login: %w", err)
-		}
-		if changed {
-			logf(d, "lever: the hub's login configuration changed — restarting the hub so it is read")
-			// Stop-then-start, not `scion server restart`: scion's own restart
-			// refuses outright when the daemon is not running, and the hub
-			// being already down is an ordinary state here — after a `lever
-			// stop`, a VM reboot, or a crash. ServerStop tolerates that (see
-			// its doc); ServerStart below tolerates the opposite.
-			if err := d.Scion.ServerStop(ctx); err != nil {
-				return fmt.Errorf("hub login: restart the hub: %w", err)
-			}
+	changed, err := d.EnsureHubLogin(ctx)
+	if err != nil {
+		return fmt.Errorf("hub login: %w", err)
+	}
+	if changed {
+		d.Log("lever: the hub's login configuration changed — restarting the hub so it is read")
+		// Stop-then-start, not `scion server restart`: scion's own restart
+		// refuses outright when the daemon is not running, and the hub
+		// being already down is an ordinary state here — after a `lever
+		// stop`, a VM reboot, or a crash. ServerStop tolerates that (see
+		// its doc); ServerStart below tolerates the opposite.
+		if err := d.Scion.ServerStop(ctx); err != nil {
+			return fmt.Errorf("hub login: restart the hub: %w", err)
 		}
 	}
 	return d.Scion.ServerStart(ctx, hubServerOpts(app, d.HubSessionSecret))
@@ -575,46 +585,26 @@ func hubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
 }
 
 // runBrokerUp runs the broker-up step: start the host broker (+ first-party
-// tools), then health-check it before the manager starts. Both Deps are
-// optional (tests / dry paths).
+// tools), then health-check it before the manager starts.
 func runBrokerUp(ctx context.Context, d Deps) error {
-	if d.StartBroker == nil {
-		return nil // tests / dry paths
-	}
 	if err := d.StartBroker(ctx); err != nil {
 		return err
 	}
-	if d.BrokerHealthy != nil {
-		return d.BrokerHealthy(ctx)
-	}
-	return nil
-}
-
-// runRemoteProxy runs the remote-proxy step: start (or confirm already
-// running) the daemonized `lever remote serve` proxy. Only reached when Plan
-// included the step, i.e. app.RemoteEnabled() — see Deps.StartRemoteProxy.
-func runRemoteProxy(ctx context.Context, d Deps) error {
-	if d.StartRemoteProxy == nil {
-		return nil // tests / dry paths
-	}
-	return d.StartRemoteProxy(ctx)
+	return d.BrokerHealthy(ctx)
 }
 
 // runAgentTemplate runs the agent-template step. Logs on change only: it is a
 // provisioning-time change the operator cannot otherwise see, and silence on a
 // no-op keeps a re-apply quiet.
 func runAgentTemplate(ctx context.Context, app *config.App, s Step, d Deps) error {
-	if d.EnsureAgentTemplate == nil {
-		return nil // tests / broker-only gate
-	}
 	// The JAIL-side path, not the host one: the scion client behind this closure
 	// runs inside the jail, where the host tree is visible only at the mount.
-	changed, err := d.EnsureAgentTemplate(ctx, jailPath(s.Target, app.Tree, d.JailMount))
+	changed, err := d.EnsureAgentTemplate(ctx, JailPath(s.Target, app.Tree, d.JailMount))
 	if err != nil {
 		return err
 	}
 	if changed {
-		logf(d, "lever: agents will no longer be launched with scion's placeholder system prompt (new agents only; existing ones keep the prompt they were provisioned with)")
+		d.Log("lever: agents will no longer be launched with scion's placeholder system prompt (new agents only; existing ones keep the prompt they were provisioned with)")
 	}
 	return nil
 }
@@ -624,7 +614,7 @@ func runAgentTemplate(ctx context.Context, app *config.App, s Step, d Deps) erro
 // false on any doubt), otherwise load and then best-effort prune the superseded
 // dangling image.
 func runLoadImage(ctx context.Context, s Step, d Deps) error {
-	if d.ImageLoaded != nil && d.ImageLoaded(ctx, s.Target) {
+	if d.ImageLoaded(ctx, s.Target) {
 		return nil
 	}
 	if err := d.LoadImage(ctx, s.Target); err != nil {
@@ -635,10 +625,8 @@ func runLoadImage(ctx context.Context, s Step, d Deps) error {
 	// ratchet the grow-only jail disk. A no-op when the load just added a
 	// brand-new image. Best-effort — a prune failure must never fail the
 	// bring-up.
-	if d.PruneImages != nil {
-		if err := d.PruneImages(ctx); err != nil {
-			logf(d, "load-image: pruning superseded jail images failed: %v", err)
-		}
+	if err := d.PruneImages(ctx); err != nil {
+		d.Log("load-image: pruning superseded jail images failed: %v", err)
 	}
 	return nil
 }
@@ -661,7 +649,7 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 // anything destructive, then (only when the registration is unsound) clear the
 // stale marker + project-config registration(s) and re-init + hub-link.
 func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) error {
-	jp := jailPath(s.Target, app.Tree, d.JailMount)
+	jp := JailPath(s.Target, app.Tree, d.JailMount)
 
 	// Idempotent register: observe BEFORE doing anything destructive. A
 	// suspended manager (or worker) agent record survives a `lever stop` +
@@ -675,18 +663,16 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	// error, or an unsound registration (zero, duplicate, or torn), falls
 	// through unchanged to the existing destructive path below — fail
 	// open, never a hard apply failure over an observe read.
-	if d.ScionProjectRegistered != nil {
-		if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
-			// Sound registration, so nothing below runs — but the recorded hub
-			// ENDPOINT can still be stale. Minting the controller PAT links the
-			// project against a throwaway hub on its own port, and that link
-			// survives precisely because this path skips the re-init. Repair it
-			// here, where the skip happens.
-			if err := repairScionHubEndpoint(ctx, d, jp); err != nil {
-				return err
-			}
-			return stripProjectSharedDirs(ctx, d, jp)
+	if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
+		// Sound registration, so nothing below runs — but the recorded hub
+		// ENDPOINT can still be stale. Minting the controller PAT links the
+		// project against a throwaway hub on its own port, and that link
+		// survives precisely because this path skips the re-init. Repair it
+		// here, where the skip happens.
+		if err := d.RepairScionHubEndpoint(ctx, jp); err != nil {
+			return err
 		}
+		return d.StripProjectSharedDirs(ctx, path.Base(jp))
 	}
 
 	// Remove a stale `.scion` marker FILE left in the tree by a previous
@@ -707,24 +693,15 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	// manually in the jail moments later succeeded (same view, no race).
 	// So the removal must go THROUGH the jail's own filesystem view — the
 	// same view the subsequent in-jail init uses — which is what
-	// d.RemoveJailFile does. It is nil in tests and the broker-only VM gate
-	// (no jail filesystem view to remove through there), so fall back to
-	// the host-side remove, which still reaches the jail via the bind mount
-	// (just without the same-view guarantee).
-	if d.RemoveJailFile != nil {
-		if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
-			return err
-		}
-	} else if err := removeStaleMarker(s.Target); err != nil {
+	// d.RemoveJailFile does.
+	if err := d.RemoveJailFile(ctx, path.Join(jp, ".scion")); err != nil {
 		return err
 	}
 	// Clear any stale project-config registration(s) for this workspace path
 	// before re-init, so `scion init` mints exactly ONE registration per
 	// workspace instead of leaving the previous apply's dir behind.
-	if d.RemoveScionProjectConfigs != nil {
-		if err := d.RemoveScionProjectConfigs(ctx, jp); err != nil {
-			return err
-		}
+	if err := d.RemoveScionProjectConfigs(ctx, jp); err != nil {
+		return err
 	}
 	if err := d.Scion.InitProject(ctx, jp); err != nil {
 		return err
@@ -732,32 +709,7 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	if err := d.Scion.HubLink(ctx, jp); err != nil {
 		return err
 	}
-	return stripProjectSharedDirs(ctx, d, jp)
-}
-
-// stripProjectSharedDirs declines scion's default cross-agent scratchpad mount
-// for the project registered at jailWorkspacePath. The hub knows the project by
-// the workspace basename — the same name ensureControllerPAT passes to `hub
-// token create` — so the two stay consistent by construction.
-//
-// A failure is fatal to apply. The alternative is starting a manager and
-// workers that share a writable directory while the operator believes they do
-// not, and a silent security regression is worse than a loud bring-up failure.
-func stripProjectSharedDirs(ctx context.Context, d Deps, jailWorkspacePath string) error {
-	if d.StripProjectSharedDirs == nil {
-		return nil
-	}
-	return d.StripProjectSharedDirs(ctx, path.Base(jailWorkspacePath))
-}
-
-// repairScionHubEndpoint points the project's recorded hub endpoint back at the
-// real hub. A no-op when the hook is unwired (tests) or the endpoint is already
-// right; see Deps.RepairScionHubEndpoint.
-func repairScionHubEndpoint(ctx context.Context, d Deps, jailWorkspacePath string) error {
-	if d.RepairScionHubEndpoint == nil {
-		return nil
-	}
-	return d.RepairScionHubEndpoint(ctx, jailWorkspacePath)
+	return d.StripProjectSharedDirs(ctx, path.Base(jp))
 }
 
 // runMintManagerBootstrap runs the mint-manager-bootstrap step: mint the
@@ -765,9 +717,6 @@ func repairScionHubEndpoint(ctx context.Context, d Deps, jailWorkspacePath strin
 // Idempotent against the LIVE broker latch (not a stale file): a spent latch is
 // tolerated only when a ticket is already staged.
 func runMintManagerBootstrap(ctx context.Context, s Step, d Deps, boot *bootTracker) error {
-	if d.MintManagerBootstrap == nil {
-		return nil
-	}
 	// Idempotent (tied to the LIVE broker latch, not a stale file): mint; if the
 	// latch is already consumed (same broker process as a prior apply), tolerate
 	// it — the manager has its bootstrap.json from then. After a broker restart
@@ -808,17 +757,15 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 		}
 		task = strings.TrimSpace(string(b))
 	}
-	jp := jailPath(app.Tree, app.Tree, d.JailMount)
+	jp := JailPath(app.Tree, app.Tree, d.JailMount)
 	// Gate on runtime-broker readiness before any create/resume: the workstation
 	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
 	// up (waitHubReady only proved the latter), so acting now would race it. This
 	// is the proactive complement to the broker-unavailable retry below — wait
 	// for a ready broker rather than only reacting when a call fails against a
 	// not-yet-ready one. Fail-soft (never errors on timeout); the retry backstops.
-	if d.WaitBrokerReady != nil {
-		if err := d.WaitBrokerReady(ctx, jp); err != nil {
-			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
-		}
+	if err := d.WaitBrokerReady(ctx, jp); err != nil {
+		return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
 	}
 	apiKey := app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey
 	if apiKey {
@@ -964,7 +911,7 @@ func observeManager(ctx context.Context, d Deps, jp, name string) (*scion.Agent,
 		return nil, fmt.Errorf("start-manager: observing agents: %w", err)
 	}
 	rec := scion.FindAgent(agents, name)
-	if rec != nil && d.VerifyAgentRole != nil {
+	if rec != nil {
 		switch rec.Phase {
 		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
 			if err := d.VerifyAgentRole(ctx, path.Base(jp), name); err != nil {
@@ -1036,7 +983,7 @@ func resumeOrRecover(ctx context.Context, d Deps, boot *bootTracker, name, jp st
 		return nil
 	}
 	if managerConcurrentlyRecovered(ctx, d, name, jp) {
-		logf(d, "start-manager: %s failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", v.label, rerr)
+		d.Log("start-manager: %s failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", v.label, rerr)
 		return nil
 	}
 	// LOUD recovery: the conversation could not be restored. This MUST reach
@@ -1169,7 +1116,7 @@ func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts sci
 // delete failure — there is no safe fallback, since a fresh Start over an
 // undeleted, un-resumable record would just 409 again.
 func recoverDeleteAndCreate(ctx context.Context, d Deps, boot *bootTracker, name, jp string, opts scion.StartOpts, logMsg, deleteFailReason string) error {
-	logf(d, "%s", logMsg)
+	d.Log("%s", logMsg)
 	if derr := d.Scion.Delete(ctx, name, jp); derr != nil {
 		return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 	}
@@ -1182,14 +1129,11 @@ func recoverDeleteAndCreate(ctx context.Context, d Deps, boot *bootTracker, name
 // set, it re-arms the broker's spent latch and mints+stages fresh material
 // (recording it into *boot so a SECOND create in the same Run — e.g. a
 // failed-resume recovery that immediately re-creates — does not re-arm
-// twice). d.RearmBootstrap == nil is tolerated (tests, and the broker-only VM
-// acceptance gate, which never reaches start-manager at all): the create path
-// proceeds unguarded, matching pre-fix behavior. A non-nil RearmBootstrap that
-// itself fails is a hard error — a create without enrolable bootstrap is
-// guaranteed to 403, so failing loudly now is strictly better than booting a
-// manager doomed to crash-loop.
+// twice). A RearmBootstrap that fails is a hard error — a create without
+// enrolable bootstrap is guaranteed to 403, so failing loudly now is strictly
+// better than booting a manager doomed to crash-loop.
 func ensureFreshBootstrap(ctx context.Context, d Deps, boot *bootTracker) error {
-	if boot.minted || d.RearmBootstrap == nil {
+	if boot.minted {
 		return nil
 	}
 	if err := d.RearmBootstrap(ctx); err != nil {
@@ -1232,28 +1176,11 @@ func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
 	return fmt.Errorf("start-manager: manager %q %w", slug, err)
 }
 
-// removeStaleMarker removes a `.scion` MARKER FILE at dir (left by a prior
-// bring-up; it persists in the bind-mounted tree across jail teardown). It
-// leaves a `.scion` DIRECTORY untouched — that's an in-repo git-mode project,
-// not a stale directory marker. Absent `.scion` is a no-op.
-func removeStaleMarker(dir string) error {
-	p := filepath.Join(dir, ".scion")
-	info, err := os.Lstat(p)
-	if err != nil {
-		return nil // nothing there (or unreadable) — fine
-	}
-	if info.IsDir() {
-		return nil // in-repo project marker dir — leave it
-	}
-	if err := os.Remove(p); err != nil {
-		return fmt.Errorf("removing stale .scion marker %s: %w", p, err)
-	}
-	return nil
-}
-
-// jailPath maps a host path under tree to its location inside the jail (mount + suffix).
-// Returns hostPath unchanged when mount=="" or hostPath is not under tree.
-func jailPath(hostPath, tree, mount string) string {
+// JailPath maps a host path under tree to its location inside the jail (mount +
+// suffix). Returns hostPath unchanged when mount=="" or hostPath is not under
+// tree. Exported for the CLI's bootstrap-token step, which registers the tree
+// root through the same mapping.
+func JailPath(hostPath, tree, mount string) string {
 	if mount == "" || tree == "" {
 		return hostPath
 	}

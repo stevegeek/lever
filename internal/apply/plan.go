@@ -14,7 +14,6 @@ import "github.com/stevegeek/lever/internal/config"
 type StepKind string
 
 const (
-	KindJailUp               StepKind = "jail-up"
 	KindBrokerUp             StepKind = "broker-up"
 	KindLoadImage            StepKind = "load-image"
 	KindInitMachine          StepKind = "init-machine"
@@ -45,8 +44,8 @@ type Step struct {
 // PlanOpts controls optional Plan behaviour.
 type PlanOpts struct {
 	// BrokerOnly reduces the plan to the steps the VM-level acceptance gate
-	// needs — jail-up (machine + egress allowlist), broker-up (host broker +
-	// tools), and mint-manager-bootstrap (the manager enrol ticket) — and omits
+	// needs — broker-up (host broker + tools) and mint-manager-bootstrap (the
+	// manager enrol ticket) — and omits
 	// ALL scion/container/registration steps (load-image, init-machine,
 	// config-registry, bootstrap-token, scion-server, credential, register-*,
 	// start-manager). The gate drives lever-agent directly in the VM, so scion is
@@ -57,19 +56,18 @@ type PlanOpts struct {
 
 // brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.
 var brokerOnlyKinds = map[StepKind]bool{
-	KindJailUp:               true,
 	KindBrokerUp:             true,
 	KindMintManagerBootstrap: true,
 }
 
-// Plan returns the ordered bring-up for an app. Order is load-bearing: the jail
-// must exist and the image loaded before scion runs in it; projects must be
-// registered before the manager (which orchestrates them) starts.
+// Plan returns the ordered bring-up for an app. Order is load-bearing: the
+// image must be loaded before scion runs in the jail; projects must be
+// registered before the manager (which orchestrates them) starts. The jail
+// itself is not a step: it is up before Run can be called at all (see Run).
 func Plan(a *config.App, opts PlanOpts) []Step {
-	steps := []Step{{Kind: KindJailUp, Target: a.Tree}}
-	// Bring the host broker (+ first-party tools) up early; the jail reaches it
+	// Bring the host broker (+ first-party tools) up first; the jail reaches it
 	// at host.orb.internal. Health-checked before the manager starts.
-	steps = append(steps, Step{Kind: KindBrokerUp})
+	steps := []Step{{Kind: KindBrokerUp}}
 	// Load every distinct image into the jail's container runtime: the manager
 	// image plus any worker that overrides it (workers default to the manager
 	// image, which is then loaded once). Workers are started later by the

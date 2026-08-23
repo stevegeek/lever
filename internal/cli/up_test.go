@@ -184,10 +184,3 @@ func TestVerifyManagerRoleGuardsUpsFastPaths(t *testing.T) {
 		t.Errorf("guard called with (%q, %q), want (\"lever\", \"assistant\")", gotProject, gotAgent)
 	}
 }
-
-// A Deps without the hook (tests, broker-only gate) must not break `up`.
-func TestVerifyManagerRoleNilHookIsANoOp(t *testing.T) {
-	if err := verifyManagerRole(context.Background(), apply.Deps{}, "/lever", "assistant"); err != nil {
-		t.Fatalf("nil hook must be a no-op, got %v", err)
-	}
-}

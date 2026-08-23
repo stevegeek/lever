@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"bytes"
+	"cmp"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,8 +22,10 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/remoteproxy"
+	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -48,56 +50,49 @@ func hubJailTransport(jr leverexec.Runner, state brokerctl.State) *hubapi.JailCu
 // `hub token create`, so the two stay consistent by construction.
 func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 
-// brokerServeCmd builds the detached `lever broker serve` command: its OWN
-// session (Setsid — survives the parent terminal/session, no controlling TTY),
-// stdout+stderr appended to outLog (so a bind failure or panic is inspectable,
-// not discarded), and the env the broker needs to issue its cert + reach the
-// jail. The pid file is written by the serve process itself, not here.
-func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (*exec.Cmd, *os.File, error) {
-	// On a fresh apply the state dir (.lever-state) does not exist yet — it's
-	// created by EnsureKeys inside the spawned child, too late for this open —
-	// so create the log's parent here or the whole bring-up hard-fails at
-	// broker-up before the broker is ever spawned.
+// detachedSelfCmd builds a detached re-exec of this binary (`self args...`):
+// its OWN session (Setsid — survives the parent terminal/session, no
+// controlling TTY), stdout+stderr appended to outLog (so a bind failure or
+// panic is inspectable, not discarded), and the parent's environment plus
+// env. Used for `lever broker serve` and `lever remote serve`; each serve
+// process writes its own pid file, not this.
+//
+// On a fresh apply the state dir (.lever-state) does not exist yet — it's
+// created by EnsureKeys inside the spawned child, too late for this open —
+// so the log's parent is created here, or the whole bring-up hard-fails
+// before the daemon is ever spawned.
+func detachedSelfCmd(self, outLog string, env []string, args ...string) (*exec.Cmd, *os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(outLog), 0o700); err != nil {
-		return nil, nil, fmt.Errorf("broker out log dir: %w", err)
+		return nil, nil, fmt.Errorf("%s: log dir: %w", args[0], err)
 	}
 	f, err := os.OpenFile(outLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return nil, nil, fmt.Errorf("broker out log: %w", err)
+		return nil, nil, fmt.Errorf("%s: out log: %w", args[0], err)
 	}
-	cmd := exec.Command(self, "broker", "serve", configPath)
+	cmd := exec.Command(self, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = append(os.Environ(),
-		"LEVER_HOST_ALIAS_IP="+aliasV4,
-		"LEVER_JAIL_USER="+runUser,
-		"LEVER_JAIL_UID="+runUID,
-	)
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = f
 	cmd.Stderr = f
 	return cmd, f, nil
 }
 
-// remoteServeCmd builds the detached `lever remote serve <config>` command:
-// its own session (Setsid — survives the parent terminal/session), stdout+
-// stderr appended to outLog. Mirrors brokerServeCmd exactly (see its doc)
-// minus the broker's jail-alias/run-user env: the proxy resolves its own jail
-// identity lazily, on its first dial (jailPrefixFn in remote.go), so it needs
-// nothing here beyond the parent's environment — which exec.Command inherits
-// by default when Env is left nil, and which is where the jail transport
-// binary is found on PATH.
+// brokerServeCmd builds the detached `lever broker serve` command with the env
+// the broker needs to issue its cert + reach the jail.
+func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (*exec.Cmd, *os.File, error) {
+	return detachedSelfCmd(self, outLog, []string{
+		"LEVER_HOST_ALIAS_IP=" + aliasV4,
+		"LEVER_JAIL_USER=" + runUser,
+		"LEVER_JAIL_UID=" + runUID,
+	}, "broker", "serve", configPath)
+}
+
+// remoteServeCmd builds the detached `lever remote serve <config>` command. No
+// env of its own: the proxy resolves its jail identity lazily, on its first
+// dial (jailPrefixFn in remote.go), so it needs nothing beyond the parent's
+// environment — which is where the jail transport binary is found on PATH.
 func remoteServeCmd(self, configPath, outLog string) (*exec.Cmd, *os.File, error) {
-	if err := os.MkdirAll(filepath.Dir(outLog), 0o700); err != nil {
-		return nil, nil, fmt.Errorf("remote proxy out log dir: %w", err)
-	}
-	f, err := os.OpenFile(outLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, nil, fmt.Errorf("remote proxy out log: %w", err)
-	}
-	cmd := exec.Command(self, "remote", "serve", configPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Stdout = f
-	cmd.Stderr = f
-	return cmd, f, nil
+	return detachedSelfCmd(self, outLog, nil, "remote", "serve", configPath)
 }
 
 // remoteController owns the apply-time remote-proxy lifecycle: spawning the
@@ -175,7 +170,7 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("lever remote serve: %w", err)
 	}
-	if err := rc.awaitListening(cmd); err != nil {
+	if err := rc.awaitListening(ctx, cmd); err != nil {
 		return err
 	}
 	// Stamp only once the proxy is proven listening, so a stamp never claims a
@@ -196,6 +191,9 @@ var (
 	remoteProxyStartInterval = 50 * time.Millisecond
 )
 
+// errChildGone is awaitListening's signal that the spawned child exited.
+var errChildGone = errors.New("child exited")
+
 // awaitListening waits for the spawned proxy to actually bind, and reports
 // what the log says when it does not.
 //
@@ -212,20 +210,20 @@ var (
 // prove OUR proxy is serving — some other process (including a leaked older
 // proxy) may hold the port, and concluding "listening" then would stamp a
 // config nothing is enforcing.
-func (rc *remoteController) awaitListening(child *exec.Cmd) error {
-	deadline := time.Now().Add(remoteProxyStartTimeout)
-	for {
+func (rc *remoteController) awaitListening(ctx context.Context, child *exec.Cmd) error {
+	attempts := int(remoteProxyStartTimeout/remoteProxyStartInterval) + 1
+	err := retry.Until(ctx, attempts, remoteProxyStartInterval, func() (bool, error) {
 		if err := child.Process.Signal(syscall.Signal(0)); err != nil {
 			// The child is gone; whatever may be listening is not it.
-			break
+			return false, errChildGone
 		}
-		if err := tcpDial(rc.addr()); err == nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(remoteProxyStartInterval)
+		return tcpDial(rc.addr()) == nil, nil
+	})
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errChildGone) && !errors.Is(err, retry.ErrExhausted) {
+		return err // the apply's own ctx ended
 	}
 	if tail := lastLogLine(rc.state.RemoteLog()); tail != "" {
 		return fmt.Errorf("the remote proxy started but is not listening on %s: %s (see %s)",
@@ -282,19 +280,6 @@ func removeJailFile(ctx context.Context, jr leverexec.Runner, jailPath string) e
 	return nil
 }
 
-// jailProjectPath maps tree (the project ROOT) to its in-jail location.
-// ensureControllerPAT only ever registers the project root (never a worker
-// subtree), so this covers just the hostPath==tree case of
-// internal/apply/run.go's jailPath — that helper is unexported in package
-// apply and can't be imported here, and the general N-path mapping isn't
-// needed for this one caller.
-func jailProjectPath(tree, jailMount string) string {
-	if jailMount == "" || tree == "" {
-		return tree
-	}
-	return jailMount
-}
-
 // throwawayHubPort is the port ensureControllerPAT's throwaway dev-auth hub is
 // reached on — a distinct port from the real hub (8080). lever runs scion in
 // workstation (combined) mode, where the Hub API rides the web server's port and
@@ -312,14 +297,18 @@ const throwawayHubPort = 48080
 // project:update is required for the post-register scratchpad-shared-dir strip
 // (scion#925): the shared-dirs REST endpoint gates on project ActionUpdate,
 // and agent:manage does NOT expand to project:update.
-var controllerPATScopes = []string{"agent:manage", "agent:attach", "project:read", "project:update"}
+func controllerPATScopes() []string {
+	return []string{"agent:manage", "agent:attach", "project:read", "project:update"}
+}
 
 // remotePATScopes is the EXACT scope set the remote-access PAT is minted
 // with: interactive (attach gates every interactive verb, message included)
 // plus read/list — and nothing that can create, delete, or reconfigure.
 // The remote proxy injects this token; it must never carry agent:manage,
 // agent:create/delete, project:update, or any secret scope.
-var remotePATScopes = []string{"agent:read", "agent:list", "project:read", "agent:attach"}
+func remotePATScopes() []string {
+	return []string{"agent:read", "agent:list", "project:read", "agent:attach"}
+}
 
 // ensureControllerPAT backs Deps.EnsureControllerPAT, the "bootstrap-token"
 // apply step (internal/apply/run.go). It owns TWO mints that both need the
@@ -380,13 +369,31 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 	// Register the kill BEFORE ServerStart so a partial start — e.g. a throwaway
 	// dev-auth server left running from a prior failed invocation, whose
 	// readiness poll then times out — is still stopped rather than leaked as a
-	// dev-auth-on admin server. ServerStop tolerates a not-running server.
-	defer func() { _ = tw.ServerStop(ctx) }()
+	// dev-auth-on admin server. ServerStop tolerates a not-running server; a
+	// live run against a scion build without `server stop` needs a
+	// jail-pid-kill fallback instead (see ServerStop's doc comment) — a
+	// live-validation item, not implemented here.
+	//
+	// Then a best-effort delete of scion's residual dev-token so it doesn't
+	// linger as an open admin credential once the real dev-auth-OFF hub takes
+	// over. scion writes it to <scionDir>/dev-token, default ~/.scion/dev-token
+	// (pkg/apiclient/devauth.go), where ~ is the JAIL USER's home (here
+	// /home/stephen — NOT /home/scion, which is the agent-container user).
+	// Resolve that home in-jail rather than hardcode it, then remove through
+	// the guarded removeJailFile helper.
+	defer func() {
+		_ = tw.ServerStop(ctx)
+		if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
+			if h := strings.TrimSpace(home.Stdout); h != "" {
+				_ = removeJailFile(ctx, jr, h+"/.scion/dev-token")
+			}
+		}
+	}()
 	if err := tw.ServerStart(ctx, scion.ServerOpts{WebPort: throwawayHubPort, DevAuth: true}); err != nil {
 		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
 	}
 
-	jp := jailProjectPath(tree, jailMount)
+	jp := apply.JailPath(tree, tree, jailMount)
 	if err := tw.InitProject(ctx, jp); err != nil {
 		return fmt.Errorf("bootstrap-token: init project: %w", err)
 	}
@@ -399,7 +406,7 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 	// PAT's label is fixed — one controller PAT and (when enabled) one remote
 	// PAT per instance.
 	if needController {
-		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-controller", controllerPATScopes)
+		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-controller", controllerPATScopes())
 		if err != nil {
 			return fmt.Errorf("bootstrap-token: hub token create: %w", err)
 		}
@@ -408,30 +415,12 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 		}
 	}
 	if needRemote {
-		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-remote", remotePATScopes)
+		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-remote", remotePATScopes())
 		if err != nil {
 			return fmt.Errorf("bootstrap-token: remote token create: %w", err)
 		}
 		if err := state.SaveRemotePAT(pat); err != nil {
 			return fmt.Errorf("bootstrap-token: persisting remote PAT: %w", err)
-		}
-	}
-	if err := tw.ServerStop(ctx); err != nil {
-		// Best-effort: the deferred ServerStop above retries at return, and a
-		// live run against a scion build without `server stop` needs a
-		// jail-pid-kill fallback instead (see ServerStop's doc comment) — a
-		// live-validation item, not implemented here.
-		_ = err
-	}
-	// Best-effort delete of scion's residual dev-token so it doesn't linger as an
-	// open admin credential once the real dev-auth-OFF hub takes over. scion writes
-	// it to <scionDir>/dev-token, default ~/.scion/dev-token (pkg/apiclient/devauth.go),
-	// where ~ is the JAIL USER's home (here /home/stephen — NOT /home/scion, which
-	// is the agent-container user). Resolve that home in-jail rather than hardcode
-	// it, then remove through the guarded removeJailFile helper.
-	if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
-		if h := strings.TrimSpace(home.Stdout); h != "" {
-			_ = removeJailFile(ctx, jr, h+"/.scion/dev-token")
 		}
 	}
 	return nil
@@ -463,11 +452,11 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			deps, _, _, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
+			w, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
 			if err != nil {
 				return err
 			}
-			if err := apply.Run(cmd.Context(), app, deps); err != nil {
+			if err := apply.Run(cmd.Context(), app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
 			cmd.Printf("application %q is up.\n", app.Name)
@@ -503,6 +492,20 @@ type brokerController struct {
 	brokerHost string          // host agents dial the broker by (IP if resolved, else hostname)
 	runUser    string          // in-machine run user for the broker child
 	runUID     string          // in-machine run uid for the broker child
+	// admin is the loopback client for the broker's admin API. Its timeout
+	// bounds every /epoch and /bootstrap call on its own, so a wedged broker
+	// cannot hang an apply step whose ctx carries no deadline.
+	admin *http.Client
+}
+
+// brokerAdminTimeout bounds one admin-API round trip (loopback; the broker
+// answers /epoch and /bootstrap from memory).
+const brokerAdminTimeout = 5 * time.Second
+
+// bootstrapResponse is the broker's POST /bootstrap body (broker/bootstrap.go
+// writes it untyped; this is the client-side shape).
+type bootstrapResponse struct {
+	Ticket string `json:"ticket"`
 }
 
 // brokerSelfExe returns the executable Start re-execs as `broker serve`. It is a
@@ -531,20 +534,17 @@ var brokerSelfExe = func() string { return os.Args[0] }
 func (bc *brokerController) Start(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, bc.adminURL+"/epoch", nil); err == nil {
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			var er broker.EpochResponse
-			decodeErr := json.NewDecoder(resp.Body).Decode(&er)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				if decodeErr == nil && brokerReusable(er, versionString(), brokerctl.ConfigHash(bc.app)) {
-					return nil // same binary + same broker config; keep the process + PID
-				}
-				fmt.Fprintf(os.Stderr, "lever: broker predates this binary or its tool config changed — restarting it (was %q)\n", er.Version)
-				if err := bc.state.StopBroker(); err != nil {
-					return fmt.Errorf("stopping the stale broker before restart: %w", err)
-				}
-			}
+	var er broker.EpochResponse
+	// Anything but a decodable 200 — connection refused, a non-200, a body that
+	// is not the epoch JSON — means no broker of ours is serving: fall through
+	// to the spawn.
+	if err := httpjson.Get(probeCtx, bc.admin, bc.adminURL+"/epoch", &er); err == nil {
+		if brokerReusable(er, versionString(), brokerctl.ConfigHash(bc.app)) {
+			return nil // same binary + same broker config; keep the process + PID
+		}
+		fmt.Fprintf(os.Stderr, "lever: broker predates this binary or its tool config changed — restarting it (was %q)\n", er.Version)
+		if err := bc.state.StopBroker(); err != nil {
+			return fmt.Errorf("stopping the stale broker before restart: %w", err)
 		}
 	}
 	cmd, logf, err := brokerServeCmd(brokerSelfExe(), bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
@@ -559,31 +559,23 @@ func (bc *brokerController) Start(ctx context.Context) error {
 	return nil
 }
 
+// brokerHealthAttempts/brokerHealthInterval bound Healthy's poll (~10s).
+const (
+	brokerHealthAttempts = 50
+	brokerHealthInterval = 200 * time.Millisecond
+)
+
 // Healthy polls GET /epoch until 200 or a ~10s timeout.
 func (bc *brokerController) Healthy(ctx context.Context) error {
-	deadline := time.Now().Add(10 * time.Second)
-	epochURL := bc.adminURL + "/epoch"
-	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, epochURL, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("broker did not become healthy within 10s (last err: %v)", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
-		}
+	var last error
+	err := retry.Until(ctx, brokerHealthAttempts, brokerHealthInterval, func() (bool, error) {
+		last = httpjson.Get(ctx, bc.admin, bc.adminURL+"/epoch", nil)
+		return last == nil, nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return fmt.Errorf("broker did not become healthy within 10s (last err: %v)", last)
 	}
+	return err
 }
 
 // Mint POSTs /bootstrap to obtain the one-time manager enrolment ticket, reads
@@ -592,26 +584,13 @@ func (bc *brokerController) Healthy(ctx context.Context) error {
 // apply.ErrBootstrapLatched so the mint step tolerates it on an idempotent
 // re-apply against the same broker process.
 func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, bc.adminURL+"/bootstrap", bytes.NewReader(nil))
-	if err != nil {
-		return apply.BootstrapMaterial{}, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusForbidden {
+	var result bootstrapResponse
+	switch err := httpjson.Post(ctx, bc.admin, bc.adminURL+"/bootstrap", nil, &result); {
+	case err == nil:
+	case httpjson.Status(err) == http.StatusForbidden:
 		return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
-	}
-	if resp.StatusCode != http.StatusOK {
-		return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap returned %d", resp.StatusCode)
-	}
-	var result struct {
-		Ticket string `json:"ticket"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap decode: %w", err)
+	default:
+		return apply.BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: %w", err)
 	}
 	caPEM, err := os.ReadFile(bc.state.CACert())
 	if err != nil {
@@ -682,22 +661,42 @@ func leverMayClaimTemplate(current string) bool {
 	}
 }
 
+// applyWiring is what buildApplyDeps resolved for one apply: the backend
+// (already up), the jail runner and state dir, the in-jail scion client, the
+// two host daemon controllers, and the apply.Deps built over them. Its methods
+// are the Deps closures that need more than a one-line forward.
+type applyWiring struct {
+	deps  apply.Deps
+	b     backend.Backend
+	sc    *scion.Client
+	app   *config.App
+	jr    leverexec.Runner
+	state brokerctl.State
+	// brokerHost is what agents (and the guest login forwarder) dial the host
+	// by: the resolved host-alias IP when the backend has one, else the alias
+	// hostname. Under closed-internet egress DNS/53 is dropped, so the
+	// hostname cannot be resolved; the IP is already allowlisted and the
+	// broker cert carries it as a SAN.
+	brokerHost string
+	cmd        *cobra.Command // for Log; nil ⇒ stderr
+}
+
 // buildApplyDeps wires the live dependencies for apply.Run.
 // It eagerly calls EnsureUp so the backend resolves the in-machine
-// run-user and UID before the JailRunner and scion.Client are constructed.
-// JailUp is therefore a no-op in the returned Deps — the jail is already
-// confirmed up and the user/uid are known.
+// run-user and UID before the JailRunner and scion.Client are constructed —
+// which is why the plan has no jail-up step: the jail is confirmed up and
+// the user/uid known before Run can be called at all.
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
 // cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
 // user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
 // that never exercise a Log-emitting path), in which case Log falls back to
 // stderr.
-func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
+func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (*applyWiring, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)
 	if err != nil {
-		return apply.Deps{}, nil, nil, err
+		return nil, err
 	}
 	cfg := backend.Config{
 		MachineName:    machine,
@@ -712,7 +711,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	}
 	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.
 	if err := b.EnsureUp(ctx, cfg); err != nil {
-		return apply.Deps{}, nil, nil, err
+		return nil, err
 	}
 	jr := b.JailRunner()
 
@@ -729,20 +728,12 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// Threaded into Deps so every hub start signs sessions with the same key.
 	sessionSecret, err := state.EnsureSessionSecret()
 	if err != nil {
-		return apply.Deps{}, nil, nil, err
+		return nil, err
 	}
 
-	adminURL := fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort())
-
-	// The jail's resolved host-alias IP (host.orb.internal as seen from the jail).
-	// Agents dial the broker by this IP — under closed-internet egress DNS/53 is
-	// dropped, so the hostname can't be resolved; the IP is already allowlisted and
-	// the broker cert carries it as a SAN. Falls back to the hostname if unresolved.
+	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: state, cmd: cmd}
 	aliasV4 := b.HostAliasV4()
-	brokerHost := b.HostToolAlias() // host.orb.internal (DNS) by default…
-	if aliasV4 != "" {
-		brokerHost = aliasV4 // …but prefer the resolved IP (no DNS needed)
-	}
+	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
 
 	// bc owns the broker lifecycle (start/health/mint) and the re-arm
 	// recombination — see brokerController's doc. Built here, after
@@ -751,11 +742,12 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		app:        app,
 		state:      state,
 		configPath: configPath,
-		adminURL:   adminURL,
+		adminURL:   fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort()),
 		aliasV4:    aliasV4,
-		brokerHost: brokerHost,
+		brokerHost: w.brokerHost,
 		runUser:    b.RunUser(),
 		runUID:     b.RunUID(),
+		admin:      &http.Client{Timeout: brokerAdminTimeout},
 	}
 
 	// rc owns the remote-proxy lifecycle (see remoteController's doc). It
@@ -771,25 +763,15 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		cfgHash:    brokerctl.RemoteConfigHash(app),
 	}
 
-	return apply.Deps{
-		// JailUp is a no-op: buildApplyDeps already brought the jail up
-		// (idempotent; resolves user/uid). The apply executor's jail-up step
-		// is thus a confirmed no-op here.
-		JailUp: func(context.Context, *config.App) error { return nil },
-		LoadImage: func(ctx context.Context, ref string) error {
-			return b.LoadImage(ctx, ref)
-		},
+	w.deps = apply.Deps{
+		LoadImage: b.LoadImage,
 		// ImageLoaded skips a redundant image re-import when the jail already
 		// holds the exact bytes (same image ID as the host) — see the Deps field
 		// doc. Fail-open in the backend, so a check failure just loads.
-		ImageLoaded: func(ctx context.Context, ref string) bool {
-			return b.ImageLoaded(ctx, ref)
-		},
+		ImageLoaded: b.ImageLoaded,
 		// PruneImages reclaims the dangling image a rebuilt tag orphans, after a
 		// load. Best-effort (the apply step logs, never fails, on error).
-		PruneImages: func(ctx context.Context) error {
-			return b.PruneJailImages(ctx)
-		},
+		PruneImages:      b.PruneJailImages,
 		Scion:            sc,
 		JailMount:        b.MountDest(),
 		HubSessionSecret: sessionSecret,
@@ -800,27 +782,21 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// comment at the register-project case in
 		// internal/apply/run.go for the VirtioFS unlink/init race this closes).
 		// The guard leaves directories untouched and is a no-op if the path is
-		// already absent, mirroring removeStaleMarker's host-side semantics.
-		RemoveJailFile: func(ctx context.Context, jailPath string) error {
-			return removeJailFile(ctx, jr, jailPath)
-		},
+		// already absent.
+		RemoveJailFile: w.removeJailFile,
 
 		// EnsureControllerPAT backs the "bootstrap-token" apply step (see
 		// ensureControllerPAT's doc above): mint the controller PAT the real,
 		// dev-auth-off hub is driven with, and (when remote access is
 		// configured on) the narrower remote-access PAT, in one agent-free
 		// window.
-		EnsureControllerPAT: func(ctx context.Context) error {
-			return ensureControllerPAT(ctx, jr, state, app.Tree, b.MountDest(), app.RemoteEnabled())
-		},
+		EnsureControllerPAT: w.ensureControllerPAT,
 
 		// RemoveScionProjectConfigs clears any stale ~/.scion/project-configs
 		// registration(s) for a workspace path before the register step re-inits
 		// (see internal/apply/run.go's register-project case) —
 		// keeps apply from accumulating a duplicate registration every run.
-		RemoveScionProjectConfigs: func(ctx context.Context, wp string) error {
-			return b.RemoveScionProjectConfigs(ctx, wp)
-		},
+		RemoveScionProjectConfigs: b.RemoveScionProjectConfigs,
 
 		// ScionProjectRegistered observes whether the register-project
 		// apply step (internal/apply/run.go) even needs to run its
@@ -828,40 +804,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// above for why that path exists; this is the idempotency gate that
 		// decides whether to run it at all, so a re-apply stops orphaning a
 		// resumable scion agent record.
-		ScionProjectRegistered: func(ctx context.Context, wp string) (bool, error) {
-			return b.ScionProjectRegistered(ctx, wp)
-		},
+		ScionProjectRegistered: b.ScionProjectRegistered,
 
-		// StripProjectSharedDirs declines scion's default cross-agent
-		// `scratchpad` mount for this project — see the Deps field doc for why
-		// it exists and why the removal must go through the hub. The request
-		// runs IN THE JAIL, like every other scion interaction: the hub binds
-		// the jail's loopback, and the Lima template suppresses every
-		// guest→host port forward on purpose, so a host-side call could not
-		// reach it there at all. The PAT is read per call so a re-mint is
-		// picked up.
-		StripProjectSharedDirs: func(ctx context.Context, projectName string) error {
-			hc := &hubapi.Client{T: hubJailTransport(jr, state)}
-			return hc.StripSharedDir(ctx, projectName, scion.DefaultHubEndpoint, scionScratchpadSharedDir)
-		},
-
-		// RepairScionHubEndpoint puts the project's recorded hub endpoint back to
-		// the real hub after a controller-PAT re-mint linked it at the throwaway
-		// one — see the Deps field doc.
-		RepairScionHubEndpoint: func(ctx context.Context, wp string) error {
-			return b.RepairScionHubEndpoint(ctx, wp, scion.DefaultHubEndpoint)
-		},
-
-		// VerifyAgentRole refuses to keep an agent whose hub record predates
-		// scion's roles — see the Deps field doc for why that is a promotion to
-		// full hub authority rather than a cosmetic gap. It fails CLOSED on
-		// every question it cannot answer: not knowing whether the installed
-		// scion has roles, or not being able to read the record, is exactly the
-		// state in which guessing hands out authority.
-		VerifyAgentRole: func(ctx context.Context, projectName, agentName string) error {
-			return hubapi.VerifyAgentRole(ctx, sc.RolesSupported,
-				&hubapi.Client{T: hubJailTransport(jr, state)}, projectName, agentName)
-		},
+		StripProjectSharedDirs: w.stripProjectSharedDirs,
+		RepairScionHubEndpoint: w.repairScionHubEndpoint,
+		VerifyAgentRole:        w.verifyAgentRole,
 
 		StartBroker:          bc.Start,
 		BrokerHealthy:        bc.Healthy,
@@ -871,9 +818,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// registered + online (see the Deps field doc): the broker registers
 		// asynchronously after the Hub API, so the first create/resume would
 		// otherwise race it. Fail-soft in the client, so it never fails bring-up.
-		WaitBrokerReady: func(ctx context.Context, project string) error {
-			return sc.WaitRuntimeBrokerReady(ctx, project)
-		},
+		WaitBrokerReady: sc.WaitRuntimeBrokerReady,
 
 		// RearmBootstrap backs Deps.RearmBootstrap — see brokerController.Rearm
 		// for the full rationale (re-arm the single-use latch on the create path,
@@ -889,75 +834,120 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		StartRemoteProxy: rc.Start,
 		StopRemoteProxy:  func(context.Context) error { return state.StopRemoteProxy() },
 
-		// EnsureHubLogin provisions the guest half of the remote login path
-		// (see apply.Deps.EnsureHubLogin). It is a no-op with remote access
-		// off: no provider runs host-side then, so a forwarder would point at
-		// nothing and an oidc_login block would advertise a login that cannot
-		// complete. The guest reaches the host at the same alias the agents
-		// already use for the broker.
-		EnsureHubLogin: func(ctx context.Context) (bool, error) {
-			if !app.RemoteEnabled() {
-				return false, nil
-			}
-			return b.EnsureHubLogin(ctx, backend.HubLogin{
-				IssuerPort:  backend.GuestLoginIssuerPort,
-				HostPort:    app.EffectiveRemoteLoginPort(),
-				HostAddress: brokerHost,
-				ClientID:    remoteproxy.LoginClientID,
-			})
-		},
-
+		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is
 		// off — see apply.Deps.DisableHubLogin for why leaving it running is
 		// the part that matters.
-		DisableHubLogin: b.DisableHubLogin,
+		DisableHubLogin:     b.DisableHubLogin,
+		EnsureAgentTemplate: w.ensureAgentTemplate,
+		Log:                 w.log,
+	}
+	return w, nil
+}
 
-		// EnsureAgentTemplate puts lever's overlay template in front of scion's
-		// stock `default` — see apply.Deps.EnsureAgentTemplate, and
-		// guest.EnsureLeverTemplate for WHY an empty system prompt is the fix.
-		//
-		// The two halves are ordered file-then-setting deliberately. Pointing
-		// default_template at a template that does not exist yet would fail
-		// every provision in between; the reverse order is inert, because a
-		// template nothing selects is just an unused directory. So a failure
-		// after the first half leaves the guest in a working state, and the
-		// next apply converges it.
-		//
-		// The setting is read before it is written so an operator who has
-		// deliberately chosen their own template keeps it: lever only claims
-		// default_template while it is still scion's own default. Reading it
-		// also keeps a re-apply quiet, since `config set` cannot report whether
-		// it changed anything.
-		EnsureAgentTemplate: func(ctx context.Context, projectDir string) (bool, error) {
-			wrote, err := b.EnsureLeverTemplate(ctx)
-			if err != nil {
-				return false, err
-			}
-			cur, err := sc.ConfigGetProject(ctx, projectDir, "default_template")
-			if err != nil {
-				return false, fmt.Errorf("read default_template: %w", err)
-			}
-			if !leverMayClaimTemplate(cur) {
-				return wrote, nil
-			}
-			if err := sc.ConfigSetProject(ctx, projectDir, "default_template", guest.LeverTemplateName); err != nil {
-				return false, fmt.Errorf("set default_template: %w", err)
-			}
-			return true, nil
-		},
+// removeJailFile backs Deps.RemoveJailFile through the jail runner.
+func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error {
+	return removeJailFile(ctx, w.jr, jailPath)
+}
 
-		// Log surfaces start-manager's loud resume-failed recovery notice (see
-		// apply.Deps.Log) on the invoking command's stderr, mirroring how other
-		// user-facing warnings already surface (cmd.PrintErrf; see cli/stop.go,
-		// cli/down.go). A nil cmd (defence in depth for any caller that doesn't
-		// have one, e.g. a future direct test) falls back to os.Stderr so the
-		// line is never silently lost.
-		Log: func(format string, args ...any) {
-			if cmd != nil {
-				cmd.PrintErrf(format+"\n", args...)
-				return
-			}
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
-		},
-	}, b, sc, nil
+// ensureControllerPAT backs Deps.EnsureControllerPAT — see the free function.
+func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
+	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), w.app.RemoteEnabled())
+}
+
+// hub is the Hub REST client, over curl in the jail with the controller PAT.
+// The request runs IN THE JAIL, like every other scion interaction: the hub
+// binds the jail's loopback, and the Lima template suppresses every
+// guest→host port forward on purpose, so a host-side call could not reach it
+// there at all. The PAT is read per call so a re-mint is picked up.
+func (w *applyWiring) hub() *hubapi.Client {
+	return &hubapi.Client{T: hubJailTransport(w.jr, w.state)}
+}
+
+// stripProjectSharedDirs declines scion's default cross-agent `scratchpad`
+// mount for this project — see apply.Deps.StripProjectSharedDirs for why it
+// exists and why the removal must go through the hub.
+func (w *applyWiring) stripProjectSharedDirs(ctx context.Context, projectName string) error {
+	return w.hub().StripSharedDir(ctx, projectName, scion.DefaultHubEndpoint, scionScratchpadSharedDir)
+}
+
+// repairScionHubEndpoint puts the project's recorded hub endpoint back to the
+// real hub after a controller-PAT re-mint linked it at the throwaway one — see
+// apply.Deps.RepairScionHubEndpoint.
+func (w *applyWiring) repairScionHubEndpoint(ctx context.Context, wp string) error {
+	return w.b.RepairScionHubEndpoint(ctx, wp, scion.DefaultHubEndpoint)
+}
+
+// verifyAgentRole refuses to keep an agent whose hub record predates scion's
+// roles — see apply.Deps.VerifyAgentRole for why that is a promotion to full
+// hub authority rather than a cosmetic gap. It fails CLOSED on every question
+// it cannot answer: not knowing whether the installed scion has roles, or not
+// being able to read the record, is exactly the state in which guessing hands
+// out authority.
+func (w *applyWiring) verifyAgentRole(ctx context.Context, projectName, agentName string) error {
+	return hubapi.VerifyAgentRole(ctx, w.sc.RolesSupported, w.hub(), projectName, agentName)
+}
+
+// ensureHubLogin provisions the guest half of the remote login path (see
+// apply.Deps.EnsureHubLogin). It is a no-op with remote access off: no
+// provider runs host-side then, so a forwarder would point at nothing and an
+// oidc_login block would advertise a login that cannot complete. The guest
+// reaches the host at the same alias the agents already use for the broker.
+func (w *applyWiring) ensureHubLogin(ctx context.Context) (bool, error) {
+	if !w.app.RemoteEnabled() {
+		return false, nil
+	}
+	return w.b.EnsureHubLogin(ctx, backend.HubLogin{
+		IssuerPort:  backend.GuestLoginIssuerPort,
+		HostPort:    w.app.EffectiveRemoteLoginPort(),
+		HostAddress: w.brokerHost,
+		ClientID:    remoteproxy.LoginClientID,
+	})
+}
+
+// ensureAgentTemplate puts lever's overlay template in front of scion's stock
+// `default` — see apply.Deps.EnsureAgentTemplate, and guest.EnsureLeverTemplate
+// for WHY an empty system prompt is the fix.
+//
+// The two halves are ordered file-then-setting deliberately. Pointing
+// default_template at a template that does not exist yet would fail every
+// provision in between; the reverse order is inert, because a template
+// nothing selects is just an unused directory. So a failure after the first
+// half leaves the guest in a working state, and the next apply converges it.
+//
+// The setting is read before it is written so an operator who has
+// deliberately chosen their own template keeps it: lever only claims
+// default_template while it is still scion's own default. Reading it also
+// keeps a re-apply quiet, since `config set` cannot report whether it changed
+// anything.
+func (w *applyWiring) ensureAgentTemplate(ctx context.Context, projectDir string) (bool, error) {
+	wrote, err := w.b.EnsureLeverTemplate(ctx)
+	if err != nil {
+		return false, err
+	}
+	cur, err := w.sc.ConfigGetProject(ctx, projectDir, "default_template")
+	if err != nil {
+		return false, fmt.Errorf("read default_template: %w", err)
+	}
+	if !leverMayClaimTemplate(cur) {
+		return wrote, nil
+	}
+	if err := w.sc.ConfigSetProject(ctx, projectDir, "default_template", guest.LeverTemplateName); err != nil {
+		return false, fmt.Errorf("set default_template: %w", err)
+	}
+	return true, nil
+}
+
+// log surfaces start-manager's loud resume-failed recovery notice (see
+// apply.Deps.Log) on the invoking command's stderr, mirroring how other
+// user-facing warnings already surface (cmd.PrintErrf; see cli/stop.go,
+// cli/down.go). A nil cmd (defence in depth for any caller that doesn't have
+// one, e.g. a direct test) falls back to os.Stderr so the line is never
+// silently lost.
+func (w *applyWiring) log(format string, args ...any) {
+	if w.cmd != nil {
+		w.cmd.PrintErrf(format+"\n", args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }

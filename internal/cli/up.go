@@ -96,9 +96,6 @@ func upDecision(phase string, fresh bool) upAction {
 // record WITHOUT calling apply.Run. project is the in-jail mount root; the hub
 // knows the project by its basename, exactly as apply's own call does.
 func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name string) error {
-	if deps.VerifyAgentRole == nil {
-		return nil
-	}
 	return deps.VerifyAgentRole(ctx, hubProjectKey(project), name)
 }
 
@@ -117,10 +114,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			deps, b, sc, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
+			w, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
 			if err != nil {
 				return err
 			}
+			deps, b, sc := w.deps, w.b, w.sc
 			project := b.MountDest() // in-jail project path == mount root
 
 			phase, probeErr := managerPhase(cmd.Context(), sc, project, app.Name)
@@ -147,11 +145,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := restartManagerFresh(cmd.Context(), sc, app.Name, project); err != nil {
 					return fmt.Errorf("--fresh: deleting the existing manager record: %w (without this the old session would be resumed)", err)
 				}
-				if err := apply.Run(cmd.Context(), app, deps); err != nil {
+				if err := apply.Run(cmd.Context(), app, deps, apply.PlanOpts{}); err != nil {
 					return err
 				}
 			case upApply:
-				if err := apply.Run(cmd.Context(), app, deps); err != nil {
+				if err := apply.Run(cmd.Context(), app, deps, apply.PlanOpts{}); err != nil {
 					return err
 				}
 			case upResume:
@@ -214,10 +212,8 @@ func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (
 	if err != nil {
 		return "", err
 	}
-	for _, a := range agents {
-		if a.Slug == name {
-			return a.Phase, nil
-		}
+	if a := scion.FindAgent(agents, name); a != nil {
+		return a.Phase, nil
 	}
 	return "", nil
 }

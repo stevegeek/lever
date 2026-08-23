@@ -455,7 +455,7 @@ func planHas(steps []Step, kind StepKind) bool {
 }
 
 // step is the thin dispatch over StepKind: it routes each step to its
-// executor. The non-trivial case bodies live in per-kind run* helpers below,
+// executor. The non-trivial case bodies live in per-kind helpers below,
 // each a method on run — no hidden state beyond it. The default
 // arm is a hard error so a Plan emitting an unknown kind fails loudly.
 func (r *run) step(ctx context.Context, s Step) error {

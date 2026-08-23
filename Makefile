@@ -85,6 +85,14 @@ all: install
 
 # Live api-key headline e2e (fake upstream; no real key). Rebuilds the host lever
 # + image bins, bakes the image, then runs the e2e script. Needs OrbStack + podman.
+# Tests behind the `integration` build tag. Each one still skips unless its own
+# prerequisites are present (LEVER_IT=1 + OrbStack for apply, LEVER_VM_PREFIX
+# for hubapi, a real scion tree + node for webassets), so this only compiles and
+# runs what the current machine can support. Plain `go test ./...` never sees them.
+.PHONY: test-integration
+test-integration:
+	go test -tags integration -timeout 40m ./...
+
 .PHONY: test-apikey-e2e
 test-apikey-e2e: install lever-image-bins
 	bash $(LEVER_IMAGE_CTX)/build-lever-image.sh

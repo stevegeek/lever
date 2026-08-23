@@ -71,6 +71,16 @@ read the Changed/Internal entries before rebasing open branches.
   on failure too.** The throwaway dev-auth hub's `~/.scion/dev-token` is now
   deleted from the deferred cleanup, so an aborted mint no longer leaves the
   open admin credential behind; before, only a successful mint removed it.
+- **Remote-proxy login refusals are sentinel-wrapped and reworded.** The
+  three refusals the login driver decides itself (the hub redirected to a
+  different OIDC provider, the hub asked for another `client_id`, the hub
+  answered without replacing the login-state cookie with a session) now wrap
+  a fixed message and append the detail in parentheses. For example, the
+  no-session case was `the hub answered <status> without turning the
+  login-state <cookie> cookie into a session` and is now `the hub answered
+  without turning the login-state cookie into a session (it answered
+  <status> and left the <cookie> cookie as it was)`. Only the log and audit
+  text changes; the proxy's HTTP responses are the same.
 
 ### Internal
 

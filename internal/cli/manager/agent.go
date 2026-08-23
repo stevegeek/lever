@@ -1,39 +1,26 @@
 package manager
 
 import (
-	"os"
-	"path/filepath"
+	"context"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// workerCallFn is the active broker caller (seam for tests).
-var workerCallFn = workerCall
+// workerCall is brokerCall specialized to the worker-command response shape.
+func workerCall(ctx context.Context, c brokerCaller, endpoint string, body any) (workerResult, error) {
+	return brokerCall[workerResult](ctx, c, endpoint, body)
+}
 
-// managerBootstrapPath is where the manager's own bootstrap.json is readable
-// from inside the manager CONTAINER, where scion mounts the tree at /workspace
-// (the jail-level /lever mount does not exist in the container), so the
-// bootstrap deposited by `lever apply` at <tree>/.lever/bootstrap.json appears
-// here. Tests can override it.
-var managerBootstrapPath = "/workspace/.lever/bootstrap.json"
-
-// managerIDDir is the directory holding the manager's mTLS identity (cert+key+ca).
-// It is the "~/.lever-id" path resolved at process start. Tests can override it.
-var managerIDDir = func() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".lever-id")
-}()
-
-func newAgentCmd() *cobra.Command {
+func newAgentCmd(c brokerCaller) *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Drive worker agents via the broker"}
-	cmd.AddCommand(agentList(), agentStart(), agentStop(), agentSuspend(), agentResume())
+	cmd.AddCommand(agentList(c), agentStart(c), agentStop(c), agentSuspend(c), agentResume(c))
 	return cmd
 }
 
-func agentStart() *cobra.Command {
+func agentStart(c brokerCaller) *cobra.Command {
 	var task string
-	c := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1),
+	cmd := &cobra.Command{Use: "start NAME", Args: cobra.ExactArgs(1),
 		Short: "Start a worker agent (fresh); to resume an existing one use `agent resume`",
 		Long: "Start a worker agent with a task.\n\n" +
 			"To bring an EXISTING (suspended/stopped) worker back up, use `lever-manager agent resume NAME` —\n" +
@@ -42,7 +29,7 @@ func agentStart() *cobra.Command {
 			"start it fresh with a new task. (Because --task defaults to a non-empty prompt, `agent start`\n" +
 			"never carries an empty task, so it cannot itself resume — that is what `agent resume` is for.)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := workerCallFn(cmd.Context(), wire.PathWorkerStart,
+			res, err := workerCall(cmd.Context(), c, wire.PathWorkerStart,
 				wire.WorkerStartRequest{Worker: args[0], Task: task})
 			if err != nil {
 				return err
@@ -50,14 +37,14 @@ func agentStart() *cobra.Command {
 			cmd.Printf("%s: %s\n", res.Worker, res.Phase)
 			return nil
 		}}
-	c.Flags().StringVar(&task, "task", "Read your context, then begin.", "task/boot prompt")
-	return c
+	cmd.Flags().StringVar(&task, "task", "Read your context, then begin.", "task/boot prompt")
+	return cmd
 }
 
-func agentVerb(use, short, endpoint string) *cobra.Command {
+func agentVerb(c brokerCaller, use, short, endpoint string) *cobra.Command {
 	return &cobra.Command{Use: use + " NAME", Args: cobra.ExactArgs(1), Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := workerCallFn(cmd.Context(), endpoint, wire.WorkerRequest{Worker: args[0]})
+			res, err := workerCall(cmd.Context(), c, endpoint, wire.WorkerRequest{Worker: args[0]})
 			if err != nil {
 				return err
 			}
@@ -66,17 +53,19 @@ func agentVerb(use, short, endpoint string) *cobra.Command {
 		}}
 }
 
-func agentStop() *cobra.Command { return agentVerb("stop", "Stop a worker agent", wire.PathWorkerStop) }
-func agentSuspend() *cobra.Command {
-	return agentVerb("suspend", "Suspend a worker agent", wire.PathWorkerSuspend)
+func agentStop(c brokerCaller) *cobra.Command {
+	return agentVerb(c, "stop", "Stop a worker agent", wire.PathWorkerStop)
 }
-func agentResume() *cobra.Command {
-	return agentVerb("resume", "Resume a worker agent", wire.PathWorkerResume)
+func agentSuspend(c brokerCaller) *cobra.Command {
+	return agentVerb(c, "suspend", "Suspend a worker agent", wire.PathWorkerSuspend)
+}
+func agentResume(c brokerCaller) *cobra.Command {
+	return agentVerb(c, "resume", "Resume a worker agent", wire.PathWorkerResume)
 }
 
-func agentList() *cobra.Command {
+func agentList(c brokerCaller) *cobra.Command {
 	return &cobra.Command{Use: "list", Short: "List worker agents", RunE: func(cmd *cobra.Command, _ []string) error {
-		res, err := workerCallFn(cmd.Context(), wire.PathWorkerList, struct{}{})
+		res, err := workerCall(cmd.Context(), c, wire.PathWorkerList, struct{}{})
 		if err != nil {
 			return err
 		}

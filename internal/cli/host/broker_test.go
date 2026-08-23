@@ -6,23 +6,7 @@ import (
 )
 
 func TestBrokerCommandWired(t *testing.T) {
-	root := newRootWith(defaultFactory)
-	var found bool
-	for _, c := range root.Commands() {
-		if c.Name() == "broker" {
-			found = true
-			subs := map[string]bool{}
-			for _, s := range c.Commands() {
-				subs[s.Name()] = true
-			}
-			if !subs["serve"] || !subs["bump-epoch"] {
-				t.Fatalf("broker subcommands = %v", subs)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("`lever broker` not wired into the host root")
-	}
+	wantSubcommands(t, "broker", "serve", "bump-epoch")
 }
 
 func TestRevokeCommandWired(t *testing.T) {

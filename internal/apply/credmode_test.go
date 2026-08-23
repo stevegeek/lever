@@ -3,7 +3,6 @@ package apply
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -24,9 +23,7 @@ func TestDefaultReadCredRejectsGroupAndWorldAccess(t *testing.T) {
 		if err == nil {
 			t.Fatalf("mode %#o must be rejected", mode)
 		}
-		if !strings.Contains(err.Error(), "0600") {
-			t.Errorf("mode %#o: error should name the required mode, got %v", mode, err)
-		}
+		wantErrContaining(t, err, "0600")
 	}
 }
 

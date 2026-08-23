@@ -24,23 +24,7 @@ import (
 )
 
 func TestRemoteCommandWired(t *testing.T) {
-	root := newRootWith(defaultFactory)
-	var found bool
-	for _, c := range root.Commands() {
-		if c.Name() == "remote" {
-			found = true
-			subs := map[string]bool{}
-			for _, s := range c.Commands() {
-				subs[s.Name()] = true
-			}
-			if !subs["serve"] || !subs["status"] {
-				t.Fatalf("remote subcommands = %v, want serve+status", subs)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("`lever remote` not wired into the host root")
-	}
+	wantSubcommands(t, "remote", "serve", "status")
 }
 
 func TestRemoteServeDisabledErrors(t *testing.T) {
@@ -53,9 +37,7 @@ func TestRemoteServeDisabledErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("remote serve with remote disabled should error")
 	}
-	if !strings.Contains(err.Error(), "remote.enabled") {
-		t.Errorf("error should mention remote.enabled, got: %v", err)
-	}
+	clitest.WantErrIs(t, err, errRemoteDisabled)
 }
 
 func TestRemoteServeLimaBackendErrors(t *testing.T) {
@@ -95,7 +77,7 @@ func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a bind error on privileged port 1 (proves the gates passed and Serve was reached)")
 	}
-	if strings.Contains(err.Error(), "remote.enabled") || strings.Contains(err.Error(), "orbstack") {
+	if errors.Is(err, errRemoteDisabled) || strings.Contains(err.Error(), "orbstack") {
 		t.Fatalf("gate checks should have passed; got a gate error instead of a bind error: %v", err)
 	}
 }

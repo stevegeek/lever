@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -142,7 +142,7 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	}
 
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -174,32 +174,21 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 
 // TestDestroyCallsTeardown verifies the renamed command (Use: "destroy")
 // still tears the jail down.
-func TestDestroyCallsTeardown(t *testing.T) {
-	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"destroy", "--machine", "lever-x"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("destroy: %v", err)
-	}
-	if !sb.down {
-		t.Fatal("destroy must call Backend.Teardown")
-	}
-}
+func TestDestroyCallsTeardown(t *testing.T) { wantTeardownVia(t, "destroy") }
 
 // TestDownAliasCallsTeardown is the deprecation-safety regression: `lever
 // down` must keep working, unchanged, as a hidden alias of `destroy`.
-func TestDownAliasCallsTeardown(t *testing.T) {
+func TestDownAliasCallsTeardown(t *testing.T) { wantTeardownVia(t, "down") }
+
+// wantTeardownVia runs `lever <verb> --machine lever-x` over a stub backend
+// and requires Backend.Teardown to have run.
+func wantTeardownVia(t *testing.T, verb string) {
+	t.Helper()
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"down", "--machine", "lever-x"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("down (alias): %v", err)
+	if _, err := clitest.Exec(t, stubRoot(sb), verb, "--machine", "lever-x"); err != nil {
+		t.Fatalf("%s: %v", verb, err)
 	}
 	if !sb.down {
-		t.Fatal("the `down` alias must still call Backend.Teardown")
+		t.Fatalf("`lever %s` must call Backend.Teardown", verb)
 	}
 }

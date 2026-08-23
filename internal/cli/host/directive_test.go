@@ -131,27 +131,7 @@ func startDirectiveUDS(t *testing.T, dir string, routes map[string]canned) *reqR
 }
 
 func TestDirectiveCommandsWired(t *testing.T) {
-	root := NewRoot()
-	var subs map[string]bool
-	var found bool
-	for _, c := range root.Commands() {
-		if c.Name() == "directive" {
-			subs = map[string]bool{}
-			for _, s := range c.Commands() {
-				subs[s.Name()] = true
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("`lever directive` not wired into the host root")
-	}
-	for _, want := range []string{"send", "list", "revoke", "selftest"} {
-		if !subs[want] {
-			t.Errorf("directive subcommands = %v, missing %q", subs, want)
-		}
-	}
+	wantSubcommands(t, "directive", "send", "list", "revoke", "selftest")
 }
 
 func TestDirectiveSendSignsAndPosts(t *testing.T) {
@@ -343,7 +323,12 @@ func TestDirectiveSendInvalidActionRejectedClientSide(t *testing.T) {
 	}
 }
 
-func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
+// sendOverExpiryCap runs `directive send --expires 2h` against an instance
+// whose directive_expiry_max is 1h, with a broker recording every call, and
+// requires the client-side rejection. The recorder is returned so the test
+// can pin which broker calls never happened.
+func sendOverExpiryCap(t *testing.T) *reqRecorder {
+	t.Helper()
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
 	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n  directive_expiry_max: 1h\n"))
@@ -358,27 +343,18 @@ func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
 	if err == nil {
 		t.Fatal("expiry beyond the configured cap should error")
 	}
+	return rec
+}
+
+func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
+	rec := sendOverExpiryCap(t)
 	if rec.has(http.MethodPost, "/directive/send") {
 		t.Fatal("send must not reach the broker when the expiry cap is violated")
 	}
 }
 
 func TestDirectiveSendOverCapErrorsBeforeResolve(t *testing.T) {
-	dir := directiveTestDir(t)
-	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n  directive_expiry_max: 1h\n"))
-	t.Chdir(dir)
-
-	// Track whether resolve was called by recording any GET request to /directive/resolve.
-	rec := startDirectiveUDS(t, dir, map[string]canned{
-		"/directive/resolve": {body: `{"cn":"worker1","slug":"worker1","generation":1}`},
-		"/directive/send":    {body: `{"id":"x","delivered":true}`},
-	})
-
-	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
-	if err == nil {
-		t.Fatal("expiry beyond the configured cap should error")
-	}
+	rec := sendOverExpiryCap(t)
 	if rec.has(http.MethodGet, "/directive/resolve") {
 		t.Fatal("resolve must not be called when expiry cap is violated (cap check must happen before network call)")
 	}

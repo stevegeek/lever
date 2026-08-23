@@ -112,9 +112,7 @@ func TestMsgList_malformedResponseIsAnError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected decode error, got nil (out=%q)", out)
 	}
-	if !strings.Contains(err.Error(), "decode /msg/list response") {
-		t.Fatalf("err = %v, want a decode /msg/list response error", err)
-	}
+	clitest.WantErrContaining(t, err, "decode /msg/list response")
 	if strings.Contains(out, "Inbox empty.") {
 		t.Fatalf("malformed response must not render as an empty inbox; out=%q", out)
 	}

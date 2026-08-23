@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
@@ -35,10 +34,9 @@ func TestStopSuspendsManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	sb := &stubBackend{runner: f}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -84,7 +82,7 @@ func TestStopDoesNotClearStagedState(t *testing.T) {
 	// Jail unreachable: skips the suspend branch entirely, isolating this test
 	// to the staged-state behavior.
 	sb := &stubBackend{resolveRunUserErr: errors.New("machine not up")}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -114,7 +112,7 @@ func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 
 	f := proc.NewFakeRunner() // no scripts: any call would error loudly
 	sb := &stubBackend{resolveRunUserErr: errors.New("machine not up"), runner: f}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -154,7 +152,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	}
 
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -174,7 +172,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 // for the current instance.
 func TestStopWithExplicitMachineDoesNotStopBroker(t *testing.T) {
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)

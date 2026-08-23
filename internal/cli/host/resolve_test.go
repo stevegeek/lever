@@ -3,10 +3,10 @@ package host
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/registry"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -53,9 +53,9 @@ func TestInstanceAppMachine(t *testing.T) {
 		t.Fatalf("explicit machine: got %q err %v", m, err)
 	}
 	// no flag, no config → the error says so
-	if _, err := (instanceApp{err: os.ErrNotExist}).machine(""); err == nil || !strings.Contains(err.Error(), "no --machine given") {
-		t.Fatalf("no config: err = %v", err)
-	}
+	_, err := (instanceApp{err: os.ErrNotExist}).machine("")
+	clitest.WantErrIs(t, err, os.ErrNotExist)
+	clitest.WantErrContaining(t, err, "no --machine given")
 	// no flag → derived from discovered config
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)

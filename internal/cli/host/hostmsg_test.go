@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -22,10 +21,8 @@ func TestHostMsgSendToManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fr := proc.NewFakeRunner()
-	fr.Script("scion", proc.Result{})
-	sb := &stubBackend{runner: fr}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	fr := scionOKRunner()
+	root := stubRoot(&stubBackend{runner: fr})
 	_, err := clitest.Exec(t, root, "msg", "send", "hello", "there", "--to", "assistant")
 	if err != nil {
 		t.Fatalf("msg send: %v", err)
@@ -56,10 +53,8 @@ func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
-	fr := proc.NewFakeRunner()
-	fr.Script("scion", proc.Result{})
-	sb := &stubBackend{runner: fr}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	fr := scionOKRunner()
+	root := stubRoot(&stubBackend{runner: fr})
 	_, err := clitest.Exec(t, root, "msg", "send", "check", "in", "--to", "scratch", "--interrupt")
 	if err != nil {
 		t.Fatalf("msg send: %v", err)
@@ -83,17 +78,12 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 	t.Chdir(dir)
 
 	fr := proc.NewFakeRunner()
-	sb := &stubBackend{runner: fr}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(&stubBackend{runner: fr})
 	_, err := clitest.Exec(t, root, "msg", "send", "hi", "--to", "nope")
 	if err == nil {
 		t.Fatal("want error for unknown --to")
 	}
-	for _, want := range []string{"nope", "assistant", "scratch"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err.Error(), want)
-		}
-	}
+	clitest.WantErrContaining(t, err, "nope", "assistant", "scratch")
 	if len(fr.Calls) != 0 {
 		t.Fatalf("scion must never be called on an unknown recipient, got %+v", fr.Calls)
 	}
@@ -105,14 +95,9 @@ func TestHostMsgSendJailDownFailsFast(t *testing.T) {
 
 	fr := proc.NewFakeRunner()
 	sb := &stubBackend{runner: fr, resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-assistant")}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "msg", "send", "hi", "--to", "assistant")
-	if err == nil {
-		t.Fatal("want error when jail is down")
-	}
-	if !strings.Contains(err.Error(), "lever up") {
-		t.Fatalf("error should tell the operator to run `lever up`; got: %v", err)
-	}
+	wantJailNotUp(t, err)
 	if len(fr.Calls) != 0 {
 		t.Fatal("msg send must never call scion when the jail is not up")
 	}

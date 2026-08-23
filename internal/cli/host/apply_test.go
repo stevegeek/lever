@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -253,15 +254,7 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := proc.NewFakeRunner()
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{})
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-wired-abc\n"})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
+	f := patMintRunner("pat-wired-abc")
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -542,9 +535,7 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 	if err == nil {
 		t.Fatal("a stand-in that never listens must not report the proxy as serving")
 	}
-	if !strings.Contains(err.Error(), "not listening") {
-		t.Fatalf("Start after a killed proxy must respawn and then check it, got: %v", err)
-	}
+	clitest.WantErrIs(t, err, errRemoteProxyNotListening) // respawned, then checked
 	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
 		t.Fatalf("remote.log not created by the respawn: %v", serr)
 	}
@@ -570,9 +561,7 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	// As above: the stand-in never binds, so the spawn is proved by the
 	// liveness check's complaint rather than by a nil.
 	err := rc.Start(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "not listening") {
-		t.Fatalf("Start with no prior proxy must spawn and then check it, got: %v", err)
-	}
+	clitest.WantErrIs(t, err, errRemoteProxyNotListening) // spawned, then checked
 	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
 		t.Fatalf("remote.log not created by the spawn: %v", serr)
 	}
@@ -606,15 +595,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
-	f := proc.NewFakeRunner()
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{}) // waitHubReady's poll, run inside ServerStart
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-mint-xyz\n"})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
+	f := patMintRunner("pat-mint-xyz")
 
 	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
@@ -700,29 +681,6 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("second call made %d new runner call(s), want 0 (must be a no-op): %+v",
 			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
 	}
-}
-
-// scriptPATMintChain registers the throwaway-window call chain shared by every
-// ensureControllerPAT test below (server start → list poll → init → hub link →
-// server stop → dev-token resolve/rm), everything except the "hub token
-// create" calls themselves — those differ per test by --name/token, so each
-// test scripts them individually via scriptTokenCreate.
-func scriptPATMintChain(f *proc.FakeRunner) {
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{}) // waitHubReady's poll, run inside ServerStart
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
-}
-
-// scriptTokenCreate registers a distinct "hub token create --project lever
-// --name <name>" response so the fake runner can tell the controller and
-// remote mints apart (they differ only by --name, which lands right after
-// --project in the argv scion.Client.HubTokenCreate builds).
-func scriptTokenCreate(f *proc.FakeRunner, name, token string) {
-	f.Script("scion hub token create --project lever --name "+name, proc.Result{Stdout: "Token: " + token + "\n"})
 }
 
 // countCalls returns how many recorded calls satisfy pred.
@@ -990,15 +948,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := proc.NewFakeRunner()
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{}) // waitHubReady's poll (throwaway AND real hub)
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-e2e-round-trip\n"})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
+	f := patMintRunner("pat-e2e-round-trip")
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -1138,12 +1088,8 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	}
 	// The cause lives only in that log — this process never sees the child's
 	// stderr — so the error has to carry it.
-	if !strings.Contains(err.Error(), "address already in use") {
-		t.Fatalf("error does not quote the log's reason: %v", err)
-	}
-	if !strings.Contains(err.Error(), st.RemoteLog()) {
-		t.Fatalf("error does not name the log: %v", err)
-	}
+	clitest.WantErrIs(t, err, errRemoteProxyNotListening)
+	clitest.WantErrContaining(t, err, "address already in use", st.RemoteLog()) // the log's reason, and the log
 
 	// And a proxy that IS listening passes.
 	ln2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))

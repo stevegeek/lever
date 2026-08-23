@@ -3,10 +3,8 @@ package host
 import (
 	"fmt"
 	"github.com/stevegeek/lever/internal/cli/clitest"
-	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -20,48 +18,33 @@ func attachApp() *config.App {
 	}
 }
 
-func TestAttachTargetDefaultsToManager(t *testing.T) {
-	slug, project, err := attachTarget(attachApp(), "/lever", "")
+// wantAttachTarget resolves `to` against attachApp and requires slug in the
+// instance project /lever.
+func wantAttachTarget(t *testing.T, to, wantSlug string) {
+	t.Helper()
+	slug, project, err := attachTarget(attachApp(), "/lever", to)
 	if err != nil {
 		t.Fatalf("attachTarget: %v", err)
 	}
-	if slug != "assistant" || project != "/lever" {
-		t.Fatalf("got (%q, %q), want (assistant, /lever)", slug, project)
+	if slug != wantSlug || project != "/lever" {
+		t.Fatalf("got (%q, %q), want (%s, /lever)", slug, project, wantSlug)
 	}
 }
 
-func TestAttachTargetManagerByName(t *testing.T) {
-	slug, project, err := attachTarget(attachApp(), "/lever", "assistant")
-	if err != nil {
-		t.Fatalf("attachTarget: %v", err)
-	}
-	if slug != "assistant" || project != "/lever" {
-		t.Fatalf("got (%q, %q), want (assistant, /lever)", slug, project)
-	}
-}
+func TestAttachTargetDefaultsToManager(t *testing.T) { wantAttachTarget(t, "", "assistant") }
 
-func TestAttachTargetWorker(t *testing.T) {
-	slug, project, err := attachTarget(attachApp(), "/lever", "scratch")
-	if err != nil {
-		t.Fatalf("attachTarget: %v", err)
-	}
-	// Single-project model: the worker's agent record lives in the instance
-	// project (the jail mount root), NOT a per-worker /lever/workers/<name>.
-	if slug != "scratch" || project != "/lever" {
-		t.Fatalf("got (%q, %q), want (scratch, /lever)", slug, project)
-	}
-}
+func TestAttachTargetManagerByName(t *testing.T) { wantAttachTarget(t, "assistant", "assistant") }
+
+// Single-project model: the worker's agent record lives in the instance
+// project (the jail mount root), NOT a per-worker /lever/workers/<name>.
+func TestAttachTargetWorker(t *testing.T) { wantAttachTarget(t, "scratch", "scratch") }
 
 func TestAttachTargetUnknownListsValidNames(t *testing.T) {
 	_, _, err := attachTarget(attachApp(), "/lever", "nope")
 	if err == nil {
 		t.Fatal("want error for unknown name")
 	}
-	for _, want := range []string{"nope", "assistant", "scratch", "worker"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err.Error(), want)
-		}
-	}
+	clitest.WantErrContaining(t, err, "nope", "assistant", "scratch", "worker")
 }
 
 // TestAttachNamePositionalIsNotAConfigPath pins that `attach <name>`'s positional
@@ -74,16 +57,11 @@ func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "attach", "scratch")
-	if err == nil {
-		t.Fatal("expected attach to fail when the jail is not up")
-	}
 	// Reaching the jail-not-up hint proves lever.yaml loaded from the CWD and the
 	// positional "scratch" was NOT treated as a config path.
-	if !strings.Contains(err.Error(), "lever up") {
-		t.Fatalf("`attach scratch` must load config from CWD and fail at ResolveRunUser; got: %v", err)
-	}
+	wantJailNotUp(t, err)
 }
 
 // TestAttachIsPassiveWhenJailNotUp is the regression test for the reviewed
@@ -94,14 +72,9 @@ func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "attach")
-	if err == nil {
-		t.Fatal("expected attach to fail when the jail is not up")
-	}
-	if !strings.Contains(err.Error(), "lever up") {
-		t.Fatalf("error should tell the operator to run `lever up`; got: %v", err)
-	}
+	wantJailNotUp(t, err)
 	if sb.up {
 		t.Fatal("attach must never call EnsureUp — it must not provision the jail")
 	}

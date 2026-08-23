@@ -1,11 +1,15 @@
 package host
 
 import (
+	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/backend"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // managerYAML is the smallest manager block config.Load accepts; tests that
@@ -66,3 +70,89 @@ func loadInstance(t *testing.T, extra string) *config.App {
 // immediately, so cmd.Start() still succeeds and the code path under test is
 // unchanged.
 var inertApplyOpts = applyOpts{SelfExe: "/usr/bin/true"}
+
+// Argv prefixes of the scion/sh calls the PAT mint window issues, named once
+// so a command change in scion.Client or ensureControllerPAT is one edit.
+const (
+	argvScionServerStart = "scion server start"
+	argvScionList        = "scion list" // waitHubReady's poll, run inside ServerStart
+	argvScionInit        = "scion init"
+	argvScionHubLink     = "scion hub link"
+	argvScionServerStop  = "scion server stop"
+	argvScionTokenCreate = "scion hub token create"
+	argvShPrintf         = "sh -c printf" // $HOME resolution for the dev-token path
+	argvShGuardedRm      = "sh -c if"     // the guarded removeJailFile rm
+)
+
+// scriptPATMintChain registers the throwaway-window call chain shared by every
+// ensureControllerPAT test (server start → list poll → init → hub link →
+// server stop → dev-token resolve/rm), everything except the "hub token
+// create" calls themselves — those differ per test by --name/token, so each
+// test scripts them via scriptTokenCreate or patMintRunner.
+func scriptPATMintChain(f *proc.FakeRunner) {
+	f.Script(argvScionServerStart, proc.Result{})
+	f.Script(argvScionList, proc.Result{})
+	f.Script(argvScionInit, proc.Result{})
+	f.Script(argvScionHubLink, proc.Result{})
+	f.Script(argvScionServerStop, proc.Result{})
+	f.Script(argvShPrintf, proc.Result{Stdout: "/home/tester"})
+	f.Script(argvShGuardedRm, proc.Result{})
+}
+
+// scriptTokenCreate registers a distinct "hub token create --project lever
+// --name <name>" response so the fake runner can tell the controller and
+// remote mints apart (they differ only by --name, which lands right after
+// --project in the argv scion.Client.HubTokenCreate builds).
+func scriptTokenCreate(f *proc.FakeRunner, name, token string) {
+	f.Script(argvScionTokenCreate+" --project lever --name "+name, proc.Result{Stdout: "Token: " + token + "\n"})
+}
+
+// patMintRunner returns a FakeRunner scripted for one whole PAT mint window,
+// answering every "hub token create" with token.
+func patMintRunner(token string) *proc.FakeRunner {
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	f.Script(argvScionTokenCreate, proc.Result{Stdout: "Token: " + token + "\n"})
+	return f
+}
+
+// scionOKRunner returns a FakeRunner whose blanket script answers every
+// scion argv with "ok", for tests that do not intercept a verb.
+func scionOKRunner() *proc.FakeRunner {
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
+	return f
+}
+
+// stubRoot builds the host root command whose backend factory always
+// returns sb.
+func stubRoot(sb *stubBackend) *cobra.Command {
+	return newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+}
+
+// wantJailNotUp fails unless err is the passive verbs' jail-down failure and
+// carries the `lever up` hint the operator is told to follow.
+func wantJailNotUp(t testing.TB, err error) {
+	t.Helper()
+	clitest.WantErrIs(t, err, errJailNotUp)
+	clitest.WantErrContaining(t, err, "lever up")
+}
+
+// wantSubcommands fails unless the host root wires a command named name
+// carrying every sub.
+func wantSubcommands(t *testing.T, name string, subs ...string) {
+	t.Helper()
+	for _, c := range newRootWith(defaultFactory).Commands() {
+		if c.Name() != name {
+			continue
+		}
+		got := clitest.Names(c)
+		for _, s := range subs {
+			if !got[s] {
+				t.Fatalf("%s subcommands = %v, want %v", name, got, subs)
+			}
+		}
+		return
+	}
+	t.Fatalf("`lever %s` not wired into the host root", name)
+}

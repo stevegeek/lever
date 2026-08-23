@@ -76,6 +76,33 @@ func testBroker(t *testing.T) *brokerEnv {
 	return &brokerEnv{Broker: b, Server: srv, CA: caInst, Keys: kp, Rules: pol, Registry: reg}
 }
 
+// allowLLM registers the broker's built-in llm pseudo-tool and grants agent
+// permission to self-obtain it, so RequestLLMToken / RefreshLLMToken succeed
+// against env.
+func allowLLM(t *testing.T, env *brokerEnv, agent string) {
+	t.Helper()
+	env.Rules.AllowObtain(agent, broker.ReservedLLMTool, broker.ReservedLLMOp)
+	if err := env.Registry.Register(registry.Tool{
+		Name:       broker.ReservedLLMTool,
+		Backend:    "lever:llm-proxy",
+		Operations: map[string]registry.Operation{broker.ReservedLLMOp: {Name: broker.ReservedLLMOp}},
+		FirstParty: true,
+	}); err != nil {
+		t.Fatalf("allowLLM: register llm tool: %v", err)
+	}
+}
+
+// enrolWorker provisions and enrols "worker" against env, returning its identity.
+func enrolWorker(t *testing.T, env *brokerEnv) Identity {
+	t.Helper()
+	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
+	if err != nil {
+		t.Fatalf("enrolWorker: %v", err)
+	}
+	return id
+}
+
 // csrWithKey returns a CSR PEM and private key PEM for cn.
 func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 	t.Helper()
@@ -205,5 +232,20 @@ func TestLoadIdentityMissingReturnsFalse(t *testing.T) {
 	// here would skip enrolment and then fail building the mTLS client).
 	if _, ok := LoadIdentity(t.TempDir()); ok {
 		t.Fatal("LoadIdentity on an empty dir must return ok=false")
+	}
+}
+
+func TestIdentityCN(t *testing.T) {
+	env := testBroker(t)
+	id := enrolWorker(t, env)
+	cn, err := id.CN()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn != "worker" {
+		t.Fatalf("CN = %q, want worker", cn)
+	}
+	if _, err := (Identity{CertPEM: []byte("not pem")}).CN(); err == nil {
+		t.Fatal("CN on invalid PEM must error")
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -114,13 +115,32 @@ func LoadIdentity(dir string) (Identity, bool) {
 	return Identity{CertPEM: cert, KeyPEM: key, CAPEM: caPEM}, true
 }
 
-// ValidCert reports whether certPEM's leaf is currently within its validity.
-func ValidCert(certPEM []byte, now time.Time) bool {
+// parseLeafPEM parses the first certificate in certPEM.
+func parseLeafPEM(certPEM []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return false
+		return nil, errors.New("agent: invalid cert PEM")
 	}
 	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("agent: parse cert: %w", err)
+	}
+	return leaf, nil
+}
+
+// CN returns the common name of the identity's leaf certificate — the name the
+// broker authenticated this agent under, and so the bound_to of a self-obtain.
+func (id Identity) CN() (string, error) {
+	leaf, err := parseLeafPEM(id.CertPEM)
+	if err != nil {
+		return "", err
+	}
+	return leaf.Subject.CommonName, nil
+}
+
+// ValidCert reports whether certPEM's leaf is currently within its validity.
+func ValidCert(certPEM []byte, now time.Time) bool {
+	leaf, err := parseLeafPEM(certPEM)
 	if err != nil {
 		return false
 	}

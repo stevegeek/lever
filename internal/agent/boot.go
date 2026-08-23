@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -40,42 +39,36 @@ func LoadBootstrap(path string) (Bootstrap, error) {
 	return bs, nil
 }
 
-// BootConfig drives Boot. MCPAdd + WriteEnvOverlay are injected so tests assert
-// the configuration without a real `claude` binary or the scion overlay file.
+// BootConfig drives Boot. MCPAdd is the one injected seam: it execs `claude mcp
+// add` in production and is recorded by tests, which otherwise run Boot against
+// a real (test) broker.
 type BootConfig struct {
-	BootstrapPath   string
-	IDDir           string
-	BrokerTools     []string // tool names → claude mcp add --transport http <broker-url>/mcp/<name>/
-	Now             time.Time
-	MCPAdd          func(name string, argv ...string) error
-	WriteEnvOverlay func(map[string]string) error
-	// ListTools, when non-nil and BrokerTools is empty, is called after enrolment
-	// to auto-discover registered tool names from the broker. Injected so tests
-	// can stub it; production sets it to agent.ListTools.
-	ListTools func(ctx context.Context, brokerURL string, client *http.Client) ([]string, error)
-	// LLMAuth selects the LLM-auth mode for this agent ("api-key" | "subscription" | "").
-	// When "api-key", Boot obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN
-	// + ANTHROPIC_BASE_URL into the env overlay. Any other value (or "") leaves those keys absent.
+	BootstrapPath string
+	IDDir         string
+	// BrokerTools are the broker tool names to register with claude (each via
+	// `claude mcp add --transport http <gateway>/mcp/<name>/`). When empty and
+	// DiscoverTools is set, the list is fetched from the broker's /tools
+	// endpoint after enrolment (fail-closed: a booting agent that cannot learn
+	// its tools is a real failure, not a tolerable degraded state).
+	BrokerTools   []string
+	DiscoverTools bool
+	// SettingsPath is the claude settings.json whose env block receives the
+	// harness overlay (WriteSettingsEnv). Empty skips the write (enrol-only).
+	SettingsPath string
+	// LLMAuth selects the LLM-auth mode ("api-key" | "subscription" | "").
+	// When "api-key", Boot obtains a capability(llm) token and writes
+	// ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL into the overlay. Any other
+	// value leaves those keys absent.
 	LLMAuth string
-	// RequestLLMToken obtains a base64url-encoded capability(llm) token bound to cn
-	// from the broker /request endpoint, over the enrolled mTLS client. The returned
-	// string must be used verbatim as ANTHROPIC_AUTH_TOKEN (already base64url-encoded
-	// by the broker; do not re-encode). Injected so tests can stub it without a live broker.
-	RequestLLMToken func(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error)
+	// MCPAdd registers one MCP server with claude. nil skips registration (the
+	// enrol-only acceptance gate has no `claude` binary).
+	MCPAdd func(name string, argv ...string) error
 }
 
 // Boot enrols the agent (idempotently) and configures the harness: writes the
-// identity, the env overlay (CLAUDE_CODE_CLIENT_CERT/_KEY + NODE_EXTRA_CA_CERTS),
-// and registers the capability MCP server + each broker /mcp/<tool>/ via MCPAdd.
+// identity, the claude settings.json env overlay, and registers the capability
+// MCP server + each broker /mcp/<tool>/ (via the loopback gateway) with MCPAdd.
 func Boot(ctx context.Context, c BootConfig) error {
-	if c.Now.IsZero() {
-		c.Now = time.Now()
-	}
-	// Only the values written into Claude's config point at the loopback
-	// gateway (which re-presents the rotating leaf on Claude's behalf);
-	// boot-time broker calls still use the direct mTLS client.
-	gatewayURL := LocalGatewayURL
-
 	// Load bootstrap early so BrokerURL is available on both the enrol AND
 	// skip-enrol (resume/restart) paths. Reading the file is cheap and idempotent;
 	// the ticket inside is only redeemed during enrol. If bootstrap is absent
@@ -89,7 +82,7 @@ func Boot(ctx context.Context, c BootConfig) error {
 
 	// Idempotent: a valid existing cert means we already enrolled (resume/restart).
 	id, ok := LoadIdentity(c.IDDir)
-	if !ok || !ValidCert(id.CertPEM, c.Now) {
+	if !ok || !ValidCert(id.CertPEM, time.Now()) {
 		if bsErr != nil {
 			// Bootstrap required for first enrol; surface the error.
 			return bsErr
@@ -104,63 +97,49 @@ func Boot(ctx context.Context, c BootConfig) error {
 		}
 	}
 
-	// Resolve broker tools: use explicit list when provided; otherwise auto-discover
-	// via the broker's /tools endpoint (fail-closed — a booting agent that can't
-	// learn its tools is a real failure, not a tolerable degraded state).
-	brokerTools := c.BrokerTools
-	if len(brokerTools) == 0 && c.ListTools != nil && brokerURL != "" {
-		client, err := id.Client()
-		if err != nil {
-			return fmt.Errorf("agent: boot: build mTLS client for tool discovery: %w", err)
-		}
-		discovered, err := c.ListTools(ctx, brokerURL, client)
-		if err != nil {
-			return err
-		}
-		brokerTools = discovered
+	// Boot-time broker calls (discovery, llm token) use the direct mTLS client:
+	// the gateway sidecar is not up yet during pre-start. Only the values written
+	// into Claude's config point at the loopback gateway.
+	client, err := id.Client()
+	if err != nil {
+		return fmt.Errorf("agent: boot: build mTLS client: %w", err)
 	}
 
-	// Env overlay points the harness at the identity files (paths only, never key bytes).
-	// Claude now reaches the broker via the loopback gateway (plaintext) and no longer
-	// presents these itself, but we keep them: they're harmless (nothing on loopback
-	// negotiates TLS) and other in-container tooling may still read NODE_EXTRA_CA_CERTS.
-	// The gateway sidecar owns the rotating leaf; these paths are just informational.
-	overlay := HarnessEnvOverlay(c.IDDir)
+	brokerTools := c.BrokerTools
+	if len(brokerTools) == 0 && c.DiscoverTools && brokerURL != "" {
+		brokerTools, err = ListTools(ctx, brokerURL, client)
+		if err != nil {
+			return err
+		}
+	}
+
+	overlay := HarnessEnvOverlay()
 	// api-key mode: obtain a capability(llm) token and inject the Anthropic env vars.
 	// Fail closed: a partial overlay without a valid token is worse than a failed boot.
-	if c.LLMAuth == LLMAuthAPIKey && c.RequestLLMToken != nil {
-		llmClient, err := id.Client()
-		if err != nil {
-			return fmt.Errorf("agent boot: build mTLS client for llm token: %w", err)
-		}
-		tok, err := c.RequestLLMToken(ctx, brokerURL, llmClient, bs.AgentCN)
-		if err != nil {
-			return fmt.Errorf("agent boot: obtain llm token: %w", err)
-		}
-		overlay["ANTHROPIC_AUTH_TOKEN"] = tok
-		// Claude posts to the loopback gateway, which proxies /llm to the broker.
-		overlay["ANTHROPIC_BASE_URL"] = llmBaseURL(gatewayURL)
-	}
-	if c.WriteEnvOverlay != nil {
-		if err := c.WriteEnvOverlay(overlay); err != nil {
-			return err
+	if c.LLMAuth == LLMAuthAPIKey {
+		if err := RefreshLLMToken(ctx, brokerURL, id, overlay); err != nil {
+			return fmt.Errorf("agent boot: %w", err)
 		}
 	}
-	if c.MCPAdd != nil {
-		// Capability server stays as stdio (lever-agent subprocess).
-		if err := c.MCPAdd("lever-capability", "lever-agent", "serve-capability"); err != nil {
+	if err := WriteSettingsEnv(c.SettingsPath, overlay); err != nil {
+		return err
+	}
+	if c.MCPAdd == nil {
+		return nil
+	}
+	// Capability server stays as stdio (lever-agent subprocess).
+	if err := c.MCPAdd("lever-capability", "lever-agent", "serve-capability"); err != nil {
+		return err
+	}
+	// Broker tools are HTTP MCP servers reached through the loopback gateway,
+	// which presents the rotating agent leaf on Claude's behalf. If brokerURL is
+	// empty (no bootstrap configured) there are no broker tools to route.
+	if brokerURL == "" {
+		return nil
+	}
+	for _, tool := range brokerTools {
+		if err := c.MCPAdd(tool, "--transport", "http", LocalGatewayURL+"/mcp/"+tool+"/"); err != nil {
 			return err
-		}
-		// Broker tools are HTTP MCP servers reached through the loopback gateway,
-		// which presents the rotating agent leaf on Claude's behalf. If brokerURL is
-		// empty (no bootstrap configured) there are no broker tools to route.
-		for _, tool := range brokerTools {
-			if brokerURL == "" {
-				continue
-			}
-			if err := c.MCPAdd(tool, "--transport", "http", gatewayURL+"/mcp/"+tool+"/"); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

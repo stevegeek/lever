@@ -19,6 +19,12 @@ install:
 	go build -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
 
+# The release version lives in internal/cli/root.go (CI greps that exact file).
+# lever-agent cannot link internal/cli, so it is stamped at build time instead:
+# internal/agent.Version is what the capability MCP server's serverInfo reports.
+LEVER_VERSION := $(shell sed -n 's/^const Version = "\(.*\)"/\1/p' internal/cli/root.go)
+LEVER_AGENT_LDFLAGS := -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION)
+
 # Cross-compile the in-jail agent helper for the OrbStack arm64 VM. Used by the
 # acceptance gate (run directly in the VM) and, baked into the
 # agent image.
@@ -26,7 +32,7 @@ install:
 lever-agent-linux:
 	@mkdir -p $(LEVER_INSTANCE)/vendor/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
+		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
 	@file $(LEVER_INSTANCE)/vendor/bin/lever-agent
 
 # The lever-claude image build context (where build-lever-image.sh runs docker
@@ -40,7 +46,7 @@ LEVER_IMAGE_CTX ?= $(LEVER_INSTANCE)/image/lever-claude
 lever-image-bins:
 	@mkdir -p $(LEVER_IMAGE_CTX)/bin $(LEVER_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
+		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
@@ -62,7 +68,7 @@ FRAMEWORK_IMAGE_CTX := image/lever-claude
 lever-image:
 	@mkdir -p $(FRAMEWORK_IMAGE_CTX)/bin $(FRAMEWORK_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
+		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \

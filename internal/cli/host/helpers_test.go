@@ -1,15 +1,17 @@
 package host
 
 import (
-	"github.com/spf13/cobra"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // managerYAML is the smallest manager block config.Load accepts; tests that
@@ -134,8 +136,8 @@ func stubRoot(sb *stubBackend) *cobra.Command {
 // carries the `lever up` hint the operator is told to follow.
 func wantJailNotUp(t testing.TB, err error) {
 	t.Helper()
-	clitest.WantErrIs(t, err, errJailNotUp)
-	clitest.WantErrContaining(t, err, "lever up")
+	testutil.WantErrIs(t, err, errJailNotUp)
+	testutil.WantErrContaining(t, err, "lever up")
 }
 
 // wantSubcommands fails unless the host root wires a command named name

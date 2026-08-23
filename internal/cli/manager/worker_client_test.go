@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 func TestWorkerCall_postsAndDecodes(t *testing.T) {
@@ -51,7 +51,7 @@ func TestHTTPCaller_surfacesBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for non-200 response")
 	}
-	clitest.WantErrContaining(t, err, "policy: may not obtain/delegate") // the body
+	testutil.WantErrContaining(t, err, "policy: may not obtain/delegate") // the body
 	if got := httpjson.Status(err); got != http.StatusForbidden {
 		t.Fatalf("httpjson.Status(err) = %d, want 403: %v", got, err)
 	}
@@ -67,10 +67,10 @@ func TestMTLSCaller_missingBootstrapOrIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := c.Call(context.Background(), "/worker/list", struct{}{}, nil)
-	clitest.WantErrContaining(t, err, "manager bootstrap:")
+	testutil.WantErrContaining(t, err, "manager bootstrap:")
 	if err := os.WriteFile(c.bootstrapPath, []byte(`{"broker_url":"https://127.0.0.1:1"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	err = c.Call(context.Background(), "/worker/list", struct{}{}, nil)
-	clitest.WantErrContaining(t, err, "manager identity not found in "+c.idDir)
+	testutil.WantErrContaining(t, err, "manager identity not found in "+c.idDir)
 }

@@ -2,10 +2,12 @@ package manager
 
 import (
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/cli/clitest"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
@@ -112,7 +114,7 @@ func TestMsgList_malformedResponseIsAnError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected decode error, got nil (out=%q)", out)
 	}
-	clitest.WantErrContaining(t, err, "decode /msg/list response")
+	testutil.WantErrContaining(t, err, "decode /msg/list response")
 	if strings.Contains(out, "Inbox empty.") {
 		t.Fatalf("malformed response must not render as an empty inbox; out=%q", out)
 	}

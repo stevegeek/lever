@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/registry"
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 func TestResolveConfigPathExplicitWins(t *testing.T) {
@@ -54,8 +54,8 @@ func TestInstanceAppMachine(t *testing.T) {
 	}
 	// no flag, no config → the error says so
 	_, err := (instanceApp{err: os.ErrNotExist}).machine("")
-	clitest.WantErrIs(t, err, os.ErrNotExist)
-	clitest.WantErrContaining(t, err, "no --machine given")
+	testutil.WantErrIs(t, err, os.ErrNotExist)
+	testutil.WantErrContaining(t, err, "no --machine given")
 	// no flag → derived from discovered config
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)

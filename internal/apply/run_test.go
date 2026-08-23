@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // runApply runs the full plan over deps completed by fillDeps.
@@ -494,7 +495,7 @@ func TestStartManagerRunningRecordButDeadContainerFailsLoud(t *testing.T) {
 		Scion: scion.New(r, scion.Options{}),
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, `phase "running"`, `container "stopped"`)
+	testutil.WantErrContaining(t, err, `phase "running"`, `container "stopped"`)
 	if r.startCalls != 0 || r.resumeCalls != 0 {
 		t.Errorf("startCalls=%d resumeCalls=%d, want 0/0 (the no-op branch must not start/resume)", r.startCalls, r.resumeCalls)
 	}
@@ -556,7 +557,7 @@ func TestStartManagerResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
 		Scion: scion.New(r, scion.Options{}),
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, "cannot resume", "delete: agent locked")
+	testutil.WantErrContaining(t, err, "cannot resume", "delete: agent locked")
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (must not attempt a fresh create over an undeleted record)", r.startCalls)
 	}
@@ -587,8 +588,8 @@ func TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError(t *te
 		Scion: scion.New(r, scion.Options{}),
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, "forced resume failed")
-	wantErrContaining(t, err, "container state corrupt", "delete: agent locked")
+	testutil.WantErrContaining(t, err, "forced resume failed")
+	testutil.WantErrContaining(t, err, "container state corrupt", "delete: agent locked")
 	if r.resumeForceCalls != 1 {
 		t.Errorf("resumeForceCalls = %d, want 1 (error phase must TRY resume --force first)", r.resumeForceCalls)
 	}
@@ -766,7 +767,7 @@ func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 		},
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, "runtime broker")
+	testutil.WantErrContaining(t, err, "runtime broker")
 	if r.startCalls != 0 || r.resumeCalls != 0 {
 		t.Errorf("startCalls=%d resumeCalls=%d, want 0/0 (no action when the gate errors)", r.startCalls, r.resumeCalls)
 	}
@@ -789,7 +790,7 @@ func TestStartManagerLivenessNeverGreenAfterCreate(t *testing.T) {
 		Scion: scion.New(r, scion.Options{}),
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, "did not come up", `container "stopped"`)
+	testutil.WantErrContaining(t, err, "did not come up", `container "stopped"`)
 	if r.startCalls != 1 {
 		t.Errorf("startCalls = %d, want 1 (Start itself must still have been attempted)", r.startCalls)
 	}
@@ -1098,7 +1099,7 @@ func TestStartManagerCreateFailsLoudlyWhenRearmFails(t *testing.T) {
 		},
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, "bootstrap", "latch")
+	testutil.WantErrContaining(t, err, "bootstrap", "latch")
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (Start must never be attempted without enrolable bootstrap material)", r.startCalls)
 	}
@@ -1138,7 +1139,7 @@ func TestStartManagerObserveListErrorIsHardFailure(t *testing.T) {
 		Scion: scion.New(fe, scion.Options{}),
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, "observing agents")
+	testutil.WantErrContaining(t, err, "observing agents")
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (must not guess an action past an observe failure)", r.startCalls)
 	}
@@ -1299,7 +1300,7 @@ func TestRunLatchedWithoutStagedBootstrapFails(t *testing.T) {
 		},
 	}
 	err := runApply(app, deps)
-	wantErrContaining(t, err, "lever down")
+	testutil.WantErrContaining(t, err, "lever down")
 }
 
 func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
@@ -2256,7 +2257,7 @@ func TestRegisterFailsWhenSharedDirStripFails(t *testing.T) {
 			return errForbidden
 		},
 	}
-	wantErrIs(t, runApply(app, deps), errForbidden)
+	testutil.WantErrIs(t, runApply(app, deps), errForbidden)
 }
 
 // TestRegisterRunsDestructivePathWhenNotRegistered pins the complement: when
@@ -2531,7 +2532,7 @@ func loadImageStep(d Deps) error {
 // emits a kind run.step has no case for.
 func TestRunStepUnknownKind(t *testing.T) {
 	err := (&run{app: &config.App{}}).step(context.Background(), Step{Kind: "no-such-kind"})
-	wantErrContaining(t, err, "no-such-kind")
+	testutil.WantErrContaining(t, err, "no-such-kind")
 }
 
 // TestLoadImageStepSkipsWhenAlreadyLoaded: the whole point of the guard — when
@@ -2596,7 +2597,7 @@ func TestLoadImageStepLoadErrorIsFatal(t *testing.T) {
 		ImageLoaded: func(context.Context, string) bool { return false },
 		PruneImages: func(context.Context) error { prunes++; return nil },
 	}
-	wantErrIs(t, loadImageStep(d), errBoom)
+	testutil.WantErrIs(t, loadImageStep(d), errBoom)
 	if prunes != 0 {
 		t.Errorf("PruneImages calls = %d, want 0 (no prune after a failed load)", prunes)
 	}
@@ -2637,7 +2638,7 @@ func TestStartManagerRefusesPreRoleRecordOnResume(t *testing.T) {
 		VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
 	}
 	err := runApply(app, deps)
-	wantErrIs(t, err, errPreRoleRefusal)
+	testutil.WantErrIs(t, err, errPreRoleRefusal)
 	if r.resumeCalls != 0 {
 		t.Errorf("resumeCalls = %d, want 0 (the guard runs BEFORE the resume)", r.resumeCalls)
 	}

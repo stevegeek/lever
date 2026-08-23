@@ -6,6 +6,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 func attachApp() *config.App {
@@ -44,7 +45,7 @@ func TestAttachTargetUnknownListsValidNames(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for unknown name")
 	}
-	clitest.WantErrContaining(t, err, "nope", "assistant", "scratch", "worker")
+	testutil.WantErrContaining(t, err, "nope", "assistant", "scratch", "worker")
 }
 
 // TestAttachNamePositionalIsNotAConfigPath pins that `attach <name>`'s positional

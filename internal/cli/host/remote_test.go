@@ -21,6 +21,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 func TestRemoteCommandWired(t *testing.T) {
@@ -37,7 +38,7 @@ func TestRemoteServeDisabledErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("remote serve with remote disabled should error")
 	}
-	clitest.WantErrIs(t, err, errRemoteDisabled)
+	testutil.WantErrIs(t, err, errRemoteDisabled)
 }
 
 func TestRemoteServeLimaBackendErrors(t *testing.T) {

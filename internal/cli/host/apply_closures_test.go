@@ -18,10 +18,10 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -140,7 +140,7 @@ func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 		t.Fatal("StartBroker on identity mismatch must enter the restart branch (not reuse)")
 	}
 	// The stop runs before the restart: the error is the stop's, not a spawn's.
-	clitest.WantErrContaining(t, err, "stopping the stale broker before restart")
+	testutil.WantErrContaining(t, err, "stopping the stale broker before restart")
 }
 
 // TestMintManagerBootstrapSuccess proves the mint closure composes the full

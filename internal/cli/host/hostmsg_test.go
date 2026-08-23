@@ -8,6 +8,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 func TestHostMsgSendToManager(t *testing.T) {
@@ -83,7 +84,7 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for unknown --to")
 	}
-	clitest.WantErrContaining(t, err, "nope", "assistant", "scratch")
+	testutil.WantErrContaining(t, err, "nope", "assistant", "scratch")
 	if len(fr.Calls) != 0 {
 		t.Fatalf("scion must never be called on an unknown recipient, got %+v", fr.Calls)
 	}

@@ -2,7 +2,6 @@ package apply
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -65,30 +64,6 @@ func setRetryBudget(t *testing.T, attempts *int, interval *time.Duration, n int)
 	origAtt, origInt := *attempts, *interval
 	*attempts, *interval = n, time.Millisecond
 	t.Cleanup(func() { *attempts, *interval = origAtt, origInt })
-}
-
-// wantErrIs fails the test unless errors.Is(err, target).
-func wantErrIs(t testing.TB, err, target error) {
-	t.Helper()
-	if !errors.Is(err, target) {
-		t.Fatalf("error %v does not wrap %v", err, target)
-	}
-}
-
-// wantErrContaining fails the test unless err is non-nil and its message
-// contains every substr.
-func wantErrContaining(t testing.TB, err error, substrs ...string) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("got nil error, want one containing %q", substrs)
-		return
-	}
-	for _, s := range substrs {
-		if !strings.Contains(err.Error(), s) {
-			t.Fatalf("error %q does not contain %q", err, s)
-			return
-		}
-	}
 }
 
 // absentThenRunningList records the observe-List call on f and answers it:

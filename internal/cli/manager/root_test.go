@@ -1,8 +1,9 @@
 package manager
 
 import (
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/cli/clitest"
 )
 
 func TestManagerRootHasOrchestrationOnly(t *testing.T) {

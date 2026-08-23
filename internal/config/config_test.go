@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // writeConfig writes body as a lever.yaml in a fresh temp dir and returns its
@@ -680,7 +682,7 @@ func TestRejectsMixedLLMAuthInstance(t *testing.T) {
 		Workers: []Worker{{Name: "worker", Dir: "w", LLMAuth: LLMAuthSubscription}},
 	}
 	err := a.Validate()
-	wantErrContaining(t, err, "mixed")
+	testutil.WantErrContaining(t, err, "mixed")
 }
 
 // TestUniformInstancesValidate: the two pure cases are accepted (uniform
@@ -722,7 +724,7 @@ func TestLoadNoHostChecksSkipsProbes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadNoHostChecks must not probe the tool binary: %v", err)
 	}
-	wantErrContaining(t, app.CheckHost(), missingBinary)
+	testutil.WantErrContaining(t, app.CheckHost(), missingBinary)
 	if _, err := Load(p); err == nil {
 		t.Fatal("Load must run CheckHost")
 	}
@@ -732,7 +734,7 @@ func TestLoadNoHostChecksSkipsProbes(t *testing.T) {
 		t.Fatalf("LoadNoHostChecks must not stat api_key_file: %v", err)
 	}
 	_, err = Load(writeConfig(t, keyCfg))
-	wantErrContaining(t, err, "api_key_file")
+	testutil.WantErrContaining(t, err, "api_key_file")
 }
 
 // TestInjectsLLMGrantPerAgentMode unit-tests the grant-injection discrimination
@@ -794,13 +796,13 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 	t.Run("invalid manager llm_auth rejects", func(t *testing.T) {
 		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager:\n  llm_auth: bogus\n"
 		_, err := Load(writeConfig(t, body))
-		wantErrContaining(t, err, "manager.llm_auth")
+		testutil.WantErrContaining(t, err, "manager.llm_auth")
 	})
 
 	t.Run("invalid worker llm_auth rejects", func(t *testing.T) {
 		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: w1\n    dir: workers/w1\n    llm_auth: bogus\n"
 		_, err := Load(writeConfig(t, body))
-		wantErrContaining(t, err, "worker w1")
+		testutil.WantErrContaining(t, err, "worker w1")
 	})
 
 	t.Run("api-key without api_key_file rejects", func(t *testing.T) {
@@ -821,7 +823,7 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 		}
 		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n  api_key_file: " + keyPath + "\n"
 		_, err := Load(writeConfig(t, body))
-		wantErrContaining(t, err, "0600")
+		testutil.WantErrContaining(t, err, "0600")
 	})
 }
 
@@ -957,7 +959,7 @@ func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
 	cfg := strings.Replace(baseCfg, "command: [true, -dsn, \"file:ref.db\"]",
 		"command: [true, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true", 1)
 	_, err := Load(writeConfig(t, cfg))
-	wantErrContaining(t, err, "allow_non_loopback", "external")
+	testutil.WantErrContaining(t, err, "allow_non_loopback", "external")
 }
 
 // TestLoadRejectsIllegalToolNames: tool names flow into the broker's
@@ -1140,7 +1142,7 @@ func TestToolCheckHostResolvesCommand(t *testing.T) {
 	// A binary that is not on the minimal PATH.
 	bad := Tool{Name: "t", Command: []string{missingBinary}}
 	err := bad.checkHost()
-	wantErrContaining(t, err, missingBinary, "PATH")
+	testutil.WantErrContaining(t, err, missingBinary, "PATH")
 }
 
 // TestToolCheckHostRejectsNonExecutableAbsolutePath: the slash-containing
@@ -1243,7 +1245,7 @@ func TestScionBinaryAndSourceRejectedInsideTree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"+tc.body)
 			_, err := Load(p)
-			wantErrContaining(t, err, "inside the mounted tree")
+			testutil.WantErrContaining(t, err, "inside the mounted tree")
 		})
 	}
 }
@@ -1427,7 +1429,7 @@ func TestRemoteExplicitPortHonoured(t *testing.T) {
 // that cannot exist.
 func TestRemoteRequiresOrbstackBackend(t *testing.T) {
 	_, err := LoadNoHostChecks(writeConfig(t, "name: x\nbackend: lima\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n"))
-	wantErrContaining(t, err, "orbstack")
+	testutil.WantErrContaining(t, err, "orbstack")
 	if strings.Contains(err.Error(), "forwarding") {
 		t.Fatalf("error must not cite guest→host forwarding as the reason, got %v", err)
 	}
@@ -1491,7 +1493,7 @@ func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
 
 	t.Setenv("PATH", "")
 	_, err := Load(writeConfig(t, body))
-	wantErrContaining(t, err, "Go toolchain")
+	testutil.WantErrContaining(t, err, "Go toolchain")
 
 	// With remote off, the same config is fine: nothing cross-compiles.
 	off := strings.Replace(body, "enabled: true", "enabled: false", 1)

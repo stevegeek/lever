@@ -9,6 +9,7 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -53,6 +54,10 @@ var backends = []entry{
 	},
 }
 
+// ErrUnknownBackend is wrapped by every lookup of a backend name that is not
+// registered; the message lists the valid names.
+var ErrUnknownBackend = errors.New("unknown backend")
+
 // lookup resolves a name (empty → Default) to its entry, or an error listing
 // the valid set so a config can never silently run a different backend than it
 // asked for.
@@ -62,7 +67,7 @@ func lookup(name string) (entry, error) {
 	}
 	e, ok := find(name)
 	if !ok {
-		return entry{}, fmt.Errorf("unknown backend %q (valid: %s)", name, strings.Join(Names(), ", "))
+		return entry{}, fmt.Errorf("%w %q (valid: %s)", ErrUnknownBackend, name, strings.Join(Names(), ", "))
 	}
 	return e, nil
 }

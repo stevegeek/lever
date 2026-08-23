@@ -1,8 +1,8 @@
 package registry
 
 import (
+	"errors"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/orbstack"
@@ -28,8 +28,8 @@ func TestSelectEmptyIsDefault(t *testing.T) {
 
 func TestSelectUnknownIsRejected(t *testing.T) {
 	_, err := Select("nope", proc.RealRunner{}, "lever-x")
-	if err == nil || !strings.Contains(err.Error(), "unknown") {
-		t.Fatalf("Select(nope) err = %v, want an 'unknown backend' error", err)
+	if !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("Select(nope) err = %v, want ErrUnknownBackend", err)
 	}
 }
 

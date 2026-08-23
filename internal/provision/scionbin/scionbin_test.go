@@ -2,6 +2,8 @@ package scionbin
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -23,8 +25,9 @@ func TestValidateNamesAllThreeKeys(t *testing.T) {
 func TestResolveSourceMissingNeverBuilds(t *testing.T) {
 	f := proc.NewFakeRunner()
 	_, err := Resolve(context.Background(), f, Spec{Source: "/does/not/exist"}, "arm64", "m")
-	if err == nil || !strings.Contains(err.Error(), "scion source") {
-		t.Fatalf("error should mention scion source; got: %v", err)
+	var srcErr *SourceError
+	if !errors.As(err, &srcErr) || srcErr.Path != "/does/not/exist" || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("error should be a SourceError wrapping the stat failure; got: %v", err)
 	}
 	if len(f.Calls) != 0 {
 		t.Fatalf("go must not run when the source is missing: %+v", f.Calls)

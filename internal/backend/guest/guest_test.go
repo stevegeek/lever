@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -225,13 +227,12 @@ func TestEnsureScionSourceMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing scion source, got nil")
 	}
-	if !strings.Contains(err.Error(), "scion source") {
-		t.Fatalf("error should mention scion source; got: %v", err)
+	var srcErr *scionbin.SourceError
+	if !errors.As(err, &srcErr) {
+		t.Fatalf("error should be a scion source error; got: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			t.Fatalf("go build must NOT be called when source missing (stat short-circuits): %+v", c)
-		}
+	if i := f.CallIndex(proc.Subcommand("go", "build")); i >= 0 {
+		t.Fatalf("go build must NOT be called when source missing (stat short-circuits): %+v", f.Calls[i])
 	}
 }
 

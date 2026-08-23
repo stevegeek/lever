@@ -52,6 +52,24 @@ func TestPollOnceSkipsEventsWithoutID(t *testing.T) {
 	}
 }
 
+// TestPollOnceCreatesOwnerOnlyFiles: the events file carries message content
+// and is owner-only (0600), in an owner-only directory, like every other
+// state file.
+func TestPollOnceCreatesOwnerOnlyFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	file := filepath.Join(dir, "events.log")
+	fi := &fakeInbox{batches: [][]scion.Event{{{"id": "e1", "type": "input-needed"}}}}
+	if _, err := New(fi, file).PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(file); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("events file mode = %v (err %v), want 0600", st.Mode().Perm(), err)
+	}
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("events dir mode = %v (err %v), want 0700", st.Mode().Perm(), err)
+	}
+}
+
 type fakeInbox struct {
 	batches [][]scion.Event
 	i       int

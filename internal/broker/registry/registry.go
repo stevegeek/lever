@@ -12,6 +12,15 @@ import (
 	"github.com/stevegeek/lever/internal/mcp"
 )
 
+// Reserved names of the broker's built-in LLM pseudo-tool: the /llm proxy,
+// which has no backend subprocess and no /mcp/llm/ route. config injects the
+// implicit {llm, generate} grant; broker.ReservedLLMTool/ReservedLLMOp alias
+// these.
+const (
+	ReservedLLMTool = "llm"
+	ReservedLLMOp   = "generate"
+)
+
 // Operation describes one operation a tool exposes.
 type Operation struct {
 	Name string

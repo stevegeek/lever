@@ -79,11 +79,9 @@ type LoginConfig struct {
 
 // LoginDriver obtains and caches hub sessions, one per verified operator.
 type LoginDriver struct {
-	// hub is the hub's base URL with no trailing slash, so a path can be
-	// appended to it directly.
-	hub string
-	// jarURL is the same URL, kept whole for reading the cookie jar.
-	jarURL   *url.URL
+	// hub is the hub's base URL: the cookie jar is read against it, and
+	// hubURL appends the handshake's paths to it.
+	hub      *url.URL
 	client   *http.Client
 	provider *Provider
 	audit    func(AuditLine)
@@ -115,8 +113,7 @@ func NewLoginDriver(cfg LoginConfig) *LoginDriver {
 	// never redirect this handshake off the host.
 	t.Proxy = nil
 	return &LoginDriver{
-		hub:      strings.TrimSuffix(cfg.Hub.String(), "/"),
-		jarURL:   cfg.Hub,
+		hub:      cfg.Hub,
 		client:   &http.Client{Transport: t, CheckRedirect: noRedirect},
 		provider: cfg.Provider,
 		audit:    cfg.Audit,
@@ -125,6 +122,11 @@ func NewLoginDriver(cfg LoginConfig) *LoginDriver {
 }
 
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// hubURL appends pathAndQuery (which starts with "/") to the hub's base URL.
+func (d *LoginDriver) hubURL(pathAndQuery string) string {
+	return strings.TrimSuffix(d.hub.String(), "/") + pathAndQuery
+}
 
 // Cookie returns the session cookie value for the given verified operator
 // login, performing the handshake on first use.
@@ -247,7 +249,7 @@ func (d *LoginDriver) login(ctx context.Context, operator string) (string, error
 	// and becomes the session at the callback. Remember which value the state
 	// is, so a callback that fails without replacing it cannot be mistaken for
 	// a login (see callback).
-	stateCookie := jarCookie(client.Jar, d.jarURL)
+	stateCookie := jarCookie(client.Jar, d.hub)
 	code, err := d.provider.Mint(start.state, start.redirectURI, start.clientID, identityFor(operator))
 	if err != nil {
 		d.recordLogin(operator, 0, err)
@@ -277,7 +279,7 @@ type loginStart struct {
 // begin performs step 1: ask the hub to start an OIDC login and read the
 // redirect it would have sent a browser.
 func (d *LoginDriver) begin(ctx context.Context, client *http.Client) (loginStart, error) {
-	resp, err := d.get(ctx, client, d.hub+oidcLoginPath)
+	resp, err := d.get(ctx, client, d.hubURL(oidcLoginPath))
 	if err != nil {
 		return loginStart{}, fmt.Errorf("remoteproxy: login: start: %w", err)
 	}
@@ -329,7 +331,7 @@ func (d *LoginDriver) callback(ctx context.Context, client *http.Client, redirec
 	if !strings.HasPrefix(ru.Path, callbackPathPrefix) {
 		return "", fmt.Errorf("remoteproxy: login: the hub's redirect_uri points at %q, not its own %s callback", ru.Path, callbackPathPrefix)
 	}
-	resp, err := d.get(ctx, client, d.hub+ru.Path+"?"+q.Encode())
+	resp, err := d.get(ctx, client, d.hubURL(ru.Path+"?"+q.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("remoteproxy: login: callback: %w", err)
 	}
@@ -349,7 +351,7 @@ func (d *LoginDriver) callback(ctx context.Context, client *http.Client, redirec
 	// carrying the login state, so a hub that answers without replacing it —
 	// a 500 that neither redirects to /login nor writes a session — would
 	// otherwise hand back the state as though it were a session.
-	if c := jarCookie(client.Jar, d.jarURL); c != "" && c != stateCookie {
+	if c := jarCookie(client.Jar, d.hub); c != "" && c != stateCookie {
 		return c, nil
 	}
 	return "", fmt.Errorf("remoteproxy: login: the hub answered %s without turning the login-state %s cookie into a session",
@@ -439,11 +441,11 @@ func (d *LoginDriver) recordLogin(operator string, status int, err error) {
 		TSLogin:  operator,
 		Method:   http.MethodGet,
 		Path:     oidcLoginPath,
-		Decision: "oidc-session",
+		Decision: DecisionOIDCSession,
 		Status:   status,
 	}
 	if err != nil {
-		line.Decision, line.Error = "oidc-session-failed", err.Error()
+		line.Decision, line.Error = DecisionOIDCSessionFailed, err.Error()
 	}
 	d.audit(line)
 }

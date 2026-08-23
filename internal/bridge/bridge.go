@@ -48,10 +48,12 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 	if len(fresh) == 0 {
 		return nil, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(b.file), 0o755); err != nil {
+	// Owner-only, like every other state file: the events carry message
+	// content.
+	if err := os.MkdirAll(filepath.Dir(b.file), 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(b.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(b.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}

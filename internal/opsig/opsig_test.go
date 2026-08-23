@@ -2,7 +2,9 @@ package opsig
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -278,5 +280,50 @@ func TestParseEnvelope(t *testing.T) {
 		IssuedAt: now.Add(-10 * time.Minute).Format(time.RFC3339)})
 	if _, err := ParseEnvelope(stale, "testinst", now, 2*time.Minute); err == nil {
 		t.Fatal("stale envelope accepted")
+	}
+}
+
+// TestParseEnvelopeNamesTheFailingField: like ParseStatement, each shape
+// rejection says which field failed.
+func TestParseEnvelopeNamesTheFailingField(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		env  Envelope
+		want string
+	}{
+		{"version", Envelope{V: 2, Instance: "testinst", Op: "list", IssuedAt: now.Format(time.RFC3339)}, "version 2"},
+		{"instance", Envelope{V: 1, Instance: "other", Op: "list", IssuedAt: now.Format(time.RFC3339)}, "instance mismatch"},
+		{"op", Envelope{V: 1, Instance: "testinst", IssuedAt: now.Format(time.RFC3339)}, "op"},
+	}
+	for _, c := range cases {
+		raw, _ := json.Marshal(c.env)
+		_, err := ParseEnvelope(raw, "testinst", now, 2*time.Minute)
+		if err == nil || !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want ErrInvalid mentioning %q", c.name, err, c.want)
+		}
+	}
+}
+
+// TestSignVerifyContextCancelled: a cancelled context stops the ssh-keygen
+// subprocess instead of letting it run unbounded on the request path.
+func TestSignVerifyContextCancelled(t *testing.T) {
+	priv, as := genKey(t, t.TempDir())
+	msg, _ := json.Marshal(validStatement(time.Now()))
+	sig, err := SignContext(context.Background(), priv, NamespaceDirective, msg)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := SignContext(ctx, priv, NamespaceDirective, msg); err == nil {
+		t.Fatal("SignContext with a cancelled ctx must fail")
+	}
+	v := Verifier{AllowedSigners: as, Principal: "operator@testinst"}
+	if err := v.VerifyContext(context.Background(), NamespaceDirective, msg, sig); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if err := v.VerifyContext(ctx, NamespaceDirective, msg, sig); err == nil {
+		t.Fatal("VerifyContext with a cancelled ctx must fail")
 	}
 }

@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/stevegeek/lever/internal/backend"
 )
 
 func writeTmp(t *testing.T, body string) string {
@@ -133,6 +131,29 @@ func TestCredentialFileResolved(t *testing.T) {
 	}
 }
 
+// TestAPIKeyFileResolvedAgainstConfigDir: a relative broker.api_key_file is
+// resolved against the config's directory like credential_file, so a config
+// loaded from another cwd (`lever broker serve`) still finds the key.
+func TestAPIKeyFileResolvedAgainstConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "secrets", "api-key")
+	if err := os.WriteFile(key, []byte("sk-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "lever.yaml")
+	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: api-key\n  api_key_file: secrets/api-key\nmanager: {}\n")
+	app, err := Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Broker.APIKeyFile != key {
+		t.Fatalf("APIKeyFile = %q, want %q", app.Broker.APIKeyFile, key)
+	}
+}
+
 func TestValidateRejectsUnknownBackend(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n")
 	_, err := Load(p)
@@ -222,7 +243,7 @@ func TestValidateRejectsGitTree(t *testing.T) {
 	}
 	a := &App{Name: "demo", Backend: "orbstack", Tree: tree}
 	a.Broker.LLMAuth = "subscription"
-	if err := a.validateNonGitTree(); err == nil {
+	if err := a.checkNonGitTree(); err == nil {
 		t.Fatalf("expected rejection: tree is itself a git repo")
 	}
 }
@@ -778,6 +799,35 @@ func TestUniformInstancesValidate(t *testing.T) {
 	if err := apikey.Validate(); err != nil {
 		t.Fatalf("uniform api-key should validate: %v", err)
 	}
+	if err := apikey.CheckHost(); err != nil {
+		t.Fatalf("0600 api_key_file should pass the host check: %v", err)
+	}
+}
+
+// TestLoadNoHostChecksSkipsProbes: Validate is pure, so a config whose only
+// faults are on the host (a missing tool binary, a missing api-key file)
+// loads through LoadNoHostChecks and is rejected by Load / CheckHost.
+func TestLoadNoHostChecksSkipsProbes(t *testing.T) {
+	cfg := replaceFirst(baseCfg, "command: [true, -dsn, \"file:ref.db\"]", "command: [definitely-not-on-path-xyz]")
+	p := writeConfig(t, cfg)
+	app, err := LoadNoHostChecks(p)
+	if err != nil {
+		t.Fatalf("LoadNoHostChecks must not probe the tool binary: %v", err)
+	}
+	if err := app.CheckHost(); err == nil || !strings.Contains(err.Error(), "definitely-not-on-path-xyz") {
+		t.Fatalf("CheckHost must reject the missing binary, got: %v", err)
+	}
+	if _, err := Load(p); err == nil {
+		t.Fatal("Load must run CheckHost")
+	}
+
+	keyCfg := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n  api_key_file: missing-key\n"
+	if _, err := LoadNoHostChecks(writeConfig(t, keyCfg)); err != nil {
+		t.Fatalf("LoadNoHostChecks must not stat api_key_file: %v", err)
+	}
+	if _, err := Load(writeConfig(t, keyCfg)); err == nil || !strings.Contains(err.Error(), "api_key_file") {
+		t.Fatalf("Load must reject a missing api_key_file, got: %v", err)
+	}
 }
 
 // TestInjectsLLMGrantPerAgentMode unit-tests the grant-injection discrimination
@@ -1222,15 +1272,15 @@ func TestValidateDiskFormat(t *testing.T) {
 	}
 }
 
-func TestToolValidateResolvesCommand(t *testing.T) {
+func TestToolCheckHostResolvesCommand(t *testing.T) {
 	// A binary guaranteed on the minimal PATH.
 	ok := Tool{Name: "t", Command: []string{"true"}}
-	if err := ok.validate(); err != nil {
+	if err := ok.checkHost(); err != nil {
 		t.Fatalf("`true` is on the minimal PATH, should validate: %v", err)
 	}
 	// A binary that is not on the minimal PATH.
 	bad := Tool{Name: "t", Command: []string{"definitely-not-on-path-xyz"}}
-	err := bad.validate()
+	err := bad.checkHost()
 	if err == nil {
 		t.Fatalf("missing binary should be rejected")
 	}
@@ -1239,21 +1289,21 @@ func TestToolValidateResolvesCommand(t *testing.T) {
 	}
 }
 
-// TestToolValidateRejectsNonExecutableAbsolutePath: the slash-containing
-// (absolute path) branch of Tool.validate() must apply the same
+// TestToolCheckHostRejectsNonExecutableAbsolutePath: the slash-containing
+// (absolute path) branch of Tool.checkHost() must apply the same
 // executable-file check as the PATH-scoped branch — a directory or a
 // non-executable file is exactly the #9 failure mode (opaque spawn failure),
 // just via an absolute path instead of a bare PATH-resolved name.
-func TestToolValidateRejectsNonExecutableAbsolutePath(t *testing.T) {
+func TestToolCheckHostRejectsNonExecutableAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
-	if err := (Tool{Name: "t", Command: []string{dir}}).validate(); err == nil {
+	if err := (Tool{Name: "t", Command: []string{dir}}).checkHost(); err == nil {
 		t.Fatalf("a directory command path should be rejected")
 	}
 	notExec := filepath.Join(dir, "not-exec")
 	if err := os.WriteFile(notExec, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := (Tool{Name: "t", Command: []string{notExec}}).validate(); err == nil {
+	if err := (Tool{Name: "t", Command: []string{notExec}}).checkHost(); err == nil {
 		t.Fatalf("a non-executable file command path should be rejected")
 	}
 }
@@ -1386,7 +1436,7 @@ func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
 		"jail port":                  8443,
 		"admin port":                 8444,
 		"proxy port":                 8445,
-		"mirrored guest issuer port": backend.GuestLoginIssuerPort,
+		"mirrored guest issuer port": GuestLoginIssuerPort,
 	} {
 		body := base + fmt.Sprintf("  login_port: %d\n", port)
 		_, err := Load(writeTmp(t, body))
@@ -1397,7 +1447,7 @@ func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
 	// The SAME guard belongs on the proxy's own port: naming the mirrored
 	// guest port there is the identical live failure, just for the other of
 	// lever's two host listeners.
-	if _, err := Load(writeTmp(t, base+fmt.Sprintf("  port: %d\n", backend.GuestLoginIssuerPort))); err == nil ||
+	if _, err := Load(writeTmp(t, base+fmt.Sprintf("  port: %d\n", GuestLoginIssuerPort))); err == nil ||
 		!strings.Contains(err.Error(), "mirrored") {
 		t.Fatalf("remote.port naming the guest forwarder's host mirror: want a collision error, got %v", err)
 	}

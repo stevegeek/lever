@@ -3,6 +3,8 @@ package guest
 import (
 	"context"
 	"fmt"
+
+	"github.com/stevegeek/lever/internal/backend/types"
 )
 
 // The guest half of lever's remote-access login path.
@@ -36,7 +38,7 @@ import (
 // configuration and the caller must restart it. An unchanged config restarts
 // nothing, which is what keeps a re-apply from bouncing the hub (and every
 // agent's connection to it) for no reason.
-func (g Guest) EnsureHubLogin(ctx context.Context, spec HubLogin) (bool, error) {
+func (g Guest) EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error) {
 	if spec.IssuerPort <= 0 || spec.HostPort <= 0 || spec.HostAddress == "" || spec.ClientID == "" {
 		return false, fmt.Errorf("guest: hub login: issuer port, host port, host address and client id are all required")
 	}
@@ -99,29 +101,4 @@ func (g Guest) DisableHubLogin(ctx context.Context) (bool, error) {
 	// already succeeded. removeHubLoginSettings is itself a quiet no-op when
 	// there is nothing to remove (see hubSettingsWithoutLogin).
 	return g.removeHubLoginSettings(ctx)
-}
-
-// HubLogin is what the guest needs in order to serve lever's remote-access
-// login path: the two ports of the bridge, how the guest reaches the host, and
-// the client_id the provider expects. The Backend interface names it through
-// the backend.HubLogin alias.
-type HubLogin struct {
-	// IssuerPort is the port the forwarder listens on INSIDE the guest, and
-	// the one the hub's issuer_url names. Always config.GuestLoginIssuerPort
-	// in production; a field rather than a direct reference to the constant so
-	// tests can vary it.
-	IssuerPort int
-	// HostPort is the port the provider binds ON THE HOST, and the one the
-	// forwarder dials there. Operator-settable (remote.login_port), because
-	// it shares the host's loopback space with the broker and the proxy.
-	// Never equal to IssuerPort — see config.GuestLoginIssuerPort.
-	HostPort int
-	// HostAddress is how the GUEST reaches the host, e.g. "host.orb.internal"
-	// or its resolved IPv4 — the same alias lever's agents already use to
-	// reach the host broker.
-	HostAddress string
-	// ClientID is the client_id lever's provider expects
-	// (remoteproxy.LoginClientID). Named rather than derived, so both ends of
-	// the contract are explicit.
-	ClientID string
 }

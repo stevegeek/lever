@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/apply"
-	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
@@ -301,9 +301,9 @@ func TestHubProjectKeyMatchesTheTokenMintKey(t *testing.T) {
 }
 
 func TestCheckScionProjectConsistent(t *testing.T) {
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: true,
-		Entries:       []backend.ScionProjectEntry{{Name: "lever__abc", WorkspacePath: "/lever"}},
+		Entries:       []types.ScionProjectEntry{{Name: "lever__abc", WorkspacePath: "/lever"}},
 	}
 	if r := checkScionProject(st, "/lever"); !r.ok {
 		t.Fatalf("one registration + marker present => pass; got %+v", r)
@@ -312,9 +312,9 @@ func TestCheckScionProjectConsistent(t *testing.T) {
 
 func TestCheckScionProjectNoRegistration(t *testing.T) {
 	// A worker's registration for a different path must not implicate /lever.
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: false,
-		Entries:       []backend.ScionProjectEntry{{Name: "scratch__x", WorkspacePath: "/lever/workers/scratch"}},
+		Entries:       []types.ScionProjectEntry{{Name: "scratch__x", WorkspacePath: "/lever/workers/scratch"}},
 	}
 	if r := checkScionProject(st, "/lever"); !r.ok {
 		t.Fatalf("no registration for the tree => pass; got %+v", r)
@@ -323,9 +323,9 @@ func TestCheckScionProjectNoRegistration(t *testing.T) {
 
 func TestCheckScionProjectRegisteredButMarkerGone(t *testing.T) {
 	// The exact bad-teardown bug: registered for /lever, but the marker is gone.
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: false,
-		Entries: []backend.ScionProjectEntry{
+		Entries: []types.ScionProjectEntry{
 			{Name: "lever__abc", WorkspacePath: "/lever"},
 			{Name: "scratch__x", WorkspacePath: "/lever/workers/scratch"},
 		},
@@ -345,9 +345,9 @@ func TestCheckScionProjectRegisteredButMarkerGone(t *testing.T) {
 func TestCheckScionProjectDuplicateRegistrations(t *testing.T) {
 	// Two entries for /lever even with the marker present — a duplicate that
 	// scion init trips over.
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: true,
-		Entries: []backend.ScionProjectEntry{
+		Entries: []types.ScionProjectEntry{
 			{Name: "lever__old", WorkspacePath: "/lever"},
 			{Name: "lever__new", WorkspacePath: "/lever"},
 		},

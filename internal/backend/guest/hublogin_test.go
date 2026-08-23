@@ -2,20 +2,19 @@ package guest
 
 import (
 	"context"
+	"gopkg.in/yaml.v3"
 	"reflect"
 	"strings"
-
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
-
-	"gopkg.in/yaml.v3"
 )
 
-func testHubLogin() HubLogin {
-	return HubLogin{IssuerPort: config.GuestLoginIssuerPort, HostPort: 8447,
+func testHubLogin() types.HubLogin {
+	return types.HubLogin{IssuerPort: config.GuestLoginIssuerPort, HostPort: 8447,
 		HostAddress: "host.orb.internal", ClientID: "lever-remote"}
 }
 

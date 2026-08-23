@@ -2,10 +2,10 @@ package host
 
 import (
 	"fmt"
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 )

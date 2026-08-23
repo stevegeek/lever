@@ -2,11 +2,11 @@ package host
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/backend"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"

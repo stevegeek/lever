@@ -14,6 +14,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -234,7 +235,7 @@ func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath strin
 // EnsureHubLogin provisions the guest half of the remote-access login path
 // (loopback forwarder + the hub's oidc_login block), reporting whether the
 // hub's configuration changed — see backend.Backend.
-func (b *Base) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool, error) {
+func (b *Base) EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error) {
 	return b.Guest().EnsureHubLogin(ctx, spec)
 }
 
@@ -253,7 +254,7 @@ func (b *Base) DisableHubLogin(ctx context.Context) (bool, error) {
 // ReadScionProjectState reads scion's registration state from the machine for
 // `lever doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
 // machine-only guest prefix, so it needs no EnsureUp.
-func (b *Base) ReadScionProjectState(ctx context.Context) (backend.ScionProjectState, error) {
+func (b *Base) ReadScionProjectState(ctx context.Context) (types.ScionProjectState, error) {
 	return b.Guest().ReadScionProjectState(ctx, MountDest)
 }
 

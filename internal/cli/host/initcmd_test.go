@@ -2,10 +2,11 @@ package host
 
 import (
 	"bytes"
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/cli/clitest"
 )
 
 // initFixture writes a minimal valid lever.yaml + tree into a temp dir and

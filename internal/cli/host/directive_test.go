@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/opsig"
 )
 

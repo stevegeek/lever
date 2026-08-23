@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
@@ -442,7 +442,7 @@ func checkToolBackends(tools []config.Tool, p doctorProbes) checkResult {
 // Either state makes `scion init` fail with "existing project marker is invalid",
 // blocking the manager from coming up. A pure function over the state the backend
 // read, so it is testable without a jail.
-func checkScionProject(st backend.ScionProjectState, mountDest string) checkResult {
+func checkScionProject(st types.ScionProjectState, mountDest string) checkResult {
 	const name = "scion project registration"
 	var reg []string
 	for _, e := range st.Entries {

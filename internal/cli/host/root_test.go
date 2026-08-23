@@ -1,8 +1,9 @@
 package host
 
 import (
-	"github.com/stevegeek/lever/internal/cli/clitest"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/cli/clitest"
 )
 
 func TestHostRootHasProvisioningOnly(t *testing.T) {

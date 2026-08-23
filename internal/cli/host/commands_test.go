@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
 type stubBackend struct {
 	up, down, stopped bool
-	scionState        backend.ScionProjectState
+	scionState        types.ScionProjectState
 	scionErr          error
 	resolveRunUserErr error       // when set, ResolveRunUser returns it instead of nil
 	runner            proc.Runner // JailRunner override; nil ⇒ proc.RealRunner{}
@@ -22,7 +23,7 @@ type stubBackend struct {
 	registeredCalls   []string // workspace paths passed to ScionProjectRegistered
 	hubLoginChanged   bool     // EnsureHubLogin's "the hub config changed" answer
 	hubLoginErr       error
-	hubLoginCalls     []backend.HubLogin
+	hubLoginCalls     []types.HubLogin
 	hubLoginDisabled  int            // DisableHubLogin call count
 	hubLoginRemoved   bool           // DisableHubLogin's "the hub config changed" answer
 	leverTemplates    int            // EnsureLeverTemplate call count
@@ -57,7 +58,7 @@ func (s *stubBackend) LoadImage(context.Context, string) error                  
 func (s *stubBackend) ImageLoaded(context.Context, string) bool                 { return false }
 func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
-func (s *stubBackend) EnsureHubLogin(_ context.Context, spec backend.HubLogin) (bool, error) {
+func (s *stubBackend) EnsureHubLogin(_ context.Context, spec types.HubLogin) (bool, error) {
 	s.hubLoginCalls = append(s.hubLoginCalls, spec)
 	return s.hubLoginChanged, s.hubLoginErr
 }
@@ -69,7 +70,7 @@ func (s *stubBackend) EnsureLeverTemplate(context.Context) (bool, error) {
 	s.leverTemplates++
 	return true, nil
 }
-func (s *stubBackend) ReadScionProjectState(context.Context) (backend.ScionProjectState, error) {
+func (s *stubBackend) ReadScionProjectState(context.Context) (types.ScionProjectState, error) {
 	return s.scionState, s.scionErr
 }
 func (s *stubBackend) RemoveScionProjectConfigs(_ context.Context, workspacePath string) error {

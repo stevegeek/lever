@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
 	"net/http"
 	"os"
 	"os/exec"
@@ -13,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/backend/registry"
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -925,7 +926,7 @@ func (w *applyWiring) ensureHubLogin(ctx context.Context) (bool, error) {
 	if !w.app.RemoteEnabled() {
 		return false, nil
 	}
-	return w.b.EnsureHubLogin(ctx, backend.HubLogin{
+	return w.b.EnsureHubLogin(ctx, types.HubLogin{
 		IssuerPort:  config.GuestLoginIssuerPort,
 		HostPort:    w.app.EffectiveRemoteLoginPort(),
 		HostAddress: w.brokerHost,

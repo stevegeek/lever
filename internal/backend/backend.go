@@ -5,16 +5,19 @@
 //
 // # Dependency direction
 //
-// internal/backend/guest is the leaf: it owns the guest-side data types the
-// Backend interface names (HubLogin, ScionProjectState) and imports nothing
-// from this package. backend imports guest and re-exports those types as
-// aliases (types.go); common (the shared implementation base) imports both.
+// This package is the CONTRACT. The plain data types its Backend interface
+// carries for the guest-side verbs (HubLogin, ScionProjectState) live in the
+// stdlib-only leaf internal/backend/types, which both this package and the
+// guest helper (internal/backend/guest) import. backend never imports guest:
+// the contract must not depend on one implementation's helper. common (the
+// shared implementation base) imports both, as an implementation should.
 package backend
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -126,7 +129,7 @@ type Backend interface {
 	// the old configuration and the caller must restart it — while an
 	// unchanged one restarts nothing, which is what stops a re-apply from
 	// bouncing the hub and every agent's connection to it.
-	EnsureHubLogin(ctx context.Context, spec HubLogin) (bool, error)
+	EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error)
 	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
 	// reporting whether it wrote anything. The overlay exists to suppress
 	// scion's stock placeholder system prompt, which would otherwise REPLACE
@@ -158,7 +161,7 @@ type Backend interface {
 	// jail (the in-tree marker + ~/.scion/project-configs entries) for `lever
 	// doctor`. Read-only; uses the machine-only guest transport, so it works
 	// without EnsureUp as long as the jail machine is up.
-	ReadScionProjectState(ctx context.Context) (ScionProjectState, error)
+	ReadScionProjectState(ctx context.Context) (types.ScionProjectState, error)
 	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
 	// registration(s) whose workspace_path == workspacePath, through the
 	// machine-only guest transport. A no-op when none match. Called before

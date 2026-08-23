@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/provision/loginfwd"
 )
 
@@ -47,7 +48,7 @@ echo "FOUND 1"
 // ensureLoginForwarder builds the forwarder for the guest's architecture,
 // installs it if the guest does not already hold those exact bytes, and makes
 // sure it is running with the arguments this spec asks for.
-func (g Guest) ensureLoginForwarder(ctx context.Context, spec HubLogin) error {
+func (g Guest) ensureLoginForwarder(ctx context.Context, spec types.HubLogin) error {
 	arch, err := g.GOARCH(ctx)
 	if err != nil {
 		return fmt.Errorf("guest: detect guest architecture: %w", err)
@@ -107,7 +108,7 @@ const loginForwardMatch = "^" + LoginForwardPath
 // resolves on the guest run-user's PATH, which has run-user-writable
 // directories ahead of /usr/bin. bash's own /dev/tcp is used for the liveness
 // probe precisely because it is a builtin — there is no netcat to shadow.
-func loginForwardScript(spec HubLogin, force bool) string {
+func loginForwardScript(spec types.HubLogin, force bool) string {
 	argv := fmt.Sprintf("%s -listen 127.0.0.1:%d -target %s:%d",
 		LoginForwardPath, spec.IssuerPort, spec.HostAddress, spec.HostPort)
 	listening := fmt.Sprintf("(exec 3<>/dev/tcp/127.0.0.1/%d) 2>/dev/null", spec.IssuerPort)

@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"path/filepath"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/scion/layout"
-	"gopkg.in/yaml.v3"
 )
 
 // Convergence of the hub's ~/.scion/settings.yaml for the remote-access login
@@ -72,7 +73,7 @@ func (g Guest) removeHubLoginSettings(ctx context.Context) (bool, error) {
 
 // ensureHubLoginSettings writes the oidc_login block into the guest's
 // ~/.scion/settings.yaml, and reports whether the file changed.
-func (g Guest) ensureHubLoginSettings(ctx context.Context, spec HubLogin) (bool, error) {
+func (g Guest) ensureHubLoginSettings(ctx context.Context, spec types.HubLogin) (bool, error) {
 	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
 		// Deliberately fatal rather than "assume empty": treating an
@@ -152,7 +153,7 @@ var writeScionSettingsScript = fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/
 // comparing the block that is there against the block lever wants: a
 // re-serialisation that only moves whitespace must not read as a change, or
 // every apply would restart the hub.
-func hubSettingsConverged(existing []byte, spec HubLogin, hasServerYAML bool) ([]byte, bool, error) {
+func hubSettingsConverged(existing []byte, spec types.HubLogin, hasServerYAML bool) ([]byte, bool, error) {
 	doc, err := layout.ParseSettings(existing)
 	if err != nil {
 		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)

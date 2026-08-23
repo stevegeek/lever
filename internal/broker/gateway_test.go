@@ -178,7 +178,7 @@ func TestGatewayEnforcesConstraintAgainstArgs(t *testing.T) {
 
 // TestGatewayDeniesObjectArgAgainstEmptyStringConstraint is the end-to-end bypass
 // regression. A token constrained to table="" must NOT be satisfied by table={"x":1}
-// (or any non-string). Before the fix, toolsCallFields coerced {"x":1} to "" and the
+// (or any non-string). Before the fix, mcp.ToolsCall coerced {"x":1} to "" and the
 // token.Verify passed — backend reached. After the fix, {"x":1} projects to `{"x":1}`
 // which does not equal "", so token.Verify denies — backend NOT reached (403).
 func TestGatewayDeniesObjectArgAgainstEmptyStringConstraint(t *testing.T) {

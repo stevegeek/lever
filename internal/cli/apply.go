@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -27,6 +26,7 @@ import (
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // scionScratchpadSharedDir is the shared directory scion stamps on every new
@@ -233,33 +233,7 @@ func (rc *remoteController) awaitListening(ctx context.Context, child *exec.Cmd)
 		rc.addr(), rc.state.RemoteLog())
 }
 
-// lastLogLine returns the final non-empty line of path, or "". Only the tail is
-// read: a long-lived proxy's log can be large, and the failure that matters is
-// always the last thing it wrote before exiting.
-func lastLogLine(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = f.Close() }()
-	const tailBytes = 4 << 10
-	fi, err := f.Stat()
-	if err != nil {
-		return ""
-	}
-	off := max(fi.Size()-tailBytes, 0)
-	buf := make([]byte, min(fi.Size()-off, tailBytes))
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-		return ""
-	}
-	lines := strings.Split(string(buf), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
-			return line
-		}
-	}
-	return ""
-}
+func lastLogLine(path string) string { return lastFileLine(path, 4<<10) }
 
 // removeJailFileScript guards a jail-side rm: it only removes a REGULAR file
 // at $1 (a directory at $1 is left untouched — a stray in-repo git-mode
@@ -498,12 +472,6 @@ type brokerController struct {
 // answers /epoch and /bootstrap from memory).
 const brokerAdminTimeout = 5 * time.Second
 
-// bootstrapResponse is the broker's POST /bootstrap body (broker/bootstrap.go
-// writes it untyped; this is the client-side shape).
-type bootstrapResponse struct {
-	Ticket string `json:"ticket"`
-}
-
 // brokerSelfExe returns the executable Start re-execs as `broker serve`. It is a
 // var so tests can point it at an inert command.
 //
@@ -534,7 +502,7 @@ func (bc *brokerController) Start(ctx context.Context) error {
 	// Anything but a decodable 200 — connection refused, a non-200, a body that
 	// is not the epoch JSON — means no broker of ours is serving: fall through
 	// to the spawn.
-	if err := httpjson.Get(probeCtx, bc.admin, bc.adminURL+"/epoch", &er); err == nil {
+	if err := httpjson.Get(probeCtx, bc.admin, bc.adminURL+wire.PathEpoch, &er); err == nil {
 		if brokerReusable(er, versionString(), brokerctl.ConfigHash(bc.app)) {
 			return nil // same binary + same broker config; keep the process + PID
 		}
@@ -565,7 +533,7 @@ const (
 func (bc *brokerController) Healthy(ctx context.Context) error {
 	var last error
 	err := retry.Until(ctx, brokerHealthAttempts, brokerHealthInterval, func() (bool, error) {
-		last = httpjson.Get(ctx, bc.admin, bc.adminURL+"/epoch", nil)
+		last = httpjson.Get(ctx, bc.admin, bc.adminURL+wire.PathEpoch, nil)
 		return last == nil, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
@@ -580,8 +548,8 @@ func (bc *brokerController) Healthy(ctx context.Context) error {
 // apply.ErrBootstrapLatched so the mint step tolerates it on an idempotent
 // re-apply against the same broker process.
 func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, error) {
-	var result bootstrapResponse
-	switch err := httpjson.Post(ctx, bc.admin, bc.adminURL+"/bootstrap", nil, &result); {
+	var result wire.BootstrapResponse
+	switch err := httpjson.Post(ctx, bc.admin, bc.adminURL+wire.PathBootstrap, nil, &result); {
 	case err == nil:
 	case httpjson.Status(err) == http.StatusForbidden:
 		return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched

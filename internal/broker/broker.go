@@ -38,8 +38,8 @@ const (
 	// registered (api-key mode) so /request can mint capability(llm) tokens, but
 	// it gets NO /mcp/llm/ tool route and is hidden from /tools — it is served
 	// only by the /llm proxy route.
-	ReservedLLMTool = "llm"
-	ReservedLLMOp   = "generate"
+	ReservedLLMTool = registry.ReservedLLMTool
+	ReservedLLMOp   = registry.ReservedLLMOp
 )
 
 // RevocationState is the persisted revocation floor + per-agent revoke list.

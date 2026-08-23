@@ -1,5 +1,7 @@
 package backend
 
+import "github.com/stevegeek/lever/internal/config"
+
 // GuestLoginIssuerPort is the GUEST-side port of lever's remote-access login
 // path: what the guest forwarder listens on, and therefore the port named in
 // the hub's `issuer_url` (scion only accepts a loopback issuer, and this is
@@ -33,7 +35,7 @@ package backend
 // (This is the third defect from that mirroring, after the proxy reaching
 // another instance's hub on host 127.0.0.1:8080. A host-side loopback address
 // that appears to be a guest service is never what it seems.)
-const GuestLoginIssuerPort = 8446
+const GuestLoginIssuerPort = config.GuestLoginIssuerPort
 
 // HubLogin is what the guest needs in order to serve lever's remote-access
 // login path: the two ports of the bridge, how the guest reaches the host, and

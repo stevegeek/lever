@@ -37,41 +37,6 @@ var (
 	brokerStartInterval = 1 * time.Second
 )
 
-// isBrokerUnavailable reports whether err is the transient "runtime broker not
-// yet registered" condition during bring-up (the registration race), as opposed
-// to a real failure. The scion workstation daemon starts its Hub API and its
-// runtime broker separately: waitHubReady confirms the Hub API serves, but the
-// runtime broker registers ASYNCHRONOUSLY afterward, so a call issued in that
-// window fails. scion words it three ways depending on the verb and how far the
-// call got before giving up:
-//   - `scion start`: plural "No runtime brokers available".
-//   - `scion resume`: singular "no runtime broker available" — the SAME race
-//     (confirmed in scion pkg/hub/handlers_agent_create_helpers.go:354,408).
-//   - either, on a cold VM: "deadline exceeded" — scion's own internal wait for
-//     the broker times out and surfaces the hub timeout instead of the clean
-//     message (observed live: "context deadline exceeded from the Hub during
-//     start-manager", which needed a second `up` to reconcile).
-//
-// All must be matched or the retry never sees its own transient error as
-// retryable. retryOnBrokerUnavailable is bounded and checks ctx between
-// attempts, so a deadline from OUR context (a genuine timeout, not scion's
-// internal one) returns promptly instead of looping the full budget.
-func isBrokerUnavailable(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "no_runtime_broker") ||
-		strings.Contains(s, "No runtime brokers available") ||
-		strings.Contains(s, "no runtime broker available") ||
-		strings.Contains(s, "deadline exceeded")
-}
-
-// DefaultHubPort is the port the real hub binds inside the jail — the port
-// half of scion.DefaultHubEndpoint (pinned equal by a test). It belongs next to
-// that endpoint in package scion; it lives here until scion exports it.
-const DefaultHubPort = 8080
-
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
 // api-key instances. It is NOT a real credential: it exists only to satisfy
 // scion's start-time auth gate so the container (and lever-agent boot) can run.
@@ -569,7 +534,7 @@ func runScionServer(ctx context.Context, app *config.App, d Deps) error {
 // flags it exists to drop.
 func hubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
 	opts := scion.ServerOpts{
-		WebPort:       DefaultHubPort,
+		WebPort:       scion.DefaultHubPort,
 		DevAuth:       false,
 		EnableWeb:     app.RemoteEnabled(),
 		SessionSecret: sessionSecret,
@@ -807,7 +772,7 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 		// dead container must fail loudly, not silently pass.
 	case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
 		// Resume rides the SAME runtime-broker-race retry as a create Start
-		// (see isBrokerUnavailable's doc): on a cold VM the runtime broker may
+		// (see scion.IsBrokerUnavailable's doc): on a cold VM the runtime broker may
 		// not have re-registered with the hub yet, and resume hits that
 		// identical transient window. Only once the retry budget is exhausted
 		// (or the error is not the transient one at all) is the session
@@ -894,7 +859,7 @@ func prepareAPIKeyMode(ctx context.Context, d Deps, jp string) error {
 // waitHubReady confirmed it), but the runtime broker registers asynchronously
 // after it, so this FIRST call into the hub can still hit the registration
 // window — on a cold VM as a "deadline exceeded" from the hub. So the observe
-// rides the SAME bounded retry as the Start/Resume (isBrokerUnavailable): a
+// rides the SAME bounded retry as the Start/Resume (scion.IsBrokerUnavailable): a
 // transient broker-not-ready blip is retried, and only a persistent or
 // genuinely-different error is fatal.
 //
@@ -996,12 +961,12 @@ func resumeOrRecover(ctx context.Context, d Deps, boot *bootTracker, name, jp st
 
 // retryOnBrokerUnavailable runs action up to brokerStartAttempts times,
 // waiting brokerStartInterval between attempts, for as long as each failure is
-// the transient runtime-broker-unavailable race (isBrokerUnavailable). A nil
+// the transient runtime-broker-unavailable race (scion.IsBrokerUnavailable). A nil
 // result, or any non-transient error, returns immediately — the retry budget
 // exists purely to absorb the registration race, not to mask real failures.
 // Shared by startManagerCreate's Start retry and start-manager's Resume retry:
 // `scion resume` hits the identical runtime-broker race as `scion start` (see
-// isBrokerUnavailable's doc), so both need the same absorbing retry.
+// scion.IsBrokerUnavailable's doc), so both need the same absorbing retry.
 func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 	var last error
 	err := retry.Until(ctx, brokerStartAttempts, brokerStartInterval, func() (bool, error) {
@@ -1009,7 +974,7 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 		if last == nil {
 			return true, nil
 		}
-		if !isBrokerUnavailable(last) {
+		if !scion.IsBrokerUnavailable(last) {
 			return false, last
 		}
 		return false, nil

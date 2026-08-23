@@ -64,7 +64,7 @@ func decodeB64(t *testing.T, s string) []byte {
 }
 
 // TestBuildToolCallBody verifies that the JSON-RPC body produced for the gateway
-// satisfies the contract expected by internal/broker/mcp.go:toolsCallFields:
+// satisfies the contract expected by internal/mcp.ToolsCall:
 //   - jsonrpc == "2.0", method == "tools/call"
 //   - params.name == op
 //   - params.arguments._capability == token

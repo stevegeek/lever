@@ -1,11 +1,9 @@
 package apply
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/scion"
 )
 
 // planStepNames extracts the Kind from each Step.
@@ -303,14 +301,5 @@ func TestPlanAgentTemplateIsOrdered(t *testing.T) {
 	}
 	if sm := idx["start-manager"]; at > sm {
 		t.Errorf("agent-template (%d) must run BEFORE start-manager (%d): the prompt is staged at provisioning and never re-staged", at, sm)
-	}
-}
-
-// TestDefaultHubPortMatchesScionEndpoint pins DefaultHubPort to the port half
-// of scion.DefaultHubEndpoint: hubServerOpts binds the hub on the former, every
-// client dials the latter.
-func TestDefaultHubPortMatchesScionEndpoint(t *testing.T) {
-	if want := fmt.Sprintf("http://127.0.0.1:%d", DefaultHubPort); scion.DefaultHubEndpoint != want {
-		t.Fatalf("scion.DefaultHubEndpoint = %q, want %q", scion.DefaultHubEndpoint, want)
 	}
 }

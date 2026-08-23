@@ -126,7 +126,7 @@ func signAndPostStatement(cmd *cobra.Command, sock, keyPath, path string, st ops
 	}
 	cmd.Println("signing exactly these bytes:")
 	cmd.Println(string(raw))
-	sig, err := opsig.Sign(keyPath, opsig.NamespaceDirective, raw)
+	sig, err := opsig.SignContext(cmd.Context(), keyPath, opsig.NamespaceDirective, raw)
 	if err != nil {
 		return fmt.Errorf("directive: sign: %w", err)
 	}
@@ -144,7 +144,7 @@ func signAndPostEnvelope(cmd *cobra.Command, sock, keyPath, appName, op string, 
 	if err != nil {
 		return err
 	}
-	sig, err := opsig.Sign(keyPath, opsig.NamespaceAdmin, raw)
+	sig, err := opsig.SignContext(cmd.Context(), keyPath, opsig.NamespaceAdmin, raw)
 	if err != nil {
 		return fmt.Errorf("directive: sign: %w", err)
 	}

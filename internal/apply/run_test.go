@@ -651,7 +651,7 @@ func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) 
 		FakeRunner: f, slug: "hello",
 		initPhase: "suspended", initContainerStatus: "stopped",
 		// scion resume's own transient wording (singular "broker" — see
-		// isBrokerUnavailable's doc), failing the first 2 calls then resolving.
+		// scion.IsBrokerUnavailable's doc), failing the first 2 calls then resolving.
 		resumeErr:              fmt.Errorf("cannot resume agent: no runtime broker available"),
 		resumeFailsThenSucceed: 2,
 	}
@@ -729,20 +729,20 @@ func TestIsBrokerUnavailable(t *testing.T) {
 		"Post \"http://hub\": context deadline exceeded",
 	}
 	for _, s := range transient {
-		if !isBrokerUnavailable(fmt.Errorf("%s", s)) {
-			t.Errorf("isBrokerUnavailable(%q) = false, want true (transient)", s)
+		if !scion.IsBrokerUnavailable(fmt.Errorf("%s", s)) {
+			t.Errorf("scion.IsBrokerUnavailable(%q) = false, want true (transient)", s)
 		}
 	}
 	for _, s := range []string{
 		"authentication failed", "project not found", "permission denied",
 		"invalid deadline configured", // "deadline" without "exceeded" must NOT match
 	} {
-		if isBrokerUnavailable(fmt.Errorf("%s", s)) {
-			t.Errorf("isBrokerUnavailable(%q) = true, want false (real failure)", s)
+		if scion.IsBrokerUnavailable(fmt.Errorf("%s", s)) {
+			t.Errorf("scion.IsBrokerUnavailable(%q) = true, want false (real failure)", s)
 		}
 	}
-	if isBrokerUnavailable(nil) {
-		t.Error("isBrokerUnavailable(nil) = true, want false")
+	if scion.IsBrokerUnavailable(nil) {
+		t.Error("scion.IsBrokerUnavailable(nil) = true, want false")
 	}
 }
 

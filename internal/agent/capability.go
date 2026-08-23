@@ -81,7 +81,7 @@ func Call(ctx context.Context, brokerURL string, client *http.Client, tool, op, 
 
 // buildToolCallBody constructs the JSON-RPC 2.0 body for a tools/call request to
 // the capability gateway. The token is placed in arguments._capability as required
-// by the gateway contract (internal/broker/mcp.go:toolsCallFields). The tool's URL
+// by the gateway contract (internal/mcp.ToolsCall). The tool's URL
 // path carries the tool name; op maps to params.name (the operation within that
 // tool). Extra key=value constraints from the CLI are merged into arguments.
 func buildToolCallBody(op, token string, args map[string]string) []byte {

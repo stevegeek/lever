@@ -104,7 +104,7 @@ type Deps struct {
 	JailMount   string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
 	// HubSessionSecret is the hub's session-cookie signing key, threaded into
 	// every hub start this package orders (hubServerOpts). The CLI ensures it
-	// host-side before Run (brokerctl.State.EnsureSessionSecret), so the same
+	// host-side before Run (state.State.EnsureSessionSecret), so the same
 	// key survives hub restarts and browser sessions with it. An argv-only
 	// option: a hub already running keeps its old key until something restarts
 	// it, and introducing the secret does NOT order that restart itself — a

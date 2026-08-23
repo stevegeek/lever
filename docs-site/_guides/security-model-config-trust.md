@@ -71,7 +71,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |
 | `scion.binary`, `scion.source` | must not resolve inside `tree` (an agent could otherwise supply the engine on the next bring-up); `binary`, `source`, `version` are mutually exclusive (checked in `config.Load`). |
-| `scion.binary` | regular file, Linux ELF, architecture matches the guest's; checked host-side at bring-up (`verifyELFArch`) before the file is copied into the jail. |
+| `scion.binary` | regular file, Linux ELF, architecture matches the guest's; checked host-side at bring-up (`scionbin.VerifyELFArch`) before the file is copied into the jail. |
 
 **`scion.binary` is a trust decision, not only a convenience.** The bytes at that path are installed
 as root at `/usr/local/bin/scion` and become the engine every agent runs under. That sits inside the

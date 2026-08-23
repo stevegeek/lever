@@ -202,7 +202,7 @@ func TestDirectiveSendVerifiesStoresAndDelivers(t *testing.T) {
 	}
 
 	recs := b.directives.List(time.Now())
-	if len(recs) != 1 || recs[0].ID != id || recs[0].State != "active" {
+	if len(recs) != 1 || recs[0].ID != id || recs[0].State != DirectiveActive {
 		t.Fatalf("store after send = %+v", recs)
 	}
 

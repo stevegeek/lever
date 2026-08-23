@@ -1,4 +1,4 @@
-package guest
+package scionbin
 
 import (
 	"encoding/binary"
@@ -47,8 +47,8 @@ func TestVerifyELFArchAcceptsMatchingArch(t *testing.T) {
 	} {
 		t.Run(tc.goarch, func(t *testing.T) {
 			p := writeELF64(t, t.TempDir(), tc.machine, etExec)
-			if err := verifyELFArch(p, tc.goarch); err != nil {
-				t.Fatalf("verifyELFArch: %v", err)
+			if err := VerifyELFArch(p, tc.goarch); err != nil {
+				t.Fatalf("VerifyELFArch: %v", err)
 			}
 		})
 	}
@@ -57,7 +57,7 @@ func TestVerifyELFArchAcceptsMatchingArch(t *testing.T) {
 func TestVerifyELFArchAcceptsPIE(t *testing.T) {
 	// A Go PIE build is ET_DYN, not ET_EXEC. Rejecting it would be wrong.
 	p := writeELF64(t, t.TempDir(), emAArch64, etDyn)
-	if err := verifyELFArch(p, "arm64"); err != nil {
+	if err := VerifyELFArch(p, "arm64"); err != nil {
 		t.Fatalf("a PIE build must be accepted: %v", err)
 	}
 }
@@ -67,7 +67,7 @@ func TestVerifyELFArchRejectsMismatchNamingBothArches(t *testing.T) {
 	// arch. The message must say which is which, or the operator cannot tell
 	// whether to rebuild the binary or fix the config.
 	p := writeELF64(t, t.TempDir(), emAArch64, etExec)
-	err := verifyELFArch(p, "amd64")
+	err := VerifyELFArch(p, "amd64")
 	if err == nil {
 		t.Fatal("expected an arch mismatch error")
 	}
@@ -83,7 +83,7 @@ func TestVerifyELFArchRejectsNonELF(t *testing.T) {
 	if err := os.WriteFile(p, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := verifyELFArch(p, "arm64")
+	err := VerifyELFArch(p, "arm64")
 	if err == nil || !strings.Contains(err.Error(), "ELF") {
 		t.Fatalf("a non-ELF file must be rejected as such, got %v", err)
 	}
@@ -91,17 +91,17 @@ func TestVerifyELFArchRejectsNonELF(t *testing.T) {
 
 func TestVerifyELFArchRejectsMissingAndNonRegular(t *testing.T) {
 	dir := t.TempDir()
-	if err := verifyELFArch(filepath.Join(dir, "absent"), "arm64"); err == nil {
+	if err := VerifyELFArch(filepath.Join(dir, "absent"), "arm64"); err == nil {
 		t.Error("a missing file must be rejected")
 	}
-	if err := verifyELFArch(dir, "arm64"); err == nil {
+	if err := VerifyELFArch(dir, "arm64"); err == nil {
 		t.Error("a directory must be rejected")
 	}
 }
 
 func TestVerifyELFArchRejectsUnknownGuestArch(t *testing.T) {
 	p := writeELF64(t, t.TempDir(), emAArch64, etExec)
-	if err := verifyELFArch(p, "riscv64"); err == nil {
+	if err := VerifyELFArch(p, "riscv64"); err == nil {
 		t.Error("an arch lever cannot map must be rejected, not silently accepted")
 	}
 }

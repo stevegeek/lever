@@ -6,7 +6,18 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
+
+// projectSettingsGlob matches every project-configs registration's settings
+// file under the guest run user's home: ~/.scion/project-configs/<name>/.scion/
+// settings.yaml. Each script below loops over it; the registration directory
+// is two levels up from the match.
+const projectSettingsGlob = `"$HOME"/` + layout.ProjectConfigsRel + `/*/` + layout.SettingsRel
+
+// workspacePathOf is the shell fragment that prints a project settings file's
+// workspace_path value (the first one, leading whitespace stripped).
+const workspacePathOf = `grep -E '^` + layout.WorkspacePathKey + `:' "$s" 2>/dev/null | head -1 | sed 's/^` + layout.WorkspacePathKey + `:[[:space:]]*//'`
 
 // ReadScionProjectState reads scion's project-registration state from the guest
 // for `lever doctor`: the in-tree marker (<workspacePath>/.scion) and each
@@ -21,11 +32,11 @@ func (g Guest) ReadScionProjectState(ctx context.Context, workspacePath string) 
 	// path; safe because workspacePath is the backend's mount constant "/lever"
 	// and worker paths are "/lever/workers/<sanitized-name>".
 	script := `
-if [ -e ` + shellSingleQuote(workspacePath+"/.scion") + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
-for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+if [ -e ` + shellSingleQuote(workspacePath+"/"+layout.ProjectMarker) + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
+for s in ` + projectSettingsGlob + `; do
   [ -e "$s" ] || continue
   d=$(basename "$(dirname "$(dirname "$s")")")
-  wp=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  wp=$(` + workspacePathOf + `)
   echo "ENTRY $d $wp"
 done
 `
@@ -59,9 +70,9 @@ func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
 func scionConfigRemoveScript(wp string) string {
 	return `
 target=` + shellSingleQuote(wp) + `
-for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+for s in ` + projectSettingsGlob + `; do
   [ -e "$s" ] || continue
-  cur=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  cur=$(` + workspacePathOf + `)
   if [ "$cur" = "$target" ]; then rm -rf "$(dirname "$(dirname "$s")")"; fi
 done
 `
@@ -161,9 +172,9 @@ func scionHubEndpointRepairScript(wp, endpoint string) string {
 	return `
 target=` + shellSingleQuote(wp) + `
 want=` + shellSingleQuote(endpoint) + `
-for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+for s in ` + projectSettingsGlob + `; do
   [ -e "$s" ] || continue
-  cur=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  cur=$(` + workspacePathOf + `)
   [ "$cur" = "$target" ] || continue
   have=$(grep -E '^[[:space:]]*endpoint:[[:space:]]*' "$s" 2>/dev/null | head -1 | sed 's/^[[:space:]]*endpoint:[[:space:]]*//')
   [ -n "$have" ] || continue

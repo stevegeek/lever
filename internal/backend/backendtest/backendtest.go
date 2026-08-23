@@ -76,7 +76,7 @@ func FakeScionCheckout(t *testing.T) string {
 }
 
 // StageFakeBuildOutput creates the file a faked `go build` would have written,
-// at the exact path guest.resolveScionBinary passes to `-o`. The install path
+// at the exact path scionbin.Resolve passes to `-o`. The install path
 // hashes that file for real, so it has to exist even when the build is a stub.
 func StageFakeBuildOutput(t *testing.T, machine string) {
 	t.Helper()

@@ -1,22 +1,28 @@
-// Package guest provisions an Ubuntu jail guest — rootless container runtimes
-// plus a cross-compiled scion binary — through host-side argv prefixes. It is
-// shared by every backend that reaches its guest via a "run this as user X"
-// prefix (orb, lima, ...); only the prefixes differ, the provisioning scripts
-// don't.
+// Package guest provisions an Ubuntu jail guest — rootless container runtimes,
+// the scion binary and its web assets, the remote-access login forwarder and
+// scion's on-disk state — through host-side argv prefixes. It is shared by
+// every backend that reaches its guest via a "run this as user X" prefix (orb,
+// lima, ...); only the prefixes differ, the provisioning scripts don't.
+//
+// It owns the TRANSPORT and the IN-GUEST scripts only. Every artefact it
+// installs is built elsewhere on the host and arrives as a local path:
+// internal/provision/scionbin (the scion binary), internal/provision/webassets
+// (the SPA) and internal/provision/loginfwd (the forwarder). Scion's file
+// layout and settings keys come from internal/scion/layout; the scripts here
+// are assembled from those constants rather than restating them.
 package guest
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
 // Guest provisions an Ubuntu jail guest through host-side argv prefixes.
@@ -161,43 +167,30 @@ func (g Guest) GOARCH(ctx context.Context) (string, error) {
 	}
 }
 
-// ensureScion cross-compiles scion from a host source checkout for linux/arm64
-// and installs it into the jail at /usr/local/bin/scion. The build runs on the
-// HOST (Go's build cache makes re-runs incremental, so this is cheap to repeat).
-// The binary is streamed into the jail by InstallRootBinary (atomic temp+mv).
-// scionModulePath is the upstream scion Go module. `version` ("" → source mode)
-// pins a commit/tag fetched via the Go module system.
-const scionModulePath = "github.com/GoogleCloudPlatform/scion"
-
 // scionDestPath is where scion is installed in the guest.
 const scionDestPath = "/usr/local/bin/scion"
 
-// ScionSpec names the one place lever should get scion from. At most one of
-// Binary/Source/Version is set; config validation enforces that
-// (internal/config). A struct rather than positional strings because three
-// same-typed parameters across two call sites is a mis-ordering waiting to
-// happen.
-type ScionSpec struct {
-	// Binary is a host-local, already-built linux binary, installed as-is. No
-	// Go toolchain, module cache or egress is needed on this host.
-	Binary string
-	// Source is a host checkout to cross-compile.
-	Source string
-	// Version pins a scion module version/commit to fetch and cross-compile.
-	Version string
-	// WebUI additionally builds scion's SPA on the host and stages it into the
-	// guest, so the hub can serve the web UI (see webassets.go). A field on the
-	// spec rather than a parameter on EnsureScion so the two backends' copies of
-	// the provisioning block stay one struct literal: that block has drifted
-	// before — Binary was added to both literals while the guard around them was
-	// updated in neither (see backend.Config.HasScion).
-	WebUI bool
-}
+// ScionSpec names the one place lever should get scion from. The type is
+// scionbin's; the alias keeps the backends' `guest.ScionSpec{...}` literals
+// beside the other guest calls they make.
+type ScionSpec = scionbin.Spec
 
 // EnsureScion puts the configured scion into the guest at scionDestPath, plus
-// its web assets when the spec asks for them.
+// its web assets when the spec asks for them. The binary is resolved on the
+// host by scionbin.Resolve (the Binary branch never touches a toolchain, which
+// is what lets the jail host carry no Go — issue #27) and streamed in by
+// InstallRootBinaryIfChanged.
 func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
-	bin, err := g.resolveScionBinary(ctx, spec)
+	// Validate the spec BEFORE touching the guest, so a plainly wrong config
+	// fails without a round-trip and without depending on the guest being up.
+	if err := spec.Validate(); err != nil {
+		return err
+	}
+	arch, err := g.GOARCH(ctx)
+	if err != nil {
+		return fmt.Errorf("detect guest architecture: %w", err)
+	}
+	bin, err := scionbin.Resolve(ctx, g.Host, spec, arch, g.Machine)
 	if err != nil {
 		return err
 	}
@@ -205,57 +198,6 @@ func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 		return err
 	}
 	return g.EnsureScionWebAssets(ctx, spec)
-}
-
-// resolveScionBinary produces a host-local scion binary for the guest's
-// architecture.
-//
-// It is the ONLY place that knows about Go. The Binary branch returns before
-// any toolchain is touched, which is what lets the machine hosting the jail
-// carry no Go, no module cache and no egress at all (issue #27).
-func (g Guest) resolveScionBinary(ctx context.Context, spec ScionSpec) (string, error) {
-	// Validate the spec BEFORE touching the guest, so a plainly wrong config
-	// fails without a round-trip and without depending on the guest being up.
-	if spec.Binary == "" && spec.Source == "" && spec.Version == "" {
-		return "", fmt.Errorf("no scion configured: set one of scion.binary, scion.source or scion.version")
-	}
-	if spec.Source != "" {
-		fi, err := os.Stat(spec.Source)
-		if err != nil {
-			return "", fmt.Errorf("scion source %q: %w", spec.Source, err)
-		}
-		if !fi.IsDir() {
-			return "", fmt.Errorf("scion source %q is not a directory", spec.Source)
-		}
-	}
-
-	arch, err := g.GOARCH(ctx)
-	if err != nil {
-		return "", fmt.Errorf("detect guest architecture: %w", err)
-	}
-	if spec.Binary != "" {
-		if err := verifyELFArch(spec.Binary, arch); err != nil {
-			return "", err
-		}
-		return spec.Binary, nil
-	}
-
-	goBin := "go"
-	buildDir := spec.Source
-	if spec.Version != "" {
-		gb, dir, err := g.fetchScionModule(ctx, spec.Version)
-		if err != nil {
-			return "", err
-		}
-		goBin, buildDir = gb, dir
-	}
-
-	out := filepath.Join(os.TempDir(), "lever-scion-"+g.Machine)
-	if _, err := g.Host.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": arch},
-		goBin, "build", "-o", out, "./cmd/scion"); err != nil {
-		return "", fmt.Errorf("cross-compile scion: %w", err)
-	}
-	return out, nil
 }
 
 // InstallRootBinary streams a host-local executable into the guest at destPath
@@ -356,34 +298,6 @@ func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPa
 		return false, err
 	}
 	return true, nil
-}
-
-// fetchScionModule downloads the pinned scion module via the Go module system
-// and returns (goBinary, moduleSourceDir) for the cross-compile. It uses the
-// REAL go binary (goBinary) for the build because the module cache lives
-// outside any toolchain-manager project dir — e.g. a version manager that
-// resolves `go` by walking up for a project file (asdf) cannot resolve it from
-// the read-only module cache, whereas the absolute binary always works.
-func (g Guest) fetchScionModule(ctx context.Context, version string) (goBin, dir string, err error) {
-	goBin, err = g.goBinary(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	out, err := g.Host.Run(ctx, nil, goBin, "mod", "download", "-json", scionModulePath+"@"+version)
-	if err != nil {
-		return "", "", fmt.Errorf("download scion %s: %w", version, err)
-	}
-	var dl struct{ Dir, Error string }
-	if jerr := json.Unmarshal([]byte(out.Stdout), &dl); jerr != nil {
-		return "", "", fmt.Errorf("parse `go mod download` output for scion %s: %w", version, jerr)
-	}
-	if dl.Error != "" {
-		return "", "", fmt.Errorf("download scion %s: %s", version, dl.Error)
-	}
-	if dl.Dir == "" {
-		return "", "", fmt.Errorf("`go mod download` returned no source dir for scion %s", version)
-	}
-	return goBin, dl.Dir, nil
 }
 
 // shellSingleQuote wraps s in single quotes safe for POSIX shells, escaping any

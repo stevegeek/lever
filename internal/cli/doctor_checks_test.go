@@ -13,11 +13,11 @@ import (
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 )
 
@@ -1088,7 +1088,7 @@ func TestCheckNodeToolchainProbeOK(t *testing.T) {
 
 func TestCheckNodeToolchainProbeError(t *testing.T) {
 	p := doctorProbes{nodeToolchain: func() (string, error) {
-		return "", fmt.Errorf("%w: node --version: exit status 126", guest.ErrNodeToolchain)
+		return "", fmt.Errorf("%w: node --version: exit status 126", webassets.ErrNodeToolchain)
 	}}
 
 	r := checkNodeToolchain(&config.App{

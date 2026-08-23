@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 // The guest half of lever's agent-template overlay.
@@ -78,7 +80,7 @@ const (
 	LeverTemplateName = "lever"
 
 	// leverTemplateRel is the overlay directory, relative to the run user's home.
-	leverTemplateRel = ".scion/templates/" + LeverTemplateName
+	leverTemplateRel = layout.TemplatesRel + "/" + LeverTemplateName
 )
 
 // EnsureLeverTemplate creates the overlay template in the guest and reports

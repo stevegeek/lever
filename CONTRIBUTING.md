@@ -15,7 +15,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/` | Shared packages for all four binaries (listed below). |
 | `internal/agent` | In-jail lever-agent core: keypair, enrolment, capability MCP server, loopback gateway, token renewal. |
 | `internal/apply` | `lever apply`/`up` bring-up: the pure `Plan` and the `Run` executor. |
-| `internal/backend` | The containment `Backend` contract and the `Candidates` guarantee matrix. `common` (shared machinery for reach-the-guest backends), `guest` (in-guest provisioning: scion checkout/binary, hub login, web assets), `guest/loginfwd` (the guest-side login forwarder binary), `lima`, `orbstack`, `registry` (name → constructor, jail argv). |
+| `internal/backend` | The containment `Backend` contract and the `Candidates` guarantee matrix. `common` (shared machinery for reach-the-guest backends), `guest` (the in-guest half of provisioning: argv-prefix transport, in-guest scripts, installing what `internal/provision` built, scion state and hub-login settings surgery), `lima`, `orbstack`, `registry` (name → constructor, jail argv). |
 | `internal/bridge` | Poll-based scion-event → events-file bridge the manager watches. |
 | `internal/broker` | The capability broker: enrol, request/delegate, MCP gateway, llm proxy, directives. `registry` (tool/operation registry and constraint mapping), `rules` (obtain/delegate policy). |
 | `internal/brokerctl` | Host-side controller for the broker daemon: state dir, keys, `serve`, tool supervisor, health. |
@@ -27,8 +27,9 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/hubapi` | Minimal scion Hub REST client for what the scion CLI does not expose. |
 | `internal/jail` | `JailRunner`: an `exec.Runner` that runs commands inside the jail. |
 | `internal/opsig` | Operator-directive signature protocol. |
+| `internal/provision` | Host-side build pipelines that produce a local artefact for the guest: `scionbin` (scion binary: prebuilt/source/pinned module, ELF arch check), `webassets` (scion's SPA via npm, cached per source digest; the node probe `lever doctor` shares), `loginfwd` (the remote-access login forwarder — see below), and the shared `GoBinary` resolver. |
 | `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy and local OIDC provider. |
-| `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens). |
+| `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys, the oidc_login block and YAML edit helpers). |
 | `internal/skills` | Framework-authored SKILL.md files scaffolded into instances. |
 | `internal/wire` | Agent⇄broker wire types (bootstrap material). |
 | `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |
@@ -39,6 +40,13 @@ Developer notes for working on lever itself. For using lever, start at the
 
 All binaries are built from one Go module (Go 1.26+). The three in-jail binaries are cross-compiled
 for `linux/<arch>` with `CGO_ENABLED=0` and copied to `/usr/local/bin` in the agent image.
+
+One more in-jail program is NOT built that way: `lever-login-forward`, the remote-access login
+forwarder (`internal/provision/loginfwd/main`). It runs in the jail VM itself, not in an agent
+container, so the agent image cannot carry it. Its source is embedded in `lever` and cross-compiled
+on the operator host during every `lever apply` of an instance with `remote.enabled`, which means
+such a host needs a Go toolchain even when scion comes from `scion.binary`. Baking it into the
+image build context like `lever-agent` would remove that requirement; that change has not been made.
 
 ## Build
 

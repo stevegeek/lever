@@ -1,4 +1,4 @@
-package guest
+package scionbin
 
 import (
 	"debug/elf"
@@ -7,21 +7,21 @@ import (
 	"os"
 )
 
-// elfMachineForGOARCH maps the Go arch names Guest.GOARCH returns onto the ELF
+// elfMachineForGOARCH maps the Go arch names guest.Guest.GOARCH returns onto the ELF
 // machine type a linux binary for that arch must declare.
 var elfMachineForGOARCH = map[string]elf.Machine{
 	"amd64": elf.EM_X86_64,
 	"arm64": elf.EM_AARCH64,
 }
 
-// verifyELFArch reports whether path is a linux executable for wantGOARCH.
+// VerifyELFArch reports whether path is a linux executable for wantGOARCH.
 //
 // This is the point of accepting a prebuilt binary: it was built somewhere
 // else, so an architecture mix-up is the realistic failure. Caught here it is a
 // config error naming both arches, raised before anything is written into the
 // guest. Uncaught it surfaces inside the guest at manager start as "exec format
 // error", which points at nothing.
-func verifyELFArch(path, wantGOARCH string) error {
+func VerifyELFArch(path, wantGOARCH string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("scion binary %q: %w", path, err)

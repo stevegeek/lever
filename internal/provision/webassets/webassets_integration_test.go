@@ -1,6 +1,6 @@
 //go:build integration
 
-package guest
+package webassets
 
 import (
 	"context"
@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 // Run with:
 //
-//	go test -tags integration -run TestRealScionWebBuild ./internal/backend/guest/ -v
+//	go test -tags integration -run TestRealScionWebBuild ./internal/provision/webassets/ -v
 //
 // Requires a real go toolchain (to fetch the scion module), a real node >= 20
 // with npm, and network access for `npm ci`. Touches no guest: it exercises the
@@ -30,24 +32,24 @@ func TestRealScionWebBuild(t *testing.T) {
 		// The pin examples/ and the docs ship today.
 		version = "e82a2a08"
 	}
-	g := Guest{Host: exec.RealRunner{}, Machine: "lever-webbuild-it"}
+	r := exec.RealRunner{}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	srcWeb, err := g.webSourceDir(ctx, ScionSpec{Version: version, WebUI: true})
+	srcWeb, err := SourceDir(ctx, r, scionbin.Spec{Version: version, WebUI: true})
 	if err != nil {
-		t.Fatalf("webSourceDir: %v", err)
+		t.Fatalf("SourceDir: %v", err)
 	}
 	t.Logf("scion %s web sources: %s", version, srcWeb)
 
 	// The build lands in the developer's real cache — the same path production
 	// uses, so PATH and any walk-up version manager behave identically here.
 	// Removed afterwards so a test run does not leave a few hundred MB behind.
-	digest, err := hashWebSource(srcWeb)
+	digest, err := HashSource(srcWeb)
 	if err != nil {
-		t.Fatalf("hashWebSource: %v", err)
+		t.Fatalf("HashSource: %v", err)
 	}
-	root, err := WebBuildCacheRoot()
+	root, err := CacheRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,9 +60,9 @@ func TestRealScionWebBuild(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(buildDir) })
 
 	start := time.Now()
-	dist, gotDigest, err := g.buildWebAssets(ctx, srcWeb)
+	dist, gotDigest, err := Build(ctx, r, srcWeb)
 	if err != nil {
-		t.Fatalf("buildWebAssets: %v", err)
+		t.Fatalf("Build: %v", err)
 	}
 	t.Logf("cold build took %s -> %s", time.Since(start).Round(time.Second), dist)
 	if gotDigest != digest {
@@ -69,8 +71,8 @@ func TestRealScionWebBuild(t *testing.T) {
 
 	// scion serves the app shell from Go and loads exactly this file; without
 	// it the browser gets the "Web UI Not Available" page.
-	if _, err := os.Stat(filepath.Join(dist, filepath.FromSlash(webAssetsSentinel))); err != nil {
-		t.Fatalf("no %s in the build output: %v", webAssetsSentinel, err)
+	if _, err := os.Stat(filepath.Join(dist, filepath.FromSlash(layout.WebAssetsSentinel))); err != nil {
+		t.Fatalf("no %s in the build output: %v", layout.WebAssetsSentinel, err)
 	}
 	// The Go server does not serve node_modules, so the icons scion's
 	// components request must have been copied into the dist tree.
@@ -78,7 +80,7 @@ func TestRealScionWebBuild(t *testing.T) {
 		t.Fatalf("shoelace icons missing from the build output: %v", err)
 	}
 
-	marker, err := os.Stat(filepath.Join(buildDir, webBuildMarker))
+	marker, err := os.Stat(filepath.Join(buildDir, BuildMarker))
 	if err != nil {
 		t.Fatalf("no completion marker: %v", err)
 	}
@@ -117,15 +119,15 @@ func TestRealScionWebBuild(t *testing.T) {
 	// The cache is the whole point: a re-apply on an unchanged pin must not
 	// re-run npm.
 	start = time.Now()
-	dist2, digest2, err := g.buildWebAssets(ctx, srcWeb)
+	dist2, digest2, err := Build(ctx, r, srcWeb)
 	if err != nil {
-		t.Fatalf("second buildWebAssets: %v", err)
+		t.Fatalf("second Build: %v", err)
 	}
 	t.Logf("cached build took %s", time.Since(start).Round(time.Millisecond))
 	if dist2 != dist || digest2 != digest {
 		t.Fatalf("cache hit resolved elsewhere: %q/%q", dist2, digest2)
 	}
-	marker2, err := os.Stat(filepath.Join(buildDir, webBuildMarker))
+	marker2, err := os.Stat(filepath.Join(buildDir, BuildMarker))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,17 +139,17 @@ func TestRealScionWebBuild(t *testing.T) {
 	// older lever that built in place — must be rebuilt, not adopted. This is
 	// the branch where the atomic publish finds its destination occupied by
 	// something incomplete and has to clear it first.
-	if err := os.Remove(filepath.Join(dist, filepath.FromSlash(webAssetsSentinel))); err != nil {
+	if err := os.Remove(filepath.Join(dist, filepath.FromSlash(layout.WebAssetsSentinel))); err != nil {
 		t.Fatal(err)
 	}
 	if webBuildComplete(buildDir) {
 		t.Fatal("a cache missing the asset scion serves must not read as complete")
 	}
-	if _, _, err := g.buildWebAssets(ctx, srcWeb); err != nil {
+	if _, _, err := Build(ctx, r, srcWeb); err != nil {
 		t.Fatalf("rebuild over an incomplete cache: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dist, filepath.FromSlash(webAssetsSentinel))); err != nil {
-		t.Fatalf("the rebuild did not restore %s: %v", webAssetsSentinel, err)
+	if _, err := os.Stat(filepath.Join(dist, filepath.FromSlash(layout.WebAssetsSentinel))); err != nil {
+		t.Fatalf("the rebuild did not restore %s: %v", layout.WebAssetsSentinel, err)
 	}
 
 	// Nothing may be left behind under the cache root but the build directory

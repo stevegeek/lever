@@ -90,8 +90,9 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 // broker via the in-jail `lever-agent` CLI; a check that cannot yet be driven
 // records a failure, never a vacuous pass.
 func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, configPath string, bf BackendFactory) error {
-	// 1. Bring the real jail up BROKER-ONLY: jail-up (machine + egress allowlist),
-	//    broker-up (host broker + tools), mint-manager-bootstrap. The VM-level gate
+	// 1. Bring the real jail up BROKER-ONLY: the jail itself (machine + egress
+	//    allowlist, inside buildApplyDeps), then broker-up (host broker +
+	//    tools) and mint-manager-bootstrap. The VM-level gate
 	//    drives lever-agent directly and never invokes scion, so all the
 	//    scion/container/registration steps (incl. init-machine, which needs a
 	//    scion binary the fresh machine lacks) are omitted. The bootstrap step

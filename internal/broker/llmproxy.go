@@ -16,23 +16,19 @@ import (
 // (b.llmUpstream — never client-controlled, so no SSRF). Fail closed on any
 // auth/verify failure; never log key or token bytes.
 func (b *Broker) llmProxyHandler() http.Handler {
-	rp := httputil.NewSingleHostReverseProxy(b.llmUpstream)
-	base := rp.Director
-	rp.Director = func(req *http.Request) {
-		base(req)
-		req.Host = b.llmUpstream.Host
+	rp := &httputil.ReverseProxy{}
+	rp.Rewrite = func(pr *httputil.ProxyRequest) {
+		// Route + scrub forwarding/identity headers (shared with the MCP
+		// gateway; forwarding headers only — it never touches credentials).
+		rewriteUpstream(pr, b.llmUpstream)
 		// Strip the inbound capability token — NEVER forward it upstream.
-		req.Header.Del("Authorization")
-		req.Header.Del("x-api-key")
+		pr.Out.Header.Del("Authorization")
+		pr.Out.Header.Del("x-api-key")
 		// Inject the real Console key + required version header.
-		req.Header.Set("x-api-key", string(b.apiKey))
-		if req.Header.Get("anthropic-version") == "" {
-			req.Header.Set("anthropic-version", "2023-06-01")
+		pr.Out.Header.Set("x-api-key", string(b.apiKey))
+		if pr.Out.Header.Get("anthropic-version") == "" {
+			pr.Out.Header.Set("anthropic-version", "2023-06-01")
 		}
-		// Scrub forwarding/identity headers (shared with the MCP gateway
-		// Director; forwarding headers only — must run without touching the
-		// x-api-key just injected above).
-		scrubProxyHeaders(req.Header)
 	}
 	// R5: do not echo upstream auth/error headers back to the jail.
 	rp.ModifyResponse = func(resp *http.Response) error {

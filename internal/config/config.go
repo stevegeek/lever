@@ -955,7 +955,7 @@ func (a *App) validateNonGitTree() error {
 	if treeIsGitRepo(a.Tree) {
 		return fmt.Errorf("config: tree %q is itself a git repository; lever targets non-git trees "+
 			"(per-worker git workflows are deferred, spec §13). A plain subdirectory inside a larger "+
-			"git repo is fine — point tree at a non-git directory (or a subdir) instead.", a.Tree)
+			"git repo is fine — point tree at a non-git directory (or a subdir) instead", a.Tree)
 	}
 	return nil
 }

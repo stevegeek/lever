@@ -37,7 +37,7 @@ func main() {
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return fmt.Errorf("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call> ...")
+		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call>")
 	}
 	switch argv[1] {
 	case "boot":

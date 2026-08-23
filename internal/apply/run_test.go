@@ -2956,9 +2956,9 @@ func TestLoadImageStepPruneErrorIsNonFatal(t *testing.T) {
 	}
 }
 
-// preRoleRefusal is what VerifyAgentRole returns for a record created before
+// errPreRoleRefusal is what VerifyAgentRole returns for a record created before
 // scion#1089: it stores no role, and a roles-aware scion reads that as `full`.
-var preRoleRefusal = fmt.Errorf("agent %q has no stored role", "hello")
+var errPreRoleRefusal = fmt.Errorf("agent %q has no stored role", "hello")
 
 // TestStartManagerRefusesPreRoleRecordOnResume: the guard must stop the apply
 // BEFORE the resume, and must not fall into the delete+create recovery — that
@@ -2971,7 +2971,7 @@ func TestStartManagerRefusesPreRoleRecordOnResume(t *testing.T) {
 		JailUp:          func(context.Context, *config.App) error { return nil },
 		LoadImage:       func(context.Context, string) error { return nil },
 		Scion:           scion.New(r, scion.Options{}),
-		VerifyAgentRole: func(context.Context, string, string) error { return preRoleRefusal },
+		VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
 	}
 	err := Run(context.Background(), app, deps)
 	if err == nil {
@@ -2999,7 +2999,7 @@ func TestStartManagerRefusesPreRoleRecordWhenRunning(t *testing.T) {
 		JailUp:          func(context.Context, *config.App) error { return nil },
 		LoadImage:       func(context.Context, string) error { return nil },
 		Scion:           scion.New(r, scion.Options{}),
-		VerifyAgentRole: func(context.Context, string, string) error { return preRoleRefusal },
+		VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
 	}
 	if err := Run(context.Background(), app, deps); err == nil {
 		t.Fatal("a running record with no stored role must fail the bring-up too")
@@ -3019,7 +3019,7 @@ func TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent(t *testing.T) {
 		Scion:     scion.New(r, scion.Options{}),
 		VerifyAgentRole: func(context.Context, string, string) error {
 			called++
-			return preRoleRefusal
+			return errPreRoleRefusal
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {

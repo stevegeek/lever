@@ -40,19 +40,24 @@ func run(argv []string) error {
 	if len(argv) < 2 {
 		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call>")
 	}
+	// One signal-bound context for every verb: SIGINT/SIGTERM cancels the
+	// network call in flight (or the renew loop) instead of leaving the
+	// process hanging in a dial or a read.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	switch argv[1] {
 	case "boot":
-		return cmdBoot(argv[2:])
+		return cmdBoot(ctx, argv[2:])
 	case "serve-capability":
-		return cmdServeCapability(argv[2:])
+		return cmdServeCapability(ctx, argv[2:])
 	case "renew":
-		return cmdRenew(argv[2:])
+		return cmdRenew(ctx, argv[2:])
 	case "gateway":
 		return cmdGateway(argv[2:])
 	case "provision":
-		return cmdProvision(argv[2:])
+		return cmdProvision(ctx, argv[2:])
 	case "request", "delegate", "call":
-		return cmdCLI(argv[1], argv[2:])
+		return cmdCLI(ctx, argv[1], argv[2:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", argv[1])
 	}
@@ -98,7 +103,7 @@ func (f *toolsFlag) Set(v string) error {
 // ./.lever/bootstrap.json), -id-dir (default $HOME/.lever-id), -settings (claude
 // settings.json path; its env block receives the dynamic LLM vars),
 // -tools (comma-separated broker tool names).
-func cmdBoot(args []string) error {
+func cmdBoot(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("boot", flag.ContinueOnError)
 	bootstrapPath := fs.String("bootstrap", defaultBootstrapPath(), "path to bootstrap.json")
 	idDir := fs.String("id-dir", defaultIDDir(), "directory for the agent identity (cert+key+ca)")
@@ -130,7 +135,7 @@ func cmdBoot(args []string) error {
 		cfg.LLMAuth = ""
 		cfg.MCPAdd = nil
 	}
-	if err := agent.Boot(context.Background(), cfg); err != nil {
+	if err := agent.Boot(ctx, cfg); err != nil {
 		return err
 	}
 	// Emit the renew sidecar so scion auto-refreshes the cert and (in api-key
@@ -206,7 +211,7 @@ func (c claudeMCP) Add(name string, argv ...string) error {
 // which registers this binary as an MCP command-mode server: Claude Code (and
 // the acceptance harness) spawns "lever-agent serve-capability" and talks
 // JSON-RPC over its stdin/stdout.
-func cmdServeCapability(args []string) error {
+func cmdServeCapability(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve-capability", flag.ContinueOnError)
 	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json (for broker URL)")
 	if err := fs.Parse(args); err != nil {
@@ -237,7 +242,7 @@ func cmdServeCapability(args []string) error {
 		AgentCN:   agentCN,
 		Client:    client,
 	})
-	return agent.ServeStdio(context.Background(), os.Stdin, os.Stdout, srv)
+	return agent.ServeStdio(ctx, os.Stdin, os.Stdout, srv)
 }
 
 // renewOpts collects the renew flags for renewOnce.
@@ -275,7 +280,7 @@ func renewOnce(ctx context.Context, opts renewOpts) error {
 // terminates it. Without -loop it performs a single renewal.
 // When -llm-auth api-key, also refreshes ANTHROPIC_AUTH_TOKEN after each cert
 // renewal and rewrites the claude settings.json env block at -settings.
-func cmdRenew(args []string) error {
+func cmdRenew(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
 	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
 	loop := fs.Bool("loop", false, "run as a renewal daemon (renew then sleep -interval, repeat until signal)")
@@ -293,14 +298,11 @@ func cmdRenew(args []string) error {
 		settingsPath:  *settingsPath,
 	}
 	if !*loop {
-		return renewOnce(context.Background(), opts)
+		return renewOnce(ctx, opts)
 	}
 
-	// Loop mode: renew once immediately, then on each ticker tick.
-	// Signal-cancel the context to exit cleanly on SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
+	// Loop mode: renew once immediately, then on each ticker tick, until the
+	// signal-bound ctx is cancelled.
 	if err := renewOnce(ctx, opts); err != nil {
 		log.Print("renew: ", err)
 	}
@@ -362,7 +364,7 @@ func bootstrapPathOrDefault(path string) string {
 // cmdProvision mints a one-use enrolment ticket for a worker via the broker's
 // /provision endpoint (manager-CN-gated). The resulting Bootstrap JSON is written
 // to -out (0600) so the acceptance harness can drop it in the jail for boot.
-func cmdProvision(args []string) error {
+func cmdProvision(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
 	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the manager identity (cert+key+ca)", "path to bootstrap.json (for broker URL if -broker-url not set)")
 	worker := fs.String("worker", "", "worker name to provision a ticket for")
@@ -394,7 +396,7 @@ func cmdProvision(args []string) error {
 		return fmt.Errorf("provision: build mTLS client: %w", err)
 	}
 
-	ticket, err := agent.Provision(context.Background(), bURL, client, *worker)
+	ticket, err := agent.Provision(ctx, bURL, client, *worker)
 	if err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
@@ -436,7 +438,7 @@ var cliVerbs = map[string]func(context.Context, cliSession) error{
 
 // cmdCLI runs one capability verb: parse, validate, resolve identity + broker,
 // then dispatch through cliVerbs.
-func cmdCLI(verb string, args []string) error {
+func cmdCLI(ctx context.Context, verb string, args []string) error {
 	a, err := parseCLIArgs(verb, args)
 	if err != nil {
 		return err
@@ -456,7 +458,7 @@ func cmdCLI(verb string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: build mTLS client: %w", verb, err)
 	}
-	return cliVerbs[verb](context.Background(), cliSession{cliArgs: a, id: id, brokerURL: bURL, client: client})
+	return cliVerbs[verb](ctx, cliSession{cliArgs: a, id: id, brokerURL: bURL, client: client})
 }
 
 // parseCLIArgs registers the verb's flags and parses args into a cliArgs.

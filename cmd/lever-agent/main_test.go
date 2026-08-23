@@ -42,7 +42,7 @@ func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
 		{"request without -tool", "request", `"-tool"`, []string{"-op", "read"}},
 		{"request without -op", "request", `"-op"`, []string{"-tool", "db"}},
 	} {
-		err := cmdCLI(tc.verb, append([]string{"-id-dir", missingID}, tc.args...))
+		err := cmdCLI(context.Background(), tc.verb, append([]string{"-id-dir", missingID}, tc.args...))
 		if err == nil {
 			t.Fatalf("%s: must error", tc.name)
 		}
@@ -217,7 +217,7 @@ func TestCallVerbSemantics(t *testing.T) {
 
 			var err error
 			out := captureStdout(t, func() {
-				err = cmdCLI("call", []string{
+				err = cmdCLI(context.Background(), "call", []string{
 					"-id-dir", idDir,
 					"-broker-url", stub.URL,
 					"-tool", "db",

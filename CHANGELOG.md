@@ -71,6 +71,11 @@ read the Changed/Internal entries before rebasing open branches.
   on failure too.** The throwaway dev-auth hub's `~/.scion/dev-token` is now
   deleted from the deferred cleanup, so an aborted mint no longer leaves the
   open admin credential behind; before, only a successful mint removed it.
+- **`lever-agent` verbs stop on SIGINT/SIGTERM.** `boot`, `serve-capability`,
+  `renew`, `provision`, `request`, `delegate` and `call` now run under one
+  signal-bound context, so a signal cancels the broker call in flight
+  instead of leaving the process in a dial or read. Before, only the
+  `renew -loop` ticker was signal-bound.
 - **Remote-proxy login refusals are sentinel-wrapped and reworded.** The
   three refusals the login driver decides itself (the hub redirected to a
   different OIDC provider, the hub asked for another `client_id`, the hub

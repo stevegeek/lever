@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // writeTmpConfig writes a minimal app.yaml with a real tree directory structure
@@ -168,15 +168,15 @@ func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 	if len(deps.HubSessionSecret) != 64 {
 		t.Fatalf("Deps.HubSessionSecret length = %d, want 64 (32 bytes hex)", len(deps.HubSessionSecret))
 	}
-	state := stateFor(p)
-	fi, err := os.Stat(state.SessionSecret())
+	st := stateFor(p)
+	fi, err := os.Stat(st.SessionSecret())
 	if err != nil {
 		t.Fatalf("session-secret not persisted: %v", err)
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("session-secret perms = %#o, want 0600", perm)
 	}
-	onDisk, err := state.EnsureSessionSecret()
+	onDisk, err := st.EnsureSessionSecret()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,8 +294,8 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 		t.Fatalf("EnsureControllerPAT: %v", err)
 	}
 
-	state := brokerctl.StateDir(filepath.Dir(p))
-	tok, err := state.LoadControllerPAT()
+	st := state.ForConfig(filepath.Dir(p))
+	tok, err := st.LoadControllerPAT()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,11 +445,11 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	t.Cleanup(func() { brokerSelfExe = prev })
 
 	dir := t.TempDir()
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -463,10 +463,10 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	// The stamp must MATCH, or Start correctly treats the running proxy as
 	// serving a different config and restarts it — which here would kill the
 	// test process, since remote.pid names it.
-	if err := state.WriteRemoteStamp("v-test", "hash-test"); err != nil {
+	if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
 		t.Fatal(err)
 	}
-	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: port,
+	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: port,
 		version: "v-test", cfgHash: "hash-test"}
 	if err := rc.Start(context.Background()); err != nil {
 		t.Fatalf("Start on an already-serving proxy must reuse (nil), got: %v", err)
@@ -490,8 +490,8 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	t.Cleanup(func() { brokerSelfExe = prev })
 
 	dir := t.TempDir()
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	victim := exec.Command("/bin/sh", "-c", "sleep 30")
@@ -499,7 +499,7 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = victim.Process.Kill(); _, _ = victim.Process.Wait() })
-	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(victim.Process.Pid)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(victim.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -509,10 +509,10 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	defer ln.Close()
 
 	// Stamp records a DIFFERENT config from the one the controller wants.
-	if err := state.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
+	if err := st.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
 		t.Fatal(err)
 	}
-	rc := &remoteController{state: state, configPath: "/x/lever.yaml",
+	rc := &remoteController{state: st, configPath: "/x/lever.yaml",
 		port: ln.Addr().(*net.TCPAddr).Port, version: "v-test", cfgHash: "hash-NEW"}
 
 	if err := rc.Start(context.Background()); err == nil {
@@ -553,15 +553,15 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 	shortenRemoteProxyStartWait(t)
 
 	dir := t.TempDir()
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(state.RemotePID(), []byte("2147483646\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte("2147483646\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: 48997}
+	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48997}
 	err := rc.Start(context.Background())
 	if err == nil {
 		t.Fatal("a stand-in that never listens must not report the proxy as serving")
@@ -569,7 +569,7 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 	if !strings.Contains(err.Error(), "not listening") {
 		t.Fatalf("Start after a killed proxy must respawn and then check it, got: %v", err)
 	}
-	if _, serr := os.Stat(state.RemoteLog()); serr != nil {
+	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
 		t.Fatalf("remote.log not created by the respawn: %v", serr)
 	}
 }
@@ -593,16 +593,16 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	shortenRemoteProxyStartWait(t)
 
 	dir := t.TempDir()
-	state := brokerctl.StateDir(dir) // no remote.pid at all
+	st := state.ForConfig(dir) // no remote.pid at all
 
-	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: 48996}
+	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48996}
 	// As above: the stand-in never binds, so the spawn is proved by the
 	// liveness check's complaint rather than by a nil.
 	err := rc.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "not listening") {
 		t.Fatalf("Start with no prior proxy must spawn and then check it, got: %v", err)
 	}
-	if _, serr := os.Stat(state.RemoteLog()); serr != nil {
+	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
 		t.Fatalf("remote.log not created by the spawn: %v", serr)
 	}
 }
@@ -632,7 +632,7 @@ func callHasPrefix(c leverexec.Call, prefix string) bool {
 // particular no second throwaway server start).
 func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	tree := t.TempDir()
-	state := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
 	f := leverexec.NewFakeRunner()
@@ -645,19 +645,19 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
 	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
 
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, false); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
 	// Persisted 0600 with the minted token.
-	fi, err := os.Stat(state.ControllerPAT())
+	fi, err := os.Stat(st.ControllerPAT())
 	if err != nil {
 		t.Fatalf("controller.pat not written: %v", err)
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("controller.pat perm = %#o, want 0600", perm)
 	}
-	tok, err := state.LoadControllerPAT()
+	tok, err := st.LoadControllerPAT()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +722,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	// Second call: PAT already persisted → no-op. In particular, no second
 	// throwaway server start (the agent-free mint window opens at most once).
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, false); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
 		t.Fatalf("second ensureControllerPAT: %v", err)
 	}
 	if len(f.Calls) != callsAfterFirst {
@@ -805,7 +805,7 @@ func scopesArg(t *testing.T, c leverexec.Call) string {
 // window preserves the agent-free-window property on first bootstrap).
 func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	tree := t.TempDir()
-	state := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
 	f := leverexec.NewFakeRunner()
@@ -813,7 +813,7 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	scriptTokenCreate(f, "lever-controller", "pat-controller-1")
 	scriptTokenCreate(f, "lever-remote", "pat-remote-1")
 
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, true); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -858,21 +858,21 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 		t.Fatalf("remote mint --scopes = %q, want %q", got, want)
 	}
 
-	ctok, err := state.LoadControllerPAT()
+	ctok, err := st.LoadControllerPAT()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ctok != "pat-controller-1" {
 		t.Fatalf("persisted controller PAT = %q, want %q", ctok, "pat-controller-1")
 	}
-	rtok, err := state.LoadRemotePAT()
+	rtok, err := st.LoadRemotePAT()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rtok != "pat-remote-1" {
 		t.Fatalf("persisted remote PAT = %q, want %q", rtok, "pat-remote-1")
 	}
-	for _, path := range []string{state.ControllerPAT(), state.RemotePAT()} {
+	for _, path := range []string{st.ControllerPAT(), st.RemotePAT()} {
 		fi, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("%s not written: %v", path, err)
@@ -891,9 +891,9 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 // controller PAT is left untouched.
 func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	tree := t.TempDir()
-	state := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
-	if err := state.SaveControllerPAT("pat-controller-existing"); err != nil {
+	if err := st.SaveControllerPAT("pat-controller-existing"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -904,7 +904,7 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	// mistakenly re-mints the controller PAT, the fake runner errors on the
 	// unscripted command and fails the test.
 
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, true); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -915,14 +915,14 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 		t.Fatalf("scion hub token create calls = %d, want 1 (remote only)", n)
 	}
 
-	ctok, err := state.LoadControllerPAT()
+	ctok, err := st.LoadControllerPAT()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ctok != "pat-controller-existing" {
 		t.Fatalf("controller PAT = %q, want unchanged %q", ctok, "pat-controller-existing")
 	}
-	rtok, err := state.LoadRemotePAT()
+	rtok, err := st.LoadRemotePAT()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -935,18 +935,18 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 // nothing to mint, so no dev-auth window opens at all (zero scion calls).
 func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	tree := t.TempDir()
-	state := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
-	if err := state.SaveControllerPAT("pat-controller-existing"); err != nil {
+	if err := st.SaveControllerPAT("pat-controller-existing"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.SaveRemotePAT("pat-remote-existing"); err != nil {
+	if err := st.SaveRemotePAT("pat-remote-existing"); err != nil {
 		t.Fatal(err)
 	}
 
 	f := leverexec.NewFakeRunner() // no scripts: any call is an error
 
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, true); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 	if len(f.Calls) != 0 {
@@ -959,7 +959,7 @@ func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 // lever-remote token, no remote.pat written.
 func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	tree := t.TempDir()
-	state := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
 	f := leverexec.NewFakeRunner()
@@ -968,21 +968,21 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	// Deliberately NOT scripting "--name lever-remote": remoteEnabled=false
 	// must never touch it.
 
-	if err := ensureControllerPAT(context.Background(), f, state, tree, jailMount, false); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
 	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
 		t.Fatalf("scion hub token create calls = %d, want 1 (controller only)", n)
 	}
-	ctok, err := state.LoadControllerPAT()
+	ctok, err := st.LoadControllerPAT()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ctok != "pat-controller-3" {
 		t.Fatalf("persisted controller PAT = %q, want %q", ctok, "pat-controller-3")
 	}
-	rtok, err := state.LoadRemotePAT()
+	rtok, err := st.LoadRemotePAT()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1077,8 +1077,8 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	}
 
 	// Persisted 0600 under the config-derived state dir.
-	state := brokerctl.StateDir(filepath.Dir(p))
-	fi, err := os.Stat(state.ControllerPAT())
+	st := state.ForConfig(filepath.Dir(p))
+	fi, err := os.Stat(st.ControllerPAT())
 	if err != nil {
 		t.Fatalf("controller.pat not written: %v", err)
 	}
@@ -1138,13 +1138,13 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	remoteProxyStartTimeout, remoteProxyStartInterval = 50*time.Millisecond, 5*time.Millisecond
 
 	dir := t.TempDir()
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// What the proxy actually wrote in the live failure.
 	logLine := "Error: remoteproxy: bind: listen tcp 127.0.0.1:8446: bind: address already in use"
-	if err := os.WriteFile(state.RemoteLog(), []byte("remote proxy \"x\" serving\n"+logLine+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemoteLog(), []byte("remote proxy \"x\" serving\n"+logLine+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1164,7 +1164,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
 
-	rc := &remoteController{state: state, configPath: filepath.Join(dir, "lever.yaml"), port: port}
+	rc := &remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: port}
 	err = rc.awaitListening(context.Background(), child)
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
@@ -1174,7 +1174,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	if !strings.Contains(err.Error(), "address already in use") {
 		t.Fatalf("error does not quote the log's reason: %v", err)
 	}
-	if !strings.Contains(err.Error(), state.RemoteLog()) {
+	if !strings.Contains(err.Error(), st.RemoteLog()) {
 		t.Fatalf("error does not name the log: %v", err)
 	}
 
@@ -1219,8 +1219,8 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	t.Cleanup(func() { brokerSelfExe = prev })
 
 	dir := t.TempDir()
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	oldProxy := exec.Command("/bin/sh", "-c", "sleep 30")
@@ -1228,12 +1228,12 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = oldProxy.Process.Kill(); _, _ = oldProxy.Process.Wait() })
-	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(oldProxy.Process.Pid)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(oldProxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Stamp matches: this is a pure PORT move, so the old proxy is "ours" —
 	// it is simply serving somewhere else.
-	if err := state.WriteRemoteStamp("v-test", "hash-test"); err != nil {
+	if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1246,7 +1246,7 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	freePort := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	rc := &remoteController{state: state, configPath: "/x/lever.yaml", port: freePort,
+	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: freePort,
 		version: "v-test", cfgHash: "hash-test"}
 	if err := rc.Start(context.Background()); err == nil {
 		t.Fatal("Start must not silently succeed here")
@@ -1262,7 +1262,7 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	// The other half of "unstoppable": the stop must also drop remote.pid, so
 	// nothing later mistakes a process lever no longer controls for the live
 	// proxy. (Here the respawn fails, so nothing rewrites the file.)
-	if _, err := os.Stat(state.RemotePID()); err == nil {
+	if _, err := os.Stat(st.RemotePID()); err == nil {
 		t.Fatal("remote.pid still names the stopped proxy — `lever remote status` and the next apply both read it as the live one")
 	}
 }
@@ -1315,7 +1315,7 @@ func TestAwaitListeningHonoursContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	rc := &remoteController{state: brokerctl.StateDir(t.TempDir()), port: port}
+	rc := &remoteController{state: state.ForConfig(t.TempDir()), port: port}
 	start := time.Now()
 	if err := rc.awaitListening(ctx, child); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)

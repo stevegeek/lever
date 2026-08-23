@@ -18,8 +18,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // writeRemoteConfig writes a minimal canonical lever.yaml into dir, with
@@ -156,17 +156,17 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 		freeRemotePort(t), freeRemotePort(t)))
 	t.Chdir(dir)
 
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// The record a previous apply left, for a config this serve knows nothing
 	// about. remote.pid names this process because the command under test runs
 	// in it — exactly the file a hand-started proxy takes over.
-	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.WriteRemoteStamp("v-previous-apply", "hash-of-another-config"); err != nil {
+	if err := st.WriteRemoteStamp("v-previous-apply", "hash-of-another-config"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,9 +184,9 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := brokerctl.RemoteConfigHash(app)
+	want := state.RemoteConfigHash(app)
 	deadline := time.Now().Add(5 * time.Second)
-	for !state.RemoteStampMatches(versionString(), want) {
+	for !st.RemoteStampMatches(versionString(), want) {
 		if time.Now().After(deadline) {
 			t.Fatalf("serve never recorded the config it loaded; output: %s", out.String())
 		}
@@ -196,7 +196,7 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	if state.RemoteStampMatches("v-previous-apply", "hash-of-another-config") {
+	if st.RemoteStampMatches("v-previous-apply", "hash-of-another-config") {
 		t.Error("the previous apply's record survived — apply would reuse this proxy as if it were serving that config")
 	}
 
@@ -261,12 +261,12 @@ func TestRemoteStatusNeverPrintsPATValue(t *testing.T) {
 	p := writeRemoteConfig(t, dir, "orbstack", "remote:\n  enabled: true\n  base_url: \"https://mac.tail1234.ts.net\"\n")
 	t.Chdir(dir)
 
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	secret := "scion_pat_super_secret_value"
-	if err := state.SaveRemotePAT(secret); err != nil {
+	if err := st.SaveRemotePAT(secret); err != nil {
 		t.Fatal(err)
 	}
 
@@ -288,13 +288,13 @@ func TestRemoteStatusReportsLivePidAndListener(t *testing.T) {
 	p := writeRemoteConfig(t, dir, "orbstack", "remote:\n  enabled: true\n  port: 0\n  base_url: \"https://mac.tail1234.ts.net\"\n")
 	t.Chdir(dir)
 
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// Record THIS test process's own pid (always alive) so the liveness
 	// check reports alive without needing a real proxy process.
-	if err := os.WriteFile(state.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

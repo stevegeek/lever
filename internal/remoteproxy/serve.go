@@ -3,17 +3,22 @@ package remoteproxy
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/stevegeek/lever/internal/daemon"
 )
+
+// warnf prints a non-fatal problem to stderr in the "lever: warning:" form
+// the rest of the host-side daemons use.
+func warnf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "lever: warning: "+format+"\n", args...)
+}
 
 // ServeConfig configures Serve.
 type ServeConfig struct {
@@ -38,7 +43,7 @@ type ServeConfig struct {
 	// The running proxy has to be what writes that record, which is why this
 	// hook exists at all. `lever apply` decides whether to reuse a running
 	// proxy or restart it by comparing a host-side stamp
-	// (brokerctl.State.WriteRemoteStamp) — but apply is not the only thing
+	// (state.State.WriteRemoteStamp) — but apply is not the only thing
 	// that starts proxies, while the pid file it reads is written by every
 	// one of them. A proxy started by hand against a different config used to
 	// inherit the stamp apply had left, so apply reported success against a
@@ -54,7 +59,7 @@ type ServeConfig struct {
 	// working must not be taken down over a bookkeeping file. That is only
 	// safe while the implementation leaves NO record behind when it fails:
 	// no stamp costs the next apply a redundant restart, a stale one costs it
-	// the whole check. brokerctl.State.WriteRemoteStamp removes the file on
+	// the whole check. state.State.WriteRemoteStamp removes the file on
 	// every failure path for this reason.
 	Stamp func() error
 	// Provider, when non-nil, is the local OIDC provider, served on its OWN
@@ -95,16 +100,16 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		}
 	}
 
-	if err := writePIDFile(cfg.PIDPath); err != nil {
-		closeListeners(ln, provLn)
+	if err := daemon.WritePIDFile(cfg.PIDPath); err != nil {
+		daemon.CloseListeners(ln, provLn)
 		return err
 	}
-	defer removePIDFile(cfg.PIDPath)
+	defer daemon.RemovePIDFile(cfg.PIDPath)
 
 	if cfg.Stamp != nil {
 		if err := cfg.Stamp(); err != nil {
-			fmt.Fprintf(os.Stderr, "lever: warning: could not record what this proxy is serving: %v\n"+
-				"lever: the next `lever apply` will restart the proxy rather than reuse it\n", err)
+			warnf("could not record what this proxy is serving: %v\n"+
+				"lever: the next `lever apply` will restart the proxy rather than reuse it", err)
 		}
 	}
 
@@ -182,16 +187,6 @@ func listenLoopback(port int) (net.Listener, error) {
 	return ln, nil
 }
 
-// closeListeners closes every non-nil listener, for the failure paths between
-// binding and serving.
-func closeListeners(lns ...net.Listener) {
-	for _, ln := range lns {
-		if ln != nil {
-			_ = ln.Close()
-		}
-	}
-}
-
 // serverReadHeaderTimeout bounds how long a client may take to send its
 // request headers, and serverIdleTimeout how long a kept-alive connection may
 // sit unused between requests.
@@ -234,34 +229,6 @@ func isLoopbackAddr(ta *net.TCPAddr) bool {
 	return ta != nil && ta.IP.IsLoopback()
 }
 
-// writePIDFile records the running process's pid at path (0600), creating
-// the parent directory if needed. A no-op when path is empty (tests that
-// don't care about pid tracking).
-func writePIDFile(path string) error {
-	if path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("remoteproxy: pid dir: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
-		return fmt.Errorf("remoteproxy: write pid: %w", err)
-	}
-	return nil
-}
-
-// removePIDFile deletes the pid file on shutdown. A removal failure is a
-// warning, not fatal (the process is exiting anyway); an already-absent file
-// is fine. A no-op when path is empty.
-func removePIDFile(path string) {
-	if path == "" {
-		return
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(os.Stderr, "lever: warning: could not remove %s: %v\n", path, err)
-	}
-}
-
 // OpenAudit opens path for append (creating it 0600 if absent) and returns a
 // function that appends one newline-terminated JSON AuditLine per call, plus
 // the underlying io.Closer. Writes are serialized so concurrent requests
@@ -277,14 +244,14 @@ func OpenAudit(path string) (func(AuditLine), io.Closer, error) {
 	write := func(line AuditLine) {
 		b, err := json.Marshal(line)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "lever: warning: audit marshal: %v\n", err)
+			warnf("audit marshal: %v", err)
 			return
 		}
 		b = append(b, '\n')
 		mu.Lock()
 		defer mu.Unlock()
 		if _, err := f.Write(b); err != nil {
-			fmt.Fprintf(os.Stderr, "lever: warning: audit write: %v\n", err)
+			warnf("audit write: %v", err)
 		}
 	}
 	return write, f, nil

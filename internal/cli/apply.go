@@ -26,6 +26,7 @@ import (
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -37,7 +38,7 @@ const scionScratchpadSharedDir = "scratchpad"
 // hubJailTransport builds the Hub REST transport: curl, inside the jail,
 // carrying the controller PAT. Shared by apply's shared-dir strip and doctor's
 // shared-dir check so both address the same hub the in-jail scion CLI does.
-func hubJailTransport(jr leverexec.Runner, state brokerctl.State) *hubapi.JailCurl {
+func hubJailTransport(jr leverexec.Runner, state state.State) *hubapi.JailCurl {
 	return &hubapi.JailCurl{
 		Runner:  jr,
 		BaseURL: scion.DefaultHubEndpoint,
@@ -108,11 +109,11 @@ func remoteServeCmd(self, configPath, outLog string) (*exec.Cmd, *os.File, error
 // why that check exists: without it, a proxy that died on a deterministic bind
 // error left `lever apply` reporting success.
 type remoteController struct {
-	state      brokerctl.State
+	state      state.State
 	configPath string
 	port       int    // app.EffectiveRemotePort()
 	version    string // this binary, for the reuse stamp
-	cfgHash    string // brokerctl.RemoteConfigHash(app), for the reuse stamp
+	cfgHash    string // state.RemoteConfigHash(app), for the reuse stamp
 }
 
 func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", rc.port) }
@@ -125,7 +126,7 @@ func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", r
 // spawning a duplicate — a duplicate would fail to bind and die, clobbering
 // remote.pid with a dead pid, the same failure mode brokerController.Start's
 // #19 reuse shortcut guards against for the broker. Liveness is the same
-// pidfile+TCP-dial check `lever remote status` uses (remotePIDStatus +
+// pidfile+TCP-dial check `lever remote status` uses (state.PIDStatus +
 // tcpDial): a live-but-not-yet-listening pid (a startup race) or a
 // stale/absent pid both fall through to a fresh spawn.
 //
@@ -142,7 +143,7 @@ func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", r
 // not grow one — it fronts the hub, so any listener of its own would be
 // reachable by whatever reaches the proxy. Hence a host-side stamp file.
 func (rc *remoteController) Start(ctx context.Context) error {
-	if _, found, alive := remotePIDStatus(rc.state.RemotePID()); found && alive {
+	if _, found, alive := state.PIDStatus(rc.state.RemotePID()); found && alive {
 		if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) && tcpDial(rc.addr()) == nil {
 			return nil // already serving: this binary, this config, this port
 		}
@@ -157,7 +158,7 @@ func (rc *remoteController) Start(ctx context.Context) error {
 		// then OVERWROTE remote.pid, so no `lever` verb could ever stop the
 		// leaked process again. An independent review caught it.
 		fmt.Fprintln(os.Stderr, "lever: the remote proxy predates this binary or its remote config changed — restarting it")
-		if err := rc.state.StopRemoteProxy(); err != nil {
+		if err := brokerctl.StopRemoteProxy(rc.state); err != nil {
 			return fmt.Errorf("restarting the remote proxy: %w", err)
 		}
 	}
@@ -331,7 +332,7 @@ func remotePATScopes() []string {
 // --scopes`, and the scopes agent:manage/agent:attach/project:read all exist;
 // the residual dev-token is at the jail user's ~/.scion/dev-token (resolved
 // in-jail below, not assumed).
-func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerctl.State, tree, jailMount string, remoteEnabled bool) error {
+func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state state.State, tree, jailMount string, remoteEnabled bool) error {
 	ctok, _ := state.LoadControllerPAT()
 	rtok, _ := state.LoadRemotePAT()
 	needController := ctok == ""
@@ -454,14 +455,14 @@ func brokerReusable(got broker.EpochResponse, wantVersion, wantHash string) bool
 // verbatim without duplicating it). Built once, after EnsureUp/HostAliasV4 have
 // resolved the run-user/uid and host alias.
 type brokerController struct {
-	app        *config.App     // EffectiveJailPort, ManagerCN, ConfigHash, Tree (Rearm)
-	state      brokerctl.State // pid file, out log, CA cert, StopBroker
-	configPath string          // passed to `lever broker serve`
-	adminURL   string          // http://127.0.0.1:<admin port>
-	aliasV4    string          // resolved host-alias IP (LEVER_HOST_ALIAS_IP for the child)
-	brokerHost string          // host agents dial the broker by (IP if resolved, else hostname)
-	runUser    string          // in-machine run user for the broker child
-	runUID     string          // in-machine run uid for the broker child
+	app        *config.App // EffectiveJailPort, ManagerCN, ConfigHash, Tree (Rearm)
+	state      state.State // pid file, out log, CA cert, StopBroker
+	configPath string      // passed to `lever broker serve`
+	adminURL   string      // http://127.0.0.1:<admin port>
+	aliasV4    string      // resolved host-alias IP (LEVER_HOST_ALIAS_IP for the child)
+	brokerHost string      // host agents dial the broker by (IP if resolved, else hostname)
+	runUser    string      // in-machine run user for the broker child
+	runUID     string      // in-machine run uid for the broker child
 	// admin is the loopback client for the broker's admin API. Its timeout
 	// bounds every /epoch and /bootstrap call on its own, so a wedged broker
 	// cannot hang an apply step whose ctx carries no deadline.
@@ -507,7 +508,7 @@ func (bc *brokerController) Start(ctx context.Context) error {
 			return nil // same binary + same broker config; keep the process + PID
 		}
 		fmt.Fprintf(os.Stderr, "lever: broker predates this binary or its tool config changed — restarting it (was %q)\n", er.Version)
-		if err := bc.state.StopBroker(); err != nil {
+		if err := brokerctl.StopBroker(bc.state); err != nil {
 			return fmt.Errorf("stopping the stale broker before restart: %w", err)
 		}
 	}
@@ -586,7 +587,7 @@ func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, 
 // start-manager's Step.Target is the manager's slug, not the tree dir — this
 // controller is the only place that has app.Tree in scope.
 func (bc *brokerController) Rearm(ctx context.Context) error {
-	if err := bc.state.StopBroker(); err != nil {
+	if err := brokerctl.StopBroker(bc.state); err != nil {
 		return fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
 	}
 	if err := bc.Start(ctx); err != nil {
@@ -635,7 +636,7 @@ type applyWiring struct {
 	sc    *scion.Client
 	app   *config.App
 	jr    leverexec.Runner
-	state brokerctl.State
+	state state.State
 	// brokerHost is what agents (and the guest login forwarder) dial the host
 	// by: the resolved host-alias IP when the backend has one, else the alias
 	// hostname. Under closed-internet egress DNS/53 is dropped, so the
@@ -684,18 +685,18 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// ensureControllerPAT (wired into Deps.EnsureControllerPAT below) persists
 	// it mid-apply (see scion.Options.HubTokenSource's doc: lazy, read at
 	// call time, wins over a static HubToken).
-	state := stateFor(configPath)
-	sc := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole)
+	st := stateFor(configPath)
+	sc := brokerctl.HostScionClient(jr, st, app.Scion.AgentRole)
 
 	// The hub's session-cookie signing key: generated once, adopted verbatim
 	// on every later apply, never rotated by lever (see EnsureSessionSecret).
 	// Threaded into Deps so every hub start signs sessions with the same key.
-	sessionSecret, err := state.EnsureSessionSecret()
+	sessionSecret, err := st.EnsureSessionSecret()
 	if err != nil {
 		return nil, err
 	}
 
-	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: state, cmd: cmd}
+	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: cmd}
 	aliasV4 := b.HostAliasV4()
 	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
 
@@ -704,7 +705,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// EnsureUp/HostAliasV4, so runUser/runUID/aliasV4 are already resolved.
 	bc := &brokerController{
 		app:        app,
-		state:      state,
+		state:      st,
 		configPath: configPath,
 		adminURL:   fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort()),
 		aliasV4:    aliasV4,
@@ -720,11 +721,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// Run's own converge-off reconciliation calls StopRemoteProxy — see
 	// internal/apply/run.go.
 	rc := &remoteController{
-		state:      state,
+		state:      st,
 		configPath: configPath,
 		port:       app.EffectiveRemotePort(),
 		version:    versionString(),
-		cfgHash:    brokerctl.RemoteConfigHash(app),
+		cfgHash:    state.RemoteConfigHash(app),
 	}
 
 	w.deps = apply.Deps{
@@ -792,11 +793,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		// StartRemoteProxy/StopRemoteProxy back the remote-proxy apply step
 		// (present only when app.RemoteEnabled() — see plan.go) and Run's
 		// own converge-to-off reconciliation when it's false (see run.go).
-		// StopRemoteProxy goes straight to brokerctl.State — no controller
+		// StopRemoteProxy goes straight to state.State — no controller
 		// method needed, since teardown-by-pidfile carries no lifecycle
 		// state of its own (unlike Start's reuse probe).
 		StartRemoteProxy: rc.Start,
-		StopRemoteProxy:  func(context.Context) error { return state.StopRemoteProxy() },
+		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is

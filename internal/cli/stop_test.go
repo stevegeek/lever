@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // TestStopSuspendsManager verifies the happy path: with a reachable jail,
@@ -31,7 +31,7 @@ func TestStopSuspendsManager(t *testing.T) {
 	// Seed the controller PAT so the suspend client's HubTokenSource resolves it:
 	// this guards that stop's scion client keeps its HubTokenSource wiring (a
 	// dropped source would authenticate anonymously against the dev-auth-off hub).
-	if err := brokerctl.StateDir(dir).SaveControllerPAT("pat-stop-suspend"); err != nil {
+	if err := state.ForConfig(dir).SaveControllerPAT("pat-stop-suspend"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -133,15 +133,15 @@ func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 
 // TestStopAlsoStopsRemoteProxy proves `lever stop` tears the remote-access
 // proxy down alongside the broker: a live pid recorded in remote.pid must be
-// killed and the pid file removed (brokerctl.State.StopRemoteProxy mirrors
+// killed and the pid file removed (state.State.StopRemoteProxy mirrors
 // StopBroker exactly — see its doc; the mechanism itself is unit-tested in
 // internal/brokerctl, this only pins that stop.go actually calls it).
 func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	dir := instanceDir(t, "demo")
 	t.Chdir(dir)
 
-	state := brokerctl.StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("sleep", "60")
@@ -149,7 +149,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	if err := os.WriteFile(state.RemotePID(), []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
+	if err := os.WriteFile(st.RemotePID(), []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,7 +163,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	if _, err := os.Stat(state.RemotePID()); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(st.RemotePID()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("remote.pid should be removed after stop, stat err = %v", err)
 	}
 	_ = cmd.Wait()
@@ -197,7 +197,7 @@ func TestStopHostDaemonsIsQuietWhenNothingRuns(t *testing.T) {
 	var errOut bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetErr(&errOut)
-	stopHostDaemons(cmd, brokerctl.StateDir(t.TempDir()))
+	stopHostDaemons(cmd, state.ForConfig(t.TempDir()))
 	if errOut.Len() != 0 {
 		t.Fatalf("unexpected warnings: %s", errOut.String())
 	}

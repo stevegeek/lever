@@ -11,24 +11,26 @@ import (
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/skills"
+	"github.com/stevegeek/lever/internal/state"
 )
 
-func scaffoldFixture(t *testing.T) (*config.App, string, string) {
+func scaffoldFixture(t *testing.T) (*config.App, string, state.State) {
 	t.Helper()
 	root := t.TempDir()
 	tree := filepath.Join(root, "workspace")
-	for _, d := range []string{filepath.Join(tree, "workers", "scratch"), filepath.Join(root, ".lever-state")} {
+	st := state.ForConfig(root)
+	for _, d := range []string{filepath.Join(tree, "workers", "scratch"), st.Dir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}}
-	return app, tree, filepath.Join(root, ".lever-state")
+	return app, tree, st
 }
 
-func readState(t *testing.T, stateDir string) map[string]string {
+func readState(t *testing.T, stateDir state.State) map[string]string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(stateDir, "skills.json"))
+	b, err := os.ReadFile(stateDir.Skills())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +153,7 @@ func TestEnsureClaudeMDBlock(t *testing.T) {
 	}
 }
 
-func readAdopted(t *testing.T, stateDir string) map[string]string {
+func readAdopted(t *testing.T, stateDir state.State) map[string]string {
 	t.Helper()
 	m, err := loadAdoptedState(stateDir)
 	if err != nil {

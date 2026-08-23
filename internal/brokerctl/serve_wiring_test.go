@@ -15,7 +15,9 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/daemon"
 	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // wiringApp returns a two-worker orbstack app; directives on iff signers != "".
@@ -35,14 +37,11 @@ func wiringApp(tree, signers string) *config.App {
 // decorateForTest builds a cfg and decorates it against a real orbstack backend
 // with a deterministic environment (no jail-runner, no host-alias override), so
 // the assertions see only the config-derived wiring.
-func decorateForTest(t *testing.T, app *config.App, version string) (broker.Config, State) {
+func decorateForTest(t *testing.T, app *config.App, version string) (broker.Config, state.State) {
 	t.Helper()
 	// Deterministic env: unset the jail-runner and host-alias hooks so
 	// decorateConfig takes the no-Runtime path and BrokerURL falls back to the
 	// backend's host alias.
-	t.Setenv("LEVER_JAIL_USER", "")
-	t.Setenv("LEVER_JAIL_UID", "")
-	t.Setenv("LEVER_HOST_ALIAS_IP", "")
 
 	kp, err := token.Generate()
 	if err != nil {
@@ -60,14 +59,14 @@ func decorateForTest(t *testing.T, app *config.App, version string) (broker.Conf
 	if err != nil {
 		t.Fatalf("BuildBroker: %v", err)
 	}
-	state := StateDir(t.TempDir())
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
-	if err := decorateConfig(&cfg, app, state, be, version); err != nil {
+	if err := decorateConfig(&cfg, app, st, be, version, ServeEnv{}); err != nil {
 		t.Fatalf("decorateConfig: %v", err)
 	}
-	return cfg, state
+	return cfg, st
 }
 
 func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
@@ -133,7 +132,7 @@ func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
 func TestDecorateConfigWiresDirectiveFieldsWhenEnabled(t *testing.T) {
 	tree := t.TempDir()
 	app := wiringApp(tree, "signers") // directives ON
-	cfg, state := decorateForTest(t, app, "v0")
+	cfg, st := decorateForTest(t, app, "v0")
 
 	if cfg.DirectiveVerifier == nil {
 		t.Fatal("DirectiveVerifier is nil with directives enabled")
@@ -141,7 +140,7 @@ func TestDecorateConfigWiresDirectiveFieldsWhenEnabled(t *testing.T) {
 	if cfg.InstanceID != "demo" {
 		t.Errorf("InstanceID = %q, want app name", cfg.InstanceID)
 	}
-	if want := filepath.Join(state.Dir, "directives.log"); cfg.DirectiveAuditPath != want {
+	if want := filepath.Join(st.Dir, "directives.log"); cfg.DirectiveAuditPath != want {
 		t.Errorf("DirectiveAuditPath = %q, want %q", cfg.DirectiveAuditPath, want)
 	}
 	if cfg.DirectiveExpiryMax != 24*time.Hour {
@@ -175,22 +174,22 @@ func TestBindListenersBindsAllThreeAndChmodsSocket(t *testing.T) {
 		t.Fatalf("mkdir temp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	state := StateDir(dir)
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
 
-	jailLn, adminLn, dirLn, err := bindListeners(app, state)
+	jailLn, adminLn, dirLn, err := bindListeners(app, st)
 	if err != nil {
 		t.Fatalf("bindListeners: %v", err)
 	}
-	defer closeListeners(jailLn, adminLn, dirLn)
+	defer daemon.CloseListeners(jailLn, adminLn, dirLn)
 
 	if jailLn == nil || adminLn == nil || dirLn == nil {
 		t.Fatalf("listeners = (%v,%v,%v), want all non-nil", jailLn, adminLn, dirLn)
 	}
 	// The UDS was created at the directive-sock path and chmod'd to 0600.
-	fi, err := os.Stat(state.DirectiveSock())
+	fi, err := os.Stat(st.DirectiveSock())
 	if err != nil {
 		t.Fatalf("stat directive socket: %v", err)
 	}
@@ -205,21 +204,21 @@ func TestBindListenersNoSocketWhenDirectivesDisabled(t *testing.T) {
 	app.Broker.JailPort = freePort(t)
 	app.Broker.AdminPort = freePort(t)
 
-	state := StateDir(t.TempDir())
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
 
-	jailLn, adminLn, dirLn, err := bindListeners(app, state)
+	jailLn, adminLn, dirLn, err := bindListeners(app, st)
 	if err != nil {
 		t.Fatalf("bindListeners: %v", err)
 	}
-	defer closeListeners(jailLn, adminLn, dirLn)
+	defer daemon.CloseListeners(jailLn, adminLn, dirLn)
 
 	if dirLn != nil {
 		t.Error("dirLn is non-nil with directives disabled, want nil (no channel)")
 	}
-	if _, err := os.Stat(state.DirectiveSock()); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Stat(st.DirectiveSock()); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("directive socket exists with directives disabled: %v", err)
 	}
 }
@@ -232,14 +231,14 @@ func TestBindListenersClosesJailWhenAdminBindFails(t *testing.T) {
 	app.Broker.JailPort = port
 	app.Broker.AdminPort = port
 
-	state := StateDir(t.TempDir())
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
 
-	jailLn, adminLn, dirLn, err := bindListeners(app, state)
+	jailLn, adminLn, dirLn, err := bindListeners(app, st)
 	if err == nil {
-		closeListeners(jailLn, adminLn, dirLn)
+		daemon.CloseListeners(jailLn, adminLn, dirLn)
 		t.Fatal("bindListeners succeeded, want admin-bind failure on the shared port")
 	}
 	if jailLn != nil || adminLn != nil || dirLn != nil {

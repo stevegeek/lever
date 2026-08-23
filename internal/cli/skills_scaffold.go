@@ -11,6 +11,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/skills"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // The scaffold engine behind `lever init` and doctor's skills check: writes
@@ -57,20 +58,20 @@ func skillTargets(app *config.App) []skillTarget {
 	return ts
 }
 
+// state.Skills records the scaffold hashes; state.SkillsAdopted records
+// owner-blessed customizations (path → hash of the adopted on-disk content).
+// They are separate files so adoption never disturbs the scaffold-tracking
+// schema. Both live host-side, outside the mounted tree, so an agent cannot
+// re-bless its own tampering.
 const (
-	skillStateFile = "skills.json"
-	// skillAdoptedFile records owner-blessed customizations (path → hash of
-	// the adopted on-disk content). Separate from skills.json so adoption
-	// never disturbs the scaffold-tracking schema. Lives host-side, outside
-	// the mounted tree, so an agent cannot re-bless its own tampering.
-	skillAdoptedFile = "skills-adopted.json"
 	// claudeMDAdoptKey is the adoption-map key for the tree-root CLAUDE.md
 	// (whole-file hash — adoption covers the file, not just the lever block).
 	claudeMDAdoptKey = "CLAUDE.md"
 )
 
-func loadHashState(stateDir, file string) (map[string]string, error) {
-	b, err := os.ReadFile(filepath.Join(stateDir, file))
+// loadHashState reads a path → hash map from path; an absent file is empty.
+func loadHashState(path string) (map[string]string, error) {
+	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	}
@@ -79,39 +80,41 @@ func loadHashState(stateDir, file string) (map[string]string, error) {
 	}
 	m := map[string]string{}
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", file, err)
+		return nil, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
 	}
 	return m, nil
 }
 
-func saveHashState(stateDir, file string, st map[string]string) error {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+// saveHashState writes a path → hash map to path (0644 — hashes are not
+// secrets), creating the state dir if needed.
+func saveHashState(path string, m map[string]string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(st, "", "  ")
+	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(stateDir, file), append(b, '\n'), 0o644)
+	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
-func loadSkillState(stateDir string) (map[string]string, error) {
-	return loadHashState(stateDir, skillStateFile)
+func loadSkillState(st state.State) (map[string]string, error) {
+	return loadHashState(st.Skills())
 }
 
-func saveSkillState(stateDir string, st map[string]string) error {
-	return saveHashState(stateDir, skillStateFile, st)
+func saveSkillState(st state.State, m map[string]string) error {
+	return saveHashState(st.Skills(), m)
 }
 
-func loadAdoptedState(stateDir string) (map[string]string, error) {
-	return loadHashState(stateDir, skillAdoptedFile)
+func loadAdoptedState(st state.State) (map[string]string, error) {
+	return loadHashState(st.SkillsAdopted())
 }
 
-func saveAdoptedState(stateDir string, st map[string]string) error {
-	return saveHashState(stateDir, skillAdoptedFile, st)
+func saveAdoptedState(st state.State, m map[string]string) error {
+	return saveHashState(st.SkillsAdopted(), m)
 }
 
-func syncSkills(app *config.App, stateDir string, force, check bool) ([]skillSyncResult, error) {
+func syncSkills(app *config.App, stateDir state.State, force, check bool) ([]skillSyncResult, error) {
 	st, err := loadSkillState(stateDir)
 	if err != nil {
 		return nil, err
@@ -246,7 +249,7 @@ func claudeMDBlockCurrent(s string) bool {
 		s[begin:end+len(skillMarkerEnd)] == claudeMDBlock()
 }
 
-func ensureClaudeMDBlock(tree, stateDir string, force, check bool) (skillAction, error) {
+func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (skillAction, error) {
 	adopted, err := loadAdoptedState(stateDir)
 	if err != nil {
 		return "", err
@@ -324,7 +327,7 @@ func skillsUpToDate(results []skillSyncResult, blockAction skillAction) bool {
 // customizations qualify — framework-current content needs no baseline, and
 // a stale-but-unmodified scaffold is refresh territory, not a customization
 // (adopting it would pin old framework content).
-func adoptSkills(app *config.App, stateDir string) ([]skillSyncResult, error) {
+func adoptSkills(app *config.App, stateDir state.State) ([]skillSyncResult, error) {
 	st, err := loadSkillState(stateDir)
 	if err != nil {
 		return nil, err

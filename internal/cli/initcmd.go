@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,7 +27,7 @@ func newInitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			stateDir := filepath.Join(filepath.Dir(path), ".lever-state")
+			stateDir := stateFor(path)
 			if adopt {
 				results, err := adoptSkills(app, stateDir)
 				if err != nil {

@@ -1,14 +1,14 @@
 // Package brokerctl is the host-side controller for the lever capability broker:
 // it translates a lever config into a broker.Config, ensures the CA + capability
-// signing root key, supervises first-party tool subprocesses, and runs the broker.
+// signing root key, supervises first-party tool subprocesses, runs the broker,
+// and stops the host-side daemons. The state directory it reads and writes is
+// package state's.
 package brokerctl
 
 import (
 	"fmt"
 	"maps"
-	"os"
 	"slices"
-	"strings"
 
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/broker/registry"
@@ -16,11 +16,8 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
-
-// serverName is the DEFAULT (orbstack) server name; Serve overrides it from the
-// selected backend's HostToolAlias.
-const serverName = "host.orb.internal"
 
 // llmSentinelBackend is the Backend value of the reserved llm pseudo-tool. It
 // satisfies registry.Register's non-empty-Backend invariant but is NEVER dialed:
@@ -101,31 +98,23 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		Agents:          agents,
 		GrantTTL:        app.Broker.GrantTTL,
 		TicketTTL:       app.Broker.TicketTTL,
-		ServerName:      serverName,
 		LLMUpstream:     app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com
 	}
 
 	// Load the api_key_file into the broker config so the /llm proxy has the
 	// key. This is host-side only; the key never enters a container.
-	// Defense-in-depth: re-check 0600 here even though config.Validate also
-	// checks it — brokerctl may be invoked outside the apply/validate path.
+	// Defense-in-depth: ReadSecret re-checks 0600 here even though
+	// config.Validate also checks it — brokerctl may be invoked outside the
+	// apply/validate path. An absent file reads as "" and is rejected below.
 	if app.AnyAPIKeyAgent() {
-		fi, err := os.Stat(app.Broker.APIKeyFile)
+		key, err := state.ReadSecret(app.Broker.APIKeyFile, "api_key_file")
 		if err != nil {
-			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file: %w", err)
+			return broker.Config{}, fmt.Errorf("brokerctl: %w", err)
 		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file must be 0600, got %#o", perm)
-		}
-		key, err := os.ReadFile(app.Broker.APIKeyFile)
-		if err != nil {
-			return broker.Config{}, fmt.Errorf("brokerctl: read api_key_file: %w", err)
-		}
-		trimmed := strings.TrimSpace(string(key))
-		if trimmed == "" {
+		if key == "" {
 			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q is empty", app.Broker.APIKeyFile)
 		}
-		cfg.APIKey = []byte(trimmed)
+		cfg.APIKey = []byte(key)
 	}
 
 	return cfg, nil

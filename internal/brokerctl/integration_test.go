@@ -47,6 +47,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // csrWithKey returns a PEM CSR for cn plus the matching EC private key PEM, so the
@@ -120,6 +121,10 @@ func repoRoot(t *testing.T) string {
 		dir = parent
 	}
 }
+
+// serverName is the orbstack HostToolAlias, which is what these integration
+// tests issue the broker's server cert for and verify against.
+const serverName = "host.orb.internal"
 
 // workerClient builds an mTLS client that pins the broker CA and presents the
 // worker's CA-issued cert, dialing 127.0.0.1 but verifying the server cert
@@ -245,12 +250,12 @@ broker:
 	}
 
 	// ── Assemble the broker exactly like brokerctl.Serve, but on :0 listeners ──
-	state := StateDir(work)
-	kp, caInst, err := state.EnsureKeys()
+	st := state.ForConfig(work)
+	kp, caInst, err := EnsureKeys(st)
 	if err != nil {
 		t.Fatalf("EnsureKeys: %v", err)
 	}
-	rev, err := state.LoadRevocation()
+	rev, err := LoadRevocation(st)
 	if err != nil {
 		t.Fatalf("LoadRevocation: %v", err)
 	}
@@ -259,7 +264,7 @@ broker:
 		t.Fatalf("BuildBroker: %v", err)
 	}
 	cfg.RevocationState = rev
-	cfg.PersistRevocation = state.SaveRevocation
+	cfg.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
 	b := broker.New(cfg)
 
 	jailLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -281,7 +286,7 @@ broker:
 	// ── Supervise the REAL lever-tool-db subprocess ────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sup := NewSupervisor(app.Broker.Tools, adminURL, state.ToolLogDir())
+	sup := NewSupervisor(app.Broker.Tools, adminURL, st.ToolLogDir())
 	if err := sup.Start(ctx); err != nil {
 		t.Fatalf("supervisor start: %v", err)
 	}
@@ -387,7 +392,7 @@ broker:
 	// bump-epoch persisted minEpoch=1 via SaveRevocation. Rebuild broker.New from
 	// the same state dir and prove the same epoch-0 token is denied with NO fresh
 	// bump — the floor survived the "restart".
-	rev2, err := state.LoadRevocation()
+	rev2, err := LoadRevocation(st)
 	if err != nil {
 		t.Fatalf("reload revocation: %v", err)
 	}
@@ -399,7 +404,7 @@ broker:
 		t.Fatalf("BuildBroker #2: %v", err)
 	}
 	cfg2.RevocationState = rev2
-	cfg2.PersistRevocation = state.SaveRevocation
+	cfg2.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
 	b2 := broker.New(cfg2)
 
 	// Stand up the second broker on its own listeners. We do NOT start a second

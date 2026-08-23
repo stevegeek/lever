@@ -3,6 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/brokerctl"
 )
 
 // newReloadCmd applies config changes to an ALREADY-RUNNING instance without a
@@ -31,7 +32,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			// finds nothing serving and spawns a fresh process on the new config
 			// (its keep-existing branch would otherwise leave the stale broker,
 			// and the config change, in place). Idempotent: a no-op if none runs.
-			if err := stateFor(path).StopBroker(); err != nil {
+			if err := brokerctl.StopBroker(stateFor(path)); err != nil {
 				return err
 			}
 			w, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)

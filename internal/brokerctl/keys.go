@@ -1,293 +1,60 @@
 package brokerctl
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
-	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/state"
 )
 
-// State is the host-side broker state directory (keys, revocation, pid, log).
-type State struct{ Dir string }
-
-// StateDir returns the .lever-state directory beside the config.
-func StateDir(configDir string) State { return State{Dir: filepath.Join(configDir, ".lever-state")} }
-
-func (s State) CACert() string        { return filepath.Join(s.Dir, "ca.crt") }
-func (s State) CAKey() string         { return filepath.Join(s.Dir, "ca.key") }
-func (s State) BrokerKey() string     { return filepath.Join(s.Dir, "broker.key") }
-func (s State) BrokerPub() string     { return filepath.Join(s.Dir, "broker.pub") }
-func (s State) Revocation() string    { return filepath.Join(s.Dir, "revocation.json") }
-func (s State) Directives() string    { return filepath.Join(s.Dir, "directives.json") }
-func (s State) DirectiveSock() string { return filepath.Join(s.Dir, "directive.sock") }
-func (s State) PID() string           { return filepath.Join(s.Dir, "broker.pid") }
-func (s State) Log() string           { return filepath.Join(s.Dir, "broker.log") }
-func (s State) OutLog() string        { return filepath.Join(s.Dir, "broker.out.log") }
-func (s State) ControllerPAT() string { return filepath.Join(s.Dir, "controller.pat") }
-func (s State) SessionSecret() string { return filepath.Join(s.Dir, "session-secret") }
-func (s State) RemotePAT() string     { return filepath.Join(s.Dir, "remote.pat") }
-func (s State) RemotePID() string     { return filepath.Join(s.Dir, "remote.pid") }
-func (s State) RemoteLog() string     { return filepath.Join(s.Dir, "remote.log") }
-func (s State) RemoteAudit() string   { return filepath.Join(s.Dir, "remote-audit.jsonl") }
-
-// RemoteStamp records the binary version + remote config a RUNNING proxy was
-// started with, so apply can tell "already serving" from "serving something
-// else". The broker answers that question over HTTP (/epoch); the proxy has no
-// such endpoint and must not grow one — it fronts the hub, so any listener of
-// its own would be reachable by whatever reaches the proxy. A file beside
-// remote.pid keeps the answer host-side, where only lever writes it.
-func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
-
-// ToolLogDir is the directory holding per-supervised-tool logs.
-func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }
-
-// EnsureKeys loads the CA + capability-signing root keypair from the state dir, generating
-// and persisting them (0600 secrets) on first use. Reused across restarts so
-// issued agent certs survive a broker restart.
-func (s State) EnsureKeys() (token.KeyPair, *ca.CA, error) {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+// EnsureKeys loads the CA + capability-signing root keypair from the state dir,
+// generating and persisting them (0600 secrets) on first use. Reused across
+// restarts so issued agent certs survive a broker restart.
+func EnsureKeys(st state.State) (token.KeyPair, *ca.CA, error) {
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return token.KeyPair{}, nil, fmt.Errorf("brokerctl: state dir: %w", err)
 	}
-	// Capability-token signing keypair.
-	var kp token.KeyPair
-	if _, err := os.Stat(s.BrokerKey()); errors.Is(err, os.ErrNotExist) {
-		gen, gerr := token.Generate()
-		if gerr != nil {
-			return token.KeyPair{}, nil, gerr
-		}
-		if werr := gen.SavePrivate(s.BrokerKey()); werr != nil {
-			return token.KeyPair{}, nil, werr
-		}
-		if werr := gen.SavePublic(s.BrokerPub()); werr != nil {
-			return token.KeyPair{}, nil, werr
-		}
-		kp = gen
-	} else {
-		loaded, lerr := token.LoadPrivate(s.BrokerKey())
-		if lerr != nil {
-			return token.KeyPair{}, nil, lerr
-		}
-		kp = loaded
+	kp, err := loadOrGenerate(st.BrokerKey(),
+		func() (token.KeyPair, error) { return token.LoadPrivate(st.BrokerKey()) },
+		func() (token.KeyPair, error) {
+			gen, err := token.Generate()
+			if err != nil {
+				return token.KeyPair{}, err
+			}
+			if err := gen.SavePrivate(st.BrokerKey()); err != nil {
+				return token.KeyPair{}, err
+			}
+			return gen, gen.SavePublic(st.BrokerPub())
+		})
+	if err != nil {
+		return token.KeyPair{}, nil, err
 	}
-	// CA.
-	var caInst *ca.CA
-	if _, err := os.Stat(s.CAKey()); errors.Is(err, os.ErrNotExist) {
-		gen, gerr := ca.Generate()
-		if gerr != nil {
-			return token.KeyPair{}, nil, gerr
-		}
-		if werr := gen.SaveCert(s.CACert()); werr != nil {
-			return token.KeyPair{}, nil, werr
-		}
-		if werr := gen.SaveKey(s.CAKey()); werr != nil {
-			return token.KeyPair{}, nil, werr
-		}
-		caInst = gen
-	} else {
-		loaded, lerr := ca.Load(s.CACert(), s.CAKey())
-		if lerr != nil {
-			return token.KeyPair{}, nil, lerr
-		}
-		caInst = loaded
+	caInst, err := loadOrGenerate(st.CAKey(),
+		func() (*ca.CA, error) { return ca.Load(st.CACert(), st.CAKey()) },
+		func() (*ca.CA, error) {
+			gen, err := ca.Generate()
+			if err != nil {
+				return nil, err
+			}
+			if err := gen.SaveCert(st.CACert()); err != nil {
+				return nil, err
+			}
+			return gen, gen.SaveKey(st.CAKey())
+		})
+	if err != nil {
+		return token.KeyPair{}, nil, err
 	}
 	return kp, caInst, nil
 }
 
-// loadJSONState reads a JSON-encoded state value from path; an absent file is
-// the zero value. `what` names the state in error messages (e.g. "revocation").
-func loadJSONState[T any](path, what string) (T, error) {
-	var v T
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return v, nil
+// loadOrGenerate returns load() when keyPath exists, else generate() — which
+// is expected to persist what it makes so the next call loads it.
+func loadOrGenerate[T any](keyPath string, load, generate func() (T, error)) (T, error) {
+	if _, err := os.Stat(keyPath); errors.Is(err, os.ErrNotExist) {
+		return generate()
 	}
-	if err != nil {
-		return v, fmt.Errorf("brokerctl: read %s: %w", what, err)
-	}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return v, fmt.Errorf("brokerctl: parse %s: %w", what, err)
-	}
-	return v, nil
-}
-
-// saveJSONState persists a JSON-encoded state value (0600), atomically. `what`
-// names the state in error messages.
-func saveJSONState[T any](path, what string, v T) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Errorf("brokerctl: marshal %s: %w", what, err)
-	}
-	if err := writeFileAtomic(path, b, 0o600); err != nil {
-		return fmt.Errorf("brokerctl: write %s: %w", what, err)
-	}
-	return nil
-}
-
-// LoadRevocation reads the persisted revocation state; an absent file is the
-// zero value (epoch 0, no revocations).
-func (s State) LoadRevocation() (broker.RevocationState, error) {
-	return loadJSONState[broker.RevocationState](s.Revocation(), "revocation")
-}
-
-// SaveRevocation persists the revocation state (0600), atomically.
-func (s State) SaveRevocation(rs broker.RevocationState) error {
-	return saveJSONState(s.Revocation(), "revocation", rs)
-}
-
-// LoadDirectives reads persisted directive state; absent file = zero value.
-func (s State) LoadDirectives() (broker.DirectiveState, error) {
-	return loadJSONState[broker.DirectiveState](s.Directives(), "directives")
-}
-
-// SaveDirectives persists directive state (0600), atomically: a crash
-// mid-write must never torn-write directives.json, since it holds the
-// replay tombstone set the broker needs on restart.
-func (s State) SaveDirectives(ds broker.DirectiveState) error {
-	return saveJSONState(s.Directives(), "directives", ds)
-}
-
-// writeFileAtomic writes data to a temp file in the same directory as path
-// then renames it over path — atomic on POSIX, so a crash mid-write leaves
-// either the old file or the new one, never a torn partial write.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op after a successful rename
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
-}
-
-// SaveControllerPAT persists the scion controller personal access token
-// (0600) under the state dir, creating the dir if needed.
-func (s State) SaveControllerPAT(tok string) error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return fmt.Errorf("brokerctl: state dir: %w", err)
-	}
-	if err := os.WriteFile(s.ControllerPAT(), []byte(tok), 0o600); err != nil {
-		return fmt.Errorf("brokerctl: write controller.pat: %w", err)
-	}
-	return nil
-}
-
-// LoadControllerPAT reads the persisted controller PAT. An absent file
-// returns ("", nil) so callers can branch on "" meaning "need to mint".
-// A file present with permissions other than 0600 is treated as tampered
-// or misconfigured and returns an error (mirrors the api_key_file
-// defense-in-depth check in build.go).
-func (s State) LoadControllerPAT() (string, error) {
-	fi, err := os.Stat(s.ControllerPAT())
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("brokerctl: controller.pat: %w", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		return "", fmt.Errorf("brokerctl: controller.pat must be 0600, got %#o", perm)
-	}
-	b, err := os.ReadFile(s.ControllerPAT())
-	if err != nil {
-		return "", fmt.Errorf("brokerctl: read controller.pat: %w", err)
-	}
-	return strings.TrimSpace(string(b)), nil
-}
-
-// EnsureSessionSecret returns the hub's session-cookie signing key, generating
-// 32 random bytes hex-encoded and persisting them (0600) on first use. An
-// existing file is adopted verbatim (whitespace-trimmed) and NEVER rewritten —
-// rotating the key signs every browser session out, so rotation is the
-// operator's move: delete the file and the next apply generates a fresh one.
-// The 0600 gate mirrors LoadControllerPAT's; an empty file is an error rather
-// than a silent regeneration, because overwriting a file the operator placed
-// would violate the never-rewrite contract.
-func (s State) EnsureSessionSecret() (string, error) {
-	fi, err := os.Stat(s.SessionSecret())
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		// Fall through to generate below.
-	case err != nil:
-		return "", fmt.Errorf("brokerctl: session-secret: %w", err)
-	default:
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			return "", fmt.Errorf("brokerctl: session-secret must be 0600, got %#o", perm)
-		}
-		b, rerr := os.ReadFile(s.SessionSecret())
-		if rerr != nil {
-			return "", fmt.Errorf("brokerctl: read session-secret: %w", rerr)
-		}
-		v := strings.TrimSpace(string(b))
-		if v == "" {
-			return "", errors.New("brokerctl: session-secret is empty — delete the file to generate a new key")
-		}
-		return v, nil
-	}
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return "", fmt.Errorf("brokerctl: state dir: %w", err)
-	}
-	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("brokerctl: session-secret: %w", err)
-	}
-	v := hex.EncodeToString(raw[:])
-	if err := os.WriteFile(s.SessionSecret(), []byte(v+"\n"), 0o600); err != nil {
-		return "", fmt.Errorf("brokerctl: write session-secret: %w", err)
-	}
-	return v, nil
-}
-
-// SaveRemotePAT persists the proxy remote personal access token
-// (0600) under the state dir, creating the dir if needed.
-func (s State) SaveRemotePAT(tok string) error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return fmt.Errorf("brokerctl: state dir: %w", err)
-	}
-	if err := os.WriteFile(s.RemotePAT(), []byte(tok), 0o600); err != nil {
-		return fmt.Errorf("brokerctl: write remote.pat: %w", err)
-	}
-	return nil
-}
-
-// LoadRemotePAT reads the persisted remote PAT. An absent file
-// returns ("", nil) so callers can branch on "" meaning "need to mint".
-// A file present with permissions other than 0600 is treated as tampered
-// or misconfigured and returns an error (mirrors the api_key_file
-// defense-in-depth check in build.go).
-func (s State) LoadRemotePAT() (string, error) {
-	fi, err := os.Stat(s.RemotePAT())
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("brokerctl: remote.pat: %w", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		return "", fmt.Errorf("brokerctl: remote.pat must be 0600, got %#o", perm)
-	}
-	b, err := os.ReadFile(s.RemotePAT())
-	if err != nil {
-		return "", fmt.Errorf("brokerctl: read remote.pat: %w", err)
-	}
-	return strings.TrimSpace(string(b)), nil
+	return load()
 }

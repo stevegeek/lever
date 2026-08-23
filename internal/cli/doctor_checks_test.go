@@ -14,11 +14,11 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/remoteproxy"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 func okDial(string) error   { return nil }
@@ -53,7 +53,7 @@ func healthyRemoteProbes() doctorProbes {
 }
 
 // writePIDFile records pid at path inside st.Dir, creating the state dir.
-func writePIDFile(t *testing.T, st brokerctl.State, path string, pid int) {
+func writePIDFile(t *testing.T, st state.State, path string, pid int) {
 	t.Helper()
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -63,8 +63,8 @@ func writePIDFile(t *testing.T, st brokerctl.State, path string, pid int) {
 	}
 }
 
-func writeBrokerPID(t *testing.T, st brokerctl.State, pid int) { writePIDFile(t, st, st.PID(), pid) }
-func writeRemotePID(t *testing.T, st brokerctl.State, pid int) {
+func writeBrokerPID(t *testing.T, st state.State, pid int) { writePIDFile(t, st, st.PID(), pid) }
+func writeRemotePID(t *testing.T, st state.State, pid int) {
 	writePIDFile(t, st, st.RemotePID(), pid)
 }
 
@@ -88,7 +88,7 @@ func writeDoctorConfig(t *testing.T, extra string) *config.App {
 }
 
 func TestCheckBrokerAliveNotStarted(t *testing.T) {
-	r := checkBrokerAlive(brokerctl.StateDir(t.TempDir()), 8443, okProbes)
+	r := checkBrokerAlive(state.ForConfig(t.TempDir()), 8443, okProbes)
 	if r.ok {
 		t.Fatal("no broker.pid must fail the check")
 	}
@@ -98,7 +98,7 @@ func TestCheckBrokerAliveNotStarted(t *testing.T) {
 }
 
 func TestCheckBrokerAliveStalePID(t *testing.T) {
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeBrokerPID(t, st, 2147483646) // no such process
 	r := checkBrokerAlive(st, 8443, okProbes)
 	if r.ok {
@@ -110,7 +110,7 @@ func TestCheckBrokerAliveStalePID(t *testing.T) {
 }
 
 func TestCheckBrokerAliveAliveButNotListening(t *testing.T) {
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeBrokerPID(t, st, os.Getpid()) // alive
 	r := checkBrokerAlive(st, 8443, failProbes)
 	if r.ok {
@@ -122,7 +122,7 @@ func TestCheckBrokerAliveAliveButNotListening(t *testing.T) {
 }
 
 func TestCheckBrokerAliveHealthy(t *testing.T) {
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeBrokerPID(t, st, os.Getpid())
 	r := checkBrokerAlive(st, 8443, okProbes)
 	if !r.ok {
@@ -518,7 +518,7 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}}
-	stateDir := filepath.Join(root, ".lever-state")
+	stateDir := state.ForConfig(root)
 
 	// Unscaffolded → fail with `lever init` hint.
 	res := checkOperatorSkills(app, stateDir)
@@ -645,7 +645,7 @@ func writeAllowedSigners(t *testing.T, path string) {
 // a warning — most instances never touch operator directives.
 func TestCheckDirectivesNotConfigured(t *testing.T) {
 	app := writeDirectivesConfig(t, "")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	r := checkDirectives(app, st)
 	if !r.ok {
 		t.Fatalf("unset allowed_signers must pass (channel just isn't configured): %+v", r)
@@ -657,7 +657,7 @@ func TestCheckDirectivesNotConfigured(t *testing.T) {
 
 func TestCheckDirectivesMissingFile(t *testing.T) {
 	app := writeDirectivesConfig(t, "operator/allowed_signers")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	r := checkDirectives(app, st)
 	if r.ok {
 		t.Fatal("configured but missing allowed_signers file must fail")
@@ -677,7 +677,7 @@ func TestCheckDirectivesEmptyFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# no keys yet\n\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	r := checkDirectives(app, st)
 	if r.ok {
 		t.Fatal("an allowed_signers file with zero key lines must fail")
@@ -690,7 +690,7 @@ func TestCheckDirectivesEmptyFile(t *testing.T) {
 func TestCheckDirectivesHappyPathBrokerNotRunning(t *testing.T) {
 	app := writeDirectivesConfig(t, "operator/allowed_signers")
 	writeAllowedSigners(t, app.OperatorAllowedSignersPath())
-	st := brokerctl.StateDir(t.TempDir()) // no broker.pid => broker not running
+	st := state.ForConfig(t.TempDir()) // no broker.pid => broker not running
 	r := checkDirectives(app, st)
 	if !r.ok {
 		t.Fatalf("a real key + no broker running must pass: %+v", r)
@@ -703,7 +703,7 @@ func TestCheckDirectivesHappyPathBrokerNotRunning(t *testing.T) {
 func TestCheckDirectivesBrokerRunningSocketPresent(t *testing.T) {
 	app := writeDirectivesConfig(t, "operator/allowed_signers")
 	writeAllowedSigners(t, app.OperatorAllowedSignersPath())
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeBrokerPID(t, st, os.Getpid())
 	if err := os.WriteFile(st.DirectiveSock(), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -720,7 +720,7 @@ func TestCheckDirectivesBrokerRunningSocketPresent(t *testing.T) {
 func TestCheckDirectivesBrokerRunningSocketAbsent(t *testing.T) {
 	app := writeDirectivesConfig(t, "operator/allowed_signers")
 	writeAllowedSigners(t, app.OperatorAllowedSignersPath())
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeBrokerPID(t, st, os.Getpid()) // alive, but directive.sock never created
 	r := checkDirectives(app, st)
 	if r.ok {
@@ -733,7 +733,7 @@ func TestCheckDirectivesBrokerRunningSocketAbsent(t *testing.T) {
 
 // writeRemotePAT writes a remote.pat file at the given mode, creating the
 // state dir first.
-func writeRemotePAT(t *testing.T, st brokerctl.State, mode os.FileMode) {
+func writeRemotePAT(t *testing.T, st state.State, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -747,7 +747,7 @@ func writeRemotePAT(t *testing.T, st brokerctl.State, mode os.FileMode) {
 // access unconfigured is a pass — most instances never turn it on.
 func TestCheckRemoteDisabled(t *testing.T) {
 	app := writeDoctorConfig(t, "")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if !r.ok {
 		t.Fatalf("remote disabled must pass: %+v", r)
@@ -759,7 +759,7 @@ func TestCheckRemoteDisabled(t *testing.T) {
 
 func TestCheckRemoteNoPIDFile(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := brokerctl.StateDir(t.TempDir()) // no remote.pid — never started
+	st := state.ForConfig(t.TempDir()) // no remote.pid — never started
 	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if r.ok {
 		t.Fatal("enabled but never started (no remote.pid) must fail")
@@ -771,7 +771,7 @@ func TestCheckRemoteNoPIDFile(t *testing.T) {
 
 func TestCheckRemotePATMissing(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	// remote.pat intentionally left absent.
 	r := checkRemote(context.Background(), app, st, okProbes, nil)
@@ -787,7 +787,7 @@ func TestCheckRemotePATMissing(t *testing.T) {
 // same posture as checkCredentialFile.
 func TestCheckRemotePATBadPermissions(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o644)
 	r := checkRemote(context.Background(), app, st, okProbes, nil)
@@ -801,7 +801,7 @@ func TestCheckRemotePATBadPermissions(t *testing.T) {
 
 func TestCheckRemoteHealthz500(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
@@ -824,7 +824,7 @@ func TestCheckRemoteHealthz500(t *testing.T) {
 // discovery with no authorization endpoint.
 func TestCheckRemoteHealthy(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
@@ -846,7 +846,7 @@ func TestCheckRemoteHealthy(t *testing.T) {
 // down` + `lever up`). The cause must win over the symptom.
 func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
@@ -885,7 +885,7 @@ func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
 // the login server-side and mints in-process.
 func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 	for _, tc := range []struct {
@@ -919,7 +919,7 @@ func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
 // would 403 its own doctor check even when everything is actually healthy.
 func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
 	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"steve@example.com\", \"other@example.com\"]\n")
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
@@ -1113,7 +1113,7 @@ func TestCheckNodeToolchainProbeError(t *testing.T) {
 // forwarder before it can answer.
 func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
 	jr := leverexec.NewFakeRunner()
-	st := brokerctl.StateDir(t.TempDir())
+	st := state.ForConfig(t.TempDir())
 
 	for _, tc := range []struct {
 		name     string
@@ -1160,7 +1160,7 @@ func TestRemoteJailLoginScriptShape(t *testing.T) {
 }
 
 func TestStateRel(t *testing.T) {
-	st := brokerctl.StateDir(filepath.Join(t.TempDir(), "inst"))
+	st := state.ForConfig(filepath.Join(t.TempDir(), "inst"))
 	if got := stateRel(st, st.RemoteLog()); got != ".lever-state/remote.log" {
 		t.Fatalf("stateRel = %q", got)
 	}

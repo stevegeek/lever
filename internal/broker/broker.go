@@ -70,10 +70,13 @@ type Config struct {
 	// (embedders/tests that never message the manager).
 	ManagerSlug string
 	// Agents lists the worker identities /provision may issue a ticket for.
-	Agents     []string
-	GrantTTL   time.Duration
-	TicketTTL  time.Duration
-	ServerName string // the server cert hostname agents dial (host.orb.internal)
+	Agents    []string
+	GrantTTL  time.Duration
+	TicketTTL time.Duration
+	// ServerName is the server cert hostname agents dial (host.orb.internal).
+	// Informational: the serving cert comes from the ServerCertSource handed
+	// to ServeListeners, so the broker itself never reads this.
+	ServerName string
 	Log        *slog.Logger
 	// Version and ConfigHash identify this broker process: the binary's
 	// version string and a digest of the broker-relevant configuration it was

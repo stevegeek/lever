@@ -14,12 +14,6 @@ import (
 	"github.com/stevegeek/lever/internal/daemon"
 )
 
-// warnf prints a non-fatal problem to stderr in the "lever: warning:" form
-// the rest of the host-side daemons use.
-func warnf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "lever: warning: "+format+"\n", args...)
-}
-
 // ServeConfig configures Serve.
 type ServeConfig struct {
 	// Port is the loopback port to bind: Serve always binds
@@ -108,7 +102,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 
 	if cfg.Stamp != nil {
 		if err := cfg.Stamp(); err != nil {
-			warnf("could not record what this proxy is serving: %v\n"+
+			daemon.Warnf("could not record what this proxy is serving: %v\n"+
 				"lever: the next `lever apply` will restart the proxy rather than reuse it", err)
 		}
 	}
@@ -244,14 +238,14 @@ func OpenAudit(path string) (func(AuditLine), io.Closer, error) {
 	write := func(line AuditLine) {
 		b, err := json.Marshal(line)
 		if err != nil {
-			warnf("audit marshal: %v", err)
+			daemon.Warnf("audit marshal: %v", err)
 			return
 		}
 		b = append(b, '\n')
 		mu.Lock()
 		defer mu.Unlock()
 		if _, err := f.Write(b); err != nil {
-			warnf("audit write: %v", err)
+			daemon.Warnf("audit write: %v", err)
 		}
 	}
 	return write, f, nil

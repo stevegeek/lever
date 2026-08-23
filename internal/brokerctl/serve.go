@@ -22,12 +22,6 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// warnf prints a non-fatal problem to stderr in the "lever: warning:" form
-// the rest of the host-side daemons use.
-func warnf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "lever: warning: "+format+"\n", args...)
-}
-
 // ServeEnv is what `lever apply` hands the detached `broker serve` child
 // through the environment (see internal/cli/apply.go detachedSelfCmd).
 // Without it (a manual `lever broker serve` with no prior apply) the
@@ -250,7 +244,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	if caPEM, err := os.ReadFile(st.CACert()); err == nil {
 		d.BrokerCAPEM = string(caPEM)
 	} else {
-		warnf("broker CA read: %v", err)
+		daemon.Warnf("broker CA read: %v", err)
 	}
 
 	// Worker dispatch runs host-side with operator identity (jail runner). apply

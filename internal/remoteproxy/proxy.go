@@ -36,6 +36,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stevegeek/lever/internal/daemon"
 )
 
 // Config wires a Handler. All fields required unless noted.
@@ -387,7 +389,7 @@ func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 					// No audit sink wired: the cause still must not vanish, or a
 					// 502 says nothing about whether the jail, the hub, or the
 					// PAT is at fault.
-					warnf("remote proxy upstream: %v", err)
+					daemon.Warnf("remote proxy upstream: %v", err)
 				}
 			}
 			http.Error(w, "bad gateway", http.StatusBadGateway)

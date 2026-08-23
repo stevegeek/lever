@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -58,5 +59,21 @@ func TestCloseListenersTolerantOfNilAndClosed(t *testing.T) {
 	CloseListeners(ln) // double close is benign
 	if _, err := net.Dial("tcp", ln.Addr().String()); err == nil {
 		t.Fatal("listener still accepting after CloseListeners")
+	}
+}
+
+func TestWarnfUsesLeverWarningPrefix(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	Warnf("thing %d failed: %v", 7, "boom")
+	os.Stderr = old
+	_ = w.Close()
+	got, _ := io.ReadAll(r)
+	if want := "lever: warning: thing 7 failed: boom\n"; string(got) != want {
+		t.Fatalf("Warnf wrote %q, want %q", got, want)
 	}
 }

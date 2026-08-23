@@ -38,8 +38,14 @@ func RemovePIDFile(path string) {
 		return
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(os.Stderr, "lever: warning: could not remove %s: %v\n", path, err)
+		Warnf("could not remove %s: %v", path, err)
 	}
+}
+
+// Warnf prints a non-fatal problem to stderr in the "lever: warning:" form
+// every host-side daemon uses.
+func Warnf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "lever: warning: "+format+"\n", args...)
 }
 
 // CloseListeners closes every non-nil listener, discarding errors: a

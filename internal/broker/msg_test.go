@@ -481,3 +481,25 @@ func TestMsgList_failsClosedWhenResolverUnwired(t *testing.T) {
 		t.Fatalf("an unwired resolver must not fall back to the fleet feed, got 200: %s", rec.Body.String())
 	}
 }
+
+func TestIdentity(t *testing.T) {
+	b := msgBroker(true) // manager CN "manager", slug "assistant", workers scratch/worker
+	cases := []struct {
+		name              string
+		wantCN, wantSlug  string
+		wantManager, want bool
+	}{
+		{"manager", "manager", "assistant", true, true},
+		{"assistant", "manager", "assistant", true, true},
+		{"scratch", "scratch", "scratch", false, true},
+		{"nope", "", "", false, false},
+		{"", "", "", false, false},
+	}
+	for _, tc := range cases {
+		cn, slug, isManager, ok := b.identity(tc.name)
+		if cn != tc.wantCN || slug != tc.wantSlug || isManager != tc.wantManager || ok != tc.want {
+			t.Fatalf("identity(%q) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
+				tc.name, cn, slug, isManager, ok, tc.wantCN, tc.wantSlug, tc.wantManager, tc.want)
+		}
+	}
+}

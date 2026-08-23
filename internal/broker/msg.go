@@ -22,9 +22,9 @@ type msgTarget struct {
 // Identity-derived, config-authoritative, default-deny. The returned error
 // text is the deny reason (audited alongside the recipient by the handler).
 func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
-	isManager := caller == b.manager
-	_, isWorker := b.workers[caller]
-	if !isManager && !isWorker {
+	// The caller is a cert CN: a slug alias is not an identity.
+	callerCN, _, isManager, ok := b.identity(caller)
+	if !ok || callerCN != caller {
 		return msgTarget{}, fmt.Errorf("caller %q is not the manager or a declared worker", caller)
 	}
 	// The manager target ALWAYS routes to agent:<slug> — scion knows the
@@ -42,7 +42,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	// who != "" preserves the bare-"user:" fallthrough to the
 	// unknown-recipient deny below.
 	if who, ok := strings.CutPrefix(to, "user:"); ok && who != "" {
-		if who == "manager" || who == b.manager || who == b.managerSlug {
+		if _, _, toManager, known := b.identity(who); who == "manager" || (known && toManager) {
 			return managerTarget, nil
 		}
 		return msgTarget{}, fmt.Errorf("user-addressed recipient %q is not broker-routable (scion supports user messaging only inside agent containers); message the manager agent instead", to)
@@ -51,17 +51,16 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if rest, ok := strings.CutPrefix(to, "agent:"); ok && rest != "" {
 		name = rest
 	}
-	if name == b.manager || name == b.managerSlug {
-		return managerTarget, nil
-	}
-	spec, ok := b.workers[name]
-	if !ok {
+	_, slug, toManager, known := b.identity(name)
+	switch {
+	case !known:
 		return msgTarget{}, fmt.Errorf("unknown recipient %q", to)
-	}
-	if !isManager && caller != name && !b.workerToWorker {
+	case toManager:
+		return managerTarget, nil
+	case !isManager && caller != name && !b.workerToWorker:
 		return msgTarget{}, fmt.Errorf("worker→worker messaging is disabled")
 	}
-	return msgTarget{scionTo: "agent:" + spec.Name, project: b.instanceProject}, nil
+	return msgTarget{scionTo: "agent:" + slug, project: b.instanceProject}, nil
 }
 
 // resolveListSubject resolves WHOSE inbox caller may read, as an agent slug.
@@ -80,12 +79,12 @@ func (b *Broker) resolveListSubject(caller, worker string) (string, error) {
 			// by the slug (see Config.ManagerSlug).
 			return b.managerSlug, nil
 		}
-		if _, ok := b.workers[worker]; !ok {
+		if _, ok := b.workerSpec(worker); !ok {
 			return "", fmt.Errorf("unknown worker %q", worker)
 		}
 		return worker, nil
 	}
-	if _, ok := b.workers[caller]; !ok {
+	if _, ok := b.workerSpec(caller); !ok {
 		return "", fmt.Errorf("caller %q is not the manager or a declared worker", caller)
 	}
 	if worker != "" {

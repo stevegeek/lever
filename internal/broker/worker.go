@@ -43,9 +43,25 @@ type WorkerSpec struct {
 	APIKey          bool   // true ⇒ api-key LLM mode for this worker
 }
 
+// workerSpec looks up a declared worker by name (its cert CN, which is also
+// its scion slug).
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
 	s, ok := b.workers[name]
 	return s, ok
+}
+
+// identity resolves an agent name to its (cert CN, scion slug) pair. The
+// manager answers to its cert CN or its scion slug (the app name — distinct,
+// see Config.ManagerSlug); a declared worker's CN IS its slug. A caller that
+// needs a strict CN (not an alias) compares the returned cn with its input.
+func (b *Broker) identity(name string) (cn, slug string, isManager, ok bool) {
+	if name == b.manager || name == b.managerSlug {
+		return b.manager, b.managerSlug, true, true
+	}
+	if spec, ok := b.workerSpec(name); ok {
+		return spec.Name, spec.Name, false, true
+	}
+	return "", "", false, false
 }
 
 // WorkerListResponse is the wire envelope for /worker/list. It stays here

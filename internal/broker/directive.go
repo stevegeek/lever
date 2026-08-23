@@ -31,14 +31,14 @@ const (
 type DirectiveRecord struct {
 	ID         string          `json:"id"`
 	State      DirectiveStatus `json:"state"`
-	Statement  []byte    `json:"statement,omitempty"`
-	Signature  []byte    `json:"signature,omitempty"`
-	TargetCN   string    `json:"target_cn"`
-	TargetGen  int       `json:"target_gen"`
-	Kind       string    `json:"kind"`
-	NotBefore  time.Time `json:"not_before"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	ConsumedAt time.Time `json:"consumed_at,omitzero"`
+	Statement  []byte          `json:"statement,omitempty"`
+	Signature  []byte          `json:"signature,omitempty"`
+	TargetCN   string          `json:"target_cn"`
+	TargetGen  int             `json:"target_gen"`
+	Kind       string          `json:"kind"`
+	NotBefore  time.Time       `json:"not_before"`
+	ExpiresAt  time.Time       `json:"expires_at"`
+	ConsumedAt time.Time       `json:"consumed_at,omitzero"`
 }
 
 // DirectiveState is the persisted directive store snapshot: per-CN enrolment

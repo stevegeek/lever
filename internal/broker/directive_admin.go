@@ -137,9 +137,10 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nbf, _ := time.Parse(time.RFC3339, st.NotBefore)
-	// Target must be a known agent at its CURRENT generation.
-	slug, ok := b.directiveSlug(st.TargetAgent.CN)
-	if !ok {
+	// Target must be a known agent (by cert CN, not a slug alias) at its
+	// CURRENT generation.
+	cn, slug, _, ok := b.identity(st.TargetAgent.CN)
+	if !ok || cn != st.TargetAgent.CN {
 		http.Error(w, "unknown target agent", http.StatusBadRequest)
 		return
 	}
@@ -195,38 +196,19 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.DirectiveSendResponse{ID: st.DirectiveID, Delivered: delivered})
 }
 
-// directiveSlug maps a target CN to its scion message slug: the manager CN
-// maps to the manager slug; a worker's CN IS its slug (spec.Name).
-func (b *Broker) directiveSlug(cn string) (string, bool) {
-	if cn == b.manager {
-		return b.managerSlug, true
-	}
-	if _, ok := b.workers[cn]; ok {
-		return cn, true
-	}
-	return "", false
-}
-
-// resolveDirectiveAgent maps a human-given agent name to its (cn, slug) pair
-// per resolveMsgTarget's aliasing conventions: "manager", the manager's cert
-// CN, or its scion slug all mean the manager; anything else must be a
-// declared worker's name (a worker's CN IS its slug).
-func (b *Broker) resolveDirectiveAgent(name string) (cn, slug string, ok bool) {
-	if name == "manager" || name == b.manager || name == b.managerSlug {
-		return b.manager, b.managerSlug, true
-	}
-	if _, ok := b.workers[name]; ok {
-		return name, name, true
-	}
-	return "", "", false
-}
-
 // handleDirectiveResolve is UNSIGNED: the UDS socket's 0600 perms are the
 // gate, and the response carries no authority (an operator still has to sign
-// a statement against the reported generation to act on it).
+// a statement against the reported generation to act on it). The agent name
+// follows resolveMsgTarget's aliasing: "manager", the manager's cert CN, or
+// its scion slug all mean the manager; anything else must be a declared
+// worker's name.
 func (b *Broker) handleDirectiveResolve(w http.ResponseWriter, r *http.Request) {
 	agent := r.URL.Query().Get("agent")
-	cn, slug, ok := b.resolveDirectiveAgent(agent)
+	name := agent
+	if name == "manager" {
+		name = b.manager
+	}
+	cn, slug, _, ok := b.identity(name)
 	if !ok {
 		http.Error(w, "unknown agent", http.StatusBadRequest)
 		return

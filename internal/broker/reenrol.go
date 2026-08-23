@@ -74,7 +74,7 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	}
 
 	// Identity gate: only configured identities are healable.
-	spec, isWorker := b.workers[cn]
+	spec, isWorker := b.workerSpec(cn)
 	if cn != b.manager && !isWorker {
 		return
 	}

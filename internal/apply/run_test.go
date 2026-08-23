@@ -487,12 +487,11 @@ func TestStartManagerObserveFirstNoOpWhenRunning(t *testing.T) {
 // whose ContainerStatus never comes up (the harness died) must fail loudly,
 // not silently pass just because the switch took the no-op path.
 func TestStartManagerRunningRecordButDeadContainerFailsLoud(t *testing.T) {
-	setRetryBudget(t, &managerLiveAttempts, &managerLiveInterval, 3)
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "stopped"}
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		ManagerLiveRetry: fastRetry(3),
+		Scion:            scion.New(r, scion.Options{}),
 	}
 	err := runApply(app, deps)
 	testutil.WantErrContaining(t, err, `phase "running"`, `container "stopped"`)
@@ -566,8 +565,8 @@ func TestStartManagerResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
 // TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds proves the
 // CRITICAL fix: `scion resume` shares Start's
 // runtime-broker-registration race, so a resume that fails with the
-// broker-unavailable wording must be RETRIED (same brokerStartAttempts/
-// brokerStartInterval budget as Start) before any loud recovery — a transient
+// broker-unavailable wording must be RETRIED (same BrokerStartRetry
+// budget as Start) before any loud recovery — a transient
 // blip must never destroy a resumable conversation.
 // TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError pins
 // the ERROR branch's distinct delete-fail error wrap ("forced resume failed
@@ -599,8 +598,6 @@ func TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError(t *te
 }
 
 func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) {
-	setRetryBudget(t, &brokerStartAttempts, &brokerStartInterval, 5)
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -612,8 +609,9 @@ func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) 
 	}
 	var logged logSink
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
-		Log:   logged.logf,
+		BrokerStartRetry: fastRetry(5),
+		Scion:            scion.New(r, scion.Options{}),
+		Log:              logged.logf,
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run should succeed once the broker race resolves within the retry budget: %v", err)
@@ -635,8 +633,6 @@ func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) 
 // recovery — the retry absorbs a transient blip, it does not turn a
 // permanently-unavailable broker into an infinite hang.
 func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testing.T) {
-	setRetryBudget(t, &brokerStartAttempts, &brokerStartInterval, 3)
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -647,8 +643,9 @@ func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testi
 	}
 	var logged logSink
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
-		Log:   logged.logf,
+		BrokerStartRetry: fastRetry(3),
+		Scion:            scion.New(r, scion.Options{}),
+		Log:              logged.logf,
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("an exhausted-but-transient resume must still recover fresh, not fail the apply: %v", err)
@@ -701,8 +698,6 @@ func TestIsBrokerUnavailable(t *testing.T) {
 // succeed onto an already-running record (pure no-op path) so the test isolates
 // the observe retry.
 func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
-	setRetryBudget(t, &brokerStartAttempts, &brokerStartInterval, 5)
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -711,7 +706,8 @@ func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
 		listFailsThenSucceed: 2,
 	}
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		BrokerStartRetry: fastRetry(5),
+		Scion:            scion.New(r, scion.Options{}),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("a transient observe-List blip must be retried, not fail the apply: %v", err)
@@ -779,15 +775,14 @@ func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 // fail loudly with the last observed phase/container, rather than trusting
 // the CLI's exit code.
 func TestStartManagerLivenessNeverGreenAfterCreate(t *testing.T) {
-	setRetryBudget(t, &managerLiveAttempts, &managerLiveInterval, 3)
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
 		liveWhenContainer: "stopped", // Start "succeeds" but the container never lives
 	}
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		ManagerLiveRetry: fastRetry(3),
+		Scion:            scion.New(r, scion.Options{}),
 	}
 	err := runApply(app, deps)
 	testutil.WantErrContaining(t, err, "did not come up", `container "stopped"`)
@@ -1211,8 +1206,6 @@ func (r *failNListsRunner) Run(ctx context.Context, env map[string]string, name 
 // within the existing retry budget, and the poll succeeds as soon as a List
 // call reports the manager running/running.
 func TestWaitManagerLiveToleratesMidPollListErrors(t *testing.T) {
-	setRetryBudget(t, &managerLiveAttempts, &managerLiveInterval, 5)
-
 	app, f := newObserveFirstApp(t)
 	// Already running/live — the no-op branch — so start-manager's OWN observe
 	// (list call 1) must succeed; failNListsRunner then fails exactly the next
@@ -1221,7 +1214,8 @@ func TestWaitManagerLiveToleratesMidPollListErrors(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "running"}
 	fe := &failNListsRunner{inner: r, failCount: 2}
 	deps := Deps{
-		Scion: scion.New(fe, scion.Options{}),
+		ManagerLiveRetry: fastRetry(5),
+		Scion:            scion.New(fe, scion.Options{}),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("two transient List blips within the liveness poll's budget must not fail apply: %v", err)
@@ -1305,7 +1299,6 @@ func TestRunLatchedWithoutStagedBootstrapFails(t *testing.T) {
 
 func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	// Make the retry fast for the test.
-	setRetryBudget(t, &brokerStartAttempts, &brokerStartInterval, 5)
 
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
@@ -1319,7 +1312,8 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	}
 	r := &flakyStartRunner{FakeRunner: scionOKRunner(), slug: "hello", startFails: 2}
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		BrokerStartRetry: fastRetry(5),
+		Scion:            scion.New(r, scion.Options{}),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run should succeed after the broker race resolves: %v", err)

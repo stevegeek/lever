@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -57,14 +56,9 @@ func (s *logSink) logf(format string, args ...any) {
 	s.lines = append(s.lines, fmt.Sprintf(format, args...))
 }
 
-// setRetryBudget overrides one of the package's (attempts, interval) retry
-// pairs for the test — n attempts, a millisecond apart — and restores it.
-func setRetryBudget(t *testing.T, attempts *int, interval *time.Duration, n int) {
-	t.Helper()
-	origAtt, origInt := *attempts, *interval
-	*attempts, *interval = n, time.Millisecond
-	t.Cleanup(func() { *attempts, *interval = origAtt, origInt })
-}
+// fastRetry is a retry budget of n attempts a millisecond apart, so a test
+// exercises the retry path without the production one-second interval.
+func fastRetry(n int) RetryBudget { return RetryBudget{Attempts: n, Interval: time.Millisecond} }
 
 // absentThenRunningList records the observe-List call on f and answers it:
 // the first call reports slug absent (so start-manager takes the create path),

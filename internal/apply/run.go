@@ -25,17 +25,32 @@ import (
 // apply recover on re-apply (vs the old skip-if-file-exists, which deadlocked).
 var ErrBootstrapLatched = errors.New("broker /bootstrap latch already consumed")
 
-// brokerStartAttempts/brokerStartInterval bound the start-manager retry that
-// absorbs the runtime-broker registration race: the scion runtime broker
-// registers with the hub ASYNCHRONOUSLY after the server starts, so a
-// start-manager that runs too soon gets "no runtime brokers available". The hub
-// itself is up (the scion-server health check passed), so this is purely a
-// timing window — retry until the broker comes online. Package vars so tests run
-// fast. (Only the first start races; workers start later when the broker is ready.)
-var (
-	brokerStartAttempts = 30
-	brokerStartInterval = 1 * time.Second
-)
+// RetryBudget bounds one of apply's polls: Attempts tries, Interval apart.
+// A zero value means the production default (see Deps).
+type RetryBudget struct {
+	Attempts int
+	Interval time.Duration
+}
+
+// or returns b, or def when b is the zero value.
+func (b RetryBudget) or(def RetryBudget) RetryBudget {
+	if b.Attempts == 0 && b.Interval == 0 {
+		return def
+	}
+	return b
+}
+
+// defaultBrokerStartRetry bounds the start-manager retry that absorbs the
+// runtime-broker registration race: the scion runtime broker registers with
+// the hub ASYNCHRONOUSLY after the server starts, so a start-manager that runs
+// too soon gets "no runtime brokers available". The hub itself is up (the
+// scion-server health check passed), so this is purely a timing window — retry
+// until the broker comes online. (Only the first start races; workers start
+// later when the broker is ready.)
+var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
+
+// defaultManagerLiveRetry bounds waitManagerLive's post-start poll.
+var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second}
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
 // api-key instances. It is NOT a real credential: it exists only to satisfy
@@ -59,6 +74,9 @@ type BootstrapMaterial = wire.Bootstrap
 type run struct {
 	app *config.App
 	d   Deps
+	// brokerStart and managerLive are the resolved retry budgets (Deps
+	// overrides or the defaults), fixed for the run.
+	brokerStart, managerLive RetryBudget
 	// minted records whether THIS apply run actually minted fresh bootstrap
 	// material (as opposed to the mint-manager-bootstrap step tolerating an
 	// already-spent latch — e.g. an idempotent re-apply against the same broker
@@ -262,6 +280,12 @@ type Deps struct {
 	// other user-facing warnings already surface (see internal/cli/host/stop.go,
 	// internal/cli/host/down.go).
 	Log func(format string, args ...any)
+	// BrokerStartRetry bounds the retry that absorbs scion's runtime-broker
+	// registration race on manager start/resume/list; ManagerLiveRetry
+	// bounds the post-start liveness poll. Zero values take the production
+	// defaults (30 × 1 s and 15 × 1 s); tests shrink them.
+	BrokerStartRetry RetryBudget
+	ManagerLiveRetry RetryBudget
 }
 
 // check returns an error naming the first required collaborator left nil.
@@ -310,7 +334,10 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 	if err := d.check(); err != nil {
 		return err
 	}
-	r := &run{app: app, d: d}
+	r := &run{app: app, d: d,
+		brokerStart: d.BrokerStartRetry.or(defaultBrokerStartRetry),
+		managerLive: d.ManagerLiveRetry.or(defaultManagerLiveRetry),
+	}
 	// The plan is kept, not just ranged over: the converge-to-off reconciliation
 	// below needs to know whether this run manages the hub at all (see
 	// disableHubLogin).
@@ -970,7 +997,7 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, opts scion.StartOp
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
-	rerr := retryOnBrokerUnavailable(ctx, v.resume)
+	rerr := r.retryOnBrokerUnavailable(ctx, v.resume)
 	if rerr == nil {
 		return nil
 	}
@@ -986,17 +1013,17 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, opts scion.StartOp
 		fmt.Sprintf(v.lostFmt, rerr), fmt.Sprintf(v.lostWhy, rerr))
 }
 
-// retryOnBrokerUnavailable runs action up to brokerStartAttempts times,
-// waiting brokerStartInterval between attempts, for as long as each failure is
+// retryOnBrokerUnavailable runs action up to r.brokerStart.Attempts times,
+// waiting r.brokerStart.Interval between attempts, for as long as each failure is
 // the transient runtime-broker-unavailable race (scion.IsBrokerUnavailable). A nil
 // result, or any non-transient error, returns immediately — the retry budget
 // exists purely to absorb the registration race, not to mask real failures.
 // Shared by startManagerCreate's Start retry and start-manager's Resume retry:
 // `scion resume` hits the identical runtime-broker race as `scion start` (see
 // scion.IsBrokerUnavailable's doc), so both need the same absorbing retry.
-func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
+func (r *run) retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 	var last error
-	err := retry.Until(ctx, brokerStartAttempts, brokerStartInterval, func() (bool, error) {
+	err := retry.Until(ctx, r.brokerStart.Attempts, r.brokerStart.Interval, func() (bool, error) {
 		last = action()
 		if last == nil {
 			return true, nil
@@ -1021,7 +1048,7 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 // consume-an-attempt tolerance within its liveness budget.
 func (r *run) listAgentsRetry(ctx context.Context, jp string) ([]scion.Agent, error) {
 	var agents []scion.Agent
-	if err := retryOnBrokerUnavailable(ctx, func() error {
+	if err := r.retryOnBrokerUnavailable(ctx, func() error {
 		a, e := r.d.Scion.List(ctx, jp)
 		if e != nil {
 			return e
@@ -1061,7 +1088,7 @@ func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool 
 }
 
 // startManagerCreate runs the create-manager retry loop: `scion start` races
-// the runtime-broker registration (see brokerStartAttempts) and treats an
+// the runtime-broker registration (see Deps.BrokerStartRetry) and treats an
 // "already running"/"already exists" 409 as success (idempotent re-apply, or a
 // create-race against a record the observe step just missed — scion's own
 // lazy hub-sync can transiently read a live record as absent). Shared by the absent-record branch and the post-delete
@@ -1084,7 +1111,7 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) erro
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
-	return retryOnBrokerUnavailable(ctx, func() error {
+	return r.retryOnBrokerUnavailable(ctx, func() error {
 		startErr := r.d.Scion.Start(ctx, opts)
 		// Idempotent: a manager already running/existing (re-apply, or a
 		// create-race the observe step missed) is success, not error.
@@ -1135,13 +1162,6 @@ func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 	return nil
 }
 
-// managerLiveAttempts/managerLiveInterval bound waitManagerLive's post-start
-// poll. Package vars so tests shrink them.
-var (
-	managerLiveAttempts = 15
-	managerLiveInterval = 1 * time.Second
-)
-
 // waitManagerLive polls r.d.Scion.List until the manager's record shows BOTH
 // Phase=="running" AND a live container, or attempts run out. This is the
 // backstop for both false-success classes above this layer: a blind `scion
@@ -1156,7 +1176,7 @@ var (
 func (r *run) waitManagerLive(ctx context.Context, jp string) error {
 	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
 		return r.d.Scion.List(c, jp)
-	}, r.app.Name, managerLiveAttempts, managerLiveInterval)
+	}, r.app.Name, r.managerLive.Attempts, r.managerLive.Interval)
 	if err == nil {
 		return nil
 	}

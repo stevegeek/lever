@@ -364,32 +364,6 @@ func TestOpenAuditRejectsUnwritableDir(t *testing.T) {
 	}
 }
 
-func TestServeOpensAuditFileWithMode0600(t *testing.T) {
-	dir := t.TempDir()
-	port := freePort(t)
-	pidPath := filepath.Join(dir, "remote.pid")
-	auditPath := filepath.Join(dir, "remote-audit.jsonl")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- Serve(ctx, ServeConfig{Port: port, Handler: okHandler(), PIDPath: pidPath, AuditPath: auditPath})
-	}()
-	waitFor(t, 2*time.Second, func() bool { return fileExists(pidPath) })
-
-	waitFor(t, 2*time.Second, func() bool { return fileExists(auditPath) })
-	if perm := statPerm(t, auditPath); perm != 0o600 {
-		t.Errorf("audit file mode = %#o, want 0600", perm)
-	}
-
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Serve did not return after ctx cancel")
-	}
-}
-
 func statPerm(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	fi, err := os.Stat(path)

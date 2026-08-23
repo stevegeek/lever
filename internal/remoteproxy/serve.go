@@ -57,15 +57,6 @@ type ServeConfig struct {
 	// the whole check. brokerctl.State.WriteRemoteStamp removes the file on
 	// every failure path for this reason.
 	Stamp func() error
-	// AuditPath, when non-empty, is opened by Serve via OpenAudit for the
-	// life of the serve, guaranteeing the audit JSONL exists (0600) as soon
-	// as the proxy starts and is closed cleanly on shutdown. This is
-	// independent of Handler's own Audit wiring (see the Handler field
-	// doc): the caller's separate OpenAudit call is what actually receives
-	// per-request AuditLines, since Handler is already built by the time
-	// Serve runs. Passing the same path here just means Serve co-owns the
-	// file's lifecycle rather than leaving it entirely to the caller.
-	AuditPath string
 	// Provider, when non-nil, is the local OIDC provider, served on its OWN
 	// loopback listener (127.0.0.1:Provider.Port()) for the life of the
 	// serve.
@@ -82,9 +73,9 @@ type ServeConfig struct {
 
 // Serve runs the proxy until ctx is cancelled: bind 127.0.0.1:<Port> (fail
 // closed on any non-loopback listen address), bind the provider's own
-// loopback port when one is configured, open the audit JSONL (append, 0600)
-// when AuditPath is set, write the pid file, record what this process is
-// serving (Stamp), and serve. On ctx.Done it shuts both servers down
+// loopback port when one is configured, write the pid file, record what
+// this process is serving (Stamp), and serve. The audit JSONL is the
+// caller's: it opens it (OpenAudit) before building Handler. On ctx.Done it shuts both servers down
 // gracefully, removes the pid file, and returns. Mirrors brokerctl.Serve's
 // bind → pid → serve → remove-pid ordering (internal/brokerctl/serve.go).
 func Serve(ctx context.Context, cfg ServeConfig) error {
@@ -102,15 +93,6 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 			_ = ln.Close()
 			return err
 		}
-	}
-
-	if cfg.AuditPath != "" {
-		_, auditCloser, err := OpenAudit(cfg.AuditPath)
-		if err != nil {
-			closeListeners(ln, provLn)
-			return fmt.Errorf("remoteproxy: open audit: %w", err)
-		}
-		defer auditCloser.Close()
 	}
 
 	if err := writePIDFile(cfg.PIDPath); err != nil {

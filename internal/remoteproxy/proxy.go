@@ -53,7 +53,8 @@ type Config struct {
 	// could own. Nil uses the default net dialer (tests).
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	// ResponseHeaderTimeout bounds the wait for the hub's response HEADERS.
-	// 0 uses DefaultResponseHeaderTimeout; tests lower it. It does not bound
+	// 0 uses DefaultResponseHeaderTimeout. A test seam: production leaves
+	// it unset; tests lower it to exercise the 502 path. It does not bound
 	// the body, so a streamed response and an upgraded connection are
 	// unaffected — the timer stops once the headers land. Only meaningful
 	// alongside DialContext, which is when this package owns the Transport.

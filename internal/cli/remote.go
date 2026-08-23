@@ -115,11 +115,10 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			cmd.Printf("remote proxy %q serving on 127.0.0.1:%d (login provider on 127.0.0.1:%d, issuer %s)\n",
 				app.Name, port, provider.Port(), provider.IssuerURL())
 			return remoteproxy.Serve(ctx, remoteproxy.ServeConfig{
-				Port:      port,
-				Handler:   handler,
-				PIDPath:   state.RemotePID(),
-				AuditPath: state.RemoteAudit(),
-				Provider:  provider,
+				Port:     port,
+				Handler:  handler,
+				PIDPath:  state.RemotePID(),
+				Provider: provider,
 				// Record the config THIS process actually loaded, not the one
 				// whoever started it believes is running. `lever apply` reuses
 				// a live proxy only when this record matches the config it is

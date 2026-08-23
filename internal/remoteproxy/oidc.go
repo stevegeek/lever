@@ -105,7 +105,8 @@ type ProviderConfig struct {
 	// Audit receives one line per request the provider answers; nil disables
 	// (tests). Values never carry a code, token or cookie.
 	Audit func(line AuditLine)
-	// Now is the clock, injectable for expiry tests. nil ⇒ time.Now.
+	// Now is the clock. nil ⇒ time.Now. A test seam: production leaves it
+	// unset; tests set it to drive code/token expiry deterministically.
 	Now func() time.Time
 }
 

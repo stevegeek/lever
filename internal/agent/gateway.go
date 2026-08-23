@@ -111,11 +111,17 @@ func (s *clientCertSource) reloadLocked() error {
 	return nil
 }
 
+// errBadCAPEM means the CA bundle held no parsable certificate.
+var errBadCAPEM = errors.New("agent: bad CA PEM")
+
+// errNotLoopback means the gateway was asked to listen off-host.
+var errNotLoopback = errors.New("gateway: listen addr must be loopback")
+
 // caPool builds a RootCAs pool from a PEM bundle.
 func caPool(caPEM []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("agent: bad CA PEM")
+		return nil, errBadCAPEM
 	}
 	return pool, nil
 }
@@ -201,7 +207,7 @@ func requireLoopback(listenAddr string) error {
 		return fmt.Errorf("gateway: parse listen addr %q: %w", listenAddr, err)
 	}
 	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("gateway: listen addr must be loopback, got %q", listenAddr)
+		return fmt.Errorf("%w, got %q", errNotLoopback, listenAddr)
 	}
 	return nil
 }

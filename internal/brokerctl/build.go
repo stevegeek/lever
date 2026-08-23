@@ -6,6 +6,7 @@
 package brokerctl
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -23,6 +24,10 @@ import (
 // satisfies registry.Register's non-empty-Backend invariant but is NEVER dialed:
 // the llm capability is exercised by the broker /llm proxy, not an /mcp/<name>/ tool route.
 const llmSentinelBackend = "lever:llm-proxy"
+
+// errEmptyAPIKeyFile means api_key_file exists but holds only whitespace. An
+// absent file is a different error (fs.ErrNotExist from package state).
+var errEmptyAPIKeyFile = errors.New("is empty")
 
 // BuildBroker assembles the config-derived groups of a broker.Config from the
 // parsed app config — Identity (the request/delegation policy from
@@ -117,7 +122,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			return broker.Config{}, fmt.Errorf("brokerctl: %w", err)
 		}
 		if key == "" {
-			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q is empty", app.Broker.APIKeyFile)
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q %w", app.Broker.APIKeyFile, errEmptyAPIKeyFile)
 		}
 		cfg.LLM.APIKey = []byte(key)
 	}

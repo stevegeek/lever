@@ -67,13 +67,16 @@ func HarnessEnvOverlay() map[string]string {
 // auth. The broker returns the token already base64url-encoded, and the proxy's
 // bearerToken decodes the value after "Bearer " verbatim, so it is returned as
 // is: do NOT re-encode it.
+// errEmptyLLMToken means the broker answered 200 with a blank token field.
+var errEmptyLLMToken = errors.New("broker /request: empty token in response")
+
 func RequestLLMToken(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error) {
 	tok, err := Request(ctx, NormalizeBrokerURL(brokerURL), client, "llm", "generate", cn, nil)
 	if err != nil {
 		return "", err
 	}
 	if tok == "" {
-		return "", errors.New("broker /request: empty token in response")
+		return "", errEmptyLLMToken
 	}
 	return tok, nil
 }

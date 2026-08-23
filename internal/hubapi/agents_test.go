@@ -102,10 +102,7 @@ func TestAgentsSurfacesForbidden(t *testing.T) {
 	f := agentsScript("")
 	f.replies[agentsPath] = reply{status: 403, body: `{"error":"forbidden"}`}
 	_, err := (&Client{T: f}).Agents(context.Background(), "lever", "hub")
-	var ae *APIError
-	if !errors.As(err, &ae) || ae.Status != 403 {
-		t.Fatalf("want an APIError with status 403, got %T: %v", err, err)
-	}
+	assertAPIStatus(t, err, 403)
 }
 
 func TestAgentsSurfacesTransportFailure(t *testing.T) {

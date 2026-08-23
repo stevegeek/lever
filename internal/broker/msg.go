@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -8,6 +9,10 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
+
+// errUnknownRecipient is the deny for a `to` that names no identity the broker
+// knows. It is wrapped as "unknown recipient %q".
+var errUnknownRecipient = errors.New("unknown recipient")
 
 // msgTarget is a resolved, policy-approved message destination: the scion
 // recipient string and the project (-g) it must be sent under. Every
@@ -54,7 +59,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	_, slug, toManager, known := b.identity(name)
 	switch {
 	case !known:
-		return msgTarget{}, fmt.Errorf("unknown recipient %q", to)
+		return msgTarget{}, fmt.Errorf("%w %q", errUnknownRecipient, to)
 	case toManager:
 		return managerTarget, nil
 	case !isManager && caller != name && !b.workerToWorker:

@@ -49,10 +49,18 @@ func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
 		if !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: error = %q, want it to name %s", tc.name, err, tc.want)
 		}
-		if strings.Contains(err.Error(), "no identity") {
+		if errors.Is(err, errNoIdentity) {
 			t.Fatalf("%s: argument checks must run before the identity load, got %q", tc.name, err)
 		}
 	}
+}
+
+// isFlagParseError reports whether err is the flag package's own rejection of
+// an argv: an undefined flag, or -h. Those have no sentinel in package flag
+// except flag.ErrHelp, so the undefined-flag case is matched on its wording.
+func isFlagParseError(err error) bool {
+	return err != nil && (errors.Is(err, flag.ErrHelp) ||
+		strings.Contains(err.Error(), "flag provided but not defined"))
 }
 
 func TestUnknownSubcommandErrors(t *testing.T) {
@@ -75,7 +83,7 @@ func TestRenewOnceNoIdentityErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("renewOnce with empty dir must return an error")
 	}
-	if !strings.Contains(err.Error(), "no identity") {
+	if !errors.Is(err, errNoIdentity) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -88,7 +96,7 @@ func TestRenewNonLoopReturnsErrorImmediately(t *testing.T) {
 	if err == nil {
 		t.Fatal("renew with no identity must error")
 	}
-	if !strings.Contains(err.Error(), "no identity") {
+	if !errors.Is(err, errNoIdentity) {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -111,8 +119,7 @@ func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 	err := run([]string{"lever-agent", "renew", "--id-dir", tmp, "--loop", "--interval", "24h"})
 	// Loop mode exits cleanly (nil) on signal. Either way, the error must NOT be
 	// a flag-parse error — that would mean cmdRenew doesn't define --loop/--interval.
-	if err != nil && (strings.Contains(err.Error(), "flag provided but not defined") ||
-		strings.Contains(err.Error(), "flag: help requested")) {
+	if isFlagParseError(err) {
 		t.Fatalf("real cmdRenew rejected --loop/--interval (manifest sidecar would break): %v", err)
 	}
 }
@@ -126,7 +133,7 @@ func TestProvisionVerbAcceptedByRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error (no identity), got nil")
 	}
-	if strings.Contains(err.Error(), "flag provided but not defined") {
+	if isFlagParseError(err) {
 		t.Fatalf("provision flags must parse: %v", err)
 	}
 }

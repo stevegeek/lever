@@ -97,19 +97,20 @@ func TestJailCurlNamesMissingCurl(t *testing.T) {
 		err: errors.New("exit status 127"),
 	}
 	_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
-	if err == nil || !strings.Contains(err.Error(), "curl is missing") {
-		t.Fatalf("want a provisioning-specific error, got %v", err)
+	if !errors.Is(err, ErrCurlMissing) {
+		t.Fatalf("want ErrCurlMissing, got %v", err)
 	}
 }
 
 func TestJailCurlSurfacesConnectionFailure(t *testing.T) {
+	exitErr := errors.New("exit status 7")
 	r := &scriptedRunner{
 		res: proc.Result{Code: 7, Stderr: "curl: (7) Failed to connect"},
-		err: errors.New("exit status 7"),
+		err: exitErr,
 	}
 	status, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
-	if err == nil {
-		t.Fatal("a connection failure must be an error")
+	if !errors.Is(err, exitErr) {
+		t.Fatalf("a connection failure must wrap the runner's error, got %v", err)
 	}
 	if status != 0 {
 		t.Errorf("status = %d, want 0 so it can never be read as an HTTP status", status)

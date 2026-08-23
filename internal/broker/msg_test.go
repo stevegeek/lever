@@ -20,30 +20,30 @@ func TestResolveMsgTarget(t *testing.T) {
 		g2g              bool
 		wantTo, wantProj string
 		wantErr          bool
-		wantErrSub       string // optional: substring the deny reason must contain
+		wantErrIs        error // optional: the sentinel the deny must wrap
 	}{
-		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever", false, ""},
-		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever", false, ""},
-		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false, ""},
-		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false, ""},
-		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false, ""},
-		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false, ""},
-		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false, ""},
-		{"manager to user other", "manager", "user:stephen", true, "", "", true, ""},
-		{"manager to unknown worker", "manager", "nope", true, "", "", true, ""},
-		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false, ""},
-		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false, ""},
-		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false, ""},
-		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever", false, ""},
-		{"worker to worker disabled", "scratch", "worker", false, "", "", true, ""},
-		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false, ""},
-		{"unknown caller", "mallory", "assistant", true, "", "", true, ""},
-		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true, ""},
-		{"worker to unknown", "scratch", "nope", true, "", "", true, ""},
+		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever", false, nil},
+		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever", false, nil},
+		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false, nil},
+		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false, nil},
+		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false, nil},
+		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false, nil},
+		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false, nil},
+		{"manager to user other", "manager", "user:stephen", true, "", "", true, nil},
+		{"manager to unknown worker", "manager", "nope", true, "", "", true, nil},
+		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false, nil},
+		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false, nil},
+		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false, nil},
+		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever", false, nil},
+		{"worker to worker disabled", "scratch", "worker", false, "", "", true, nil},
+		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false, nil},
+		{"unknown caller", "mallory", "assistant", true, "", "", true, nil},
+		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true, nil},
+		{"worker to unknown", "scratch", "nope", true, "", "", true, nil},
 		// Bare prefixes are NOT the empty manager alias / empty agent name:
 		// they must fall through to the unknown-recipient deny.
-		{"bare user: prefix denied", "manager", "user:", true, "", "", true, "unknown recipient"},
-		{"bare agent: prefix denied", "manager", "agent:", true, "", "", true, ""},
+		{"bare user: prefix denied", "manager", "user:", true, "", "", true, errUnknownRecipient},
+		{"bare agent: prefix denied", "manager", "agent:", true, "", "", true, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -51,8 +51,8 @@ func TestResolveMsgTarget(t *testing.T) {
 			if c.wantErr != (err != nil) {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}
-			if c.wantErrSub != "" && !strings.Contains(err.Error(), c.wantErrSub) {
-				t.Fatalf("err = %v, want substring %q", err, c.wantErrSub)
+			if c.wantErrIs != nil && !errors.Is(err, c.wantErrIs) {
+				t.Fatalf("err = %v, want %v", err, c.wantErrIs)
 			}
 			if err == nil && (tgt.scionTo != c.wantTo || tgt.project != c.wantProj) {
 				t.Fatalf("got (%q,%q), want (%q,%q)", tgt.scionTo, tgt.project, c.wantTo, c.wantProj)

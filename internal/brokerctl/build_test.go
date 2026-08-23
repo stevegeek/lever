@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
@@ -154,8 +153,8 @@ func TestBuildBrokerRejectsEmptyAPIKeyFile(t *testing.T) {
 			t.Errorf("content=%q: expected error for empty api_key_file, got nil", content)
 			continue
 		}
-		if !strings.Contains(err.Error(), "empty") {
-			t.Errorf("content=%q: error must mention \"empty\", got: %v", content, err)
+		if !errors.Is(err, errEmptyAPIKeyFile) {
+			t.Errorf("content=%q: want errEmptyAPIKeyFile, got: %v", content, err)
 		}
 	}
 }
@@ -238,7 +237,7 @@ func TestBuildBrokerAbsentAPIKeyFileIsNotReportedAsEmpty(t *testing.T) {
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected fs.ErrNotExist for absent api_key_file, got: %v", err)
 	}
-	if strings.Contains(err.Error(), "empty") {
+	if errors.Is(err, errEmptyAPIKeyFile) {
 		t.Fatalf("absent file must not be reported as empty: %v", err)
 	}
 }

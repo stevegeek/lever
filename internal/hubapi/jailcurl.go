@@ -3,6 +3,7 @@ package hubapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,6 +15,10 @@ import (
 // provisioning installs curl (internal/backend/guest/guest.go), so this means
 // the jail is not provisioned, not that the hub is down — worth saying so.
 const curlNotFound = 127
+
+// ErrCurlMissing means the jail has no curl, so the request never left. It is
+// a provisioning problem, not a hub problem; callers match it with errors.Is.
+var ErrCurlMissing = errors.New("curl is missing from the jail")
 
 // maxBody caps the response lever reads. The hub's replies here are small; a
 // wrong service on the hub port is not bounded by anything else.
@@ -67,8 +72,8 @@ func (j *JailCurl) Do(ctx context.Context, method, path string) (int, []byte, er
 		"sh", "-c", curlScript, "_", method, url)
 	if err != nil {
 		if res.Code == curlNotFound {
-			return 0, nil, fmt.Errorf("%s %s: curl is missing from the jail (is it provisioned?): %s",
-				method, path, strings.TrimSpace(res.Stderr))
+			return 0, nil, fmt.Errorf("%s %s: %w (is it provisioned?): %s",
+				method, path, ErrCurlMissing, strings.TrimSpace(res.Stderr))
 		}
 		return 0, nil, fmt.Errorf("%s %s: reaching the hub from the jail: %w: %s",
 			method, path, err, strings.TrimSpace(res.Stderr))

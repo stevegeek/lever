@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // validate checks one broker.tools entry's shape, failing closed. External
@@ -27,8 +27,8 @@ func (t Tool) validate() error {
 		if o.Name == "" {
 			return fmt.Errorf("config: broker tool %q has an operation with an empty name", t.Name)
 		}
-		if o.Name == registry.WildcardOp {
-			return fmt.Errorf("config: broker tool %q declares operation %q, which is reserved for gate: coarse", t.Name, registry.WildcardOp)
+		if o.Name == wire.WildcardOp {
+			return fmt.Errorf("config: broker tool %q declares operation %q, which is reserved for gate: coarse", t.Name, wire.WildcardOp)
 		}
 	}
 	if !t.External {
@@ -500,7 +500,7 @@ func (a *App) validateBrokerGrants() error {
 	// Known tools + their op sets.
 	toolOps := map[string]map[string]bool{}
 	// Built-in reserved pseudo-tool: llm (broker /llm proxy, no backend subprocess).
-	toolOps[registry.ReservedLLMTool] = map[string]bool{registry.ReservedLLMOp: true}
+	toolOps[wire.ReservedLLMTool] = map[string]bool{wire.ReservedLLMOp: true}
 	for _, t := range a.Broker.Tools {
 		if t.Name == "" {
 			return fmt.Errorf("config: broker.tools entry has empty name")
@@ -516,7 +516,7 @@ func (a *App) validateBrokerGrants() error {
 		}
 		ops := map[string]bool{}
 		if t.External && t.EffectiveGate() == GateCoarse {
-			ops[registry.WildcardOp] = true
+			ops[wire.WildcardOp] = true
 		}
 		for _, o := range t.Operations {
 			ops[o.Name] = true
@@ -534,7 +534,7 @@ func (a *App) validateBrokerGrants() error {
 			return fmt.Errorf("config: %s grants tool %q which is not a declared broker.tool", who, tool)
 		}
 		if !ops[op] {
-			if op == registry.WildcardOp {
+			if op == wire.WildcardOp {
 				return fmt.Errorf("config: %s grants op %q on tool %q, but the wildcard is honored only for a gate: coarse external tool", who, op, tool)
 			}
 			return fmt.Errorf("config: %s grants %q on tool %q which has no such operation", who, op, tool)

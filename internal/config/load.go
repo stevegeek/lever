@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/wire"
 	"gopkg.in/yaml.v3"
 )
 
@@ -154,11 +154,11 @@ func LoadNoHostChecks(path string) (*App, error) {
 func (a *App) injectLLMGrants() {
 	add := func(obtain *[]Grant) {
 		for _, g := range *obtain {
-			if g.Tool == registry.ReservedLLMTool && g.Op == registry.ReservedLLMOp {
+			if g.Tool == wire.ReservedLLMTool && g.Op == wire.ReservedLLMOp {
 				return
 			}
 		}
-		*obtain = append(*obtain, Grant{Tool: registry.ReservedLLMTool, Op: registry.ReservedLLMOp})
+		*obtain = append(*obtain, Grant{Tool: wire.ReservedLLMTool, Op: wire.ReservedLLMOp})
 	}
 	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
 		add(&a.Manager.Obtain)

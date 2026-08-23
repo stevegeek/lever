@@ -16,15 +16,17 @@ import (
 	"sync"
 
 	"github.com/stevegeek/lever/internal/mcp"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
-// Reserved names of the broker's built-in LLM pseudo-tool: the /llm proxy,
-// which has no backend subprocess and no /mcp/llm/ route. config injects the
-// implicit {llm, generate} grant; broker.ReservedLLMTool/ReservedLLMOp alias
-// these.
+// Reserved names of the broker's built-in LLM pseudo-tool (the /llm proxy,
+// which has no backend subprocess and no /mcp/llm/ route) and of a coarse
+// tool's single operation. Declared in wire, the contract leaf, so config can
+// spell them without importing this package; aliased here for the broker side.
 const (
-	ReservedLLMTool = "llm"
-	ReservedLLMOp   = "generate"
+	ReservedLLMTool = wire.ReservedLLMTool
+	ReservedLLMOp   = wire.ReservedLLMOp
+	WildcardOp      = wire.WildcardOp
 )
 
 // Operation describes one operation a tool exposes.
@@ -43,12 +45,6 @@ type Operation struct {
 	// mint-time error (#21). Empty = permissive (any key is a constraint).
 	Params []string
 }
-
-// WildcardOp is the operation name of a coarse tool's single capability. It is
-// a literal op value — minted, granted, and verified by exact match — so the
-// token layer needs no wildcard logic; the gateway simply REQUIRES this op for
-// a coarse tool (and never for a fine one, so "*" cannot widen a fine tool).
-const WildcardOp = "*"
 
 // Tool is a registered MCP tool.
 type Tool struct {

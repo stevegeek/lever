@@ -69,10 +69,8 @@ type Config struct {
 	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
 	// (embedders/tests that never message the manager).
 	ManagerSlug string
-	// Agents lists the worker identities /provision may issue a ticket for.
-	Agents    []string
-	GrantTTL  time.Duration
-	TicketTTL time.Duration
+	GrantTTL    time.Duration
+	TicketTTL   time.Duration
 	// ServerName is the server cert hostname agents dial (host.orb.internal).
 	// Informational: the serving cert comes from the ServerCertSource handed
 	// to ServeListeners, so the broker itself never reads this.
@@ -186,7 +184,6 @@ type Broker struct {
 	rules     *rules.Policy
 	reg       *registry.Registry
 	manager   string
-	agents    map[string]struct{}
 	grantTTL  time.Duration
 	ticketTTL time.Duration
 	log       *slog.Logger
@@ -254,10 +251,6 @@ func New(c Config) *Broker {
 		c.Log = slog.New(slog.DiscardHandler)
 	}
 	directives := newDirectiveStore(c.DirectiveState, c.PersistDirectives, c.Log)
-	agents := make(map[string]struct{}, len(c.Agents))
-	for _, a := range c.Agents {
-		agents[a] = struct{}{}
-	}
 	revoked := make(map[string]bool, len(c.RevocationState.Revoked))
 	for _, a := range c.RevocationState.Revoked {
 		revoked[a] = true
@@ -280,7 +273,7 @@ func New(c Config) *Broker {
 	return &Broker{
 		// identity, keys and policy
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
-		manager: c.ManagerIdentity, managerSlug: c.ManagerSlug, agents: agents,
+		manager: c.ManagerIdentity, managerSlug: c.ManagerSlug,
 		grantTTL: c.GrantTTL, ticketTTL: c.TicketTTL, log: c.Log,
 		version: c.Version, configHash: c.ConfigHash,
 		// persisted state
@@ -347,11 +340,6 @@ func (b *Broker) isRevoked(agent string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.revoked[agent]
-}
-
-func (b *Broker) isAgent(name string) bool {
-	_, ok := b.agents[name]
-	return ok
 }
 
 // audit logs a decision; detail is "" for plain allows. kvs are optional

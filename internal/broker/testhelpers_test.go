@@ -74,7 +74,7 @@ func regTool(name, backend, op string) registry.Tool {
 // composition of it with option funcs. The base is a fully keyed broker
 // (keys, CA, ticket store), the default policy + registry (analyst obtains
 // db.read; manager delegates db.read to worker; tool "db"), manager identity
-// "manager" (slug = CN), provisionable agents manager/analyst/worker, and a
+// "manager" (slug = CN), one declared worker "worker", and a
 // discarded log.
 
 type configOpt func(*Config)
@@ -96,7 +96,7 @@ func testConfig(t *testing.T, opts ...configOpt) Config {
 	_ = reg.Register(regTool("db", "http://127.0.0.1:3201", "read"))
 	cfg := Config{
 		Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
-		ManagerIdentity: "manager", Agents: []string{"manager", "analyst", "worker"},
+		ManagerIdentity: "manager", Workers: []WorkerSpec{{Name: "worker"}},
 		GrantTTL: time.Hour, TicketTTL: 10 * time.Minute, ServerName: "host.orb.internal",
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

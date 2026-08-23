@@ -40,10 +40,8 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		}
 	}
 	addGrants(app.ManagerCN(), app.Manager.Obtain, app.Manager.Delegate)
-	agents := make([]string, 0, len(app.Workers))
 	for _, g := range app.Workers {
 		addGrants(g.Name, g.Obtain, g.Delegate)
-		agents = append(agents, g.Name)
 	}
 
 	reg := registry.New()
@@ -95,7 +93,6 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		Rules:           pol,
 		Registry:        reg,
 		ManagerIdentity: app.ManagerCN(),
-		Agents:          agents,
 		GrantTTL:        app.Broker.GrantTTL,
 		TicketTTL:       app.Broker.TicketTTL,
 		LLMUpstream:     app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com

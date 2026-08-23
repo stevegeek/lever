@@ -51,8 +51,8 @@ func TestBuildBrokerAssemblesRulesAndRegistry(t *testing.T) {
 	if !ok || tool.Backend != "127.0.0.1:3201" || !tool.FirstParty {
 		t.Fatalf("registry envelope wrong: %+v ok=%v", tool, ok)
 	}
-	if cfg.ManagerIdentity != "manager" || len(cfg.Agents) != 1 || cfg.Agents[0] != "worker" {
-		t.Fatalf("identity/agents wrong: %q %v", cfg.ManagerIdentity, cfg.Agents)
+	if cfg.ManagerIdentity != "manager" {
+		t.Fatalf("identity wrong: %q", cfg.ManagerIdentity)
 	}
 }
 

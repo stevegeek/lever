@@ -27,7 +27,7 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if !b.isAgent(req.Worker) {
+	if _, ok := b.workerSpec(req.Worker); !ok {
 		b.audit("provision", caller, "deny", "unknown worker: "+req.Worker)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return

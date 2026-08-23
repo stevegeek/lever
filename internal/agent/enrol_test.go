@@ -53,7 +53,7 @@ func testBroker(t *testing.T) *brokerEnv {
 		Rules:           pol,
 		Registry:        reg,
 		ManagerIdentity: "manager",
-		Agents:          []string{"worker"},
+		Workers:         []broker.WorkerSpec{{Name: "worker"}},
 		ServerName:      "127.0.0.1",
 	})
 	src, err := caInst.NewServerCertSource("127.0.0.1", nil, []string{"127.0.0.1"})

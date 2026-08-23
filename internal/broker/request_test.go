@@ -209,7 +209,7 @@ func TestRequestDeniesWildcardMintOnFineTool(t *testing.T) {
 	cfg := testConfig(t)
 	// Simulate a policy misconfiguration that slipped past config validation:
 	// the registry gate (HasOperation) must still deny — a fine tool has no "*".
-	cfg.Rules.AllowObtain("analyst", "db", registry.WildcardOp)
+	cfg.Identity.Rules.AllowObtain("analyst", "db", registry.WildcardOp)
 	b := New(cfg)
 	body := `{"tool":"db","op":"*"}`
 	r := httptest.NewRequest("POST", "/request", strings.NewReader(body))
@@ -356,7 +356,7 @@ func TestRequestAllowAuditCarriesMintLedger(t *testing.T) {
 
 func TestRequestDelegationAuditNamesDelegateRule(t *testing.T) {
 	cfg := restrictedConfig(t)
-	cfg.Rules.AllowDelegate("manager", "db", "read", "analyst")
+	cfg.Identity.Rules.AllowDelegate("manager", "db", "read", "analyst")
 	var buf bytes.Buffer
 	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
 	b := New(cfg)

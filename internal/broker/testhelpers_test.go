@@ -95,10 +95,12 @@ func testConfig(t *testing.T, opts ...configOpt) Config {
 	reg := registry.New()
 	_ = reg.Register(regTool("db", "http://127.0.0.1:3201", "read"))
 	cfg := Config{
-		Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
-		ManagerIdentity: "manager", Workers: []WorkerSpec{{Name: "worker"}},
-		GrantTTL: time.Hour, TicketTTL: 10 * time.Minute, ServerName: "host.orb.internal",
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Identity: IdentityConfig{
+			Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
+			ManagerIdentity: "manager", GrantTTL: time.Hour, TicketTTL: 10 * time.Minute,
+		},
+		Dispatch: DispatchConfig{Workers: []WorkerSpec{{Name: "worker"}}},
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -120,7 +122,7 @@ func withPolicy(build func(*rules.Policy)) configOpt {
 		if build != nil {
 			build(pol)
 		}
-		c.Rules = pol
+		c.Identity.Rules = pol
 	}
 }
 
@@ -134,22 +136,22 @@ func withTools(t *testing.T, tools ...registry.Tool) configOpt {
 				t.Fatal(err)
 			}
 		}
-		c.Registry = reg
+		c.Identity.Registry = reg
 	}
 }
 
 // withManager sets the manager cert CN and its scion slug.
 func withManager(cn, slug string) configOpt {
-	return func(c *Config) { c.ManagerIdentity, c.ManagerSlug = cn, slug }
+	return func(c *Config) { c.Identity.ManagerIdentity, c.Identity.ManagerSlug = cn, slug }
 }
 
 // withRuntime wires the worker dispatch side: the runtime, the declared
 // workers, the bootstrap CA/URL staged for them and the instance project.
 func withRuntime(rt WorkerRuntime, specs ...WorkerSpec) configOpt {
 	return func(c *Config) {
-		c.Runtime, c.Workers = rt, specs
-		c.BrokerCAPEM, c.BrokerURL = "CA-PEM", "https://10.0.0.2:8080"
-		c.InstanceProject = testInstanceProject
+		c.Dispatch.Runtime, c.Dispatch.Workers = rt, specs
+		c.Dispatch.BrokerCAPEM, c.Dispatch.BrokerURL = "CA-PEM", "https://10.0.0.2:8080"
+		c.Dispatch.InstanceProject = testInstanceProject
 	}
 }
 
@@ -168,7 +170,7 @@ func withLLM(t *testing.T, apiKey []byte, upstreamURL string) configOpt {
 	return func(c *Config) {
 		tools(c)
 		policy(c)
-		c.APIKey, c.LLMUpstream = apiKey, upstreamURL
+		c.LLM = LLMConfig{APIKey: apiKey, Upstream: upstreamURL}
 	}
 }
 
@@ -250,7 +252,7 @@ func reenrolBroker(t *testing.T, rt WorkerRuntime, mode string) (*Broker, Worker
 		BootstrapDir:  filepath.Join(t.TempDir(), ".lever")}
 	managerDir := filepath.Join(t.TempDir(), ".lever")
 	b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt, spec),
-		func(c *Config) { c.AutoReenrol, c.ManagerBootstrapDir = mode, managerDir }))
+		func(c *Config) { c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = mode, managerDir }))
 	return b, spec, managerDir
 }
 
@@ -268,7 +270,7 @@ var msgWorkers = []WorkerSpec{
 func msgBroker(t *testing.T, g2g bool) *Broker {
 	t.Helper()
 	return New(testConfig(t, withManager("manager", "assistant"), withRuntime(nil, msgWorkers...),
-		func(c *Config) { c.WorkerToWorker = g2g }))
+		func(c *Config) { c.Dispatch.WorkerToWorker = g2g }))
 }
 
 // newMsgTestBroker is msgBroker with a fakeMsgRuntime wired and the audit
@@ -278,7 +280,7 @@ func newMsgTestBroker(t *testing.T, g2g bool) (*Broker, *fakeMsgRuntime, *bytes.
 	var buf bytes.Buffer
 	rt := &fakeMsgRuntime{WorkerRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
 	b := New(testConfig(t, withAudit(&buf), withManager("manager", "assistant"), withRuntime(rt, msgWorkers...),
-		func(c *Config) { c.WorkerToWorker = g2g }))
+		func(c *Config) { c.Dispatch.WorkerToWorker = g2g }))
 	return b, rt, &buf
 }
 
@@ -292,9 +294,11 @@ func directiveTestBroker(t *testing.T) (b *Broker, priv string, allowedSigners s
 	rt = &fakeDirectiveRuntime{fakeRuntime: fakeRuntime{agents: map[string][]scion.Agent{}}}
 	cfg := testConfig(t, withRuntime(rt, WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker"}),
 		func(c *Config) {
-			c.DirectiveVerifier = &opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-			c.InstanceID = "testinst"
-			c.DirectiveExpiryMax = 24 * time.Hour
+			c.Directives = DirectiveConfig{
+				Verifier:   &opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"},
+				InstanceID: "testinst",
+				ExpiryMax:  24 * time.Hour,
+			}
 		})
 	return New(cfg), priv, as, rt
 }

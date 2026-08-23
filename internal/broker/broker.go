@@ -5,6 +5,7 @@
 package broker
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"net/url"
@@ -48,12 +49,31 @@ type RevocationState struct {
 	Revoked  []string `json:"revoked"`
 }
 
-// Config assembles a Broker. Zero GrantTTL/TicketTTL are defaulted. The
-// fields are grouped by concern; brokerctl.Build fills the identity and
-// persistence groups and brokerctl's serve path decorates the rest.
+// Config assembles a Broker. Its groups map onto who fills them: brokerctl's
+// BuildBroker fills Identity and LLM from the parsed app config, and its serve
+// path fills Persistence, Dispatch and Directives plus the top-level fields
+// from the state dir, the selected backend and the process environment.
 type Config struct {
-	// ---- Identity, keys and policy ----
+	Identity    IdentityConfig
+	Persistence PersistenceConfig
+	LLM         LLMConfig
+	Dispatch    DispatchConfig
+	Directives  DirectiveConfig
 
+	// Log receives the audit decisions; nil ⇒ a discard logger.
+	Log *slog.Logger
+	// Version and ConfigHash identify this broker process: the binary's
+	// version string and a digest of the broker-relevant configuration it was
+	// started with. Reported by /epoch so apply's broker-reuse shortcut can
+	// detect a stale broker (old binary or old tool set) and restart it
+	// instead of silently reusing it (#19). Both optional (empty = unreported).
+	Version    string
+	ConfigHash string
+}
+
+// IdentityConfig is the broker's keys, CA and policy: everything that decides
+// who may obtain which capability. Zero GrantTTL/TicketTTL are defaulted.
+type IdentityConfig struct {
 	Keys     token.KeyPair
 	CA       *ca.CA
 	Tickets  *ca.TicketStore
@@ -71,44 +91,35 @@ type Config struct {
 	ManagerSlug string
 	GrantTTL    time.Duration
 	TicketTTL   time.Duration
-	// ServerName is the server cert hostname agents dial (host.orb.internal).
-	// Informational: the serving cert comes from the ServerCertSource handed
-	// to ServeListeners, so the broker itself never reads this.
-	ServerName string
-	Log        *slog.Logger
-	// Version and ConfigHash identify this broker process: the binary's
-	// version string and a digest of the broker-relevant configuration it was
-	// started with. Reported by /epoch so apply's broker-reuse shortcut can
-	// detect a stale broker (old binary or old tool set) and restart it
-	// instead of silently reusing it (#19). Both optional (empty = unreported).
-	Version    string
-	ConfigHash string
+}
 
-	// ---- Persisted state ----
-
-	// RevocationState seeds the epoch floor + revoke list at construction
-	// (loaded from the state dir) so a restart never silently un-revokes.
-	RevocationState RevocationState
+// PersistenceConfig seeds the broker's persisted state at construction and
+// writes it through on every change, so a restart never silently un-revokes
+// or drops a directive.
+type PersistenceConfig struct {
+	// Revocation seeds the epoch floor + revoke list (loaded from the state dir).
+	Revocation RevocationState
 	// PersistRevocation is called (under the broker lock) whenever revocation
 	// state changes, to write it through to the state dir. nil ⇒ no persistence.
 	PersistRevocation func(RevocationState) error
-	// DirectiveState seeds the persistent operator-directive store at
-	// construction (loaded from the state dir); PersistDirectives writes it
-	// through on every mutation. Modeled on RevocationState/PersistRevocation.
-	DirectiveState    DirectiveState
+	// Directives seeds the persistent operator-directive store; PersistDirectives
+	// writes it through on every mutation. Modeled on Revocation/PersistRevocation.
+	Directives        DirectiveState
 	PersistDirectives func(DirectiveState) error
+}
 
-	// ---- LLM proxy ----
-
+// LLMConfig configures the /llm proxy.
+type LLMConfig struct {
 	// APIKey is the real Anthropic Console key bytes (loaded host-side from the
 	// 0600 api_key_file by brokerctl). nil ⇒ no /llm route is served.
 	APIKey []byte
-	// LLMUpstream is the proxy target; empty defaults to https://api.anthropic.com.
+	// Upstream is the proxy target; empty defaults to https://api.anthropic.com.
 	// Set by tests to a fake upstream. NEVER derived from a client request.
-	LLMUpstream string
+	Upstream string
+}
 
-	// ---- Worker dispatch and messaging (host-side) ----
-
+// DispatchConfig is the host-side worker dispatch and messaging wiring.
+type DispatchConfig struct {
 	// Runtime is the scion client the broker drives; Workers are the
 	// config-derived, path-authoritative worker descriptions; BrokerCAPEM/
 	// BrokerURL are copied into each worker's staged bootstrap so it trusts
@@ -157,23 +168,24 @@ type Config struct {
 	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
 	// Empty disables manager healing (audited as an error on lapse).
 	ManagerBootstrapDir string
+}
 
-	// ---- Operator directives ----
-
-	// DirectiveVerifier gates the operator-directive UDS admin channel: nil
-	// means directives are disabled and every /directive/* route 404s.
-	DirectiveVerifier *opsig.Verifier
+// DirectiveConfig configures the operator-directive UDS admin channel.
+type DirectiveConfig struct {
+	// Verifier gates the channel: nil means directives are disabled and every
+	// /directive/* route 404s.
+	Verifier *opsig.Verifier
 	// InstanceID is this instance's name, checked against Statement.Instance /
 	// Envelope.Instance on every signed directive op (opsig.ParseStatement /
 	// ParseEnvelope's instance-mismatch fail-closed check).
 	InstanceID string
-	// DirectiveAuditPath is the bounded JSON-lines audit log for the
-	// directive channel. Empty ⇒ dirAudit.append is a no-op (still non-nil,
-	// so handlers never nil-check it).
-	DirectiveAuditPath string
-	// DirectiveExpiryMax clamps how far in the future a submitted directive's
+	// AuditPath is the bounded JSON-lines audit log for the directive channel.
+	// Empty ⇒ dirAudit.append is a no-op (still non-nil, so handlers never
+	// nil-check it).
+	AuditPath string
+	// ExpiryMax clamps how far in the future a submitted directive's
 	// expires_at may sit (on top of opsig's own 24h hard cap).
-	DirectiveExpiryMax time.Duration
+	ExpiryMax time.Duration
 }
 
 // Broker is the running capability authority + brokered-tool proxy.
@@ -237,63 +249,56 @@ type Broker struct {
 
 // New builds a Broker from c.
 func New(c Config) *Broker {
-	if c.GrantTTL <= 0 {
-		c.GrantTTL = defaultGrantTTL
+	id, pe, llm, d, dir := c.Identity, c.Persistence, c.LLM, c.Dispatch, c.Directives
+	if id.GrantTTL <= 0 {
+		id.GrantTTL = defaultGrantTTL
 	}
-	if c.TicketTTL <= 0 {
-		c.TicketTTL = defaultTicketTTL
+	if id.TicketTTL <= 0 {
+		id.TicketTTL = defaultTicketTTL
+	}
+	if id.ManagerSlug == "" {
+		id.ManagerSlug = id.ManagerIdentity
 	}
 	if c.Log == nil {
 		// Default to a no-op logger so audit() never nil-panics when a caller
-		// (e.g. brokerctl.Serve, which leaves Log unset) builds a Config without
-		// one. Every decision path audits, so a nil log would otherwise crash
-		// the first request.
+		// builds a Config without one. Every decision path audits, so a nil
+		// log would otherwise crash the first request.
 		c.Log = slog.New(slog.DiscardHandler)
 	}
-	directives := newDirectiveStore(c.DirectiveState, c.PersistDirectives, c.Log)
-	revoked := make(map[string]bool, len(c.RevocationState.Revoked))
-	for _, a := range c.RevocationState.Revoked {
+	revoked := make(map[string]bool, len(pe.Revocation.Revoked))
+	for _, a := range pe.Revocation.Revoked {
 		revoked[a] = true
 	}
-	upstream := c.LLMUpstream
-	if upstream == "" {
-		upstream = "https://api.anthropic.com"
-	}
-	up, _ := url.Parse(upstream) // operator/test-controlled, validated at serve time
-	workers := make(map[string]WorkerSpec, len(c.Workers))
-	for _, g := range c.Workers {
+	up, _ := url.Parse(cmp.Or(llm.Upstream, "https://api.anthropic.com")) // operator/test-controlled, validated at serve time
+	workers := make(map[string]WorkerSpec, len(d.Workers))
+	for _, g := range d.Workers {
 		workers[g.Name] = g
-	}
-	if c.ManagerSlug == "" {
-		c.ManagerSlug = c.ManagerIdentity
-	}
-	if c.AutoReenrol == "" {
-		c.AutoReenrol = autoReenrolAll
 	}
 	return &Broker{
 		// identity, keys and policy
-		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
-		manager: c.ManagerIdentity, managerSlug: c.ManagerSlug,
-		grantTTL: c.GrantTTL, ticketTTL: c.TicketTTL, log: c.Log,
-		version: c.Version, configHash: c.ConfigHash,
+		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
+		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug,
+		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
+		log: c.Log, version: c.Version, configHash: c.ConfigHash,
 		// persisted state
-		minEpoch: c.RevocationState.MinEpoch, revoked: revoked, persist: c.PersistRevocation,
-		directives: directives,
+		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
+		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),
 		// llm proxy
-		apiKey: c.APIKey, llmUpstream: up,
+		apiKey: llm.APIKey, llmUpstream: up,
 		// worker dispatch and messaging
-		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
-		instanceProject: c.InstanceProject, workerToWorker: c.WorkerToWorker,
-		verifyRole: c.VerifyAgentRole, resolveAgentID: c.ResolveAgentID, tree: c.Tree,
+		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
+		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
+		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, tree: d.Tree,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval,
-		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
-		reenrolEvents: make(chan string, reenrolQueueDepth),
-		reenrolNow:    time.Now,
-		reenrolLast:   map[string]time.Time{},
-		reenrolTries:  map[string]int{},
+		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
+		managerBootstrapDir: d.ManagerBootstrapDir,
+		reenrolEvents:       make(chan string, reenrolQueueDepth),
+		reenrolNow:          time.Now,
+		reenrolLast:         map[string]time.Time{},
+		reenrolTries:        map[string]int{},
 		// operator directives
-		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
-		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,
+		directiveVerifier: dir.Verifier, instanceID: dir.InstanceID,
+		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
 		dirRate: newRateWindow(),
 	}
 }

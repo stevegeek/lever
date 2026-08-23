@@ -147,7 +147,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	}
 
 	// Config-derived, path-authoritative worker specs — the SAME production
-	// function Serve calls (see serve.go: cfg.Workers = WorkerSpecs(app, jailMount)).
+	// function Serve calls (see serve.go dispatchConfig: Workers: WorkerSpecs(app, jailMount)).
 	const jailMount = "/lever"
 	specs := WorkerSpecs(app, jailMount)
 	if len(specs) != 2 {
@@ -176,10 +176,10 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	if err := decorateConfig(&cfg, app, st, be, "test", ServeEnv{}); err != nil {
 		t.Fatalf("decorateConfig: %v", err)
 	}
-	if cfg.InstanceProject != jailMount {
-		t.Fatalf("decorateConfig InstanceProject = %q, want backend MountDest %q", cfg.InstanceProject, jailMount)
+	if cfg.Dispatch.InstanceProject != jailMount {
+		t.Fatalf("decorateConfig InstanceProject = %q, want backend MountDest %q", cfg.Dispatch.InstanceProject, jailMount)
 	}
-	cfg.Runtime = rt
+	cfg.Dispatch.Runtime = rt
 	b := broker.New(cfg)
 
 	call := func(method, path, body string) *httptest.ResponseRecorder {
@@ -190,7 +190,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		} else {
 			r = httptest.NewRequest(method, path, nil)
 		}
-		r.TLS = fakeTLSWithCN(cfg.ManagerIdentity)
+		r.TLS = fakeTLSWithCN(cfg.Identity.ManagerIdentity)
 		rec := httptest.NewRecorder()
 		b.JailHandler().ServeHTTP(rec, r)
 		return rec

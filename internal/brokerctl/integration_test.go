@@ -1,6 +1,10 @@
+//go:build integration
+
 package brokerctl
 
-// integration_test.go is the host-side host-side acceptance test. It
+// integration_test.go is the host-side acceptance test. It builds the real
+// cmd/lever-tool-db binary with `go build`, so it runs only under
+// `go test -tags integration`. It
 // drives the WHOLE host-side capability stack end to end:
 //
 //	config.Load(lever.yaml)  →  EnsureKeys + LoadRevocation + BuildBroker + broker.New
@@ -23,15 +27,8 @@ package brokerctl
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -49,27 +46,6 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
-
-// csrWithKey returns a PEM CSR for cn plus the matching EC private key PEM, so the
-// test can present the CA-signed cert as a client (the simulated worker).
-func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.CreateCertificateRequest(rand.Reader,
-		&x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-}
 
 // freeLoopbackPort grabs an OS-assigned loopback port, then releases it so a
 // child process (the real lever-tool-db) can bind it as its own MCP backend. A
@@ -120,41 +96,6 @@ func repoRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
-}
-
-// serverName is the orbstack HostToolAlias, which is what these integration
-// tests issue the broker's server cert for and verify against.
-const serverName = "host.orb.internal"
-
-// workerClient builds an mTLS client that pins the broker CA and presents the
-// worker's CA-issued cert, dialing 127.0.0.1 but verifying the server cert
-// against the broker's serverName (host.orb.internal) — the OrbStack hostname the
-// real server cert is issued for.
-func workerClient(t *testing.T, caInst *ca.CA, cert tls.Certificate) *http.Client {
-	t.Helper()
-	pool := x509.NewCertPool()
-	pool.AddCert(caInst.Cert)
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		RootCAs:      pool,
-		ServerName:   serverName, // "host.orb.internal"
-		Certificates: []tls.Certificate{cert},
-	}}}
-}
-
-// workerCert issues a CA-signed client cert for cn (the simulated-agent technique
-// from the broker e2e: skip provision/enrol, mint the leaf directly from the CA).
-func workerCert(t *testing.T, caInst *ca.CA, cn string) tls.Certificate {
-	t.Helper()
-	csrPEM, keyPEM := csrWithKey(t, cn)
-	certPEM, err := caInst.SignCSR(csrPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pair, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pair
 }
 
 // mintWorkerToken mints a delegated db.read token bound to "worker" constrained to
@@ -263,8 +204,8 @@ broker:
 	if err != nil {
 		t.Fatalf("BuildBroker: %v", err)
 	}
-	cfg.RevocationState = rev
-	cfg.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
+	cfg.Persistence.Revocation = rev
+	cfg.Persistence.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
 	b := broker.New(cfg)
 
 	jailLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -403,8 +344,8 @@ broker:
 	if err != nil {
 		t.Fatalf("BuildBroker #2: %v", err)
 	}
-	cfg2.RevocationState = rev2
-	cfg2.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
+	cfg2.Persistence.Revocation = rev2
+	cfg2.Persistence.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
 	b2 := broker.New(cfg2)
 
 	// Stand up the second broker on its own listeners. We do NOT start a second

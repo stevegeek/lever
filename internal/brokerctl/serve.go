@@ -158,7 +158,8 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	// resolve the hostname and instead connect to the already-allowlisted alias
 	// IP, which TLS validates against this IP SAN. Absent (e.g. a direct
 	// `lever broker serve`), fall back to the hostname-only cert.
-	certSrc, err := caInst.NewServerCertSource(cfg.ServerName, []string{cfg.ServerName}, []string{env.HostAliasIP})
+	serverName := be.HostToolAlias()
+	certSrc, err := caInst.NewServerCertSource(serverName, []string{serverName}, []string{env.HostAliasIP})
 	if err != nil {
 		return err
 	}
@@ -173,93 +174,122 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, certSrc)
 }
 
-// decorateConfig fills the host-side, config-derived fields of a broker.Config
-// that BuildBroker leaves unset: the persisted revocation/directive state and
-// their write-through closures, the operator-directive verifier, the selected
-// backend's server name + mount dest, the worker-dispatch runtime, the worker
-// specs + instance project, and the identity/URL fields. It is the exact wiring
-// Serve applies between BuildBroker and broker.New; single_project_dispatch_test
-// drives this same function so the two can never drift.
+// decorateConfig fills the host-side groups of a broker.Config that BuildBroker
+// leaves unset — Persistence (state-dir revocation/directive state and their
+// write-through closures), Directives (the operator-directive channel, when
+// enabled), Dispatch (the worker-dispatch runtime, worker specs, instance
+// project and URLs) — plus the /epoch Version/ConfigHash pair. It is the exact
+// wiring Serve applies between BuildBroker and broker.New;
+// single_project_dispatch_test drives this same function so the two can never
+// drift.
 func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be backend.Backend, version string, env ServeEnv) error {
-	rev, err := LoadRevocation(st)
+	pe, err := persistenceConfig(st)
 	if err != nil {
 		return err
+	}
+	d, err := dispatchConfig(app, st, be, env)
+	if err != nil {
+		return err
+	}
+	cfg.Persistence = pe
+	cfg.Dispatch = d
+	if app.DirectivesEnabled() {
+		cfg.Directives = broker.DirectiveConfig{
+			Verifier:   &opsig.Verifier{AllowedSigners: app.OperatorAllowedSignersPath(), Principal: app.OperatorPrincipal()},
+			InstanceID: app.Name,
+			AuditPath:  st.DirectiveAudit(),
+			ExpiryMax:  app.EffectiveDirectiveExpiryMax(),
+		}
+	}
+	cfg.Version = version
+	cfg.ConfigHash = ConfigHash(app)
+	return nil
+}
+
+// persistenceConfig loads the persisted revocation + directive state from st
+// and wires their write-through closures.
+func persistenceConfig(st state.State) (broker.PersistenceConfig, error) {
+	rev, err := LoadRevocation(st)
+	if err != nil {
+		return broker.PersistenceConfig{}, err
 	}
 	dirs, err := LoadDirectives(st)
 	if err != nil {
-		return err
+		return broker.PersistenceConfig{}, err
 	}
-	cfg.RevocationState = rev
-	cfg.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
-	cfg.DirectiveState = dirs
-	cfg.PersistDirectives = func(ds broker.DirectiveState) error { return SaveDirectives(st, ds) }
-	if app.DirectivesEnabled() {
-		cfg.DirectiveVerifier = &opsig.Verifier{AllowedSigners: app.OperatorAllowedSignersPath(), Principal: app.OperatorPrincipal()}
-		cfg.InstanceID = app.Name
-		cfg.DirectiveAuditPath = st.DirectiveAudit()
-		cfg.DirectiveExpiryMax = app.EffectiveDirectiveExpiryMax()
-	}
-	cfg.ServerName = be.HostToolAlias()
+	return broker.PersistenceConfig{
+		Revocation:        rev,
+		PersistRevocation: func(rs broker.RevocationState) error { return SaveRevocation(st, rs) },
+		Directives:        dirs,
+		PersistDirectives: func(ds broker.DirectiveState) error { return SaveDirectives(st, ds) },
+	}, nil
+}
 
+// dispatchConfig builds the host-side worker-dispatch group: the worker specs
+// and instance project from the selected backend's mount dest, the scion
+// runtime + hub lookups when apply passed the jail run-user through env, and
+// the CA/URL every staged bootstrap carries.
+func dispatchConfig(app *config.App, st state.State, be backend.Backend, env ServeEnv) (broker.DispatchConfig, error) {
 	jailMount := be.MountDest()
-	// Worker dispatch runs host-side with operator identity (jail runner). apply
-	// passes the resolved run-user/uid via env (ServeEnv). Without the env
-	// (manual `broker serve` with no prior apply) cfg.Runtime stays nil; the
-	// worker handlers detect this via runtimeReady and return 502 — they do not
-	// panic. apply is the real path.
-	if env.JailUser != "" && env.JailUID != "" {
-		jr, jerr := registry.JailRunner(app.Backend, leverexec.RealRunner{}, machineName(app), env.JailUser, env.JailUID)
-		if jerr != nil {
-			return jerr
-		}
-		// HostScionClient lets the broker's own worker-dispatch scion client
-		// (host-side, operator identity) authenticate against the real,
-		// dev-auth-off hub with the controller PAT minted by `lever apply`'s
-		// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
-		sc := HostScionClient(jr, st, app.Scion.AgentRole)
-		cfg.Runtime = sc
-		// Worker resume meets the same pre-role record hazard as the manager's
-		// (see broker.Config.VerifyAgentRole). The hub read rides the same jail
-		// runner and controller PAT as every other lever hub call.
-		hc := &hubapi.Client{T: &hubapi.JailCurl{
-			Runner:  jr,
-			BaseURL: scion.DefaultHubEndpoint,
-			Token:   controllerPAT(st),
-		}}
-		projectKey := filepath.Base(jailMount)
-		cfg.VerifyAgentRole = func(ctx context.Context, agent string) error {
-			return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, projectKey, agent)
-		}
-		// /msg/list cuts the controller's fleet-wide notification feed down to
-		// one agent, and needs the hub's agent id to attribute events (see
-		// broker.Config.ResolveAgentID).
-		cfg.ResolveAgentID = func(ctx context.Context, agentSlug string) (string, error) {
-			return hc.AgentID(ctx, projectKey, scion.DefaultHubEndpoint, agentSlug)
-		}
+	d := broker.DispatchConfig{
+		Workers:         WorkerSpecs(app, jailMount),
+		InstanceProject: jailMount,
+		WorkerToWorker:  app.WorkerToWorkerMessaging(),
+		// Natural-lapse auto-re-enrol (#22): mode from config; the manager's
+		// bootstrap.json lives at <tree>/.lever (mint-manager-bootstrap stages it
+		// there; workers carry their dir in WorkerSpec.BootstrapDir).
+		AutoReenrol:         string(app.EffectiveAutoReenrol()),
+		ManagerBootstrapDir: filepath.Join(app.Tree, ".lever"),
+		// Confinement anchor for every bootstrap.json the broker stages (see
+		// broker.DispatchConfig.Tree): the mount point, which no agent can replace.
+		Tree: app.Tree,
+		// Agents under closed-internet egress dial the host-alias IP; otherwise
+		// the backend's host alias hostname (the server cert's DNS SAN).
+		BrokerURL: workerBrokerURL(cmp.Or(env.HostAliasIP, be.HostToolAlias()), app.EffectiveJailPort()),
 	}
-	cfg.Workers = WorkerSpecs(app, jailMount)
-	cfg.InstanceProject = jailMount
-	// The manager's scion agent slug is the APP NAME (apply's start-manager
-	// dispatches the manager as Worker: app.Name), not the manager cert CN.
-	cfg.ManagerSlug = app.Name
-	// Natural-lapse auto-re-enrol (#22): mode from config; the manager's
-	// bootstrap.json lives at <tree>/.lever (mint-manager-bootstrap stages it
-	// there; workers carry their dir in WorkerSpec.BootstrapDir).
-	cfg.AutoReenrol = string(app.EffectiveAutoReenrol())
-	cfg.ManagerBootstrapDir = filepath.Join(app.Tree, ".lever")
-	// Confinement anchor for every bootstrap.json the broker stages (see
-	// broker.Config.Tree): the mount point, which no agent can replace.
-	cfg.Tree = app.Tree
-	cfg.Version = version
-	cfg.ConfigHash = ConfigHash(app)
-	cfg.WorkerToWorker = app.WorkerToWorkerMessaging()
 	if caPEM, err := os.ReadFile(st.CACert()); err == nil {
-		cfg.BrokerCAPEM = string(caPEM)
+		d.BrokerCAPEM = string(caPEM)
 	} else {
 		warnf("broker CA read: %v", err)
 	}
-	cfg.BrokerURL = workerBrokerURL(cmp.Or(env.HostAliasIP, cfg.ServerName), app.EffectiveJailPort())
-	return nil
+
+	// Worker dispatch runs host-side with operator identity (jail runner). apply
+	// passes the resolved run-user/uid via env (ServeEnv). Without the env
+	// (manual `broker serve` with no prior apply) Runtime stays nil; the worker
+	// handlers detect this via runtimeReady and return 502 — they do not panic.
+	// apply is the real path.
+	if env.JailUser == "" || env.JailUID == "" {
+		return d, nil
+	}
+	jr, err := registry.JailRunner(app.Backend, leverexec.RealRunner{}, machineName(app), env.JailUser, env.JailUID)
+	if err != nil {
+		return broker.DispatchConfig{}, err
+	}
+	// HostScionClient lets the broker's own worker-dispatch scion client
+	// (host-side, operator identity) authenticate against the real,
+	// dev-auth-off hub with the controller PAT minted by `lever apply`'s
+	// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
+	sc := HostScionClient(jr, st, app.Scion.AgentRole)
+	d.Runtime = sc
+	// Worker resume meets the same pre-role record hazard as the manager's
+	// (see broker.DispatchConfig.VerifyAgentRole). The hub read rides the same
+	// jail runner and controller PAT as every other lever hub call.
+	hc := &hubapi.Client{T: &hubapi.JailCurl{
+		Runner:  jr,
+		BaseURL: scion.DefaultHubEndpoint,
+		Token:   controllerPAT(st),
+	}}
+	projectKey := filepath.Base(jailMount)
+	d.VerifyAgentRole = func(ctx context.Context, agent string) error {
+		return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, projectKey, agent)
+	}
+	// /msg/list cuts the controller's fleet-wide notification feed down to
+	// one agent, and needs the hub's agent id to attribute events (see
+	// broker.DispatchConfig.ResolveAgentID).
+	d.ResolveAgentID = func(ctx context.Context, agentSlug string) (string, error) {
+		return hc.AgentID(ctx, projectKey, scion.DefaultHubEndpoint, agentSlug)
+	}
+	return d, nil
 }
 
 // bindListeners pre-binds the broker's loopback listeners so Serve learns the

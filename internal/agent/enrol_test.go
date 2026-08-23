@@ -47,14 +47,15 @@ func testBroker(t *testing.T) *brokerEnv {
 	reg := registry.New()
 	pol := rules.NewPolicy()
 	b := broker.New(broker.Config{
-		Keys:            kp,
-		CA:              caInst,
-		Tickets:         ca.NewTicketStore(),
-		Rules:           pol,
-		Registry:        reg,
-		ManagerIdentity: "manager",
-		Workers:         []broker.WorkerSpec{{Name: "worker"}},
-		ServerName:      "127.0.0.1",
+		Identity: broker.IdentityConfig{
+			Keys:            kp,
+			CA:              caInst,
+			Tickets:         ca.NewTicketStore(),
+			Rules:           pol,
+			Registry:        reg,
+			ManagerIdentity: "manager",
+		},
+		Dispatch: broker.DispatchConfig{Workers: []broker.WorkerSpec{{Name: "worker"}}},
 	})
 	src, err := caInst.NewServerCertSource("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {

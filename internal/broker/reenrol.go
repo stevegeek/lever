@@ -146,7 +146,7 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		}
 	}
 	// The healer bounces an agent through resume, so it meets the same pre-role
-	// record hazard as an operator-driven resume (see Config.VerifyAgentRole).
+	// record hazard as an operator-driven resume (see DispatchConfig.VerifyAgentRole).
 	// Abandoning the heal is the safe answer: a lapsed leaf costs that agent its
 	// brokered tools, while healing it into full hub authority costs the
 	// instance its containment.

@@ -116,9 +116,9 @@ func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event,
 const testInstanceProject = "/lever"
 
 func TestWorkerSpecLookup(t *testing.T) {
-	b := New(Config{
+	b := New(Config{Dispatch: DispatchConfig{
 		Workers: []WorkerSpec{{Name: "worker", WorkspaceSubdir: "workers/worker"}},
-	})
+	}})
 	if _, ok := b.workerSpec("worker"); !ok {
 		t.Fatal("expected worker spec present")
 	}

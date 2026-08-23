@@ -76,7 +76,7 @@ func (b *Broker) resolveListSubject(caller, worker string) (string, error) {
 	if caller == b.manager {
 		if worker == "" {
 			// The manager's agent slug, NOT its cert CN: the hub knows it only
-			// by the slug (see Config.ManagerSlug).
+			// by the slug (see IdentityConfig.ManagerSlug).
 			return b.managerSlug, nil
 		}
 		if _, ok := b.workerSpec(worker); !ok {
@@ -180,7 +180,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolve BEFORE reading: without an id to attribute events to there is no
 	// safe answer, and returning the raw feed is the leak (see
-	// Config.ResolveAgentID).
+	// DispatchConfig.ResolveAgentID).
 	if b.resolveAgentID == nil {
 		b.audit("msg", caller, "error", "list: agent id resolver not wired")
 		http.Error(w, "inbox unavailable", http.StatusBadGateway)

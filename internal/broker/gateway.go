@@ -15,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/mcp"
 )
 
 // rewriteUpstream is the shared ProxyRequest rewrite for the broker-side
@@ -82,7 +83,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		if err != nil {
 			return err
 		}
-		out := augmentToolsListSchema(body)
+		out := mcp.AugmentToolsListSchema(body)
 		resp.Body = io.NopCloser(bytes.NewReader(out))
 		resp.ContentLength = int64(len(out))
 		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(out)))
@@ -108,14 +109,14 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		method, msg, ok := parseJSONRPC(body)
+		method, msg, ok := mcp.Parse(body)
 		if !ok {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		switch method {
 		case "tools/call":
-			op, args, capB64, ok := toolsCallFields(msg)
+			op, args, capB64, ok := mcp.ToolsCall(msg)
 			if !ok || capB64 == "" {
 				b.audit(toolName, caller, "deny", "missing capability")
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -170,7 +171,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 				r.ContentLength = int64(len(body))
 				r.Header.Set("X-Lever-Caller", caller)
 			} else {
-				cleaned := stripCapability(msg)
+				cleaned := mcp.StripCapability(msg)
 				r.Body = io.NopCloser(bytes.NewReader(cleaned))
 				r.ContentLength = int64(len(cleaned))
 			}

@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/apply"
-	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // TestPhaseOrAbsent covers the definitive-absence fallback: a failed phase
@@ -149,7 +149,7 @@ func TestFirstLine(t *testing.T) {
 // whose /epoch identity matches this binary AND this broker config. A broker
 // predating the fields reports them empty — always a mismatch.
 func TestBrokerReusable(t *testing.T) {
-	got := broker.EpochResponse{Version: "v", ConfigHash: "h"}
+	got := wire.EpochResponse{Version: "v", ConfigHash: "h"}
 	if !brokerReusable(got, "v", "h") {
 		t.Fatal("matching identity must be reusable")
 	}
@@ -159,7 +159,7 @@ func TestBrokerReusable(t *testing.T) {
 	if brokerReusable(got, "v", "h2") {
 		t.Fatal("config drift must force a restart")
 	}
-	if brokerReusable(broker.EpochResponse{}, "v", "h") {
+	if brokerReusable(wire.EpochResponse{}, "v", "h") {
 		t.Fatal("an old broker (no identity fields) must force a restart")
 	}
 }

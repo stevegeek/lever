@@ -35,7 +35,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			if err := brokerctl.StopBroker(stateFor(path)); err != nil {
 				return err
 			}
-			w, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
+			w, err := buildApplyDeps(cmd.Context(), app, path, bf, applyOpts{Cmd: cmd})
 			if err != nil {
 				return err
 			}

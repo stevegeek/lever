@@ -72,3 +72,11 @@ func execCmd(t *testing.T, cmd *cobra.Command, argv ...string) (string, error) {
 	err := cmd.Execute()
 	return out.String(), err
 }
+
+// inertApplyOpts is what tests build apply deps with. Never let a test spawn a
+// real broker or proxy: os.Args[0] here is the TEST BINARY, and brokerServeCmd
+// detaches the child with Setsid, so any spawn outlives the run unreaped — a
+// full suite run once left 724 stray processes behind. `true` exits 0
+// immediately, so cmd.Start() still succeeds and the code path under test is
+// unchanged.
+var inertApplyOpts = applyOpts{SelfExe: "/usr/bin/true"}

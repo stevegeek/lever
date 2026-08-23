@@ -589,3 +589,45 @@ func TestGatewayRevokedDenyAuditCarriesTokenID(t *testing.T) {
 		t.Fatalf("revoked deny must carry the token id %q, got: %s", id, out)
 	}
 }
+
+// An MCP body over gatewayBodyLimit is rejected with 400 and an audited
+// "bad body" deny before any parse or authz — the backend is never reached.
+func TestGatewayRejectsOversizedBody(t *testing.T) {
+	var reached bool
+	var gotBody string
+	up := upstreamMCP(t, &reached, &gotBody)
+	defer up.Close()
+	cfg, audit := auditConfig(t)
+	b := New(cfg)
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"ping","pad":"` + strings.Repeat("x", gatewayBodyLimit) + `"}`
+	r := httptest.NewRequest("POST", "/mcp/db/", strings.NewReader(body))
+	r.TLS = leafFor(t, b, "worker")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if reached {
+		t.Fatal("backend reached despite oversized body")
+	}
+	if !strings.Contains(audit.String(), `detail="bad body"`) {
+		t.Fatalf("audit missing bad body deny: %s", audit.String())
+	}
+}
+
+func TestBackendURL(t *testing.T) {
+	cases := map[string]string{
+		"127.0.0.1:3201":        "http://127.0.0.1:3201",
+		"[::1]:3101/mcp":        "http://[::1]:3101/mcp",
+		"https://h.example/mcp": "https://h.example/mcp",
+	}
+	for in, want := range cases {
+		u, err := backendURL(in)
+		if err != nil || u.String() != want {
+			t.Fatalf("backendURL(%q) = %v, %v; want %q", in, u, err, want)
+		}
+	}
+}

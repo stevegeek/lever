@@ -7,6 +7,20 @@ import (
 	"testing"
 )
 
+// seededState returns a State whose dir exists and holds one file, written by
+// pick (a State path method) with content and mode.
+func seededState(t *testing.T, pick func(State) string, content []byte, mode os.FileMode) State {
+	t.Helper()
+	s := ForConfig(t.TempDir())
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pick(s), content, mode); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func TestControllerPATRoundTrip(t *testing.T) {
 	s := ForConfig(t.TempDir())
 	if err := s.SaveControllerPAT("pat-secret-123"); err != nil {
@@ -44,13 +58,7 @@ func TestLoadControllerPATAbsent(t *testing.T) {
 }
 
 func TestLoadControllerPATWrongPerms(t *testing.T) {
-	s := ForConfig(t.TempDir())
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(s.ControllerPAT(), []byte("pat-secret-123"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	s := seededState(t, State.ControllerPAT, []byte("pat-secret-123"), 0o644)
 	if _, err := s.LoadControllerPAT(); err == nil {
 		t.Fatal("LoadControllerPAT() with 0644 perms: want error, got nil")
 	}
@@ -148,14 +156,8 @@ func TestEnsureSessionSecretGeneratesOnce(t *testing.T) {
 // places the live hub's key in the file (possibly with trailing whitespace),
 // and lever adopts it trimmed, byte-for-byte untouched on disk.
 func TestEnsureSessionSecretAdoptsExisting(t *testing.T) {
-	s := ForConfig(t.TempDir())
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	seeded := []byte("operator-seeded-value\n")
-	if err := os.WriteFile(s.SessionSecret(), seeded, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	s := seededState(t, State.SessionSecret, seeded, 0o600)
 	v, err := s.EnsureSessionSecret()
 	if err != nil {
 		t.Fatal(err)
@@ -173,26 +175,14 @@ func TestEnsureSessionSecretAdoptsExisting(t *testing.T) {
 }
 
 func TestEnsureSessionSecretRejectsLoosePerms(t *testing.T) {
-	s := ForConfig(t.TempDir())
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(s.SessionSecret(), []byte("whatever"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	s := seededState(t, State.SessionSecret, []byte("whatever"), 0o644)
 	if _, err := s.EnsureSessionSecret(); err == nil {
 		t.Fatal("want perm error, got nil")
 	}
 }
 
 func TestEnsureSessionSecretRejectsEmptyFile(t *testing.T) {
-	s := ForConfig(t.TempDir())
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(s.SessionSecret(), []byte(" \n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	s := seededState(t, State.SessionSecret, []byte(" \n"), 0o600)
 	if _, err := s.EnsureSessionSecret(); err == nil {
 		t.Fatal("empty session-secret must error, not silently regenerate")
 	}

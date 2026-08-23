@@ -15,7 +15,7 @@ import (
 func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []byte {
 	if caller == "" {
 		s.audit("", "", "deny", "missing X-Lever-Caller")
-		return mcp.Error(id, -32000, "forbidden")
+		return mcp.Error(id, mcp.CodeServerError, "forbidden")
 	}
 	// Snapshot pubKey under the mutex so we see Register's write atomically and
 	// avoid a data race (Register writes under s.mu; reads must also hold s.mu).
@@ -32,22 +32,22 @@ func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []by
 	// could log misleading op/arg detail derived from an untrusted payload.
 	if pubKey == nil {
 		s.audit("", caller, "deny", "not registered")
-		return mcp.Error(id, -32000, "forbidden")
+		return mcp.Error(id, mcp.CodeServerError, "forbidden")
 	}
 	op, args, capB64, ok := mcp.ToolsCall(msg)
 	if !ok || capB64 == "" {
 		s.audit(op, caller, "deny", "missing capability or bad shape")
-		return mcp.Error(id, -32000, "forbidden")
+		return mcp.Error(id, mcp.CodeServerError, "forbidden")
 	}
 	o, known := s.ops[op]
 	if !known {
 		s.audit(op, caller, "deny", "unknown operation")
-		return mcp.Error(id, -32601, "method not found")
+		return mcp.Error(id, mcp.CodeMethodNotFound, "method not found")
 	}
 	rawTok, err := base64.RawURLEncoding.DecodeString(capB64)
 	if err != nil {
 		s.audit(op, caller, "deny", "bad capability encoding")
-		return mcp.Error(id, -32000, "forbidden")
+		return mcp.Error(id, mcp.CodeServerError, "forbidden")
 	}
 	params := mcp.MapConstraintParams(o.CaveatParam, args)
 	if err := token.Verify(pubKey, rawTok, token.Request{
@@ -55,7 +55,7 @@ func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []by
 		Params: params, Now: time.Now(), MinEpoch: s.freshEpoch(context.Background()),
 	}); err != nil {
 		s.audit(op, caller, "deny", "verify: "+err.Error())
-		return mcp.Error(id, -32000, "forbidden")
+		return mcp.Error(id, mcp.CodeServerError, "forbidden")
 	}
 	vc := ValidatedContext{Caller: caller, Tool: s.name, Operation: op, Constraints: params}
 	if o.Backstop != nil {
@@ -63,13 +63,13 @@ func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []by
 		// Handler actually executes, independent of token constraint mapping.
 		if err := o.Backstop(vc, args); err != nil {
 			s.audit(op, caller, "deny", "backstop: "+err.Error())
-			return mcp.Error(id, -32000, "forbidden")
+			return mcp.Error(id, mcp.CodeServerError, "forbidden")
 		}
 	}
 	result, err := o.Handler(vc, args)
 	if err != nil {
 		s.audit(op, caller, "error", err.Error())
-		return mcp.Error(id, -32603, "tool error")
+		return mcp.Error(id, mcp.CodeInternalError, "tool error")
 	}
 	s.audit(op, caller, "allow", "")
 	payload, _ := json.Marshal(result)

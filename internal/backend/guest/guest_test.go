@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/exec"
 )
 
@@ -148,18 +149,6 @@ func TestGOARCHUnrecognizedErrors(t *testing.T) {
 	}
 }
 
-// stageFakeBuildOutput creates the file a faked `go build` would have written,
-// at the exact path scionbin.Resolve passes to `-o`. InstallRootBinaryIfChanged
-// hashes that file for real, so it has to exist even when the build is a stub.
-func stageFakeBuildOutput(t *testing.T, machine string) {
-	t.Helper()
-	p := filepath.Join(os.TempDir(), "lever-scion-"+machine)
-	if err := os.WriteFile(p, []byte("fake-scion-"+machine), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(p) })
-}
-
 func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	for _, shape := range prefixShapes("lever-jail") {
 		t.Run(shape.name, func(t *testing.T) {
@@ -169,7 +158,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Code: 1})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			src := t.TempDir() // must exist for the stat check
-			stageFakeBuildOutput(t, "lever-jail")
+			backendtest.StageFakeBuildOutput(t, "lever-jail")
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
 			if err := g.EnsureScion(context.Background(), ScionSpec{Source: src}); err != nil {
@@ -261,7 +250,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("orb -m lever-vtest cat", exec.Result{Code: 1})
 	f.Script("orb -u root -m lever-vtest", exec.Result{})
 
-	stageFakeBuildOutput(t, "lever-vtest")
+	backendtest.StageFakeBuildOutput(t, "lever-vtest")
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-vtest"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-vtest"}, Machine: "lever-vtest"}
 	if err := g.EnsureScion(context.Background(), ScionSpec{Version: pin}); err != nil {
 		t.Fatalf("EnsureScion(version): %v", err)

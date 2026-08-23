@@ -22,7 +22,9 @@ read the Changed/Internal entries before rebasing open branches.
   (`mcp.MaxBodyBytes`). The MCP `initialize` reply reports the real server
   version instead of a placeholder.
 - **`lever apply --dry-run` no longer lists a jail-up step.** The step was a
-  no-op; the backend brings the machine up inside the steps that need it.
+  no-op on every production path: apply brings the machine up eagerly, before
+  planning, to resolve the run user. The machine still comes up; only the
+  phantom step is gone.
 - **`broker.api_key_file` is resolved against the config file's directory**
   when relative, like every other path in `lever.yaml`. An absolute path is
   unchanged.

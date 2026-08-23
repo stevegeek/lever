@@ -252,11 +252,11 @@ func (rc *remoteController) awaitListening(ctx context.Context, child *exec.Cmd)
 		return err // the apply's own ctx ended
 	}
 	if tail := lastLogLine(rc.state.RemoteLog()); tail != "" {
-		return fmt.Errorf("the remote proxy started but is not listening on %s: %s (see %s)",
-			rc.addr(), tail, rc.state.RemoteLog())
+		return fmt.Errorf("%w on %s: %s (see %s)",
+			errRemoteProxyNotListening, rc.addr(), tail, rc.state.RemoteLog())
 	}
-	return fmt.Errorf("the remote proxy started but is not listening on %s — see %s",
-		rc.addr(), rc.state.RemoteLog())
+	return fmt.Errorf("%w on %s — see %s",
+		errRemoteProxyNotListening, rc.addr(), rc.state.RemoteLog())
 }
 
 func lastLogLine(path string) string { return lastFileLine(path, 4<<10) }

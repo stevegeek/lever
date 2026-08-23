@@ -68,7 +68,7 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			}
 			// Passive: resolve the jail transport, never provision.
 			if err := b.ResolveRunUser(cmd.Context()); err != nil {
-				return fmt.Errorf("attach: jail not up (%v) — run `lever up` first", err)
+				return fmt.Errorf("attach: %w (%v) — run `lever up` first", errJailNotUp, err)
 			}
 			// state gives this client the controller PAT (minted by a prior
 			// `lever apply`'s bootstrap-token step) via HubTokenSource, so the

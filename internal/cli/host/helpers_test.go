@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -127,4 +128,12 @@ func scionOKRunner() *proc.FakeRunner {
 // returns sb.
 func stubRoot(sb *stubBackend) *cobra.Command {
 	return newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+}
+
+// wantJailNotUp fails unless err is the passive verbs' jail-down failure and
+// carries the `lever up` hint the operator is told to follow.
+func wantJailNotUp(t testing.TB, err error) {
+	t.Helper()
+	clitest.WantErrIs(t, err, errJailNotUp)
+	clitest.WantErrContaining(t, err, "lever up")
 }

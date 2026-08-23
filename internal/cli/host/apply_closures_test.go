@@ -12,14 +12,15 @@ import (
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -138,9 +139,8 @@ func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("StartBroker on identity mismatch must enter the restart branch (not reuse)")
 	}
-	if !strings.Contains(err.Error(), "stopping the stale broker before restart") {
-		t.Fatalf("mismatch must stop the stale broker BEFORE restart; got err: %v", err)
-	}
+	// The stop runs before the restart: the error is the stop's, not a spawn's.
+	clitest.WantErrContaining(t, err, "stopping the stale broker before restart")
 }
 
 // TestMintManagerBootstrapSuccess proves the mint closure composes the full
@@ -228,8 +228,8 @@ func TestMintManagerBootstrapNon200(t *testing.T) {
 	if errors.Is(err, apply.ErrBootstrapLatched) {
 		t.Fatal("a 500 must NOT be treated as a spent latch")
 	}
-	if !strings.Contains(err.Error(), "status 500") {
-		t.Fatalf("error should name the status code, got: %v", err)
+	if got := httpjson.Status(err); got != http.StatusInternalServerError {
+		t.Fatalf("httpjson.Status(err) = %d, want 500 (the error must carry the status): %v", got, err)
 	}
 }
 

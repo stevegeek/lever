@@ -3,7 +3,6 @@ package host
 import (
 	"fmt"
 	"github.com/stevegeek/lever/internal/cli/clitest"
-	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -56,11 +55,7 @@ func TestAttachTargetUnknownListsValidNames(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for unknown name")
 	}
-	for _, want := range []string{"nope", "assistant", "scratch", "worker"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err.Error(), want)
-		}
-	}
+	clitest.WantErrContaining(t, err, "nope", "assistant", "scratch", "worker")
 }
 
 // TestAttachNamePositionalIsNotAConfigPath pins that `attach <name>`'s positional
@@ -75,14 +70,9 @@ func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
 	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "attach", "scratch")
-	if err == nil {
-		t.Fatal("expected attach to fail when the jail is not up")
-	}
 	// Reaching the jail-not-up hint proves lever.yaml loaded from the CWD and the
 	// positional "scratch" was NOT treated as a config path.
-	if !strings.Contains(err.Error(), "lever up") {
-		t.Fatalf("`attach scratch` must load config from CWD and fail at ResolveRunUser; got: %v", err)
-	}
+	wantJailNotUp(t, err)
 }
 
 // TestAttachIsPassiveWhenJailNotUp is the regression test for the reviewed
@@ -95,12 +85,7 @@ func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
 	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "attach")
-	if err == nil {
-		t.Fatal("expected attach to fail when the jail is not up")
-	}
-	if !strings.Contains(err.Error(), "lever up") {
-		t.Fatalf("error should tell the operator to run `lever up`; got: %v", err)
-	}
+	wantJailNotUp(t, err)
 	if sb.up {
 		t.Fatal("attach must never call EnsureUp — it must not provision the jail")
 	}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -534,9 +535,7 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 	if err == nil {
 		t.Fatal("a stand-in that never listens must not report the proxy as serving")
 	}
-	if !strings.Contains(err.Error(), "not listening") {
-		t.Fatalf("Start after a killed proxy must respawn and then check it, got: %v", err)
-	}
+	clitest.WantErrIs(t, err, errRemoteProxyNotListening) // respawned, then checked
 	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
 		t.Fatalf("remote.log not created by the respawn: %v", serr)
 	}
@@ -562,9 +561,7 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	// As above: the stand-in never binds, so the spawn is proved by the
 	// liveness check's complaint rather than by a nil.
 	err := rc.Start(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "not listening") {
-		t.Fatalf("Start with no prior proxy must spawn and then check it, got: %v", err)
-	}
+	clitest.WantErrIs(t, err, errRemoteProxyNotListening) // spawned, then checked
 	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
 		t.Fatalf("remote.log not created by the spawn: %v", serr)
 	}
@@ -1091,12 +1088,8 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	}
 	// The cause lives only in that log — this process never sees the child's
 	// stderr — so the error has to carry it.
-	if !strings.Contains(err.Error(), "address already in use") {
-		t.Fatalf("error does not quote the log's reason: %v", err)
-	}
-	if !strings.Contains(err.Error(), st.RemoteLog()) {
-		t.Fatalf("error does not name the log: %v", err)
-	}
+	clitest.WantErrIs(t, err, errRemoteProxyNotListening)
+	clitest.WantErrContaining(t, err, "address already in use", st.RemoteLog()) // the log's reason, and the log
 
 	// And a proxy that IS listening passes.
 	ln2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))

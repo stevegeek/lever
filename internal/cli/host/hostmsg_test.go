@@ -83,11 +83,7 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for unknown --to")
 	}
-	for _, want := range []string{"nope", "assistant", "scratch"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err.Error(), want)
-		}
-	}
+	clitest.WantErrContaining(t, err, "nope", "assistant", "scratch")
 	if len(fr.Calls) != 0 {
 		t.Fatalf("scion must never be called on an unknown recipient, got %+v", fr.Calls)
 	}
@@ -101,12 +97,7 @@ func TestHostMsgSendJailDownFailsFast(t *testing.T) {
 	sb := &stubBackend{runner: fr, resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-assistant")}
 	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "msg", "send", "hi", "--to", "assistant")
-	if err == nil {
-		t.Fatal("want error when jail is down")
-	}
-	if !strings.Contains(err.Error(), "lever up") {
-		t.Fatalf("error should tell the operator to run `lever up`; got: %v", err)
-	}
+	wantJailNotUp(t, err)
 	if len(fr.Calls) != 0 {
 		t.Fatal("msg send must never call scion when the jail is not up")
 	}

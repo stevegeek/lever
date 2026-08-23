@@ -76,7 +76,7 @@ func loadRemoteApp(args []string) (string, *config.App, error) {
 		return "", nil, err
 	}
 	if !app.RemoteEnabled() {
-		return "", nil, fmt.Errorf("remote access is disabled — set remote.enabled: true in the config")
+		return "", nil, errRemoteDisabled
 	}
 	// Orbstack-only for now — but NOT because of how the proxy
 	// reaches the hub. It dials through the jail

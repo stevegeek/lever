@@ -195,42 +195,17 @@ func TestEnsureUpRejectsOldLima(t *testing.T) {
 }
 
 func TestLimaVersionAtLeast(t *testing.T) {
-	cases := []struct {
-		name    string
-		stdout  string
-		wantOK  bool
-		wantErr bool
-		wantGot string
-	}{
-		{name: "2.1.3 >= 2.0.0 → ok", stdout: "limactl version 2.1.3\n", wantOK: true, wantGot: "2.1.3"},
-		{name: "2.0.0 >= 2.0.0 → ok (exact match)", stdout: "limactl version 2.0.0\n", wantOK: true, wantGot: "2.0.0"},
-		{name: "1.9.9 >= 2.0.0 → too old", stdout: "limactl version 1.9.9\n", wantOK: false, wantGot: "1.9.9"},
-		{name: "3.0.0 >= 2.0.0 → ok (major bump)", stdout: "limactl version 3.0.0\n", wantOK: true, wantGot: "3.0.0"},
-		{name: "malformed output → error", stdout: "limactl: command not found\n", wantErr: true},
-		{name: "empty output → error", stdout: "", wantErr: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := proc.NewFakeRunner()
-			f.Script("limactl --version", proc.Result{Stdout: tc.stdout})
-			ok, got, err := common.VersionAtLeast(context.Background(), f, []string{"limactl", "--version"}, limaVersionRe, 2, 0, 0)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (ok=%t got=%q)", ok, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if ok != tc.wantOK {
-				t.Errorf("ok: want %t got %t", tc.wantOK, ok)
-			}
-			if got != tc.wantGot {
-				t.Errorf("got version string: want %q got %q", tc.wantGot, got)
-			}
-		})
-	}
+	backendtest.RunVersionCases(t, []backendtest.VersionCase{
+		{Name: "2.1.3 >= 2.0.0 → ok", Stdout: "limactl version 2.1.3\n", WantOK: true, WantGot: "2.1.3"},
+		{Name: "2.0.0 >= 2.0.0 → ok (exact match)", Stdout: "limactl version 2.0.0\n", WantOK: true, WantGot: "2.0.0"},
+		{Name: "1.9.9 >= 2.0.0 → too old", Stdout: "limactl version 1.9.9\n", WantOK: false, WantGot: "1.9.9"},
+		{Name: "3.0.0 >= 2.0.0 → ok (major bump)", Stdout: "limactl version 3.0.0\n", WantOK: true, WantGot: "3.0.0"},
+		{Name: "malformed output → error", Stdout: "limactl: command not found\n", WantErr: true},
+		{Name: "empty output → error", Stdout: "", WantErr: true},
+	}, func(f *proc.FakeRunner, stdout string) (bool, string, error) {
+		f.Script("limactl --version", proc.Result{Stdout: stdout})
+		return common.VersionAtLeast(context.Background(), f, []string{"limactl", "--version"}, limaVersionRe, 2, 0, 0)
+	})
 }
 
 // --- ResolveRunUser: passive attach must resolve without provisioning. ---
@@ -290,9 +265,7 @@ func TestTeardownDeletesVMWhenPresent(t *testing.T) {
 	if err := New(f, vm, common.Options{}).Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if last := f.Calls[len(f.Calls)-1]; !last.Subcommand("limactl", "delete") {
-		t.Fatalf("expected last call limactl delete --force; got %+v", f.Calls)
-	}
+	backendtest.AssertLastSubcommand(t, f, "limactl", "delete")
 }
 
 func TestTeardownIsNoopWhenAbsent(t *testing.T) {
@@ -313,9 +286,7 @@ func TestStopStopsVMWhenListed(t *testing.T) {
 	if err := New(f, vm, common.Options{}).Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if last := f.Calls[len(f.Calls)-1]; !last.Subcommand("limactl", "stop") {
-		t.Fatalf("expected last call limactl stop lever-x; got %+v", f.Calls)
-	}
+	backendtest.AssertLastSubcommand(t, f, "limactl", "stop")
 }
 
 func TestStopIsNoopWhenVMAbsent(t *testing.T) {
@@ -529,15 +500,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	// I2: an already-closed chain must NOT be flushed or re-resolved — that
 	// would briefly open egress for a running agent.
-	if r.Flushed {
-		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
-	}
-	if r.Resolved {
-		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
-	}
-	if l.HostAliasV4() != backendtest.HostAliasV4 {
-		t.Fatalf("alias should be read from the existing chain, got %q", l.HostAliasV4())
-	}
+	backendtest.AssertClosedChainKept(t, r, l.HostAliasV4())
 }
 
 // EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. The

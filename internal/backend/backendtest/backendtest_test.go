@@ -122,3 +122,29 @@ func TestAssertHelpers(t *testing.T) {
 	AssertFlushPrecedesResolve(t, f, "host.orb.internal")
 	AssertNoNodeTooling(t, f)
 }
+
+func TestAssertLastSubcommandAndClosedChainKept(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("orb", proc.Result{})
+	_, _ = f.Run(context.Background(), nil, "orb", "list")
+	_, _ = f.Run(context.Background(), nil, "orb", "stop", "m")
+	AssertLastSubcommand(t, f, "orb", "stop")
+	AssertClosedChainKept(t, &ClosedChainRunner{FakeRunner: f}, HostAliasV4)
+}
+
+func TestRunVersionCases(t *testing.T) {
+	var seen []string
+	RunVersionCases(t, []VersionCase{
+		{Name: "ok", Stdout: "1.2.3", WantOK: true, WantGot: "1.2.3"},
+		{Name: "err", Stdout: "", WantErr: true},
+	}, func(f *proc.FakeRunner, stdout string) (bool, string, error) {
+		seen = append(seen, stdout)
+		if stdout == "" {
+			return false, "", errors.New("no version")
+		}
+		return true, stdout, nil
+	})
+	if len(seen) != 2 {
+		t.Fatalf("check ran %d times, want 2", len(seen))
+	}
+}

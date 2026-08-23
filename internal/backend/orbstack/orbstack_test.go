@@ -62,15 +62,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	// I2: an already-closed chain must NOT be flushed or re-resolved — that would
 	// briefly open egress for a running agent.
-	if r.Flushed {
-		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
-	}
-	if r.Resolved {
-		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
-	}
-	if b.HostAliasV4() != backendtest.HostAliasV4 {
-		t.Fatalf("alias should be read from the existing chain, got %q", b.HostAliasV4())
-	}
+	backendtest.AssertClosedChainKept(t, r, b.HostAliasV4())
 }
 
 func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
@@ -236,9 +228,7 @@ func TestStopStopsMachineWhenListed(t *testing.T) {
 	if err := New(f, machine, common.Options{}).Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if last := f.Calls[len(f.Calls)-1]; !last.Subcommand("orb", "stop") {
-		t.Fatalf("expected last call orb stop lever-jail; got %+v", f.Calls)
-	}
+	backendtest.AssertLastSubcommand(t, f, "orb", "stop")
 }
 
 func TestStopIsNoopWhenAbsent(t *testing.T) {
@@ -316,9 +306,7 @@ func TestTeardownDeletesMachineWhenPresent(t *testing.T) {
 	if err := New(f, machine, common.Options{}).Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if last := f.Calls[len(f.Calls)-1]; !last.Subcommand("orb", "delete") {
-		t.Fatalf("expected last call orb delete; got %+v", f.Calls)
-	}
+	backendtest.AssertLastSubcommand(t, f, "orb", "delete")
 }
 
 func TestTeardownIsNoopWhenAbsent(t *testing.T) {
@@ -333,83 +321,19 @@ func TestTeardownIsNoopWhenAbsent(t *testing.T) {
 // --- OrbStack version preflight tests ---
 
 func TestOrbVersionAtLeast(t *testing.T) {
-	cases := []struct {
-		name    string
-		stdout  string
-		wantOK  bool
-		wantErr bool
-		wantGot string
-	}{
-		{
-			name:    "2.2.1 >= 2.1.1 → ok",
-			stdout:  "Version: 2.2.1 (2020100)\n",
-			wantOK:  true,
-			wantGot: "2.2.1",
-		},
-		{
-			name:    "2.1.1 >= 2.1.1 → ok (exact match)",
-			stdout:  "Version: 2.1.1 (2000000)\n",
-			wantOK:  true,
-			wantGot: "2.1.1",
-		},
-		{
-			name:    "2.1.0 >= 2.1.1 → too old",
-			stdout:  "Version: 2.1.0 (1990000)\n",
-			wantOK:  false,
-			wantGot: "2.1.0",
-		},
-		{
-			name:    "2.0.9 >= 2.1.1 → too old (minor mismatch)",
-			stdout:  "Version: 2.0.9 (1900000)\n",
-			wantOK:  false,
-			wantGot: "2.0.9",
-		},
-		{
-			name:    "3.0.0 >= 2.1.1 → ok (major bump)",
-			stdout:  "Version: 3.0.0 (9999999)\n",
-			wantOK:  true,
-			wantGot: "3.0.0",
-		},
-		{
-			name:    "1.9.9 >= 2.1.1 → too old (major too low)",
-			stdout:  "Version: 1.9.9 (1000000)\n",
-			wantOK:  false,
-			wantGot: "1.9.9",
-		},
-		{
-			name:    "malformed output → error",
-			stdout:  "orb: command not found\n",
-			wantErr: true,
-		},
-		{
-			name:    "empty output → error",
-			stdout:  "",
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := proc.NewFakeRunner()
-			f.Script("orb version", proc.Result{Stdout: tc.stdout})
-			ok, got, err := common.VersionAtLeast(context.Background(), f, []string{"orb", "version"}, orbVersionRe, 2, 1, 1)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (ok=%t got=%q)", ok, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if ok != tc.wantOK {
-				t.Errorf("ok: want %t got %t", tc.wantOK, ok)
-			}
-			if got != tc.wantGot {
-				t.Errorf("got version string: want %q got %q", tc.wantGot, got)
-			}
-		})
-	}
+	backendtest.RunVersionCases(t, []backendtest.VersionCase{
+		{Name: "2.2.1 >= 2.1.1 → ok", Stdout: "Version: 2.2.1 (2020100)\n", WantOK: true, WantGot: "2.2.1"},
+		{Name: "2.1.1 >= 2.1.1 → ok (exact match)", Stdout: "Version: 2.1.1 (2000000)\n", WantOK: true, WantGot: "2.1.1"},
+		{Name: "2.1.0 >= 2.1.1 → too old", Stdout: "Version: 2.1.0 (1990000)\n", WantOK: false, WantGot: "2.1.0"},
+		{Name: "2.0.9 >= 2.1.1 → too old (minor mismatch)", Stdout: "Version: 2.0.9 (1900000)\n", WantOK: false, WantGot: "2.0.9"},
+		{Name: "3.0.0 >= 2.1.1 → ok (major bump)", Stdout: "Version: 3.0.0 (9999999)\n", WantOK: true, WantGot: "3.0.0"},
+		{Name: "1.9.9 >= 2.1.1 → too old (major too low)", Stdout: "Version: 1.9.9 (1000000)\n", WantOK: false, WantGot: "1.9.9"},
+		{Name: "malformed output → error", Stdout: "orb: command not found\n", WantErr: true},
+		{Name: "empty output → error", Stdout: "", WantErr: true},
+	}, func(f *proc.FakeRunner, stdout string) (bool, string, error) {
+		f.Script("orb version", proc.Result{Stdout: stdout})
+		return common.VersionAtLeast(context.Background(), f, []string{"orb", "version"}, orbVersionRe, 2, 1, 1)
+	})
 }
 
 func TestEnsureUpRejectsOldOrb(t *testing.T) {

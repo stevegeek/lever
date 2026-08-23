@@ -293,3 +293,63 @@ func AssertScionBuild(t *testing.T, f *proc.FakeRunner, src, machine string) boo
 	}
 	return true
 }
+
+// AssertLastSubcommand fails unless the last recorded call is `host sub ...`.
+func AssertLastSubcommand(t *testing.T, f *proc.FakeRunner, host, sub string) {
+	t.Helper()
+	if len(f.Calls) == 0 || !f.Calls[len(f.Calls)-1].Subcommand(host, sub) {
+		t.Fatalf("expected last call `%s %s`; got %+v", host, sub, f.Calls)
+	}
+}
+
+// AssertClosedChainKept pins the I2 invariant after a re-apply against an
+// already-closed chain: the chain was neither flushed nor re-resolved (either
+// would briefly open egress for a running agent), and the alias was read from
+// the live chain.
+func AssertClosedChainKept(t *testing.T, r *ClosedChainRunner, gotV4 string) {
+	t.Helper()
+	if r.Flushed {
+		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
+	}
+	if r.Resolved {
+		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
+	}
+	if gotV4 != HostAliasV4 {
+		t.Fatalf("alias should be read from the existing chain, got %q", gotV4)
+	}
+}
+
+// VersionCase is one row of RunVersionCases.
+type VersionCase struct {
+	Name    string
+	Stdout  string
+	WantOK  bool
+	WantErr bool
+	WantGot string
+}
+
+// RunVersionCases drives common.VersionAtLeast-style probes: check scripts
+// stdout on a fresh runner and returns the probe's (ok, got, err).
+func RunVersionCases(t *testing.T, cases []VersionCase, check func(f *proc.FakeRunner, stdout string) (bool, string, error)) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			ok, got, err := check(proc.NewFakeRunner(), tc.Stdout)
+			if tc.WantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (ok=%t got=%q)", ok, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ok != tc.WantOK {
+				t.Errorf("ok: want %t got %t", tc.WantOK, ok)
+			}
+			if got != tc.WantGot {
+				t.Errorf("got version string: want %q got %q", tc.WantGot, got)
+			}
+		})
+	}
+}

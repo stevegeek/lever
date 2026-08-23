@@ -29,11 +29,6 @@ func NewMCPServer(c MCPConfig) *MCPServer {
 	return &MCPServer{brokerURL: c.BrokerURL, agentCN: c.AgentCN, client: c.Client}
 }
 
-// Handler is the HTTP adapter over Handle (body bounded by mcp.MaxBodyBytes).
-func (s *MCPServer) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { mcp.ServeHTTP(w, r, s.Handle) })
-}
-
 // Handle is the transport-free core: it takes one raw JSON-RPC message and
 // returns the framed reply (always non-empty). Stdio bridges (lever-agent
 // serve-capability) call this directly, one line in, one line out; ctx cancels

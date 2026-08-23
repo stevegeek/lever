@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -61,10 +62,8 @@ func verifies(pub []byte, tokB64, caller string, params map[string]string) bool 
 
 func rpc(t *testing.T, s *MCPServer, body string) map[string]any {
 	t.Helper()
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/", strings.NewReader(body)))
 	var resp map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	_ = json.Unmarshal(s.Handle(context.Background(), []byte(body)), &resp)
 	return resp
 }
 

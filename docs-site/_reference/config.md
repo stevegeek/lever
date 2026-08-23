@@ -142,7 +142,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 |---|---|---|---|---|
 | `name` | string | **yes** | - | Instance identity. The jail machine is named `lever-<name>` and the manager's Scion agent slug is `<name>`. (Its capability identity at the broker is separate: `broker.manager_identity`, default `manager`.) Must match `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes a machine name and a shell token). |
 | `backend` | string | **yes** | - | Containment backend (the jail substrate). `orbstack` and `lima` are the *implemented* values today; any other name (including roadmap/rejected backends like `apple-container` or `linux-docker`) is **rejected at load** rather than silently substituted. Run `lever backends` for the guarantee matrix. See [containment backends](/reference/backends/). |
-| `tree` | path | **yes** | - | A **confined relative subdirectory** of the instance root, bind-mounted **in place** into the jail (agents edit these real files live). Must not be `.` (the root itself is never mounted), absolute, or contain `..`. |
+| `tree` | path | **yes** | - | A **confined relative subdirectory** of the instance root, bind-mounted **in place** into the jail (agents edit these real files live). Must not be `.` (the root itself is never mounted), absolute, or contain `..`. Must not itself be a git repository (a `.git` entry directly in the tree is rejected at load); a plain subdirectory inside a larger git repo is fine, ancestors are not checked. |
 | `scion` | object | no | - | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | - | The manager agent (see below). |
 | `workers` | list | no | `[]` | Project agents the manager orchestrates (see below). |
@@ -186,18 +186,9 @@ as the guarantee, not the error message.
 Whichever mode you use, lever records the installed binary's sha256 in the jail and skips the copy when it already matches, so an unchanged scion is not re-streamed on every `lever up`.
 
 **With [`remote.enabled`](#remote), `version:` and `source:` additionally need node >= 20 + npm on
-the host.** Neither mode has any web assets to serve: upstream tracks only
-`web/dist/client/.gitkeep` and `.gitignore`s the built output, so a binary compiled from either one
-serves Scion's "Web UI Not Available" page. The fetched module (or your checkout) does carry the
-full npm project, so lever runs `npm ci && npm run build` **on the host** from that same source
-tree and starts the hub with `--web-assets-dir` pointing at the staged result. The build is cached
-per pin under `~/Library/Caches/lever/scion-web/` (macOS) or `~/.cache/lever/scion-web/` (Linux) —
-**~210MB per distinct pin, never pruned, always safe to delete** — and staged into the guest at
-`/usr/local/share/scion/web` (~3.3MB; vite's sourcemaps are stripped from the staged payload), so
-an unchanged pin costs no npm run at all. `binary:` is exempt — lever has no source to build from, does not pass `--web-assets-dir`, and
-leaves whatever that binary embedded in charge. `lever doctor` reports the node toolchain, and
-`lever apply` fails by name when it is missing. See the [remote access
-guide](/remote-access/#2-make-sure-the-host-has-node).
+the host.** Neither carries built web assets, so lever builds the hub's web UI host-side from the
+same source tree and stages it into the guest; `binary:` is exempt. Cache location, sizes, and
+failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-host-has-node).
 
 ### `manager`
 
@@ -232,9 +223,8 @@ configs are unaffected until you turn them on.
 | `require_image_digest` | bool | no | `false` | When `true`, every image must be pinned by **content digest** (`…@sha256:<hex>`) rather than a mutable tag like `:latest`. Guarantees you run exactly the bytes you vetted (a tag can be re-pointed to different content later). |
 
 > **Note:** these are enforced at config-load (host side), so they bound what `lever apply` loads and
-> what the manager/workers declare. An explicit `--image` passed to `lever-manager agent start` is a
-> runtime override and isn't policy-checked, but it can only run an image already loaded into the
-> jail (which came from the validated config).
+> what the manager/workers declare. `lever-manager agent start` takes no image argument; the broker
+> resolves each worker's image from the validated config.
 
 ### `broker`
 
@@ -249,10 +239,10 @@ CN-bound, short-lived capability tokens. See [security-model §6](/security-mode
 | `jail_port` | int | no | `8443` | mTLS port the in-jail agents reach the broker on (allowlisted in the egress rules). Defaults to 8443; set an explicit port only to run several instances' brokers on one host at once. |
 | `admin_port` | int | no | `8444` | **Loopback-only** unauthenticated admin port (`/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`); bind is rejected if non-loopback. Defaults to 8444. |
 | `grant_ttl` | duration | no | `24h` | Capability token lifetime. A backstop only: the per-call epoch/revocation check is the real cut, so a session-scale TTL is safe (and must outlive the 12h renew cycle). |
-| `ticket_ttl` | duration | no | (default) | Lifetime of a one-time enrolment ticket (the manager-bootstrap and agent-enrol tickets minted at apply). Short by design; only needs to outlive container boot. |
+| `ticket_ttl` | duration | no | `10m` | Lifetime of a one-time enrolment ticket (the manager-bootstrap and agent-enrol tickets minted at apply). Short by design; only needs to outlive container boot. |
 | `manager_identity` | string | no | `manager` | The capability CN the manager enrols under (its certificate identity at the broker), distinct from its Scion agent slug (`name`). |
 | `auto_reenrol` | enum | no | `all` | Which agents the broker auto-heals after a **natural** mTLS-leaf lapse (`all` \| `manager` \| `off`). When an agent's short-lived client leaf ages out while renewal couldn't run (host asleep, instance idle), the broker's handshake verification proves the presented cert is its own CA's, valid in every way but time — never a revoked or foreign identity — then re-stages a fresh one-use enrolment ticket and bounces the agent so boot re-enrols (conversation preserved via resume). Attempts are audited (`op=reenrol`) and bounded (10&nbsp;min cooldown, 3 per burst). `lever revoke` always wins: revoked identities are never healed. |
-| `tools` | list of `{name, command, backend, operations, allowed_values, external, gate, allow_non_loopback}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs — each may declare `params` (its argument names): when set, a capability mint whose constraint keys fall outside `params` ∪ `caveat_param` keys is rejected at mint time with an accurate error, instead of minting an over-narrowed token that fails closed only at call time (a typo'd key otherwise surfaces as a baffling `constraint not satisfied` far from the mistake); `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. With `external: true` the broker FRONTS an already-running host MCP server instead of spawning one: no `command`, `backend` is the server's own listen address (`host:port[/path]`, literal loopback IP unless `allow_non_loopback: true`), and the tool registers third-party — the broker enforces the rules and strips the capability before proxying. |
+| `tools` | list of `{name, command, backend, operations, allowed_values, external, gate, allow_non_loopback}` | no | `[]` | First-party / brokered tools registered for capability minting. `command` launches the supervised subprocess; `backend` is the loopback address it listens on (injected as `-backend`); `operations` are the `{name}` verbs — each may declare `params` (its argument names): when set, a capability mint whose constraint keys fall outside `params` ∪ `caveat_param` keys is rejected at mint time with an accurate error, instead of minting an over-narrowed token that fails closed only at call time (a typo'd key otherwise surfaces as a baffling `constraint not satisfied` far from the mistake); `caveat_param` (map of constraint key → request argument name, for non-identity mappings such as `table: schema.table`) is an optional declared guard: at registration the broker checks the tool-shipped caveat-param map equals it and rejects the tool (403) otherwise; its keys also count as valid constraint keys for the `params` check. Omit to accept whatever the tool ships; `allowed_values` restricts a constraint key to a permitted set (e.g. `table: [A, B]`), enforced at mint. With `external: true` the broker FRONTS an already-running host MCP server instead of spawning one: no `command`, `backend` is the server's own listen address (`host:port[/path]`, literal loopback IP unless `allow_non_loopback: true`), and the tool registers third-party — the broker enforces the rules and strips the capability before proxying. |
 | `messaging` | object | no | `worker_to_worker: true` | Routing policy for broker-routed typed messaging (`/msg/send`, `/msg/list`; see [architecture.md](/architecture/)). `worker_to_worker` (bool) permits worker→worker sends; it's a pointer under the hood so unset ⇒ **allowed**, an explicit `false` denies it for a stricter hub-and-spoke model. Recipients themselves aren't a config key, they're resolved from the caller's mTLS identity: the manager may message any declared worker and read any inbox (`msg list --worker <name>`); a worker may always message the manager and read only its own inbox. |
 
 #### External MCP servers (`external: true`)
@@ -332,17 +322,10 @@ operator:
   directive_expiry_max: 24h                   # optional; default 24h
 ```
 
-The operator principal is fixed as `operator@<instance-name>`, one principal per instance; put
-**multiple keys** under it (≥2 recommended) so a lost or rotated key never locks the operator out
-(break-glass), and use `allowed_signers` `valid-after`/`valid-before` to expire a key without a
-config edit. Recommended key posture: keep the private key on the operator's own machine, ideally
-hardware-backed (touch-to-sign) — a compromised host then doesn't imply a compromised operator
-key. A key kept on the broker host itself is weaker (effective trust = "can invoke the CLI / read
-the key on that host") and not hardware-backed; acceptable on a personal machine, but document the
-posture in use. Never forward an SSH agent to the broker host for signing — a forwarded agent is a
-signing oracle a compromised host could use to sign arbitrary directives.
-
-See [security-model.md](/security-model/) for the delivery/verification mechanism and threat model.
+The operator principal is fixed as `operator@<instance-name>`, one principal per instance. Key
+posture (where to keep the key, multi-key break-glass, no agent forwarding) is in
+[security model §11.5](/security-model/operator-directives/); setup and usage are in the
+[operator directives guide](/operator-directives/).
 
 ### `remote`
 
@@ -354,7 +337,7 @@ access guide](/remote-access/) for the accepted security posture, setup steps, a
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `enabled` | bool | no | `false` | Turns the proxy on. Also needs a **Go toolchain on the host** — it cross-compiles the guest's login forwarder at apply time; with `scion.binary:` (the only mode that did not already need one) a missing `go` is rejected at config load. Requires `backend: orbstack` — rejected at config load on any other backend, because the Lima path is not live-validated yet. This is not a reachability limit: the proxy dials the hub through the jail, so no guest→host forwarding is involved. Also requires **node >= 20 + npm on the host** with [`scion.version`](#scion) or `scion.source`: neither carries built web assets, so lever builds the UI host-side and stages it into the guest (`binary:` is exempt). `lever doctor` checks it. |
-| `port` | int | no | `8445` | Host loopback port the proxy binds. Must not collide with the broker's `jail_port`/`admin_port`, with `login_port`, or with `8446` (the host port the jail's login forwarder is mirrored onto) — all rejected at config load. Give each remote-enabled instance on the host its own port: the proxies reach their own jails, so only the host listeners are shared ground. |
+| `port` | int | no | `8445` | Host loopback port the proxy binds. Must not collide with the broker's `jail_port`/`admin_port`, with `login_port`, or with `8446` (the host port the jail's login forwarder is mirrored onto) — all rejected at config load. Also rejected if listed in `manager.allow_ports`: the proxy trusts the `Tailscale-User-Login` header because only `tailscale serve` can reach its loopback listener, and an allow_ports hole would let the jail reach it directly. Give each remote-enabled instance on the host its own port: the proxies reach their own jails, so only the host listeners are shared ground. |
 | `login_port` | int | no | `8447` | **Host** loopback port the local OIDC provider binds — the login path that gets the browser a hub session with no external identity provider and no dev-auth. The port the HUB dials is a different, fixed one inside the guest (`8446`, no config key): Scion validates `issuer_url` at hub startup and refuses to start unless it is loopback, so a forwarder listens there and carries the bytes to this port. The two must differ because the container runtime mirrors a guest listener onto the host at the same number — one number for both halves left the provider unable to bind. Rejected at config load if it collides with `port`, the broker's listeners, or `8446` (the guest forwarder's host mirror). A second remote-enabled instance needs its own value. See the [guide](/remote-access/#how-the-browser-is-logged-in). |
 | `base_url` | string (URL) | **yes when `enabled`** | - | The tailnet serve hostname, as an absolute `https://` URL, e.g. `https://myhost.tailxxxx.ts.net`. **Rejected at config load if empty while `enabled: true`**: the proxy matches every request's `Origin` against the host this resolves to, and an empty `base_url` would fail closed on every request — a proxy that could never serve anything, so lever refuses to load that config at all. It configures **only the proxy**; lever deliberately never passes it to the hub as `--base-url` (see the [guide](/remote-access/#the-tailnet-url-never-reaches-the-hub)). |
 | `allowed_users` | list of string | no | `[]` | Optional identity pinning: when non-empty, only these Tailscale login names (matched against the `Tailscale-User-Login` header `tailscale serve` sets) may reach the proxy. Empty ⇒ anyone reachable through the tailnet. A blank entry is rejected at config load. It also decides the identity the login path asserts to the hub, so the hub's user row names the operator who actually connected — with it unset, a placeholder identity is used instead. |
@@ -370,18 +353,13 @@ remote:
 
 ## Conventions & derived values
 
-- **Canonical filename:** `lever.yaml` at the instance root. Resolved from the current directory
-  only, **no walk-up** (run `lever` from the root, or pass an explicit path).
-- **Root is not mounted:** the instance root holds the config + boot prompt and stays host-only;
-  only the `tree:` subdir is bind-mounted.
 - **Machine name:** `lever-<name>`. `up`/`apply`/`stop`/`destroy`/`doctor` all agree on this, derived
   from the config (override on `stop`/`destroy`/`doctor` with `--machine`). `lever down` is a
   deprecated alias of `destroy`.
 - **Worker image inheritance:** a worker with no `image:` runs on `manager.image`. The bring-up plan
   loads every distinct image once (deduped). At dispatch the capability broker reads the config
-  directly and supplies each worker's resolved image, so `agent start NAME` needs no `--image` (an
-  explicit `--image` still overrides). The manager never handles host paths or credentials: it names
-  a configured worker and the broker resolves everything host-side.
+  directly and supplies each worker's resolved image, so `agent start NAME` takes no image argument.
+  The manager names a configured worker; the broker resolves paths, image and credentials host-side.
 - **In-place mounts:** the `tree` subdir (and each `workers[].dir` within it) is bind-mounted into the
   jail so agents edit the real host files. There is no copy/sync step.
 - **Path resolution base:** relative `tree`/`prompt_file`/`scion.source`/`credential_file` resolve
@@ -389,6 +367,6 @@ remote:
 
 ## See also
 
-- [getting-started.md](/getting-started/), build a working instance from scratch.
-- [security-model.md](/security-model/), trust boundaries, threat model, and the credential
-  flow these keys drive.
+- [Getting started](/getting-started/), build a working instance from scratch.
+- [Security model](/security-model/), trust boundaries, threat model, and the credential flow
+  these keys drive.

@@ -41,7 +41,9 @@ prefix is what scion loads without a pull).
 **Claude Code version:** the image bakes Claude Code at an explicit pin (`ARG
 CLAUDE_CODE_VERSION` in the Dockerfile) and disables the in-container auto-updater — agents never
 self-update; upgrades happen by rebuild. To bump: edit the ARG (or pass `--build-arg
-CLAUDE_CODE_VERSION=X.Y.Z`), rebuild the image, `lever apply`, and power-cycle the manager
+CLAUDE_CODE_VERSION=X.Y.Z`), rebuild the image with `make lever-image LEVER_IMAGE_FORCE=1` (the
+build script refuses to overwrite an existing `scionlocal/lever-claude:<arch>` without it),
+`lever apply`, and power-cycle the manager
 (`lever stop && lever up` — the conversation is preserved on OrbStack). Don't rely on the scion
 base image's copy: it installs claude unpinned, so it's whatever was current when that base was
 last rebuilt.
@@ -65,13 +67,13 @@ local Docker store — **tag it for its arch** so `make lever-image` finds it:
 docker tag scion-claude:latest scion-claude:arm64   # or :amd64, matching the image's real arch
 ```
 
-(The build script tells you exactly this if the arch-tagged base is missing.) See scion's
-`image-build/` for the full story — scion owns this step.
+(The build script reports this if the arch-tagged base is missing.) See scion's `image-build/`
+for detail; scion owns this step.
 
-**Extending the image for your instance.** The generic image is deliberately minimal — scion's
-harness plus lever's binaries and boot hook, nothing else. If your agents need a language toolchain
-or a project CLI, write a small instance Dockerfile `FROM lever-claude:<arch>` that adds it, and point
-`manager.image` (and any worker `image:`) at your tag. If your added layer does root-level work
+**Extending the image for your instance.** The generic image is minimal: scion's harness plus
+lever's binaries and boot hook. If your agents need a language toolchain or a project CLI, write an
+instance Dockerfile `FROM lever-claude:<arch>` that adds it, and point `manager.image` (and any
+worker `image:`) at your tag. If your added layer does root-level work
 under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and `USER scion`.
 The jail runs rootless podman, where a root-owned home is unwritable by the agent and silently
 breaks its boot hook. Keep instance-specific tooling in that layer, not in the framework image.

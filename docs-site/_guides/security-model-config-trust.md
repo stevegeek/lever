@@ -14,7 +14,7 @@ bind-mount, which host file to read as a credential, which image to run, what te
 manager's task. The config is, in effect, host-side code, so two things matter: **where it comes
 from** (can an attacker substitute it?) and **whether the agents it constrains can rewrite it**.
 
-Both are now structurally closed:
+Both are closed:
 
 ### 5.1 The config never enters the mount (no in-jail tamper → host escalation)
 
@@ -60,17 +60,18 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 
 ### 5.3 Field validation (defence in depth, even for a trusted config)
 
-`config.Validate()` and the credential read now enforce:
+`config.Validate()` and the credential read enforce:
 
 | Field | Check |
 |---|---|
 | `name`, worker `name` | `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes the jail machine name and a shell token). |
-| `tree` | confined relative subdir (not `.`/absolute/`..`); also rejected (or warned on) if it is itself a git repository, see [§4.1](/security-model/worker-isolation/). |
+| `tree` | confined relative subdir (not `.`/absolute/`..`); also rejected if it is itself a git repository (an ancestor `.git` is allowed), see [§4.1](/security-model/worker-isolation/). |
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute). |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
-| `credential_file` | read with a **permission check** (rejected if world-readable) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
+| `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | already rejected absolute/`..` (unchanged). |
-| `scion.binary` | must be a regular ELF executable whose architecture matches the guest's, checked **before** anything is written into the jail. |
+| `scion.binary`, `scion.source` | must not resolve inside `tree` (an agent could otherwise supply the engine on the next bring-up); `binary`, `source`, `version` are mutually exclusive (checked in `config.Load`). |
+| `scion.binary` | regular file, Linux ELF, architecture matches the guest's; checked host-side at bring-up (`verifyELFArch`) before the file is copied into the jail. |
 
 **`scion.binary` is a trust decision, not only a convenience.** The bytes at that path are installed
 as root at `/usr/local/bin/scion` and become the engine every agent runs under. That sits inside the
@@ -82,10 +83,10 @@ artifact carries no integrity guarantee lever can check. The architecture check 
 mistake, not a substituted file. Choosing `binary:` makes its provenance yours to guarantee.
 
 **What was already sound:** the execution plumbing is argv-clean, no shell injection in the hot
-paths; the single `bash -c` (scion install) correctly single-quote-escapes its interpolated values;
+paths; the `bash -c` scripts in internal/backend/guest (scion install, scion settings write, web-assets staging) single-quote every dynamic value via `shellSingleQuote`; the remaining two (agent template, login-forwarder disable) interpolate only compile-time constants;
 `jailPath` never fabricates an in-jail path for an out-of-tree target; the credential value is
 scrubbed from error output at its one call site (by literal match, so a value that parses as a
-flag is masked too — it travels as plaintext argv since Scion stopped base64-decoding it).
+flag is masked too — it travels as plaintext argv since the scion CLI marks it `encoding=raw` (ce96122c, 2026-08-10); an older pin fails at apply with a pin-floor error).
 
 ### 5.4 The manager holds no worker-dispatch authority
 
@@ -104,9 +105,9 @@ configuration, there is no in-jail config file for a compromised manager to tamp
 
 ### 5.5 Residual
 
-Image **registry allowlist** and **digest pinning** are now available as opt-in `security:` policy
+Image **registry allowlist** and **digest pinning** are opt-in `security:` policy
 (§5.3), enable them to bound *which* registry an image comes from and to require vetted, immutable
-images. Still open: redaction by secret-key-name rather than argv shape (L1 in the backlog). The
+images. Still open: `redactArgs` (internal/scion/client.go) masks by argv position, not by secret key name. The
 dominant in-jail risks are [§6](/security-model/credentials/) (the projected credential) and [§8](/security-model/compromise/) (open-egress exfiltration): **closed
-in api-key mode** (the default) by the built capability broker ([§6.1](/security-model/credentials/)) plus `egress: closed`, and
+in api-key mode** (the default) by the capability broker ([§6.1](/security-model/credentials/)) plus `egress: closed`, and
 still present under the subscription opt-in.

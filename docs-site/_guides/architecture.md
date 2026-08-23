@@ -4,12 +4,9 @@ nav_order: 4
 ---
 # Architecture
 
-> **Mostly built.** Jail bring-up, the manager up/attach lifecycle, the capability broker, worker
-> dispatch (the manager calling the broker's `/worker/*` endpoints), broker-routed messaging
-> (`/msg/send`, `/msg/list`), and the `lever-manager watch` bridge are implemented and validated (see
-> [security-model.md](/security-model/)). The notification contract in
-> §4 (the `input-needed`/`completed` event names) is still being refined; treat those event names as
-> illustrative, not literal identifiers.
+The bridge (`lever-manager watch`) relays Scion's inbox events verbatim as JSON lines; lever defines
+no event types of its own. The `input-needed` event and the `COMPLETED` state change in §4 are
+Scion's names, which the operator skill relies on (internal/skills/lever-operator/SKILL.md).
 
 Lever is a thin orchestration-and-interface layer over [Scion](https://github.com/GoogleCloudPlatform/scion),
 which provides the container runtime, agent sessions, attach/resume, and typed messaging. Two Scion
@@ -36,7 +33,7 @@ graph TD
             RD[rootless podman]
             FW{{egress allowlist<br/>iptables / ip6tables<br/>enforced in jail netns}}
             subgraph agents[Agent containers, rootless, same project]
-                MGR[Manager agent, the coordinator]
+                MGR[Manager agent]
                 WA[Worker agent A]
                 WB[Worker agent B]
             end
@@ -60,17 +57,12 @@ graph TD
   *isolated machine*) and the containers inside it are kernel namespaces, so nesting adds no
   per-level CPU cost. With the `orbstack`/`lima` backends a single kernel is shared across the
   manager and all workers — a security trade noted in [security-model.md §8](/security-model/compromise/);
-  the `apple-container` backend gives each agent its own VM kernel.
+  a per-agent-VM backend (`apple-container`, roadmap) would give each agent its own kernel.
 - **The jail is the containment boundary**, not Scion. The egress allowlist is enforced in the
   jail's network namespace, outside the agent containers.
-- **OrbStack is the reference *backend*, not a hard dependency.** The jail is a contract: a
-  hypervisor boundary, no host files, a controllable netns with egress enforced in it, a
-  host-reachable broker. OrbStack is one implementation; `lima` (macOS/Linux, its own VM kernel)
-  is the second; `apple-container` (per-agent micro-VM) is on the roadmap. Each backend declares
-  its own guarantees — run `lever backends` or see [containment backends](/reference/backends/).
-  **Docker Desktop is not a backend** (its shared VM auto-mounts your home and its netns is not
-  controllable), and a native no-VM `linux-docker` backend was rejected for sharing the host
-  kernel outright; the backends page has both writeups.
+- **OrbStack is the reference *backend*, not a hard dependency.** The jail is a contract;
+  OrbStack and `lima` implement it, `apple-container` is on the roadmap, and Docker Desktop and a
+  no-VM `linux-docker` backend are rejected. See [containment backends](/reference/backends/).
 
 ## 2. The project model: a project is a directory
 
@@ -124,7 +116,7 @@ defense-by-absence guarantee above. Config validation enforces a non-git tree ro
 | Scion server + Scion broker | container lifecycle, sessions, attach/resume, typed messaging | core (runs inside the jail) |
 | rootless podman | the container runtime the Scion broker drives (rootless, see security-model.md) | core (inside the jail) |
 | Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls, relays typed agent messaging (`/msg/send`, `/msg/list`), and runs the [operator-directive](/operator-directives/) channel (a 0600 UDS admin socket + agent-facing `directive_consume` over mTLS; see [security-model](/security-model/operator-directives/)) | **core** (runs on host) |
-| Manager **runtime/role** | the coordinator: a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
+| Manager **runtime/role** | a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
 | Manager **prompt / skills / tool (MCP) config** | what makes it *this* manager | **instance-supplied config** |
 | Worker agents | agents in the instance's one Scion project, each bound to its own subdirectory workspace; isolated from siblings by defense-by-absence (§2), not a separate project | core lifecycle; instance defines the workers |
 | Agent base image | the coding-agent harness container | **core ships a generic minimal base; the instance extends/bakes its own** (see §6) |
@@ -137,8 +129,9 @@ ports it may reach, is configuration the instance supplies.
 ## 4. The dispatch / notification loop
 
 The manager dispatches a unit of work to a worker and then watches a typed event stream rather than
-polling. Two event types matter most: `input-needed` (the worker is blocked on a decision) and a
-terminal `completed`.
+polling. Two events matter most: `input-needed` (the worker is blocked on a decision) and the state
+change to `COMPLETED`. Both are Scion events that the bridge relays verbatim; lever adds nothing to
+them.
 
 {% raw %}
 ```mermaid
@@ -149,7 +142,7 @@ sequenceDiagram
     participant Sc as Scion
     participant Wk as Worker agent
     Hu->>Mg: "do X in app-a"
-    Mg->>Br: start worker (POST /worker/start, mTLS, correlation id)
+    Mg->>Br: start worker (POST /worker/start, mTLS)
     Br->>Sc: start worker (controller PAT, host-side)
     Sc->>Wk: launch container, deliver task
     Wk-->>Sc: event: input-needed ("which DB?")
@@ -160,9 +153,9 @@ sequenceDiagram
     Mg->>Br: message worker (POST /msg/send, mTLS)
     Br->>Sc: relay message (controller PAT, host-side)
     Sc->>Wk: deliver
-    Wk-->>Sc: event: completed
+    Wk-->>Sc: event: state-change (COMPLETED)
     Sc-->>Br: typed event (polled via POST /msg/list, mTLS)
-    Br-->>Mg: relayed via the watch bridge (echoes the correlation id)
+    Br-->>Mg: relayed via the watch bridge
     Mg->>Hu: report done
 ```
 {% endraw %}
@@ -174,15 +167,14 @@ runs with dev-auth off, and only the host-side broker holds the controller PAT (
 [security-model.md §4](/security-model/worker-isolation/)) — so only the broker can address an arbitrary agent's
 inbox.
 
-**The task ↔ agent contract.** The core knows nothing about an instance's task records. At dispatch
-the instance supplies an opaque **correlation id**; the core echoes that id on lifecycle events
-(notably `completed`). The instance maps the id back to its own record and decides what "close the
-task" means. So the live agent stream tells you *how it's going*; the instance's records remain the
-authority on *what* and *whether done*.
+**The task ↔ agent contract.** The core knows nothing about an instance's task records and carries
+no correlation id. The bridge relays agent messages verbatim; an instance that needs correlation
+instructs its workers to echo a task id in their messages (see [conventions](/conventions/)). The
+instance's records remain the authority on what was asked and whether it is done.
 
 ## 5. Entry point
 
-`lever` is the single command an operator runs on the host. It:
+`lever up` is the everyday command an operator runs on the host. It:
 
 1. Ensures the jail (isolated machine) is up, with rootless podman, the Scion server/broker, and
    the egress allowlist applied.
@@ -191,8 +183,6 @@ authority on *what* and *whether done*.
 3. Hands the terminal to the manager session (the Scion server/broker run inside the jail; `lever`
    attaches in from the host). On detach, the manager is left **suspended** so the next `lever`
    resumes the same conversation.
-
-(How much of the attach/tmux UX is generic core vs instance presentation is still being decided.)
 
 Three lifecycle verbs, at increasing cost:
 

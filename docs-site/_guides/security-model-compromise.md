@@ -53,7 +53,7 @@ not.
     compromised agent can leak anything in the tree, the model-API endpoint alone is a covert
     channel. Tightening this would require an egress proxy / data-loss controls not yet specified.
   - *api-key (closed egress):* arbitrary internet egress is closed, so the only outbound path is the
-    broker → fixed `api.anthropic.com`. That **narrows but does not eliminate** exfiltration: the
+    broker → the configured upstream (`broker.llm_upstream`, default `api.anthropic.com`; config-set, never client-controlled). That **narrows but does not eliminate** exfiltration: the
     `/llm` proxy is still a covert channel. The proxy scrubs response *headers*
     (`WWW-Authenticate`, `x-api-key`) and only ever talks to the fixed trusted upstream (no SSRF), but
     it streams the SSE response **body** unbuffered and so cannot scrub it, an accepted residual.

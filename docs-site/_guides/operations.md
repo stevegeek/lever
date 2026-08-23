@@ -4,8 +4,7 @@ nav_order: 9
 ---
 # Operations & recipes
 
-Task-shaped guides for running an instance day to day and growing it past the first
-`lever up`. Each recipe is self-contained.
+Recipes for running an instance day to day.
 
 ## Changing config on a running instance
 
@@ -72,9 +71,8 @@ All host-side state lives in `.lever-state/` at the instance root:
 | `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 
-Agent-side, the source of truth is the session itself: `lever attach [name]` shows the full
-scrollback including every incoming message and tool call. `lever doctor` should be your first
-command whenever anything looks wrong — every check prints a specific fix hint.
+Agent-side, `lever attach [name]` shows the full scrollback including every incoming message and
+tool call. Run `lever doctor` first whenever anything looks wrong; every check prints a fix hint.
 
 ### Log rotation
 
@@ -100,8 +98,8 @@ others if you split it into its own stanza.
 
 | Symptom | Likely cause | Do |
 |---|---|---|
-| Tool call denied `missing capability` | agent didn't mint/attach | the agent should follow its `lever-operator` skill (mint via `lever-capability`, pass `_capability`); if the skill is missing, run `lever init` |
-| Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then stop+up |
+| Tool call denied `missing capability` | agent didn't mint/attach | the agent should follow its skill (`lever-operator` for the manager, `lever-agent` for a worker): mint via `lever-capability`, pass `_capability`; if the skill is missing, run `lever init` |
+| Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then `lever reload` |
 | "unknown recipient" / new worker invisible | broker still running on the old config | `lever reload` |
 | 502 on an external tool call | the host-side server isn't listening | `lever doctor` (external-backends check), start your server |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
@@ -114,8 +112,7 @@ others if you split it into its own stanza.
 1. Pull and rebuild: `cd lever_to && make all` (host binary), and if the agent-side binaries
    changed, `make lever-image-bins` + rebuild your agent image, then `lever apply` to load it.
 2. `lever init` — refreshes the scaffolded skills (your edited and adopted copies are left
-   alone; `--check` to preview). `CHANGELOG.md` in the repo notes anything that needs more than
-   this. If you've customized scaffolds and doctor nags about them, accept them once with
+   alone; `--check` to preview). If you've customized scaffolds and doctor nags about them, accept them once with
    `lever init --adopt`.
 3. `lever reload` (or `lever stop && lever up` to also power-cycle the VM) — restart onto the new
    binaries/config.

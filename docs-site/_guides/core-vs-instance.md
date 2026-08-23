@@ -4,7 +4,7 @@ nav_order: 7
 ---
 # Core vs instance
 
-Lever is split so that the reusable framework and a particular person's setup never tangle.
+Lever separates the reusable framework from a particular operator's setup.
 
 - The **core** (`lever.to`) is the generic, open-source framework: the orchestration engine, the
   manager *runtime/role*, the security jail, the project model, the `lever` binary, and the docs.
@@ -14,8 +14,7 @@ Lever is split so that the reusable framework and a particular person's setup ne
   core-built in-jail binaries into its own agent image via `make lever-image-bins`, but never forks
   the core itself).
 
-The framework authors run their own personal assistant as the first instance, dogfooding the core
-so the abstraction is proven by real use.
+The reference instance is the authors' personal assistant.
 
 {% raw %}
 ```mermaid
@@ -36,7 +35,7 @@ graph TD
         WORKERS[your workers]
         MCFG[manager prompt / skills / MCP config]
         EXTIMG[extended/baked agent image]
-        CFG[config: worker dirs, allowlist host:ports,<br/>jail + mount settings, bridge sink path]
+        CFG[config: worker dirs, allowlist host:ports;<br/>bridge sink path via the manager's --events-file flag<br/>to lever-manager watch, not a config key]
     end
     inst -->|depends on| core
 ```
@@ -51,7 +50,7 @@ graph TD
 | Agent image | a generic, minimal harness base image | the **extended/baked image** its workers need |
 | Security / jail | jail provisioning + egress-allowlist mechanism | the allowlist **values** (your tool ports), mount root, jail settings |
 | Entry point | the `lever` binary | a thin personal CLI that delegates orchestration to `lever` |
-| Notification bridge | the mechanism (event stream → sink) | the **sink path** + what consumes it |
+| Notification bridge | the mechanism (event stream → sink) | the **sink path** (the `--events-file` flag the manager passes to `lever-manager watch`, not a config key) + what consumes it |
 | Conventions | documented patterns (see below), not enforced code | how you actually organise your tree |
 | Tools | none, the core ships no personal tools | your own (task tracking, content, domain logic, …) |
 | Knowledge base | none | all of it |
@@ -70,28 +69,22 @@ graph TD
 - **Conventions are documentation, not code.** Lever recommends a way to organise a tree (workers;
   optionally areas/projects/goals/archive), but the core does not force it. See
   [conventions.md](/conventions/).
-- **The instance declares itself to the core via config**, so the core stays instance-agnostic. The
-  config format is **built and documented** (see the [configuration reference](/reference/config/));
-  `lever.yaml` at the instance root carries:
-  - `name`, `backend`, and `tree` (the bind-mounted subdir);
-  - `manager` (image, boot prompt, allowlisted host ports, LLM-auth mode);
-  - `workers` (each worker's directory and capability grants);
-  - `broker` (the capability broker: LLM-auth mode, tools, API-key file);
-  - optional `scion` (engine version/source), `egress`, and `security` (image policy).
-- **The "task ↔ agent" contract is shared plumbing, by correlation id.** The core knows nothing about
-  "to-dos"; at dispatch the instance passes an opaque correlation id, the core echoes it on lifecycle
-  events (e.g. `completed`), and the instance maps it back to its own record and decides what closing
-  it means.
+- **The instance declares itself to the core via config**, so the core stays instance-agnostic.
+  `lever.yaml` at the instance root carries the tree, manager, workers, broker, and optional
+  engine/egress/security/operator/remote blocks; every key is in the
+  [configuration reference](/reference/config/).
+- **The task ↔ agent link is an instance convention.** The core carries no correlation id and
+  tracks no tasks; the bridge relays agent messages verbatim. An instance that needs correlation
+  instructs its workers to echo a task id in their messages and maps it back to its own records.
 
 ## Building an instance (the intended shape)
 
-1. Build the `lever` binary (`make all`) and have its runtime prerequisites in place (OrbStack; a
-   Go toolchain so the pinned Scion engine is fetched and cross-compiled at provision time). See
+1. Build the `lever` binary and meet its runtime prerequisites; see
    [getting started](/getting-started/).
 2. Create a project tree: a top-level directory (your knowledge base + tools) with a `workers/`
    subdirectory for the projects agents will work on.
-3. Write an instance config (the keys above): your workers, your tool/MCP ports to allowlist, jail
-   settings, the manager's prompt + skills, your agent image, and the bridge sink path.
+3. Write an instance config: `tree`, `workers`, `manager.allow_ports`, `manager.prompt_file`,
+   `manager.image`.
 4. Run `lever`, it provisions the jail, brings up the manager on your tree, and hands you the
    session.
 5. Add your own tools and knowledge base inside the tree. Anything agent-related calls the `lever`

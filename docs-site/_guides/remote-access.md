@@ -27,38 +27,28 @@ jail hub web port (guest 127.0.0.1:8080, --enable-web)
 ```
 
 The proxy also runs a **local OIDC provider** on its own loopback port, which is how the browser
-gets a hub session without an external identity provider and without dev-auth. It is worth
-understanding before you enable this — see [how the browser is logged
-in](#how-the-browser-is-logged-in).
+gets a hub session without an external identity provider and without dev-auth. See [how the
+browser is logged in](#how-the-browser-is-logged-in) before you enable this.
 
 ## Accepted posture — read this before enabling it
 
-This is step 1 of a staged direction, and the posture it accepts is deliberate, not an oversight.
-Quoting the design spec directly:
+Whoever can reach the proxy through your tailnet gets the same interactive power over the jail's
+agents that you have from the phone — full chat, full attach, everything the injected PAT's scopes
+allow (see [below](#the-remote-pat)). What they do **not** get is anything past the jail boundary:
+the blast radius of a compromised tailnet device is the jail interior (agents, the mounted project
+tree via the UI's exec-backed surfaces, LLM spend), never the host. The security invariants this
+feature does not change:
 
-> The full hub UI is exposed to the tailnet; the blast radius of a compromised tailnet device is
-> the jail INTERIOR (agents, mounted project tree via the UI's exec-backed surfaces, LLM spend) —
-> never the host, which the VM boundary protects regardless.
+- No agent gains any capability: the egress firewall, broker mTLS surfaces, and jail mounts are
+  unchanged. Only a host-side inbound path for the human is added.
+- The phone never holds a hub credential; the PAT stays host-side.
+- Directives remain the only authenticated operator override (signing key + host UDS, unreachable
+  from this path).
 
-In other words: whoever can reach the proxy through your tailnet gets the same interactive power
-over the jail's agents that you have from the phone — full chat, full attach, everything the
-injected PAT's scopes allow (see [below](#the-remote-pat)). What they do **not** get is anything
-past the jail boundary. The security invariants this feature does not change:
-
-> No agent gains any new capability; the egress firewall, broker mTLS surfaces, and jail mounts are
-> untouched. This feature only adds a host-side INBOUND path for the human.
-
-> The phone never holds a hub credential; the PAT lives host-side only.
-
-> Directives remain the ONLY authenticated operator override: signing key + host UDS, unreachable
-> from this path. Remote chat arrives as ordinary unauthenticated `user:` messages; the manager's
-> remit-gating boundary is unchanged.
-
-That last point matters in practice: a message you send from your phone lands as an ordinary
-unauthenticated `user:` turn, exactly like a message typed at `lever attach` or sent with `lever
-msg send`. A hardened manager's remit-gating and refusal behavior treat it no differently — remote
-access is a new *transport*, not a new *authority*. If you need the manager to treat an instruction
-as provably yours, that's what [operator directives](/operator-directives/) are for.
+A message you send from your phone lands as an ordinary unauthenticated `user:` turn, like a
+message typed at `lever attach` or sent with `lever msg send`. Remote access is a new transport,
+not a new authority; for a provably-operator instruction use
+[operator directives](/operator-directives/).
 
 ## Setup
 
@@ -72,6 +62,11 @@ remote:
   # login_port: 8447                            # optional; defaults to 8447 (the OIDC provider)
   # allowed_users: []                           # optional identity pinning — see below
 ```
+
+Validation at load: `base_url` must be an absolute `https://` URL. `port` and `login_port` may not
+equal 8443, 8444, 8446, or each other. `port` may not appear in `manager.allow_ports`: that grant
+would let a jailed agent dial the proxy, set `Tailscale-User-Login` itself, and receive the injected
+PAT.
 
 **`base_url` is required whenever `enabled: true`.** The proxy matches every request's
 `Origin`/`Sec-Fetch-Site` against the host `base_url` resolves to; with `base_url` unset, that host
@@ -151,13 +146,11 @@ output is cached, so this only costs you the first apply per pin.
 node --version    # must print v20 or newer
 ```
 
-This is a real prerequisite, not a nicety, because a `scion.version:` pin ships **no** web assets.
-Upstream's repo tracks only `web/dist/client/.gitkeep` and `.gitignore`s the built output, so a
-binary compiled from the fetched module has an empty embedded filesystem and serves Scion's bare
-*"Web UI Not Available — built without embedded web assets"* page. The fetched Go module **does**
-carry the full npm project, though, so lever builds it from exactly the source tree the pinned
-binary was compiled from, and starts the hub with `--web-assets-dir` pointing at the result. One
-pin, one download, no way for the binary and the UI to disagree.
+A `scion.version:` pin ships **no** web assets: upstream tracks only `web/dist/client/.gitkeep`
+and `.gitignore`s the built output, so a binary compiled from the fetched module serves Scion's
+*"Web UI Not Available"* page. The fetched Go module does carry the full npm project, so lever
+builds it from the same source tree the binary was compiled from and starts the hub with
+`--web-assets-dir` pointing at the result.
 
 The build runs host-side for the same reason scion itself is cross-compiled host-side: the guest
 carries no toolchain, and giving it one would also mean giving the jail npm's registry egress.
@@ -173,24 +166,16 @@ The cache is keyed by a digest of scion's web sources, so an unchanged pin is a 
 (milliseconds, no npm) and a changed pin builds once. A `source:` checkout is keyed the same way,
 by content, so editing the SPA rebuilds it and nothing else does.
 
-**The host cache grows by one directory per distinct scion pin, and lever never prunes it.** That
-is deliberate: several remote-enabled instances on one host share this cache, and if lever deleted
-"the pins I am not using" on every apply, two instances on different pins would each delete the
-other's build and thrash a full rebuild every time. **Deleting the cache directory — or any
-`<digest>` inside it — is always safe**; the next apply rebuilds what it needs. If you hop between
-pins often, that is the cleanup, and it is yours to run.
+**The host cache grows by one directory per distinct scion pin, and lever never prunes it**:
+several remote-enabled instances on one host share the cache, and pruning unused pins would make
+instances on different pins rebuild each other's output on every apply. Deleting the cache
+directory, or any `<digest>` inside it, is always safe; the next apply rebuilds what it needs.
 
-What reaches the guest is much smaller than what is built: lever strips vite's sourcemaps from the
-staged payload, which is 71% of the build output (8.2MB of 11.5MB at pin `e82a2a08`). They exist to
-debug Scion's SPA, which lever does not develop, and they would otherwise ship to every guest on
-every pin. The UI is unaffected — browsers fetch a `.map` only when devtools is open, and then
-simply do without.
+Staging excludes `*.map` (vite sourcemaps), which is most of the build output.
 
-`lever doctor` checks this for you, and `lever apply` fails early and by name if node is missing or
-broken — the failure you would otherwise meet is the "Web UI Not Available" page in your browser,
-hours away from its cause. The most common cause is an **asdf/mise shim** that resolves on `PATH`
-while the version it points at is not installed; that exits 126 with no useful text, so put a real
-node ahead of the shim:
+`lever doctor` checks this, and `lever apply` fails by name if node is missing or broken. The most
+common cause is an asdf/mise shim on `PATH` whose version is not installed (exit 126, no text); put
+a real node ahead of the shim:
 
 ```sh
 export PATH="$HOME/.asdf/installs/nodejs/<ver>/bin:$PATH"
@@ -224,8 +209,9 @@ already set, this happens in the *same* window as the controller-PAT mint — no
 tailscale serve --bg --https=443 http://127.0.0.1:8445
 ```
 
-(substitute your configured `remote.port` if you set one; `lever remote status` always prints the
-exact command with the effective port filled in). This is the **only** Tailscale-side command lever
+(substitute your configured `remote.port` if you set one; `lever remote status` prints the command
+with the proxy port filled in; it always shows `--https=443`, so adjust the HTTPS port yourself for a
+second instance). This is the **only** Tailscale-side command lever
 asks you to run — lever does not manage Tailscale itself. It needs **MagicDNS and HTTPS certificates
 enabled** for your tailnet (Tailscale admin console → DNS), since `tailscale serve --https` is what
 gets you a real cert for the `*.ts.net` hostname `base_url` should name.
@@ -339,10 +325,6 @@ the runtime unable to mirror, and the whole thing worked by luck.) Only the host
 configurable, so no configuration can make the two halves of one instance collide; `lever.yaml`
 additionally rejects a `login_port` of `8446`, which is the host port that mirror occupies.
 
-This is the third defect from that mirroring — the first made the proxy reach another instance's
-hub on host `127.0.0.1:8080`. A host loopback address that looks like a guest service is never what
-it seems.
-
 **The login port is granted in the jail's egress allowlist**, and only while remote access is on.
 The forwarder's whole job is to reach a host port, and that allowlist is the one thing deciding
 whether a jail→host dial succeeds — without the grant the dial is dropped, the hub's discovery
@@ -350,10 +332,10 @@ fetch hangs, and the browser gets a 502 with every process apparently healthy. T
 port, added beside the broker's, and it disappears from the next rebuild when remote access goes
 off.
 
-> **On `egress: closed`, enabling remote access on a RUNNING instance needs `lever down` + `lever
-> up`, not just `lever apply`.** A live closed chain is deliberately never rebuilt in place (that
-> would briefly open egress under a running agent), so a newly granted port does not take effect
-> until the instance is brought up again. `lever doctor` names this when it sees it.
+> **On `egress: closed`, enabling remote access on a RUNNING instance needs `lever destroy` +
+> `lever up`, not just `lever apply`.** A live closed chain is never rebuilt in place (that would
+> briefly open egress under a running agent), so a newly granted port does not take effect until
+> the instance is brought up again. `lever doctor` names this when it sees it.
 
 **A Go toolchain is needed on the host** while remote access is on: the guest forwarder is
 cross-compiled for the guest's architecture at apply time. A `scion.version:`/`scion.source:`
@@ -378,20 +360,13 @@ all (the default — often fine for a single-operator tailnet).
 
 ## Never use `tailscale funnel`
 
-Publish the proxy with `tailscale serve`, which is reachable **only from your tailnet**.
-`tailscale funnel` is the same command shape and publishes to the **public internet** — and
-nothing in lever can refuse it, because a funnelled request arrives looking like any other.
-
-The consequence is not a lesser version of tailnet access, it is the whole thing: the proxy
-injects a credential on every forwarded request, so an unauthenticated stranger gets the same
-interactive power over the jail interior as your phone — reading agent transcripts and attaching
-to a running agent's terminal. `allowed_users` is not a backstop either. It is empty by default,
-and even when set it pins a Tailscale login that a funnelled request simply does not carry, which
-is a 403 only for as long as the header stays absent.
-
-The host stays VM-protected either way — this is exposure of the jail interior, not of your Mac.
-That is the same posture the threat-model section describes for the tailnet; funnel just removes
-the tailnet from it.
+Publish the proxy with `tailscale serve`, which is reachable only from your tailnet. `tailscale
+funnel` has the same command shape and publishes to the public internet; lever cannot refuse a
+funnelled request, because it arrives like any other. The proxy injects a credential on every
+forwarded request, so an unauthenticated stranger would get the same interactive power over the
+jail interior as your phone. `allowed_users` is not a backstop: it is empty by default, and a
+funnelled request carries no Tailscale login header. The host stays VM-protected either way; this
+is exposure of the jail interior.
 
 ## The asset build runs on the host
 
@@ -407,16 +382,17 @@ build entirely (and serves no web UI).
 
 Every request the proxy handles — allowed or denied — is appended as one JSON line to
 `.lever-state/remote-audit.jsonl`: timestamp, the Tailscale login if present, method, path, the
-decision (`allow` / `deny-origin` / `deny-user` / `deny-no-pat` / `deny-no-session`), and the
+decision (`allow` / `deny-host` when the `Host` header does not match `base_url` / `deny-origin` /
+`deny-user` / `deny-no-pat` / `deny-no-session`), and the
 upstream status once known. The login path writes there too: `oidc-session` when a session is
-obtained for an operator, `oidc-discovery` / `oidc-token` / `oidc-userinfo` for each call the hub's
-back channel makes, and `deny-authorize` for anything that probes `/authorize` — nothing legitimate
+obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
+`oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
+refuses one, `oidc-not-found` for an unknown path), and `deny-authorize` for anything that probes `/authorize` — nothing legitimate
 ever does, so a line like that is either a misconfiguration or something in the jail looking around.
 No line ever carries a cookie, a code, a token or the PAT. A request that never got an answer from the hub also carries an `error` field naming the
 cause — a stopped jail, a missing `nc`, a hub refusing the connection — since a bare `502` cannot
-tell those apart. This is a host-side record of remote traffic that the hub's own logs don't give
-you (see lever#8's "hub reachable unaudited" complaint) — check it first if `lever doctor`'s
-healthz probe fails, or if something reached an agent you don't recognize.
+tell those apart. The hub does not log this traffic; check this file first if doctor's healthz probe
+fails or an agent received a message you do not recognise.
 
 ## The remote PAT
 
@@ -426,9 +402,9 @@ that creates, deletes, or reconfigures an agent, and nothing that reads a projec
 persisted host-side only, `.lever-state/remote.pat`, mode `0600`, and is a **different** token from
 the controller PAT the broker itself uses.
 
-**Expiry is not checked by lever in v1.** The hub's default token lifetime is 90 days; lever has no
+**Expiry is not checked by lever.** The hub's default token lifetime is 90 days; lever has no
 cheap way to read a token's remaining lifetime back from the hub, so `lever doctor` cannot warn you
-before it lapses (this is a known, documented gap — see the CHANGELOG). If remote access starts
+before it lapses. If remote access starts
 failing auth for no other visible reason, re-mint by deleting the file and re-applying:
 
 ```sh
@@ -444,14 +420,10 @@ window, agent-free, that mints a fresh token and nothing else.
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —
   asked for in chat, like any other task — not a button the phone UI exposes as an operator
   capability of its own.
-- **No new authority.** A remote chat message is an ordinary unauthenticated `user:` turn; it
-  carries no more weight than `lever msg send` or typing at `lever attach`. If the manager would
-  refuse an instruction from either of those, it refuses it here too. [Operator
-  directives](/operator-directives/) remain the only channel an agent can treat as authenticated.
-- **No credential on the phone.** The remote PAT never leaves the host; so does the session cookie
-  the proxy obtains for the UI shell, and the hub's own `Set-Cookie` is stripped from every
-  response before it reaches the browser, so the browser never ends up holding an alternate,
-  lever-unmanaged credential either.
+- **No new authority.** A remote chat message is an ordinary unauthenticated `user:` turn (see
+  the accepted posture above).
+- **No credential on the phone.** The remote PAT and the UI session cookie stay on the host; the
+  hub's `Set-Cookie` is stripped from every response.
 - **No identity provider, and no endpoint that mints sessions.** The local OIDC provider has no
   authorization endpoint at all — see [how the browser is logged
   in](#how-the-browser-is-logged-in).

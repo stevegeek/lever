@@ -13,7 +13,7 @@ behaving.**
 
 This page holds the core idea and the summary; the mechanism detail lives in the sub-pages below.
 Section numbers (§N) are stable across the split — each sub-page keeps its original numbering.
-What is shipped versus pending is tracked on [validation](/security-model/validation/).
+Validation coverage is on [validation](/security-model/validation/).
 
 | Section | Page |
 |---|---|
@@ -22,8 +22,8 @@ What is shipped versus pending is tracked on [validation](/security-model/valida
 | §5 The operator boundary (config out of the mount, validation, dispatch) | [Config trust](/security-model/config-trust/) |
 | §6 Credential blast radius and the capability broker | [Credentials & capabilities](/security-model/credentials/) |
 | §7–§8 What a compromised agent can and cannot do; non-claims | [Compromise scenarios](/security-model/compromise/) |
-| §9 Validation evidence and current status | [Validation](/security-model/validation/) |
-| §11 Operator directives — an authenticated human channel (honest Phase-1 scope) | [Operator directives](/security-model/operator-directives/) |
+| §9 Validation evidence and coverage | [Validation](/security-model/validation/) |
+| §11 Operator directives — an authenticated human channel | [Operator directives](/security-model/operator-directives/) |
 
 §5 covers the operator's control over instance *configuration*; §11 covers a verifiable channel for
 the operator's *runtime* instructions to a live agent — the two close different halves of the same
@@ -68,5 +68,5 @@ egress ([§8](/security-model/compromise/)).
 
 ## 10. Reporting a vulnerability
 
-Pre-release; a security contact will be published with the first release. If you find a containment
-hole in the meantime, please open a minimal-detail issue and request a private channel.
+Open a minimal-detail issue at https://github.com/stevegeek/lever/issues and request a private
+channel.

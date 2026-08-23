@@ -1,8 +1,7 @@
 # assistant-demo — a tiny AI assistant on lever
 
-A minimal but complete lever instance: a personal assistant that runs a morning
-**standup** (today's weather + your pending todos). It's built to show, in one
-runnable example, the two ways an agent gets a tool and how lever gates them:
+A lever instance that runs a morning standup (weather + pending todos). It shows
+the two brokered tool kinds and how the broker gates each:
 
 | tool | kind | who runs it | how it's gated |
 |---|---|---|---|
@@ -36,22 +35,18 @@ assistant-demo/
 From a checkout of lever (`lever` on your PATH — `make all` — and the agent image
 built — `make lever-image`; see the [getting-started guide](../../docs-site/_guides/getting-started.md)):
 
-1. **Build the two demo tools onto your PATH** (the broker spawns `lever-tool-todo`
-   by name, so it must be on the PATH `lever` inherits; you run `weather-stub`
-   yourself):
+1. **Build the two demo tools.** The broker spawns `lever-tool-todo` with a fixed
+   PATH of `/usr/local/bin:/usr/bin:/bin`; it does not use your shell PATH, and
+   `lever apply` / `lever up` fail at config load if the command does not resolve
+   there. Build it into `/usr/local/bin`, or build it anywhere and set an absolute
+   path in `command:` in `lever.yaml`. You run `weather-stub` from your shell, so
+   it may go in `~/.local/bin` (on your shell PATH) or run as `./weather-stub`:
 
    ```sh
    cd examples/assistant-demo
-   go build -o ~/.local/bin/lever-tool-todo ./tools/lever-tool-todo
-   go build -o ~/.local/bin/weather-stub    ./tools/weather-stub
+   go build -o /usr/local/bin/lever-tool-todo ./tools/lever-tool-todo
+   go build -o ~/.local/bin/weather-stub       ./tools/weather-stub
    ```
-
-   These go next to the `lever` binary (`~/.local/bin`). That directory **must be
-   on your `PATH`** — the broker resolves `lever-tool-todo` by name from the
-   environment `lever up` inherits, and you invoke `weather-stub` by name. If
-   `command -v lever` works in the shell you'll run `lever up` from, you're set;
-   otherwise `export PATH="$HOME/.local/bin:$PATH"` (a different `--prefix`? build
-   the tools into that same dir).
 
 2. **Provide a Claude OAuth token** at `~/.scion/oauth-token` (0600), as in the
    getting-started guide (this demo uses `subscription` mode).
@@ -85,9 +80,9 @@ built — `make lever-image`; see the [getting-started guide](../../docs-site/_g
 
 ## What to look at
 
-- **`lever doctor`** — the `weather` external-backend check confirms `weather-stub`'s
-  port is listening (a TCP probe; it doesn't exercise the MCP path); the
-  operator-skills check confirms `lever init` ran.
+- **`lever doctor`** — the `tool backends` check dials `weather-stub`'s port (TCP
+  only, no MCP round-trip) and confirms `lever-tool-todo` resolves on the
+  supervisor PATH; the `operator skills` check confirms `lever init` ran.
 - **`.lever-state/broker.log`** — every capability decision. You'll see the
   manager's `weather` mint + call, and the todo worker's `todo/list` mint + call,
   each `allow`ed against its grant, and a `deny` if you ask an agent for the tool

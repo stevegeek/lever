@@ -29,37 +29,26 @@ your machine
 ```
 
 The jail is the security boundary. Your project tree is bind-mounted **in place**, so agents edit
-the real files; there's no copy or sync. See [security-model.md](/security-model/) for what
-the jail does and doesn't protect.
+the real files. See the [security model](/security-model/) for what the jail does and does not
+protect.
 
 ## Prerequisites
 
-- **macOS on Apple Silicon** with [OrbStack](https://orbstack.dev) running. (OrbStack is the
-  validated backend today.)
-- **Go 1.26+** — both to build the binaries and on `PATH` at runtime: `lever apply`/`lever up`
-  cross-compile the pinned Scion engine into the jail, so they shell out to `go`. If you manage Go
-  with a version manager (asdf, mise), make sure the **real toolchain** is resolvable, not just a
-  shim — a shim that isn't initialised in the non-interactive sub-process fails with
-  `resolve go toolchain (is go on PATH?): exit status 126`. The fix is to put the actual toolchain
-  bin on `PATH`, e.g. `export PATH="$HOME/.asdf/installs/golang/1.26.4/go/bin:$PATH"` (adjust the
-  version); `go version` should print from that path.
-- **The agent image** `scionlocal/lever-claude:<arch>` on your host Docker (images are tagged by
-  architecture — `:arm64` / `:amd64` — so one host can cross-build both without clobbering; a tagless
-  `manager.image` in the config auto-resolves to the jail's arch). `lever apply` loads it into the
-  jail; it can't be pulled from inside (egress is locked down). If you don't have it yet, build it —
-  one command once you have scion's base image:
-
-      make lever-image                    # builds for your host arch (default arm64)
-      # make lever-image LEVER_IMAGE_ARCH=amd64   # cross-build for an amd64 server
-
-  This cross-compiles the in-jail binaries and builds `scionlocal/lever-claude:<arch>` FROM scion's
-  stock `scion-claude:<arch>`. See
-  [building the agent image](/getting-started/install/#1a-build-the-agent-image) for the
-  scion-base prerequisite and how instances extend the image. Confirm with
+- **macOS on Apple Silicon** with [OrbStack](https://orbstack.dev) running (`backend: orbstack`,
+  used by this walkthrough). A `lima` backend also exists for macOS and Linux; see
+  [backends](/reference/backends/).
+- **Go 1.26+** — to build the binaries, and on `PATH` at runtime: `lever apply`/`lever up`
+  cross-compile the pinned Scion engine into the jail. A version-manager shim (asdf, mise) that is
+  not initialised in the non-interactive sub-process fails with `resolve go toolchain (is go on
+  PATH?): exit status 126`; put the real toolchain bin on `PATH` (see
+  [troubleshooting](/operations/#troubleshooting-quick-table)).
+- **The agent image** `scionlocal/lever-claude:<arch>` on your host Docker. `lever apply` loads it
+  into the jail; it cannot be pulled from inside. Build it with `make lever-image`; see
+  [step 1a](/getting-started/install/#1a-build-the-agent-image). Confirm with
   `docker images | grep scionlocal/lever-claude`.
 - **A Claude OAuth token** in a file (mint with `claude setup-token`) for this subscription demo.
   Point `manager.credential_file` at it. Use a least-privilege token; in subscription mode it is
-  projected into the agent containers (see the security doc).
+  projected into the agent containers ([security model §6](/security-model/credentials/)).
 
 ## Where to go next
 

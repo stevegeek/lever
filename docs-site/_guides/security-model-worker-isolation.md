@@ -23,6 +23,13 @@ container: it is unreadable at the kernel/VM boundary, not merely hidden by conv
 permission (container UIDs are synced to the host UID, so file permissions alone give no
 inter-agent isolation here).
 
+Config validation also rejects two workers whose `dir`s overlap (the same subtree, or one an
+ancestor of the other; `validateWorkerDirsDisjoint`, `internal/config/config.go`), since the outer
+worker would otherwise mount the inner one's workspace, including the unspent enrolment ticket the
+broker stages at `<dir>/.lever/bootstrap.json`. A worker named `manager` is rejected separately: the
+operator-directive channel resolves that literal name to the manager regardless of
+`broker.manager_identity`, so such a worker could never be addressed.
+
 How the subdir mount is delivered: worker confinement uses a **project-relative `--workspace`**
 mount with a containment guard (rejecting `..`/symlink escape), which Scion resolves within the
 project root and mounts as exactly that subtree (an absolute `--workspace` instead mounts that
@@ -36,8 +43,9 @@ live-revalidated.
 
 This guarantee also holds only on a **non-git tree root**: a git repository at the tree root can
 pull Scion's mount builder into a worktree branch that also bind-mounts the whole `.git` object
-store, through which a worker could read *committed* sibling content. Config validation refuses (or
-warns on) a git tree root at load time; the relative-`--workspace` guard likewise resolves within the
+store, through which a worker could read *committed* sibling content. Config validation refuses a git
+tree root at load time (`validateNonGitTree`, `internal/config/config.go`); it checks only the tree
+itself, not ancestor directories. The relative-`--workspace` guard likewise resolves within the
 project root regardless of a stray ancestor `.git`. A worker's *own* subdirectory may still contain
 its own git repository; that is unaffected.
 
@@ -102,9 +110,11 @@ it do exactly that. Lever closes this: the real, long-lived Scion hub inside the
 Instead, every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
 capability broker on the manager's behalf, and by `lever` itself for attach/msg/stop) is
 authenticated with a **controller PAT**: a Scion hub token scoped to exactly
-`agent:manage,agent:attach,project:read` (`agent:attach` is load-bearing — the `agent:manage` alias
-alone 403s on `start`, since scion gates every interactive verb, including `start`, on
-`agent:attach`). It is:
+`agent:manage,agent:attach,project:read,project:update` (`agent:attach` is load-bearing — the
+`agent:manage` alias alone 403s on `start`, since scion gates every interactive verb, including
+`start`, on `agent:attach`; `project:update` is required because the shared-dirs endpoint used for
+the scratchpad removal in §4.1 gates on project update, and `agent:manage` does not expand to it).
+It is:
 
 - **Minted through a throwaway, jail-local hub.** Before any agent container exists, bring-up starts
   a temporary `scion server --dev-auth=true` on a fixed private port (48080) no agent ever learns, initializes the
@@ -124,6 +134,10 @@ alone 403s on `start`, since scion gates every interactive verb, including `star
   already has agents to recover automatically, and re-minting is not attempted behind your back.
 - **Injected only into lever's own host-side Scion client calls**, as the `SCION_HUB_TOKEN`
   environment variable, by the capability broker and by `lever attach`/`lever msg`/`lever stop`.
+- **Not the only host-side PAT.** A second, narrower host-side PAT
+  (`agent:read,agent:list,project:read,agent:attach`) is minted in the same window when
+  `remote.enabled: true`, for the remote-access proxy only; it is also stored under `.lever-state/`
+  and never enters the jail. See [remote access](/remote-access/).
 
 The result: even a fully compromised worker or manager container has no credential that lets it
 talk to the Scion hub directly. It cannot register a project, request an arbitrary mount, or
@@ -134,12 +148,9 @@ dispatch specifically, further gated by the config-declared subdirectory per [§
 itself. It does not change the manager's own trust position: the manager legitimately mounts the
 whole tree (§4.1), so a compromised manager can still read and write everything the instance keeps
 there, including the knowledge base and every worker's subdirectory, that is an inherent cost of
-giving the manager whole-tree oversight ([§7](/security-model/compromise/)), not a gap in the worker-isolation model above. **Not
-yet done:** the live acceptance checks that would exercise this guarantee against a real
-`scion start` (sibling subdirectories, a stray ancestor `.git`, the controller PAT's exact scopes)
-are not yet wired into `lever acceptance`. The mechanism is implemented and was live-validated once
-by hand (2026-07-10, on the pre-merge fork implementation — the guard has since merged upstream as
-Scion's relative `--workspace`, see §4.1), and no dedicated automated live gate exists today.
+giving the manager whole-tree oversight ([§7](/security-model/compromise/)), not a gap in the
+worker-isolation model above. No automated live gate exercises this guarantee yet; see
+[validation](/security-model/validation/).
 
 ### 4.3 Per-agent network namespace: a private loopback per agent
 

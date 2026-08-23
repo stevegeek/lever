@@ -6,29 +6,34 @@ permalink: /security-model/validation/
 ---
 Part of the [security model](/security-model/). Sections keep their original § numbers.
 
-## Validation status
+## Coverage
 
-> **Validation status.** *Shipped and validated:* the containment primitives (§9); the capability
-> broker, mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance` gate,
-> and the **api-key `/llm` strip-and-inject path end-to-end** (broker verifies the capability token,
-> strips it, injects the real Console key host-side), guarded by `make test-apikey-e2e`; container boot
-> enrols the agent and registers the broker tools over mTLS; the **single-project model** ([§4](/security-model/worker-isolation/)) — one
-> Scion project per instance, the real hub running dev-auth off, lifecycle driven only by a host-only
-> controller PAT, and worker↔worker isolation by defense-by-absence — is implemented (worker
-> isolation uses Scion's relative `--workspace`, merged upstream in
-> [scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815); see [§4.1](/security-model/worker-isolation/)).
-> *Mid-session cert/leaf rotation is now built and live:* the agent's leaf
-> is short-lived and renewed every 12h, and every long-lived broker client re-reads it per handshake
-> rather than caching the boot cert — see [§6.3](/security-model/credentials/) and [Agent identity & certificates](/agent-identity/).
-> *Still pending:* the full in-container claude driving a first-party tool (`/mcp/db/`) end-to-end;
-> a running session's pickup of a rotated **LLM bearer token** (`ANTHROPIC_AUTH_TOKEN`, api-key mode
-> only — `renewOnce` rewrites `settings.json`, but Claude reads it once at startup); and a **dedicated
-> live acceptance gate for the single-project isolation guarantee**:
-> the mechanism ([§4](/security-model/worker-isolation/)) is implemented (on upstream Scion's relative `--workspace`,
-> in the pinned `scion.version`; see [§4.1](/security-model/worker-isolation/)), but the checks
-> that would exercise it against a real `scion start` (sibling subdirectories,
-> a stray ancestor `.git`, the controller PAT's exact scopes) are not yet wired into
-> `lever acceptance`.
+Validated (by hand or by an automated gate):
+
+- Containment primitives (§9 below).
+- Capability broker, mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance`
+  gate.
+- Api-key `/llm` strip-and-inject path end-to-end (`make test-apikey-e2e`): the broker verifies the
+  capability token, strips it, and injects the real Console key host-side.
+- Container boot enrols the agent and registers the broker tools over mTLS.
+- Single-project model ([§4](/security-model/worker-isolation/)): one Scion project per instance,
+  hub with dev-auth off, lifecycle driven only by a host-only controller PAT, worker isolation via
+  Scion's relative `--workspace` ([scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815)).
+- Mid-session leaf rotation: the agent's leaf is renewed every 12h and every long-lived broker
+  client re-reads it per handshake ([§6.3](/security-model/credentials/), [agent identity](/agent-identity/)).
+- `lima` backend (`make test-lima-e2e`): the six `lever acceptance` checks under both egress
+  postures, guest port-forward suppression, idempotent closed re-bring-up, and teardown on a real VM.
+
+Not validated:
+
+- The in-container claude driving a first-party tool (`/mcp/db/`) end-to-end.
+- A running session's pickup of a rotated LLM bearer token (`ANTHROPIC_AUTH_TOKEN`, api-key mode):
+  `renewOnce` rewrites `settings.json`, but Claude reads it once at startup.
+- A live acceptance check for the §4 isolation guarantee against a real `scion start` (sibling
+  subdirectories, a stray ancestor `.git`, the controller PAT's exact scopes). The mechanism is
+  implemented; `lever acceptance` does not exercise it.
+- The project-tree mount's allow side (exactly the chosen tree is present and nothing else), the
+  manager Claude agent under rootless podman, and the manager's MCP reachability.
 
 ## 9. Validation evidence
 
@@ -36,7 +41,7 @@ Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 
 - **The escape exists without the jail.** From inside an ordinary agent container (no host
   filesystem, no Docker socket), using only a Scion hub **development-auth token** (the mode used
-  for this test; the real hub now runs `--dev-auth=false` and no agent is ever handed a hub
+  for this test; the real hub runs `--dev-auth=false` and no agent is ever handed a hub
   credential, [§4.2](/security-model/worker-isolation/)), the hub accepted a new project + a **provider with an arbitrary host path (no
   path validation)**; starting an agent then drove the broker to bind-mount a sensitive host
   directory into a new container, whose files were readable. This is the threat the jail closes:
@@ -51,13 +56,6 @@ Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 - **The runtime runs inside the jail.** Rootless podman runs containers (native `overlayfs`); the
   Scion binary builds and runs; a rootless host-networked container obeys the egress allowlist.
 
-What is **not** yet validated (pending the full-system test): the project-tree mount's *allow* side
-(that exactly the chosen tree is present and nothing else), the real manager Claude agent under
-rootless podman, the manager's MCP reachability in practice, and a live run of the [§4](/security-model/worker-isolation/)
-single-project isolation guarantee against a real `scion start` (the lever code is implemented and
-was live-validated once by hand on the pre-merge fork implementation — the guard has since merged
-upstream as Scion's relative `--workspace` and is in the pinned commit — but there is no wired
-acceptance check for it yet, see [§4.1](/security-model/worker-isolation/) and [§4.2](/security-model/worker-isolation/)).
 
 > Validation was performed by checking reachability and file presence by size/permission, never by
 > printing secret contents.

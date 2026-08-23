@@ -12,15 +12,16 @@ The minimal lever example: a manager agent plus one worker.
 
 ```
 hello-worker/
-├── lever.yaml          # Application config
-├── manager.md          # Manager system prompt
-└── workers/
-    └── worker/         # The single worker (agent workspace)
+├── lever.yaml          # Application config (host-side, not mounted)
+├── manager.md          # Manager system prompt (host-side)
+└── workspace/          # the bind-mounted tree (`tree: workspace`)
+    └── workers/
+        └── worker/     # The single worker (agent workspace)
 ```
 
 ## How to run
 
-From inside this directory (the `lever.yaml` is discovered automatically):
+From inside this directory (`lever` reads `./lever.yaml`; there is no walk-up):
 
 ```sh
 lever up                # bring up the jail + attach the manager
@@ -29,6 +30,6 @@ lever apply
 lever apply --dry-run   # preview the bring-up plan only
 ```
 
-The manager will dispatch a task to `worker`, wait for the completion event, and
-report the result. See [../../docs-site/_guides/getting-started.md](../../docs-site/_guides/getting-started.md)
-for the full worked example.
+The manager dispatches a task to `worker`, waits for the completion event, and reports the
+result. This example is the worked example in
+[getting started](../../docs-site/_guides/getting-started.md).

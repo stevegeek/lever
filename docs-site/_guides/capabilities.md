@@ -4,10 +4,9 @@ nav_order: 6
 ---
 # Capabilities: how agents get authority
 
-Lever's inner security layer is a **capability model**: agents hold no ambient authority — no API
-keys in the environment, no open ports to host services. Everything an agent may do outside its
-own workspace is represented by a revocable, identity-bound **capability token** minted by the
-host-side **broker**, and every use of one is checked, audited, and revocable.
+Agents hold no ambient authority: no API keys in the environment, no open ports to host
+services. Everything an agent may do outside its own workspace is a revocable, identity-bound
+**capability token** minted by the host-side **broker**; every use is checked and audited.
 
 This page describes the model end to end. For the *why* (threat model, what containment alone
 can't buy), see [security-model §6](/security-model/credentials/); for the *config keys*, see the
@@ -48,7 +47,8 @@ Agents mint through the **`lever-capability`** MCP tool (available in every agen
   delegator's `delegate:` list; a delegated token is strictly narrower than what the delegator
   holds, and extra `key=value` arguments become constraints baked into the token.
 
-Two **gate grains** exist per tool (`gate:` in the tool's config entry):
+Two **gate grains** exist for an `external: true` tool (`gate:` in the tool's config entry); a
+broker-supervised first-party tool is always fine-gated:
 
 - `coarse` — one capability covers the whole tool. Mint requests are coerced to `op: "*"`; any
   operation passes. Right for personal external servers where per-verb control adds nothing.
@@ -83,13 +83,9 @@ reveals metadata (which tool/op an agent was granted), not authority.
 
 ## Operator directives are not a capability grant
 
-Lever separately has [operator directives](/operator-directives/): SSH-signed instructions a
-human operator sends to one target agent. It's easy to conflate the two mechanisms, so to be
-precise — a directive authenticates *who is asking*, it does not widen *what the agent may do*.
-On consume, the broker returns a validated action descriptor; the agent still requests any
-capability it needs and calls brokered tools through the exact mint-then-call path described
-above, subject to the same `obtain:`/`delegate:` policy and epoch/revocation checks. A directive
-grants no new capability.
+[Operator directives](/operator-directives/) authenticate *who is asking*; they do not widen
+*what the agent may do*. A consumed directive returns an action descriptor, and the agent still
+mints and calls through the path above under the same `obtain:`/`delegate:` policy.
 
 ## The LLM as a capability (api-key mode)
 

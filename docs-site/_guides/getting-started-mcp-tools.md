@@ -8,10 +8,8 @@ Part of [getting started](/getting-started/). Steps keep their original numberin
 
 ## 7. Give an agent an MCP server (the various ways)
 
-Agents get real power from MCP (Model Context Protocol) servers — calendars, search, a database,
-your own tools. But an MCP server runs on your host, and the jail's whole point is that a
-prompt-injected agent *can't* reach your host freely. So "attach an MCP server" is really "poke a
-controlled hole." lever gives you two ways to do it, with a clear trade-off.
+An MCP server runs on the host, which the jail blocks by default. lever offers two ways to expose
+one to an agent: an ambient egress hole, or a capability-gated broker route.
 
 ### Approach A — ambient (`allow_ports` + `.mcp.json`)
 
@@ -29,6 +27,10 @@ manager:
 { "mcpServers": { "mytool": { "type": "http", "url": "http://host.orb.internal:3200" } } }
 ```
 
+Note: `lever doctor` fails the `no stray .mcp.json in tree` check while this file exists, because
+project-scope MCP entries collide with the user-scope tools `lever-agent boot` registers. Approach A
+is therefore incompatible with a clean `lever doctor`; prefer Approach B.
+
 The agent now reaches `mytool` directly. This is easy and fine for a **trusted, read-only** server,
 but it is an **ambient** grant. Any agent in the jail can hit that port with no per-call check, and
 the port is a standing hole in the egress allowlist for as long as it's listed. There is no
@@ -36,23 +38,20 @@ capability, no per-agent scoping, and no audit.
 
 ### Approach B — brokered (capability-gated, recommended)
 
-Register the server as a **broker tool** instead. The capability broker (host-side, holds no agent
-trust) fronts it over mTLS at `/mcp/<name>/`; an agent reaches it **only with a
-capability token the broker mints**, bound to that agent's identity. No `allow_ports` hole, no
-hand-authored `.mcp.json` — `lever-agent boot` (baked into the image) discovers registered tools via
-the broker's `/tools` and runs `claude mcp add /mcp/<name>/` for each. You get per-agent scoping and
-an audit trail, and closing the ambient hole means a compromised agent can't reach the port at all
-except through a capability it was granted. (The full model — enrolment, tokens, delegation,
-revocation — is described in [capabilities.md](/capabilities/).)
+Register the server as a **broker tool** instead. The capability broker fronts it over mTLS at
+`/mcp/<name>/`; an agent reaches it only with a capability token the broker mints, bound to that
+agent's identity. No `allow_ports` hole, no hand-authored `.mcp.json`: `lever-agent boot` (baked
+into the image) discovers registered tools via the broker's `/tools` and runs `claude mcp add` for
+each. You get per-agent scoping and an audit trail. The model (enrolment, tokens, delegation,
+revocation) is in [capabilities](/capabilities/).
 
 There are **two kinds** of broker tool:
 
-**External tool** (`external: true`) — front a server that is *already running* (you start it; the
-broker does **not** spawn it). This is the right choice for third-party or desktop-app servers —
-e.g. anything driving macOS apps via AppleScript, where the OS ties Automation permission to your
-login session and a broker-forked child would lose it. Bind it on host **loopback** (a literal
-`127.0.0.1`/`[::1]`; the broker proxies host-side, so a non-loopback backend would let the agent
-reach your LAN *through* the broker). Pick a capability grain:
+**External tool** (`external: true`) — front a server that is *already running*; the broker does
+not spawn it. Use this for third-party or desktop-app servers (e.g. AppleScript-driven servers,
+where Automation permission is tied to your login session). Bind it on host loopback; the rules
+are under [External MCP servers](/reference/config/#external-mcp-servers-external-true) in the
+config reference. Pick a capability grain:
 
 ```yaml
 broker:
@@ -73,8 +72,7 @@ broker:
 
 - `gate: fine` (the default) — enumerate `operations`; a token authorises one operation, and
   `allowed_values` pins arguments. Use for anything sensitive.
-- `gate: coarse` — one wildcard grant (`op: "*"`) admits every call the server exposes. Simplest;
-  wholesale trust. The broker audits the real operation either way.
+- `gate: coarse` — one wildcard grant (`op: "*"`) admits every call the server exposes.
 
 **First-party (captool) tool** — a tool the broker **supervises** as a subprocess (you give it a
 `command`), written with the captool SDK so it re-verifies the capability itself and the broker
@@ -95,8 +93,7 @@ broker:
 ### Granting access — who may use which tool
 
 A registered tool is inert until an agent is granted a capability for it. Grants are per-identity
-and default-deny (the token model behind them — identities, minting, delegation, revocation — is
-described in [capabilities.md](/capabilities/)):
+and default-deny:
 
 ```yaml
 manager:
@@ -112,11 +109,11 @@ workers:
 ```
 
 - **`obtain`** — the agent can self-mint a capability for the listed `{tool, op}`.
-- **`delegate`** — the manager can mint a token *bound to a named recipient* worker at dispatch time
-  (an attenuated hand-off).
-- Absence of a grant = no access, and a grant for one agent can't be replayed by another (the
-  token is identity-bound). Gate grains (`fine` vs `coarse`, and why a `"*"` wildcard can never
-  widen a `fine` tool) are covered in [capabilities.md](/capabilities/).
+- **`delegate`** — the manager can mint a token bound to a named recipient worker at dispatch time.
+- No grant means no access, and a token minted for one agent is rejected from another
+  ([capabilities](/capabilities/)).
+- After editing `broker.tools` or grants on a running instance, run `lever reload`
+  ([operations](/operations/#changing-config-on-a-running-instance)).
 
 ### Which should I use?
 
@@ -128,6 +125,6 @@ workers:
 | Egress hole | standing (`allow_ports`) | none | none |
 | Capability required per call | no | yes (token stripped) | yes (token forwarded) |
 
-Start with **A** to get moving; move a server to **B** when you want it scoped per agent, audited,
-and off the ambient allowlist. See [config-reference.md](/reference/config/) for every key and
-[security-model.md](/security-model/) for what the gate does and doesn't protect.
+Start with **A**; move a server to **B** when you want it scoped per agent, audited, and off the
+ambient allowlist. See the [config reference](/reference/config/) for every key and
+[security model §6.2](/security-model/credentials/) for what the gate does and does not protect.

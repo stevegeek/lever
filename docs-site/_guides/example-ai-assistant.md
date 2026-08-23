@@ -5,15 +5,10 @@ nav_order: 3
 
 # Example: a personal AI assistant
 
-A good fit for Lever is a **personal assistant made of several long-running
-agents**: distinct personas, each trusted with a different slice of your data
-and tools. You talk to a **manager** and it dispatches work to the personas.
-Lever lets you give one persona access to your notes and another only web search,
-without ever putting a real credential in any container, and without trusting the
-agents to behave.
-
-This page builds a small, generic version of that. Nothing here reflects a real
-setup; the tools (`notes`, `web`) are illustrative.
+This page builds a small personal assistant: several long-running worker agents, each trusted
+with a different slice of your data and tools, dispatched by a **manager**. One worker gets
+access to your notes, another only web search, and no container holds a real credential. The
+tools (`notes`, `web`) are illustrative.
 
 ## The shape
 
@@ -122,14 +117,14 @@ lever-manager agent start researcher \
 ```
 
 - It has no `notes` grant, so the broker **refuses to mint** any `notes`
-  capability for it (`/request` → 403). 
+  capability for it (`/request` → 403).
 - Even if it somehow obtained a token, every token is **identity-bound**, a
   capability minted for `archivist` is rejected when presented by `researcher`.
 - It cannot reach `api.anthropic.com`, your host, or the LAN directly. Egress is
   closed, so its only outbound path is the broker, and the broker only does what
   its capabilities allow.
 
-The blast radius of a compromised `researcher` is: web search. That's it.
+The blast radius of a compromised `researcher` is web search.
 
 ## Delegation (optional)
 
@@ -150,8 +145,6 @@ what policy allows, never wider.
 
 ## Why this needs Lever
 
-Scion would run these three agents and message between them, but it would inject
-the real model key into every container in cleartext, leave egress open, and gate
-tools only with a coarse shared token. The per-persona boundary, the key never
-touching a container, and the closed egress are what Lever adds. See the
-[security model](/security-model/) for how each is enforced.
+Scion alone would inject the real model key into every container, leave egress open, and gate
+tools with a coarse shared token; see [what Lever adds over Scion](/introduction/) and the
+[security model](/security-model/).

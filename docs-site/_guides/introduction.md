@@ -28,12 +28,11 @@ container in cleartext. Lever closes that gap.
 
 ## What Lever adds over Scion
 
-Lever's value is the boundary it draws *around* Scion — things Scion presupposes
-but doesn't build:
+Lever draws a boundary *around* Scion:
 
 | | Scion alone | With Lever |
 |---|---|---|
-| **Containment** | runs on your host | the whole stack runs in an OrbStack isolated machine; agents run in rootless podman |
+| **Containment** | runs on your host | the whole stack runs in an isolated VM (OrbStack isolated machine, or a Lima VM on Linux/non-OrbStack macOS); agents run in rootless podman |
 | **Network egress** | open by default | LAN and non-allowlisted host ports dropped; public internet open by default, or `egress: closed` to seal the jail to the broker alone |
 | **Model credential** | injected into every container in cleartext | held host-side, the broker injects it, agents never see it (api-key, the default). The `subscription` opt-in hands the agent the OAuth token instead |
 | **Tool access** | a coarse, shared token | per-agent, capability-gated MCP calls with pinned constraints |

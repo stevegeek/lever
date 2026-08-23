@@ -6,42 +6,30 @@ permalink: /security-model/credentials/
 ---
 Part of the [security model](/security-model/). Sections keep their original § numbers.
 
-## 6. Credential blast radius, and the path to capabilities
+## 6. Credential blast radius, and the capability broker
 
-> **STATUS: BUILT.** The capability broker described below as "target" now ships and is
-> enforced, realised with a **typed Ed25519-signed capability token** (`internal/cap/token`), not
-> macaroons. (It was first built on biscuits/Datalog; that was simplified to a typed signed token after
-> an audit found the only biscuit-specific feature, offline, holder-side attenuation, went unused,
-> because every capability is minted online by the broker, which is always on the verification path.)
-> The "Finding" and "Target design" text is kept as the threat narrative; **§6.1 + §6.2 describe the
-> built, enforced state.** Where this section says *macaroon*, read *signed capability token*, with one
-> correction: narrowing happens at **mint** (the broker bakes constraints into the signed token), not by
-> offline holder-side attenuation.
+**The exposure (subscription mode).** `lever apply` sets the credential read from
+`manager.credential_file` (`CLAUDE_CODE_OAUTH_TOKEN`) as a Hub secret (`internal/apply/run.go`
+`runCredential`); scion injects it into every agent container's environment at start (user/owner
+scope, single jail = single tenant). Every worker therefore holds the real, long-lived OAuth token
+in `$CLAUDE_CODE_OAUTH_TOKEN` (or a token file in its home). Combined with open internet egress for
+the model API ([§8](/security-model/compromise/)), a single prompt-injected worker can read the
+token and exfiltrate it, impersonating the operator's account beyond the jail. The token is ambient,
+shared, and long-lived: the highest-value secret in the system. ([§4](/security-model/worker-isolation/)'s
+dev-auth-off/controller-PAT hardening closes the separate risk of a compromised agent driving the
+hub; it does not touch this exposure.) This applies to `llm_auth: subscription` only (§6.1).
 
-**Finding.** The manager sets the upstream credential (`CLAUDE_CODE_OAUTH_TOKEN`) as a Hub secret;
-scion **resolves and injects it into every agent container's environment** at start (user/owner
-scope, single jail = single tenant). So **every worker holds the real, long-lived OAuth token** in
-`$CLAUDE_CODE_OAUTH_TOKEN` (or a token file in its home). This is a **subscription-mode** exposure
-only (§6.1). Combined with [§8](/security-model/compromise/) (open internet egress for the model API), a single prompt-injected
-worker can read the token and exfiltrate it, **impersonating the operator's account beyond the
-jail.** ([§4](/security-model/worker-isolation/)'s dev-auth-off/controller-PAT hardening closes the *separate* risk of a compromised
-agent driving the hub itself; it does not touch this ambient-credential exposure, which is a
-property of subscription mode's design, not of hub authority.) The token is *ambient, shared, and
-long-lived*, the worst combination, and the highest-value secret in the system.
+**The mechanism.** A host-side capability broker holds the raw credential and never projects it
+into a container. Agents present their mTLS identity and exchange it for a short-TTL, CN-bound,
+typed Ed25519-signed capability token (`internal/cap/token`) scoped to what their policy allows.
+Constraints are fixed at mint; there is no holder-side attenuation. The broker is reachable only via
+the allowlisted host alias and is the sole minter, so a worker's token is strictly weaker than the
+manager's and a delegated token is an online mint, never an offline hand-off. §6.1 covers the
+api-key mode and the mixed-instance residual; §6.2 lists what the broker enforces.
 
-This is the strongest argument for replacing **pushing keys to agents** with **agents exchanging
-identity for narrow capabilities.**
+### 6.1 Api-key mode and the mixed-instance residual
 
-The fix, **now built**, is a host-side capability broker that holds the raw credential and never
-projects it into a container: agents present their mTLS identity and exchange it for a short-TTL,
-CN-bound capability scoped to exactly what their policy allows. The broker rides the existing egress
-fence (reachable only via the allowlisted host alias) and is the sole minter, so a worker's token is
-strictly weaker than the manager's and a delegated token is an online mint, never an offline hand-off.
-§6.1 and §6.2 describe the built, enforced state.
-
-### 6.1 Built state (api-key mode) and the mixed-instance residual
-
-The capability broker is now built: an agent in **`llm_auth: api-key`** mode (the default) holds only
+An agent in **`llm_auth: api-key`** mode (the default) holds only
 a short-lived, CN-bound `capability(llm)` token and routes the model through the broker `/llm` proxy,
 which strips the token and injects the real Console key host-side. Such an agent **never receives a
 real Anthropic credential**. Adding **`egress: closed`** (valid only for a uniformly api-key instance)
@@ -71,7 +59,7 @@ To *support* mixed instances later would require per-container egress and/or pro
 only into subscription agents' projects (not as a hub-wide secret), deferred; until then, mixed is a
 hard config error.
 
-### 6.2 What the broker enforces (built lock-downs)
+### 6.2 What the broker enforces
 
 The capability model itself — identities, minting, delegation, revocation — is described in
 [capabilities.md](/capabilities/). This section lists the shipped, code-enforced properties, the
@@ -82,8 +70,8 @@ The capability model itself — identities, minting, delegation, revocation — 
   verified client-cert CN and fails closed without one (`ca.RequireAgent`, called first on `/request`,
   `/llm`, and every brokered tool route). A stolen token is useless without that agent's
   in-container private key, which is generated in the container and never leaves it.
-- **Per-call epoch + revocation is the real cut, not the TTL.** A generous 24h grant TTL is only a
-  backstop; on **every** call the broker re-checks the live revocation set and `MinEpoch`
+- **Per-call epoch + revocation is the real cut, not the TTL.** A generous grant TTL (24h by default;
+  `broker.grant_ttl` overrides it) is only a backstop; on **every** call the broker re-checks the live revocation set and `MinEpoch`
   (`/revoke` and `/bump-epoch`, persisted across restarts and seeded at construction). Revoking an
   agent or bumping the epoch denies its outstanding tokens immediately, this is verified for both the
   `/llm` proxy and first-party tool calls.
@@ -121,8 +109,7 @@ The capability model itself — identities, minting, delegation, revocation — 
   a validated action *descriptor*; the agent still executes it through the ordinary capability path
   described in this section, subject to the same `MayObtain`-at-mint and `token.Verify`-at-call
   checks. See [Operator directives](/security-model/operator-directives/) (§11) for the full threat
-  model, including the honest Phase-1 scope (delivery and verification are built; call-time
-  enforcement is not).
+  model and scope (delivery and verification are enforced; call-time enforcement is not).
 
 **External MCP servers (broker-fronted).** A `broker.tools` entry with `external: true` is a
 host server the broker *fronts but does not spawn*: it registers from config, is gated on the
@@ -196,20 +183,17 @@ because resume neither re-stamps the role nor fails.
 So `lever apply` reads the hub's record before it keeps an agent, and **fails the bring-up** when
 the record stores no role while the installed Scion understands roles — including for an agent
 already `running`, which refreshes its own token on the same rule. It cannot repair the record:
-`scion resume` has no `--role` flag and the hub exposes no route to set a stored role, so the only
-ways out are to delete the agent and let lever recreate it with `--role baseline`, losing its
-conversation, or to stay on a pin older than scion#1089. Refusing hands that choice to the
+`scion resume` has no `--role` flag and the hub exposes no route to set a stored role, so the ways
+out are to delete the agent and let lever recreate it with `--role baseline` (losing its
+conversation), to stamp `agentRole: baseline` into the stored records in `~/.scion/hub.db` with the
+hub stopped (this only narrows), or to stay on a pin older than scion#1089. Refusing hands that choice to the
 operator rather than taking it: the recovery that would "fix" the record is the same delete that
 destroys the session. `lever doctor` reports unrolled records on *any* pin, so the bump can be
-planned before it is attempted. The **known exception** remains
-agent `DELETE`: at this pin scion still authorizes `performAgentDelete` only for user callers, so
-an agent's own token is not scope-checked on that path (create/lifecycle/read/token-refresh are all
-gated for agents; delete is the lone gap). A fix — a lifecycle-scope + project-isolation gate on
-`performAgentDelete`, under which a baseline agent's token is refused — merged upstream on
-2026-08-10 as [scion#1097](https://github.com/GoogleCloudPlatform/scion/pull/1097) (`9282f01f`);
-the gap closes on this instance once the pin advances past it.
-Closing it is a scion-side change, not something lever's controller-PAT model can guard from the
-outside. **Egress mode
+planned before it is attempted. Agent `DELETE` was the lone
+ungated verb until [scion#1097](https://github.com/GoogleCloudPlatform/scion/pull/1097)
+(`9282f01f`, 2026-08-10) added a lifecycle-scope + project-isolation gate on `performAgentDelete`;
+the shipped example pin `e82a2a08` includes it, so a baseline agent's token is refused on delete. A
+pin older than `9282f01f` keeps the gap; lever's controller-PAT model cannot close it from outside. **Egress mode
 gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically so the
 in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable
 identically under `open` or `closed`. The real (if narrow) bound is tenancy: this is a
@@ -219,14 +203,8 @@ blast radius to escalate into ([§8](/security-model/compromise/)).
 
 ### 6.3 Leaf rotation and the re-read invariant
 
-The mTLS identity this section rests on — the cert an agent presents to mint a capability, and
-the CN every token is bound to — is a **24h leaf** signed at enrolment; the short life bounds the
-exposure window of a leaked agent key to a day, backstopping the per-call epoch + revocation that
-is the real cut (§6.2). The private key is generated inside the container and never leaves it;
-enrolment rides a single-use, CN-bound ticket (§6.2). One operational invariant is
-security-relevant, because getting it wrong is a silent availability failure that masquerades as
-the broker being down: **every long-lived broker client must re-read the rotating leaf per TLS
-handshake**, or all brokered tools fail together at the 24h mark while the broker stays healthy.
-The full lifecycle — enrolment, the `lever-renew` sidecar, the broker's self-rotating serving
-cert, and the two long-lived clients — is on
-[Agent identity & certificates](/agent-identity/).
+The mTLS identity this section rests on is a **24h leaf** signed at enrolment; the short life
+bounds the exposure window of a leaked agent key to a day, backstopping the per-call epoch +
+revocation that is the real cut (§6.2). Every long-lived broker client must re-read the rotating
+leaf per TLS handshake. The lifecycle (enrolment, renewal, the two long-lived clients, and the
+failure mode when the invariant is broken) is on [Agent identity & certificates](/agent-identity/).

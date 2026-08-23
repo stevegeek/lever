@@ -36,24 +36,28 @@ features:
       pinned at mint time.
 ---
 
-Lever runs **multiagent fleets of coding agents under strong containment** — on
-your laptop or a cloud instance. It wraps
+Lever runs fleets of coding agents under containment. It wraps
 [Scion](https://github.com/GoogleCloudPlatform/scion), Google's container-based
-agent orchestrator, in a **containment-and-credential boundary**: Scion and every
+agent orchestrator, in a containment-and-credential boundary: Scion and every
 agent it runs (via rootless podman) live inside one isolated VM with no host
-filesystem access, no ambient authority, and a locked-down egress allowlist. A
-**capability broker stays on the host**, outside the jail, and mediates everything
-that crosses it — the agents' credentials, their tool calls, and Scion's own hub
-calls — so your real model key never lands in a container, and you can close egress
-to the broker alone when you want nothing else reachable.
+filesystem access, no ambient authority, and an egress allowlist. A
+**capability broker** stays on the host, outside the jail, and mediates everything
+that crosses it (the agents' credentials, their tool calls, and Scion's hub
+calls), so the real model key never lands in a container; `egress: closed` seals the
+jail to the broker alone.
 
-A fleet is a **manager** agent with visibility over the whole project tree and
+A fleet is a **manager** agent with the whole project tree as its workspace and
 broker-granted authority to orchestrate the others, plus **worker** agents each
-confined to a subtree with a narrower set of tool grants. Point them at real work
-without handing them your secrets.
+confined to a subtree with narrower tool grants.
 
-**Platforms today:** macOS on Apple Silicon with [OrbStack](https://orbstack.dev)
-is the validated path. A Lima backend (targeting Linux and non-OrbStack macOS) is
-built and passing its end-to-end suite, with live Linux validation in progress —
-treat Linux support as *being proven*, not proven. Building from source needs Go
-1.26+; there are no binary releases yet.
+**Platforms:** macOS on Apple Silicon with [OrbStack](https://orbstack.dev), or
+Lima (macOS `vz`, Linux QEMU/KVM; Lima >= 2.0.0, checked at bring-up). The
+Linux/Lima path is validated end-to-end. Known Lima gaps: `lever stop` -> `up`
+comes back with a fresh manager conversation
+([#3](https://github.com/stevegeek/lever/issues/3)); `remote:` requires the
+`orbstack` backend (rejected at config load otherwise).
+
+Prebuilt `lever` binaries ship per release (darwin/linux, amd64/arm64). A Go
+1.26+ toolchain is required at runtime with `scion.version`/`scion.source` (Scion
+is compiled at `lever apply`); `scion.binary` needs none. The agent image is built
+locally with Docker. See [install](/getting-started/install/).

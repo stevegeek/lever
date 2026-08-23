@@ -113,9 +113,6 @@ violating guarantee 0 outright. It's rejected on the same grounds as Docker Desk
 opposite direction: Docker Desktop fails guarantees 1-2 despite having a VM; `linux-docker` would
 have satisfied guarantees 1-3 but had no VM at all.
 
-Recorded for honesty rather than deleted, because the underlying audience is real: a Linux host
-with no nested-virtualization support (a bare VPS, some CI runners) cannot run `lima`'s QEMU/KVM
-path or any other VM backend. A **weaker, explicit-opt-in** native backend for that case remains a
-possible future direction, for an operator who knowingly accepts a shared kernel because the
-hardware has no other option, never a default and never silently substituted for a VM backend. Not
-built.
+Kept as a record because the audience exists: a Linux host without nested virtualization cannot
+run `lima`. An explicit-opt-in shared-kernel backend for that case is a possible future direction.
+Not built.

@@ -86,10 +86,6 @@ busy connection keeps working.)
 
 ## Identity and operator directives
 
-[Operator directives](/operator-directives/) bind to this identity more tightly than a
-capability token does: a directive names its target agent's `{cn, enrolment generation}`, a
-persisted per-CN counter bumped on every genuine `/enrol` (so a recycled slug can't inherit a
-predecessor's still-active directives) and established on `/renew` (so an agent that restarts
-with a persisted cert keeps consuming directives issued to it). One agent's live certificate can
-therefore never be used to consume a directive meant for another — see
-[security-model](/security-model/operator-directives/).
+[Operator directives](/operator-directives/) bind to `{cn, enrolment generation}`, a persisted
+per-CN counter bumped on `/enrol` and established on `/renew`. See
+[security model §11.4](/security-model/operator-directives/).

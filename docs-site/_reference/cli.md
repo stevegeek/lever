@@ -6,8 +6,10 @@ nav_order: 3
 
 Lever ships two binaries with user-facing commands: **`lever`**, the host control plane you run
 from an instance root, and **`lever-manager`**, the in-jail orchestration CLI the manager agent
-runs inside its container. (A third binary, `lever-agent`, is baked into agent images and run
-automatically by the container pre-start hook — it has no operator-facing surface.)
+runs inside its container. (Two more binaries have no operator-facing surface: `lever-agent`,
+baked into agent images and run by the container pre-start hook, and `lever-tool-db`, the
+reference capability-aware MCP tool that the broker launches and supervises when a `tools:` entry
+names it.)
 
 All `lever` commands read `./lever.yaml` from the current directory when the config argument is
 omitted — there is no walk-up discovery, so run them from the instance root.
@@ -32,7 +34,7 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 |---|---|
 | `lever init` | Scaffold/refresh the framework operator skills (SKILL.md) into the instance tree — `lever-operator` at the tree root, `lever-agent` in each declared worker dir — plus a marked reference block in the tree-root CLAUDE.md. Hash-guarded: files you've edited are left alone with a warning (`--force` overwrites); `--check` reports staleness without writing (non-zero exit); `--adopt` records your customizations as an accepted baseline so doctor and `--check` treat them as OK — later drift past that baseline still fails doctor (tamper detection: agents can write these files, the baseline lives host-side). Re-run after upgrading lever or adding a worker. |
 | `lever doctor` | Run real health checks — broker alive and serving, every declared tool backend reachable/resolvable (external servers dialed, supervised commands resolved on the supervisor PATH), the agent image's baked Claude Code version, manager credential file presence/size/mode, no stray `.mcp.json` in the tree, usable Go toolchain, scion project-registration consistency, operator-skills scaffold current, operator directives configured (signer key count, admin socket present), remote-access proxy when enabled (pid/listen, PAT presence + mode, an end-to-end `GET /healthz` through the proxy) — each failure printing a specific fix hint. Exits non-zero on any failure. `--machine`/`--backend` run the profile away from an instance root. |
-| `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → init-machine → config-registry → bootstrap-token, a throwaway dev-auth hub mints the controller PAT → scion-server, dev-auth off → credential → register-project, one registration for the tree → mint-manager-bootstrap → start-manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
+| `lever apply [config]` | Headless bring-up: runs the full ordered plan (jail → broker → images → init-machine → config-registry → bootstrap-token (a throwaway dev-auth hub mints the controller PAT) → scion-server (dev-auth off) → remote-proxy (only when `remote.enabled: true`) → credential (only when `manager.credential_file` is set) → register-project (one registration for the tree) → agent-template → mint-manager-bootstrap → start-manager) with no attach. `--dry-run` prints the plan and exits with no side effects. The non-interactive half of `up`, for scripts and scheduled runs. |
 | `lever provision` | Low-level: provision the jail only (create the isolated machine, install runtimes + scion, apply egress rules). `--machine`, `--tree`, `--allow-port`. Idempotent; rarely needed directly — `up`/`apply` call it for you. |
 | `lever backends` | List the containment backends (orbstack, lima) and the guarantees each declares — the matrix config validation checks your `backend:` choice against. |
 
@@ -50,9 +52,9 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 
 Authenticated delivery of an operator-signed action to a target agent — see the `operator:` block
 in the [config reference](/reference/config/) for the signer trust anchor and expiry defaults, and
-[security-model.md](/security-model/) for the verification mechanism. Unlike most `lever`
-commands, `directive` subcommands take an explicit `[CONFIG]` rather than resolving only from the
-current directory (`doctor` and `msg` are cwd-based; `directive` isn't).
+[security-model.md](/security-model/) for the verification mechanism. Like most `lever`
+commands, `directive` subcommands resolve `[CONFIG]` from an explicit argument or `./lever.yaml`
+in the current directory.
 
 | Command | What it does |
 |---|---|
@@ -83,11 +85,11 @@ can only reach workers the operator declared.
 
 | Command | What it does |
 |---|---|
-| `lever-manager agent start NAME --task "…"` | Dispatch a declared worker that has **no** existing record. The broker resolves the worker's image and workspace from the config host-side; `--task` is the only routine flag and fixes the worker's task at creation. Against an **existing** worker `agent start` returns HTTP 409 (its task can't be changed in place) — use `agent resume` to re-run its original task, `msg send` to give a running worker new work, or ask the operator to `lever worker purge` it to start fresh with a new task. Confirms the worker is live before reporting success. |
+| `lever-manager agent start NAME --task "…"` | Dispatch a declared worker that has **no** existing record. The broker resolves the worker's image and workspace from the config host-side; `--task` is the only routine flag and fixes the worker's task at creation; it defaults to `"Read your context, then begin."`, so `agent start` never sends an empty task. Against an **existing** worker `agent start` returns HTTP 409 (its task can't be changed in place) — use `agent resume` to re-run its original task, `msg send` to give a running worker new work, or ask the operator to `lever worker purge` it to start fresh with a new task. Confirms the worker is live before reporting success. |
 | `lever-manager agent list` | List worker agents and their phases. |
 | `lever-manager agent stop NAME` / `suspend NAME` / `resume NAME` | Worker lifecycle, broker-routed. Suspend keeps the container (cheap resume); stop removes it but keeps the record. |
-| `lever-manager msg send "…" --to NAME` | Message a running agent. `NAME` is a worker name, or `user:manager` to reach the manager (the form taught to workers). Routing is identity-derived and default-deny. |
-| `lever-manager msg list` | Read the typed agent-event inbox; `--worker <name>` reads a worker's inbox (manager only). |
+| `lever-manager msg send "…" --to NAME` | Message a running agent. `NAME` is `<name>` or `agent:<name>` for a worker, or `user:manager` to reach the manager (the form taught to workers). `--interrupt` injects the message ahead of the recipient's next turn. Routing is identity-derived and default-deny. |
+| `lever-manager msg list` | Read the typed agent-event inbox; `--worker <name>` reads a worker's inbox (manager only). `--all` includes already-read events. |
 | `lever-manager watch --events-file PATH` | Bridge scion agent events (state changes, `input-needed`) into a file, appending as they arrive (`--interval` seconds between polls, default 5). The manager tails this to get live worker notifications. |
 | `lever-manager version` | Print the version. |
 

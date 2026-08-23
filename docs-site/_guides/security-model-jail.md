@@ -60,8 +60,9 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 - **Reachability under closed egress.** With the catch-all DROP, DNS/53 is dropped too, so an agent
   cannot resolve `host.orb.internal`. Agents therefore dial the broker by its **resolved alias IP**
   (already allowlisted), and the broker mints its server cert with that **IP as a SAN** so TLS still
-  validates (`internal/cap/ca/issue.go IssueServerCertSANs`, wired in `internal/brokerctl/serve.go`
-  and `internal/cli/apply.go`). Re-applying a *live* closed instance detects the active catch-all DROP
+  validates (`internal/cap/ca/rotate.go NewServerCertSource`, which mints via `IssueServerCertSANs`;
+  `internal/brokerctl/serve.go` passes the IP from `$LEVER_HOST_ALIAS_IP`, which
+  `internal/cli/apply.go` sets on the broker child). Re-applying a *live* closed instance detects the active catch-all DROP
   and skips the flush/rebuild, so egress is never momentarily reopened under a running agent.
 
 **Enforcement** lives in the jail's network namespace, for both postures. A **non-privileged** agent
@@ -84,58 +85,15 @@ native `overlayfs` (not the slow userspace `fuse-overlayfs`), so the performance
 
 ### 2.4 Substrates: the jail is a contract, not a product
 
-Everything above describes OrbStack, but the jail is a **contract**, not that one product. A
-containment backend must provide five things. Guarantee 0 was added 2026-07-02, after rejecting a
-native-Linux backend on exactly this ground (see below):
-
-0. **A hypervisor boundary between the agent workload and the host kernel.** Mandatory: agents run
-   arbitrary, potentially adversarial code ([§1](/security-model/)), and a network/mount/user namespace is not a
-   substitute for a separate kernel — one kernel-level exploit from any agent reaches everything
-   sharing that kernel. No backend without a VM boundary is added to `lever backends`.
-1. **No host filesystem** beyond the one chosen project tree (§2.1).
-2. **A network namespace Lever controls**, so the egress allowlist can be enforced *outside* the agent
-   containers (§2.2).
-3. **Egress enforced in that namespace**, not by the agent behaving.
-4. **A host-reachable broker endpoint** for capability, LLM, and tool traffic.
-
-OrbStack is the **reference implementation** of that contract; `lima` is the second, both are
-**implemented**. Each **declares** what it actually guarantees rather than pretending they are
-equivalent — a `Profile` in code, surfaced by `lever backends`:
-
-| Backend | Kernel boundary | FS bounded by | Egress enforced at |
-|---|---|---|---|
-| **orbstack** | shared jail-VM kernel | isolated machine: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables |
-| **lima** | own VM kernel | VM: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables |
-
-Full mechanism detail, the roadmap entry, and rejected backends live on the
-[containment backends](/reference/backends/) page; the highlights:
-
-- **`lima`'s containment surface is a lever-owned template**, not a stock one. Besides the VM kernel
-  boundary and the single project-tree mount, it closes a hazard specific to Lima: by default Lima
-  forwards *every* guest listener to the host's `127.0.0.1` (live-confirmed 2026-07-02: on a stock
-  template, a guest-side `0.0.0.0` listener is reachable at the host's loopback), which would let a
-  jailed agent squat a host-loopback port and impersonate a local service (a dev server, a
-  credential helper). The template's `portForwards` block carries an ignore-all rule, closing this
-  before the guest VM ever exists.
-- **Docker Desktop is *not* a backend.** The jail is a VM-isolation construct, not a container
-  runtime. Docker Desktop's VM is *shared* infrastructure — it auto-mounts your home directory and
-  its network namespace is not yours to control — so it satisfies neither guarantee 1 nor 2. Running
-  Lever's containers directly in it would appear to work while silently voiding the containment.
-- **A native, no-VM Linux backend (`linux-docker`) was explored and rejected**, the opposite failure
-  from Docker Desktop's: its namespace-based design (root-owned netns, mount-namespace + `tmpfs`
-  shadowing) would have satisfied guarantees 1-3, but shares the host kernel outright, violating the
-  new guarantee 0 — an adversarial agent ([§1](/security-model/)) is one kernel-level privilege escalation from host
-  root. Its egress and filesystem answers were sound and are recorded on the backends page for the
-  record; a weaker, explicit-opt-in variant for hosts with no nested-virtualization support (a bare
-  VPS) remains a possible future direction, never a silent substitute for a VM backend.
-- **`apple-container` (roadmap) is a different topology.** It runs each agent in its own micro-VM (a
-  kernel per agent — the strongest isolation of any Mac option, satisfying guarantee 0 *per agent*
-  rather than per jail, turning the shared-kernel trade in [§8](/security-model/compromise/) into a non-issue), but there is no
-  single jail to hang one egress chokepoint on, and its networking is young (full support needs
-  macOS 26).
-
-This is exactly why config validation rejects any backend name that isn't implemented instead of
-quietly falling back to OrbStack: a containment posture must never be silently substituted.
+Everything above describes OrbStack, but the jail is a **contract**. A containment backend must
+provide a hypervisor boundary between the agent workload and the host kernel (guarantee 0, added
+2026-07-02 after the native-Linux backend was rejected on that ground), no host filesystem beyond
+the project tree (§2.1), a network namespace Lever controls with egress enforced in it (§2.2), and a
+host-reachable broker endpoint. The full contract, the per-backend guarantee matrix, the `lima`
+template mechanism, the `apple-container` roadmap entry, and the rejected Docker Desktop and
+`linux-docker` backends are on the [containment backends](/reference/backends/) page. Config
+validation rejects any backend name that is not implemented rather than falling back to OrbStack,
+so a containment posture is never silently substituted.
 
 **Lima operational notes**, from the T13 security review:
 
@@ -180,8 +138,6 @@ quietly falling back to OrbStack: a containment posture must never be silently s
   global-scope v6 today, to catch this drifting silently in the future.
 
 The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
-all workers — see [§8](/security-model/compromise/); `lima` carries the same trade one level up (its own kernel is separate from the
-host, but still one kernel shared *within* the jail by the manager and every worker). That trade is a
-property of the *backend*, not of Lever, and the table above is how you see it before you choose.
-Run `lever backends` for the live matrix; set the backend with the `backend:` key
-([config reference](/reference/config/)).
+all workers ([§8](/security-model/compromise/)); `lima` carries the same trade one level up (its own
+kernel is separate from the host, but still one kernel shared within the jail). That trade is a
+property of the backend, not of Lever; run `lever backends` for the live matrix.

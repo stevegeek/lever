@@ -26,15 +26,15 @@ cannot be persuasive text the model is talked into trusting. It has to be a **si
 artifact**, delivered as a pointer, fetched by the agent over its own already-authenticated channel.
 The model never checks a signature; all cryptography is host-side.
 
-### 11.1 Three layers, and the honest limit of each
+### 11.1 Three layers and the limit of each
 
 | Layer | Where | What it does |
 |---|---|---|
 | 1. Delivery gate | Broker, host-side | A forged, unsigned, or altered directive never reaches an agent's inbox. This is a real cryptographic property over the signed artifact. |
 | 2. Agent-side live verification | Agent, over its own mTLS channel to the broker | Stops low-effort in-context spoofing by binding consumption to the caller's verified identity. Depends on per-agent network-namespace isolation ([§4.3](/security-model/worker-isolation/), shipped 0.7.0) — without it, co-resident agents shared a gateway loopback and this binding would not be trustworthy. |
-| 3. Host-enforced action binding | Broker, at tool-call time | The intended end state: the broker itself enforces the specific bound action when the tool is called. **Not implemented in Phase 1.** |
+| 3. Host-enforced action binding | Broker, at tool-call time | The intended end state: the broker itself enforces the specific bound action when the tool is called. **Not implemented.** |
 
-> **Honest Phase-1 scope.** Phase 1 delivers authenticated, integrity-protected, replay-proof
+> **Scope.** The shipped mechanism delivers authenticated, integrity-protected, replay-proof
 > **delivery and verification** of an operator-signed action bound to a specific target agent. It
 > does **not** yet enforce that action at tool-call time. On consume, the broker returns the
 > validated action descriptor to the agent, which then makes the call through its ordinary
@@ -42,16 +42,15 @@ The model never checks a signature; all cryptography is host-side.
 > mint, `token.Verify` at call, [§6.2](/security-model/credentials/)). **A directive therefore grants no new capability.**
 > Its value is that the request is *provably from the operator*, which lets a hardened agent act on
 > operator intent it would otherwise refuse for lack of a verifiable requester — for actions already
-> within its standing grants. For the `tool_call` and `approval` kinds, the *execution* boundary in
-> Phase 1 is still model discipline (bar-raising, not host-enforced); true call-time enforcement, and
-> `approval`'s distinguishing operator-approval gate, is deferred to a later phase with its own
-> adversarial review. Do not describe Phase-1 `tool_call` as "host-enforced capability" — it isn't yet.
+> within its standing grants. For the `tool_call` and `approval` kinds, the *execution* boundary
+> is model discipline (bar-raising, not host-enforced); call-time enforcement and `approval`'s
+> operator-approval gate are not implemented. `tool_call` is not a host-enforced capability.
 
 Three directive kinds exist: `tool_call` (a fully-bound call — tool, op, and args all fixed at
-signing, so injected text has no argument left to steer, subject to the Phase-1 note above),
+signing, so injected text has no argument left to steer, subject to the scope note above),
 `approval` (permits a call the agent's *standing* grants already allow but policy flagged for
-operator sign-off; never elevates beyond standing grants; its distinguishing enforcement is the
-Phase-2 piece), and `instruction` (free-text advisory guidance with **no host enforcement** —
+operator sign-off; never elevates beyond standing grants; its distinguishing enforcement is
+not implemented), and `instruction` (free-text advisory guidance with **no host enforcement** —
 explicitly the lowest-trust, escape-hatch kind; the bootstrap treats it as the operator's steer,
 never as authority that overrides a refusal of a sensitive or outbound action).
 
@@ -67,15 +66,16 @@ public**, not secret.
 
 **Out of scope:** host compromise (as throughout this security model), and the model being
 *persuaded* to act within the host's already-permitted actions — precisely why Layer 3 (§11.1)
-matters, and why Phase 1 alone does not defend against it.
+matters, and why delivery alone does not defend against it.
 
 ### 11.3 Mechanism, in brief
 
 The operator signs a canonical JSON statement with an SSH key (`ssh-keygen -Y sign`, a fixed
 namespace) naming the target agent, a time window, and an action. `lever directive send` submits
 the exact bytes and signature over a 0600 unix-domain admin socket in the instance state
-dir — genuinely unreachable from inside the jail; every admin operation is operator-signed
-regardless, the socket is defence in depth, not the trust boundary. The broker verifies the
+dir — genuinely unreachable from inside the jail; every state-changing admin operation (send, list, revoke, selftest) is operator-signed; the
+read-only `/directive/resolve` lookup of an agent's `{cn, generation}` is gated by the socket's
+0600 mode alone and returns no authority. The socket is defence in depth, not the trust boundary. The broker verifies the
 signature against an `allowed_signers` file (fixed principal, fixed namespace, only exit 0
 accepted) over the exact received bytes, parses those same bytes (rejecting duplicate JSON keys, no
 re-serialize step to smuggle a mismatch through), validates the time window and instance name, and
@@ -108,7 +108,7 @@ identity behind it, which is why it depends on the per-agent network namespace w
 [§4.3](/security-model/worker-isolation/): before that shipped, co-resident agents shared one
 gateway loopback and a compromised sibling could have presented as another agent's identity.
 
-### 11.5 Key posture (honest)
+### 11.5 Key posture
 
 - **Default, recommended:** the signing key lives on the operator's own machine, or is
   hardware-backed (touch-to-sign). Host compromise then does not imply operator-key compromise, and
@@ -130,7 +130,7 @@ gateway loopback and a compromised sibling could have presented as another agent
   round-trips a self-signed test directive to catch an `allowed_signers` misconfiguration before it
   matters.
 
-### 11.6 Threat model: attack, defence, and honest residual
+### 11.6 Threat model: attack, defence, residual
 
 | Attack | Defence / mechanism |
 |---|---|
@@ -150,10 +150,10 @@ gateway loopback and a compromised sibling could have presented as another agent
 | Stolen operator signing key | Live revocation via `allowed_signers` edit, short default expiry (10m, hard-capped 24h), ≥2 keys recommended, hardware touch-to-sign for the strongest posture (§11.5). |
 | `allowed_signers` misconfiguration / operator lockout | `lever directive selftest` plus the multi-key recommendation (§11.5). |
 
-**Honest residuals — stated, not hidden:**
+**Residuals:**
 
-- Phase-1 `tool_call`/`approval` execution is model discipline, not host-enforced; Layer 3 (§11.1)
-  is the pending piece that closes this.
+- `tool_call`/`approval` execution is model discipline, not host-enforced; Layer 3 (§11.1)
+  is not implemented.
 - The "this turn, you emitted it" property that the bootstrap carve-out relies on depends on the
   harness rendering tool results distinguishably from message text — bar-raising, not a proof.
 - A compromised hub sits on the delivery path for the pointer and can block a notification or
@@ -170,6 +170,6 @@ page: the [jail](/security-model/jail/) (§2) for the environment agents run in,
 [per-agent network namespace](/security-model/worker-isolation/) (§4.3) specifically, without which
 the mTLS identity that consume binds to would not be trustworthy. The capability broker and its
 grant checks ([§6](/security-model/credentials/)) are what a consumed action's *execution* still
-goes through in Phase 1 — a directive authenticates the requester, it does not widen what the
+goes through — a directive authenticates the requester, it does not widen what the
 requester may do. For CLI usage, the `operator:` config block, and worked examples, see the
 [operator directives](/operator-directives/) feature guide.

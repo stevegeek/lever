@@ -60,8 +60,7 @@ graph TD
 - **The jail is the containment boundary**, not Scion. The egress allowlist is enforced in the
   jail's network namespace, outside the agent containers.
 - **OrbStack is the reference *backend*, not a hard dependency.** The jail is a contract;
-  OrbStack and `lima` implement it; Docker Desktop and a no-VM `linux-docker` backend are
-  rejected. See [containment backends](/reference/backends/).
+  OrbStack and `lima` implement it. See [containment backends](/reference/backends/).
 
 ## 2. The project model: a project is a directory
 

@@ -74,8 +74,7 @@ The jail mounts only the project tree you choose and cannot route to the LAN; on
 allowlist of host ports and the model API is reachable. No fork of Scion is required; containment
 is enforced from outside it.
 
-The jail is a contract, not one product. OrbStack and `lima` implement it today; Docker Desktop
-does not and is not a backend. See [containment backends](docs-site/_reference/backends.md) and the
+The jail is a contract, not one product. OrbStack and `lima` implement it. See [containment backends](docs-site/_reference/backends.md) and the
 [security model](docs-site/_guides/security-model.md).
 
 ## Core + instance

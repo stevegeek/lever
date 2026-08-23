@@ -173,7 +173,6 @@ type Broker struct {
 	agents    map[string]struct{}
 	grantTTL  time.Duration
 	ticketTTL time.Duration
-	srvName   string
 	log       *slog.Logger
 
 	apiKey      []byte
@@ -261,7 +260,7 @@ func New(c Config) *Broker {
 	return &Broker{
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
 		manager: c.ManagerIdentity, agents: agents,
-		grantTTL: c.GrantTTL, ticketTTL: c.TicketTTL, srvName: c.ServerName, log: c.Log,
+		grantTTL: c.GrantTTL, ticketTTL: c.TicketTTL, log: c.Log,
 		minEpoch: c.RevocationState.MinEpoch,
 		revoked:  revoked,
 		persist:  c.PersistRevocation,

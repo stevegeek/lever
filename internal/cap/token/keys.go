@@ -10,9 +10,6 @@ import (
 	"os"
 )
 
-// osStat is a package indirection so tests can assert file permissions.
-var osStat = os.Stat
-
 // KeyPair is the broker's capability-signing root keypair (Ed25519). The
 // private key is the forge; the public key is published for verification.
 type KeyPair struct {

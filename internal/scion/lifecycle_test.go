@@ -326,7 +326,7 @@ func TestAttachArgvNotRun(t *testing.T) {
 // how the jail env is embedded for attach (internal/jail/attach.go).
 func TestAttachArgvEmbedsHubTokenWhenPresent(t *testing.T) {
 	f := exec.NewFakeRunner()
-	c := New(f, Options{Bin: "scion", HubToken: "pat123"})
+	c := New(f, Options{Bin: "scion", HubTokenSource: func() string { return "pat123" }})
 	argv := c.AttachArgv("a", "/g/a")
 	want := []string{"env", "SCION_HUB_TOKEN=pat123", "scion", "attach", "a", "-g", "/g/a"}
 	if strings.Join(argv, " ") != strings.Join(want, " ") {

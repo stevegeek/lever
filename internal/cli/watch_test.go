@@ -91,7 +91,7 @@ func TestBrokerInboxer_malformedResponseIsAnError(t *testing.T) {
 }
 
 func TestWatchCmd_requiresEventsFile(t *testing.T) {
-	root := newManagerRootWith()
+	root := NewManagerRoot()
 	root.SetArgs([]string{"watch"})
 	if err := root.Execute(); err == nil {
 		t.Fatal("expected error for missing --events-file")

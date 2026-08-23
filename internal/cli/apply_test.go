@@ -1144,8 +1144,16 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
+	// A live stand-in for the spawned proxy: awaitListening gives up early
+	// once the child is gone, so it must outlive the test.
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+
 	rc := &remoteController{state: state, configPath: filepath.Join(dir, "lever.yaml"), port: port}
-	err = rc.awaitListening(nil)
+	err = rc.awaitListening(child)
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
 	}
@@ -1164,7 +1172,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 		t.Skipf("could not re-bind %d: %v", port, err)
 	}
 	defer func() { _ = ln2.Close() }()
-	if err := rc.awaitListening(nil); err != nil {
+	if err := rc.awaitListening(child); err != nil {
 		t.Fatalf("a listening proxy must pass: %v", err)
 	}
 }

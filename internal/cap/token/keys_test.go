@@ -76,7 +76,7 @@ func TestSavePrivateIsNotWorldReadable(t *testing.T) {
 	if err := kp.SavePrivate(p); err != nil {
 		t.Fatal(err)
 	}
-	info, err := osStat(p)
+	info, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
 	}

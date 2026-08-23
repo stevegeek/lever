@@ -34,15 +34,10 @@ func baseBootConfig(t *testing.T) BootConfig {
 		IDDir:           filepath.Join(dir, "id"),
 		BrokerTools:     []string{"db"},
 		Now:             time.Now(),
-		GatewayURL:      testGatewayURL,
 		MCPAdd:          func(string, ...string) error { return nil },
 		WriteEnvOverlay: func(map[string]string) error { return nil },
 	}
 }
-
-// testGatewayURL is a distinctive non-default gateway URL so assertions can prove
-// MCP/LLM config points at the loopback gateway and NOT at the broker.
-const testGatewayURL = "http://127.0.0.1:18462"
 
 func TestBootAPIKeyWritesAnthropicEnv(t *testing.T) {
 	var overlay map[string]string
@@ -59,7 +54,7 @@ func TestBootAPIKeyWritesAnthropicEnv(t *testing.T) {
 	if overlay["ANTHROPIC_AUTH_TOKEN"] != wantToken {
 		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q (token must be stored verbatim, no re-encode)", overlay["ANTHROPIC_AUTH_TOKEN"], wantToken)
 	}
-	if want := testGatewayURL + "/llm"; overlay["ANTHROPIC_BASE_URL"] != want {
+	if want := LocalGatewayURL + "/llm"; overlay["ANTHROPIC_BASE_URL"] != want {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q (must point at the loopback gateway, not the broker)", overlay["ANTHROPIC_BASE_URL"], want)
 	}
 }
@@ -117,7 +112,6 @@ func TestBootEnrolsAndConfigures(t *testing.T) {
 	idDir := filepath.Join(dir, "id")
 	err := Boot(context.Background(), BootConfig{
 		BootstrapPath: bsPath, IDDir: idDir, BrokerTools: []string{"db"}, Now: time.Now(),
-		GatewayURL: testGatewayURL,
 		MCPAdd: func(name string, argv ...string) error {
 			calls = append(calls, mcpCall{name: name, argv: argv})
 			return nil
@@ -164,7 +158,7 @@ func TestBootEnrolsAndConfigures(t *testing.T) {
 	if dbCall == nil {
 		t.Fatal("expected MCPAdd call for broker tool 'db'")
 	}
-	assertBrokerToolArgv(t, "db", dbCall.argv, testGatewayURL)
+	assertBrokerToolArgv(t, "db", dbCall.argv, LocalGatewayURL)
 	// The MCP URL must be the gateway, never the broker directly.
 	if strings.Contains(strings.Join(dbCall.argv, " "), env.Server.URL) {
 		t.Errorf("broker tool 'db' MCPAdd must route via the gateway, not the broker URL %q: %v", env.Server.URL, dbCall.argv)
@@ -184,7 +178,7 @@ func TestBootIsIdempotent(t *testing.T) {
 	var firstCalls []mcpCall
 	cfg := BootConfig{
 		BootstrapPath: bsPath, IDDir: idDir, Now: time.Now(),
-		BrokerTools: []string{"db"}, GatewayURL: testGatewayURL,
+		BrokerTools: []string{"db"},
 		MCPAdd: func(name string, argv ...string) error {
 			firstCalls = append(firstCalls, mcpCall{name: name, argv: argv})
 			return nil
@@ -224,7 +218,7 @@ func TestBootIsIdempotent(t *testing.T) {
 	if dbCall2 == nil {
 		t.Fatal("second (idempotent) boot must still MCPAdd broker tool 'db'")
 	}
-	assertBrokerToolArgv(t, "db", dbCall2.argv, testGatewayURL)
+	assertBrokerToolArgv(t, "db", dbCall2.argv, LocalGatewayURL)
 }
 
 // TestBootDiscoveryUsesBrokerNotGateway proves the boot-time tool-discovery call
@@ -241,7 +235,6 @@ func TestBootDiscoveryUsesBrokerNotGateway(t *testing.T) {
 	var gotBrokerURL string
 	cfg := BootConfig{
 		BootstrapPath: bsPath, IDDir: filepath.Join(dir, "id"), Now: time.Now(),
-		GatewayURL:      testGatewayURL,
 		MCPAdd:          func(string, ...string) error { return nil },
 		WriteEnvOverlay: func(map[string]string) error { return nil },
 		ListTools: func(_ context.Context, brokerURL string, _ *http.Client) ([]string, error) {
@@ -255,7 +248,7 @@ func TestBootDiscoveryUsesBrokerNotGateway(t *testing.T) {
 	if gotBrokerURL != env.Server.URL {
 		t.Errorf("ListTools got broker URL %q, want the real broker %q (never the gateway)", gotBrokerURL, env.Server.URL)
 	}
-	if gotBrokerURL == testGatewayURL {
+	if gotBrokerURL == LocalGatewayURL {
 		t.Error("boot-time discovery must not be routed through the not-yet-running gateway")
 	}
 }

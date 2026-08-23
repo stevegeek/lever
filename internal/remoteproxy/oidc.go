@@ -28,7 +28,7 @@ import (
 // come from OIDC. It comes from ONE property: an authorization code can only
 // be created by an in-process call to Provider.Mint, inside the host-side
 // proxy, at the same trust level as the remote PAT file sitting beside it.
-// There is no HTTP route that mints one — see authorizeIsPermanently404.
+// There is no HTTP route that mints one — see handleAuthorize.
 //
 // Everything the hub reaches (discovery, /token, /userinfo) is also reachable
 // from inside the jail, because the guest-side forwarder that gives the hub a
@@ -70,7 +70,7 @@ const (
 	// /auth/login/oidc then 500s) but nothing ever dials it: the proxy drives
 	// the whole login server-side. It names a host that cannot resolve, so it
 	// can never be mistaken for a live endpoint, and it deliberately does NOT
-	// point at this provider's own /authorize — see authorizeIsPermanently404.
+	// point at this provider's own /authorize — see handleAuthorize.
 	// Exported so `lever doctor` can assert that the hub redirects HERE and
 	// nowhere else, which is what proves the hub is configured against
 	// lever's provider rather than someone's real IdP.
@@ -263,11 +263,6 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	p.record(r, "deny-authorize", http.StatusNotFound, "the local OIDC provider has no authorization endpoint by design")
 	http.NotFound(w, r)
 }
-
-// authorizeIsPermanently404 is a named anchor for the decision above, so the
-// grep that finds "/authorize" in this package also finds the reason it 404s.
-// Referenced by TestAuthorizeIsPermanently404.
-const authorizeIsPermanently404 = "/authorize must never be implemented: it would be an HTTP code-minting endpoint reachable from inside the jail"
 
 func (p *Provider) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	p.record(r, "oidc-not-found", http.StatusNotFound, "")

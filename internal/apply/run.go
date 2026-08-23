@@ -81,17 +81,13 @@ const apiKeyPlaceholder = "sk-ant-placeholder0lever0broker0injects0the0real0key0
 // site while the field/tag definition lives in exactly one place.
 type BootstrapMaterial = wire.Bootstrap
 
-// bootTracker threads the manager's bootstrap material through Run's steps,
-// AND records whether THIS apply run actually minted fresh material (as
-// opposed to the mint-manager-bootstrap step tolerating an already-spent
-// latch — e.g. an idempotent re-apply against the same broker process; see
-// ErrBootstrapLatched). start-manager's create path needs exactly that
-// "did we mint fresh material this run" signal: relying on BootstrapMaterial's
-// zero value would work today (the tolerate-latch path never assigns it), but
-// that's an implicit contract worth making explicit rather than fragile.
+// bootTracker records whether THIS apply run actually minted fresh bootstrap
+// material (as opposed to the mint-manager-bootstrap step tolerating an
+// already-spent latch — e.g. an idempotent re-apply against the same broker
+// process; see ErrBootstrapLatched). start-manager's create path needs exactly
+// that "did we mint fresh material this run" signal.
 type bootTracker struct {
-	material BootstrapMaterial
-	minted   bool
+	minted bool
 }
 
 // StageBootstrapMaterial writes m as the manager's one-time enrolment ticket
@@ -170,7 +166,7 @@ type Deps struct {
 	// by start-manager's create path when no fresh material was minted this
 	// apply (the mint step tolerated a spent latch). nil => the create path
 	// proceeds without re-arm (tests; and resume paths never need it).
-	RearmBootstrap func(ctx context.Context) (BootstrapMaterial, error)
+	RearmBootstrap func(ctx context.Context) error
 	// BrokerOnly reduces the bring-up to {jail-up, broker-up, mint-manager-bootstrap}
 	// for the VM-level acceptance gate (which drives lever-agent directly and
 	// never invokes scion). Default false = full bring-up (unchanged).
@@ -788,7 +784,6 @@ func runMintManagerBootstrap(ctx context.Context, s Step, d Deps, boot *bootTrac
 		}
 		return err
 	}
-	boot.material = m
 	boot.minted = true
 	// Deposit it as a 0600 file in the mount (the lever-agent reads it).
 	return StageBootstrapMaterial(s.Target, m)
@@ -1144,11 +1139,9 @@ func ensureFreshBootstrap(ctx context.Context, d Deps, boot *bootTracker) error 
 	if boot.minted || d.RearmBootstrap == nil {
 		return nil
 	}
-	m, err := d.RearmBootstrap(ctx)
-	if err != nil {
+	if err := d.RearmBootstrap(ctx); err != nil {
 		return fmt.Errorf("start-manager: re-arming the broker's spent bootstrap latch: %w", err)
 	}
-	boot.material = m
 	boot.minted = true
 	return nil
 }

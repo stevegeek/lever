@@ -81,9 +81,7 @@ func newHostRootWith(bf BackendFactory) *cobra.Command {
 }
 
 // NewManagerRoot builds the in-jail orchestration CLI (`lever-manager`).
-func NewManagerRoot() *cobra.Command { return newManagerRootWith() }
-
-func newManagerRootWith() *cobra.Command {
+func NewManagerRoot() *cobra.Command {
 	root := &cobra.Command{Use: "lever-manager", Short: "In-jail worker orchestration"}
 	root.AddCommand(versionCmd())
 	root.AddCommand(newAgentCmd(), newMsgCmd(), newWatchCmd())

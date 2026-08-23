@@ -456,8 +456,7 @@ type App struct {
 	Remote   Remote      `yaml:"remote"`
 	Disk     string      `yaml:"disk"` // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
 
-	dir     string // instance root (the config file's directory)
-	treeRel string // tree as the confined relative subdir (before joining to dir)
+	dir string // instance root (the config file's directory)
 }
 
 // validateBackend rejects a config's backend unless lever can run it. The set
@@ -589,7 +588,6 @@ func Load(path string) (*App, error) {
 	if !confinedRel(app.Tree) {
 		return nil, fmt.Errorf("config: tree %q must be a relative subdirectory inside the instance root (not %q, not absolute, no \"..\")", app.Tree, ".")
 	}
-	app.treeRel = app.Tree
 	app.Tree = filepath.Join(app.dir, app.Tree)
 	if abs, err := filepath.Abs(app.Tree); err == nil {
 		app.Tree = abs

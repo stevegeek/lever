@@ -208,18 +208,16 @@ var (
 // The log's tail is quoted into the error because the cause is always there
 // and nowhere else — the child owns that file, and this process never sees its
 // stderr.
-// child, when non-nil, is the process just spawned: a listener alone does not
+// child is the (started) process just spawned: a listener alone does not
 // prove OUR proxy is serving — some other process (including a leaked older
 // proxy) may hold the port, and concluding "listening" then would stamp a
 // config nothing is enforcing.
 func (rc *remoteController) awaitListening(child *exec.Cmd) error {
 	deadline := time.Now().Add(remoteProxyStartTimeout)
 	for {
-		if child != nil && child.Process != nil {
-			if err := child.Process.Signal(syscall.Signal(0)); err != nil {
-				// The child is gone; whatever may be listening is not it.
-				break
-			}
+		if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+			// The child is gone; whatever may be listening is not it.
+			break
 		}
 		if err := tcpDial(rc.addr()); err == nil {
 			return nil
@@ -655,24 +653,24 @@ func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, 
 // staging code path). Staging happens HERE (not in apply/run.go) because
 // start-manager's Step.Target is the manager's slug, not the tree dir — this
 // controller is the only place that has app.Tree in scope.
-func (bc *brokerController) Rearm(ctx context.Context) (apply.BootstrapMaterial, error) {
+func (bc *brokerController) Rearm(ctx context.Context) error {
 	if err := bc.state.StopBroker(); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
+		return fmt.Errorf("stopping the broker to re-arm its bootstrap latch: %w", err)
 	}
 	if err := bc.Start(ctx); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("restarting the broker to re-arm its bootstrap latch: %w", err)
+		return fmt.Errorf("restarting the broker to re-arm its bootstrap latch: %w", err)
 	}
 	if err := bc.Healthy(ctx); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("waiting for the re-armed broker to become healthy: %w", err)
+		return fmt.Errorf("waiting for the re-armed broker to become healthy: %w", err)
 	}
 	m, err := bc.Mint(ctx)
 	if err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("minting bootstrap material from the re-armed broker: %w", err)
+		return fmt.Errorf("minting bootstrap material from the re-armed broker: %w", err)
 	}
 	if err := apply.StageBootstrapMaterial(bc.app.Tree, m); err != nil {
-		return apply.BootstrapMaterial{}, fmt.Errorf("staging re-armed bootstrap material: %w", err)
+		return fmt.Errorf("staging re-armed bootstrap material: %w", err)
 	}
-	return m, nil
+	return nil
 }
 
 // leverMayClaimTemplate reports whether lever may point default_template at its

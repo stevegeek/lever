@@ -41,7 +41,6 @@ func (s *stubBackend) Teardown(context.Context) error                 { s.down =
 func (s *stubBackend) Stop(context.Context) error                     { s.stopped = true; return nil }
 func (s *stubBackend) Profile() backend.Profile                       { return backend.Profile{Name: "stub"} }
 func (s *stubBackend) HostAliasV4() string                            { return "" }
-func (s *stubBackend) MachineName() string                            { return "lever-stub" }
 func (s *stubBackend) RunUser() string                                { return "stub" }
 func (s *stubBackend) RunUID() string                                 { return "501" }
 func (s *stubBackend) ResolveRunUser(context.Context) error           { return s.resolveRunUserErr }

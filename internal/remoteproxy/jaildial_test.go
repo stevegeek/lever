@@ -129,13 +129,12 @@ func TestJailDialCloseReapsChild(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
+	// wait.done closes only after cmd.Wait returned, so the child was reaped
+	// (no zombie per connection).
 	select {
 	case <-jc.wait.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close returned but the child was never reaped")
-	}
-	if jc.cmd.ProcessState == nil {
-		t.Fatal("child process was not waited on — one zombie per connection")
 	}
 	// Close is idempotent: the proxy can close a conn it has already closed.
 	if err := c.Close(); err != nil {
@@ -488,23 +487,20 @@ func TestJailDialMissingMachineIsNotDiagnosedAsMissingNC(t *testing.T) {
 // that drops a conn without closing it must not leak a jail process (and its
 // wait goroutine) for the life of the proxy.
 func TestJailDialDroppedConnEndsItsChild(t *testing.T) {
-	// Take only the fields, so the conn itself becomes unreachable here.
-	done, cmd := func() (chan struct{}, *exec.Cmd) {
+	// Take only the wait channel, so the conn itself becomes unreachable here.
+	// It closes only after cmd.Wait returned, so the child was waited on.
+	done := func() chan struct{} {
 		c, err := dialTest(t, shPrefix("exec cat"), "127.0.0.1:8080")
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		jc := c.(*jailConn)
-		return jc.wait.done, jc.cmd
+		return c.(*jailConn).wait.done
 	}()
 
 	for range 50 {
 		runtime.GC()
 		select {
 		case <-done:
-			if cmd.ProcessState == nil {
-				t.Fatal("child was not waited on")
-			}
 			return
 		case <-time.After(100 * time.Millisecond):
 		}

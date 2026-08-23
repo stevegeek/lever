@@ -35,12 +35,11 @@ const (
 	KindRemoteProxy StepKind = "remote-proxy"
 )
 
-// Step is one named bring-up operation. Kind drives the executor; Target/Detail
-// carry operands (a dir to register, the manager image, etc.).
+// Step is one named bring-up operation. Kind drives the executor; Target
+// carries the operand (a dir to register, the manager slug, etc.).
 type Step struct {
 	Kind   StepKind
 	Target string
-	Detail string
 }
 
 // PlanOpts controls optional Plan behaviour.
@@ -89,7 +88,7 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	}
 	steps = append(steps,
 		Step{Kind: KindInitMachine},
-		Step{Kind: KindConfigRegistry, Detail: "scionlocal"},
+		Step{Kind: KindConfigRegistry},
 		// Mint (or reuse) the controller PAT the executor injects into the real,
 		// dev-auth-off hub via SCION_HUB_TOKEN, BEFORE scion-server locks the hub
 		// down. See Deps.EnsureControllerPAT.
@@ -115,7 +114,7 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	steps = append(steps, Step{Kind: KindAgentTemplate, Target: a.Tree})
 	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
 	steps = append(steps, Step{Kind: KindMintManagerBootstrap, Target: a.Tree})
-	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name, Detail: a.ManagerImage()})
+	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name})
 	if opts.BrokerOnly {
 		filtered := steps[:0:0]
 		for _, s := range steps {

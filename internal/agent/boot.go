@@ -53,11 +53,6 @@ type BootConfig struct {
 	// string must be used verbatim as ANTHROPIC_AUTH_TOKEN (already base64url-encoded
 	// by the broker; do not re-encode). Injected so tests can stub it without a live broker.
 	RequestLLMToken func(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error)
-	// GatewayURL is the loopback URL of the in-container gateway proxy that Claude
-	// talks to for MCP + LLM traffic (it re-presents the rotating leaf on Claude's
-	// behalf). Empty means LocalGatewayURL. Only the values written into Claude's
-	// config point here; boot-time broker calls still use the direct mTLS client.
-	GatewayURL string
 }
 
 // Boot enrols the agent (idempotently) and configures the harness: writes the
@@ -67,10 +62,10 @@ func Boot(ctx context.Context, c BootConfig) error {
 	if c.Now.IsZero() {
 		c.Now = time.Now()
 	}
-	gatewayURL := c.GatewayURL
-	if gatewayURL == "" {
-		gatewayURL = LocalGatewayURL
-	}
+	// Only the values written into Claude's config point at the loopback
+	// gateway (which re-presents the rotating leaf on Claude's behalf);
+	// boot-time broker calls still use the direct mTLS client.
+	gatewayURL := LocalGatewayURL
 
 	// Load bootstrap early so BrokerURL is available on both the enrol AND
 	// skip-enrol (resume/restart) paths. Reading the file is cheap and idempotent;

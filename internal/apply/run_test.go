@@ -945,9 +945,9 @@ func TestStartManagerCreateRearmsSpentLatchWhenNoFreshMintThisRun(t *testing.T) 
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+		RearmBootstrap: func(context.Context) error {
 			rearmCalls++
-			return BootstrapMaterial{Ticket: "fresh-ticket"}, nil
+			return nil
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
@@ -976,9 +976,9 @@ func TestStartManagerCreateSkipsRearmWhenFreshMintAlreadyHappened(t *testing.T) 
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, no latch
 		},
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+		RearmBootstrap: func(context.Context) error {
 			rearmCalls++
-			return BootstrapMaterial{}, nil
+			return nil
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
@@ -1009,9 +1009,9 @@ func TestStartManagerRecoveryRearmsBeforeFreshCreate(t *testing.T) {
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
 		Log:       func(string, ...any) {},
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+		RearmBootstrap: func(context.Context) error {
 			rearmCalls++
-			return BootstrapMaterial{Ticket: "fresh-after-recovery"}, nil
+			return nil
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
@@ -1043,9 +1043,9 @@ func TestStartManagerResumeRearmsWhenNoFreshMaterial(t *testing.T) {
 		// No MintManagerBootstrap -> no fresh material minted this run
 		// (boot.minted stays false), modelling the persisted-broker/spent-latch
 		// state in which an expired leaf would otherwise stay dead.
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+		RearmBootstrap: func(context.Context) error {
 			rearmCalls++
-			return BootstrapMaterial{Ticket: "fresh-for-resume"}, nil
+			return nil
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
@@ -1074,9 +1074,9 @@ func TestStartManagerResumeSkipsRearmWhenAlreadyMinted(t *testing.T) {
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, latch was open
 		},
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+		RearmBootstrap: func(context.Context) error {
 			rearmCalls++
-			return BootstrapMaterial{}, nil
+			return nil
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
@@ -1101,9 +1101,9 @@ func TestStartManagerNoOpRunningNeverRearms(t *testing.T) {
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
+		RearmBootstrap: func(context.Context) error {
 			rearmCalls++
-			return BootstrapMaterial{}, nil
+			return nil
 		},
 	}
 	if err := Run(context.Background(), app, deps); err != nil {
@@ -1125,8 +1125,8 @@ func TestStartManagerCreateFailsLoudlyWhenRearmFails(t *testing.T) {
 		JailUp:    func(context.Context, *config.App) error { return nil },
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			return BootstrapMaterial{}, fmt.Errorf("broker restart failed: connection refused")
+		RearmBootstrap: func(context.Context) error {
+			return fmt.Errorf("broker restart failed: connection refused")
 		},
 	}
 	err := Run(context.Background(), app, deps)

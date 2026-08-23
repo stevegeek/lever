@@ -2,18 +2,20 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/httpjson"
 )
 
 // ListTools fetches the broker's registered tool names over mTLS so the agent
-// can register each tool's /mcp/<tool>/ gateway with claude at boot. The decode
-// is bounded to 1 MiB (the only broker helper with a body limit today).
+// can register each tool's /mcp/<tool>/ gateway with claude at boot.
 func ListTools(ctx context.Context, brokerURL string, client *http.Client) ([]string, error) {
-	out, err := getJSON[struct {
+	var out struct {
 		Tools []string `json:"tools"`
-	}](ctx, client, brokerURL+"/tools", 1<<20, "agent: list tools")
-	if err != nil {
-		return nil, err
+	}
+	if err := httpjson.Get(ctx, client, brokerURL+"/tools", &out); err != nil {
+		return nil, fmt.Errorf("agent: list tools: %w", err)
 	}
 	return out.Tools, nil
 }

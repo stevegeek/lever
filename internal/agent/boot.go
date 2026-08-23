@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/stevegeek/lever/internal/wire"
@@ -18,7 +19,14 @@ import (
 // uses while the fields/tags live in exactly one place.
 type Bootstrap = wire.Bootstrap
 
-// LoadBootstrap reads the deposited bootstrap.json.
+// NormalizeBrokerURL strips trailing slashes so callers can append "/enrol",
+// "/request", ... without producing "//enrol".
+func NormalizeBrokerURL(u string) string {
+	return strings.TrimRight(u, "/")
+}
+
+// LoadBootstrap reads the deposited bootstrap.json. BrokerURL is normalized via
+// NormalizeBrokerURL.
 func LoadBootstrap(path string) (Bootstrap, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -28,6 +36,7 @@ func LoadBootstrap(path string) (Bootstrap, error) {
 	if err := json.Unmarshal(b, &bs); err != nil {
 		return Bootstrap{}, fmt.Errorf("agent: parse bootstrap: %w", err)
 	}
+	bs.BrokerURL = NormalizeBrokerURL(bs.BrokerURL)
 	return bs, nil
 }
 

@@ -24,11 +24,12 @@ import (
 // the llm capability is exercised by the broker /llm proxy, not an /mcp/<name>/ tool route.
 const llmSentinelBackend = "lever:llm-proxy"
 
-// BuildBroker assembles a broker.Config from the parsed app config: the
-// request/delegation policy (from manager+worker grants), the pre-loaded tool
-// registry (config-authoritative envelopes; caveat_param is the config-declared
-// guard, the tool re-supplies it at /register), the agent list, and TTLs. The
-// caller supplies the keys/CA/tickets (EnsureKeys).
+// BuildBroker assembles the config-derived groups of a broker.Config from the
+// parsed app config — Identity (the request/delegation policy from
+// manager+worker grants, the pre-loaded tool registry whose config-authoritative
+// envelopes the tool re-supplies at /register, the manager identity and TTLs)
+// and LLM (the api_key_file contents and upstream). The caller supplies the
+// keys/CA/tickets (EnsureKeys); decorateConfig fills the host-side groups.
 func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca.TicketStore) (broker.Config, error) {
 	pol := rules.NewPolicy()
 	addGrants := func(cn string, obtain []config.Grant, delegate []config.DelegateGrant) {
@@ -87,15 +88,22 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 	}
 
 	cfg := broker.Config{
-		Keys:            keys,
-		CA:              caInst,
-		Tickets:         tickets,
-		Rules:           pol,
-		Registry:        reg,
-		ManagerIdentity: app.ManagerCN(),
-		GrantTTL:        app.Broker.GrantTTL,
-		TicketTTL:       app.Broker.TicketTTL,
-		LLMUpstream:     app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com
+		Identity: broker.IdentityConfig{
+			Keys:            keys,
+			CA:              caInst,
+			Tickets:         tickets,
+			Rules:           pol,
+			Registry:        reg,
+			ManagerIdentity: app.ManagerCN(),
+			// The manager's scion agent slug is the APP NAME (apply's start-manager
+			// dispatches the manager as Worker: app.Name), not the manager cert CN.
+			ManagerSlug: app.Name,
+			GrantTTL:    app.Broker.GrantTTL,
+			TicketTTL:   app.Broker.TicketTTL,
+		},
+		LLM: broker.LLMConfig{
+			Upstream: app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com
+		},
 	}
 
 	// Load the api_key_file into the broker config so the /llm proxy has the
@@ -111,7 +119,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		if key == "" {
 			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q is empty", app.Broker.APIKeyFile)
 		}
-		cfg.APIKey = []byte(key)
+		cfg.LLM.APIKey = []byte(key)
 	}
 
 	return cfg, nil

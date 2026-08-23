@@ -74,23 +74,20 @@ func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
 	app := wiringApp(tree, "") // directives OFF
 	cfg, _ := decorateForTest(t, app, "v1.2.3")
 
-	if cfg.ManagerSlug != "demo" {
-		t.Errorf("ManagerSlug = %q, want app name %q", cfg.ManagerSlug, "demo")
+	if cfg.Identity.ManagerSlug != "demo" {
+		t.Errorf("ManagerSlug = %q, want app name %q", cfg.Identity.ManagerSlug, "demo")
 	}
-	if len(cfg.Workers) != 2 {
-		t.Fatalf("Workers = %d, want 2 (WorkerSpecs of the two config workers)", len(cfg.Workers))
+	if len(cfg.Dispatch.Workers) != 2 {
+		t.Fatalf("Workers = %d, want 2 (WorkerSpecs of the two config workers)", len(cfg.Dispatch.Workers))
 	}
 	// InstanceProject + the mount are the SELECTED backend's dest, not hardwired.
-	if cfg.InstanceProject != "/lever" {
-		t.Errorf("InstanceProject = %q, want %q (backend MountDest)", cfg.InstanceProject, "/lever")
+	if cfg.Dispatch.InstanceProject != "/lever" {
+		t.Errorf("InstanceProject = %q, want %q (backend MountDest)", cfg.Dispatch.InstanceProject, "/lever")
 	}
-	if cfg.ServerName != "host.orb.internal" {
-		t.Errorf("ServerName = %q, want orbstack HostToolAlias", cfg.ServerName)
-	}
-	// host falls back to ServerName (LEVER_HOST_ALIAS_IP unset); port is the
-	// default jail port.
-	if want := "https://host.orb.internal:8443"; cfg.BrokerURL != want {
-		t.Errorf("BrokerURL = %q, want %q", cfg.BrokerURL, want)
+	// host falls back to the orbstack HostToolAlias (LEVER_HOST_ALIAS_IP
+	// unset); port is the default jail port.
+	if want := "https://host.orb.internal:8443"; cfg.Dispatch.BrokerURL != want {
+		t.Errorf("BrokerURL = %q, want %q", cfg.Dispatch.BrokerURL, want)
 	}
 	if cfg.Version != "v1.2.3" {
 		t.Errorf("Version = %q, want the passed-in version", cfg.Version)
@@ -98,34 +95,34 @@ func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
 	if cfg.ConfigHash != ConfigHash(app) {
 		t.Errorf("ConfigHash = %q, want ConfigHash(app) %q", cfg.ConfigHash, ConfigHash(app))
 	}
-	if !cfg.WorkerToWorker {
+	if !cfg.Dispatch.WorkerToWorker {
 		t.Error("WorkerToWorker = false, want true (default)")
 	}
-	if cfg.AutoReenrol != "all" {
-		t.Errorf("AutoReenrol = %q, want %q (default)", cfg.AutoReenrol, "all")
+	if cfg.Dispatch.AutoReenrol != "all" {
+		t.Errorf("AutoReenrol = %q, want %q (default)", cfg.Dispatch.AutoReenrol, "all")
 	}
-	if want := filepath.Join(tree, ".lever"); cfg.ManagerBootstrapDir != want {
-		t.Errorf("ManagerBootstrapDir = %q, want %q", cfg.ManagerBootstrapDir, want)
+	if want := filepath.Join(tree, ".lever"); cfg.Dispatch.ManagerBootstrapDir != want {
+		t.Errorf("ManagerBootstrapDir = %q, want %q", cfg.Dispatch.ManagerBootstrapDir, want)
 	}
 	// Persist closures are the state's writers — non-nil so the broker can
 	// write revocation/directive state through on mutation.
-	if cfg.PersistRevocation == nil {
+	if cfg.Persistence.PersistRevocation == nil {
 		t.Error("PersistRevocation is nil, want state.SaveRevocation")
 	}
-	if cfg.PersistDirectives == nil {
+	if cfg.Persistence.PersistDirectives == nil {
 		t.Error("PersistDirectives is nil, want state.SaveDirectives")
 	}
 	// No jail-runner env ⇒ no worker-dispatch runtime is wired.
-	if cfg.Runtime != nil {
+	if cfg.Dispatch.Runtime != nil {
 		t.Error("Runtime is non-nil, want nil without LEVER_JAIL_USER/UID")
 	}
 	// Directives off ⇒ the directive-channel fields stay zero.
-	if cfg.DirectiveVerifier != nil {
+	if cfg.Directives.Verifier != nil {
 		t.Error("DirectiveVerifier set with directives disabled")
 	}
-	if cfg.InstanceID != "" || cfg.DirectiveAuditPath != "" || cfg.DirectiveExpiryMax != 0 {
+	if cfg.Directives.InstanceID != "" || cfg.Directives.AuditPath != "" || cfg.Directives.ExpiryMax != 0 {
 		t.Errorf("directive fields set with directives disabled: id=%q audit=%q max=%v",
-			cfg.InstanceID, cfg.DirectiveAuditPath, cfg.DirectiveExpiryMax)
+			cfg.Directives.InstanceID, cfg.Directives.AuditPath, cfg.Directives.ExpiryMax)
 	}
 }
 
@@ -134,17 +131,17 @@ func TestDecorateConfigWiresDirectiveFieldsWhenEnabled(t *testing.T) {
 	app := wiringApp(tree, "signers") // directives ON
 	cfg, st := decorateForTest(t, app, "v0")
 
-	if cfg.DirectiveVerifier == nil {
+	if cfg.Directives.Verifier == nil {
 		t.Fatal("DirectiveVerifier is nil with directives enabled")
 	}
-	if cfg.InstanceID != "demo" {
-		t.Errorf("InstanceID = %q, want app name", cfg.InstanceID)
+	if cfg.Directives.InstanceID != "demo" {
+		t.Errorf("InstanceID = %q, want app name", cfg.Directives.InstanceID)
 	}
-	if want := filepath.Join(st.Dir, "directives.log"); cfg.DirectiveAuditPath != want {
-		t.Errorf("DirectiveAuditPath = %q, want %q", cfg.DirectiveAuditPath, want)
+	if want := filepath.Join(st.Dir, "directives.log"); cfg.Directives.AuditPath != want {
+		t.Errorf("DirectiveAuditPath = %q, want %q", cfg.Directives.AuditPath, want)
 	}
-	if cfg.DirectiveExpiryMax != 24*time.Hour {
-		t.Errorf("DirectiveExpiryMax = %v, want 24h (default)", cfg.DirectiveExpiryMax)
+	if cfg.Directives.ExpiryMax != 24*time.Hour {
+		t.Errorf("DirectiveExpiryMax = %v, want 24h (default)", cfg.Directives.ExpiryMax)
 	}
 }
 

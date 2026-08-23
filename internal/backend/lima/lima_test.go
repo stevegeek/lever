@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/exec"
 )
 
@@ -238,7 +240,7 @@ func TestLimaVersionAtLeast(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := exec.NewFakeRunner()
 			f.Script("limactl --version", exec.Result{Stdout: tc.stdout})
-			ok, got, err := limaVersionAtLeast(context.Background(), f, 2, 0, 0)
+			ok, got, err := common.VersionAtLeast(context.Background(), f, []string{"limactl", "--version"}, limaVersionRe, 2, 0, 0)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (ok=%t got=%q)", ok, got)
@@ -432,9 +434,21 @@ func TestHostToolAliasAndJailPrefix(t *testing.T) {
 	}
 }
 
+// resolvedLima returns a backend whose run user is resolved (leveruser/501)
+// through the same probes EnsureUp issues, without provisioning anything.
+func resolvedLima(t *testing.T, f *exec.FakeRunner, vm string) *Lima {
+	t.Helper()
+	backendtest.ScriptRunUser(f, "limactl shell "+vm, "leveruser", "501")
+	l := New(f, vm)
+	if err := l.ReadRunUser(context.Background()); err != nil {
+		t.Fatalf("ReadRunUser: %v", err)
+	}
+	f.Calls = nil
+	return l
+}
+
 func TestJailTransportMethods(t *testing.T) {
-	l := New(exec.NewFakeRunner(), "lever-x")
-	l.UID = "501"
+	l := resolvedLima(t, exec.NewFakeRunner(), "lever-x")
 
 	if l.JailRunner() == nil {
 		t.Fatal("JailRunner() = nil")
@@ -456,29 +470,33 @@ func TestJailTransportMethods(t *testing.T) {
 
 func TestInstallGuestBinaryArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
-	f.Script("bash", exec.Result{})
+	f.Script("limactl", exec.Result{})
+	local := filepath.Join(t.TempDir(), "lever-agent")
+	if err := os.WriteFile(local, []byte("agent-bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	l := New(f, "lever-x")
-	if err := l.InstallGuestBinary(context.Background(), "/host/lever-agent", "/usr/local/bin/lever-agent"); err != nil {
+	if err := l.InstallGuestBinary(context.Background(), local, "/usr/local/bin/lever-agent"); err != nil {
 		t.Fatalf("InstallGuestBinary: %v", err)
 	}
 	if len(f.Calls) != 1 {
 		t.Fatalf("want 1 host call, got %d", len(f.Calls))
 	}
 	c := f.Calls[0]
-	if c.Name != "bash" || len(c.Args) != 2 || c.Args[0] != "-c" {
-		t.Fatalf("want `bash -c <script>`, got %s %v", c.Name, c.Args)
+	// The root transport prefix must be wired through verbatim, with the
+	// binary on stdin of the guest-side script.
+	if c.Name != "limactl" || !reflect.DeepEqual(c.Args[:5], []string{"shell", "lever-x", "sudo", "bash", "-c"}) {
+		t.Fatalf("root prefix mis-wired: %s %v", c.Name, c.Args)
 	}
-	// The root transport prefix must be wired through verbatim (shell-quoted).
-	if !strings.Contains(c.Args[1], `'limactl' 'shell' 'lever-x' 'sudo'`) {
-		t.Fatalf("root prefix mis-wired in install script: %q", c.Args[1])
+	if c.Stdin != "agent-bytes" {
+		t.Fatalf("binary not streamed on stdin: %q", c.Stdin)
 	}
 }
 
 func TestJailRunnerArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
+	l := resolvedLima(t, f, "lever-x")
 	f.Script("limactl", exec.Result{Stdout: "ok\n"})
-	l := New(f, "lever-x")
-	l.UID = "501"
 	if _, err := l.JailRunner().Run(context.Background(), nil, "true"); err != nil {
 		t.Fatalf("JailRunner run: %v", err)
 	}
@@ -497,8 +515,7 @@ func TestJailRunnerArgv(t *testing.T) {
 }
 
 func TestAttachArgvFullPrefix(t *testing.T) {
-	l := New(exec.NewFakeRunner(), "lever-x")
-	l.UID = "501"
+	l := resolvedLima(t, exec.NewFakeRunner(), "lever-x")
 	attach := l.AttachArgv([]string{"scion", "attach"})
 	if wantPrefix := []string{"limactl", "shell", "lever-x", "env"}; !reflect.DeepEqual(attach[:4], wantPrefix) {
 		t.Fatalf("attach prefix mis-wired: %v", attach[:4])
@@ -574,95 +591,40 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	}
 }
 
-// closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for
-// `iptables -S` and records whether the chain was flushed or the alias
-// re-resolved. It intercepts those substrings in a fixed switch order BEFORE
-// falling through to the embedded FakeRunner, so results are deterministic —
-// FakeRunner.Script matches by HasPrefix over its (randomized-iteration-order)
-// map, so two overlapping keys like "...iptables -S LEVER_EGRESS" and the
-// shorter generic "...iptables" are both valid prefixes of the same call, and
-// which one "wins" is nondeterministic. Mirrors orbstack_test.go's
-// closedChainRunner exactly (see orbstack_test.go:28-79).
-type closedChainRunner struct {
-	*exec.FakeRunner
-	flushed, resolved bool
-}
-
-func (r *closedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
-	argv := strings.Join(args, " ")
-	if name == "limactl" {
-		switch {
-		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
-			return exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"}, nil
-		case strings.Contains(argv, "-F LEVER_EGRESS"):
-			r.flushed = true
-		case strings.Contains(argv, "getent ahosts"):
-			r.resolved = true
-		}
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
-
-func (r *closedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
-	return r.RunIn(ctx, "", env, name, args...)
-}
-
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &closedChainRunner{FakeRunner: exec.NewFakeRunner()}
+	r := &backendtest.ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "limactl", Open: true}
 	r.Script("limactl shell lever-x sudo iptables", exec.Result{})
 	r.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	r.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
 	l := New(r, "lever-x")
 	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
 	// live chain, so a re-apply that hits the skip must leave a prior
 	// aliasV6 untouched rather than zeroing it.
-	l.AliasV6 = "fd07::fe"
+	if err := l.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
+		t.Fatalf("first ApplyEgress: %v", err)
+	}
+	if l.HostAliasV6() != "fd07::fe" {
+		t.Fatalf("the rebuild must record v6; got %q", l.HostAliasV6())
+	}
+	r.Open, r.Flushed, r.Resolved = false, false, false
 
 	if err := l.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
 	// I2: an already-closed chain must NOT be flushed or re-resolved — that
 	// would briefly open egress for a running agent.
-	if r.flushed {
+	if r.Flushed {
 		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
 	}
-	if r.resolved {
+	if r.Resolved {
 		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
 	}
 	if l.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", l.HostAliasV4())
 	}
-	if l.AliasV6 != "fd07::fe" {
-		t.Fatalf("skip path must not clobber a prior aliasV6; got %q", l.AliasV6)
+	if l.HostAliasV6() != "fd07::fe" {
+		t.Fatalf("skip path must not clobber a prior aliasV6; got %q", l.HostAliasV6())
 	}
-}
-
-// fakeScionCheckout writes the minimum of a scion checkout that the web-asset
-// path inspects: a web/ holding package.json.
-func fakeScionCheckout(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return root
-}
-
-// scriptScionInstall scripts the host build + guest install of the scion binary
-// so a test can reach whatever runs AFTER it.
-func scriptScionInstall(t *testing.T, f *exec.FakeRunner, machine string) {
-	t.Helper()
-	f.Script("go build", exec.Result{})
-	f.Script("bash -c", exec.Result{})
-	// A digest mismatch, so the install streams rather than skipping.
-	f.Script("limactl shell "+machine+" /usr/bin/sha256sum", exec.Result{Code: 1})
-	p := filepath.Join(os.TempDir(), "lever-scion-"+machine)
-	if err := os.WriteFile(p, []byte("fake-scion-"+machine), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(p) })
 }
 
 // EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. Each
@@ -677,12 +639,12 @@ func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 
 	f := exec.NewFakeRunner()
 	scriptedVM(f)
-	scriptScionInstall(t, f, "lever-x")
+	backendtest.ScriptScionInstall(t, f, "limactl shell lever-x", "lever-x")
 	l := New(f, "lever-x")
 
 	err := l.EnsureUp(context.Background(), backend.Config{
 		MachineName: "lever-x", ProjectTree: "/Users/x/tree",
-		ScionSource: fakeScionCheckout(t), ScionWebUI: true,
+		ScionSource: backendtest.FakeScionCheckout(t), ScionWebUI: true,
 	})
 	// node is deliberately not scripted: the web build stops at its toolchain
 	// probe, which is only reachable if ScionWebUI was threaded through.
@@ -698,12 +660,12 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 
 	f := exec.NewFakeRunner()
 	scriptedVM(f)
-	scriptScionInstall(t, f, "lever-x")
+	backendtest.ScriptScionInstall(t, f, "limactl shell lever-x", "lever-x")
 	l := New(f, "lever-x")
 
 	if err := l.EnsureUp(context.Background(), backend.Config{
 		MachineName: "lever-x", ProjectTree: "/Users/x/tree",
-		ScionSource: fakeScionCheckout(t),
+		ScionSource: backendtest.FakeScionCheckout(t),
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}

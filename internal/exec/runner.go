@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 )
@@ -24,11 +25,17 @@ type Runner interface {
 	// RunIn is like Run but executes in the given working directory. An empty dir
 	// uses the process cwd.
 	RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (Result, error)
+	// RunStdin is like Run but feeds stdin to the command. It is the argv-only
+	// way to stream host bytes into a command (a file into `<prefix> bash -c
+	// 'cat > …'`, an archive into `podman load`) — no host shell, no
+	// string-built pipeline, no quoting of the prefix. A nil stdin behaves
+	// like Run.
+	RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error)
 }
 
 type RealRunner struct{}
 
-func (r RealRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (Result, error) {
+func (r RealRunner) run(ctx context.Context, dir string, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if len(env) > 0 {
 		cmd.Env = cmd.Environ()
@@ -38,6 +45,9 @@ func (r RealRunner) RunIn(ctx context.Context, dir string, env map[string]string
 	}
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if stdin != nil {
+		cmd.Stdin = stdin
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -49,17 +59,26 @@ func (r RealRunner) RunIn(ctx context.Context, dir string, env map[string]string
 	return res, err
 }
 
+func (r RealRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (Result, error) {
+	return r.run(ctx, dir, nil, env, name, args...)
+}
+
 func (r RealRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (Result, error) {
-	return r.RunIn(ctx, "", env, name, args...)
+	return r.run(ctx, "", nil, env, name, args...)
+}
+
+func (r RealRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error) {
+	return r.run(ctx, "", stdin, env, name, args...)
 }
 
 // --- test double ---
 
 type Call struct {
-	Name string
-	Args []string
-	Env  map[string]string
-	Dir  string
+	Name  string
+	Args  []string
+	Env   map[string]string
+	Dir   string
+	Stdin string // everything RunStdin read from its reader ("" for Run/RunIn)
 }
 
 type FakeRunner struct {
@@ -89,4 +108,19 @@ func (f *FakeRunner) RunIn(_ context.Context, dir string, env map[string]string,
 
 func (f *FakeRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (Result, error) {
 	return f.RunIn(ctx, "", env, name, args...)
+}
+
+// RunStdin records the call with the FULL stdin content drained into
+// Call.Stdin, so a test can assert on what the command would have received.
+func (f *FakeRunner) RunStdin(_ context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error) {
+	var in []byte
+	if stdin != nil {
+		var err error
+		if in, err = io.ReadAll(stdin); err != nil {
+			f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env, Stdin: string(in)})
+			return Result{Code: 1}, fmt.Errorf("fakerunner: read stdin: %w", err)
+		}
+	}
+	f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env, Stdin: string(in)})
+	return f.scriptedResult(name, args)
 }

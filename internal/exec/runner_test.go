@@ -50,3 +50,29 @@ func TestFakeRunnerRecordsDir(t *testing.T) {
 		t.Fatalf("dir=%q", f.Calls[0].Dir)
 	}
 }
+
+func TestFakeRunnerRecordsStdin(t *testing.T) {
+	f := NewFakeRunner()
+	f.Script("orb -m m bash -c", Result{})
+	_, err := f.RunStdin(context.Background(), strings.NewReader("payload\n"), nil, "orb", "-m", "m", "bash", "-c", "cat > /x")
+	if err != nil {
+		t.Fatalf("RunStdin: %v", err)
+	}
+	if len(f.Calls) != 1 || f.Calls[0].Stdin != "payload\n" {
+		t.Fatalf("calls=%+v", f.Calls)
+	}
+	if f.Calls[0].Name != "orb" || f.Calls[0].Args[len(f.Calls[0].Args)-1] != "cat > /x" {
+		t.Fatalf("argv not recorded: %+v", f.Calls[0])
+	}
+}
+
+func TestRealRunnerFeedsStdin(t *testing.T) {
+	r := RealRunner{}
+	res, err := r.RunStdin(context.Background(), strings.NewReader("hello stdin"), nil, "cat")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Stdout != "hello stdin" {
+		t.Fatalf("stdout=%q", res.Stdout)
+	}
+}

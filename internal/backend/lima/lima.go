@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
@@ -35,8 +34,8 @@ type Lima struct {
 
 func New(r exec.Runner, vm string) *Lima {
 	l := &Lima{}
-	l.Base = common.Base{
-		R:         r,
+	l.Base = common.NewBase(common.Config{
+		Runner:    r,
 		Machine:   vm,
 		HostAlias: hostAlias,
 		Hooks: common.Hooks{
@@ -52,7 +51,7 @@ func New(r exec.Runner, vm string) *Lima {
 			},
 			ResolveHostAlias: l.resolveHostAlias,
 		},
-	}
+	})
 	return l
 }
 
@@ -76,7 +75,7 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	// semantics — explicit guestIPMustBeZero is required from 2.0 on (see
 	// template.go) — so an older limactl would silently forward guest ports to
 	// the host loopback despite the rendered ignore rules.
-	ok, got, err := limaVersionAtLeast(ctx, l.R, 2, 0, 0)
+	ok, got, err := common.VersionAtLeast(ctx, l.Runner(), []string{"limactl", "--version"}, limaVersionRe, 2, 0, 0)
 	if err != nil {
 		return fmt.Errorf("EnsureUp: limactl version check: %w", err)
 	}
@@ -89,7 +88,7 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := l.ReadRunUser(ctx); err != nil {
 		return err
 	}
-	if err := l.Guest().EnsureRuntimes(ctx, l.User); err != nil {
+	if err := l.Guest().EnsureRuntimes(ctx, l.RunUser()); err != nil {
 		return err
 	}
 	if cfg.HasScion() {
@@ -103,44 +102,6 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 		}
 	}
 	return l.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
-}
-
-// limaVersionAtLeast runs `limactl --version`, parses the semver, and returns
-// whether it is >= (major, minor, patch). got is the raw version string on
-// success or the raw output on parse failure. This mirrors orbstack's
-// orbVersionAtLeast compare exactly (same three-way major/minor/patch
-// switch); it is copied here rather than hoisted into guest because it is the
-// only other call site — hoisting a generic compare for one duplicate would
-// be churn without payoff.
-func limaVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch int) (ok bool, got string, err error) {
-	res, err := r.Run(ctx, nil, "limactl", "--version")
-	if err != nil {
-		return false, "", fmt.Errorf("limactl --version: %w", err)
-	}
-	m := limaVersionRe.FindStringSubmatch(res.Stdout)
-	if m == nil {
-		return false, strings.TrimSpace(res.Stdout), fmt.Errorf("limactl --version: could not parse version from %q", strings.TrimSpace(res.Stdout))
-	}
-	// m[1],m[2],m[3] are guaranteed digits by the regex.
-	vMaj, _ := strconv.Atoi(m[1])
-	vMin, _ := strconv.Atoi(m[2])
-	vPat, _ := strconv.Atoi(m[3])
-	got = fmt.Sprintf("%s.%s.%s", m[1], m[2], m[3])
-
-	switch {
-	case vMaj > major:
-		return true, got, nil
-	case vMaj < major:
-		return false, got, nil
-	// vMaj == major
-	case vMin > minor:
-		return true, got, nil
-	case vMin < minor:
-		return false, got, nil
-	// vMin == minor
-	default:
-		return vPat >= patch, got, nil
-	}
 }
 
 // ensureVM creates the jail VM from the rendered template (template.go) if it
@@ -173,7 +134,7 @@ func (l *Lima) ensureVM(ctx context.Context, projectTree, disk string) error {
 		// Idempotent: already up (and just verified un-drifted).
 		return nil
 	}
-	if _, err := l.R.Run(ctx, nil, "limactl", "start", "--tty=false", l.Machine); err != nil {
+	if _, err := l.Runner().Run(ctx, nil, "limactl", "start", "--tty=false", l.Machine()); err != nil {
 		return fmt.Errorf("limactl start: %w", err)
 	}
 	return nil
@@ -252,16 +213,16 @@ func (inst realizedInstance) matchesContainment(projectTree string) bool {
 // realizedInstance) and fails closed unless it matches the containment
 // template's intent for projectTree.
 func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) error {
-	res, err := l.R.Run(ctx, nil, "limactl", "list", "--json", l.Machine)
+	res, err := l.Runner().Run(ctx, nil, "limactl", "list", "--json", l.Machine())
 	if err != nil {
-		return fmt.Errorf("read back realized config for %q: %w", l.Machine, err)
+		return fmt.Errorf("read back realized config for %q: %w", l.Machine(), err)
 	}
 	var inst realizedInstance
 	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &inst); err != nil {
-		return fmt.Errorf("parse realized config for %q: %w", l.Machine, err)
+		return fmt.Errorf("parse realized config for %q: %w", l.Machine(), err)
 	}
 	if !inst.matchesContainment(projectTree) {
-		return fmt.Errorf("lima VM %q exists with a mismatched containment config (mounts/port-forwards/containerd drifted from the lever template); run 'lever down' then 'lever up' to recreate", l.Machine)
+		return fmt.Errorf("lima VM %q exists with a mismatched containment config (mounts/port-forwards/containerd drifted from the lever template); run 'lever down' then 'lever up' to recreate", l.Machine())
 	}
 	return nil
 }
@@ -269,13 +230,13 @@ func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) err
 // vmStatus returns this VM's status field from `limactl list`, or "" if the
 // VM is not listed at all.
 func (l *Lima) vmStatus(ctx context.Context) (string, error) {
-	res, err := l.R.Run(ctx, nil, "limactl", "list", "--format", "{{.Name}} {{.Status}}")
+	res, err := l.Runner().Run(ctx, nil, "limactl", "list", "--format", "{{.Name}} {{.Status}}")
 	if err != nil {
 		return "", fmt.Errorf("limactl list: %w", err)
 	}
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		f := strings.Fields(line)
-		if len(f) >= 2 && f[0] == l.Machine {
+		if len(f) >= 2 && f[0] == l.Machine() {
 			return f[1], nil
 		}
 	}
@@ -303,7 +264,7 @@ func (l *Lima) createVM(ctx context.Context, projectTree, disk string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close lima config tempfile: %w", err)
 	}
-	if _, err := l.R.Run(ctx, nil, "limactl", "create", "--name="+l.Machine, "--tty=false", path); err != nil {
+	if _, err := l.Runner().Run(ctx, nil, "limactl", "create", "--name="+l.Machine(), "--tty=false", path); err != nil {
 		return fmt.Errorf("limactl create: %w", err)
 	}
 	return nil
@@ -320,10 +281,10 @@ func (l *Lima) ResolveRunUser(ctx context.Context) error {
 		return err
 	}
 	if status == "" {
-		return fmt.Errorf("lima VM %q does not exist", l.Machine)
+		return fmt.Errorf("lima VM %q does not exist", l.Machine())
 	}
 	if status != "Running" {
-		return fmt.Errorf("lima VM %q is not running (status %q)", l.Machine, status)
+		return fmt.Errorf("lima VM %q is not running (status %q)", l.Machine(), status)
 	}
 	return l.ReadRunUser(ctx)
 }
@@ -338,7 +299,7 @@ func (l *Lima) Teardown(ctx context.Context) error {
 	if status == "" {
 		return nil // already gone
 	}
-	if _, err := l.R.Run(ctx, nil, "limactl", "delete", "--force", l.Machine); err != nil {
+	if _, err := l.Runner().Run(ctx, nil, "limactl", "delete", "--force", l.Machine()); err != nil {
 		return fmt.Errorf("limactl delete: %w", err)
 	}
 	return nil
@@ -356,7 +317,7 @@ func (l *Lima) Stop(ctx context.Context) error {
 	if status == "" {
 		return nil // already gone; nothing to stop
 	}
-	if _, err := l.R.Run(ctx, nil, "limactl", "stop", l.Machine); err != nil {
+	if _, err := l.Runner().Run(ctx, nil, "limactl", "stop", l.Machine()); err != nil {
 		return fmt.Errorf("limactl stop: %w", err)
 	}
 	return nil
@@ -366,7 +327,7 @@ func (l *Lima) Stop(ctx context.Context) error {
 // resolves to FROM INSIDE the VM (both forward to the host's 127.0.0.1). It is
 // the Base ResolveHostAlias hook (and is exercised directly by lima_test.go).
 func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) {
-	res, err := l.R.Run(ctx, nil, "limactl", "shell", l.Machine, "getent", "ahosts", hostAlias)
+	res, err := l.Runner().Run(ctx, nil, "limactl", "shell", l.Machine(), "getent", "ahosts", hostAlias)
 	if err != nil {
 		return "", "", fmt.Errorf("getent %s: %w", hostAlias, err)
 	}

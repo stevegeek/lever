@@ -140,7 +140,6 @@ type Backend interface {
 	// part of the answer: no hub ever reads it, and a restart is too expensive
 	// to spend on a change the hub cannot see. See guest.DisableHubLogin.
 	DisableHubLogin(ctx context.Context) (bool, error)
-	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	// Stop powers the machine off but keeps its disk intact — distinct from
 	// Teardown, which deletes the machine. Idempotent: a no-op if the machine

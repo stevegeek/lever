@@ -43,6 +43,66 @@ func notRunning(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "server daemon is not running")
 }
 
+// IsBrokerUnavailable reports whether err is the "runtime broker not yet
+// registered" condition during bring-up (the registration race), as opposed
+// to a real failure. The scion workstation daemon starts its Hub API and its
+// runtime broker separately: the hub serves before the runtime broker has
+// registered ASYNCHRONOUSLY, so a call issued in that window fails. scion
+// words it three ways depending on the verb and how far the call got before
+// giving up:
+//   - `scion start`: plural "No runtime brokers available".
+//   - `scion resume`: singular "no runtime broker available" — the SAME race
+//     (confirmed in scion pkg/hub/handlers_agent_create_helpers.go:354,408).
+//   - either, on a cold VM: "deadline exceeded" — scion's own internal wait for
+//     the broker times out and surfaces the hub timeout instead of the clean
+//     message (observed live: "context deadline exceeded from the Hub during
+//     start-manager", which needed a second `up` to reconcile).
+//
+// All must be matched or a retry never sees its own transient error as
+// retryable. A caller that retries on it must check its OWN ctx between
+// attempts, since a deadline from that ctx (a genuine timeout, not scion's
+// internal one) matches too.
+func IsBrokerUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "no_runtime_broker") ||
+		strings.Contains(s, "No runtime brokers available") ||
+		strings.Contains(s, "no runtime broker available") ||
+		strings.Contains(s, "deadline exceeded")
+}
+
+// IsAgentAbsent reports whether err from a scion agent verb (`list`, `status`,
+// `resume`…) DEFINITIVELY means the named agent cannot be running — as opposed
+// to an unknown failure a caller must not paper over. It matches, case-
+// insensitively:
+//   - "is not responding" / "connection refused": no hub is reachable on the
+//     machine — the hub is only started by apply's scion-server step, so
+//     before the first apply nothing can be running;
+//   - "project not found": the hub is up but the project was never
+//     hub-registered (e.g. a partial prior bring-up where local `scion init`
+//     ran but `scion hub link` didn't) — no agent can be running under a
+//     project the hub doesn't know, and apply's register-project step (init +
+//     hub link) is exactly the repair;
+//   - "no git origin remote found": scion's documented fallback when the path
+//     isn't a locally registered project at all (no ~/.scion/project-configs
+//     entry — forced project resolution falls back to git; see the
+//     waitHubReady comment documenting this exact string). Lever projects are
+//     directory projects, never git-resolved, so for lever this can only mean
+//     "not registered" — again definitively absent, and register-project is
+//     the repair.
+func IsAgentAbsent(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "is not responding") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "project not found") ||
+		strings.Contains(msg, "no git origin remote found")
+}
+
 // hubReadyAttempts/hubReadyInterval are the default waitHubReady budget.
 const (
 	hubReadyAttempts = 30

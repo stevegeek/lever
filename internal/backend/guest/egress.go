@@ -57,7 +57,7 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 		return "", "", false, err
 	}
 	for _, rule := range egress.BuildRules(v4, v6, allowedPorts, closedInternet) {
-		if _, err := g.rootRun(ctx, append([]string{rule.Family.Binary()}, rule.Args...)...); err != nil {
+		if _, err := g.RootRun(ctx, append([]string{rule.Family.Binary()}, rule.Args...)...); err != nil {
 			return "", "", false, fmt.Errorf("apply %s: %w", rule.Render(), err)
 		}
 	}
@@ -72,7 +72,7 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 // from the per-port ACCEPT rule (`-d <ip>/32 … --dport … -j ACCEPT`), so we never
 // need DNS (which the active DROP blocks anyway).
 func (g Guest) existingClosedAlias(ctx context.Context) (string, bool) {
-	res, err := g.rootRun(ctx, "iptables", "-S", egress.Chain)
+	res, err := g.RootRun(ctx, "iptables", "-S", egress.Chain)
 	if err != nil {
 		return "", false // chain absent (fresh machine) or unreadable
 	}
@@ -105,7 +105,7 @@ func (g Guest) existingClosedAlias(ctx context.Context) (string, bool) {
 func (g Guest) resetEgressChain(ctx context.Context) error {
 	for _, bin := range []string{"iptables", "ip6tables"} {
 		run := func(args ...string) error {
-			_, err := g.rootRun(ctx, append([]string{bin}, args...)...)
+			_, err := g.RootRun(ctx, append([]string{bin}, args...)...)
 			return err
 		}
 		// Create the chain if absent (-N errors if it already exists — tolerate).

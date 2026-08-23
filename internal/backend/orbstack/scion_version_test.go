@@ -2,11 +2,10 @@ package orbstack
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/exec"
 )
@@ -27,7 +26,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("orb -u root -m lever-vtest", exec.Result{})
 	f.Script("bash -c", exec.Result{})
 
-	stageFakeBuildOutput(t, "lever-vtest")
+	backendtest.StageFakeBuildOutput(t, "lever-vtest")
 	o := New(f, "lever-vtest")
 	if err := o.Guest().EnsureScion(context.Background(), guest.ScionSpec{Version: pin}); err != nil {
 		t.Fatalf("EnsureScion(version): %v", err)
@@ -62,16 +61,4 @@ func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "unknown revision") {
 		t.Errorf("error must carry the download failure, got %v", err)
 	}
-}
-
-// stageFakeBuildOutput creates the file a faked `go build` would have written,
-// at the path resolveScionBinary passes to `-o`. InstallRootBinaryIfChanged
-// hashes that file for real, so it must exist even when the build is a stub.
-func stageFakeBuildOutput(t *testing.T, machine string) {
-	t.Helper()
-	p := filepath.Join(os.TempDir(), "lever-scion-"+machine)
-	if err := os.WriteFile(p, []byte("fake-scion-"+machine), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(p) })
 }

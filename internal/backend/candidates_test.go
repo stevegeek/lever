@@ -17,14 +17,6 @@ func TestCandidatesAreExactlyTheImplemented(t *testing.T) {
 	}
 }
 
-func TestCandidateProfileNameMatchesCandidateName(t *testing.T) {
-	for _, c := range Candidates {
-		if c.Profile.Name != c.Name {
-			t.Errorf("candidate %q has Profile.Name %q", c.Name, c.Profile.Name)
-		}
-	}
-}
-
 func TestProfileForKnownAndUnknown(t *testing.T) {
 	if p, ok := ProfileFor("orbstack"); !ok || p.Name != "orbstack" {
 		t.Fatalf("ProfileFor(orbstack) = %+v, %v", p, ok)

@@ -27,18 +27,18 @@ type Guest struct {
 	Machine    string      // jail identifier (temp-file naming)
 }
 
-// rootRun / userRun execute args inside the guest via the RootPrefix / UserPrefix
+// RootRun / UserRun execute args inside the guest via the RootPrefix / UserPrefix
 // transport respectively, e.g. RootPrefix ["orb","-u","root","-m",m] + args
 // ["iptables","-S",chain] runs `orb -u root -m <m> iptables -S <chain>`. Both
 // delegate to prefixRun, which defensively copies prefix[1:] before appending so
 // concurrent callers can't alias/corrupt each other's argv (append may reuse the
 // underlying array when capacity allows) — the single place the prefix-splat
 // idiom lives.
-func (g Guest) rootRun(ctx context.Context, args ...string) (exec.Result, error) {
+func (g Guest) RootRun(ctx context.Context, args ...string) (exec.Result, error) {
 	return g.prefixRun(ctx, g.RootPrefix, args...)
 }
 
-func (g Guest) userRun(ctx context.Context, args ...string) (exec.Result, error) {
+func (g Guest) UserRun(ctx context.Context, args ...string) (exec.Result, error) {
 	return g.prefixRun(ctx, g.UserPrefix, args...)
 }
 
@@ -47,16 +47,29 @@ func (g Guest) prefixRun(ctx context.Context, prefix []string, args ...string) (
 	return g.Host.Run(ctx, nil, prefix[0], argv...)
 }
 
+// pipeInto streams stdin into a bash script running inside the guest through
+// prefix: `<prefix> bash -c <script>` with the host bytes on its stdin. It is
+// how every host→guest byte stream travels (a binary, a settings file, an
+// asset archive): argv only, through the Runner's stdin seam — no host shell,
+// no `cat X | prefix bash -c '…'` pipeline, no quoting of the prefix words.
+// bash resolves on the prefix user's PATH (root's for RootPrefix, which no run
+// user can write to).
+func (g Guest) pipeInto(ctx context.Context, prefix []string, stdin io.Reader, script string) error {
+	argv := append(append([]string{}, prefix[1:]...), "bash", "-c", script)
+	_, err := g.Host.RunStdin(ctx, stdin, nil, prefix[0], argv...)
+	return err
+}
+
 // EnsureRuntimes installs prereqs + rootless Docker and rootless Podman.
 // Idempotent: the rootless install script and systemctl --start are safe to re-run.
 // Podman is daemonless so no service startup is needed; scion auto-prefers it over Docker.
 func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	root := func(script string) error {
-		_, err := g.rootRun(ctx, "bash", "-lc", script)
+		_, err := g.RootRun(ctx, "bash", "-lc", script)
 		return err
 	}
 	user := func(script string) error {
-		_, err := g.userRun(ctx, "bash", "-lc", script)
+		_, err := g.UserRun(ctx, "bash", "-lc", script)
 		return err
 	}
 	// Guard the apt step behind a dpkg presence check so a re-apply (or a second
@@ -134,7 +147,7 @@ EOF`); err != nil {
 // GOARCH returns the guest's Go cross-compile arch, detected via `uname -m`
 // run inside the guest (as the run user).
 func (g Guest) GOARCH(ctx context.Context) (string, error) {
-	res, err := g.userRun(ctx, "uname", "-m")
+	res, err := g.UserRun(ctx, "uname", "-m")
 	if err != nil {
 		return "", fmt.Errorf("uname -m: %w", err)
 	}
@@ -151,14 +164,7 @@ func (g Guest) GOARCH(ctx context.Context) (string, error) {
 // ensureScion cross-compiles scion from a host source checkout for linux/arm64
 // and installs it into the jail at /usr/local/bin/scion. The build runs on the
 // HOST (Go's build cache makes re-runs incremental, so this is cheap to repeat).
-// The binary is piped into the jail via `bash -c "cat <bin> | orb … bash -c 'cat
-// > … .tmp && chmod && mv'"` because the Runner has no stdin channel. The install
-// is atomic: it writes a temp file then mv's it over the destination (mv is
-// atomic on the same filesystem), so a mid-stream failure can't leave a
-// truncated, executable /usr/local/bin/scion. `set -o pipefail` makes a
-// left-side failure (e.g. the host `cat`) propagate instead of being masked by a
-// successful right side. bash (not sh) is required because dash on Linux hosts —
-// where the linux-docker backend will run — does not support `set -o pipefail`.
+// The binary is streamed into the jail by InstallRootBinary (atomic temp+mv).
 // scionModulePath is the upstream scion Go module. `version` ("" → source mode)
 // pins a commit/tag fetched via the Go module system.
 const scionModulePath = "github.com/GoogleCloudPlatform/scion"
@@ -195,7 +201,7 @@ func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 	if err != nil {
 		return err
 	}
-	if err := g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath); err != nil {
+	if _, err := g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath); err != nil {
 		return err
 	}
 	return g.EnsureScionWebAssets(ctx, spec)
@@ -259,33 +265,50 @@ func (g Guest) resolveScionBinary(ctx context.Context, spec ScionSpec) (string, 
 // guest as root" knowledge lives only in the backend's RootPrefix, never in a
 // caller.
 //
-// The install is atomic: it pipes the host file to a temp path in the guest,
-// makes it executable, then mv's it over destPath (mv is atomic on the same
-// filesystem), so a mid-stream failure can't leave a truncated, executable
-// binary at destPath. `set -o pipefail` propagates a left-side (host `cat`)
-// failure instead of letting the successful right side mask it. bash (not sh)
-// is required for pipefail. destPath is a fixed literal at every call site
-// today (not attacker input), but it — and its derived .tmp — are still
-// shell-quoted: the nested `bash -c '<inner script>'` argument is itself
-// embedded inside the OUTER install script, so a raw destPath containing a
-// single quote would close that quoting from the OUTER bash's perspective and
-// let anything after it run as an extra host-side command. Quoting closes
-// that off for any future caller with a dynamic destPath.
+// The install is atomic: the host file is the stdin of a guest-side script
+// that writes a temp path, makes it executable, then mv's it over destPath (mv
+// is atomic on the same filesystem), so a mid-stream failure can't leave a
+// truncated, executable binary at destPath. A short read fails `cat` and the
+// `&&` chain stops before the mv. destPath is a fixed literal at every call
+// site today (not attacker input), but it — and its derived .tmp — are still
+// shell-quoted, because they are interpolated into the guest script.
 func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string) error {
-	rootWords := make([]string, 0, len(g.RootPrefix))
-	for _, w := range g.RootPrefix {
-		rootWords = append(rootWords, shellSingleQuote(w))
+	f, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}
-	tmp := destPath + ".tmp"
-	inner := fmt.Sprintf("cat > %s && chmod +x %s && mv %s %s",
-		shellSingleQuote(tmp), shellSingleQuote(tmp), shellSingleQuote(tmp), shellSingleQuote(destPath))
-	install := fmt.Sprintf(
-		`set -o pipefail; cat %s | %s bash -c %s`,
-		shellSingleQuote(localPath), strings.Join(rootWords, " "), shellSingleQuote(inner))
-	if _, err := g.Host.Run(ctx, nil, "bash", "-c", install); err != nil {
+	defer func() { _ = f.Close() }()
+	if err := g.pipeInto(ctx, g.RootPrefix, f, installRootBinaryScript(destPath)); err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}
 	return nil
+}
+
+// installRootBinaryScript is the guest-side half of InstallRootBinary: read
+// stdin into destPath.tmp, then swap it in. Split out so a test can pin it.
+func installRootBinaryScript(destPath string) string {
+	tmp := shellSingleQuote(destPath + ".tmp")
+	return fmt.Sprintf("cat > %s && chmod +x %s && mv %s %s", tmp, tmp, tmp, shellSingleQuote(destPath))
+}
+
+// guestFileDigest returns the hex sha256 the guest reports for path, or ""
+// when it cannot be read (no such file, no sha256sum, an unreadable path).
+//
+// Absolute path, not a bare name: UserRun passes no env, so a bare name
+// resolves on the guest user's PATH, which precedes /usr/bin with
+// run-user-writable directories. A shim there could report the expected
+// digest for a replaced binary and pin it forever. That needs guest root
+// (who could replace the binary outright), but the fix is one word.
+func (g Guest) guestFileDigest(ctx context.Context, path string) string {
+	res, err := g.UserRun(ctx, "/usr/bin/sha256sum", path)
+	if err != nil {
+		return ""
+	}
+	// `sha256sum` prints "<hex>  <path>"; take the digest field only.
+	if f := strings.Fields(res.Stdout); len(f) > 0 {
+		return f[0]
+	}
+	return ""
 }
 
 // hashFile returns the hex sha256 of a host-local file.
@@ -303,7 +326,7 @@ func hashFile(path string) (string, error) {
 }
 
 // InstallRootBinaryIfChanged installs localPath at destPath unless the guest
-// already holds exactly those bytes.
+// already holds exactly those bytes, and reports whether it installed.
 //
 // scion is 158MB and was otherwise re-streamed into the guest on every
 // bring-up, in every mode, whether or not it had changed.
@@ -321,37 +344,31 @@ func hashFile(path string) (string, error) {
 // Fails open: if the guest digest cannot be read for any reason — no such file,
 // no sha256sum, an unreadable path — lever installs. Being wrong that way costs
 // redundant work; the other way would skip a real install.
-func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) error {
+func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) (bool, error) {
 	want, err := hashFile(localPath)
 	if err != nil {
-		return fmt.Errorf("hashing %s: %w", localPath, err)
+		return false, fmt.Errorf("hashing %s: %w", localPath, err)
 	}
-	// Absolute path, not a bare name: userRun passes no env, so a bare name
-	// resolves on the guest user's PATH, which precedes /usr/bin with
-	// run-user-writable directories. A shim there could report the expected
-	// digest for a replaced binary and pin it forever. That needs guest root
-	// (who could replace scion outright), but the fix is one word.
-	if res, err := g.userRun(ctx, "/usr/bin/sha256sum", destPath); err == nil {
-		// `sha256sum` prints "<hex>  <path>"; take the digest field only.
-		if f := strings.Fields(res.Stdout); len(f) > 0 && f[0] == want {
-			return nil
-		}
+	if g.guestFileDigest(ctx, destPath) == want {
+		return false, nil
 	}
-	return g.InstallRootBinary(ctx, localPath, destPath)
+	if err := g.InstallRootBinary(ctx, localPath, destPath); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // fetchScionModule downloads the pinned scion module via the Go module system
-// and returns (goBinary, moduleSourceDir) for the cross-compile. It resolves the
-// REAL go binary (GOROOT/bin/go) and uses it for the build because the module
-// cache lives outside any toolchain-manager project dir — e.g. a version manager
-// that resolves `go` by walking up for a project file (asdf) cannot resolve it
-// from the read-only module cache, whereas the absolute binary always works.
+// and returns (goBinary, moduleSourceDir) for the cross-compile. It uses the
+// REAL go binary (goBinary) for the build because the module cache lives
+// outside any toolchain-manager project dir — e.g. a version manager that
+// resolves `go` by walking up for a project file (asdf) cannot resolve it from
+// the read-only module cache, whereas the absolute binary always works.
 func (g Guest) fetchScionModule(ctx context.Context, version string) (goBin, dir string, err error) {
-	root, err := g.Host.Run(ctx, nil, "go", "env", "GOROOT")
+	goBin, err = g.goBinary(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve go toolchain (is go on PATH?): %w", err)
+		return "", "", err
 	}
-	goBin = filepath.Join(strings.TrimSpace(root.Stdout), "bin", "go")
 	out, err := g.Host.Run(ctx, nil, goBin, "mod", "download", "-json", scionModulePath+"@"+version)
 	if err != nil {
 		return "", "", fmt.Errorf("download scion %s: %w", version, err)

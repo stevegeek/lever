@@ -100,7 +100,7 @@ func (g Guest) EnsureLeverTemplate(ctx context.Context) (bool, error) {
 		`set -e; d="$HOME/%s"; f="$d/system-prompt.md"; `+
 			`if [ -s "$f" ] || [ ! -f "$f" ]; then mkdir -p "$d" && : > "$f" && echo wrote; fi`,
 		leverTemplateRel)
-	res, err := g.userRun(ctx, "bash", "-c", script)
+	res, err := g.UserRun(ctx, "bash", "-c", script)
 	if err != nil {
 		return false, fmt.Errorf("guest: create the %s agent template: %w", LeverTemplateName, err)
 	}

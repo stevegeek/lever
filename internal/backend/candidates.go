@@ -2,23 +2,22 @@ package backend
 
 import "sort"
 
-// Candidate is one containment backend and the guarantees it declares. This
-// slice is the SINGLE SOURCE of the substrate guarantee matrix — and it lists
-// ONLY implemented backends: a candidate exists iff internal/backend/registry
-// has a constructor for it (enforced by the registry's lockstep test). Roadmap
-// and rejected backends are documentation, not code — see
+// Candidate is one containment backend and the guarantees it declares. Its
+// name is the Profile's name. This slice is the SINGLE SOURCE of the substrate
+// guarantee matrix — and it lists ONLY implemented backends: a candidate
+// exists iff internal/backend/registry has an entry for it (enforced by the
+// registry's lockstep test; this package cannot import the implementations).
+// Roadmap and rejected backends are documentation, not code — see
 // docs-site/_reference/backends.md, which also states the contract's guarantee
 // 0: a hypervisor boundary between the agent workload and the host kernel is
 // mandatory; no backend without it may be added here.
 type Candidate struct {
-	Name    string
-	Profile Profile
+	Profile
 }
 
 // Candidates lists every backend Lever can run.
 var Candidates = []Candidate{
 	{
-		Name: "orbstack",
 		Profile: Profile{
 			Name:             "orbstack",
 			SeparateKernel:   false, // shares the one OrbStack VM kernel across manager+workers
@@ -28,7 +27,6 @@ var Candidates = []Candidate{
 		},
 	},
 	{
-		Name: "lima",
 		Profile: Profile{
 			Name:             "lima",
 			SeparateKernel:   true, // own Lima VM kernel, not shared with the host or other jails

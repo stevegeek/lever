@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,7 +28,11 @@ import (
 // Passed explicitly as Options.HubEndpoint by host-side constructors — New
 // applies no default, and an empty HubEndpoint omits SCION_HUB_ENDPOINT
 // entirely, deferring to the scion binary's own default.
-const DefaultHubEndpoint = "http://127.0.0.1:8080"
+var DefaultHubEndpoint = "http://127.0.0.1:" + strconv.Itoa(DefaultHubPort)
+
+// DefaultHubPort is the port scion's hub listens on inside the jail (scion's
+// own --web-port default); DefaultHubEndpoint is derived from it.
+const DefaultHubPort = 8080
 
 type Options struct {
 	Bin            string        // default "scion"

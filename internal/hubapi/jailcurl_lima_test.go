@@ -40,7 +40,7 @@ func TestJailCurlAgainstRealVM(t *testing.T) {
 		url = "http://127.0.0.1:8080"
 	}
 
-	jr := jail.New(leverexec.RealRunner{}, splitCSV(prefix), "501")
+	jr := jail.New(jail.Config{Host: leverexec.RealRunner{}, Prefix: splitCSV(prefix), UID: "501"})
 	j := &JailCurl{Runner: jr, BaseURL: url, Token: func() string { return "probe-token" }}
 
 	status, body, err := j.Do(context.Background(), "GET", "/probe")

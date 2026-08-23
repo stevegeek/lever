@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/exec"
 )
 
@@ -25,58 +27,39 @@ func TestProfileIsSingleSourced(t *testing.T) {
 	}
 }
 
-// closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for `iptables -S`
-// and records whether the chain was flushed or the alias re-resolved.
-type closedChainRunner struct {
-	*exec.FakeRunner
-	flushed, resolved bool
-}
-
-func (r *closedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
-	argv := strings.Join(args, " ")
-	if name == "orb" {
-		switch {
-		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
-			return exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"}, nil
-		case strings.Contains(argv, "-F LEVER_EGRESS"):
-			r.flushed = true
-		case strings.Contains(argv, "getent ahosts"):
-			r.resolved = true
-		}
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
-
-func (r *closedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
-	return r.RunIn(ctx, "", env, name, args...)
-}
-
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &closedChainRunner{FakeRunner: exec.NewFakeRunner()}
+	r := &backendtest.ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "orb", Open: true}
 	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
 	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	r.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
 	b := New(r, "lever-jail")
 	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
 	// live chain (existingClosedAlias never reads v6), so a re-apply that hits
 	// the skip must leave the previously-resolved v6 alias untouched rather
 	// than zeroing it.
-	b.AliasV6 = "fd07::fe"
+	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
+		t.Fatalf("first ApplyEgress: %v", err)
+	}
+	if b.HostAliasV6() != "fd07::fe" {
+		t.Fatalf("the rebuild must record v6; got %q", b.HostAliasV6())
+	}
+	r.Open, r.Flushed, r.Resolved = false, false, false
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
 	// I2: an already-closed chain must NOT be flushed or re-resolved — that would
 	// briefly open egress for a running agent.
-	if r.flushed {
+	if r.Flushed {
 		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
 	}
-	if r.resolved {
+	if r.Resolved {
 		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
 	}
 	if b.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", b.HostAliasV4())
 	}
-	if b.AliasV6 != "fd07::fe" {
-		t.Fatalf("skip path must not clobber a prior aliasV6 (it cannot know v6 from the live chain); got %q", b.AliasV6)
+	if b.HostAliasV6() != "fd07::fe" {
+		t.Fatalf("skip path must not clobber a prior aliasV6 (it cannot know v6 from the live chain); got %q", b.HostAliasV6())
 	}
 }
 
@@ -492,7 +475,7 @@ func TestOrbVersionAtLeast(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := exec.NewFakeRunner()
 			f.Script("orb version", exec.Result{Stdout: tc.stdout})
-			ok, got, err := orbVersionAtLeast(context.Background(), f, 2, 1, 1)
+			ok, got, err := common.VersionAtLeast(context.Background(), f, []string{"orb", "version"}, orbVersionRe, 2, 1, 1)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (ok=%t got=%q)", ok, got)
@@ -560,7 +543,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	f.Script("orb -m lever-jail sh -c", exec.Result{Code: 1})
 	f.Script("orb -u root -m lever-jail sh -c", exec.Result{})
 	src := t.TempDir() // must exist for the stat check
-	stageFakeBuildOutput(t, "lever-jail")
+	backendtest.StageFakeBuildOutput(t, "lever-jail")
 	b := New(f, "lever-jail")
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
@@ -596,13 +579,13 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 			}
 			sawBuild = true
 		}
-		if c.Name == "bash" && len(c.Args) >= 2 && c.Args[0] == "-c" {
-			script := c.Args[1]
-			if strings.Contains(script, "set -o pipefail") &&
-				strings.Contains(script, "scion.tmp") &&
+		// The install: root prefix, guest-side atomic script, binary on stdin.
+		if c.Name == "orb" && len(c.Args) >= 6 && reflect.DeepEqual(c.Args[:6], []string{"-u", "root", "-m", "lever-jail", "bash", "-c"}) {
+			script := c.Args[len(c.Args)-1]
+			if strings.Contains(script, "scion.tmp") &&
 				strings.Contains(script, "mv") &&
-				strings.Contains(script, "'lever-jail'") &&
-				strings.Contains(script, "/usr/local/bin/scion") {
+				strings.Contains(script, "/usr/local/bin/scion") &&
+				c.Stdin == "fake-scion-lever-jail" {
 				sawInstall = true
 			}
 		}
@@ -611,7 +594,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 		t.Fatalf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
 	}
 	if !sawInstall {
-		t.Fatalf("expected bash -c atomic scion install into jail; calls=%+v", f.Calls)
+		t.Fatalf("expected atomic scion install into jail via the root prefix; calls=%+v", f.Calls)
 	}
 }
 
@@ -674,10 +657,21 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	}
 }
 
+// resolvedOrb returns a backend whose run user is resolved (stephen/501)
+// through the same probes EnsureUp issues, without provisioning anything.
+func resolvedOrb(t *testing.T, f *exec.FakeRunner, machine string) *OrbStack {
+	t.Helper()
+	backendtest.ScriptRunUser(f, "orb -m "+machine, "stephen", "501")
+	o := New(f, machine)
+	if err := o.ReadRunUser(context.Background()); err != nil {
+		t.Fatalf("ReadRunUser: %v", err)
+	}
+	f.Calls = nil
+	return o
+}
+
 func TestJailTransportMethods(t *testing.T) {
-	o := New(exec.NewFakeRunner(), "lever-x")
-	// Pre-EnsureUp the prefix uses the zero-value user; we only test post-resolve.
-	o.User, o.UID = "stephen", "501"
+	o := resolvedOrb(t, exec.NewFakeRunner(), "lever-x")
 
 	if got := JailPrefix("lever-x", "stephen"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
 		t.Fatalf("JailPrefix = %v", got)
@@ -702,29 +696,33 @@ func TestJailTransportMethods(t *testing.T) {
 
 func TestInstallGuestBinaryArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
-	f.Script("bash", exec.Result{})
+	f.Script("orb", exec.Result{})
+	local := filepath.Join(t.TempDir(), "lever-agent")
+	if err := os.WriteFile(local, []byte("agent-bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	o := New(f, "lever-x")
-	if err := o.InstallGuestBinary(context.Background(), "/host/lever-agent", "/usr/local/bin/lever-agent"); err != nil {
+	if err := o.InstallGuestBinary(context.Background(), local, "/usr/local/bin/lever-agent"); err != nil {
 		t.Fatalf("InstallGuestBinary: %v", err)
 	}
 	if len(f.Calls) != 1 {
 		t.Fatalf("want 1 host call, got %d", len(f.Calls))
 	}
 	c := f.Calls[0]
-	if c.Name != "bash" || len(c.Args) != 2 || c.Args[0] != "-c" {
-		t.Fatalf("want `bash -c <script>`, got %s %v", c.Name, c.Args)
+	// The root transport prefix must be wired through verbatim, with the
+	// binary on stdin of the guest-side script.
+	if c.Name != "orb" || !reflect.DeepEqual(c.Args[:6], []string{"-u", "root", "-m", "lever-x", "bash", "-c"}) {
+		t.Fatalf("root prefix mis-wired: %s %v", c.Name, c.Args)
 	}
-	// The root transport prefix must be wired through verbatim (shell-quoted).
-	if !strings.Contains(c.Args[1], `'orb' '-u' 'root' '-m' 'lever-x'`) {
-		t.Fatalf("root prefix mis-wired in install script: %q", c.Args[1])
+	if c.Stdin != "agent-bytes" {
+		t.Fatalf("binary not streamed on stdin: %q", c.Stdin)
 	}
 }
 
 func TestJailRunnerArgv(t *testing.T) {
 	f := exec.NewFakeRunner()
+	o := resolvedOrb(t, f, "lever-x")
 	f.Script("orb", exec.Result{Stdout: "ok\n"})
-	o := New(f, "lever-x")
-	o.User, o.UID = "stephen", "501"
 	if _, err := o.JailRunner().Run(context.Background(), nil, "true"); err != nil {
 		t.Fatalf("JailRunner run: %v", err)
 	}
@@ -743,8 +741,7 @@ func TestJailRunnerArgv(t *testing.T) {
 }
 
 func TestAttachArgvFullPrefix(t *testing.T) {
-	o := New(exec.NewFakeRunner(), "lever-x")
-	o.User, o.UID = "stephen", "501"
+	o := resolvedOrb(t, exec.NewFakeRunner(), "lever-x")
 	attach := o.AttachArgv([]string{"scion", "attach"})
 	if wantPrefix := []string{"orb", "-m", "lever-x", "-u", "stephen", "env"}; !reflect.DeepEqual(attach[:6], wantPrefix) {
 		t.Fatalf("attach prefix mis-wired: %v", attach[:6])
@@ -794,7 +791,6 @@ func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
 	scriptedMachine(f)
 	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "aarch64\n"})
 	f.Script("orb -m lever-jail /usr/bin/sha256sum", exec.Result{Code: 1}) // not installed yet
-	f.Script("bash -c", exec.Result{})
 	b := New(f, "lever-jail")
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
@@ -808,38 +804,13 @@ func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
 		if c.Name == "go" {
 			t.Fatalf("binary mode must never invoke go through EnsureUp; got %+v", c)
 		}
-		if c.Name == "bash" && len(c.Args) > 1 && strings.Contains(c.Args[1], "cat ") {
+		if len(c.Args) > 1 && c.Args[len(c.Args)-2] == "-c" && strings.Contains(c.Args[len(c.Args)-1], "cat > ") {
 			installed = true
 		}
 	}
 	if !installed {
 		t.Fatal("EnsureUp with only ScionBinary set installed nothing")
 	}
-}
-
-// fakeScionCheckout writes the minimum of a scion checkout that the web-asset
-// path inspects: a web/ holding package.json.
-func fakeScionCheckout(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return root
-}
-
-// scriptScionInstall scripts the host build + guest install of the scion binary
-// so a test can reach whatever runs AFTER it.
-func scriptScionInstall(t *testing.T, f *exec.FakeRunner, machine string) {
-	t.Helper()
-	f.Script("go build", exec.Result{})
-	f.Script("bash -c", exec.Result{})
-	// A digest mismatch, so the install streams rather than skipping.
-	f.Script("orb -m "+machine+" /usr/bin/sha256sum", exec.Result{Code: 1})
-	stageFakeBuildOutput(t, machine)
 }
 
 // EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. Each
@@ -854,12 +825,12 @@ func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 
 	f := exec.NewFakeRunner()
 	scriptedMachine(f)
-	scriptScionInstall(t, f, "lever-jail")
+	backendtest.ScriptScionInstall(t, f, "orb -m lever-jail", "lever-jail")
 	b := New(f, "lever-jail")
 
 	err := b.EnsureUp(context.Background(), backend.Config{
 		MachineName: "lever-jail", ProjectTree: "/Users/x/tree",
-		ScionSource: fakeScionCheckout(t), ScionWebUI: true,
+		ScionSource: backendtest.FakeScionCheckout(t), ScionWebUI: true,
 	})
 	// node is deliberately not scripted: the web build stops at its toolchain
 	// probe, which is only reachable if ScionWebUI was threaded through.
@@ -875,12 +846,12 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 
 	f := exec.NewFakeRunner()
 	scriptedMachine(f)
-	scriptScionInstall(t, f, "lever-jail")
+	backendtest.ScriptScionInstall(t, f, "orb -m lever-jail", "lever-jail")
 	b := New(f, "lever-jail")
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
 		MachineName: "lever-jail", ProjectTree: "/Users/x/tree",
-		ScionSource: fakeScionCheckout(t),
+		ScionSource: backendtest.FakeScionCheckout(t),
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}

@@ -202,10 +202,10 @@ func TestStageWebAssetsScript(t *testing.T) {
 	}
 	// Extract-then-swap, so a failure leaves the destination absent rather
 	// than half-written.
-	tmp := ScionWebAssetsDir + ".tmp"
+	tmp := layout.WebAssetsDir + ".tmp"
 	for _, want := range []string{
 		"-C '" + tmp + "'",
-		"mv '" + tmp + "' '" + ScionWebAssetsDir + "'",
+		"mv '" + tmp + "' '" + layout.WebAssetsDir + "'",
 		"printf %s 'deadbeef' > '" + filepath.Join(tmp, webDigestFile) + "'",
 	} {
 		if !strings.Contains(got, want) {

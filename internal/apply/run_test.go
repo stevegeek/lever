@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 // runApply runs the full plan over deps completed by fillDeps.
@@ -1701,7 +1701,7 @@ func TestRunScionServerEmitsSessionSecret(t *testing.T) {
 // TestRunScionServerPointsTheHubAtStagedAssets is the end of the staged-assets wire:
 // a remote-enabled instance on a `version:` pin has no embedded SPA, so the
 // scion-server step must point the hub at the directory the backend staged.
-// The path is guest.ScionWebAssetsDir at both ends by construction — this pins
+// The path is layout.WebAssetsDir at both ends by construction — this pins
 // that the step actually emits it.
 func TestRunScionServerPointsTheHubAtStagedAssets(t *testing.T) {
 	f := exec.NewFakeRunner()
@@ -1723,7 +1723,7 @@ func TestRunScionServerPointsTheHubAtStagedAssets(t *testing.T) {
 	for _, c := range f.Calls {
 		j += strings.Join(c.Args, " ") + "|"
 	}
-	if want := "--enable-web --web-assets-dir=" + guest.ScionWebAssetsDir + "|"; !strings.Contains(j, want) {
+	if want := "--enable-web --web-assets-dir=" + layout.WebAssetsDir + "|"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
 	}
 }

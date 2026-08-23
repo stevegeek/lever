@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
@@ -347,7 +346,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		// remote access off.
 		//
 		// The SPA lever staged into the guest for the hub also stays
-		// (guest.ScionWebAssetsDir; EnsureScionWebAssets simply skips once
+		// (layout.WebAssetsDir; EnsureScionWebAssets simply skips once
 		// app.ScionWebAssets() is false), and that is deliberate on three
 		// counts:
 		//
@@ -545,7 +544,7 @@ func hubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
 		// assets, so the flag can never point at a directory nothing put
 		// anything in — see ServerOpts.WebAssetsDir for why that case is
 		// worse than passing no flag at all.
-		opts.WebAssetsDir = guest.ScionWebAssetsDir
+		opts.WebAssetsDir = layout.WebAssetsDir
 	}
 	return opts
 }

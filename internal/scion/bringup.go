@@ -284,7 +284,7 @@ type ServerOpts struct {
 	// built output, so a binary compiled from the fetched module serves scion's
 	// "Web UI Not Available" page. lever builds the assets host-side from that
 	// same module and stages them into the guest, and this flag points the hub
-	// at them (internal/backend/guest.ScionWebAssetsDir).
+	// at them (layout.WebAssetsDir).
 	//
 	// Only ever set together with EnableWeb, and only when lever actually staged
 	// the assets — config.App.ScionWebAssets decides both. Setting it otherwise

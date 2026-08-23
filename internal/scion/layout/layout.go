@@ -65,6 +65,17 @@ const WorkspacePathKey = "workspace_path"
 // URL path and a path under the dist root.
 const WebAssetsSentinel = "assets/main.js"
 
+// WebAssetsDir is where lever stages scion's built SPA inside the guest, and
+// therefore the value it passes to `scion server start --web-assets-dir`.
+// Unlike the rest of this file it is lever's choice, not a scion fact, but it
+// is the one guest path both ends of a contract must name — the staging in
+// internal/backend/guest and the flag in internal/apply — and this leaf is
+// what both already import.
+//
+// /usr/local/share is the FHS home for architecture-independent data installed
+// outside the package manager, which is exactly what a built SPA is.
+const WebAssetsDir = "/usr/local/share/scion/web"
+
 // Keys in the machine-level settings.yaml, as scion's V1 settings schema names
 // them (pkg/config/settings_v1.go).
 const (

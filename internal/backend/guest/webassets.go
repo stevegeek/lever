@@ -11,16 +11,6 @@ import (
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
-// ScionWebAssetsDir is where lever stages scion's built SPA inside the guest,
-// and therefore the value it passes to `scion server start --web-assets-dir`.
-// It sits beside scionDestPath because both answer the same question — where
-// does lever put scion's parts in the guest — and both ends of the contract
-// (the staging below, the flag in internal/apply) must name the SAME path.
-//
-// /usr/local/share is the FHS home for architecture-independent data installed
-// outside the package manager, which is exactly what a built SPA is.
-const ScionWebAssetsDir = "/usr/local/share/scion/web"
-
 // webDigestFile records, INSIDE the staged guest directory, the digest of the
 // asset tree lever put there. Unlike the scion binary — which is verified by
 // hashing the installed file itself (see InstallRootBinaryIfChanged) — a tree
@@ -38,7 +28,7 @@ const ScionWebAssetsDir = "/usr/local/share/scion/web"
 const webDigestFile = ".lever-web-digest"
 
 // EnsureScionWebAssets builds scion's SPA on the HOST (webassets.Build) and
-// stages it into the guest at ScionWebAssetsDir.
+// stages it into the guest at layout.WebAssetsDir.
 //
 // The work is skipped at two levels, so a re-apply on an unchanged pin costs
 // two cheap probes and no npm: the host build cache is keyed by a digest of
@@ -77,10 +67,10 @@ func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 	err := g.pipeInto(ctx, g.RootPrefix, pr, stageWebAssetsScript(digest))
 	_ = pr.Close()
 	if terr := <-tarErr; terr != nil {
-		return fmt.Errorf("stage scion web assets into guest at %s: pack %s: %w", ScionWebAssetsDir, dist, terr)
+		return fmt.Errorf("stage scion web assets into guest at %s: pack %s: %w", layout.WebAssetsDir, dist, terr)
 	}
 	if err != nil {
-		return fmt.Errorf("stage scion web assets into guest at %s: %w", ScionWebAssetsDir, err)
+		return fmt.Errorf("stage scion web assets into guest at %s: %w", layout.WebAssetsDir, err)
 	}
 	return nil
 }
@@ -92,8 +82,8 @@ func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 // guest re-stages, which costs 12MB of transport rather than an unusable UI.
 func (g Guest) stagedWebDigest(ctx context.Context) string {
 	script := fmt.Sprintf("test -f %s && cat %s",
-		shellSingleQuote(filepath.Join(ScionWebAssetsDir, filepath.FromSlash(layout.WebAssetsSentinel))),
-		shellSingleQuote(filepath.Join(ScionWebAssetsDir, webDigestFile)))
+		shellSingleQuote(filepath.Join(layout.WebAssetsDir, filepath.FromSlash(layout.WebAssetsSentinel))),
+		shellSingleQuote(filepath.Join(layout.WebAssetsDir, webDigestFile)))
 	// Absolute path, not a bare name: UserRun passes no env, so a bare name
 	// resolves on the guest run-user's PATH, which precedes /usr/bin with
 	// run-user-writable directories (the same reasoning as
@@ -126,14 +116,14 @@ func (g Guest) stagedWebDigest(ctx context.Context) string {
 // runs as. Paths and the digest are shell-quoted because they are interpolated
 // into the script.
 func stageWebAssetsScript(digest string) string {
-	tmp := ScionWebAssetsDir + ".tmp"
+	tmp := layout.WebAssetsDir + ".tmp"
 	return fmt.Sprintf("rm -rf %s && mkdir -p %s && tar -xf - --no-same-owner -C %s && printf %%s %s > %s && rm -rf %s && mv %s %s",
 		shellSingleQuote(tmp),
 		shellSingleQuote(tmp),
 		shellSingleQuote(tmp),
 		shellSingleQuote(digest),
 		shellSingleQuote(filepath.Join(tmp, webDigestFile)),
-		shellSingleQuote(ScionWebAssetsDir),
+		shellSingleQuote(layout.WebAssetsDir),
 		shellSingleQuote(tmp),
-		shellSingleQuote(ScionWebAssetsDir))
+		shellSingleQuote(layout.WebAssetsDir))
 }

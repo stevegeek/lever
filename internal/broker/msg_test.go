@@ -233,7 +233,7 @@ func TestMsgList_workerForbiddenOtherWorker(t *testing.T) {
 func TestMsgNilRuntime_returns502(t *testing.T) {
 	b := New(testConfig(t, withManager("assistant", ""),
 		withRuntime(nil, WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch"}),
-		func(c *Config) { c.WorkerToWorker = true }))
+		func(c *Config) { c.Dispatch.WorkerToWorker = true }))
 
 	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "assistant")
 	if rec.Code != 502 {

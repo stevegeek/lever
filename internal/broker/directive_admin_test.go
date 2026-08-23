@@ -365,12 +365,14 @@ func TestDirectiveSendRejectsApprovalForUnknownTool(t *testing.T) {
 func TestDirectiveSendRejectsExpiryBeyondInstanceCap(t *testing.T) {
 	priv, as := genOperatorKey(t)
 	cfg := testConfig(t)
-	cfg.DirectiveVerifier = &opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	cfg.InstanceID = "testinst"
-	cfg.DirectiveExpiryMax = time.Hour // tighter than opsig's 24h MaxExpiry
+	cfg.Directives = DirectiveConfig{
+		Verifier:   &opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"},
+		InstanceID: "testinst",
+		ExpiryMax:  time.Hour, // tighter than opsig's 24h MaxExpiry
+	}
 	rt := &fakeDirectiveRuntime{fakeRuntime: fakeRuntime{agents: map[string][]scion.Agent{}}}
-	cfg.Runtime = rt
-	cfg.InstanceProject = testInstanceProject
+	cfg.Dispatch.Runtime = rt
+	cfg.Dispatch.InstanceProject = testInstanceProject
 	b := New(cfg)
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)

@@ -168,7 +168,7 @@ func TestRequestPolicyDenyDetailFullStringWithCoercionAndDelegation(t *testing.T
 // with the bound_to suffix present (delegation grant exists, op unregistered).
 func TestRequestUnregisteredOpDenyDetailFullString(t *testing.T) {
 	cfg, audit := auditConfig(t)
-	cfg.Rules.AllowDelegate("manager", "db", "drop", "worker") // grant for an op the registry lacks
+	cfg.Identity.Rules.AllowDelegate("manager", "db", "drop", "worker") // grant for an op the registry lacks
 	b := New(cfg)
 	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
 		Tool: "db", Op: "drop", BoundTo: "worker",

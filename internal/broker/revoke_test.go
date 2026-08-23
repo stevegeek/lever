@@ -9,7 +9,7 @@ import (
 
 func TestNewSeedsRevocationState(t *testing.T) {
 	c := testConfig(t)
-	c.RevocationState = RevocationState{MinEpoch: 4, Revoked: []string{"worker"}}
+	c.Persistence.Revocation = RevocationState{MinEpoch: 4, Revoked: []string{"worker"}}
 	b := New(c)
 	if b.MinEpoch() != 4 {
 		t.Fatalf("MinEpoch = %d, want 4 (seeded)", b.MinEpoch())
@@ -22,7 +22,7 @@ func TestNewSeedsRevocationState(t *testing.T) {
 func TestBumpEpochPersistsAndRaises(t *testing.T) {
 	c := testConfig(t)
 	var saved RevocationState
-	c.PersistRevocation = func(rs RevocationState) error { saved = rs; return nil }
+	c.Persistence.PersistRevocation = func(rs RevocationState) error { saved = rs; return nil }
 	b := New(c)
 	r := httptest.NewRequest("POST", "/bump-epoch", nil)
 	w := httptest.NewRecorder()
@@ -35,7 +35,7 @@ func TestBumpEpochPersistsAndRaises(t *testing.T) {
 func TestRevokePersistsAgent(t *testing.T) {
 	c := testConfig(t)
 	var saved RevocationState
-	c.PersistRevocation = func(rs RevocationState) error { saved = rs; return nil }
+	c.Persistence.PersistRevocation = func(rs RevocationState) error { saved = rs; return nil }
 	b := New(c)
 	r := httptest.NewRequest("POST", "/revoke", bytes.NewReader([]byte(`{"agent":"worker"}`)))
 	w := httptest.NewRecorder()

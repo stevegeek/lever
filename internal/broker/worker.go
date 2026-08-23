@@ -52,7 +52,7 @@ func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
 
 // identity resolves an agent name to its (cert CN, scion slug) pair. The
 // manager answers to its cert CN or its scion slug (the app name — distinct,
-// see Config.ManagerSlug); a declared worker's CN IS its slug. A caller that
+// see IdentityConfig.ManagerSlug); a declared worker's CN IS its slug. A caller that
 // needs a strict CN (not an alias) compares the returned cn with its input.
 func (b *Broker) identity(name string) (cn, slug string, isManager, ok bool) {
 	if name == b.manager || name == b.managerSlug {
@@ -216,7 +216,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		return
 	}
 	// Refuse a record whose stored role this scion would read as full, BEFORE
-	// staging anything (see Config.VerifyAgentRole).
+	// staging anything (see DispatchConfig.VerifyAgentRole).
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
 		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, err.Error(), http.StatusConflict)

@@ -25,8 +25,8 @@ func TestEpochBumpAndRevoke(t *testing.T) {
 
 func TestNewDefaultsTTLs(t *testing.T) {
 	c := testConfig(t)
-	c.GrantTTL = 0
-	c.TicketTTL = 0
+	c.Identity.GrantTTL = 0
+	c.Identity.TicketTTL = 0
 	b := New(c)
 	if b.grantTTL <= 0 || b.ticketTTL <= 0 {
 		t.Fatalf("TTLs not defaulted: grant=%v ticket=%v", b.grantTTL, b.ticketTTL)

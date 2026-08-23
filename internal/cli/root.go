@@ -1,38 +1,34 @@
+// Package cli holds what the two lever binaries share: the release Version
+// constant and the `version` command. Everything that runs in a specific
+// trust domain lives in a subpackage — cli/host for the operator's machine
+// (`lever`) and cli/manager for the agent container (`lever-manager`) — so
+// that neither binary links the other's code.
+//
+// The release workflow greps `const Version = "..."` from this file; keep the
+// constant here.
 package cli
 
 import (
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/backend/registry"
-	"github.com/stevegeek/lever/internal/exec"
 )
 
 const Version = "0.19.0"
 
-// BackendFactory builds a named backend for a given machine name.
-type BackendFactory func(name, machine string) (backend.Backend, error)
-
-// defaultFactory builds the named backend via the registry. Config validation
-// guarantees a config's name is valid; flag-driven commands (provision, down,
-// doctor with explicit --backend) surface registry errors directly.
-func defaultFactory(name, machine string) (backend.Backend, error) {
-	return registry.Select(name, exec.RealRunner{}, machine)
+// VersionCmd returns the `version` command both binaries register.
+func VersionCmd() *cobra.Command {
+	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(VersionString()) }}
 }
 
-func versionCmd() *cobra.Command {
-	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(versionString()) }}
-}
-
-// versionString augments the hardcoded release Version with Go's embedded VCS
+// VersionString augments the hardcoded release Version with Go's embedded VCS
 // stamp when present: the commit the binary was built from (short) plus a
 // "-dirty" marker for an uncommitted tree, or — for a `go install module@vX`
 // build, which carries no VCS stamp — the module version. This stops `lever
 // version` from masking a stale or local build behind the bare release string
 // (a make-install binary can lag the source it was built from, which the
 // hardcoded const alone hides).
-func versionString() string {
+func VersionString() string {
 	var rev, modVersion string
 	dirty := false
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -68,22 +64,4 @@ func formatVersion(base, rev string, dirty bool, modVersion string) string {
 	default:
 		return base
 	}
-}
-
-// NewHostRoot builds the host control-plane CLI (`lever`): provisioning only.
-func NewHostRoot() *cobra.Command { return newHostRootWith(defaultFactory) }
-
-func newHostRootWith(bf BackendFactory) *cobra.Command {
-	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)"}
-	root.AddCommand(versionCmd())
-	root.AddCommand(newProvisionCmd(bf), newDestroyCmd(bf), newStopCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newReloadCmd(bf), newAttachCmd(bf), newHostMsgCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf), newBackendsCmd(), newInitCmd(), newDirectiveCmd(), newWorkerCmd(bf), newRemoteCmd(bf))
-	return root
-}
-
-// NewManagerRoot builds the in-jail orchestration CLI (`lever-manager`).
-func NewManagerRoot() *cobra.Command {
-	root := &cobra.Command{Use: "lever-manager", Short: "In-jail worker orchestration"}
-	root.AddCommand(versionCmd())
-	root.AddCommand(newAgentCmd(), newMsgCmd(), newWatchCmd())
-	return root
 }

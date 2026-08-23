@@ -18,8 +18,13 @@ read the Changed/Internal entries before rebasing open branches.
   wrong method gets 405 instead of being decoded. Request bodies are read
   through `http.MaxBytesReader`: 64 KiB for jail and admin JSON, 4 KiB for
   the small verbs, 256 KiB for signed envelopes, 4 MiB for the tool gateway.
-- **captool (and the agent's MCP server) cap request bodies at 1 MiB**
-  (`mcp.MaxBodyBytes`). The MCP `initialize` reply reports
+- **captool and the agent's MCP server cap a message at 1 MiB**
+  (`mcp.MaxBodyBytes`): the HTTP transport reads bodies through
+  `http.MaxBytesReader`, and `lever-agent serve-capability`'s stdio
+  transport now sizes its line scanner to the same cap (it was
+  `bufio.Scanner`'s 64 KiB default, so a line between 64 KiB and 1 MiB that
+  used to end the session is now answered; a longer line still ends it with
+  `bufio.ErrTooLong`). The MCP `initialize` reply reports
   `captool.Config.Version`; `lever-tool-db` now sets it from a build-time
   `main.Version` (the Makefile and `tools/test/lima-e2e.sh` stamp it with
   `-ldflags`), so a `make`-built tool reports the lever version and a plain
@@ -51,6 +56,21 @@ read the Changed/Internal entries before rebasing open branches.
   updating.
 - **`lever-agent` binaries report a version.** The Makefile passes
   `-ldflags` (`LEVER_AGENT_LDFLAGS`) into every `lever-agent` build.
+- **Broker `/worker/*` routes authenticate before they decode.** A request
+  from a caller that is not the manager gets 403 whatever its body; only an
+  authenticated caller with a malformed body gets 400 (it used to be 400
+  for both).
+- **Broker worker start/resume report a ticket-staging failure as
+  `stage error`** (500) for every step; the old `ticket error` body for the
+  mint step is gone.
+- **Signed admin-op envelope rejections are audited with a specific
+  reason.** `opsig.ParseEnvelope` names the failing field (`version N`,
+  `instance mismatch`, `op`) where the audit line used to say `envelope
+  fields`. The HTTP response is unchanged (`invalid envelope`, 400).
+- **`lever apply`'s bootstrap-token step removes scion's residual dev-token
+  on failure too.** The throwaway dev-auth hub's `~/.scion/dev-token` is now
+  deleted from the deferred cleanup, so an aborted mint no longer leaves the
+  open admin credential behind; before, only a successful mint removed it.
 
 ### Internal
 

@@ -1,12 +1,16 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/mcp"
 )
 
 // TestServeStdioOneLineInOneLineOut pins the command-mode MCP transport: every
@@ -65,5 +69,32 @@ func TestServeStdioEmptyInput(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("no input must produce no output, got %q", out.String())
+	}
+}
+
+// TestServeStdioLineCapMatchesHTTPBodyCap pins the stdio transport to the
+// same 1 MiB message cap as the HTTP one: a line just under the cap is
+// answered, one over it ends the session with bufio.ErrTooLong.
+func TestServeStdioLineCapMatchesHTTPBodyCap(t *testing.T) {
+	srv := NewMCPServer(MCPConfig{BrokerURL: "https://broker.invalid", AgentCN: "worker", Client: http.DefaultClient})
+	pad := func(n int) string {
+		head := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"`
+		tail := `"}}`
+		return head + strings.Repeat("x", n-len(head)-len(tail)) + tail
+	}
+	var out bytes.Buffer
+	if err := ServeStdio(context.Background(), strings.NewReader(pad(mcp.MaxBodyBytes)+"\n"), &out, srv); err != nil {
+		t.Fatalf("line at the cap: %v", err)
+	}
+	if !strings.Contains(out.String(), `"result"`) {
+		t.Fatalf("line at the cap not answered: %q", out.String())
+	}
+	out.Reset()
+	err := ServeStdio(context.Background(), strings.NewReader(pad(mcp.MaxBodyBytes+1)+"\n"), &out, srv)
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("line over the cap: err = %v, want bufio.ErrTooLong", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("over-cap line was answered: %q", out.String())
 	}
 }

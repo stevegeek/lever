@@ -941,25 +941,6 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 	return latest, found, nil
 }
 
-// readFileTail returns up to the last max bytes of the file at path.
-func readFileTail(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if off := fi.Size() - max; off > 0 {
-		if _, err := f.Seek(off, io.SeekStart); err != nil {
-			return nil, err
-		}
-	}
-	return io.ReadAll(f)
-}
-
 // claudeVersionProbe reads the baked Claude Code version from an image's
 // `claude_code_version` label via `docker image inspect`. Overridable in tests.
 var claudeVersionProbe = func(imageRef string) (string, error) {

@@ -29,13 +29,14 @@ func fakeBroker(t *testing.T, epoch *int64) *httptest.Server {
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"epoch": int(atomic.LoadInt64(epoch))})
 	})
-	return httptest.NewServer(mux)
+	br := httptest.NewServer(mux)
+	t.Cleanup(br.Close)
+	return br
 }
 
 func TestRegisterCachesPubKeyAndEpoch(t *testing.T) {
 	var epoch int64 = 3
 	br := fakeBroker(t, &epoch)
-	defer br.Close()
 	s := testServer(t)
 	s.adminURL = br.URL
 	if err := s.Register(context.Background()); err != nil {
@@ -52,7 +53,6 @@ func TestRegisterCachesPubKeyAndEpoch(t *testing.T) {
 func TestFreshEpochRefreshesAfterTTL(t *testing.T) {
 	var epoch int64 = 0
 	br := fakeBroker(t, &epoch)
-	defer br.Close()
 	s := testServer(t)
 	s.adminURL = br.URL
 	s.epochTTL = 0 // always stale -> always refetch

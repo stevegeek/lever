@@ -10,7 +10,11 @@ import (
 	"testing"
 )
 
-func testServer(t *testing.T) *Server {
+// newTestServer builds the one "db" Server every captool test drives: a single
+// "read" operation with table/filter caveats, the given backstop and handler,
+// and logging discarded.
+func newTestServer(t *testing.T, backstop func(ValidatedContext, map[string]string) error,
+	handler func(ValidatedContext, map[string]string) (any, error)) *Server {
 	t.Helper()
 	s, err := New(Config{
 		Name: "db", Backend: "127.0.0.1:0", AdminURL: "http://127.0.0.1:0",
@@ -18,10 +22,8 @@ func testServer(t *testing.T) *Server {
 			Name: "read", Description: "read rows",
 			Params:      []ParamSpec{{Name: "table", Type: "string"}, {Name: "filter", Type: "string"}},
 			CaveatParam: map[string]string{"table": "table", "filter": "filter"},
-			Backstop:    func(ValidatedContext, map[string]string) error { return nil },
-			Handler: func(_ ValidatedContext, a map[string]string) (any, error) {
-				return map[string]string{"table": a["table"]}, nil
-			},
+			Backstop:    backstop,
+			Handler:     handler,
 		}},
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -29,6 +31,15 @@ func testServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func testServer(t *testing.T) *Server {
+	t.Helper()
+	return newTestServer(t,
+		func(ValidatedContext, map[string]string) error { return nil },
+		func(_ ValidatedContext, a map[string]string) (any, error) {
+			return map[string]string{"table": a["table"]}, nil
+		})
 }
 
 func rpc(t *testing.T, s *Server, body string, hdr map[string]string) *httptest.ResponseRecorder {

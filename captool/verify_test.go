@@ -16,22 +16,14 @@ import (
 // whether the operation handler ran. The backstop forbids table "C".
 func serverBoundTo(t *testing.T, kp token.KeyPair, ran *bool) *Server {
 	t.Helper()
-	s, err := New(Config{
-		Name: "db", Backend: "127.0.0.1:0", AdminURL: "http://127.0.0.1:0",
-		Operations: []Operation{{
-			Name: "read", CaveatParam: map[string]string{"table": "table", "filter": "filter"},
-			Backstop: func(_ ValidatedContext, a map[string]string) error {
-				if a["table"] == "C" {
-					return errors.New("backstop denied")
-				}
-				return nil
-			},
-			Handler: func(_ ValidatedContext, a map[string]string) (any, error) { *ran = true; return a, nil },
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestServer(t,
+		func(_ ValidatedContext, a map[string]string) error {
+			if a["table"] == "C" {
+				return errors.New("backstop denied")
+			}
+			return nil
+		},
+		func(_ ValidatedContext, a map[string]string) (any, error) { *ran = true; return a, nil })
 	s.pubKey = kp.Public
 	s.epoch, s.epochAt, s.epochTTL = 0, time.Now(), time.Hour
 	return s

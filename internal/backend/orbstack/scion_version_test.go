@@ -7,7 +7,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/backend/guest"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // ensureScion in version mode must resolve the real go binary, `go mod download`
@@ -16,15 +16,15 @@ import (
 func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	const pin = "666333f9"
 	const moduleDir = "/mod/github.com/!google!cloud!platform/scion@v0.0.0-x"
-	f := exec.NewFakeRunner()
-	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
+	f := proc.NewFakeRunner()
+	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	f.Script("/opt/go/bin/go mod download -json github.com/GoogleCloudPlatform/scion@"+pin,
-		exec.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
-	f.Script("/opt/go/bin/go build -o", exec.Result{})
-	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
-	f.Script("orb -m lever-vtest sh -c", exec.Result{Code: 1})
-	f.Script("orb -u root -m lever-vtest", exec.Result{})
-	f.Script("bash -c", exec.Result{})
+		proc.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
+	f.Script("/opt/go/bin/go build -o", proc.Result{})
+	f.Script("orb -m lever-vtest uname -m", proc.Result{Stdout: "arm64\n"})
+	f.Script("orb -m lever-vtest sh -c", proc.Result{Code: 1})
+	f.Script("orb -u root -m lever-vtest", proc.Result{})
+	f.Script("bash -c", proc.Result{})
 
 	backendtest.StageFakeBuildOutput(t, "lever-vtest")
 	o := New(f, "lever-vtest")
@@ -32,7 +32,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 		t.Fatalf("EnsureScion(version): %v", err)
 	}
 
-	var build *exec.Call
+	var build *proc.Call
 	for i := range f.Calls {
 		if c := f.Calls[i]; c.Name == "/opt/go/bin/go" && len(c.Args) > 0 && c.Args[0] == "build" {
 			build = &f.Calls[i]
@@ -51,10 +51,10 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 
 // A failed `go mod download` (bad commit) must surface, not silently fall through.
 func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
-	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
-	f.Script("/opt/go/bin/go mod download -json", exec.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
+	f := proc.NewFakeRunner()
+	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
+	f.Script("orb -m lever-vtest uname -m", proc.Result{Stdout: "arm64\n"})
+	f.Script("/opt/go/bin/go mod download -json", proc.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
 	o := New(f, "lever-vtest")
 	if err := o.Guest().EnsureScion(context.Background(), guest.ScionSpec{Version: "deadbeef"}); err == nil {
 		t.Fatal("expected error when go mod download reports a bad revision")

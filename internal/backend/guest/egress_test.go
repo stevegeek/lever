@@ -6,11 +6,11 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/backendtest"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // orbGuest returns a Guest shaped like orbstack's, for argv-identical assertions.
-func orbGuest(host exec.Runner, machine string) Guest {
+func orbGuest(host proc.Runner, machine string) Guest {
 	return Guest{
 		Host:       host,
 		UserPrefix: []string{"orb", "-m", machine},
@@ -29,9 +29,9 @@ func noopResolve(t *testing.T) func(context.Context) (string, string, error) {
 }
 
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &backendtest.ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "orb"}
-	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	r := &backendtest.ClosedChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "orb"}
+	r.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	r.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	g := orbGuest(r, "lever-jail")
 
 	v4, _, rebuilt, err := g.ApplyEgress(context.Background(), noopResolve(t), []int{8443}, true)
@@ -58,9 +58,9 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 }
 
 func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) {
@@ -93,9 +93,9 @@ func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
 }
 
 func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }

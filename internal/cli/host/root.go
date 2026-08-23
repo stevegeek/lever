@@ -9,7 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/cli"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // BackendFactory builds a named backend for a given machine name.
@@ -19,7 +19,7 @@ type BackendFactory func(name, machine string) (backend.Backend, error)
 // guarantees a config's name is valid; flag-driven commands (provision, down,
 // doctor with explicit --backend) surface registry errors directly.
 func defaultFactory(name, machine string) (backend.Backend, error) {
-	return registry.Select(name, exec.RealRunner{}, machine)
+	return registry.Select(name, proc.RealRunner{}, machine)
 }
 
 // NewRoot builds the host control-plane CLI (`lever`): provisioning only.

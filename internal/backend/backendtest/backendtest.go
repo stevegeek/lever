@@ -1,4 +1,4 @@
-// Package backendtest holds the exec.Runner doubles and fixtures the backend
+// Package backendtest holds the proc.Runner doubles and fixtures the backend
 // packages' tests share (orbstack, lima, guest). Test-only consumers; nothing
 // in production imports it.
 package backendtest
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // ClosedChainRunner answers `iptables -S LEVER_EGRESS` through Host (the
@@ -27,7 +27,7 @@ import (
 // active chain), so a test can drive one full rebuild before flipping to the
 // closed posture.
 type ClosedChainRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	Host              string
 	Open              bool
 	Flushed, Resolved bool
@@ -38,13 +38,13 @@ type ClosedChainRunner struct {
 // dropped, everything else dropped.
 const ClosedChain = "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"
 
-func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	argv := strings.Join(args, " ")
 	if name == r.Host {
 		switch {
 		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
 			if !r.Open {
-				return exec.Result{Stdout: ClosedChain}, nil
+				return proc.Result{Stdout: ClosedChain}, nil
 			}
 		case strings.Contains(argv, "-F LEVER_EGRESS"):
 			r.Flushed = true
@@ -57,7 +57,7 @@ func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[strin
 
 // Run must be re-declared, not inherited: the embedded FakeRunner's Run calls
 // ITS OWN RunIn, so a caller using Run would bypass the interception above.
-func (r *ClosedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *ClosedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -90,18 +90,18 @@ func StageFakeBuildOutput(t *testing.T, machine string) {
 // ScriptScionInstall scripts the host build + guest install of the scion
 // binary so a test can reach whatever runs AFTER it. userPrefix is the guest's
 // run-user prefix joined by spaces (e.g. "orb -m lever-jail").
-func ScriptScionInstall(t *testing.T, f *exec.FakeRunner, userPrefix, machine string) {
+func ScriptScionInstall(t *testing.T, f *proc.FakeRunner, userPrefix, machine string) {
 	t.Helper()
-	f.Script("go build", exec.Result{})
+	f.Script("go build", proc.Result{})
 	// A digest mismatch, so the install streams rather than skipping.
-	f.Script(userPrefix+" /usr/bin/sha256sum", exec.Result{Code: 1})
+	f.Script(userPrefix+" /usr/bin/sha256sum", proc.Result{Code: 1})
 	StageFakeBuildOutput(t, machine)
 }
 
 // ScriptRunUser scripts the two probes common.Base.ReadRunUser issues through
 // userPrefix (e.g. "orb -m lever-jail"), so a test can resolve the run user
 // without EnsureUp.
-func ScriptRunUser(f *exec.FakeRunner, userPrefix, user, uid string) {
-	f.Script(userPrefix+" whoami", exec.Result{Stdout: user + "\n"})
-	f.Script(userPrefix+" id -u", exec.Result{Stdout: uid + "\n"})
+func ScriptRunUser(f *proc.FakeRunner, userPrefix, user, uid string) {
+	f.Script(userPrefix+" whoami", proc.Result{Stdout: user + "\n"})
+	f.Script(userPrefix+" id -u", proc.Result{Stdout: uid + "\n"})
 }

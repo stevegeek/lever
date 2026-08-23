@@ -14,8 +14,8 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
-	"github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 const (
@@ -43,7 +43,7 @@ type Hooks struct {
 	// Guest returns the guest provisioner scoped to (r, machine); its User/Root
 	// prefixes differ per backend (orb has a distinct `-u root` form; lima appends
 	// `sudo`).
-	Guest func(r exec.Runner, machine string) guest.Guest
+	Guest func(r proc.Runner, machine string) guest.Guest
 	// ResolveHostAlias resolves the host tool alias's (v4, v6) as seen from inside
 	// the jail. Kept per-backend because each has a dedicated exact-argv test.
 	ResolveHostAlias func(ctx context.Context) (v4, v6 string, err error)
@@ -51,7 +51,7 @@ type Hooks struct {
 
 // Config is what a Base needs from its embedder, set once at construction.
 type Config struct {
-	Runner    exec.Runner // host runner (the prefix binary runs on the host)
+	Runner    proc.Runner // host runner (the prefix binary runs on the host)
 	Machine   string      // jail identifier
 	HostAlias string      // DNS name an agent uses to reach allowlisted host tools
 	Hooks     Hooks
@@ -62,7 +62,7 @@ type Config struct {
 // user/uid (via ReadRunUser) and the resolved aliases (via ApplyEgress). The
 // resolved state is unexported so only those two paths can change it.
 type Base struct {
-	r         exec.Runner
+	r         proc.Runner
 	machine   string
 	hostAlias string
 	hooks     Hooks
@@ -79,7 +79,7 @@ func NewBase(cfg Config) Base {
 }
 
 // Runner returns the host runner the backend was built with.
-func (b *Base) Runner() exec.Runner { return b.r }
+func (b *Base) Runner() proc.Runner { return b.r }
 
 // Machine returns the jail machine name this backend targets.
 func (b *Base) Machine() string { return b.machine }
@@ -161,7 +161,7 @@ func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedIntern
 
 // JailRunner returns the command transport into the jail (valid after EnsureUp,
 // which resolves the run user).
-func (b *Base) JailRunner() exec.Runner {
+func (b *Base) JailRunner() proc.Runner {
 	return b.jail()
 }
 

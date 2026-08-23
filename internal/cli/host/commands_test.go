@@ -6,16 +6,16 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 type stubBackend struct {
 	up, down, stopped bool
 	scionState        backend.ScionProjectState
 	scionErr          error
-	resolveRunUserErr error            // when set, ResolveRunUser returns it instead of nil
-	runner            leverexec.Runner // JailRunner override; nil ⇒ leverexec.RealRunner{}
-	removeScionCalls  []string         // workspace paths passed to RemoveScionProjectConfigs
+	resolveRunUserErr error       // when set, ResolveRunUser returns it instead of nil
+	runner            proc.Runner // JailRunner override; nil ⇒ proc.RealRunner{}
+	removeScionCalls  []string    // workspace paths passed to RemoveScionProjectConfigs
 	removeScionErr    error
 	registeredResult  bool // ScionProjectRegistered return value
 	registeredErr     error
@@ -44,11 +44,11 @@ func (s *stubBackend) HostAliasV4() string                            { return "
 func (s *stubBackend) RunUser() string                                { return "stub" }
 func (s *stubBackend) RunUID() string                                 { return "501" }
 func (s *stubBackend) ResolveRunUser(context.Context) error           { return s.resolveRunUserErr }
-func (s *stubBackend) JailRunner() leverexec.Runner {
+func (s *stubBackend) JailRunner() proc.Runner {
 	if s.runner != nil {
 		return s.runner
 	}
-	return leverexec.RealRunner{}
+	return proc.RealRunner{}
 }
 func (s *stubBackend) AttachArgv(inner []string) []string {
 	return append([]string{"stub-attach"}, inner...)

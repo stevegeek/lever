@@ -4,12 +4,12 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestAttachArgv(t *testing.T) {
 	inner := []string{"scion", "attach", "demo", "-g", "/lever"}
-	jr := New(Config{Host: exec.NewFakeRunner(), Prefix: orbPrefix("lever-demo", "leveruser"), UID: "501"})
+	jr := New(Config{Host: proc.NewFakeRunner(), Prefix: orbPrefix("lever-demo", "leveruser"), UID: "501"})
 	got := jr.AttachArgv(inner)
 	// Default: own pasta netns, so SCION_FORCE_HOST_NETWORK is NOT emitted.
 	want := []string{

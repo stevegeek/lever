@@ -15,8 +15,8 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/state"
@@ -47,7 +47,7 @@ func healthyRemoteProbes() doctorProbes {
 		remoteLogin: func(int) (loginProbeResult, error) {
 			return loginProbeResult{discovery: 200, authorize: 404, authzURL: "https://lever.invalid/authorize"}, nil
 		},
-		remoteJailLogin: func(context.Context, leverexec.Runner, string) (int, string, error) {
+		remoteJailLogin: func(context.Context, proc.Runner, string) (int, string, error) {
 			return 302, remoteproxy.DeadAuthorizationEndpoint, nil
 		},
 	}
@@ -835,7 +835,7 @@ func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
 	// The host-side provider is healthy; the GUEST half is not — the hub
 	// cannot reach the provider through the forwarder, and answers 500.
 	p := healthyRemoteProbes()
-	p.remoteJailLogin = func(context.Context, leverexec.Runner, string) (int, string, error) {
+	p.remoteJailLogin = func(context.Context, proc.Runner, string) (int, string, error) {
 		return 500, "", nil
 	}
 	// What the live proxy answers while the login chain is broken.
@@ -845,7 +845,7 @@ func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
 		return 502, nil
 	}
 
-	r := checkRemote(context.Background(), app, st, p, leverexec.NewFakeRunner())
+	r := checkRemote(context.Background(), app, st, p, proc.NewFakeRunner())
 	if r.ok {
 		t.Fatal("a hub that cannot reach the login provider must fail the check")
 	}
@@ -1094,7 +1094,7 @@ func TestCheckNodeToolchainProbeError(t *testing.T) {
 // start a login is what exercises both — it has to fetch discovery through the
 // forwarder before it can answer.
 func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
-	jr := leverexec.NewFakeRunner()
+	jr := proc.NewFakeRunner()
 	st := state.ForConfig(t.TempDir())
 
 	for _, tc := range []struct {
@@ -1113,7 +1113,7 @@ func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
 		{"unexpected status", 418, "", nil, false, "want 302"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := doctorProbes{remoteJailLogin: func(context.Context, leverexec.Runner, string) (int, string, error) {
+			p := doctorProbes{remoteJailLogin: func(context.Context, proc.Runner, string) (int, string, error) {
 				return tc.status, tc.redirect, tc.err
 			}}
 			detail, _, ok := checkRemoteLoginPath(context.Background(), jr, st, p)
@@ -1182,9 +1182,9 @@ func TestCheckListeningProcess(t *testing.T) {
 // claudeVersionProbe maps docker's "<no value>" (label absent) to "", and
 // reports docker's own stderr on failure.
 func TestClaudeVersionProbe(t *testing.T) {
-	r := leverexec.NewFakeRunner()
-	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} labelled", leverexec.Result{Stdout: "2.1.207\n"})
-	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} bare", leverexec.Result{Stdout: "<no value>\n"})
+	r := proc.NewFakeRunner()
+	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} labelled", proc.Result{Stdout: "2.1.207\n"})
+	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} bare", proc.Result{Stdout: "<no value>\n"})
 	if v, err := claudeVersionProbe(r, "labelled"); err != nil || v != "2.1.207" {
 		t.Fatalf("labelled: %q, %v", v, err)
 	}
@@ -1199,7 +1199,7 @@ func TestClaudeVersionProbe(t *testing.T) {
 // productionProbes wires every field: a nil probe would panic the first time
 // a check on a real instance reached it.
 func TestProductionProbesWiresEveryField(t *testing.T) {
-	p := productionProbes(leverexec.NewFakeRunner())
+	p := productionProbes(proc.NewFakeRunner())
 	if p.dial == nil || p.goVersion == nil || p.nodeToolchain == nil || p.claudeVersion == nil ||
 		p.remoteHealthz == nil || p.remoteLogin == nil || p.remoteJailLogin == nil {
 		t.Fatalf("productionProbes left a probe nil: %+v", p)

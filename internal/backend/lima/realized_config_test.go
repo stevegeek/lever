@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // matchingRealizedConfigJSON returns a `limactl list --json <vm>` line (the
@@ -25,14 +25,14 @@ func matchingRealizedConfigJSON(vm, projectTree string) string {
 		`}}`
 }
 
-func scriptRealizedConfig(f *exec.FakeRunner, vm, json string) {
-	f.Script("limactl list --json "+vm, exec.Result{Stdout: json + "\n"})
+func scriptRealizedConfig(f *proc.FakeRunner, vm, json string) {
+	f.Script("limactl list --json "+vm, proc.Result{Stdout: json + "\n"})
 }
 
 // --- verifyRealizedConfig: direct unit tests (fake runner, no full EnsureUp). ---
 
 func TestVerifyRealizedConfigAcceptsMatch(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
 	l := New(f, "lever-x")
 
@@ -129,7 +129,7 @@ func TestVerifyRealizedConfigDetectsDrift(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
+			f := proc.NewFakeRunner()
 			scriptRealizedConfig(f, "lever-x", tc.json)
 			l := New(f, "lever-x")
 
@@ -155,11 +155,11 @@ func TestVerifyRealizedConfigDetectsDrift(t *testing.T) {
 // realized config has drifted from the template must fail EnsureUp closed,
 // and must NOT proceed to provision runtimes/scion/egress on the drifted VM.
 func TestEnsureUpFailsClosedOnDriftedRunningVM(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	limaVersionScript(f)
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Running\n"})
 	// Drift: a second mount an operator's global override could have added.
-	f.Script("limactl list --json lever-x", exec.Result{Stdout: `{"name":"lever-x","status":"Running","config":{` +
+	f.Script("limactl list --json lever-x", proc.Result{Stdout: `{"name":"lever-x","status":"Running","config":{` +
 		`"mounts":[{"location":"/Users/x/tree","mountPoint":"/lever","writable":true},{"location":"/","mountPoint":"/host","writable":true}],` +
 		`"portForwards":[` +
 		`{"guestIP":"0.0.0.0","guestIPMustBeZero":true,"guestPortRange":[1,65535],"proto":"any","ignore":true},` +
@@ -184,19 +184,19 @@ func TestEnsureUpFailsClosedOnDriftedRunningVM(t *testing.T) {
 // TestEnsureUpVerifiesRealizedConfigOnFreshCreate proves the check also runs
 // right after `limactl create` (not just on adoption of a pre-existing VM).
 func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	limaVersionScript(f)
-	f.Script("limactl list --format", exec.Result{Stdout: ""}) // no VM yet
-	f.Script("limactl create --name=lever-x --tty=false", exec.Result{Stdout: "created\n"})
+	f.Script("limactl list --format", proc.Result{Stdout: ""}) // no VM yet
+	f.Script("limactl create --name=lever-x --tty=false", proc.Result{Stdout: "created\n"})
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
-	f.Script("limactl start --tty=false lever-x", exec.Result{Stdout: "started\n"})
-	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
-	f.Script("limactl shell lever-x bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x sudo bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \n"})
-	f.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	f.Script("limactl start --tty=false lever-x", proc.Result{Stdout: "started\n"})
+	f.Script("limactl shell lever-x whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("limactl shell lever-x id -u", proc.Result{Stdout: "501\n"})
+	f.Script("limactl shell lever-x bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x sudo bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \n"})
+	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
+	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
 	l := New(f, "lever-x")
 
 	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: "lever-x", ProjectTree: "/Users/x/tree"}); err != nil {
@@ -218,7 +218,7 @@ func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
 // idempotency test (lima_test.go) still holds now that a verify call is
 // interposed: a matching config must still result in no create/start calls.
 func TestEnsureUpIsIdempotentWhenRunningAndMatching(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedVM(f) // scripts a matching realized config for "/Users/x/tree" too
 	l := New(f, "lever-x")
 

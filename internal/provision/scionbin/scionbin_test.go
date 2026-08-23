@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestValidateNamesAllThreeKeys(t *testing.T) {
@@ -21,7 +21,7 @@ func TestValidateNamesAllThreeKeys(t *testing.T) {
 }
 
 func TestResolveSourceMissingNeverBuilds(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	_, err := Resolve(context.Background(), f, Spec{Source: "/does/not/exist"}, "arm64", "m")
 	if err == nil || !strings.Contains(err.Error(), "scion source") {
 		t.Fatalf("error should mention scion source; got: %v", err)
@@ -32,8 +32,8 @@ func TestResolveSourceMissingNeverBuilds(t *testing.T) {
 }
 
 func TestResolveSourceCrossCompiles(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("go build", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("go build", proc.Result{})
 	src := t.TempDir()
 	out, err := Resolve(context.Background(), f, Spec{Source: src}, "arm64", "lever-jail")
 	if err != nil {
@@ -60,16 +60,16 @@ func TestResolveSourceCrossCompiles(t *testing.T) {
 func TestResolveVersionBuildsFromPinnedModule(t *testing.T) {
 	const pin = "666333f9"
 	const moduleDir = "/mod/github.com/!google!cloud!platform/scion@v0.0.0-x"
-	f := exec.NewFakeRunner()
-	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
+	f := proc.NewFakeRunner()
+	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	f.Script("/opt/go/bin/go mod download -json "+ModulePath+"@"+pin,
-		exec.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
-	f.Script("/opt/go/bin/go build -o", exec.Result{})
+		proc.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
+	f.Script("/opt/go/bin/go build -o", proc.Result{})
 
 	if _, err := Resolve(context.Background(), f, Spec{Version: pin}, "arm64", "m"); err != nil {
 		t.Fatalf("Resolve(version): %v", err)
 	}
-	var build *exec.Call
+	var build *proc.Call
 	for i := range f.Calls {
 		if c := f.Calls[i]; c.Name == "/opt/go/bin/go" && len(c.Args) > 0 && c.Args[0] == "build" {
 			build = &f.Calls[i]
@@ -93,9 +93,9 @@ func TestFetchModuleErrors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
-			f.Script("/opt/go/bin/go mod download -json", exec.Result{Stdout: c.stdout})
+			f := proc.NewFakeRunner()
+			f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
+			f.Script("/opt/go/bin/go mod download -json", proc.Result{Stdout: c.stdout})
 			_, _, err := FetchModule(context.Background(), f, "deadbeef")
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want %q", err, c.want)
@@ -108,7 +108,7 @@ func TestFetchModuleErrors(t *testing.T) {
 // mode nothing ever invokes `go`.
 func TestResolveBinaryModeNeverInvokesGo(t *testing.T) {
 	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	out, err := Resolve(context.Background(), f, Spec{Binary: bin}, "arm64", "m")
 	if err != nil {
 		t.Fatalf("Resolve(binary): %v", err)
@@ -123,7 +123,7 @@ func TestResolveBinaryModeNeverInvokesGo(t *testing.T) {
 
 func TestResolveBinaryModeRejectsWrongArch(t *testing.T) {
 	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
-	if _, err := Resolve(context.Background(), exec.NewFakeRunner(), Spec{Binary: bin}, "amd64", "m"); err == nil {
+	if _, err := Resolve(context.Background(), proc.NewFakeRunner(), Spec{Binary: bin}, "amd64", "m"); err == nil {
 		t.Fatal("expected an arch mismatch error")
 	}
 }

@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestSecretSetErrorRedactsToken(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	// Leave the command unscripted: FakeRunner returns a non-zero Result
 	// with an error for unscripted commands.
 	c := New(f, Options{})
@@ -34,7 +34,7 @@ func TestSecretSetErrorRedactsToken(t *testing.T) {
 // masks the key instead and cobra echoes the value back in its own error.
 func TestSecretSetScrubsFlagLookingValue(t *testing.T) {
 	const secret = "-leading-dash-secret-value"
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	c := New(f, Options{})
 	err := c.SecretSet(context.Background(), "CLAUDE_CODE_OAUTH_TOKEN", secret)
 	if err == nil {

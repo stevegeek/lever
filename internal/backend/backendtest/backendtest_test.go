@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestClosedChainRunnerInterceptsOnlyItsHost(t *testing.T) {
-	r := &ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "orb"}
-	r.Script("orb", exec.Result{})
-	r.Script("limactl", exec.Result{Stdout: "other\n"})
+	r := &ClosedChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "orb"}
+	r.Script("orb", proc.Result{})
+	r.Script("limactl", proc.Result{Stdout: "other\n"})
 	res, err := r.Run(context.Background(), nil, "orb", "-u", "root", "-m", "m", "iptables", "-S", "LEVER_EGRESS")
 	if err != nil || res.Stdout != ClosedChain {
 		t.Fatalf("closed chain not served: %q %v", res.Stdout, err)
@@ -32,7 +32,7 @@ func TestClosedChainRunnerInterceptsOnlyItsHost(t *testing.T) {
 }
 
 func TestClosedChainRunnerOpenFallsThrough(t *testing.T) {
-	r := &ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "orb", Open: true}
+	r := &ClosedChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "orb", Open: true}
 	_, err := r.Run(context.Background(), nil, "orb", "iptables", "-S", "LEVER_EGRESS")
 	if err == nil || !strings.Contains(err.Error(), "unscripted") {
 		t.Fatalf("open posture must consult the FakeRunner: %v", err)
@@ -40,7 +40,7 @@ func TestClosedChainRunnerOpenFallsThrough(t *testing.T) {
 }
 
 func TestScriptRunUser(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	ScriptRunUser(f, "orb -m m", "stephen", "501")
 	res, _ := f.Run(context.Background(), nil, "orb", "-m", "m", "id", "-u")
 	if res.Stdout != "501\n" {

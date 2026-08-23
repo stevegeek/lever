@@ -9,8 +9,8 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/proc"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -48,7 +48,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 			}
 			state := stateFor(path)
 
-			probes := productionProbes(leverexec.RealRunner{})
+			probes := productionProbes(proc.RealRunner{})
 			checks := runDoctorChecks(cmd.Context(), app, state, b, probes)
 			failed := 0
 			for _, c := range checks {

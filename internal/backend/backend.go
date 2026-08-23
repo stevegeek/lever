@@ -19,7 +19,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // Profile DECLARES what a backend actually guarantees, so the security posture
@@ -104,7 +104,7 @@ type Backend interface {
 	// it errors if the machine is not already up. For passive verbs (attach) that
 	// need the jail transport but must never create or configure the machine.
 	ResolveRunUser(ctx context.Context) error
-	JailRunner() exec.Runner            // command transport into the jail
+	JailRunner() proc.Runner            // command transport into the jail
 	AttachArgv(inner []string) []string // interactive TTY argv (lever up)
 	LoadImage(ctx context.Context, imageRef string) error
 	// ImageLoaded reports whether the jail already holds imageRef at the same

@@ -8,7 +8,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/broker"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -103,8 +103,8 @@ func TestUpDecision(t *testing.T) {
 // resumable — resuming it with `claude --continue` would restore the very
 // conversation `--fresh` asked to discard.
 func TestRestartManagerFreshIssuesDelete(t *testing.T) {
-	f := leverexec.NewFakeRunner()
-	f.Script("scion", leverexec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	sc := scion.New(f, scion.Options{})
 
 	if err := restartManagerFresh(context.Background(), sc, "hello", "/lever"); err != nil {

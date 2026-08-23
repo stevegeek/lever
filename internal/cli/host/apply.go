@@ -21,9 +21,9 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
@@ -40,7 +40,7 @@ const scionScratchpadSharedDir = "scratchpad"
 // hubJailTransport builds the Hub REST transport: curl, inside the jail,
 // carrying the controller PAT. Shared by apply's shared-dir strip and doctor's
 // shared-dir check so both address the same hub the in-jail scion CLI does.
-func hubJailTransport(jr leverexec.Runner, state state.State) *hubapi.JailCurl {
+func hubJailTransport(jr proc.Runner, state state.State) *hubapi.JailCurl {
 	return &hubapi.JailCurl{
 		Runner:  jr,
 		BaseURL: scion.DefaultHubEndpoint,
@@ -250,7 +250,7 @@ const removeJailFileScript = `if [ ! -d "$1" ] && [ -e "$1" ]; then rm -f -- "$1
 // removeJailFile runs removeJailFileScript through jr against a jail-absolute
 // path. Best-effort by convention at call sites that don't want a missing (or
 // already-removed) target to fail the caller.
-func removeJailFile(ctx context.Context, jr leverexec.Runner, jailPath string) error {
+func removeJailFile(ctx context.Context, jr proc.Runner, jailPath string) error {
 	if _, err := jr.Run(ctx, nil, "sh", "-c", removeJailFileScript, "_", jailPath); err != nil {
 		return fmt.Errorf("removing jail file %s: %w", jailPath, err)
 	}
@@ -334,7 +334,7 @@ func remotePATScopes() []string {
 // --scopes`, and the scopes agent:manage/agent:attach/project:read all exist;
 // the residual dev-token is at the jail user's ~/.scion/dev-token (resolved
 // in-jail below, not assumed).
-func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state state.State, tree, jailMount string, remoteEnabled bool) error {
+func ensureControllerPAT(ctx context.Context, jr proc.Runner, state state.State, tree, jailMount string, remoteEnabled bool) error {
 	ctok, _ := state.LoadControllerPAT()
 	rtok, _ := state.LoadRemotePAT()
 	needController := ctok == ""
@@ -641,7 +641,7 @@ type applyWiring struct {
 	b     backend.Backend
 	sc    *scion.Client
 	app   *config.App
-	jr    leverexec.Runner
+	jr    proc.Runner
 	state state.State
 	// brokerHost is what agents (and the guest login forwarder) dial the host
 	// by: the resolved host-alias IP when the backend has one, else the alias

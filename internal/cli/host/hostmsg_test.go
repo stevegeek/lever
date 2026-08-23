@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -21,8 +21,8 @@ func TestHostMsgSendToManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fr := leverexec.NewFakeRunner()
-	fr.Script("scion", leverexec.Result{})
+	fr := proc.NewFakeRunner()
+	fr.Script("scion", proc.Result{})
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	_, err := execCmd(t, root, "msg", "send", "hello", "there", "--to", "assistant")
@@ -55,8 +55,8 @@ func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
-	fr := leverexec.NewFakeRunner()
-	fr.Script("scion", leverexec.Result{})
+	fr := proc.NewFakeRunner()
+	fr.Script("scion", proc.Result{})
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	_, err := execCmd(t, root, "msg", "send", "check", "in", "--to", "scratch", "--interrupt")
@@ -81,7 +81,7 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
-	fr := leverexec.NewFakeRunner()
+	fr := proc.NewFakeRunner()
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	_, err := execCmd(t, root, "msg", "send", "hi", "--to", "nope")
@@ -102,7 +102,7 @@ func TestHostMsgSendJailDownFailsFast(t *testing.T) {
 	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
-	fr := leverexec.NewFakeRunner()
+	fr := proc.NewFakeRunner()
 	sb := &stubBackend{runner: fr, resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-assistant")}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	_, err := execCmd(t, root, "msg", "send", "hi", "--to", "assistant")

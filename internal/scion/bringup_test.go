@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestEnvSetArgvAndProjectScope(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	if err := c.EnvSet(context.Background(), "/jail/work", "LEVER_LLM_AUTH", "api-key"); err != nil {
 		t.Fatal(err)
@@ -38,8 +38,8 @@ func TestEnvSetArgvAndProjectScope(t *testing.T) {
 // `hub secret set` cannot express the mode at all, so the call goes through the
 // --secret form of `hub env set`, which writes the same row.
 func TestSecretSetIsAlwaysInjected(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	if err := c.SecretSet(context.Background(), "ANTHROPIC_API_KEY", "sk-ant-placeholder"); err != nil {
 		t.Fatal(err)
@@ -77,8 +77,8 @@ func TestSecretSetOldPinErrorNamesTheCause(t *testing.T) {
 }
 
 func TestBringupArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	_ = c.InitMachine(context.Background())
 	_ = c.ConfigSetGlobal(context.Background(), "image_registry", "scionlocal")
@@ -104,8 +104,8 @@ func TestBringupArgv(t *testing.T) {
 }
 
 func TestServerStartArgvWithPort(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 41000, DevAuth: false}); err != nil {
 		t.Fatal(err)
@@ -120,8 +120,8 @@ func TestServerStartArgvWithPort(t *testing.T) {
 }
 
 func TestServerStartArgvWithoutPort(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	if err := c.ServerStart(context.Background(), ServerOpts{DevAuth: true}); err != nil {
 		t.Fatal(err)
@@ -140,8 +140,8 @@ func TestServerStartArgvWithoutPort(t *testing.T) {
 // that flag into the agents' hub endpoint, which no jail agent can reach
 // (see ServerOpts.EnableWeb). internal/apply proves the consequence.
 func TestServerStartEmitsEnableWebOnly(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
@@ -161,8 +161,8 @@ func TestServerStartEmitsEnableWebOnly(t *testing.T) {
 // web/dist/client/.gitkeep), so the hub must be pointed at the assets lever
 // built and staged, or it serves its "Web UI Not Available" page.
 func TestServerStartEmitsWebAssetsDir(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true, WebAssetsDir: "/usr/local/share/scion/web"}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
@@ -179,8 +179,8 @@ func TestServerStartEmitsWebAssetsDir(t *testing.T) {
 // any non-empty value as an override that REPLACES embedded assets rather than
 // falling back to them — so the flag never travels alone.
 func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, WebAssetsDir: "/usr/local/share/scion/web"}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
@@ -195,8 +195,8 @@ func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
 // daemon persists it to server-args.json and a `scion server restart` replays
 // it — the whole point: sessions survive hub restarts.
 func TestServerStartEmitsSessionSecret(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
@@ -212,8 +212,8 @@ func TestServerStartEmitsSessionSecret(t *testing.T) {
 // An empty SessionSecret omits the flag entirely (scion generates a per-boot
 // random key) — the throwaway mint-window hub takes this path.
 func TestServerStartOmitsSessionSecretWhenEmpty(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: true}); err != nil {
 		t.Fatal(err)
@@ -229,7 +229,7 @@ func TestServerStartOmitsSessionSecretWhenEmpty(t *testing.T) {
 func TestServerStartFailureRedactsSessionSecret(t *testing.T) {
 	// Nothing scripted: the fake fails every call, which drives run's error
 	// path — the one that renders the argv.
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	c := New(f, Options{})
 	err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"})
 	if err == nil {
@@ -241,8 +241,8 @@ func TestServerStartFailureRedactsSessionSecret(t *testing.T) {
 }
 
 func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	// EnableWeb left at its zero value must not appear in the argv. Note what
 	// that does and does not buy: it is NOT how a hub is made API-only —
@@ -289,8 +289,8 @@ func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 		{WebPort: 8080, EnableWeb: true, WebAssetsDir: "/usr/local/share/scion/web"},
 		{WebPort: 8080, WebAssetsDir: "/usr/local/share/scion/web"},
 	} {
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := proc.NewFakeRunner()
+		f.Script("scion", proc.Result{Stdout: "ok"})
 		if err := New(f, Options{}).ServerStart(context.Background(), o); err != nil {
 			t.Fatalf("%+v: %v", o, err)
 		}
@@ -305,8 +305,8 @@ func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 }
 
 func TestServerStopArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
 	if err := c.ServerStop(context.Background()); err != nil {
 		t.Fatal(err)
@@ -327,19 +327,19 @@ func TestServerStopArgv(t *testing.T) {
 // internal/apply/run_test.go), falling through to the wrapped FakeRunner for
 // everything else.
 type notRunningRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	stderr string
 }
 
-func (r *notRunningRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *notRunningRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "stop" {
-		r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
-		return exec.Result{Code: 1, Stderr: r.stderr}, fmt.Errorf("exit status 1")
+		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Code: 1, Stderr: r.stderr}, fmt.Errorf("exit status 1")
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *notRunningRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *notRunningRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -359,7 +359,7 @@ func TestServerStopTolerantOfNotRunning(t *testing.T) {
 		"Error: server daemon is not running",
 		"Error: server daemon is not running\n\nUse 'scion server start' to start it",
 	} {
-		f := &notRunningRunner{FakeRunner: exec.NewFakeRunner(), stderr: stderr}
+		f := &notRunningRunner{FakeRunner: proc.NewFakeRunner(), stderr: stderr}
 		c := New(f, Options{})
 		if err := c.ServerStop(context.Background()); err != nil {
 			t.Fatalf("ServerStop must tolerate scion's own not-running answer %q: %v", stderr, err)
@@ -373,7 +373,7 @@ func TestServerStopTolerantOfNotRunning(t *testing.T) {
 // A stop that fails for any OTHER reason is still a failure: tolerance is for
 // "there was nothing to stop", not for "the stop did not work".
 func TestServerStopReportsRealFailures(t *testing.T) {
-	f := &notRunningRunner{FakeRunner: exec.NewFakeRunner(), stderr: "Error: permission denied"}
+	f := &notRunningRunner{FakeRunner: proc.NewFakeRunner(), stderr: "Error: permission denied"}
 	c := New(f, Options{})
 	if err := c.ServerStop(context.Background()); err == nil {
 		t.Fatal("ServerStop swallowed a real failure")

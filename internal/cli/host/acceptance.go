@@ -12,7 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // acceptanceCheckNames returns the six acceptance checks in a fixed, documented order. The
@@ -181,7 +181,7 @@ func bootstrapDirInJail(app *config.App, mount string) string {
 // `lever-agent` inside the jail machine.
 type acceptanceHarness struct {
 	app       *config.App
-	jr        leverexec.Runner
+	jr        proc.Runner
 	hostAlias string // host alias reachable from the jail (host.orb.internal); the broker listens behind it
 	bootDir   string // in-jail dir containing bootstrap.json (broker URL + CA)
 	managerID string // in-jail dir holding the manager's mTLS identity (the delegator)
@@ -416,7 +416,7 @@ const (
 // verify failure), the TCP connection SUCCEEDED — connecting is the point. Exit 0
 // is reachable; exit 7 (refused) / 28 (timeout/dropped) is blocked; exit 127
 // (curl absent) or anything else is uncertain (FAIL-CLOSED).
-func classifyEgressProbe(res leverexec.Result, err error) (probeState, error) {
+func classifyEgressProbe(res proc.Result, err error) (probeState, error) {
 	if err == nil {
 		return stateReachable, nil
 	}

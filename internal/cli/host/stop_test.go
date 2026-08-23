@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -35,8 +35,8 @@ func TestStopSuspendsManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := leverexec.NewFakeRunner()
-	f.Script("scion", leverexec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	sb := &stubBackend{runner: f}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
@@ -112,7 +112,7 @@ func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
-	f := leverexec.NewFakeRunner() // no scripts: any call would error loudly
+	f := proc.NewFakeRunner() // no scripts: any call would error loudly
 	sb := &stubBackend{resolveRunUserErr: errors.New("machine not up"), runner: f}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer

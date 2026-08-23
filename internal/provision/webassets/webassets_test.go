@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
@@ -95,9 +95,9 @@ func TestNodeMajor(t *testing.T) {
 
 func TestCheckNodeToolchain(t *testing.T) {
 	t.Run("accepts a supported node", func(t *testing.T) {
-		f := exec.NewFakeRunner()
-		f.Script("node --version", exec.Result{Stdout: "v25.9.0\n"})
-		f.Script("npm --version", exec.Result{Stdout: "11.12.1\n"})
+		f := proc.NewFakeRunner()
+		f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
+		f.Script("npm --version", proc.Result{Stdout: "11.12.1\n"})
 		got, err := CheckNodeToolchain(context.Background(), f, "/probe")
 		if err != nil {
 			t.Fatalf("CheckNodeToolchain: %v", err)
@@ -116,7 +116,7 @@ func TestCheckNodeToolchain(t *testing.T) {
 
 	// The live shape of a dead asdf/mise shim: on PATH, resolves, exits 126.
 	t.Run("rejects a broken shim", func(t *testing.T) {
-		f := exec.NewFakeRunner()
+		f := proc.NewFakeRunner()
 		_, err := CheckNodeToolchain(context.Background(), f, "/probe")
 		if err == nil {
 			t.Fatal("expected an error when node is unusable")
@@ -127,8 +127,8 @@ func TestCheckNodeToolchain(t *testing.T) {
 	})
 
 	t.Run("rejects node below the engines floor", func(t *testing.T) {
-		f := exec.NewFakeRunner()
-		f.Script("node --version", exec.Result{Stdout: "v18.19.1\n"})
+		f := proc.NewFakeRunner()
+		f.Script("node --version", proc.Result{Stdout: "v18.19.1\n"})
 		_, err := CheckNodeToolchain(context.Background(), f, "/probe")
 		if err == nil || !strings.Contains(err.Error(), "too old") {
 			t.Fatalf("want a too-old error naming the floor; got %v", err)
@@ -136,8 +136,8 @@ func TestCheckNodeToolchain(t *testing.T) {
 	})
 
 	t.Run("rejects a working node with no npm", func(t *testing.T) {
-		f := exec.NewFakeRunner()
-		f.Script("node --version", exec.Result{Stdout: "v25.9.0\n"})
+		f := proc.NewFakeRunner()
+		f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
 		_, err := CheckNodeToolchain(context.Background(), f, "/probe")
 		if err == nil || !strings.Contains(err.Error(), "npm --version") {
 			t.Fatalf("want an npm error; got %v", err)
@@ -299,11 +299,11 @@ func TestWriteWebAssetsTar(t *testing.T) {
 func TestBuildWebAssetsRejectsAnEmptyBuild(t *testing.T) {
 	isolateCacheDir(t)
 	src := fakeScionSource(t)
-	f := exec.NewFakeRunner()
-	f.Script("node --version", exec.Result{Stdout: "v25.9.0\n"})
-	f.Script("npm --version", exec.Result{Stdout: "11.12.1\n"})
-	f.Script("npm ci", exec.Result{})
-	f.Script("npm run build", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
+	f.Script("npm --version", proc.Result{Stdout: "11.12.1\n"})
+	f.Script("npm ci", proc.Result{})
+	f.Script("npm run build", proc.Result{})
 
 	_, _, err := Build(context.Background(), f, filepath.Join(src, "web"))
 	if err == nil {
@@ -319,11 +319,11 @@ func TestBuildWebAssetsRejectsAnEmptyBuild(t *testing.T) {
 func TestBuildWebAssetsUsesReproducibleInstall(t *testing.T) {
 	isolateCacheDir(t)
 	src := fakeScionSource(t)
-	f := exec.NewFakeRunner()
-	f.Script("node --version", exec.Result{Stdout: "v25.9.0\n"})
-	f.Script("npm --version", exec.Result{Stdout: "11.12.1\n"})
-	f.Script("npm ci", exec.Result{})
-	f.Script("npm run build", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
+	f.Script("npm --version", proc.Result{Stdout: "11.12.1\n"})
+	f.Script("npm ci", proc.Result{})
+	f.Script("npm run build", proc.Result{})
 	_, _, _ = Build(context.Background(), f, filepath.Join(src, "web"))
 
 	var sawCI, sawBuild bool
@@ -354,7 +354,7 @@ func TestBuildWebAssetsUsesReproducibleInstall(t *testing.T) {
 func TestBuildWebAssetsFailsEarlyWithoutNode(t *testing.T) {
 	cacheRoot := isolateCacheDir(t)
 	src := fakeScionSource(t)
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 
 	_, _, err := Build(context.Background(), f, filepath.Join(src, "web"))
 	if err == nil {
@@ -389,7 +389,7 @@ func TestBuildReusesCachedBuild(t *testing.T) {
 	}
 	buildDir := stageCompletedBuild(t, cacheRoot, digest)
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	dist, got, err := Build(context.Background(), f, filepath.Join(src, "web"))
 	if err != nil {
 		t.Fatalf("Build: %v", err)

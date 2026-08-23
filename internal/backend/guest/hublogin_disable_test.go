@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // writtenSettings returns the settings content the guest was sent (the stdin
 // of the write script) and how many writes were attempted.
-func writtenSettings(f *exec.FakeRunner) (written string, writes int) {
+func writtenSettings(f *proc.FakeRunner) (written string, writes int) {
 	for _, c := range f.Calls {
 		if len(c.Args) > 0 && c.Args[len(c.Args)-1] == writeScionSettingsScript {
 			writes++
@@ -46,13 +46,13 @@ func TestDisableHubLoginRemovesTheBlockWhenTheForwarderIsAlreadyGone(t *testing.
 		t.Fatalf("fixture has no oidc_login block to remove:\n%s", settings)
 	}
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	// The forwarder binary is already gone — the script's early exit.
-	f.Script("orb -u root -m m bash -c", exec.Result{Stdout: "FOUND 0\n"})
+	f.Script("orb -u root -m m bash -c", proc.Result{Stdout: "FOUND 0\n"})
 	// ...but the hub's settings still carry the block lever wrote.
-	f.Script("orb -m m /bin/bash -c", exec.Result{Stdout: "LEGACY 0\n" + string(settings)})
+	f.Script("orb -m m /bin/bash -c", proc.Result{Stdout: "LEGACY 0\n" + string(settings)})
 	// The settings write itself (content on the stdin of the guest script).
-	f.Script("orb -m m bash -c", exec.Result{})
+	f.Script("orb -m m bash -c", proc.Result{})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
 
 	if _, err := g.DisableHubLogin(context.Background()); err != nil {

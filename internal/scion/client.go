@@ -1,5 +1,5 @@
 // Package scion is the single seam to the `scion` CLI. It builds argv + env and
-// delegates execution to an injected exec.Runner, mirroring the Ruby ScionClient
+// delegates execution to an injected proc.Runner, mirroring the Ruby ScionClient
 // so every method is unit-testable with a fake runner.
 //
 // # What lives where
@@ -34,7 +34,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // DefaultHubEndpoint is the hub endpoint on the loopback of whatever runs the
@@ -69,7 +69,7 @@ type Client struct {
 	hubEndpoint    string
 	hubTokenSource func() string
 	agentRole      string
-	r              exec.Runner
+	r              proc.Runner
 
 	// Poll budgets for waitHubReady / WaitRuntimeBrokerReady. New sets the
 	// defaults; tests shrink them on the instance.
@@ -79,7 +79,7 @@ type Client struct {
 	brokerReadyInterval time.Duration
 }
 
-func New(r exec.Runner, o Options) *Client {
+func New(r proc.Runner, o Options) *Client {
 	bin := o.Bin
 	if bin == "" {
 		bin = "scion"

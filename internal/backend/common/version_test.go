@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 var testVersionRe = regexp.MustCompile(`Version:\s*(\d+)\.(\d+)\.(\d+)`)
@@ -25,8 +25,8 @@ func TestVersionAtLeast(t *testing.T) {
 		{"Version: 10.0.0", true},
 	}
 	for _, c := range cases {
-		f := exec.NewFakeRunner()
-		f.Script("tool version", exec.Result{Stdout: c.out + "\n"})
+		f := proc.NewFakeRunner()
+		f.Script("tool version", proc.Result{Stdout: c.out + "\n"})
 		ok, got, err := VersionAtLeast(context.Background(), f, []string{"tool", "version"}, testVersionRe, 2, 1, 1)
 		if err != nil {
 			t.Fatalf("%q: %v", c.out, err)
@@ -41,13 +41,13 @@ func TestVersionAtLeast(t *testing.T) {
 }
 
 func TestVersionAtLeastErrors(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("tool version", exec.Result{Stdout: "garbage\n"})
+	f := proc.NewFakeRunner()
+	f.Script("tool version", proc.Result{Stdout: "garbage\n"})
 	ok, got, err := VersionAtLeast(context.Background(), f, []string{"tool", "version"}, testVersionRe, 1, 0, 0)
 	if err == nil || ok || got != "garbage" || !strings.Contains(err.Error(), "tool version: could not parse") {
 		t.Fatalf("parse failure: ok=%v got=%q err=%v", ok, got, err)
 	}
-	_, _, err = VersionAtLeast(context.Background(), exec.NewFakeRunner(), []string{"tool", "version"}, testVersionRe, 1, 0, 0)
+	_, _, err = VersionAtLeast(context.Background(), proc.NewFakeRunner(), []string{"tool", "version"}, testVersionRe, 1, 0, 0)
 	if err == nil || !strings.HasPrefix(err.Error(), "tool version: ") {
 		t.Fatalf("run failure: %v", err)
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {
@@ -65,8 +65,8 @@ func TestParseScionStateIgnoresJunk(t *testing.T) {
 func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 	for _, shape := range prefixShapes("lever-x") {
 		t.Run(shape.name, func(t *testing.T) {
-			f := leverexec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " "), leverexec.Result{})
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " "), proc.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix}
 
 			if err := g.RemoveScionProjectConfigs(context.Background(), "/lever/workers/scratch"); err != nil {
@@ -98,7 +98,7 @@ func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 // swallows) a failure of the guest command itself, mirroring
 // ReadScionProjectState's error handling.
 func TestRemoveScionProjectConfigsErrorsOnGuestFailure(t *testing.T) {
-	f := leverexec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
+	f := proc.NewFakeRunner() // no Script registered ⇒ unscripted-command error
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
 
 	if err := g.RemoveScionProjectConfigs(context.Background(), "/lever"); err == nil {
@@ -242,8 +242,8 @@ func TestScionProjectRegisteredIgnoresOtherWorkspacePaths(t *testing.T) {
 func TestScionProjectRegisteredIssuesThroughUserPrefix(t *testing.T) {
 	for _, shape := range prefixShapes("lever-x") {
 		t.Run(shape.name, func(t *testing.T) {
-			f := leverexec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " "), leverexec.Result{Stdout: "MARKER 1\nENTRY lever__aaaa1111 /lever\n"})
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " "), proc.Result{Stdout: "MARKER 1\nENTRY lever__aaaa1111 /lever\n"})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix}
 
 			ok, err := g.ScionProjectRegistered(context.Background(), "/lever")
@@ -263,9 +263,9 @@ func TestScionProjectRegisteredIssuesThroughUserPrefix(t *testing.T) {
 // TestScionProjectRegisteredNotRegisteredOverTransport is the same transport
 // proof for the negative case (no entries at all).
 func TestScionProjectRegisteredNotRegisteredOverTransport(t *testing.T) {
-	f := leverexec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
-	f.Script(strings.Join(g.UserPrefix, " "), leverexec.Result{Stdout: "MARKER 1\n"})
+	f.Script(strings.Join(g.UserPrefix, " "), proc.Result{Stdout: "MARKER 1\n"})
 
 	ok, err := g.ScionProjectRegistered(context.Background(), "/lever")
 	if err != nil {
@@ -281,7 +281,7 @@ func TestScionProjectRegisteredNotRegisteredOverTransport(t *testing.T) {
 // ReadScionProjectState's error handling — the register apply step relies on
 // seeing a non-nil error to fail OPEN to the destructive path.
 func TestScionProjectRegisteredErrorsOnGuestFailure(t *testing.T) {
-	f := leverexec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
+	f := proc.NewFakeRunner() // no Script registered ⇒ unscripted-command error
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
 
 	if _, err := g.ScionProjectRegistered(context.Background(), "/lever"); err == nil {

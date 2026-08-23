@@ -1,7 +1,7 @@
 // Package provision holds the HOST-side build pipelines that produce the
 // artefacts lever puts into a jail: the scion binary (scionbin), scion's web
 // UI (webassets) and the remote-access login forwarder (loginfwd). Each
-// subpackage takes an exec.Runner and returns a local path; none of them
+// subpackage takes an proc.Runner and returns a local path; none of them
 // knows how to reach a guest. Streaming the artefact in is
 // internal/backend/guest's job, through its prefix transport.
 //
@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // GoBinary resolves the REAL go binary (GOROOT/bin/go) rather than trusting
@@ -27,7 +27,7 @@ import (
 // resolves `go` by walking up for a project file (asdf, mise) cannot resolve
 // it from a directory outside any project — which is exactly where the module
 // cache and the temp build directories these pipelines use live.
-func GoBinary(ctx context.Context, r exec.Runner) (string, error) {
+func GoBinary(ctx context.Context, r proc.Runner) (string, error) {
 	root, err := r.Run(ctx, nil, "go", "env", "GOROOT")
 	if err != nil {
 		return "", fmt.Errorf("resolve go toolchain (is go on PATH?): %w", err)

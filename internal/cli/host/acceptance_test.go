@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // TestVMIDDirPerRole asserts the per-role VM identity dirs are distinct and
@@ -101,17 +101,17 @@ func TestClassifyEgressProbe(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		res       leverexec.Result
+		res       proc.Result
 		err       error
 		wantState probeState
 	}{
-		{name: "exit 0 = reachable", res: leverexec.Result{Code: 0}, err: nil, wantState: stateReachable},
-		{name: "exit 35 (TLS connect) = reachable", res: leverexec.Result{Code: 35}, err: errNonZero, wantState: stateReachable},
-		{name: "exit 60 (cert verify) = reachable", res: leverexec.Result{Code: 60}, err: errNonZero, wantState: stateReachable},
-		{name: "exit 7 (refused) = blocked", res: leverexec.Result{Code: 7}, err: errNonZero, wantState: stateBlocked},
-		{name: "exit 28 (timeout/dropped) = blocked", res: leverexec.Result{Code: 28}, err: errNonZero, wantState: stateBlocked},
-		{name: "exit 127 (curl absent) = uncertain", res: leverexec.Result{Code: 127, Stderr: "command not found"}, err: errNonZero, wantState: stateUncertain},
-		{name: "exit 6 (DNS) = uncertain", res: leverexec.Result{Code: 6, Stderr: "could not resolve"}, err: errNonZero, wantState: stateUncertain},
+		{name: "exit 0 = reachable", res: proc.Result{Code: 0}, err: nil, wantState: stateReachable},
+		{name: "exit 35 (TLS connect) = reachable", res: proc.Result{Code: 35}, err: errNonZero, wantState: stateReachable},
+		{name: "exit 60 (cert verify) = reachable", res: proc.Result{Code: 60}, err: errNonZero, wantState: stateReachable},
+		{name: "exit 7 (refused) = blocked", res: proc.Result{Code: 7}, err: errNonZero, wantState: stateBlocked},
+		{name: "exit 28 (timeout/dropped) = blocked", res: proc.Result{Code: 28}, err: errNonZero, wantState: stateBlocked},
+		{name: "exit 127 (curl absent) = uncertain", res: proc.Result{Code: 127, Stderr: "command not found"}, err: errNonZero, wantState: stateUncertain},
+		{name: "exit 6 (DNS) = uncertain", res: proc.Result{Code: 6, Stderr: "could not resolve"}, err: errNonZero, wantState: stateUncertain},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -6,11 +6,11 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/orbstack"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestSelectImplemented(t *testing.T) {
-	b, err := Select("orbstack", exec.RealRunner{}, "lever-x")
+	b, err := Select("orbstack", proc.RealRunner{}, "lever-x")
 	if err != nil {
 		t.Fatalf("Select(orbstack): %v", err)
 	}
@@ -20,14 +20,14 @@ func TestSelectImplemented(t *testing.T) {
 }
 
 func TestSelectEmptyIsDefault(t *testing.T) {
-	b, err := Select("", exec.RealRunner{}, "lever-x")
+	b, err := Select("", proc.RealRunner{}, "lever-x")
 	if err != nil || b == nil {
 		t.Fatalf("Select(\"\") = %v, %v; want the default backend", b, err)
 	}
 }
 
 func TestSelectUnknownIsRejected(t *testing.T) {
-	_, err := Select("nope", exec.RealRunner{}, "lever-x")
+	_, err := Select("nope", proc.RealRunner{}, "lever-x")
 	if err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("Select(nope) err = %v, want an 'unknown backend' error", err)
 	}

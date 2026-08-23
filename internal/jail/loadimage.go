@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	osexec "os/exec"
+	"os/exec"
 	"slices"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // loadImageArgs returns the full host argv (including the prefix binary) that
@@ -65,9 +65,9 @@ func normalizeImageID(id string) string {
 
 // hostImageID returns the host docker image ID (config digest) for imageRef,
 // normalized (see normalizeImageID), or "" if docker cannot resolve it. Runs on
-// the host via the plain exec.Runner seam (not the in-jail JailRunner, which
+// the host via the plain proc.Runner seam (not the in-jail JailRunner, which
 // would inject jail env and rewrite the argv).
-func hostImageID(ctx context.Context, r exec.Runner, imageRef string) string {
+func hostImageID(ctx context.Context, r proc.Runner, imageRef string) string {
 	res, err := r.Run(ctx, nil, "docker", "image", "inspect", "--format", "{{.Id}}", imageRef)
 	if err != nil {
 		return ""
@@ -79,7 +79,7 @@ func hostImageID(ctx context.Context, r exec.Runner, imageRef string) string {
 // if it is not loaded (the inspect exits non-zero) or the command otherwise
 // fails. The prefix argv runs on the host too (the prefix binary reaches into
 // the jail), so it takes the same plain host Runner.
-func jailImageID(ctx context.Context, r exec.Runner, prefix []string, uid, imageRef string) string {
+func jailImageID(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) string {
 	args := imageInspectArgs(prefix, uid, imageRef)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
@@ -96,7 +96,7 @@ func jailImageID(ctx context.Context, r exec.Runner, prefix []string, uid, image
 // tag whose ID no longer matches), so an unreliable check at worst costs a
 // redundant load — never a wrongly-skipped one that would leave a stale image
 // in the jail.
-func ImageLoaded(ctx context.Context, r exec.Runner, prefix []string, uid, imageRef string) bool {
+func ImageLoaded(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) bool {
 	host := hostImageID(ctx, r, imageRef)
 	if host == "" {
 		return false
@@ -105,10 +105,10 @@ func ImageLoaded(ctx context.Context, r exec.Runner, prefix []string, uid, image
 }
 
 // PruneImages removes dangling images from the jail (see pruneImagesArgs). Runs
-// on the host via the plain exec.Runner seam. Unlike the removed CombinedOutput
+// on the host via the plain proc.Runner seam. Unlike the removed CombinedOutput
 // path, the Runner captures stdout and stderr separately, so the error detail is
 // composed from both (stderr first, where podman writes failures).
-func PruneImages(ctx context.Context, r exec.Runner, prefix []string, uid string) error {
+func PruneImages(ctx context.Context, r proc.Runner, prefix []string, uid string) error {
 	args := pruneImagesArgs(prefix, uid)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
@@ -122,14 +122,14 @@ func PruneImages(ctx context.Context, r exec.Runner, prefix []string, uid string
 // through the Runner's stdin seam. Nothing is buffered — the payload can be
 // multi-GB.
 //
-// The producer side (`docker save`) stays on os/exec: the exec.Runner
+// The producer side (`docker save`) stays on os/exec: the proc.Runner
 // contract captures a command's stdout into memory, which is exactly what a
 // multi-GB archive must not do, so the one command whose OUTPUT is the stream
 // writes straight into the pipe. The consumer side (the jail's `podman load`)
 // goes through r.RunStdin like every other in-jail command.
-func LoadImage(ctx context.Context, r exec.Runner, prefix []string, uid, imageRef string) error {
+func LoadImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) error {
 	return loadImage(ctx, r, prefix, uid, func(w io.Writer) error {
-		save := osexec.CommandContext(ctx, "docker", "save", imageRef)
+		save := exec.CommandContext(ctx, "docker", "save", imageRef)
 		save.Stdout = w
 		if err := save.Run(); err != nil {
 			return fmt.Errorf("docker save: %w", err)
@@ -147,7 +147,7 @@ func LoadImage(ctx context.Context, r exec.Runner, prefix []string, uid, imageRe
 // producer's error is primary only when the load itself succeeded, or when
 // the load's own failure is the short read the dead producer caused — in
 // which case both are named.
-func loadImage(ctx context.Context, r exec.Runner, prefix []string, uid string, save func(io.Writer) error) error {
+func loadImage(ctx context.Context, r proc.Runner, prefix []string, uid string, save func(io.Writer) error) error {
 	pr, pw := io.Pipe()
 	saveErr := make(chan error, 1)
 	go func() {

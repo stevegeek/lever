@@ -17,7 +17,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -91,8 +91,8 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := leverexec.NewFakeRunner()
-	f.Script("sh", leverexec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("sh", proc.Result{Stdout: "ok"})
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -253,15 +253,15 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := leverexec.NewFakeRunner()
-	f.Script("scion server start", leverexec.Result{})
-	f.Script("scion list", leverexec.Result{})
-	f.Script("scion init", leverexec.Result{})
-	f.Script("scion hub link", leverexec.Result{})
-	f.Script("scion hub token create", leverexec.Result{Stdout: "Token: pat-wired-abc\n"})
-	f.Script("scion server stop", leverexec.Result{})
-	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
+	f := proc.NewFakeRunner()
+	f.Script("scion server start", proc.Result{})
+	f.Script("scion list", proc.Result{})
+	f.Script("scion init", proc.Result{})
+	f.Script("scion hub link", proc.Result{})
+	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-wired-abc\n"})
+	f.Script("scion server stop", proc.Result{})
+	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -592,7 +592,7 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 
 // callIndex returns the index of the first call in calls satisfying pred, or
 // -1 if none matches. Helper for the ordered-call assertions below.
-func callIndex(calls []leverexec.Call, pred func(leverexec.Call) bool) int {
+func callIndex(calls []proc.Call, pred func(proc.Call) bool) int {
 	for i, c := range calls {
 		if pred(c) {
 			return i
@@ -601,7 +601,7 @@ func callIndex(calls []leverexec.Call, pred func(leverexec.Call) bool) int {
 	return -1
 }
 
-func callHasPrefix(c leverexec.Call, prefix string) bool {
+func callHasPrefix(c proc.Call, prefix string) bool {
 	full := strings.TrimSpace(c.Name + " " + strings.Join(c.Args, " "))
 	return strings.HasPrefix(full, prefix)
 }
@@ -618,15 +618,15 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
-	f := leverexec.NewFakeRunner()
-	f.Script("scion server start", leverexec.Result{})
-	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll, run inside ServerStart
-	f.Script("scion init", leverexec.Result{})
-	f.Script("scion hub link", leverexec.Result{})
-	f.Script("scion hub token create", leverexec.Result{Stdout: "Token: pat-mint-xyz\n"})
-	f.Script("scion server stop", leverexec.Result{})
-	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
+	f := proc.NewFakeRunner()
+	f.Script("scion server start", proc.Result{})
+	f.Script("scion list", proc.Result{}) // waitHubReady's poll, run inside ServerStart
+	f.Script("scion init", proc.Result{})
+	f.Script("scion hub link", proc.Result{})
+	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-mint-xyz\n"})
+	f.Script("scion server stop", proc.Result{})
+	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
 
 	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
@@ -648,12 +648,12 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("persisted PAT = %q, want %q", tok, "pat-mint-xyz")
 	}
 
-	iStart := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server start") })
-	iInit := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion init") })
-	iLink := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub link") })
-	iToken := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") })
-	iStop := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server stop") })
-	iRm := callIndex(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "sh -c if") })
+	iStart := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") })
+	iInit := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion init") })
+	iLink := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub link") })
+	iToken := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") })
+	iStop := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server stop") })
+	iRm := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "sh -c if") })
 	if iStart < 0 || iInit < 0 || iLink < 0 || iToken < 0 || iStop < 0 || iRm < 0 {
 		t.Fatalf("missing expected call(s); calls=%+v", f.Calls)
 	}
@@ -719,26 +719,26 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 // server stop → dev-token resolve/rm), everything except the "hub token
 // create" calls themselves — those differ per test by --name/token, so each
 // test scripts them individually via scriptTokenCreate.
-func scriptPATMintChain(f *leverexec.FakeRunner) {
-	f.Script("scion server start", leverexec.Result{})
-	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll, run inside ServerStart
-	f.Script("scion init", leverexec.Result{})
-	f.Script("scion hub link", leverexec.Result{})
-	f.Script("scion server stop", leverexec.Result{})
-	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
+func scriptPATMintChain(f *proc.FakeRunner) {
+	f.Script("scion server start", proc.Result{})
+	f.Script("scion list", proc.Result{}) // waitHubReady's poll, run inside ServerStart
+	f.Script("scion init", proc.Result{})
+	f.Script("scion hub link", proc.Result{})
+	f.Script("scion server stop", proc.Result{})
+	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
 }
 
 // scriptTokenCreate registers a distinct "hub token create --project lever
 // --name <name>" response so the fake runner can tell the controller and
 // remote mints apart (they differ only by --name, which lands right after
 // --project in the argv scion.Client.HubTokenCreate builds).
-func scriptTokenCreate(f *leverexec.FakeRunner, name, token string) {
-	f.Script("scion hub token create --project lever --name "+name, leverexec.Result{Stdout: "Token: " + token + "\n"})
+func scriptTokenCreate(f *proc.FakeRunner, name, token string) {
+	f.Script("scion hub token create --project lever --name "+name, proc.Result{Stdout: "Token: " + token + "\n"})
 }
 
 // countCalls returns how many recorded calls satisfy pred.
-func countCalls(calls []leverexec.Call, pred func(leverexec.Call) bool) int {
+func countCalls(calls []proc.Call, pred func(proc.Call) bool) int {
 	n := 0
 	for _, c := range calls {
 		if pred(c) {
@@ -751,7 +751,7 @@ func countCalls(calls []leverexec.Call, pred func(leverexec.Call) bool) int {
 // tokenCreateCallFor returns the "scion hub token create" call whose --name
 // flag equals name, so a test can inspect ITS --scopes argv directly rather
 // than assuming which of possibly several token-create calls is which.
-func tokenCreateCallFor(t *testing.T, calls []leverexec.Call, name string) leverexec.Call {
+func tokenCreateCallFor(t *testing.T, calls []proc.Call, name string) proc.Call {
 	t.Helper()
 	for _, c := range calls {
 		if !callHasPrefix(c, "scion hub token create") {
@@ -764,14 +764,14 @@ func tokenCreateCallFor(t *testing.T, calls []leverexec.Call, name string) lever
 		}
 	}
 	t.Fatalf("no hub token create call with --name %s found; calls=%+v", name, calls)
-	return leverexec.Call{}
+	return proc.Call{}
 }
 
 // scopesArg returns the literal value of a hub-token-create call's --scopes
 // flag (the exact argv element, not a substring of the joined command line —
 // a Contains check on the joined string passes even when extra scopes are
 // appended, since the expected prefix is still present).
-func scopesArg(t *testing.T, c leverexec.Call) string {
+func scopesArg(t *testing.T, c proc.Call) string {
 	t.Helper()
 	for i, a := range c.Args {
 		if a == "--scopes" && i+1 < len(c.Args) {
@@ -791,7 +791,7 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
-	f := leverexec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptPATMintChain(f)
 	scriptTokenCreate(f, "lever-controller", "pat-controller-1")
 	scriptTokenCreate(f, "lever-remote", "pat-remote-1")
@@ -800,7 +800,7 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
-	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
 		t.Fatalf("scion server start calls = %d, want 1 (one shared window)", n)
 	}
 	// The throwaway mint hub must never gain the web flags even though
@@ -821,10 +821,10 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	// deferred kill (belt-and-braces against a partial start) — see
 	// ensureControllerPAT's doc; TestEnsureControllerPATMintsThenNoOps checks
 	// existence for the same reason, not an exact count.
-	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server stop") }); n < 1 {
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server stop") }); n < 1 {
 		t.Fatalf("scion server stop calls = %d, want at least 1", n)
 	}
-	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 2 {
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 2 {
 		t.Fatalf("scion hub token create calls = %d, want 2 (controller + remote)", n)
 	}
 
@@ -880,7 +880,7 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := leverexec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptPATMintChain(f)
 	scriptTokenCreate(f, "lever-remote", "pat-remote-2")
 	// Deliberately NOT scripting "--name lever-controller": if the code
@@ -891,10 +891,10 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
-	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
 		t.Fatalf("scion server start calls = %d, want 1 (remote-only window still opens)", n)
 	}
-	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
 		t.Fatalf("scion hub token create calls = %d, want 1 (remote only)", n)
 	}
 
@@ -927,7 +927,7 @@ func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := leverexec.NewFakeRunner() // no scripts: any call is an error
+	f := proc.NewFakeRunner() // no scripts: any call is an error
 
 	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
@@ -945,7 +945,7 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
-	f := leverexec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptPATMintChain(f)
 	scriptTokenCreate(f, "lever-controller", "pat-controller-3")
 	// Deliberately NOT scripting "--name lever-remote": remoteEnabled=false
@@ -955,7 +955,7 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
-	if n := countCalls(f.Calls, func(c leverexec.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
 		t.Fatalf("scion hub token create calls = %d, want 1 (controller only)", n)
 	}
 	ctok, err := st.LoadControllerPAT()
@@ -1002,15 +1002,15 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := leverexec.NewFakeRunner()
-	f.Script("scion server start", leverexec.Result{})
-	f.Script("scion list", leverexec.Result{}) // waitHubReady's poll (throwaway AND real hub)
-	f.Script("scion init", leverexec.Result{})
-	f.Script("scion hub link", leverexec.Result{})
-	f.Script("scion hub token create", leverexec.Result{Stdout: "Token: pat-e2e-round-trip\n"})
-	f.Script("scion server stop", leverexec.Result{})
-	f.Script("sh -c printf", leverexec.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", leverexec.Result{})                           // the guarded removeJailFile rm
+	f := proc.NewFakeRunner()
+	f.Script("scion server start", proc.Result{})
+	f.Script("scion list", proc.Result{}) // waitHubReady's poll (throwaway AND real hub)
+	f.Script("scion init", proc.Result{})
+	f.Script("scion hub link", proc.Result{})
+	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-e2e-round-trip\n"})
+	f.Script("scion server stop", proc.Result{})
+	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
+	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -1033,10 +1033,10 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 
 	// bootstrap-token precedes scion-server: the throwaway (48080, dev-auth
 	// ON) server start must land BEFORE the real hub's (8080, dev-auth OFF).
-	iThrowaway := callIndex(f.Calls, func(c leverexec.Call) bool {
+	iThrowaway := callIndex(f.Calls, func(c proc.Call) bool {
 		return callHasPrefix(c, "scion server start --web-port 48080")
 	})
-	iReal := callIndex(f.Calls, func(c leverexec.Call) bool {
+	iReal := callIndex(f.Calls, func(c proc.Call) bool {
 		return callHasPrefix(c, "scion server start --web-port 8080")
 	})
 	if iThrowaway < 0 || iReal < 0 {

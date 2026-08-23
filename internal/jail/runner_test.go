@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // orbPrefix is a test-only helper mirroring the OrbStack backend's JailPrefix
@@ -18,8 +18,8 @@ func orbPrefix(machine, user string) []string {
 }
 
 func TestJailRunnerWrapsWithOrbEnv(t *testing.T) {
-	host := exec.NewFakeRunner()
-	host.Script("orb", exec.Result{Stdout: "ok"})
+	host := proc.NewFakeRunner()
+	host.Script("orb", proc.Result{Stdout: "ok"})
 	jr := New(Config{Host: host, Prefix: orbPrefix("lever-jail", "leveruser"), UID: "501"})
 	_, err := jr.Run(context.Background(), map[string]string{"SCION_HUB_ENDPOINT": "http://127.0.0.1:8080"}, "scion", "list", "--format", "json")
 	if err != nil {
@@ -37,8 +37,8 @@ func TestJailRunnerWrapsWithOrbEnv(t *testing.T) {
 }
 
 func TestJailRunnerRunInUsesEnvChdir(t *testing.T) {
-	host := exec.NewFakeRunner()
-	host.Script("orb", exec.Result{})
+	host := proc.NewFakeRunner()
+	host.Script("orb", proc.Result{})
 	jr := New(Config{Host: host, Prefix: orbPrefix("lever-jail", "leveruser"), UID: "501"})
 	_, _ = jr.RunIn(context.Background(), "/lever/workers/worker", nil, "scion", "init", "--non-interactive")
 	got := strings.Join(host.Calls[0].Args, " ")
@@ -52,8 +52,8 @@ func TestJailRunnerRunInUsesEnvChdir(t *testing.T) {
 
 func TestPrefixIsBackendShaped(t *testing.T) {
 	// A lima-shaped prefix produces limactl argv with the same env handling.
-	host := exec.NewFakeRunner()
-	host.Script("limactl", exec.Result{})
+	host := proc.NewFakeRunner()
+	host.Script("limactl", proc.Result{})
 	jr := New(Config{Host: host, Prefix: []string{"limactl", "shell", "lever-x"}, UID: "501"})
 	_, err := jr.Run(context.Background(), map[string]string{"A": "1"}, "true")
 	if err != nil {
@@ -92,8 +92,8 @@ func TestForceHostNetworkEscapeHatch(t *testing.T) {
 	}
 	// The transport itself is pure: it emits the knob iff Config says so.
 	for _, force := range []bool{false, true} {
-		host := exec.NewFakeRunner()
-		host.Script("orb", exec.Result{})
+		host := proc.NewFakeRunner()
+		host.Script("orb", proc.Result{})
 		jr := New(Config{Host: host, Prefix: orbPrefix("lever-x", "leveruser"), UID: "501", ForceHostNetwork: force})
 		if _, err := jr.Run(context.Background(), nil, "true"); err != nil {
 			t.Fatalf("run: %v", err)

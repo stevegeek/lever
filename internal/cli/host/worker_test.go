@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -53,8 +53,8 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := leverexec.NewFakeRunner()
-	f.Script("scion", leverexec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	sb := &stubBackend{runner: f}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
@@ -110,7 +110,7 @@ func TestWorkerPurgeRequiresForce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := leverexec.NewFakeRunner() // no scripts: any scion call errors loudly
+	f := proc.NewFakeRunner() // no scripts: any scion call errors loudly
 	sb := &stubBackend{runner: f}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
@@ -134,7 +134,7 @@ func TestWorkerPurgeUnknownWorker(t *testing.T) {
 	dir := workerInstanceDir(t)
 	t.Chdir(dir)
 
-	f := leverexec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	sb := &stubBackend{runner: f}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer

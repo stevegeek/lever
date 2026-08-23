@@ -12,7 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/backend/common"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // TestProfileIsSingleSourced guards against re-hardcoding the profile: OrbStack's
@@ -22,16 +22,16 @@ func TestProfileIsSingleSourced(t *testing.T) {
 	if !ok {
 		t.Fatal("backend.Candidates is missing orbstack")
 	}
-	if got := New(exec.RealRunner{}, "m").Profile(); got != want {
+	if got := New(proc.RealRunner{}, "m").Profile(); got != want {
 		t.Errorf("Profile() = %+v, want declared %+v", got, want)
 	}
 }
 
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &backendtest.ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "orb", Open: true}
-	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
-	r.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	r := &backendtest.ClosedChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "orb", Open: true}
+	r.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	r.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	r.Script("orb -m lever-jail getent ahosts host.orb.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
 	b := New(r, "lever-jail")
 	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
 	// live chain (existingClosedAlias never reads v6), so a re-apply that hits
@@ -64,10 +64,10 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 }
 
 func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	b := New(f, "lever-jail")
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
@@ -93,27 +93,27 @@ func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
 }
 
 // orbVersionScript scripts a successful `orb version` response for >= 2.1.1.
-func orbVersionScript(f *exec.FakeRunner) {
-	f.Script("orb version", exec.Result{Stdout: "Version: 2.2.1 (2020100)\n"})
+func orbVersionScript(f *proc.FakeRunner) {
+	f.Script("orb version", proc.Result{Stdout: "Version: 2.2.1 (2020100)\n"})
 }
 
-func scriptedMachine(f *exec.FakeRunner) {
+func scriptedMachine(f *proc.FakeRunner) {
 	orbVersionScript(f)
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"}) // machine already exists
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
-	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
+	f.Script("orb list", proc.Result{Stdout: "lever-jail running ubuntu\n"}) // machine already exists
+	f.Script("orb -m lever-jail whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", proc.Result{Stdout: "501\n"})
+	f.Script("orb -m lever-jail bash", proc.Result{Stdout: "ok\n"})
+	f.Script("orb -u root -m lever-jail bash", proc.Result{Stdout: "ok\n"})
 	// EnsureScion (when a test sets ScionSource/ScionVersion): guest arch detection.
-	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "arm64\n"})
+	f.Script("orb -m lever-jail uname -m", proc.Result{Stdout: "arm64\n"})
 	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 }
 
 func TestEnsureUpIsIdempotentWhenMachineExists(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	b := New(f, "lever-jail")
 
@@ -132,18 +132,18 @@ func TestEnsureUpIsIdempotentWhenMachineExists(t *testing.T) {
 }
 
 func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	orbVersionScript(f)
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
-	f.Script("orb create --isolated --mount", exec.Result{Stdout: "created\n"})
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
-	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
+	f.Script("orb list", proc.Result{Stdout: "\n"}) // no machines
+	f.Script("orb create --isolated --mount", proc.Result{Stdout: "created\n"})
+	f.Script("orb -m lever-jail whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", proc.Result{Stdout: "501\n"})
+	f.Script("orb -m lever-jail bash", proc.Result{Stdout: "ok\n"})
+	f.Script("orb -u root -m lever-jail bash", proc.Result{Stdout: "ok\n"})
 	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	b := New(f, "lever-jail")
 
 	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/Users/x/tree"}); err != nil {
@@ -163,10 +163,10 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 // --- ResolveRunUser: passive attach must resolve without provisioning. ---
 
 func TestResolveRunUserResolvesWhenMachineRunning(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail running ubuntu\n"})
+	f.Script("orb -m lever-jail whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", proc.Result{Stdout: "501\n"})
 	b := New(f, "lever-jail")
 
 	if err := b.ResolveRunUser(context.Background()); err != nil {
@@ -185,8 +185,8 @@ func TestResolveRunUserResolvesWhenMachineRunning(t *testing.T) {
 }
 
 func TestResolveRunUserErrorsWhenMachineAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "\n"}) // no machines
 	b := New(f, "lever-jail")
 
 	err := b.ResolveRunUser(context.Background())
@@ -204,8 +204,8 @@ func TestResolveRunUserErrorsWhenMachineAbsent(t *testing.T) {
 }
 
 func TestResolveRunUserErrorsWhenMachineNotRunning(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail stopped ubuntu\n"})
 	b := New(f, "lever-jail")
 
 	err := b.ResolveRunUser(context.Background())
@@ -224,16 +224,16 @@ func TestResolveRunUserErrorsWhenMachineNotRunning(t *testing.T) {
 }
 
 func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	orbVersionScript(f)
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "1000\n"}) // non-default uid
-	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f.Script("orb list", proc.Result{Stdout: "lever-jail running ubuntu\n"})
+	f.Script("orb -m lever-jail whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("orb -m lever-jail id -u", proc.Result{Stdout: "1000\n"}) // non-default uid
+	f.Script("orb -m lever-jail bash", proc.Result{Stdout: "ok\n"})
+	f.Script("orb -u root -m lever-jail bash", proc.Result{Stdout: "ok\n"})
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	b := New(f, "lever-jail")
 
 	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/Users/x/tree"}); err != nil {
@@ -245,14 +245,14 @@ func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 }
 
 func TestProfileDeclaresSharedKernelAndFragile(t *testing.T) {
-	p := New(exec.NewFakeRunner(), "lever-jail").Profile()
+	p := New(proc.NewFakeRunner(), "lever-jail").Profile()
 	if p.SeparateKernel || !p.VersionFragile {
 		t.Fatalf("orbstack profile wrong: %+v", p)
 	}
 }
 
 func TestProfileFSBoundedByIsHonest(t *testing.T) {
-	p := New(exec.NewFakeRunner(), "lever-jail").Profile()
+	p := New(proc.NewFakeRunner(), "lever-jail").Profile()
 	if !strings.Contains(p.FSBoundedBy, "/lever") {
 		t.Fatalf("Profile.FSBoundedBy should mention /lever mount; got %q", p.FSBoundedBy)
 	}
@@ -262,10 +262,10 @@ func TestProfileFSBoundedByIsHonest(t *testing.T) {
 }
 
 func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	b := New(f, "lever-jail")
 
 	if err := b.ApplyEgress(context.Background(), []int{3305}, false); err != nil {
@@ -289,9 +289,9 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 // --- Stop: power off, keep disk (distinct from Teardown). ---
 
 func TestStopStopsMachineWhenListed(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb stop lever-jail", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail running ubuntu\n"})
+	f.Script("orb stop lever-jail", proc.Result{})
 	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -302,8 +302,8 @@ func TestStopStopsMachineWhenListed(t *testing.T) {
 }
 
 func TestStopIsNoopWhenAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "\n"}) // no machines
 	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
 		t.Fatalf("Stop should be a no-op, got: %v", err)
 	}
@@ -315,9 +315,9 @@ func TestStopIsNoopWhenAbsent(t *testing.T) {
 }
 
 func TestStopOnAlreadyStoppedMachineIsHarmless(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
-	f.Script("orb stop lever-jail", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	f.Script("orb stop lever-jail", proc.Result{})
 	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
 		t.Fatalf("Stop on an already-stopped machine should be harmless, got: %v", err)
 	}
@@ -327,10 +327,10 @@ func TestStopOnAlreadyStoppedMachineIsHarmless(t *testing.T) {
 // treated as a no-op. ---
 
 func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
-	f.Script("orb start lever-jail", exec.Result{})
-	f.Script("orb -m lever-jail true", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	f.Script("orb start lever-jail", proc.Result{})
+	f.Script("orb -m lever-jail true", proc.Result{})
 	b := New(f, "lever-jail")
 
 	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
@@ -356,8 +356,8 @@ func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
 }
 
 func TestEnsureMachineRunningIsNoop(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail running ubuntu\n"})
 	b := New(f, "lever-jail")
 
 	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
@@ -371,9 +371,9 @@ func TestEnsureMachineRunningIsNoop(t *testing.T) {
 }
 
 func TestEnsureMachineStartTimesOutWhenUnreachable(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
-	f.Script("orb start lever-jail", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail stopped ubuntu\n"})
+	f.Script("orb start lever-jail", proc.Result{})
 	// "orb -m lever-jail true" is deliberately unscripted: FakeRunner errors on
 	// every unscripted call, simulating a machine that never becomes reachable.
 	b := New(f, "lever-jail")
@@ -389,9 +389,9 @@ func TestEnsureMachineStartTimesOutWhenUnreachable(t *testing.T) {
 }
 
 func TestTeardownDeletesMachineWhenPresent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb delete lever-jail", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "lever-jail running ubuntu\n"})
+	f.Script("orb delete lever-jail", proc.Result{})
 	if err := New(f, "lever-jail").Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -401,8 +401,8 @@ func TestTeardownDeletesMachineWhenPresent(t *testing.T) {
 }
 
 func TestTeardownIsNoopWhenAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
+	f := proc.NewFakeRunner()
+	f.Script("orb list", proc.Result{Stdout: "\n"}) // no machines
 	if err := New(f, "lever-jail").Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown should be a no-op, got: %v", err)
 	}
@@ -473,8 +473,8 @@ func TestOrbVersionAtLeast(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script("orb version", exec.Result{Stdout: tc.stdout})
+			f := proc.NewFakeRunner()
+			f.Script("orb version", proc.Result{Stdout: tc.stdout})
 			ok, got, err := common.VersionAtLeast(context.Background(), f, []string{"orb", "version"}, orbVersionRe, 2, 1, 1)
 			if tc.wantErr {
 				if err == nil {
@@ -496,8 +496,8 @@ func TestOrbVersionAtLeast(t *testing.T) {
 }
 
 func TestEnsureUpRejectsOldOrb(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb version", exec.Result{Stdout: "Version: 2.1.0 (1990000)\n"})
+	f := proc.NewFakeRunner()
+	f.Script("orb version", proc.Result{Stdout: "Version: 2.1.0 (1990000)\n"})
 	b := New(f, "lever-jail")
 
 	err := b.EnsureUp(context.Background(), backend.Config{
@@ -516,7 +516,7 @@ func TestEnsureUpRejectsOldOrb(t *testing.T) {
 }
 
 func TestEnsureUpInstallsPodman(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	b := New(f, "lever-jail")
 	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/t", AllowedPorts: nil}); err != nil {
@@ -535,13 +535,13 @@ func TestEnsureUpInstallsPodman(t *testing.T) {
 }
 
 func TestEnsureScionBuildsAndInstalls(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	f.Script("go build", exec.Result{})
-	f.Script("bash -c", exec.Result{})
+	f.Script("go build", proc.Result{})
+	f.Script("bash -c", proc.Result{})
 	// The install now reads a digest marker first and records one after.
-	f.Script("orb -m lever-jail sh -c", exec.Result{Code: 1})
-	f.Script("orb -u root -m lever-jail sh -c", exec.Result{})
+	f.Script("orb -m lever-jail sh -c", proc.Result{Code: 1})
+	f.Script("orb -u root -m lever-jail sh -c", proc.Result{})
 	src := t.TempDir() // must exist for the stat check
 	backendtest.StageFakeBuildOutput(t, "lever-jail")
 	b := New(f, "lever-jail")
@@ -599,7 +599,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 }
 
 func TestEnsureScionSkippedWhenEmpty(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	b := New(f, "lever-jail")
 
@@ -619,7 +619,7 @@ func TestEnsureScionSkippedWhenEmpty(t *testing.T) {
 }
 
 func TestEnsureScionSourceMissing(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	b := New(f, "lever-jail")
@@ -641,7 +641,7 @@ func TestEnsureScionSourceMissing(t *testing.T) {
 }
 
 func TestEnsureUpRequiresProjectTree(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	// No `orb version` needed: ProjectTree guard fires before the preflight.
 	b := New(f, "lever-jail")
 
@@ -659,7 +659,7 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 
 // resolvedOrb returns a backend whose run user is resolved (stephen/501)
 // through the same probes EnsureUp issues, without provisioning anything.
-func resolvedOrb(t *testing.T, f *exec.FakeRunner, machine string) *OrbStack {
+func resolvedOrb(t *testing.T, f *proc.FakeRunner, machine string) *OrbStack {
 	t.Helper()
 	backendtest.ScriptRunUser(f, "orb -m "+machine, "stephen", "501")
 	o := New(f, machine)
@@ -671,7 +671,7 @@ func resolvedOrb(t *testing.T, f *exec.FakeRunner, machine string) *OrbStack {
 }
 
 func TestJailTransportMethods(t *testing.T) {
-	o := resolvedOrb(t, exec.NewFakeRunner(), "lever-x")
+	o := resolvedOrb(t, proc.NewFakeRunner(), "lever-x")
 
 	if got := JailPrefix("lever-x", "stephen"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
 		t.Fatalf("JailPrefix = %v", got)
@@ -695,8 +695,8 @@ func TestJailTransportMethods(t *testing.T) {
 // is pinned directly through the root transport. ---
 
 func TestInstallGuestBinaryArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb", proc.Result{})
 	local := filepath.Join(t.TempDir(), "lever-agent")
 	if err := os.WriteFile(local, []byte("agent-bytes"), 0o755); err != nil {
 		t.Fatal(err)
@@ -720,9 +720,9 @@ func TestInstallGuestBinaryArgv(t *testing.T) {
 }
 
 func TestJailRunnerArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	o := resolvedOrb(t, f, "lever-x")
-	f.Script("orb", exec.Result{Stdout: "ok\n"})
+	f.Script("orb", proc.Result{Stdout: "ok\n"})
 	if _, err := o.JailRunner().Run(context.Background(), nil, "true"); err != nil {
 		t.Fatalf("JailRunner run: %v", err)
 	}
@@ -741,7 +741,7 @@ func TestJailRunnerArgv(t *testing.T) {
 }
 
 func TestAttachArgvFullPrefix(t *testing.T) {
-	o := resolvedOrb(t, exec.NewFakeRunner(), "lever-x")
+	o := resolvedOrb(t, proc.NewFakeRunner(), "lever-x")
 	attach := o.AttachArgv([]string{"scion", "attach"})
 	if wantPrefix := []string{"orb", "-m", "lever-x", "-u", "stephen", "env"}; !reflect.DeepEqual(attach[:6], wantPrefix) {
 		t.Fatalf("attach prefix mis-wired: %v", attach[:6])
@@ -752,7 +752,7 @@ func TestAttachArgvFullPrefix(t *testing.T) {
 }
 
 func TestRunUserUIDAfterEnsureUp(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f) // scripts whoami→leveruser, id -u→501
 	b := New(f, "lever-jail")
 
@@ -787,10 +787,10 @@ func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "aarch64\n"})
-	f.Script("orb -m lever-jail /usr/bin/sha256sum", exec.Result{Code: 1}) // not installed yet
+	f.Script("orb -m lever-jail uname -m", proc.Result{Stdout: "aarch64\n"})
+	f.Script("orb -m lever-jail /usr/bin/sha256sum", proc.Result{Code: 1}) // not installed yet
 	b := New(f, "lever-jail")
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
@@ -823,7 +823,7 @@ func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	backendtest.ScriptScionInstall(t, f, "orb -m lever-jail", "lever-jail")
 	b := New(f, "lever-jail")
@@ -844,7 +844,7 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	backendtest.ScriptScionInstall(t, f, "orb -m lever-jail", "lever-jail")
 	b := New(f, "lever-jail")

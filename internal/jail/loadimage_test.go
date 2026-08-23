@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestLoadImageArgs(t *testing.T) {
@@ -68,20 +68,20 @@ const (
 // and jailImageID (an `orb …` prefix call) resolve independently. A missing
 // script for either binary makes that side error — the real-world "image not
 // present / inspect exits non-zero" case — which the readers map to "".
-func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *exec.FakeRunner {
+func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *proc.FakeRunner {
 	t.Helper()
-	r := exec.NewFakeRunner()
+	r := proc.NewFakeRunner()
 	if hostOut != "" {
-		r.Script("docker", exec.Result{Stdout: hostOut})
+		r.Script("docker", proc.Result{Stdout: hostOut})
 	}
 	if jailOut != "" {
-		r.Script("orb", exec.Result{Stdout: jailOut})
+		r.Script("orb", proc.Result{Stdout: jailOut})
 	}
 	return r
 }
 
 // TestImageLoaded exercises the fail-open host-vs-jail comparison offline
-// through the exec.Runner seam — previously unreachable because the readers
+// through the proc.Runner seam — previously unreachable because the readers
 // shelled out to os/exec directly.
 func TestImageLoaded(t *testing.T) {
 	prefix := orbPrefix("lever-demo", "leveruser")
@@ -133,7 +133,7 @@ func TestImageLoadedUsesHostSeam(t *testing.T) {
 // TestPruneImagesErrorPropagates: a failing prune surfaces a wrapped error (the
 // only call site logs it non-fatally), rather than being swallowed.
 func TestPruneImagesErrorPropagates(t *testing.T) {
-	r := exec.NewFakeRunner() // no script for the prefix binary -> Run errors
+	r := proc.NewFakeRunner() // no script for the prefix binary -> Run errors
 	err := PruneImages(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501")
 	if err == nil {
 		t.Fatal("PruneImages must propagate the runner error")
@@ -146,8 +146,8 @@ func TestPruneImagesErrorPropagates(t *testing.T) {
 // TestPruneImagesSuccess: a clean prune returns nil and drives the prune argv
 // through the host runner.
 func TestPruneImagesSuccess(t *testing.T) {
-	r := exec.NewFakeRunner()
-	r.Script("orb", exec.Result{})
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
 	if err := PruneImages(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501"); err != nil {
 		t.Fatalf("PruneImages: %v", err)
 	}
@@ -176,8 +176,8 @@ func TestPruneImagesArgs(t *testing.T) {
 // `podman load` as stdin, through the prefix argv — no host shell, no pipeline
 // string.
 func TestLoadImageStreamsSaveIntoPodmanLoad(t *testing.T) {
-	r := exec.NewFakeRunner()
-	r.Script("orb", exec.Result{})
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
 	err := loadImage(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", func(w io.Writer) error {
 		_, err := io.WriteString(w, "tarball-bytes")
 		return err
@@ -200,8 +200,8 @@ func TestLoadImageStreamsSaveIntoPodmanLoad(t *testing.T) {
 // A failing producer is reported as the cause, not masked by the consumer's
 // short read.
 func TestLoadImageReportsSaveFailure(t *testing.T) {
-	r := exec.NewFakeRunner()
-	r.Script("orb", exec.Result{})
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
 	err := loadImage(context.Background(), r, orbPrefix("m", "u"), "501", func(io.Writer) error {
 		return errors.New("docker save: no such image")
 	})
@@ -211,7 +211,7 @@ func TestLoadImageReportsSaveFailure(t *testing.T) {
 }
 
 func TestLoadImageReportsLoadFailure(t *testing.T) {
-	r := exec.NewFakeRunner() // unscripted orb -> load fails
+	r := proc.NewFakeRunner() // unscripted orb -> load fails
 	err := loadImage(context.Background(), r, orbPrefix("m", "u"), "501", func(w io.Writer) error {
 		_, err := io.WriteString(w, "x")
 		return err
@@ -224,10 +224,10 @@ func TestLoadImageReportsLoadFailure(t *testing.T) {
 // unreadRunner fails the load without ever reading stdin, the way a podman
 // that rejects the command up front does. The producer then sees a closed
 // pipe; that write error must not mask the load's own stderr.
-type unreadRunner struct{ exec.Runner }
+type unreadRunner struct{ proc.Runner }
 
-func (unreadRunner) RunStdin(context.Context, io.Reader, map[string]string, string, ...string) (exec.Result, error) {
-	return exec.Result{Code: 125, Stderr: "Error: cannot connect to podman\n"}, errors.New("exit status 125")
+func (unreadRunner) RunStdin(context.Context, io.Reader, map[string]string, string, ...string) (proc.Result, error) {
+	return proc.Result{Code: 125, Stderr: "Error: cannot connect to podman\n"}, errors.New("exit status 125")
 }
 
 func TestLoadImageLoadFailureBeforeDrainKeepsLoadStderr(t *testing.T) {

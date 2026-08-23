@@ -4,12 +4,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestGoBinaryResolvesGOROOT(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
+	f := proc.NewFakeRunner()
+	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	got, err := GoBinary(context.Background(), f)
 	if err != nil {
 		t.Fatalf("GoBinary: %v", err)
@@ -20,7 +20,7 @@ func TestGoBinaryResolvesGOROOT(t *testing.T) {
 }
 
 func TestGoBinaryErrorsWithoutGo(t *testing.T) {
-	if _, err := GoBinary(context.Background(), exec.NewFakeRunner()); err == nil {
+	if _, err := GoBinary(context.Background(), proc.NewFakeRunner()); err == nil {
 		t.Fatal("expected an error when go is not on PATH")
 	}
 }

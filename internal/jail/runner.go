@@ -1,4 +1,4 @@
-// Package jail provides a JailRunner: an exec.Runner that executes commands
+// Package jail provides a JailRunner: an proc.Runner that executes commands
 // INSIDE a jail via a backend-supplied argv prefix — e.g.
 // ["orb","-m",m,"-u",u] (OrbStack) or ["limactl","shell",vm] (Lima) — followed
 // by `env [-C dir] K=V… cmd args`. GNU `env` sets the jail environment (and
@@ -15,11 +15,11 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
-// compile-time assertion: *Runner satisfies exec.Runner
-var _ exec.Runner = (*Runner)(nil)
+// compile-time assertion: *Runner satisfies proc.Runner
+var _ proc.Runner = (*Runner)(nil)
 
 // ForceHostNetworkEnv is the host-side escape hatch that makes every in-jail
 // scion command fall back to `--network=host` (a shared netns) for debugging —
@@ -39,7 +39,7 @@ func ForceHostNetworkFromEnv() bool {
 
 // Config is everything a Runner needs to reach one jail.
 type Config struct {
-	Host   exec.Runner // host runner (the prefix binary runs on the host)
+	Host   proc.Runner // host runner (the prefix binary runs on the host)
 	Prefix []string    // backend argv prefix, e.g. ["orb","-m",m,"-u",u]
 	UID    string      // run-user uid, for XDG_RUNTIME_DIR
 	// ForceHostNetwork re-emits scion's SCION_FORCE_HOST_NETWORK so agents run
@@ -105,16 +105,16 @@ func (r *Runner) argv(dir string, env map[string]string, name string, args []str
 	return argv
 }
 
-func (r *Runner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *Runner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-func (r *Runner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *Runner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	argv := r.argv(dir, env, name, args)
 	return r.cfg.Host.Run(ctx, nil, argv[0], argv[1:]...)
 }
 
-func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
 	argv := r.argv("", env, name, args)
 	return r.cfg.Host.RunStdin(ctx, stdin, nil, argv[0], argv[1:]...)
 }

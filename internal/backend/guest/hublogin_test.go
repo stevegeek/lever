@@ -9,7 +9,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
 
 	"gopkg.in/yaml.v3"
@@ -237,8 +237,8 @@ func TestLoginForwardScriptUsesAbsolutePathsAndTheRightArgv(t *testing.T) {
 }
 
 func TestWriteScionSettingsIsAtomicAndUserOwned(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -m lever-x bash -c", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb -m lever-x bash -c", proc.Result{})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-x"}}
 	if err := g.writeScionSettings(context.Background(), []byte("server: {}\n")); err != nil {
 		t.Fatalf("writeScionSettings: %v", err)
@@ -370,10 +370,10 @@ func TestDisableHubLoginReportsOnlyWhatTheHubWasServing(t *testing.T) {
 			"removing the forwarder changes nothing the hub reads, so it cannot be worth a restart"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script("orb -u root -m m bash -c", exec.Result{Stdout: tc.forwards})
-			f.Script("orb -m m /bin/bash -c", exec.Result{Stdout: "LEGACY 0\n" + tc.settings})
-			f.Script("orb -m m bash -c", exec.Result{})
+			f := proc.NewFakeRunner()
+			f.Script("orb -u root -m m bash -c", proc.Result{Stdout: tc.forwards})
+			f.Script("orb -m m /bin/bash -c", proc.Result{Stdout: "LEGACY 0\n" + tc.settings})
+			f.Script("orb -m m bash -c", proc.Result{})
 			g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
 
 			changed, err := g.DisableHubLogin(context.Background())
@@ -394,13 +394,13 @@ func TestDisableHubLoginReportsOnlyWhatTheHubWasServing(t *testing.T) {
 // here would restart the hub every apply on any guest whose settings lever
 // cannot parse.
 func TestDisableHubLoginReportsNoChangeWhenItCannotRead(t *testing.T) {
-	for name, read := range map[string]exec.Result{
+	for name, read := range map[string]proc.Result{
 		"unparseable output": {Stdout: "not the LEGACY header at all\n"},
 		"not yaml":           {Stdout: "LEGACY 0\n\tthis: [is not\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script("orb -u root -m m bash -c", exec.Result{Stdout: "FOUND 1\n"})
+			f := proc.NewFakeRunner()
+			f.Script("orb -u root -m m bash -c", proc.Result{Stdout: "FOUND 1\n"})
 			f.Script("orb -m m /bin/bash -c", read)
 			g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
 

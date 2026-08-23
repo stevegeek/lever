@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	lexec "github.com/stevegeek/lever/internal/exec"
+	lexec "github.com/stevegeek/lever/internal/proc"
 )
 
 func fakeRunner() *lexec.FakeRunner         { return lexec.NewFakeRunner() }

@@ -15,9 +15,9 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/daemon"
-	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -60,7 +60,7 @@ func machineName(app *config.App) string { return "lever-" + app.Name }
 // agentRole is the instance's configured scion.agent_role; empty omits the
 // --role flag (see config.ScionConfig.AgentRole). It is threaded in rather than
 // read from config here so package scion stays a thin, config-free wrapper.
-func HostScionClient(jr leverexec.Runner, st state.State, agentRole string) *scion.Client {
+func HostScionClient(jr proc.Runner, st state.State, agentRole string) *scion.Client {
 	return scion.New(jr, scion.Options{
 		HubEndpoint:    scion.DefaultHubEndpoint,
 		HubTokenSource: controllerPAT(st),
@@ -90,7 +90,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	// app.Backend was validated selectable at config.Load, so this cannot pick a
 	// planned backend; routing through the registry keeps the mount dest coming
 	// from the SELECTED backend rather than a hardwired one.
-	be, err := registry.Select(app.Backend, leverexec.RealRunner{}, machineName(app))
+	be, err := registry.Select(app.Backend, proc.RealRunner{}, machineName(app))
 	if err != nil {
 		return err
 	}
@@ -255,7 +255,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	if env.JailUser == "" || env.JailUID == "" {
 		return d, nil
 	}
-	jr, err := registry.JailRunner(app.Backend, leverexec.RealRunner{}, machineName(app), env.JailUser, env.JailUID)
+	jr, err := registry.JailRunner(app.Backend, proc.RealRunner{}, machineName(app), env.JailUser, env.JailUID)
 	if err != nil {
 		return broker.DispatchConfig{}, err
 	}

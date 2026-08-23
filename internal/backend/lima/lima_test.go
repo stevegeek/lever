@@ -13,7 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/backend/common"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // TestProfileIsSingleSourced guards against re-hardcoding the profile: Lima's
@@ -23,13 +23,13 @@ func TestProfileIsSingleSourced(t *testing.T) {
 	if !ok {
 		t.Fatal("backend.Candidates is missing lima")
 	}
-	if got := New(exec.NewFakeRunner(), "lever-x").Profile(); got != want {
+	if got := New(proc.NewFakeRunner(), "lever-x").Profile(); got != want {
 		t.Errorf("Profile() = %+v, want declared %+v", got, want)
 	}
 }
 
 func TestProfileDeclaresSeparateKernel(t *testing.T) {
-	p := New(exec.NewFakeRunner(), "lever-x").Profile()
+	p := New(proc.NewFakeRunner(), "lever-x").Profile()
 	if !p.SeparateKernel {
 		t.Fatalf("lima profile should declare SeparateKernel=true (own VM kernel); got %+v", p)
 	}
@@ -37,29 +37,29 @@ func TestProfileDeclaresSeparateKernel(t *testing.T) {
 
 // limaVersionScript scripts a successful `limactl --version` response for the
 // installed dev version (verified live: `limactl version 2.1.3`).
-func limaVersionScript(f *exec.FakeRunner) {
-	f.Script("limactl --version", exec.Result{Stdout: "limactl version 2.1.3\n"})
+func limaVersionScript(f *proc.FakeRunner) {
+	f.Script("limactl --version", proc.Result{Stdout: "limactl version 2.1.3\n"})
 }
 
 // scriptedVM scripts a fully up (Running) VM: version, list, whoami/id -u,
 // runtimes, egress. Used by tests that only care about post-EnsureUp state.
-func scriptedVM(f *exec.FakeRunner) {
+func scriptedVM(f *proc.FakeRunner) {
 	limaVersionScript(f)
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Running\n"})
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
-	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
-	f.Script("limactl shell lever-x bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x sudo bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x uname -m", exec.Result{Stdout: "arm64\n"})
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	f.Script("limactl shell lever-x whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("limactl shell lever-x id -u", proc.Result{Stdout: "501\n"})
+	f.Script("limactl shell lever-x bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x sudo bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x uname -m", proc.Result{Stdout: "arm64\n"})
+	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
+	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
 }
 
 // callIndex returns the index of the first "limactl" call whose leading args
 // exactly match want, or -1.
-func callIndex(calls []exec.Call, want []string) int {
+func callIndex(calls []proc.Call, want []string) int {
 	for i, c := range calls {
 		if c.Name != "limactl" || len(c.Args) < len(want) {
 			continue
@@ -82,19 +82,19 @@ func callIndex(calls []exec.Call, want []string) int {
 // whoami/id -u, runtimes, egress, in that order. ---
 
 func TestEnsureUpFreshHostFullSequence(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	limaVersionScript(f)
-	f.Script("limactl list --format", exec.Result{Stdout: ""}) // no VMs yet
-	f.Script("limactl create --name=lever-x --tty=false", exec.Result{Stdout: "created\n"})
+	f.Script("limactl list --format", proc.Result{Stdout: ""}) // no VMs yet
+	f.Script("limactl create --name=lever-x --tty=false", proc.Result{Stdout: "created\n"})
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
-	f.Script("limactl start --tty=false lever-x", exec.Result{Stdout: "started\n"})
-	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
-	f.Script("limactl shell lever-x bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x sudo bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	f.Script("limactl start --tty=false lever-x", proc.Result{Stdout: "started\n"})
+	f.Script("limactl shell lever-x whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("limactl shell lever-x id -u", proc.Result{Stdout: "501\n"})
+	f.Script("limactl shell lever-x bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x sudo bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
+	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
 	l := New(f, "lever-x")
 
 	if err := l.EnsureUp(context.Background(), backend.Config{
@@ -137,7 +137,7 @@ func TestEnsureUpFreshHostFullSequence(t *testing.T) {
 // --- Test 2: idempotency — Running VM → no create, no start. ---
 
 func TestEnsureUpIsIdempotentWhenRunning(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedVM(f) // "lever-x Running"
 	l := New(f, "lever-x")
 
@@ -162,18 +162,18 @@ func TestEnsureUpIsIdempotentWhenRunning(t *testing.T) {
 // --- Test 3: Stopped VM → start but no create. ---
 
 func TestEnsureUpStartsStoppedVMWithoutCreate(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	limaVersionScript(f)
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Stopped\n"})
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Stopped\n"})
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
-	f.Script("limactl start --tty=false lever-x", exec.Result{})
-	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
-	f.Script("limactl shell lever-x bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x sudo bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \n"})
-	f.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	f.Script("limactl start --tty=false lever-x", proc.Result{})
+	f.Script("limactl shell lever-x whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("limactl shell lever-x id -u", proc.Result{Stdout: "501\n"})
+	f.Script("limactl shell lever-x bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x sudo bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \n"})
+	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
+	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
 	l := New(f, "lever-x")
 
 	if err := l.EnsureUp(context.Background(), backend.Config{
@@ -203,8 +203,8 @@ func TestEnsureUpStartsStoppedVMWithoutCreate(t *testing.T) {
 // --- Test 4: version preflight — Lima >= 2.0.0 required. ---
 
 func TestEnsureUpRejectsOldLima(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl --version", exec.Result{Stdout: "limactl version 0.23.0\n"})
+	f := proc.NewFakeRunner()
+	f.Script("limactl --version", proc.Result{Stdout: "limactl version 0.23.0\n"})
 	l := New(f, "lever-x")
 
 	err := l.EnsureUp(context.Background(), backend.Config{
@@ -238,8 +238,8 @@ func TestLimaVersionAtLeast(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script("limactl --version", exec.Result{Stdout: tc.stdout})
+			f := proc.NewFakeRunner()
+			f.Script("limactl --version", proc.Result{Stdout: tc.stdout})
 			ok, got, err := common.VersionAtLeast(context.Background(), f, []string{"limactl", "--version"}, limaVersionRe, 2, 0, 0)
 			if tc.wantErr {
 				if err == nil {
@@ -263,10 +263,10 @@ func TestLimaVersionAtLeast(t *testing.T) {
 // --- ResolveRunUser: passive attach must resolve without provisioning. ---
 
 func TestResolveRunUserResolvesWhenVMRunning(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
-	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "501\n"})
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl shell lever-x whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("limactl shell lever-x id -u", proc.Result{Stdout: "501\n"})
 	l := New(f, "lever-x")
 
 	if err := l.ResolveRunUser(context.Background()); err != nil {
@@ -287,8 +287,8 @@ func TestResolveRunUserResolvesWhenVMRunning(t *testing.T) {
 }
 
 func TestResolveRunUserErrorsWhenVMAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: ""}) // no VMs
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: ""}) // no VMs
 	l := New(f, "lever-x")
 
 	err := l.ResolveRunUser(context.Background())
@@ -306,8 +306,8 @@ func TestResolveRunUserErrorsWhenVMAbsent(t *testing.T) {
 }
 
 func TestResolveRunUserErrorsWhenVMStopped(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Stopped\n"})
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Stopped\n"})
 	l := New(f, "lever-x")
 
 	err := l.ResolveRunUser(context.Background())
@@ -330,9 +330,9 @@ func TestResolveRunUserErrorsWhenVMStopped(t *testing.T) {
 // --- Test 5: teardown. ---
 
 func TestTeardownDeletesVMWhenPresent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
-	f.Script("limactl delete --force lever-x", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl delete --force lever-x", proc.Result{})
 	if err := New(f, "lever-x").Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -343,8 +343,8 @@ func TestTeardownDeletesVMWhenPresent(t *testing.T) {
 }
 
 func TestTeardownIsNoopWhenAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: ""})
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: ""})
 	if err := New(f, "lever-x").Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown should be a no-op, got: %v", err)
 	}
@@ -358,9 +358,9 @@ func TestTeardownIsNoopWhenAbsent(t *testing.T) {
 // --- Stop: power off, keep disk (distinct from Teardown). ---
 
 func TestStopStopsVMWhenListed(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
-	f.Script("limactl stop lever-x", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl stop lever-x", proc.Result{})
 	if err := New(f, "lever-x").Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -371,8 +371,8 @@ func TestStopStopsVMWhenListed(t *testing.T) {
 }
 
 func TestStopIsNoopWhenVMAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: ""}) // no VMs
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: ""}) // no VMs
 	if err := New(f, "lever-x").Stop(context.Background()); err != nil {
 		t.Fatalf("Stop should be a no-op, got: %v", err)
 	}
@@ -384,9 +384,9 @@ func TestStopIsNoopWhenVMAbsent(t *testing.T) {
 }
 
 func TestStopOnAlreadyStoppedVMIsHarmless(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Stopped\n"})
-	f.Script("limactl stop lever-x", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Stopped\n"})
+	f.Script("limactl stop lever-x", proc.Result{})
 	if err := New(f, "lever-x").Stop(context.Background()); err != nil {
 		t.Fatalf("Stop on an already-stopped VM should be harmless, got: %v", err)
 	}
@@ -395,24 +395,24 @@ func TestStopOnAlreadyStoppedVMIsHarmless(t *testing.T) {
 // --- Test 6: DockerHost — default before EnsureUp, resolved uid after. ---
 
 func TestDockerHostDefaultBeforeEnsureUp(t *testing.T) {
-	l := New(exec.NewFakeRunner(), "lever-x")
+	l := New(proc.NewFakeRunner(), "lever-x")
 	if got := l.DockerHost(); got != "unix:///run/user/501/docker.sock" {
 		t.Fatalf("DockerHost() before EnsureUp = %q", got)
 	}
 }
 
 func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	limaVersionScript(f)
-	f.Script("limactl list --format", exec.Result{Stdout: "lever-x Running\n"})
+	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Running\n"})
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
-	f.Script("limactl shell lever-x whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("limactl shell lever-x id -u", exec.Result{Stdout: "1000\n"}) // non-default uid
-	f.Script("limactl shell lever-x bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x sudo bash", exec.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \n"})
-	f.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	f.Script("limactl shell lever-x whoami", proc.Result{Stdout: "leveruser\n"})
+	f.Script("limactl shell lever-x id -u", proc.Result{Stdout: "1000\n"}) // non-default uid
+	f.Script("limactl shell lever-x bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x sudo bash", proc.Result{Stdout: "ok\n"})
+	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \n"})
+	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
+	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
 	l := New(f, "lever-x")
 
 	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: "lever-x", ProjectTree: "/Users/x/tree"}); err != nil {
@@ -426,7 +426,7 @@ func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 // --- Test 7: HostToolAlias + JailPrefix. ---
 
 func TestHostToolAliasAndJailPrefix(t *testing.T) {
-	if got := New(exec.NewFakeRunner(), "lever-x").HostToolAlias(); got != "host.lima.internal" {
+	if got := New(proc.NewFakeRunner(), "lever-x").HostToolAlias(); got != "host.lima.internal" {
 		t.Fatalf("HostToolAlias() = %q", got)
 	}
 	if got := JailPrefix("v"); !reflect.DeepEqual(got, []string{"limactl", "shell", "v"}) {
@@ -436,7 +436,7 @@ func TestHostToolAliasAndJailPrefix(t *testing.T) {
 
 // resolvedLima returns a backend whose run user is resolved (leveruser/501)
 // through the same probes EnsureUp issues, without provisioning anything.
-func resolvedLima(t *testing.T, f *exec.FakeRunner, vm string) *Lima {
+func resolvedLima(t *testing.T, f *proc.FakeRunner, vm string) *Lima {
 	t.Helper()
 	backendtest.ScriptRunUser(f, "limactl shell "+vm, "leveruser", "501")
 	l := New(f, vm)
@@ -448,7 +448,7 @@ func resolvedLima(t *testing.T, f *exec.FakeRunner, vm string) *Lima {
 }
 
 func TestJailTransportMethods(t *testing.T) {
-	l := resolvedLima(t, exec.NewFakeRunner(), "lever-x")
+	l := resolvedLima(t, proc.NewFakeRunner(), "lever-x")
 
 	if l.JailRunner() == nil {
 		t.Fatal("JailRunner() = nil")
@@ -469,8 +469,8 @@ func TestJailTransportMethods(t *testing.T) {
 // is pinned directly through the root transport. ---
 
 func TestInstallGuestBinaryArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("limactl", proc.Result{})
 	local := filepath.Join(t.TempDir(), "lever-agent")
 	if err := os.WriteFile(local, []byte("agent-bytes"), 0o755); err != nil {
 		t.Fatal(err)
@@ -494,9 +494,9 @@ func TestInstallGuestBinaryArgv(t *testing.T) {
 }
 
 func TestJailRunnerArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	l := resolvedLima(t, f, "lever-x")
-	f.Script("limactl", exec.Result{Stdout: "ok\n"})
+	f.Script("limactl", proc.Result{Stdout: "ok\n"})
 	if _, err := l.JailRunner().Run(context.Background(), nil, "true"); err != nil {
 		t.Fatalf("JailRunner run: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestJailRunnerArgv(t *testing.T) {
 }
 
 func TestAttachArgvFullPrefix(t *testing.T) {
-	l := resolvedLima(t, exec.NewFakeRunner(), "lever-x")
+	l := resolvedLima(t, proc.NewFakeRunner(), "lever-x")
 	attach := l.AttachArgv([]string{"scion", "attach"})
 	if wantPrefix := []string{"limactl", "shell", "lever-x", "env"}; !reflect.DeepEqual(attach[:4], wantPrefix) {
 		t.Fatalf("attach prefix mis-wired: %v", attach[:4])
@@ -528,7 +528,7 @@ func TestAttachArgvFullPrefix(t *testing.T) {
 // --- Additional coverage mirroring orbstack's suite. ---
 
 func TestEnsureUpRequiresProjectTree(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	// No `limactl --version` needed: the ProjectTree guard fires before the preflight.
 	l := New(f, "lever-x")
 
@@ -545,8 +545,8 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 }
 
 func TestResolveHostAliasParsesBothFamilies(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "" +
+	f := proc.NewFakeRunner()
+	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "" +
 		"fd07:b51a:cc66:f0::fe STREAM host.lima.internal\n" +
 		"0.250.250.254   STREAM \n"})
 	l := New(f, "lever-x")
@@ -564,10 +564,10 @@ func TestResolveHostAliasParsesBothFamilies(t *testing.T) {
 }
 
 func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
+	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
 	l := New(f, "lever-x")
 
 	if err := l.ApplyEgress(context.Background(), []int{3305}, false); err != nil {
@@ -592,10 +592,10 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 }
 
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &backendtest.ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "limactl", Open: true}
-	r.Script("limactl shell lever-x sudo iptables", exec.Result{})
-	r.Script("limactl shell lever-x sudo ip6tables", exec.Result{})
-	r.Script("limactl shell lever-x getent ahosts host.lima.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
+	r := &backendtest.ClosedChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "limactl", Open: true}
+	r.Script("limactl shell lever-x sudo iptables", proc.Result{})
+	r.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
+	r.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
 	l := New(r, "lever-x")
 	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
 	// live chain, so a re-apply that hits the skip must leave a prior
@@ -637,7 +637,7 @@ func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedVM(f)
 	backendtest.ScriptScionInstall(t, f, "limactl shell lever-x", "lever-x")
 	l := New(f, "lever-x")
@@ -658,7 +658,7 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedVM(f)
 	backendtest.ScriptScionInstall(t, f, "limactl shell lever-x", "lever-x")
 	l := New(f, "lever-x")

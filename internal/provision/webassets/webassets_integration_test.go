@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
@@ -32,7 +32,7 @@ func TestRealScionWebBuild(t *testing.T) {
 		// The pin examples/ and the docs ship today.
 		version = "e82a2a08"
 	}
-	r := exec.RealRunner{}
+	r := proc.RealRunner{}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 

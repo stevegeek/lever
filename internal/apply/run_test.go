@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
@@ -143,22 +143,22 @@ func isObserveList(args []string) bool {
 // taken), and every call after that reports it running/running (so the
 // post-start liveness verify converges as soon as Start finally succeeds).
 type flakyStartRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	slug       string
 	startFails int
 	startCalls int
 	listCalls  int
 }
 
-func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		if isObserveList(args) {
 			r.listCalls++
-			r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
+			r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 			if r.listCalls == 1 {
-				return exec.Result{Stdout: "[]"}, nil
+				return proc.Result{Stdout: "[]"}, nil
 			}
-			return exec.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
+			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
 		}
 		hasStart, hasServer, isProbe := false, false, false
 		for _, a := range args {
@@ -176,21 +176,21 @@ func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string
 		}
 		if isProbe {
 			// Answer as a scion WITHOUT --role, matching the pins lever can fetch.
-			return exec.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
+			return proc.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
 		}
 		if hasStart && !hasServer { // agent start, not `scion server start`
 			r.startCalls++
 			if r.startCalls <= r.startFails {
 				// Client.run builds its error from Stdout+Stderr, so the marker must
 				// live there, not just in the Go error.
-				return exec.Result{Code: 1, Stderr: "no_runtime_broker: No runtime brokers available for this project"}, fmt.Errorf("exit status 1")
+				return proc.Result{Code: 1, Stderr: "no_runtime_broker: No runtime brokers available for this project"}, fmt.Errorf("exit status 1")
 			}
 		}
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -203,20 +203,20 @@ func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name 
 // call after that reports it running/running (so the post-start liveness
 // verify converges once AlreadyRunning is tolerated as success).
 type alreadyUpRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	slug      string
 	listCalls int
 }
 
-func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		if isObserveList(args) {
 			r.listCalls++
-			r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
+			r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 			if r.listCalls == 1 {
-				return exec.Result{Stdout: "[]"}, nil
+				return proc.Result{Stdout: "[]"}, nil
 			}
-			return exec.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
+			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
 		}
 		hasServer, hasStart := false, false
 		for _, a := range args {
@@ -228,16 +228,16 @@ func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]
 			}
 		}
 		if hasServer && hasStart {
-			return exec.Result{Code: 1, Stderr: "Error: server is already running (PID: 123)"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "Error: server is already running (PID: 123)"}, fmt.Errorf("exit status 1")
 		}
 		if hasStart && !hasServer {
-			return exec.Result{Code: 1, Stderr: "Error: agent already running"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "Error: agent already running"}, fmt.Errorf("exit status 1")
 		}
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -261,7 +261,7 @@ func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name s
 // argv is still exercised and recorded), and the post-create liveness poll
 // converges on the very next list call.
 type agentLifecycleRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	slug string
 
 	initPhase, initContainerStatus   string
@@ -312,7 +312,7 @@ func (r *agentLifecycleRunner) goLive() {
 }
 
 func (r *agentLifecycleRunner) record(dir string, env map[string]string, name string, args []string) {
-	r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
+	r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 }
 
 // verb extracts the scion subcommand from args, skipping the leading `-g
@@ -342,7 +342,7 @@ func (r *agentLifecycleRunner) verb(args []string) string {
 	return args[0]
 }
 
-func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name != "scion" {
 		return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 	}
@@ -350,25 +350,25 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	switch r.verb(args) {
 	case "role-probe":
 		// Answer as a scion WITHOUT --role, matching the pins lever can fetch.
-		return exec.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
+		return proc.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
 	case "list":
 		r.listCalls++
 		r.record(dir, env, name, args)
 		if r.listErr != nil && (r.listFailsThenSucceed == 0 || r.listCalls <= r.listFailsThenSucceed) {
-			return exec.Result{Code: 1, Stderr: r.listErr.Error()}, r.listErr
+			return proc.Result{Code: 1, Stderr: r.listErr.Error()}, r.listErr
 		}
 		if r.phase == "" {
-			return exec.Result{Stdout: "[]"}, nil
+			return proc.Result{Stdout: "[]"}, nil
 		}
-		return exec.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
+		return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
 	case "start":
 		r.startCalls++
 		r.record(dir, env, name, args)
 		if r.startErr != nil {
-			return exec.Result{Code: 1, Stderr: r.startErr.Error()}, r.startErr
+			return proc.Result{Code: 1, Stderr: r.startErr.Error()}, r.startErr
 		}
 		r.goLive()
-		return exec.Result{Stdout: "ok"}, nil
+		return proc.Result{Stdout: "ok"}, nil
 	case "resume":
 		r.resumeCalls++
 		for _, a := range args {
@@ -381,33 +381,33 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 			if r.healerRecoversOnResumeFail {
 				r.goLive()
 			}
-			return exec.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
+			return proc.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
 		}
 		r.goLive()
-		return exec.Result{Stdout: "ok"}, nil
+		return proc.Result{Stdout: "ok"}, nil
 	case "delete":
 		r.deleteCalls++
 		r.record(dir, env, name, args)
 		if r.deleteErr != nil {
-			return exec.Result{Code: 1, Stderr: r.deleteErr.Error()}, r.deleteErr
+			return proc.Result{Code: 1, Stderr: r.deleteErr.Error()}, r.deleteErr
 		}
 		r.phase, r.containerStatus = "", ""
-		return exec.Result{Stdout: "ok"}, nil
+		return proc.Result{Stdout: "ok"}, nil
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *agentLifecycleRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *agentLifecycleRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
 // newObserveFirstApp returns a minimal app + fresh FakeRunner for the
 // start-manager observe-first tests, sharing one shape across the matrix
 // (name "hello", matching agentLifecycleRunner's slug in each test below).
-func newObserveFirstApp(t *testing.T) (*config.App, *exec.FakeRunner) {
+func newObserveFirstApp(t *testing.T) (*config.App, *proc.FakeRunner) {
 	t.Helper()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1271,21 +1271,21 @@ type firstListErrRunner struct {
 	listSeen int
 }
 
-func (r *firstListErrRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *firstListErrRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.inner.RunStdin(ctx, stdin, env, name, args...)
 }
 
-func (r *firstListErrRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *firstListErrRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" && isObserveList(args) {
 		r.listSeen++
 		if r.listSeen == 1 {
-			return exec.Result{Code: 1, Stderr: "hub: internal server error"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "hub: internal server error"}, fmt.Errorf("exit status 1")
 		}
 	}
 	return r.inner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *firstListErrRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *firstListErrRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -1302,21 +1302,21 @@ type failNListsRunner struct {
 	listSeen  int
 }
 
-func (r *failNListsRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *failNListsRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.inner.RunStdin(ctx, stdin, env, name, args...)
 }
 
-func (r *failNListsRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *failNListsRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" && isObserveList(args) {
 		r.listSeen++
 		if r.listSeen > 1 && r.listSeen <= 1+r.failCount {
-			return exec.Result{Code: 1, Stderr: "hub: transient blip"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "hub: transient blip"}, fmt.Errorf("exit status 1")
 		}
 	}
 	return r.inner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *failNListsRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *failNListsRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -1363,8 +1363,8 @@ func TestRunIdempotentReapply(t *testing.T) {
 		Name: "demo", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
 	}
-	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner(), slug: "demo"}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &alreadyUpRunner{FakeRunner: proc.NewFakeRunner(), slug: "demo"}
+	r.Script("scion", proc.Result{Stdout: "ok"})
 	mintCalled := false
 	deps := Deps{
 		LoadImage: func(context.Context, string) error { return nil },
@@ -1390,8 +1390,8 @@ func TestRunIdempotentReapply(t *testing.T) {
 func TestRunMintBootstrapPropagatesRealError(t *testing.T) {
 	tree := t.TempDir()
 	app := &config.App{Name: "demo", Backend: "orbstack", Tree: tree, Manager: config.Manager{Image: "img"}}
-	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner(), slug: "demo"}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &alreadyUpRunner{FakeRunner: proc.NewFakeRunner(), slug: "demo"}
+	r.Script("scion", proc.Result{Stdout: "ok"})
 	deps := Deps{
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
@@ -1413,8 +1413,8 @@ func TestRunMintBootstrapPropagatesRealError(t *testing.T) {
 func TestRunLatchedWithoutStagedBootstrapFails(t *testing.T) {
 	tree := t.TempDir() // nothing staged
 	app := &config.App{Name: "demo", Backend: "orbstack", Tree: tree, Manager: config.Manager{Image: "img"}}
-	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner(), slug: "demo"}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &alreadyUpRunner{FakeRunner: proc.NewFakeRunner(), slug: "demo"}
+	r.Script("scion", proc.Result{Stdout: "ok"})
 	deps := Deps{
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
@@ -1448,8 +1448,8 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &flakyStartRunner{FakeRunner: exec.NewFakeRunner(), slug: "hello", startFails: 2}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &flakyStartRunner{FakeRunner: proc.NewFakeRunner(), slug: "hello", startFails: 2}
+	r.Script("scion", proc.Result{Stdout: "ok"})
 	deps := Deps{
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
@@ -1462,8 +1462,8 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	}
 }
 func TestRunDispatchesStepsInOrder(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
@@ -1506,7 +1506,7 @@ type serverStartOrderRunner struct {
 	order *[]string
 }
 
-func (r *serverStartOrderRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *serverStartOrderRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		hasServer, hasStart := false, false
 		for _, a := range args {
@@ -1524,7 +1524,7 @@ func (r *serverStartOrderRunner) RunIn(ctx context.Context, dir string, env map[
 	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *serverStartOrderRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *serverStartOrderRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -1533,8 +1533,8 @@ func (r *serverStartOrderRunner) Run(ctx context.Context, env map[string]string,
 // exactly once, and strictly before the `scion server start` call — the
 // controller PAT must exist before the real, dev-auth-off hub locks down.
 func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1580,8 +1580,8 @@ func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
 // caller that doesn't wire the mint window) must not error and must not
 // block the rest of Run — the scion-server step still runs unguarded.
 func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1617,8 +1617,8 @@ func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
 }
 
 func TestRunCredentialStep(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img", CredentialFile: "/x/token"},
@@ -1647,8 +1647,8 @@ func TestRunCredentialStep(t *testing.T) {
 // carry --enable-web. It must NOT carry the tailnet base_url; the
 // consequence of that is asserted by the agent-endpoint test below.
 func TestRunScionServerEmitsWebFlagsWhenRemoteEnabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1675,8 +1675,8 @@ func TestRunScionServerEmitsWebFlagsWhenRemoteEnabled(t *testing.T) {
 // the exact value, so the hub signs session cookies with the host-persisted
 // key instead of a per-boot random one.
 func TestRunScionServerEmitsSessionSecret(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1704,8 +1704,8 @@ func TestRunScionServerEmitsSessionSecret(t *testing.T) {
 // The path is layout.WebAssetsDir at both ends by construction — this pins
 // that the step actually emits it.
 func TestRunScionServerPointsTheHubAtStagedAssets(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1732,8 +1732,8 @@ func TestRunScionServerPointsTheHubAtStagedAssets(t *testing.T) {
 // flag must stay off: a non-empty value would make scion serve an empty
 // directory INSTEAD of whatever the operator embedded in their own binary.
 func TestRunScionServerOmitsAssetsDirForBinaryMode(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1835,8 +1835,8 @@ func agentHubEndpoint(t *testing.T, serverStart []string) string {
 func TestRunScionServerKeepsAgentHubEndpointJailReachable(t *testing.T) {
 	serverStartArgs := func(t *testing.T, app *config.App) []string {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := proc.NewFakeRunner()
+		f.Script("scion", proc.Result{Stdout: "ok"})
 		deps := Deps{
 			LoadImage: func(context.Context, string) error { return nil },
 			Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
@@ -1880,8 +1880,8 @@ func TestRunScionServerKeepsAgentHubEndpointJailReachable(t *testing.T) {
 // `server start` call must NOT gain --enable-web or --base-url — a headless
 // hub must not serve the SPA.
 func TestRunScionServerOmitsWebFlagsWhenRemoteDisabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1910,8 +1910,8 @@ func TestRunScionServerOmitsWebFlagsWhenRemoteDisabled(t *testing.T) {
 // injected Deps.StartRemoteProxy for it — exactly once, exactly like every
 // other step's Deps func.
 func TestRunRemoteProxyStepInvokesStartWhenEnabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1936,8 +1936,8 @@ func TestRunRemoteProxyStepInvokesStartWhenEnabled(t *testing.T) {
 // level): the proxy needs the hub up, so its start must be observed
 // strictly after `scion server start` actually runs.
 func TestRunRemoteProxyStepOrderedAfterScionServer(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -1979,8 +1979,8 @@ func TestRunRemoteProxyStepOrderedAfterScionServer(t *testing.T) {
 // caller that hasn't wired the proxy controller) must not error even though
 // the step is present in the plan.
 func TestRunRemoteProxyStepSkipsCleanlyWhenNil(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -2002,8 +2002,8 @@ func TestRunRemoteProxyStepSkipsCleanlyWhenNil(t *testing.T) {
 // Deps.StopRemoteProxy to converge a stale proxy (left running from a prior
 // apply with remote enabled) to stopped.
 func TestRunConvergesRemoteProxyOffWhenDisabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -2027,8 +2027,8 @@ func TestRunConvergesRemoteProxyOffWhenDisabled(t *testing.T) {
 // when remote IS enabled, Run must never call StopRemoteProxy — only the
 // remote-proxy step's StartRemoteProxy runs.
 func TestRunDoesNotStopRemoteProxyWhenEnabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -2054,8 +2054,8 @@ func TestRunDoesNotStopRemoteProxyWhenEnabled(t *testing.T) {
 // pre-remote-access test, and any caller that doesn't need the proxy), must
 // not error.
 func TestRunConvergeOffSkipsCleanlyWhenNil(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -2085,8 +2085,8 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	deps := Deps{
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
@@ -2122,8 +2122,8 @@ func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	deps := Deps{
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
@@ -2171,8 +2171,8 @@ func TestStartManagerNoLLMAuthEnvForSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	deps := Deps{
 		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
@@ -2216,8 +2216,8 @@ func TestRegisterRemovesStaleMarkerBeforeInit(t *testing.T) {
 	// A stale marker in the tree must be gone by the time `scion init` runs,
 	// so init creates a fresh project (writing workspace_path) rather than
 	// resolving the stale marker and skipping it.
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
@@ -2264,8 +2264,8 @@ func TestRegisterRemovesMarkerThroughJailWhenProvided(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("project-id: stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2303,8 +2303,8 @@ func TestRegisterRemovesMarkerThroughJailWhenProvided(t *testing.T) {
 // exactly ONE register-project step, for the instance tree.
 func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2368,8 +2368,8 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 // does) must not crash Run, and `scion init` still runs.
 func TestRegisterToleratesNilRemoveScionProjectConfigs(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2407,8 +2407,8 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("project-id: real\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2471,8 +2471,8 @@ func TestRegisterStripsSharedDirsOnBothPaths(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := t.TempDir()
-			f := exec.NewFakeRunner()
-			f.Script("scion", exec.Result{Stdout: "ok"})
+			f := proc.NewFakeRunner()
+			f.Script("scion", proc.Result{Stdout: "ok"})
 			app := &config.App{
 				Name: "hello", Backend: "orbstack", Tree: tree,
 				Manager: config.Manager{Image: "img"},
@@ -2508,8 +2508,8 @@ func TestRegisterStripsSharedDirsOnBothPaths(t *testing.T) {
 // directory while the operator believes they do not.
 func TestRegisterFailsWhenSharedDirStripFails(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2537,8 +2537,8 @@ func TestRegisterFailsWhenSharedDirStripFails(t *testing.T) {
 // exactly as it does today.
 func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2590,8 +2590,8 @@ func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
 // like a `false` result would.
 func TestRegisterFallsThroughToDestructivePathOnObserveError(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2633,8 +2633,8 @@ func TestRegisterFallsThroughToDestructivePathOnObserveError(t *testing.T) {
 // does, before this task) must not crash Run, and `scion init` still runs.
 func TestRegisterToleratesNilScionProjectRegistered(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2665,8 +2665,8 @@ func TestRegisterToleratesNilScionProjectRegistered(t *testing.T) {
 // dropped; see register-project's single-step doc).
 func TestRegisterUsesJailPaths(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2716,8 +2716,8 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 // truly gone, not coincidentally absent.
 func TestSingleProjectRegisterRunsOnceAcrossTwoWorkers(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2783,8 +2783,8 @@ func TestSingleProjectRegisterRunsOnceAcrossTwoWorkers(t *testing.T) {
 
 func TestStartUsesJailPath(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -3046,8 +3046,8 @@ func TestRegisterRepairsHubEndpointOnTheSkipPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -3078,8 +3078,8 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -3104,10 +3104,10 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 // on serving a configuration with no login in it — and an unconditional
 // restart would drop every agent's hub connection on every apply.
 func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
-	run := func(t *testing.T, changed bool, ensureErr error) ([]exec.Call, error) {
+	run := func(t *testing.T, changed bool, ensureErr error) ([]proc.Call, error) {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := proc.NewFakeRunner()
+		f.Script("scion", proc.Result{Stdout: "ok"})
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"},
 			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
@@ -3118,7 +3118,7 @@ func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
 		}
 		return f.Calls, runApply(app, deps)
 	}
-	stopped := func(calls []exec.Call) bool {
+	stopped := func(calls []proc.Call) bool {
 		for _, c := range calls {
 			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" && c.Args[1] == "stop" {
 				return true
@@ -3158,8 +3158,8 @@ func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
 func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
 	run := func(t *testing.T, remote config.Remote) (disabled, ensured int) {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := proc.NewFakeRunner()
+		f.Script("scion", proc.Result{Stdout: "ok"})
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"}, Remote: remote}
 		deps := Deps{
@@ -3203,8 +3203,8 @@ func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
 func TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState(t *testing.T) {
 	run := func(t *testing.T, changed bool) (server, logs []string) {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := proc.NewFakeRunner()
+		f.Script("scion", proc.Result{Stdout: "ok"})
 		// Remote access off — the config this whole path is about.
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"}}
@@ -3258,8 +3258,8 @@ func TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState(t *testing.T)
 // down on every apply — but ordering a hub restart would fail an apply that
 // was never driving scion in the first place.
 func TestRemoteOffSkipsTheHubRestartWhenThePlanDoesNotManageTheHub(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"}}
 	disabled := 0
@@ -3288,19 +3288,19 @@ type stoppedHubRunner struct {
 	inner *agentLifecycleRunner
 }
 
-func (r *stoppedHubRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *stoppedHubRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.inner.RunStdin(ctx, stdin, env, name, args...)
 }
 
-func (r *stoppedHubRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *stoppedHubRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "stop" {
-		r.inner.FakeRunner.Calls = append(r.inner.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
-		return exec.Result{Code: 1, Stderr: "Error: server daemon is not running"}, fmt.Errorf("exit status 1")
+		r.inner.FakeRunner.Calls = append(r.inner.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Code: 1, Stderr: "Error: server daemon is not running"}, fmt.Errorf("exit status 1")
 	}
 	return r.inner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *stoppedHubRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *stoppedHubRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -3315,8 +3315,8 @@ func (r *stoppedHubRunner) Run(ctx context.Context, env map[string]string, name 
 // Restarting something that is already stopped must be a no-op followed by a
 // start.
 func TestScionServerRestartsAHubThatIsAlreadyStopped(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: "ok"})
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
 		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}

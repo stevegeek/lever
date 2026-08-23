@@ -74,6 +74,8 @@ read the Changed/Internal entries before rebasing open branches.
 
 ### Internal
 
+- `internal/exec` is renamed to `internal/proc` so it no longer shadows `os/exec` (the `leverexec` alias is gone).
+
 - **Integration tests are behind `-tags integration`.** The live VM, hubapi
   and `lever-tool-db` host tests no longer run under `go test ./...`; run
   `make test-integration` (or `go test -tags integration ./...`).

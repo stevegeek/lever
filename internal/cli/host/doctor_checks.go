@@ -20,8 +20,8 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
@@ -70,12 +70,12 @@ type doctorProbes struct {
 	// remoteLogin inspects the local OIDC provider on its loopback port.
 	remoteLogin func(port int) (loginProbeResult, error)
 	// remoteJailLogin asks the hub, from inside the jail, to start a login.
-	remoteJailLogin func(ctx context.Context, jr leverexec.Runner, hubURL string) (status int, redirect string, err error)
+	remoteJailLogin func(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error)
 }
 
 // productionProbes wires the real probes. Host subprocesses (go, node,
 // docker) run through r.
-func productionProbes(r leverexec.Runner) doctorProbes {
+func productionProbes(r proc.Runner) doctorProbes {
 	return doctorProbes{
 		dial:            tcpDial,
 		goVersion:       func() (string, error) { return goVersionProbe(r) },
@@ -210,7 +210,7 @@ const remoteJailLoginScript = `exec /usr/bin/curl -sS --connect-timeout 5 --max-
 	`-o /dev/null -w '%{http_code} %{redirect_url}' "$1"`
 
 // remoteJailLoginProbe runs that request and parses its answer.
-func remoteJailLoginProbe(ctx context.Context, jr leverexec.Runner, hubURL string) (status int, redirect string, err error) {
+func remoteJailLoginProbe(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error) {
 	res, err := jr.Run(ctx, nil, "sh", "-c", remoteJailLoginScript, "_", hubURL+"/auth/login/oidc")
 	if err != nil {
 		return 0, "", fmt.Errorf("%v: %s", err, strings.TrimSpace(res.Stderr))
@@ -262,7 +262,7 @@ func isLoopbackURL(raw string) bool {
 // chain worked at the time of the FIRST login since the hub started — not
 // that it is reachable this second. The forwarder dying after that (a guest
 // reboot, say) surfaces on the next cold login, not here.
-func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner, st state.State, p doctorProbes) (detail string, fix string, ok bool) {
+func checkRemoteLoginPath(ctx context.Context, jr proc.Runner, st state.State, p doctorProbes) (detail string, fix string, ok bool) {
 	if jr == nil {
 		return "", "", true // no jail transport wired (tests)
 	}
@@ -314,7 +314,7 @@ func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner, st state.Sta
 // (delete remote.pat, then `lever apply`) is the same shape as the
 // documented controller-PAT re-mint, default expiry 90d (see the
 // remote-access guide).
-func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorProbes, jr leverexec.Runner) checkResult {
+func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorProbes, jr proc.Runner) checkResult {
 	const name = "remote access"
 	if !app.RemoteEnabled() {
 		return checkResult{name, true, "disabled", ""}
@@ -672,7 +672,7 @@ func checkMcpJsonInTree(tree string) checkResult {
 // distinguishes "not on PATH at all" from "on PATH but broken" (e.g. a dead
 // asdf/mise shim, which typically fails with exit status 126) by resolving via
 // exec.LookPath first.
-func goVersionProbe(r leverexec.Runner) (string, error) {
+func goVersionProbe(r proc.Runner) (string, error) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		return "", err
@@ -714,7 +714,7 @@ func checkGoToolchain(scion config.ScionConfig, p doctorProbes) checkResult {
 // probe run in the user's project — which may have its own .tool-versions —
 // would not be evidence about the build, which runs elsewhere. Same reason
 // scionbin.FetchModule resolves the real go binary rather than trusting a shim.
-func nodeToolchainProbe(r leverexec.Runner) (string, error) {
+func nodeToolchainProbe(r proc.Runner) (string, error) {
 	root, err := webassets.CacheRoot()
 	if err != nil {
 		return "", err
@@ -992,7 +992,7 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 // `claude_code_version` label via `docker image inspect`. The image ID
 // inspect in internal/jail (hostImageID) reads a different field and is not
 // exported, so this is its own invocation.
-func claudeVersionProbe(r leverexec.Runner, imageRef string) (string, error) {
+func claudeVersionProbe(r proc.Runner, imageRef string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := r.Run(ctx, nil, "docker", "image", "inspect",

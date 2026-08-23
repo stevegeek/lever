@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestRunInjectsEnvAndBin(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion list", exec.Result{Stdout: "[]"})
+	f := proc.NewFakeRunner()
+	f.Script("scion list", proc.Result{Stdout: "[]"})
 	c := New(f, Options{Bin: "scion", HubEndpoint: "http://127.0.0.1:8080", HubTokenSource: func() string { return "pat123" }})
 	if _, err := c.run(context.Background(), "", "list"); err != nil {
 		t.Fatalf("run: %v", err)
@@ -25,7 +25,7 @@ func TestRunInjectsEnvAndBin(t *testing.T) {
 }
 
 func TestEnvAlwaysEnablesHub(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
 	if got := c.env()["SCION_HUB_ENABLED"]; got != "true" {
 		t.Fatalf("expected SCION_HUB_ENABLED=true, got %q", got)
@@ -35,7 +35,7 @@ func TestEnvAlwaysEnablesHub(t *testing.T) {
 // TestEnvEmitsLazyHubTokenSource: HubTokenSource is read at call time (the
 // mint-mid-apply case, where the token isn't known at New() time).
 func TestEnvEmitsLazyHubTokenSource(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	tok := ""
 	c := New(f, Options{HubTokenSource: func() string { return tok }})
 	if _, ok := c.env()["SCION_HUB_TOKEN"]; ok {
@@ -51,7 +51,7 @@ func TestEnvEmitsLazyHubTokenSource(t *testing.T) {
 // key at all (not even empty string) — keeps subscription-mode (no controller
 // PAT) env untouched.
 func TestEnvOmitsHubTokenWhenUnset(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
 	if _, ok := c.env()["SCION_HUB_TOKEN"]; ok {
 		t.Fatalf("expected no SCION_HUB_TOKEN key, got %q", c.env()["SCION_HUB_TOKEN"])

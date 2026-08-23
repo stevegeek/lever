@@ -40,7 +40,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision"
 )
 
@@ -55,7 +55,7 @@ const goMod = "module lever-login-forward\n\ngo 1.22\n"
 // Build cross-compiles the forwarder for goarch ("arm64"/"amd64") and returns
 // the host-local path of the result. machine names the build directory under
 // os.TempDir so two jails on one host never share one.
-func Build(ctx context.Context, r exec.Runner, goarch, machine string) (string, error) {
+func Build(ctx context.Context, r proc.Runner, goarch, machine string) (string, error) {
 	dir := filepath.Join(os.TempDir(), "lever-loginfwd-"+machine)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("login forwarder build dir: %w", err)

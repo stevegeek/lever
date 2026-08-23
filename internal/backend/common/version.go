@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // VersionAtLeast runs argv on the host, extracts "major.minor.patch" from its
@@ -15,7 +15,7 @@ import (
 // >= (major, minor, patch). got is the parsed version on success, or the raw
 // output on parse failure. Errors are prefixed with the argv so the preflight
 // names the tool it probed.
-func VersionAtLeast(ctx context.Context, r exec.Runner, argv []string, re *regexp.Regexp, major, minor, patch int) (ok bool, got string, err error) {
+func VersionAtLeast(ctx context.Context, r proc.Runner, argv []string, re *regexp.Regexp, major, minor, patch int) (ok bool, got string, err error) {
 	name := strings.Join(argv, " ")
 	res, err := r.Run(ctx, nil, argv[0], argv[1:]...)
 	if err != nil {

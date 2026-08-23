@@ -21,13 +21,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
 // Guest provisions an Ubuntu jail guest through host-side argv prefixes.
 type Guest struct {
-	Host       exec.Runner // host runner (builds, pipes)
+	Host       proc.Runner // host runner (builds, pipes)
 	UserPrefix []string    // executes in-guest as the run user, e.g. ["orb","-m",m]
 	RootPrefix []string    // executes in-guest as root, e.g. ["orb","-u","root","-m",m]
 	Machine    string      // jail identifier (temp-file naming)
@@ -40,15 +40,15 @@ type Guest struct {
 // concurrent callers can't alias/corrupt each other's argv (append may reuse the
 // underlying array when capacity allows) — the single place the prefix-splat
 // idiom lives.
-func (g Guest) RootRun(ctx context.Context, args ...string) (exec.Result, error) {
+func (g Guest) RootRun(ctx context.Context, args ...string) (proc.Result, error) {
 	return g.prefixRun(ctx, g.RootPrefix, args...)
 }
 
-func (g Guest) UserRun(ctx context.Context, args ...string) (exec.Result, error) {
+func (g Guest) UserRun(ctx context.Context, args ...string) (proc.Result, error) {
 	return g.prefixRun(ctx, g.UserPrefix, args...)
 }
 
-func (g Guest) prefixRun(ctx context.Context, prefix []string, args ...string) (exec.Result, error) {
+func (g Guest) prefixRun(ctx context.Context, prefix []string, args ...string) (proc.Result, error) {
 	argv := append(append([]string{}, prefix[1:]...), args...)
 	return g.Host.Run(ctx, nil, prefix[0], argv...)
 }

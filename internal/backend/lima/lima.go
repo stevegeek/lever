@@ -19,7 +19,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // hostAlias is the DNS name Lima resolves to the host from inside the VM.
@@ -32,7 +32,7 @@ type Lima struct {
 	common.Base
 }
 
-func New(r exec.Runner, vm string) *Lima {
+func New(r proc.Runner, vm string) *Lima {
 	l := &Lima{}
 	l.Base = common.NewBase(common.Config{
 		Runner:    r,
@@ -41,7 +41,7 @@ func New(r exec.Runner, vm string) *Lima {
 		Hooks: common.Hooks{
 			// Lima's jail prefix is static — it does not depend on the run user.
 			JailPrefix: func(machine, _ string) []string { return JailPrefix(machine) },
-			Guest: func(r exec.Runner, machine string) guest.Guest {
+			Guest: func(r proc.Runner, machine string) guest.Guest {
 				return guest.Guest{
 					Host:       r,
 					UserPrefix: JailPrefix(machine),

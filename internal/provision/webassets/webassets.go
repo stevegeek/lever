@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
@@ -73,7 +73,7 @@ const NodeToolchainFix = `put a REAL node+npm on PATH (not just an asdf/mise shi
 // the first). It is deliberate: the call is idempotent and costs ~0.3s against
 // a warm module cache, which is cheaper than threading the resolved directory
 // out of the binary path and through two backends to get here.
-func SourceDir(ctx context.Context, r exec.Runner, spec scionbin.Spec) (string, error) {
+func SourceDir(ctx context.Context, r proc.Runner, spec scionbin.Spec) (string, error) {
 	root := spec.Source
 	if spec.Version != "" {
 		_, dir, err := scionbin.FetchModule(ctx, r, spec.Version)
@@ -120,7 +120,7 @@ func CacheRoot() (string, error) {
 // nothing about the build, which runs under CacheRoot. Both `lever
 // apply` and `lever doctor` therefore probe in the build's own directory, and
 // get the same answer for the same reason.
-func CheckNodeToolchain(ctx context.Context, r exec.Runner, probeDir string) (string, error) {
+func CheckNodeToolchain(ctx context.Context, r proc.Runner, probeDir string) (string, error) {
 	res, err := r.RunIn(ctx, probeDir, nil, "node", "--version")
 	if err != nil {
 		return "", fmt.Errorf("%w: node --version: %v", ErrNodeToolchain, err)
@@ -160,7 +160,7 @@ func nodeMajor(out string) (int, error) {
 // fetched module version is immutable, so the same pin always hits the same
 // directory), so a re-apply on an unchanged pin costs one cheap probe and no
 // npm.
-func Build(ctx context.Context, r exec.Runner, srcWeb string) (dist, digest string, err error) {
+func Build(ctx context.Context, r proc.Runner, srcWeb string) (dist, digest string, err error) {
 	digest, err = HashSource(srcWeb)
 	if err != nil {
 		return "", "", fmt.Errorf("hashing scion web sources at %s: %w", srcWeb, err)

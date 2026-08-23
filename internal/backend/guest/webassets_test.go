@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
@@ -62,7 +62,7 @@ func stageCompletedBuild(t *testing.T, cacheRoot, digest string) {
 // A binary-mode spec must not touch the host or the guest at all: scion's own
 // embedded assets (if any) stay in charge.
 func TestEnsureScionWebAssetsSkipsBinaryMode(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
 	if err := g.EnsureScionWebAssets(context.Background(), ScionSpec{Binary: "/bin/scion", WebUI: true}); err != nil {
 		t.Fatalf("EnsureScionWebAssets: %v", err)
@@ -85,10 +85,10 @@ func TestEnsureScionWebAssetsReusesCachedBuild(t *testing.T) {
 			}
 			stageCompletedBuild(t, cacheRoot, digest)
 
-			f := exec.NewFakeRunner()
+			f := proc.NewFakeRunner()
 			// The guest holds nothing yet, so staging must run.
-			f.Script(strings.Join(shape.userPrefix, " ")+" /bin/bash -c", exec.Result{})
-			f.Script(strings.Join(shape.rootPrefix, " ")+" bash -c", exec.Result{})
+			f.Script(strings.Join(shape.userPrefix, " ")+" /bin/bash -c", proc.Result{})
+			f.Script(strings.Join(shape.rootPrefix, " ")+" bash -c", proc.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "m"}
 
 			if err := g.EnsureScionWebAssets(context.Background(), ScionSpec{Source: src, WebUI: true}); err != nil {
@@ -133,8 +133,8 @@ func TestEnsureScionWebAssetsSkipsStagingWhenGuestMatches(t *testing.T) {
 	}
 	stageCompletedBuild(t, cacheRoot, digest)
 
-	f := exec.NewFakeRunner()
-	f.Script("orb -m m /bin/bash -c", exec.Result{Stdout: digest + "\n"})
+	f := proc.NewFakeRunner()
+	f.Script("orb -m m /bin/bash -c", proc.Result{Stdout: digest + "\n"})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
 
 	if err := g.EnsureScionWebAssets(context.Background(), ScionSpec{Source: src, WebUI: true}); err != nil {
@@ -150,8 +150,8 @@ func TestEnsureScionWebAssetsSkipsStagingWhenGuestMatches(t *testing.T) {
 // A guest whose digest matches but whose assets are gone must re-stage: this is
 // the blind spot a bare marker would have.
 func TestStagedWebDigestRequiresTheAssetItAttests(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -m m /bin/bash -c", exec.Result{Stdout: "abc123\n"})
+	f := proc.NewFakeRunner()
+	f.Script("orb -m m /bin/bash -c", proc.Result{Stdout: "abc123\n"})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}}
 	if got := g.stagedWebDigest(context.Background()); got != "abc123" {
 		t.Fatalf("stagedWebDigest=%q want abc123", got)
@@ -169,7 +169,7 @@ func TestStagedWebDigestRequiresTheAssetItAttests(t *testing.T) {
 
 	// An unreadable guest reports "" so the caller re-stages, rather than
 	// trusting a probe that did not answer.
-	empty := exec.NewFakeRunner()
+	empty := proc.NewFakeRunner()
 	ge := Guest{Host: empty, UserPrefix: []string{"orb", "-m", "m"}}
 	if got := ge.stagedWebDigest(context.Background()); got != "" {
 		t.Fatalf("a failed probe must read as %q, got %q", "", got)

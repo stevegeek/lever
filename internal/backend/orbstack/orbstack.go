@@ -20,7 +20,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/retry"
 )
 
@@ -50,7 +50,7 @@ type OrbStack struct {
 	probeInterval time.Duration
 }
 
-func New(r exec.Runner, machine string) *OrbStack {
+func New(r proc.Runner, machine string) *OrbStack {
 	o := &OrbStack{probeAttempts: startProbeAttempts, probeInterval: startProbeInterval}
 	o.Base = common.NewBase(common.Config{
 		Runner:    r,
@@ -58,7 +58,7 @@ func New(r exec.Runner, machine string) *OrbStack {
 		HostAlias: "host.orb.internal",
 		Hooks: common.Hooks{
 			JailPrefix: JailPrefix,
-			Guest: func(r exec.Runner, machine string) guest.Guest {
+			Guest: func(r proc.Runner, machine string) guest.Guest {
 				return guest.Guest{
 					Host:       r,
 					UserPrefix: []string{"orb", "-m", machine},

@@ -31,7 +31,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -165,7 +165,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	// env is set, so decorateConfig takes the no-Runtime path and we inject the
 	// fake afterward. Workers/InstanceProject (jailMount) come from the selected
 	// backend's MountDest, which is "/lever" for orbstack (== the jailMount const).
-	be, err := registry.Select(app.Backend, leverexec.RealRunner{}, "lever-"+app.Name)
+	be, err := registry.Select(app.Backend, proc.RealRunner{}, "lever-"+app.Name)
 	if err != nil {
 		t.Fatalf("registry.Select: %v", err)
 	}

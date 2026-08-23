@@ -12,8 +12,8 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/lima"
 	"github.com/stevegeek/lever/internal/backend/orbstack"
-	"github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // Default is the backend used when a caller supplies no name (e.g. the low-level
@@ -23,7 +23,7 @@ const Default = "orbstack"
 // entry is what the registry knows about one backend.
 type entry struct {
 	// New builds the backend for a jail machine.
-	New func(r exec.Runner, machine string) backend.Backend
+	New func(r proc.Runner, machine string) backend.Backend
 	// JailPrefix is the argv prefix that runs a command INSIDE the jail for an
 	// already-resolved identity — no EnsureUp state, no I/O.
 	JailPrefix func(machine, user string) []string
@@ -33,11 +33,11 @@ type entry struct {
 // in backend.Candidates.
 var backends = map[string]entry{
 	"orbstack": {
-		New:        func(r exec.Runner, machine string) backend.Backend { return orbstack.New(r, machine) },
+		New:        func(r proc.Runner, machine string) backend.Backend { return orbstack.New(r, machine) },
 		JailPrefix: orbstack.JailPrefix,
 	},
 	"lima": {
-		New:        func(r exec.Runner, machine string) backend.Backend { return lima.New(r, machine) },
+		New:        func(r proc.Runner, machine string) backend.Backend { return lima.New(r, machine) },
 		JailPrefix: func(machine, _ string) []string { return lima.JailPrefix(machine) },
 	},
 }
@@ -58,7 +58,7 @@ func lookup(name string) (entry, error) {
 
 // Select builds the named backend for a jail machine. An empty name uses
 // Default.
-func Select(name string, r exec.Runner, machine string) (backend.Backend, error) {
+func Select(name string, r proc.Runner, machine string) (backend.Backend, error) {
 	e, err := lookup(name)
 	if err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func Select(name string, r exec.Runner, machine string) (backend.Backend, error)
 // named backend, from an already-resolved identity. The remote proxy's
 // jail-dial transport needs the bare prefix rather than a JailRunner: it execs
 // `<prefix> nc host port` and adapts the child's pipes to a net.Conn, which
-// exec.Runner's run-to-completion, capture-the-output contract cannot express.
+// proc.Runner's run-to-completion, capture-the-output contract cannot express.
 func JailArgv(name, machine, user string) ([]string, error) {
 	e, err := lookup(name)
 	if err != nil {
@@ -85,7 +85,7 @@ func JailArgv(name, machine, user string) ([]string, error) {
 // identity and passed it via env; the broker process reconstructs the transport
 // here. The host-network escape hatch is read here, at construction, so the
 // transport itself stays pure.
-func JailRunner(name string, host exec.Runner, machine, user, uid string) (exec.Runner, error) {
+func JailRunner(name string, host proc.Runner, machine, user, uid string) (proc.Runner, error) {
 	argv, err := JailArgv(name, machine, user)
 	if err != nil {
 		return nil, err

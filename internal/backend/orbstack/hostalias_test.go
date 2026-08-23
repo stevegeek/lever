@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestResolveHostAliasParsesBothFamilies(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	// `orb -m <machine> getent ahosts host.orb.internal`
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "" +
+	f.Script("orb -m lever-jail getent ahosts host.orb.internal", proc.Result{Stdout: "" +
 		"fd07:b51a:cc66:f0::fe STREAM host.orb.internal\n" +
 		"fd07:b51a:cc66:f0::fe DGRAM  \n" +
 		"0.250.250.254   STREAM \n" +

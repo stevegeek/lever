@@ -8,8 +8,8 @@ import (
 	"os"
 	"testing"
 
-	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // TestJailCurlAgainstRealVM runs the REAL curl script through a REAL jail
@@ -43,7 +43,7 @@ func TestJailCurlAgainstRealVM(t *testing.T) {
 		url = "http://127.0.0.1:8080"
 	}
 
-	jr := jail.New(jail.Config{Host: leverexec.RealRunner{}, Prefix: splitCSV(prefix), UID: "501"})
+	jr := jail.New(jail.Config{Host: proc.RealRunner{}, Prefix: splitCSV(prefix), UID: "501"})
 	j := &JailCurl{Runner: jr, BaseURL: url, Token: func() string { return "probe-token" }}
 
 	status, body, err := j.Do(context.Background(), "GET", "/probe")

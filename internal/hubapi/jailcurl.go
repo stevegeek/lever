@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // curlNotFound is the shell's exit code for an absent command. lever's guest
@@ -45,7 +45,7 @@ const curlScript = `exec curl -sS --connect-timeout 5 --max-time 20 ` +
 // two lever instances are up: each has its own 127.0.0.1:8080.
 type JailCurl struct {
 	// Runner executes inside the jail (internal/jail.Runner).
-	Runner leverexec.Runner
+	Runner proc.Runner
 	// BaseURL is the hub root AS SEEN FROM THE JAIL, e.g. "http://127.0.0.1:8080".
 	BaseURL string
 	// Token returns the controller PAT. Called per request so a re-mint between

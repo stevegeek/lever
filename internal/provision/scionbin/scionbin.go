@@ -16,7 +16,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision"
 )
 
@@ -86,7 +86,7 @@ func (s Spec) Validate() error {
 // lets the machine hosting the jail carry no Go, no module cache and no
 // egress at all (issue #27). Callers run Validate first; Resolve does it
 // again so it is safe on its own.
-func Resolve(ctx context.Context, r exec.Runner, spec Spec, goarch, machine string) (string, error) {
+func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine string) (string, error) {
 	if err := spec.Validate(); err != nil {
 		return "", err
 	}
@@ -126,7 +126,7 @@ func OutputPath(machine string) string {
 // outside any toolchain-manager project dir — a version manager that resolves
 // `go` by walking up for a project file (asdf) cannot resolve it from the
 // read-only module cache, whereas the absolute binary always works.
-func FetchModule(ctx context.Context, r exec.Runner, version string) (goBin, dir string, err error) {
+func FetchModule(ctx context.Context, r proc.Runner, version string) (goBin, dir string, err error) {
 	goBin, err = provision.GoBinary(ctx, r)
 	if err != nil {
 		return "", "", err

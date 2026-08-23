@@ -26,7 +26,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/daemon` | Pid-file and listener bookkeeping shared by the host-side daemons. |
 | `internal/config` | `lever.yaml` schema, loading and validation. |
 | `internal/egress` | Jail egress allowlist as iptables/ip6tables rules. |
-| `internal/exec` | The single seam to external commands (`Runner`, `FakeRunner`). |
+| `internal/proc` | The single seam to external commands (`Runner`, `FakeRunner`). |
 | `internal/httpjson` | JSON-over-HTTP client helper (`Post`, typed decode, the one error shape) used by every broker caller. |
 | `internal/hubapi` | Minimal scion Hub REST client for what the scion CLI does not expose. |
 | `internal/jail` | `JailRunner`: an `exec.Runner` that runs commands inside the jail. |

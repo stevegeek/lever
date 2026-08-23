@@ -19,8 +19,11 @@ read the Changed/Internal entries before rebasing open branches.
   through `http.MaxBytesReader`: 64 KiB for jail and admin JSON, 4 KiB for
   the small verbs, 256 KiB for signed envelopes, 4 MiB for the tool gateway.
 - **captool (and the agent's MCP server) cap request bodies at 1 MiB**
-  (`mcp.MaxBodyBytes`). The MCP `initialize` reply reports the real server
-  version instead of a placeholder.
+  (`mcp.MaxBodyBytes`). The MCP `initialize` reply reports
+  `captool.Config.Version`; `lever-tool-db` now sets it from a build-time
+  `main.Version` (the Makefile and `tools/test/lima-e2e.sh` stamp it with
+  `-ldflags`), so a `make`-built tool reports the lever version and a plain
+  `go build` reports `dev`.
 - **`lever apply --dry-run` no longer lists a jail-up step.** The step was a
   no-op on every production path: apply brings the machine up eagerly, before
   planning, to resolve the run user. The machine still comes up; only the

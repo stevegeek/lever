@@ -24,6 +24,8 @@ install:
 # internal/agent.Version is what the capability MCP server's serverInfo reports.
 LEVER_VERSION := $(shell sed -n 's/^const Version = "\(.*\)"/\1/p' internal/cli/root.go)
 LEVER_AGENT_LDFLAGS := -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION)
+# lever-tool-db reports its version the same way (captool serverInfo).
+LEVER_TOOL_DB_LDFLAGS := -X main.Version=$(LEVER_VERSION)
 
 # Cross-compile the in-jail agent helper for the OrbStack arm64 VM. Used by the
 # acceptance gate (run directly in the VM) and, baked into the
@@ -48,7 +50,7 @@ lever-image-bins:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
+		go build -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(LEVER_IMAGE_CTX)/scionhook/pre-start
@@ -70,7 +72,7 @@ lever-image:
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
+		go build -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start

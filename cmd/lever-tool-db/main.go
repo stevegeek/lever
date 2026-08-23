@@ -15,6 +15,11 @@ import (
 	"github.com/stevegeek/lever/captool"
 )
 
+// Version is what the MCP serverInfo reports. The Makefile stamps it with
+// -ldflags "-X main.Version=..." (LEVER_TOOL_DB_LDFLAGS); a plain `go build`
+// reports "dev".
+var Version = "dev"
+
 // readBackstop enforces the tool's hard invariants regardless of the token:
 // read-only and table ∈ {A,B}.
 func readBackstop(ctx captool.ValidatedContext, args map[string]string) error {
@@ -30,7 +35,7 @@ func readBackstop(ctx captool.ValidatedContext, args map[string]string) error {
 // buildServer declares the read operation over store and returns the captool server.
 func buildServer(store *Store, name, backend, adminURL string) (*captool.Server, error) {
 	return captool.New(captool.Config{
-		Name: name, Backend: backend, AdminURL: adminURL,
+		Name: name, Version: Version, Backend: backend, AdminURL: adminURL,
 		Log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		Operations: []captool.Operation{{
 			Name: "read", Description: "read rows from an allowed table filtered by owner",

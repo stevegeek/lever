@@ -18,9 +18,9 @@ import (
 // pipes to a net.Conn, which exec.Runner's run-to-completion, capture-the-
 // output contract cannot express.
 //
-// This is the single lockstep point for the in-jail transport — JailRunner is
-// built on it — so adding a backend means extending exactly one switch
-// (exercised by TestJailArgvCoversAllCandidates).
+// This switch is one of the three backend lockstep points (with the
+// constructors table and backend.Candidates — see the package doc); JailRunner
+// is built on it. TestJailArgvCoversAllCandidates keeps it in step.
 func JailArgv(name, machine, user string) ([]string, error) {
 	if name == "" {
 		name = Default

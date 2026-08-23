@@ -181,8 +181,8 @@ func syncSkills(app *config.App, stateDir string, force, check bool) ([]skillSyn
 	return results, nil
 }
 
-// decideSkill maps the observed target state to (action, writeNeeded). See
-// the behavior table in the plan/spec: current content always wins; an
+// decideSkill maps the observed target state to (action, writeNeeded).
+// Current content always wins; an
 // adopted customization is respected (only --force reclaims it); an
 // unmodified scaffold refreshes silently; anything else — including an
 // untracked pre-existing file — is treated as an owner edit.

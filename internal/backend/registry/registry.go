@@ -1,7 +1,9 @@
-// Package registry constructs the selected containment backend. It is the one
-// place that maps a backend name to a concrete implementation, so adding a
-// backend means adding one entry here (and one entry in backend.Candidates) —
-// nothing else in the codebase names a concrete backend.
+// Package registry constructs the selected containment backend. It maps a
+// backend name to a concrete implementation. Adding a backend today means
+// touching three lockstep points: the constructors table here, the JailArgv
+// switch (jailrunner.go) and backend.Candidates — the registry's lockstep
+// tests enforce that they agree. Nothing else in the codebase names a
+// concrete backend.
 package registry
 
 import (

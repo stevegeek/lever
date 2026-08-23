@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
@@ -1121,7 +1122,7 @@ func TestCheckNodeToolchainProbeError(t *testing.T) {
 	orig := nodeToolchainProbe
 	defer func() { nodeToolchainProbe = orig }()
 	nodeToolchainProbe = func() (string, error) {
-		return "", errors.New("node/npm toolchain not usable: node --version: exit status 126")
+		return "", fmt.Errorf("%w: node --version: exit status 126", guest.ErrNodeToolchain)
 	}
 
 	r := checkNodeToolchain(&config.App{

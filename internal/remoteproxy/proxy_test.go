@@ -276,8 +276,7 @@ func TestUpgradeRequestGetsRewrite(t *testing.T) {
 	}
 }
 
-// TestStripsSetCookieFromHubResponse covers behavior-contract point 9 (from
-// the Task 1 spike): the hub mints a fresh scion_sess cookie on every
+// TestStripsSetCookieFromHubResponse: the hub mints a fresh scion_sess cookie on every
 // cookie-less request; the phone must never receive it, since a leaked
 // scion_sess would be an alternate, lever-unmanaged credential.
 func TestStripsSetCookieFromHubResponse(t *testing.T) {

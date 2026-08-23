@@ -6,7 +6,7 @@ package broker
 // generation — all byte-identical), revoked-caller and certless denial, and
 // the per-CN rate limit. Directives are seeded directly via the store
 // (b.directives.Submit), bypassing the signed /directive/send admin
-// channel, per Task 5's brief — these routes never verify signatures
+// channel — these routes never verify signatures
 // themselves.
 
 import (

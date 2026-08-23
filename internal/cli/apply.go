@@ -52,7 +52,7 @@ func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 // session (Setsid — survives the parent terminal/session, no controlling TTY),
 // stdout+stderr appended to outLog (so a bind failure or panic is inspectable,
 // not discarded), and the env the broker needs to issue its cert + reach the
-// jail. The pid file is written by the serve process itself (Task 1), not here.
+// jail. The pid file is written by the serve process itself, not here.
 func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (*exec.Cmd, *os.File, error) {
 	// On a fresh apply the state dir (.lever-state) does not exist yet — it's
 	// created by EnsureKeys inside the spawned child, too late for this open —
@@ -303,7 +303,7 @@ func jailProjectPath(tree, jailMount string) string {
 // binds :48080). ServerStart emits --web-port, so the throwaway lands here,
 // physically isolated from the real dev-auth-OFF hub the scion-server apply step
 // starts on 8080 right after. The throwaway's dev-auth window is agent-free +
-// jail-loopback only (the "agent-free window" — see the P3 plan).
+// jail-loopback only (the "agent-free window").
 const throwawayHubPort = 48080
 
 // controllerPATScopes is the EXACT scope set the controller PAT is minted
@@ -330,7 +330,7 @@ var remotePATScopes = []string{"agent:read", "agent:list", "project:read", "agen
 //
 // Idempotent per token: a PAT already persisted in state short-circuits its
 // own mint (survives `down`→`up`; clearStagedRuntimeState only wipes
-// tree/.lever/*, see the P3 plan's Global Constraints). If NEITHER token is
+// tree/.lever/*). If NEITHER token is
 // missing this is a complete no-op — no window opens at all.
 //
 // Why one window: the dev-auth mint window is the sensitive part (a
@@ -419,7 +419,7 @@ func ensureControllerPAT(ctx context.Context, jr leverexec.Runner, state brokerc
 	if err := tw.ServerStop(ctx); err != nil {
 		// Best-effort: the deferred ServerStop above retries at return, and a
 		// live run against a scion build without `server stop` needs a
-		// jail-pid-kill fallback instead (see ServerStop's doc comment) — a P4
+		// jail-pid-kill fallback instead (see ServerStop's doc comment) — a
 		// live-validation item, not implemented here.
 		_ = err
 	}
@@ -479,7 +479,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 }
 
 // brokerReusable reports whether a running broker's /epoch identity matches
-// this binary + this broker config, i.e. whether apply's M2 shortcut may keep
+// this binary + this broker config, i.e. whether apply's broker-reuse shortcut may keep
 // it (#19). A broker predating the identity fields reports them empty —
 // mismatch — so old brokers are always restarted rather than trusted.
 func brokerReusable(got broker.EpochResponse, wantVersion, wantHash string) bool {

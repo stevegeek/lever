@@ -1,7 +1,7 @@
 package brokerctl
 
-// single_project_dispatch_test.go is Task 6's broker-side single-project
-// integration proof (P2 plan). It drives the REAL config → WorkerSpecs →
+// single_project_dispatch_test.go is the broker-side single-project
+// integration proof. It drives the REAL config → WorkerSpecs →
 // broker.Config → broker.New chain (BuildBroker + WorkerSpecs, exactly as
 // Serve assembles them, minus the real backend/jail wiring) for a config with
 // TWO workers (dir: workers/a, dir: workers/b), with only the scion runtime
@@ -123,7 +123,7 @@ func fakeTLSWithCN(cn string) *tls.ConnectionState {
 
 // TestSingleProjectWorkerDispatchAndList drives the collapsed single-project
 // broker dispatch end to end (fake scion runtime only) for a two-worker
-// config, per the P2 plan's Task 6.
+// config.
 func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	tree := t.TempDir() // real dir: HostWorkspace MkdirAll is genuine, assertable
 	kp, err := token.Generate()

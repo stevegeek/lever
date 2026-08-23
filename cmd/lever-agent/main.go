@@ -125,7 +125,7 @@ func cmdBoot(args []string) error {
 	if err := agent.Boot(ctx, cfg); err != nil {
 		return err
 	}
-	// G2: emit the renew sidecar so scion auto-refreshes the cert and (in api-key
+	// Emit the renew sidecar so scion auto-refreshes the cert and (in api-key
 	// mode) the LLM token. Skip in enrol-only mode — the bare VM acceptance gate
 	// has no long-running container to run sidecars in.
 	if !*enrolOnly {
@@ -333,8 +333,8 @@ func writeRenewServices(homeDir, idDir, bootstrapPath, settingsPath, llmAuth str
 //
 // PAIRING WITH BOOT.GO: boot.go calls MCPAdd("lever-capability", "lever-agent",
 // "serve-capability"). Claude Code interprets this as a command-mode MCP server
-// and spawns "lever-agent serve-capability" reading/writing stdio JSON-RPC. Task 8
-// validates this transport live in the acceptance run.
+// and spawns "lever-agent serve-capability" reading/writing stdio JSON-RPC. The
+// acceptance run validates this transport live.
 func cmdServeCapability(args []string) error {
 	fs := flag.NewFlagSet("serve-capability", flag.ContinueOnError)
 	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json (for broker URL)")

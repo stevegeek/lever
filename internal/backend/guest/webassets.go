@@ -73,12 +73,13 @@ const webBuildMarker = ".lever-web-build"
 // vite instead of naming the actual problem.
 const minNodeMajor = 20
 
-// errNodeToolchain is the sentinel for "this host cannot build scion's web UI".
+// ErrNodeToolchain is the sentinel for "this host cannot build scion's web UI".
 // A sentinel rather than a bare message so the apply path and `lever doctor`
-// can share one diagnosis, and one remediation, for the same condition.
-var errNodeToolchain = errors.New("node/npm toolchain not usable")
+// (errors.Is) can share one diagnosis, and one remediation, for the same
+// condition.
+var ErrNodeToolchain = errors.New("node/npm toolchain not usable")
 
-// NodeToolchainFix is the remediation printed for errNodeToolchain. It names the
+// NodeToolchainFix is the remediation printed for ErrNodeToolchain. It names the
 // asdf/mise shim case explicitly because that is the failure this project keeps
 // meeting: a shim is ON PATH and resolves, but the version it points at is not
 // installed, so it exits 126 with no useful text (the same trap checkGoToolchain
@@ -187,19 +188,19 @@ func WebBuildCacheRoot() (string, error) {
 func CheckNodeToolchain(ctx context.Context, r exec.Runner, probeDir string) (string, error) {
 	res, err := r.RunIn(ctx, probeDir, nil, "node", "--version")
 	if err != nil {
-		return "", fmt.Errorf("%w: node --version: %v", errNodeToolchain, err)
+		return "", fmt.Errorf("%w: node --version: %v", ErrNodeToolchain, err)
 	}
 	version := strings.TrimSpace(res.Stdout)
 	major, err := nodeMajor(version)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", errNodeToolchain, err)
+		return "", fmt.Errorf("%w: %v", ErrNodeToolchain, err)
 	}
 	if major < minNodeMajor {
 		return "", fmt.Errorf("%w: node %s is too old — scion's web UI needs node >= %d (its package.json engines)",
-			errNodeToolchain, version, minNodeMajor)
+			ErrNodeToolchain, version, minNodeMajor)
 	}
 	if _, err := r.RunIn(ctx, probeDir, nil, "npm", "--version"); err != nil {
-		return "", fmt.Errorf("%w: npm --version: %v", errNodeToolchain, err)
+		return "", fmt.Errorf("%w: npm --version: %v", ErrNodeToolchain, err)
 	}
 	return version, nil
 }

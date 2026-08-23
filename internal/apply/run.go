@@ -860,7 +860,7 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 	// non-zero, verified upstream 2026-07-04); resume
 	// covers suspended AND stopped records, relaunching with
 	// `claude --continue` (conversation restored). Live evidence
-	// 2026-07-04 (see the resume-reconciliation plan's Evidence base).
+	// 2026-07-04.
 	//
 	// The Hub API is up by this point in Plan() (scion-server ran first, and
 	// waitHubReady confirmed it), but the runtime broker registers
@@ -1070,16 +1070,14 @@ func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) 
 // the runtime-broker registration (see brokerStartAttempts) and treats an
 // "already running"/"already exists" 409 as success (idempotent re-apply, or a
 // create-race against a record the observe step just missed — scion's own
-// lazy hub-sync can transiently read a live record as absent; see the plan's
-// Evidence base). Shared by the absent-record branch and the post-delete
+// lazy hub-sync can transiently read a live record as absent). Shared by the absent-record branch and the post-delete
 // recovery branches above (a failed resume, or an unresumable phase, falls
 // back to exactly this same create path), so all three take the identical
 // retry behavior — including the bootstrap re-arm below, which is why it
 // lives HERE rather than duplicated at each of the three call sites.
 //
 // A freshly-created scion agent record has no agent home to reuse (unlike
-// resume, which restores an existing one — see the resume-reconciliation
-// plan's Evidence base), so lever-agent boot ALWAYS re-enrols after a create.
+// resume, which restores an existing one), so lever-agent boot ALWAYS re-enrols after a create.
 // If the broker's single-use /bootstrap latch was already consumed by an
 // earlier apply against this same broker process (mint-manager-bootstrap
 // tolerated ErrBootstrapLatched — see its doc — leaving boot.minted false),
@@ -1220,7 +1218,8 @@ const maxCredentialBytes = 64 << 10
 
 // defaultReadCred reads a credential file, refusing world-readable files (a real
 // credential should be 0600) and oversized files. This is defence-in-depth for
-// the credential projected into agent containers; see security-model-config-trust.md §5.
+// the credential projected into agent containers; see
+// docs-site/_guides/security-model-config-trust.md §5.
 func defaultReadCred(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {

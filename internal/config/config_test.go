@@ -601,9 +601,7 @@ func TestSecurityImagePolicyAppliesToWorkers(t *testing.T) {
 		"security:\n  allowed_image_registries: [scionlocal]\n" +
 		"manager:\n  image: scionlocal/mgr:latest\n" +
 		"workers:\n  - name: g\n    dir: workers/g\n    image: ghcr.io/who/x:latest\n"
-	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil {
-		t.Fatal("worker image outside the allowlist should be rejected")
-	}
+	rejectNoHost(t, body) // worker image outside the allowlist should be rejected
 }
 
 const baseCfg = `
@@ -654,24 +652,18 @@ func TestLoadParsesBrokerAndGrants(t *testing.T) {
 func TestLoadRejectsGrantWithUnknownTool(t *testing.T) {
 	bad := baseCfg + "\n# trailing\n"
 	bad = strings.Replace(bad, "tool: db, op: read, to: [worker]", "tool: nope, op: read, to: [worker]", 1)
-	if _, err := LoadNoHostChecks(writeConfig(t, bad)); err == nil {
-		t.Fatal("a delegate grant referencing an undeclared tool must be rejected")
-	}
+	rejectNoHost(t, bad) // a delegate grant referencing an undeclared tool must be rejected
 }
 
 func TestLoadRejectsDelegateToUnknownAgent(t *testing.T) {
 	bad := strings.Replace(baseCfg, "to: [worker]", "to: [ghost]", 1)
-	if _, err := LoadNoHostChecks(writeConfig(t, bad)); err == nil {
-		t.Fatal("a delegate.to naming an undeclared agent must be rejected")
-	}
+	rejectNoHost(t, bad) // a delegate.to naming an undeclared agent must be rejected
 }
 
 func TestLoadRejectsGrantWithUnknownOp(t *testing.T) {
 	// db exists but has only op "read"; granting "write" must be rejected.
 	bad := strings.Replace(baseCfg, "op: read, to:", "op: write, to:", 1)
-	if _, err := LoadNoHostChecks(writeConfig(t, bad)); err == nil {
-		t.Fatal("a delegate grant referencing an undeclared op must be rejected")
-	}
+	rejectNoHost(t, bad) // a delegate grant referencing an undeclared op must be rejected
 }
 
 // TestRejectsMixedLLMAuthInstance: an instance that mixes api-key and
@@ -896,9 +888,7 @@ func TestLoadAcceptsWildcardGrantOnCoarseTool(t *testing.T) {
 func TestLoadRejectsWildcardGrantOnFineTool(t *testing.T) {
 	cfg := strings.Replace(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
 		"workers:\n  - {name: worker, dir: work, obtain: [{tool: devonthink, op: \"*\"}]}", 1)
-	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err == nil {
-		t.Fatal("a wildcard grant on a fine tool must be rejected at load")
-	}
+	rejectNoHost(t, cfg) // a wildcard grant on a fine tool must be rejected at load
 }
 
 func TestLoadRejectsExternalToolShapeErrors(t *testing.T) {
@@ -927,9 +917,7 @@ func TestLoadRejectsExternalToolShapeErrors(t *testing.T) {
 
 func TestLoadRejectsFineExternalWithoutOperations(t *testing.T) {
 	cfg := strings.Replace(extCfg, "      operations:\n        - {name: search}\n      allowed_values: {database: [work, personal]}\n", "", 1)
-	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err == nil {
-		t.Fatal("a fine external tool with no operations must be rejected")
-	}
+	rejectNoHost(t, cfg) // a fine external tool with no operations must be rejected
 }
 
 func TestLoadRejectsSupervisedToolWithoutCommand(t *testing.T) {
@@ -1021,9 +1009,7 @@ func TestLoadAcceptsUnderscoreToolName(t *testing.T) {
 func TestLoadRejectsEmptyOperationName(t *testing.T) {
 	cfg := strings.Replace(baseCfg, "{name: read, caveat_param: {table: table, filter: filter}}",
 		"{name: read, caveat_param: {table: table, filter: filter}}\n        - {name: \"\"}", 1)
-	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err == nil {
-		t.Fatal("an operation with an empty name must be rejected")
-	}
+	rejectNoHost(t, cfg) // an operation with an empty name must be rejected
 }
 
 func TestWorkerToWorkerMessagingDefaultsTrue(t *testing.T) {
@@ -1072,25 +1058,19 @@ func TestOperatorUnsetDisablesDirectives(t *testing.T) {
 // a validation error, not silently clamped.
 func TestOperatorRejectsExpiryMaxOver24h(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: 25h\n"
-	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil {
-		t.Fatal("directive_expiry_max > 24h should be rejected")
-	}
+	rejectNoHost(t, body) // directive_expiry_max > 24h should be rejected
 }
 
 // directive_expiry must not exceed directive_expiry_max.
 func TestOperatorRejectsExpiryOverMax(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: 2h\n  directive_expiry_max: 1h\n"
-	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil {
-		t.Fatal("directive_expiry > directive_expiry_max should be rejected")
-	}
+	rejectNoHost(t, body) // directive_expiry > directive_expiry_max should be rejected
 }
 
 // allowed_signers must stay confined to the instance dir, like prompt_file.
 func TestOperatorRejectsAllowedSignersEscapingInstanceDir(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  allowed_signers: ../../etc/passwd\n"
-	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil {
-		t.Fatal("allowed_signers escaping the instance dir should be rejected")
-	}
+	rejectNoHost(t, body) // allowed_signers escaping the instance dir should be rejected
 }
 
 // A confined allowed_signers loads cleanly and flips DirectivesEnabled on.

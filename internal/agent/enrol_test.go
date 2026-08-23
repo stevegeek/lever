@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -12,17 +11,13 @@ import (
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/broker/brokertest"
 	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
-// brokerEnv holds all test-side handles for a broker under test.
-type brokerEnv = brokertest.Env
-
 // testBroker builds a broker that permits provisioning worker "worker" and a CA
-// server cert, and returns a brokerEnv with all relevant handles for test setup
+// server cert, and returns a brokertest.Env with all relevant handles for test setup
 // and assertion (including the policy and registry instances the broker was built
 // from, so callers can drive them directly without any production accessor).
-func testBroker(t *testing.T) *brokerEnv {
+func testBroker(t *testing.T) *brokertest.Env {
 	t.Helper()
 	return brokertest.NewTestBroker(t, brokertest.Config{})
 }
@@ -30,7 +25,7 @@ func testBroker(t *testing.T) *brokerEnv {
 // allowLLM registers the broker's built-in llm pseudo-tool and grants agent
 // permission to self-obtain it, so RequestLLMToken / RefreshLLMToken succeed
 // against env.
-func allowLLM(t *testing.T, env *brokerEnv, agent string) {
+func allowLLM(t *testing.T, env *brokertest.Env, agent string) {
 	t.Helper()
 	env.Rules.AllowObtain(agent, broker.ReservedLLMTool, broker.ReservedLLMOp)
 	if err := env.Registry.Register(registry.Tool{
@@ -44,9 +39,9 @@ func allowLLM(t *testing.T, env *brokerEnv, agent string) {
 }
 
 // enrolWorker provisions and enrols "worker" against env, returning its identity.
-func enrolWorker(t *testing.T, env *brokerEnv) Identity {
+func enrolWorker(t *testing.T, env *brokertest.Env) Identity {
 	t.Helper()
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	ticket := env.ProvisionWorker(t, "worker")
 	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
 	if err != nil {
 		t.Fatalf("enrolWorker: %v", err)
@@ -62,14 +57,6 @@ func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 		t.Fatal(err)
 	}
 	return csr, key
-}
-
-// provisionAs signs a manager client cert with the CA, builds an mTLS client,
-// POSTs /provision {worker}, and returns the ticket string.
-func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *ca.CA, worker string) string {
-	t.Helper()
-	manager := brokertest.Client(caInst, brokertest.Cert(t, caInst, "manager"), "")
-	return brokertest.ProvisionWorker(t, manager, srv.URL, worker)
 }
 
 // parseLeaf decodes the first certificate from certPEM.
@@ -101,7 +88,7 @@ func assertMode(t *testing.T, path string, want uint32) {
 
 func TestEnrolReturnsSignedIdentity(t *testing.T) {
 	env := testBroker(t)
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	ticket := env.ProvisionWorker(t, "worker")
 	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +104,7 @@ func TestEnrolReturnsSignedIdentity(t *testing.T) {
 
 func TestEnrolRejectsCNMismatch(t *testing.T) {
 	env := testBroker(t)
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	ticket := env.ProvisionWorker(t, "worker")
 	// A CSR CN that doesn't match the ticket's worker must be rejected by the broker.
 	if _, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "evil"); err == nil {
 		t.Fatal("enrol with CN != ticket worker must fail")

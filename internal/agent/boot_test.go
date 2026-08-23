@@ -10,13 +10,15 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/broker/brokertest"
 )
 
 // writeBootstrap writes a bootstrap.json for env under dir with a freshly
 // provisioned "worker" ticket and returns its path.
-func writeBootstrap(t *testing.T, env *brokerEnv, dir string) string {
+func writeBootstrap(t *testing.T, env *brokertest.Env, dir string) string {
 	t.Helper()
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
+	ticket := env.ProvisionWorker(t, "worker")
 	bsPath := filepath.Join(dir, "bootstrap.json")
 	bs, _ := json.Marshal(Bootstrap{
 		Ticket:    ticket,
@@ -33,7 +35,7 @@ func writeBootstrap(t *testing.T, env *brokerEnv, dir string) string {
 // baseBootConfig returns a BootConfig wired to env with a provisioned "worker"
 // ticket, ready for Boot to enrol and configure: an explicit tool list, a
 // settings.json under the temp dir, and a no-op MCPAdd.
-func baseBootConfig(t *testing.T, env *brokerEnv) BootConfig {
+func baseBootConfig(t *testing.T, env *brokertest.Env) BootConfig {
 	t.Helper()
 	dir := t.TempDir()
 	return BootConfig{

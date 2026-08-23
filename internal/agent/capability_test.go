@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/broker/brokertest"
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
@@ -19,13 +20,13 @@ import (
 
 // allowDelegate adds a delegation rule to the broker's policy: agent may delegate
 // (tool, op) to recipient.
-func allowDelegate(t *testing.T, env *brokerEnv, agent, tool, op, recipient string) {
+func allowDelegate(t *testing.T, env *brokertest.Env, agent, tool, op, recipient string) {
 	t.Helper()
 	env.Rules.AllowDelegate(agent, tool, op, recipient)
 }
 
 // regDB registers the "db" tool with a "read" operation in the broker's registry.
-func regDB(t *testing.T, env *brokerEnv) {
+func regDB(t *testing.T, env *brokertest.Env) {
 	t.Helper()
 	if err := env.Registry.Register(registry.Tool{
 		Name:    "db",

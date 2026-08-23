@@ -28,12 +28,10 @@ package remoteproxy
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -389,7 +387,7 @@ func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 					// No audit sink wired: the cause still must not vanish, or a
 					// 502 says nothing about whether the jail, the hub, or the
 					// PAT is at fault.
-					fmt.Fprintf(os.Stderr, "lever: warning: remote proxy upstream: %v\n", err)
+					warnf("remote proxy upstream: %v", err)
 				}
 			}
 			http.Error(w, "bad gateway", http.StatusBadGateway)

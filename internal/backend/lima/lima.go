@@ -91,23 +91,7 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := l.ensureVM(ctx, cfg.ProjectTree, cfg.Disk); err != nil {
 		return err
 	}
-	if err := l.ReadRunUser(ctx); err != nil {
-		return err
-	}
-	if err := l.Guest().EnsureRuntimes(ctx, l.RunUser()); err != nil {
-		return err
-	}
-	if cfg.HasScion() {
-		if err := l.Guest().EnsureScion(ctx, guest.ScionSpec{
-			Binary:  cfg.ScionBinary,
-			Source:  cfg.ScionSource,
-			Version: cfg.ScionVersion,
-			WebUI:   cfg.ScionWebUI,
-		}); err != nil {
-			return err
-		}
-	}
-	return l.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+	return l.Provision(ctx, cfg)
 }
 
 // ensureVM creates the jail VM from the rendered template (template.go) if it

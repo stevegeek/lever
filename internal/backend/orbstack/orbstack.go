@@ -103,23 +103,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.ensureMachine(ctx, cfg.ProjectTree); err != nil {
 		return err
 	}
-	if err := o.ReadRunUser(ctx); err != nil {
-		return err
-	}
-	if err := o.Guest().EnsureRuntimes(ctx, o.RunUser()); err != nil {
-		return err
-	}
-	if cfg.HasScion() {
-		if err := o.Guest().EnsureScion(ctx, guest.ScionSpec{
-			Binary:  cfg.ScionBinary,
-			Source:  cfg.ScionSource,
-			Version: cfg.ScionVersion,
-			WebUI:   cfg.ScionWebUI,
-		}); err != nil {
-			return err
-		}
-	}
-	return o.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+	return o.Provision(ctx, cfg)
 }
 
 // ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning: it

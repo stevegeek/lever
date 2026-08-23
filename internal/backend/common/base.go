@@ -147,6 +147,32 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 	return nil
 }
 
+// Provision is the shared tail of every embedder's EnsureUp, run once the
+// machine exists: resolve the run user, install the guest runtimes, install
+// scion when cfg asks for one, then apply egress. One copy rather than one
+// per backend: the ScionSpec literal drifted between the two once (ScionBinary
+// was added to both literals while the guard around them was updated in
+// neither — see backend.Config.HasScion).
+func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
+	if err := b.ReadRunUser(ctx); err != nil {
+		return err
+	}
+	if err := b.Guest().EnsureRuntimes(ctx, b.RunUser()); err != nil {
+		return err
+	}
+	if cfg.HasScion() {
+		if err := b.Guest().EnsureScion(ctx, guest.ScionSpec{
+			Binary:  cfg.ScionBinary,
+			Source:  cfg.ScionSource,
+			Version: cfg.ScionVersion,
+			WebUI:   cfg.ScionWebUI,
+		}); err != nil {
+			return err
+		}
+	}
+	return b.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+}
+
 // ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records the
 // resolved host alias, preserving the I2 no-reopen property. Called by each
 // embedder's EnsureUp as its last step; it is not part of the Backend

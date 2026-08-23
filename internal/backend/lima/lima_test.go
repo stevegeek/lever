@@ -616,11 +616,10 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 }
 
-// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. Each
-// backend keeps its OWN copy of that struct literal, and this pair has drifted
-// before — ScionBinary was added to both literals while the guard around them
-// was updated in neither (see backend.Config.HasScion) — so both backends pin
-// it, and both assert the negative too.
+// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. The
+// literal now lives once in common.Base.Provision, but each backend still pins
+// it end to end (and asserts the negative) so a backend that stops calling
+// Provision, or calls it with the wrong config, is caught here.
 func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -448,3 +448,20 @@ func TestAttachArgvHasNoEnvPrefixWhenNothingToPin(t *testing.T) {
 		t.Fatalf("no env assignments means no env prefix, got %q", strings.Join(argv, " "))
 	}
 }
+
+// TestWaitAgentLiveZeroAttemptsExhaustsImmediately pins that a non-positive
+// budget is exhaustion, not retry.Until's "unbounded" reading of <= 0.
+func TestWaitAgentLiveZeroAttemptsExhaustsImmediately(t *testing.T) {
+	calls := 0
+	list := func(context.Context) ([]Agent, error) {
+		calls++
+		return []Agent{{Slug: "mgr", Phase: "running", ContainerStatus: "running"}}, nil
+	}
+	err := WaitAgentLive(context.Background(), list, "mgr", 0, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "did not come up") {
+		t.Fatalf("err = %v, want exhaustion", err)
+	}
+	if calls != 0 {
+		t.Fatalf("list called %d times with a zero budget", calls)
+	}
+}

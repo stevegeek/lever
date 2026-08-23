@@ -43,9 +43,14 @@ func ContainerLive(status string) bool {
 // `worker %q %w`) reporting the last observed phase/container, or the last list
 // error if the final attempts could not observe the record. On context
 // cancellation it returns ctx.Err() unwrapped so callers can detect it.
+// attempts <= 0 is an exhausted budget with nothing observed, not "poll
+// forever" (retry.Until's reading of a non-positive count).
 func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {
 	var lastPhase, lastContainer string
 	var lastErr error
+	if attempts <= 0 {
+		return fmt.Errorf("did not come up (last phase %q, container %q) — scion reported success but the harness is not live", lastPhase, lastContainer)
+	}
 	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
 		agents, err := list(ctx)
 		if err != nil {

@@ -86,7 +86,7 @@ func TestPlanOrder(t *testing.T) {
 	// of worker count (workers no longer register their own scion projects).
 	// (0:broker-up 1:load-image 2:init-machine 3:config-registry 4:bootstrap-token 5:scion-server 6:register-project 7:agent-template 8:mint-manager-bootstrap 9:start-manager)
 	if steps[6].Target != "/t" {
-		t.Fatalf("register-project target=%q", steps[7].Target)
+		t.Fatalf("register-project target=%q", steps[6].Target)
 	}
 }
 

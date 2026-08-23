@@ -526,21 +526,25 @@ func (bc *brokerController) Start(ctx context.Context) error {
 	return nil
 }
 
-// brokerHealthAttempts/brokerHealthInterval bound Healthy's poll (~10s).
+// brokerHealthTimeout bounds Healthy's poll on the wall clock; the interval
+// paces the attempts within it. A wall-clock bound rather than an attempt
+// count because each probe can itself take up to brokerAdminTimeout.
 const (
-	brokerHealthAttempts = 50
+	brokerHealthTimeout  = 10 * time.Second
 	brokerHealthInterval = 200 * time.Millisecond
 )
 
-// Healthy polls GET /epoch until 200 or a ~10s timeout.
+// Healthy polls GET /epoch until 200 or brokerHealthTimeout elapses.
 func (bc *brokerController) Healthy(ctx context.Context) error {
+	pollCtx, cancel := context.WithTimeout(ctx, brokerHealthTimeout)
+	defer cancel()
 	var last error
-	err := retry.Until(ctx, brokerHealthAttempts, brokerHealthInterval, func() (bool, error) {
-		last = httpjson.Get(ctx, bc.admin, bc.adminURL+wire.PathEpoch, nil)
+	err := retry.Until(pollCtx, 0, brokerHealthInterval, func() (bool, error) {
+		last = httpjson.Get(pollCtx, bc.admin, bc.adminURL+wire.PathEpoch, nil)
 		return last == nil, nil
 	})
-	if errors.Is(err, retry.ErrExhausted) {
-		return fmt.Errorf("broker did not become healthy within 10s (last err: %v)", last)
+	if err != nil && ctx.Err() == nil {
+		return fmt.Errorf("broker did not become healthy within %s (last err: %v)", brokerHealthTimeout, last)
 	}
 	return err
 }

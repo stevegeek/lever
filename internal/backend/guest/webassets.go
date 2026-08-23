@@ -68,9 +68,17 @@ func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 		return nil
 	}
 	pr, pw := io.Pipe()
-	go func() { _ = pw.CloseWithError(webassets.WriteTar(pw, dist)) }()
+	tarErr := make(chan error, 1)
+	go func() {
+		err := webassets.WriteTar(pw, dist)
+		_ = pw.CloseWithError(err)
+		tarErr <- err
+	}()
 	err := g.pipeInto(ctx, g.RootPrefix, pr, stageWebAssetsScript(digest))
 	_ = pr.Close()
+	if terr := <-tarErr; terr != nil {
+		return fmt.Errorf("stage scion web assets into guest at %s: pack %s: %w", ScionWebAssetsDir, dist, terr)
+	}
 	if err != nil {
 		return fmt.Errorf("stage scion web assets into guest at %s: %w", ScionWebAssetsDir, err)
 	}

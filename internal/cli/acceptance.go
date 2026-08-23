@@ -507,4 +507,3 @@ func (h *acceptanceHarness) checkRevocation(ctx context.Context) (bool, error) {
 	}
 	return false, fmt.Errorf("token still accepted after bump-epoch (must be 403): %s", out)
 }
-

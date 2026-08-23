@@ -4,23 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
-// baseBootConfig returns a BootConfig wired to a live fake broker with a
-// provisioned "worker" ticket, ready for Boot to enrol and configure.
-// WriteEnvOverlay and MCPAdd are no-ops unless overridden by the caller.
-func baseBootConfig(t *testing.T) BootConfig {
+// writeBootstrap writes a bootstrap.json for env under dir with a freshly
+// provisioned "worker" ticket and returns its path.
+func writeBootstrap(t *testing.T, env *brokerEnv, dir string) string {
 	t.Helper()
-	env := testBroker(t)
 	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
-	dir := t.TempDir()
 	bsPath := filepath.Join(dir, "bootstrap.json")
 	bs, _ := json.Marshal(Bootstrap{
 		Ticket:    ticket,
@@ -28,68 +24,88 @@ func baseBootConfig(t *testing.T) BootConfig {
 		BrokerURL: env.Server.URL,
 		AgentCN:   "worker",
 	})
-	_ = os.WriteFile(bsPath, bs, 0o600)
+	if err := os.WriteFile(bsPath, bs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bsPath
+}
+
+// baseBootConfig returns a BootConfig wired to env with a provisioned "worker"
+// ticket, ready for Boot to enrol and configure: an explicit tool list, a
+// settings.json under the temp dir, and a no-op MCPAdd.
+func baseBootConfig(t *testing.T, env *brokerEnv) BootConfig {
+	t.Helper()
+	dir := t.TempDir()
 	return BootConfig{
-		BootstrapPath:   bsPath,
-		IDDir:           filepath.Join(dir, "id"),
-		BrokerTools:     []string{"db"},
-		Now:             time.Now(),
-		MCPAdd:          func(string, ...string) error { return nil },
-		WriteEnvOverlay: func(map[string]string) error { return nil },
+		BootstrapPath: writeBootstrap(t, env, dir),
+		IDDir:         filepath.Join(dir, "id"),
+		BrokerTools:   []string{"db"},
+		SettingsPath:  filepath.Join(dir, "settings.json"),
+		MCPAdd:        func(string, ...string) error { return nil },
 	}
 }
 
 func TestBootAPIKeyWritesAnthropicEnv(t *testing.T) {
-	var overlay map[string]string
-	c := baseBootConfig(t)
-	c.LLMAuth = "api-key"
-	c.WriteEnvOverlay = func(m map[string]string) error { overlay = m; return nil }
-	c.RequestLLMToken = func(_ context.Context, _ string, _ *http.Client, cn string) (string, error) {
-		return "ENC_TOKEN_FOR_" + cn, nil
-	}
+	env := testBroker(t)
+	allowLLM(t, env, "worker")
+	c := baseBootConfig(t, env)
+	c.LLMAuth = LLMAuthAPIKey
 	if err := Boot(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
-	const wantToken = "ENC_TOKEN_FOR_worker"
-	if overlay["ANTHROPIC_AUTH_TOKEN"] != wantToken {
-		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q (token must be stored verbatim, no re-encode)", overlay["ANTHROPIC_AUTH_TOKEN"], wantToken)
+	overlay := readSettingsEnv(t, c.SettingsPath)
+	if overlay["ANTHROPIC_AUTH_TOKEN"] == "" {
+		t.Error("api-key boot must write ANTHROPIC_AUTH_TOKEN")
 	}
 	if want := LocalGatewayURL + "/llm"; overlay["ANTHROPIC_BASE_URL"] != want {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q (must point at the loopback gateway, not the broker)", overlay["ANTHROPIC_BASE_URL"], want)
 	}
+	if overlay["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] != "1" {
+		t.Errorf("harness overlay keys missing from settings env: %v", overlay)
+	}
 }
 
 func TestBootAPIKeyFailsClosedOnTokenError(t *testing.T) {
-	// Fail closed (boot.go:118): if the broker won't mint an llm token, Boot must
-	// abort BEFORE writing the env overlay — a partial overlay with cert paths but a
-	// missing/empty ANTHROPIC_AUTH_TOKEN would hand claude an unauthenticated proxy
-	// config. Boot must error and WriteEnvOverlay must never be called.
-	wroteOverlay := false
-	c := baseBootConfig(t)
-	c.LLMAuth = "api-key"
-	c.WriteEnvOverlay = func(map[string]string) error { wroteOverlay = true; return nil }
-	c.RequestLLMToken = func(context.Context, string, *http.Client, string) (string, error) {
-		return "", errors.New("broker refused")
-	}
-	err := Boot(context.Background(), c)
-	if err == nil {
+	// Fail closed: if the broker won't mint an llm token (no obtain grant for
+	// "worker" here), Boot must abort BEFORE writing the settings env — a
+	// partial overlay with a missing/empty ANTHROPIC_AUTH_TOKEN would hand
+	// claude an unauthenticated proxy config.
+	env := testBroker(t)
+	c := baseBootConfig(t, env)
+	c.LLMAuth = LLMAuthAPIKey
+	if err := Boot(context.Background(), c); err == nil {
 		t.Fatal("Boot must fail closed when the llm token cannot be obtained")
 	}
-	if wroteOverlay {
-		t.Fatal("Boot must NOT write the env overlay after a failed llm-token acquisition")
+	if _, err := os.Stat(c.SettingsPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Boot must NOT write settings.json after a failed llm-token acquisition; stat err = %v", err)
 	}
 }
 
 func TestBootSubscriptionOmitsAnthropicAuthToken(t *testing.T) {
-	var overlay map[string]string
-	c := baseBootConfig(t)
-	c.LLMAuth = "subscription"
-	c.WriteEnvOverlay = func(m map[string]string) error { overlay = m; return nil }
+	env := testBroker(t)
+	c := baseBootConfig(t, env)
+	c.LLMAuth = LLMAuthSubscription
 	if err := Boot(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
+	overlay := readSettingsEnv(t, c.SettingsPath)
 	if _, ok := overlay["ANTHROPIC_AUTH_TOKEN"]; ok {
 		t.Error("subscription boot must NOT set ANTHROPIC_AUTH_TOKEN")
+	}
+	if overlay["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] != "1" {
+		t.Errorf("subscription boot must still write the harness overlay: %v", overlay)
+	}
+}
+
+func TestBootEnrolOnlySkipsSettingsAndMCP(t *testing.T) {
+	env := testBroker(t)
+	dir := t.TempDir()
+	c := BootConfig{BootstrapPath: writeBootstrap(t, env, dir), IDDir: filepath.Join(dir, "id")}
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := LoadIdentity(c.IDDir); !ok {
+		t.Fatal("enrol-only boot must still write the identity")
 	}
 }
 
@@ -101,31 +117,20 @@ type mcpCall struct {
 
 func TestBootEnrolsAndConfigures(t *testing.T) {
 	env := testBroker(t)
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
-	dir := t.TempDir()
-	bsPath := filepath.Join(dir, "bootstrap.json")
-	bs, _ := json.Marshal(Bootstrap{Ticket: ticket, BrokerCA: string(env.CA.CertPEM()), BrokerURL: env.Server.URL, AgentCN: "worker"})
-	_ = os.WriteFile(bsPath, bs, 0o600)
-
-	var envOverlay map[string]string
 	var calls []mcpCall
-	idDir := filepath.Join(dir, "id")
-	err := Boot(context.Background(), BootConfig{
-		BootstrapPath: bsPath, IDDir: idDir, BrokerTools: []string{"db"}, Now: time.Now(),
-		MCPAdd: func(name string, argv ...string) error {
-			calls = append(calls, mcpCall{name: name, argv: argv})
-			return nil
-		},
-		WriteEnvOverlay: func(m map[string]string) error { envOverlay = m; return nil },
-	})
-	if err != nil {
+	c := baseBootConfig(t, env)
+	c.MCPAdd = func(name string, argv ...string) error {
+		calls = append(calls, mcpCall{name: name, argv: argv})
+		return nil
+	}
+	if err := Boot(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := LoadIdentity(idDir); !ok {
+	if _, ok := LoadIdentity(c.IDDir); !ok {
 		t.Fatal("boot must write the enrolled identity")
 	}
-	if envOverlay["CLAUDE_CODE_CLIENT_CERT"] == "" || envOverlay["CLAUDE_CODE_CLIENT_KEY"] == "" || envOverlay["NODE_EXTRA_CA_CERTS"] == "" {
-		t.Fatalf("env overlay missing identity vars: %v", envOverlay)
+	if envOverlay := readSettingsEnv(t, c.SettingsPath); envOverlay["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] != "1" {
+		t.Fatalf("settings env missing the harness overlay: %v", envOverlay)
 	}
 
 	// capability server + one per broker tool ("db").
@@ -167,24 +172,10 @@ func TestBootEnrolsAndConfigures(t *testing.T) {
 
 func TestBootIsIdempotent(t *testing.T) {
 	env := testBroker(t)
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
-	dir := t.TempDir()
-	bsPath := filepath.Join(dir, "bootstrap.json")
-	bs, _ := json.Marshal(Bootstrap{Ticket: ticket, BrokerCA: string(env.CA.CertPEM()), BrokerURL: env.Server.URL, AgentCN: "worker"})
-	_ = os.WriteFile(bsPath, bs, 0o600)
-	idDir := filepath.Join(dir, "id")
 
 	// First boot: enrols and configures.
-	var firstCalls []mcpCall
-	cfg := BootConfig{
-		BootstrapPath: bsPath, IDDir: idDir, Now: time.Now(),
-		BrokerTools: []string{"db"},
-		MCPAdd: func(name string, argv ...string) error {
-			firstCalls = append(firstCalls, mcpCall{name: name, argv: argv})
-			return nil
-		},
-		WriteEnvOverlay: func(map[string]string) error { return nil },
-	}
+	cfg := baseBootConfig(t, env)
+	idDir := cfg.IDDir
 	if err := Boot(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -225,59 +216,38 @@ func TestBootIsIdempotent(t *testing.T) {
 // still hits the real broker over the direct mTLS client — the gateway sidecar is
 // not up during pre-start, so routing discovery through it would deadlock boot.
 func TestBootDiscoveryUsesBrokerNotGateway(t *testing.T) {
+	// No gateway is listening on LocalGatewayAddr during this test, so a
+	// discovery that succeeds proves it went straight to the broker over mTLS.
 	env := testBroker(t)
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
-	dir := t.TempDir()
-	bsPath := filepath.Join(dir, "bootstrap.json")
-	bs, _ := json.Marshal(Bootstrap{Ticket: ticket, BrokerCA: string(env.CA.CertPEM()), BrokerURL: env.Server.URL, AgentCN: "worker"})
-	_ = os.WriteFile(bsPath, bs, 0o600)
-
-	var gotBrokerURL string
-	cfg := BootConfig{
-		BootstrapPath: bsPath, IDDir: filepath.Join(dir, "id"), Now: time.Now(),
-		MCPAdd:          func(string, ...string) error { return nil },
-		WriteEnvOverlay: func(map[string]string) error { return nil },
-		ListTools: func(_ context.Context, brokerURL string, _ *http.Client) ([]string, error) {
-			gotBrokerURL = brokerURL
-			return []string{"db"}, nil
-		},
-	}
-	if err := Boot(context.Background(), cfg); err != nil {
-		t.Fatal(err)
-	}
-	if gotBrokerURL != env.Server.URL {
-		t.Errorf("ListTools got broker URL %q, want the real broker %q (never the gateway)", gotBrokerURL, env.Server.URL)
-	}
-	if gotBrokerURL == LocalGatewayURL {
-		t.Error("boot-time discovery must not be routed through the not-yet-running gateway")
-	}
-}
-
-func TestBootAutoDiscoversTools(t *testing.T) {
-	env := testBroker(t)
-	ticket := provisionAs(t, env.Broker, env.Server, env.CA, "worker")
-	dir := t.TempDir()
-	bsPath := filepath.Join(dir, "bootstrap.json")
-	bs, _ := json.Marshal(Bootstrap{Ticket: ticket, BrokerCA: string(env.CA.CertPEM()), BrokerURL: env.Server.URL, AgentCN: "worker"})
-	_ = os.WriteFile(bsPath, bs, 0o600)
-
+	regDB(t, env)
 	var mcpAdds []string
-	idDir := filepath.Join(dir, "id")
-	cfg := BootConfig{
-		BootstrapPath:   bsPath,
-		IDDir:           idDir,
-		Now:             time.Now(),
-		MCPAdd:          func(name string, argv ...string) error { mcpAdds = append(mcpAdds, name); return nil },
-		WriteEnvOverlay: func(map[string]string) error { return nil },
-		ListTools: func(_ context.Context, _ string, _ *http.Client) ([]string, error) {
-			return []string{"db"}, nil
-		},
-	}
+	cfg := baseBootConfig(t, env)
+	cfg.BrokerTools = nil
+	cfg.DiscoverTools = true
+	cfg.MCPAdd = func(name string, argv ...string) error { mcpAdds = append(mcpAdds, name); return nil }
 	if err := Boot(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(mcpAdds, "lever-capability") || !slices.Contains(mcpAdds, "db") {
-		t.Fatalf("expected lever-capability + db registered, got %v", mcpAdds)
+		t.Fatalf("expected lever-capability + discovered db registered, got %v", mcpAdds)
+	}
+}
+
+func TestBootExplicitToolsSkipDiscovery(t *testing.T) {
+	// -tools "" (explicit empty list) must not fall back to discovery: the
+	// registry here has "db", but nothing may be registered.
+	env := testBroker(t)
+	regDB(t, env)
+	var mcpAdds []string
+	cfg := baseBootConfig(t, env)
+	cfg.BrokerTools = nil
+	cfg.DiscoverTools = false
+	cfg.MCPAdd = func(name string, argv ...string) error { mcpAdds = append(mcpAdds, name); return nil }
+	if err := Boot(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(mcpAdds, "db") {
+		t.Fatalf("explicit empty tool list must skip discovery, got %v", mcpAdds)
 	}
 }
 

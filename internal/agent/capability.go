@@ -52,31 +52,34 @@ func Request(ctx context.Context, brokerURL string, client *http.Client, tool, o
 // within that tool); extra constraints are merged into arguments.
 //
 // Unlike Request (which swallows a non-200 body into the error), Call returns the
-// raw response body, the HTTP status, AND the error separately, because the caller
-// prints the body to the user BEFORE surfacing the non-200 error — the acceptance
-// harness's deny checks rely on both the printed output and the non-zero exit. A
-// non-200 yields body+status+`call: status %d`; transport or read failures yield
-// an empty body, zero status, and the wrapped error.
-func Call(ctx context.Context, brokerURL string, client *http.Client, tool, op, token string, constraints map[string]string) (string, int, error) {
+// raw response body AND the error separately, because the caller prints the body
+// to the user BEFORE surfacing the non-200 error — the acceptance harness's deny
+// checks rely on both the printed output and the non-zero exit. A non-200 yields
+// the body plus a "call:"-wrapped *httpjson.StatusError carrying the code (use
+// httpjson.Status to read it); transport or read failures yield an empty body
+// and the wrapped error.
+func Call(ctx context.Context, brokerURL string, client *http.Client, tool, op, token string, constraints map[string]string) (string, error) {
 	body := buildToolCallBody(op, token, constraints)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brokerURL+"/mcp/"+tool+"/", bytes.NewReader(body))
+	url := brokerURL + "/mcp/" + tool + "/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("call: %w", err)
+		return "", fmt.Errorf("call: %w", err)
 	}
 	defer resp.Body.Close()
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(resp.Body); err != nil {
-		return "", 0, fmt.Errorf("call: read response: %w", err)
+		return "", fmt.Errorf("call: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return buf.String(), resp.StatusCode, fmt.Errorf("call: status %d", resp.StatusCode)
+		// Body deliberately left out of the StatusError: the caller prints it.
+		return buf.String(), fmt.Errorf("call: %w", &httpjson.StatusError{Method: http.MethodPost, URL: url, Code: resp.StatusCode})
 	}
-	return buf.String(), resp.StatusCode, nil
+	return buf.String(), nil
 }
 
 // buildToolCallBody constructs the JSON-RPC 2.0 body for a tools/call request to

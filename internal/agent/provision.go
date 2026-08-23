@@ -19,8 +19,3 @@ func Provision(ctx context.Context, brokerURL string, client *http.Client, worke
 	}
 	return pr.Ticket, nil
 }
-
-// BootstrapFor composes the worker Bootstrap a freshly-provisioned worker enrols with.
-func BootstrapFor(worker, ticket, brokerCA, brokerURL string) Bootstrap {
-	return Bootstrap{Ticket: ticket, BrokerCA: brokerCA, BrokerURL: brokerURL, AgentCN: worker}
-}

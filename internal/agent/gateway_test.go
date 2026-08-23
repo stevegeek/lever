@@ -322,7 +322,7 @@ func TestGatewayProxyIdleConnTimeout(t *testing.T) {
 }
 
 func TestGatewayRejectsNonLoopbackListen(t *testing.T) {
-	err := Gateway("0.0.0.0:8462", "https://broker.example", []byte("ca"), t.TempDir())
+	err := Gateway(GatewayConfig{Listen: "0.0.0.0:8462", BrokerURL: "https://broker.example", CAPEM: []byte("ca"), IDDir: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("Gateway must reject a non-loopback listen addr, got err=%v", err)
 	}

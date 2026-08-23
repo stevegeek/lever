@@ -16,11 +16,17 @@ import (
 	"time"
 )
 
-// LocalGatewayURL is the loopback address Claude's MCP/LLM config points at. The
-// gateway sidecar reverse-proxies that plaintext traffic to the real broker over
-// mTLS, presenting the always-current agent leaf — so Claude never holds the
-// rotating cert (which it would otherwise cache for its whole lifetime).
-const LocalGatewayURL = "http://127.0.0.1:8462"
+// LocalGatewayAddr is the loopback address the gateway sidecar listens on and
+// LocalGatewayURL is the same address as the base URL Claude's MCP/LLM config
+// points at. The gateway reverse-proxies that plaintext traffic to the real
+// broker over mTLS, presenting the always-current agent leaf — so Claude never
+// holds the rotating cert (which it would otherwise cache for its whole
+// lifetime). Both the sidecar's --listen argument and the gateway flag default
+// derive from LocalGatewayAddr; there is no second copy of the port.
+const (
+	LocalGatewayAddr = "127.0.0.1:8462"
+	LocalGatewayURL  = "http://" + LocalGatewayAddr
+)
 
 // idleConnTimeout caps how long a pooled broker connection lingers before the
 // proxy must re-handshake. GetClientCertificate runs per-HANDSHAKE, not
@@ -72,7 +78,7 @@ func (s *clientCertSource) GetClientCertificate(_ *tls.CertificateRequestInfo) (
 			if s.cert == nil || now().After(s.cert.Leaf.NotAfter) {
 				return nil, rerr
 			}
-			log.Printf("agent: re-read agent leaf failed, serving cached: %v", rerr)
+			log.Printf("gateway: re-read agent leaf failed, serving cached: %v", rerr)
 		}
 	}
 	return s.cert, nil
@@ -158,21 +164,29 @@ func NewReloadingClient(idDir string, caPEM []byte) (*http.Client, error) {
 	return &http.Client{Transport: tr}, nil
 }
 
+// GatewayConfig drives Gateway.
+type GatewayConfig struct {
+	Listen    string // loopback address to serve plaintext on (LocalGatewayAddr in production)
+	BrokerURL string // real broker origin the proxy forwards to over mTLS
+	CAPEM     []byte // CA that signed the broker's serving cert
+	IDDir     string // directory holding the rotating agent.{crt,key}
+}
+
 // Gateway runs the loopback reverse-proxy: it accepts plaintext HTTP from
-// in-container Claude on listenAddr and forwards to the real broker at brokerURL
-// over mTLS, presenting the rotating agent leaf from idDir. Blocks until the
+// in-container Claude on c.Listen and forwards to the real broker at c.BrokerURL
+// over mTLS, presenting the rotating agent leaf from c.IDDir. Blocks until the
 // listener closes (process signal).
-func Gateway(listenAddr, brokerURL string, caPEM []byte, idDir string) error {
-	if err := requireLoopback(listenAddr); err != nil {
+func Gateway(c GatewayConfig) error {
+	if err := requireLoopback(c.Listen); err != nil {
 		return err
 	}
-	proxy, err := newGatewayProxy(brokerURL, caPEM, idDir)
+	proxy, err := newGatewayProxy(c.BrokerURL, c.CAPEM, c.IDDir)
 	if err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", listenAddr)
+	ln, err := net.Listen("tcp", c.Listen)
 	if err != nil {
-		return fmt.Errorf("gateway: listen %s: %w", listenAddr, err)
+		return fmt.Errorf("gateway: listen %s: %w", c.Listen, err)
 	}
 	srv := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(ln)

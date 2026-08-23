@@ -1,42 +1,22 @@
 package manager
 
 import (
-	"context"
 	"encoding/json"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// withFakeMsgBroker points msgCallFn at a test broker for the duration of the
-// test, decoding each request body into a map so assertions can inspect it.
-func withFakeMsgBroker(t *testing.T, handle func(w http.ResponseWriter, gotPath string, gotBody map[string]any)) {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		handle(w, r.URL.Path, body)
-	}))
-	t.Cleanup(srv.Close)
-
-	oldCall := msgCallFn
-	msgCallFn = func(ctx context.Context, endpoint string, body any) (json.RawMessage, error) {
-		return postBroker[json.RawMessage](ctx, srv.Client(), srv.URL, endpoint, body)
-	}
-	t.Cleanup(func() { msgCallFn = oldCall })
-}
-
 func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
 	var gotPath string
 	var gotBody map[string]any
-	withFakeMsgBroker(t, func(w http.ResponseWriter, path string, body map[string]any) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, path string, body map[string]any) {
 		gotPath, gotBody = path, body
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	})
+	}))
 
-	root := NewRoot()
-	out, err := execCmd(t, root, "msg", "send", "hello", "--to", "scratch", "--interrupt")
+	out, err := clitest.Exec(t, root, "msg", "send", "hello", "--to", "scratch", "--interrupt")
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -56,13 +36,12 @@ func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
 
 func TestMsgSend_bodyIsJoinedArgs(t *testing.T) {
 	var gotBody map[string]any
-	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, body map[string]any) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, body map[string]any) {
 		gotBody = body
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	})
+	}))
 
-	root := NewRoot()
-	if _, err := execCmd(t, root, "msg", "send", "--to", "scratch", "hello", "there"); err != nil {
+	if _, err := clitest.Exec(t, root, "msg", "send", "--to", "scratch", "hello", "there"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if gotBody["body"] != "hello there" {
@@ -76,17 +55,16 @@ func TestMsgSend_bodyIsJoinedArgs(t *testing.T) {
 func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 	var gotPath string
 	var gotBody map[string]any
-	withFakeMsgBroker(t, func(w http.ResponseWriter, path string, body map[string]any) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, path string, body map[string]any) {
 		gotPath, gotBody = path, body
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"events": []map[string]any{
 				{"id": "e1", "status": "WAITING_FOR_INPUT", "message": "poet needs input"},
 			},
 		})
-	})
+	}))
 
-	root := NewRoot()
-	out, err := execCmd(t, root, "msg", "list", "--worker", "scratch", "--all")
+	out, err := clitest.Exec(t, root, "msg", "list", "--worker", "scratch", "--all")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -106,13 +84,12 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 
 func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 	var gotBody map[string]any
-	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, body map[string]any) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, body map[string]any) {
 		gotBody = body
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
-	})
+	}))
 
-	root := NewRoot()
-	if _, err := execCmd(t, root, "msg", "list"); err != nil {
+	if _, err := clitest.Exec(t, root, "msg", "list"); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	want := map[string]any{"all": false, "worker": ""}
@@ -124,15 +101,14 @@ func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 }
 
 func TestMsgList_malformedResponseIsAnError(t *testing.T) {
-	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
 		// Valid JSON (passes the raw-message transport) but the wrong shape:
 		// "events" is a string, not an array. Must surface as an error, NOT
 		// render as "Inbox empty." (a silent-empty inbox hides broker faults).
 		_, _ = w.Write([]byte(`{"events": "not-an-array"}`))
-	})
+	}))
 
-	root := NewRoot()
-	out, err := execCmd(t, root, "msg", "list")
+	out, err := clitest.Exec(t, root, "msg", "list")
 	if err == nil {
 		t.Fatalf("expected decode error, got nil (out=%q)", out)
 	}
@@ -145,12 +121,11 @@ func TestMsgList_malformedResponseIsAnError(t *testing.T) {
 }
 
 func TestMsgList_emptyInboxPrintsFallback(t *testing.T) {
-	withFakeMsgBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
-	})
+	}))
 
-	root := NewRoot()
-	out, err := execCmd(t, root, "msg", "list")
+	out, err := clitest.Exec(t, root, "msg", "list")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

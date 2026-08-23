@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,7 @@ func initFixture(t *testing.T) string {
 
 func TestInitScaffoldsAndIsIdempotent(t *testing.T) {
 	root := initFixture(t)
-	out, err := execCmd(t, newInitCmd())
+	out, err := clitest.Exec(t, newInitCmd())
 	if err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
 	}
@@ -47,7 +48,7 @@ func TestInitScaffoldsAndIsIdempotent(t *testing.T) {
 			t.Fatalf("missing %s", p)
 		}
 	}
-	out2, err := execCmd(t, newInitCmd())
+	out2, err := clitest.Exec(t, newInitCmd())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,34 +59,34 @@ func TestInitScaffoldsAndIsIdempotent(t *testing.T) {
 
 func TestInitCheckExitsNonZeroWhenMissingAndZeroWhenCurrent(t *testing.T) {
 	initFixture(t)
-	if _, err := execCmd(t, newInitCmd(), "--check"); err == nil {
+	if _, err := clitest.Exec(t, newInitCmd(), "--check"); err == nil {
 		t.Fatal("check on unscaffolded instance must fail")
 	}
-	if out, err := execCmd(t, newInitCmd()); err != nil {
+	if out, err := clitest.Exec(t, newInitCmd()); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
 	}
-	if out, err := execCmd(t, newInitCmd(), "--check"); err != nil {
+	if out, err := clitest.Exec(t, newInitCmd(), "--check"); err != nil {
 		t.Fatalf("check after init must pass: %v\n%s", err, out)
 	}
 }
 
 func TestInitWarnsOnOwnerEditAndForceOverwrites(t *testing.T) {
 	root := initFixture(t)
-	if _, err := execCmd(t, newInitCmd()); err != nil {
+	if _, err := clitest.Exec(t, newInitCmd()); err != nil {
 		t.Fatal(err)
 	}
 	op := filepath.Join(root, "workspace", ".claude", "skills", "lever-operator", "SKILL.md")
 	if err := os.WriteFile(op, []byte("owner edit"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := execCmd(t, newInitCmd())
+	out, err := clitest.Exec(t, newInitCmd())
 	if err != nil {
 		t.Fatalf("init with owner edit must still exit 0: %v", err)
 	}
 	if !bytes.Contains([]byte(out), []byte("locally modified")) {
 		t.Fatalf("want owner-edit warning:\n%s", out)
 	}
-	if _, err := execCmd(t, newInitCmd(), "--force"); err != nil {
+	if _, err := clitest.Exec(t, newInitCmd(), "--force"); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(op)
@@ -96,27 +97,27 @@ func TestInitWarnsOnOwnerEditAndForceOverwrites(t *testing.T) {
 
 func TestInitAdoptIsMutuallyExclusiveWithForceAndCheck(t *testing.T) {
 	initFixture(t)
-	if _, err := execCmd(t, newInitCmd(), "--adopt", "--force"); err == nil {
+	if _, err := clitest.Exec(t, newInitCmd(), "--adopt", "--force"); err == nil {
 		t.Fatal("--adopt --force must error")
 	}
-	if _, err := execCmd(t, newInitCmd(), "--adopt", "--check"); err == nil {
+	if _, err := clitest.Exec(t, newInitCmd(), "--adopt", "--check"); err == nil {
 		t.Fatal("--adopt --check must error")
 	}
 }
 
 func TestInitAdoptBlessesCustomizationForCheck(t *testing.T) {
 	root := initFixture(t)
-	if _, err := execCmd(t, newInitCmd()); err != nil {
+	if _, err := clitest.Exec(t, newInitCmd()); err != nil {
 		t.Fatal(err)
 	}
 	op := filepath.Join(root, "workspace", ".claude", "skills", "lever-operator", "SKILL.md")
 	if err := os.WriteFile(op, []byte("owner edit"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := execCmd(t, newInitCmd(), "--check"); err == nil {
+	if _, err := clitest.Exec(t, newInitCmd(), "--check"); err == nil {
 		t.Fatal("check must fail before adoption")
 	}
-	out, err := execCmd(t, newInitCmd(), "--adopt")
+	out, err := clitest.Exec(t, newInitCmd(), "--adopt")
 	if err != nil {
 		t.Fatalf("adopt: %v\n%s", err, out)
 	}
@@ -125,11 +126,11 @@ func TestInitAdoptBlessesCustomizationForCheck(t *testing.T) {
 			t.Fatalf("adopt output missing %q:\n%s", want, out)
 		}
 	}
-	if out, err := execCmd(t, newInitCmd(), "--check"); err != nil {
+	if out, err := clitest.Exec(t, newInitCmd(), "--check"); err != nil {
 		t.Fatalf("check after adopt must pass: %v\n%s", err, out)
 	}
 	// Adopted file survives a plain re-run untouched.
-	if _, err := execCmd(t, newInitCmd()); err != nil {
+	if _, err := clitest.Exec(t, newInitCmd()); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(op); string(b) != "owner edit" {
@@ -139,7 +140,7 @@ func TestInitAdoptBlessesCustomizationForCheck(t *testing.T) {
 	if err := os.WriteFile(op, []byte("edited after adoption"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := execCmd(t, newInitCmd(), "--check"); err == nil {
+	if _, err := clitest.Exec(t, newInitCmd(), "--check"); err == nil {
 		t.Fatal("check must fail on drift past the adopted baseline")
 	}
 }

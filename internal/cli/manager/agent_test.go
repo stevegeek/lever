@@ -1,10 +1,8 @@
 package manager
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -23,21 +21,12 @@ func TestManagerBootstrapPathIsContainerWorkspace(t *testing.T) {
 func TestAgentStart_callsBroker(t *testing.T) {
 	// Point the manager client at a fake broker.
 	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
+	c := fakeBroker(t, func(w http.ResponseWriter, path string, _ map[string]any) {
+		gotPath = path
 		_ = json.NewEncoder(w).Encode(map[string]string{"worker": "worker", "phase": "running"})
-	}))
-	defer srv.Close()
+	})
 
-	// Seed a manager bootstrap + identity that resolve to srv.URL with srv.Client().
-	// Override the two package seams for the test:
-	oldCall := workerCallFn
-	workerCallFn = func(ctx context.Context, endpoint string, body any) (workerResult, error) {
-		return postBroker[workerResult](ctx, srv.Client(), srv.URL, endpoint, body)
-	}
-	defer func() { workerCallFn = oldCall }()
-
-	cmd := newAgentCmd()
+	cmd := newAgentCmd(c)
 	cmd.SetArgs([]string{"start", "worker", "--task", "go"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)

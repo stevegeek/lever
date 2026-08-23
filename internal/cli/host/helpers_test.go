@@ -1,12 +1,10 @@
 package host
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -61,14 +59,10 @@ func loadInstance(t *testing.T, extra string) *config.App {
 	return app
 }
 
-// execCmd runs cmd with argv, capturing stdout and stderr into one buffer,
-// and returns the combined output with Execute's error.
-func execCmd(t *testing.T, cmd *cobra.Command, argv ...string) (string, error) {
-	t.Helper()
-	cmd.SetArgs(argv)
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	err := cmd.Execute()
-	return out.String(), err
-}
+// inertApplyOpts is what tests build apply deps with. Never let a test spawn a
+// real broker or proxy: os.Args[0] here is the TEST BINARY, and brokerServeCmd
+// detaches the child with Setsid, so any spawn outlives the run unreaped — a
+// full suite run once left 724 stray processes behind. `true` exits 0
+// immediately, so cmd.Start() still succeeds and the code path under test is
+// unchanged.
+var inertApplyOpts = applyOpts{SelfExe: "/usr/bin/true"}

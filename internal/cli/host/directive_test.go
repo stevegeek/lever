@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"io"
 	"net"
 	"net/http"
@@ -164,7 +165,7 @@ func TestDirectiveSendSignsAndPosts(t *testing.T) {
 		"/directive/send":    {body: `{"id":"whatever","delivered":true}`},
 	})
 
-	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hello there")
+	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hello there")
 	if err != nil {
 		t.Fatalf("directive send: %v\noutput: %s", err, out)
 	}
@@ -227,7 +228,7 @@ func TestDirectiveSendActionFlag(t *testing.T) {
 	})
 
 	action := `{"kind":"tool_call","tool":"qmd","op":"search","args":{"q":"x"},"arg_binding":"exact","uses":1}`
-	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--action", action)
+	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--action", action)
 	if err != nil {
 		t.Fatalf("directive send --action: %v\noutput: %s", err, out)
 	}
@@ -261,7 +262,7 @@ func TestDirectiveSendNotBeforeFlag(t *testing.T) {
 	})
 
 	nb := time.Now().Add(30 * time.Minute).Truncate(time.Second).Format(time.RFC3339)
-	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--not-before", nb)
+	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--not-before", nb)
 	if err != nil {
 		t.Fatalf("directive send --not-before: %v\noutput: %s", err, out)
 	}
@@ -291,7 +292,7 @@ func TestDirectiveListStateFilter(t *testing.T) {
 		"/directive/list": {body: `{"directives":[{"id":"a","state":"active"},{"id":"b","state":"consumed"}]}`},
 	})
 
-	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "list", "--state", "active")
+	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "list", "--state", "active")
 	if err != nil {
 		t.Fatalf("directive list --state: %v\noutput: %s", err, out)
 	}
@@ -310,7 +311,7 @@ func TestDirectiveSendActionAndInstructionMutuallyExclusive(t *testing.T) {
 	t.Chdir(dir)
 
 	// No server started at all — this must fail before any network call.
-	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--action", `{"kind":"instruction","text":"hi"}`)
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--action", `{"kind":"instruction","text":"hi"}`)
 	if err == nil {
 		t.Fatal("--instruction + --action together should error")
 	}
@@ -322,7 +323,7 @@ func TestDirectiveSendRequiresOneOfInstructionOrAction(t *testing.T) {
 	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
-	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1")
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1")
 	if err == nil {
 		t.Fatal("neither --instruction nor --action should error")
 	}
@@ -336,7 +337,7 @@ func TestDirectiveSendInvalidActionRejectedClientSide(t *testing.T) {
 
 	// No server started — an invalid action must be rejected before any
 	// resolve/send round-trip.
-	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--action", `{"kind":"sudo"}`)
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--action", `{"kind":"sudo"}`)
 	if err == nil {
 		t.Fatal("invalid action kind should be rejected client-side")
 	}
@@ -353,7 +354,7 @@ func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
 		"/directive/send":    {body: `{"id":"x","delivered":true}`},
 	})
 
-	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
 	if err == nil {
 		t.Fatal("expiry beyond the configured cap should error")
 	}
@@ -374,7 +375,7 @@ func TestDirectiveSendOverCapErrorsBeforeResolve(t *testing.T) {
 		"/directive/send":    {body: `{"id":"x","delivered":true}`},
 	})
 
-	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
 	if err == nil {
 		t.Fatal("expiry beyond the configured cap should error")
 	}
@@ -390,7 +391,7 @@ func TestDirectiveSendMissingKeyErrors(t *testing.T) {
 	t.Chdir(dir)
 
 	// No server started — a missing key must be caught before any dial.
-	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi")
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi")
 	if err == nil {
 		t.Fatal("missing signing key should error")
 	}
@@ -406,7 +407,7 @@ func TestDirectiveListSendsSignedEnvelope(t *testing.T) {
 		"/directive/list": {body: `{"directives":[]}`},
 	})
 
-	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "list")
+	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "list")
 	if err != nil {
 		t.Fatalf("directive list: %v\noutput: %s", err, out)
 	}
@@ -448,7 +449,7 @@ func TestDirectiveRevokeSendsSignedEnvelope(t *testing.T) {
 		"/directive/revoke": {body: `{"revoked":true}`},
 	})
 
-	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "revoke", "abc-123")
+	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "revoke", "abc-123")
 	if err != nil {
 		t.Fatalf("directive revoke: %v\noutput: %s", err, out)
 	}
@@ -490,7 +491,7 @@ func TestDirectiveSelftestOK(t *testing.T) {
 		"/directive/selftest": {body: `{"ok":true}`},
 	})
 
-	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "selftest")
+	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "selftest")
 	if err != nil {
 		t.Fatalf("directive selftest: %v\noutput: %s", err, out)
 	}
@@ -525,7 +526,7 @@ func TestDirectiveSelftestFailureExitsNonZero(t *testing.T) {
 		"/directive/selftest": {status: http.StatusBadRequest, body: `{"error":"signature verification failed"}`},
 	})
 
-	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "selftest")
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "selftest")
 	if err == nil {
 		t.Fatal("selftest failure should return a non-nil error (non-zero exit)")
 	}

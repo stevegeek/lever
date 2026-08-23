@@ -1,21 +1,12 @@
 package host
 
 import (
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
-func names(root *cobra.Command) map[string]bool {
-	m := map[string]bool{}
-	for _, c := range root.Commands() {
-		m[c.Name()] = true
-	}
-	return m
-}
-
 func TestHostRootHasProvisioningOnly(t *testing.T) {
-	n := names(NewRoot())
+	n := clitest.Names(NewRoot())
 	// msg is deliberately on BOTH roots: the host's is operator-authority,
 	// fire-and-forget, no-broker-hop (attachTarget + scion.Client.Message
 	// directly); the manager's is broker-routed send+list. Different trust

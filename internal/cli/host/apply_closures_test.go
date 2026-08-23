@@ -17,11 +17,11 @@ import (
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // buildDepsAgainstFakeBroker loads writeTmpConfig's app, points its broker
@@ -32,15 +32,6 @@ import (
 // EffectiveJailPort()/ManagerCN()/ConfigHash feed the closures under test.
 func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps, *config.App, state.State, string) {
 	t.Helper()
-	// Never let a test spawn a real broker. os.Args[0] here is the TEST BINARY,
-	// and brokerServeCmd detaches the child with Setsid, so any spawn outlives
-	// the run unreaped — a full suite run once left 724 stray processes behind.
-	// `true` exits 0 immediately, so cmd.Start() still succeeds and the code
-	// path under test is unchanged.
-	prev := brokerSelfExe
-	brokerSelfExe = func() string { return "/usr/bin/true" }
-	t.Cleanup(func() { brokerSelfExe = prev })
-
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
 	if err != nil {
@@ -64,7 +55,7 @@ func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps,
 
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -85,7 +76,7 @@ func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
 		epochHits++
-		_ = json.NewEncoder(w).Encode(broker.EpochResponse{
+		_ = json.NewEncoder(w).Encode(wire.EpochResponse{
 			Epoch:      1,
 			Version:    cli.VersionString(),
 			ConfigHash: brokerctl.ConfigHash(app),
@@ -126,7 +117,7 @@ func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 	var app *config.App
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(broker.EpochResponse{
+		_ = json.NewEncoder(w).Encode(wire.EpochResponse{
 			Epoch:      1,
 			Version:    "some-older-binary",
 			ConfigHash: brokerctl.ConfigHash(app),
@@ -268,10 +259,6 @@ func TestBrokerHealthyReturnsOnOK(t *testing.T) {
 // It asserts the port reaches the backend — the only thing that builds the
 // iptables ACCEPT rules — and that a non-remote instance does not gain it.
 func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
-	prev := brokerSelfExe
-	brokerSelfExe = func() string { return "/usr/bin/true" }
-	t.Cleanup(func() { brokerSelfExe = prev })
-
 	build := func(t *testing.T, remote bool) backend.Config {
 		t.Helper()
 		p := writeTmpConfig(t)
@@ -283,7 +270,7 @@ func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
 			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net"}
 		}
 		sb := &stubBackend{}
-		if _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, nil); err != nil {
+		if _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, inertApplyOpts); err != nil {
 			t.Fatalf("buildApplyDeps: %v", err)
 		}
 		if !sb.up {

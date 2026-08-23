@@ -11,14 +11,11 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// msgCallFn is the active broker caller (seam for tests), mirroring workerCallFn.
-var msgCallFn = msgCall
-
-// msgCall is brokerCall specialized to the raw msg-endpoint response body: it
-// loads bootstrap+identity exactly as workerCall does and posts JSON, returning
-// the undecoded response so msg/watch can decode {"events":[...]} themselves.
-func msgCall(ctx context.Context, endpoint string, body any) (json.RawMessage, error) {
-	return brokerCall[json.RawMessage](ctx, endpoint, body)
+// msgCall is brokerCall specialized to the raw msg-endpoint response body,
+// returning the undecoded response so msg/watch can decode {"events":[...]}
+// themselves.
+func msgCall(ctx context.Context, c brokerCaller, endpoint string, body any) (json.RawMessage, error) {
+	return brokerCall[json.RawMessage](ctx, c, endpoint, body)
 }
 
 // decodeMsgEvents unmarshals a /msg/list response body ({"events":[...]}) into
@@ -33,37 +30,37 @@ func decodeMsgEvents(raw json.RawMessage) ([]scion.Event, error) {
 	return res.Events, nil
 }
 
-func newMsgCmd() *cobra.Command {
+func newMsgCmd(c brokerCaller) *cobra.Command {
 	cmd := &cobra.Command{Use: "msg", Short: "Send/read typed agent messages (broker-routed)"}
-	cmd.AddCommand(msgSend(), msgList())
+	cmd.AddCommand(msgSend(c), msgList(c))
 	return cmd
 }
 
-func msgSend() *cobra.Command {
+func msgSend(c brokerCaller) *cobra.Command {
 	var to string
 	var interrupt bool
-	c := &cobra.Command{Use: "send BODY", Args: cobra.MinimumNArgs(1), Short: "Send a message to an agent/user",
+	cmd := &cobra.Command{Use: "send BODY", Args: cobra.MinimumNArgs(1), Short: "Send a message to an agent/user",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := strings.Join(args, " ")
-			if _, err := msgCallFn(cmd.Context(), wire.PathMsgSend,
+			if _, err := msgCall(cmd.Context(), c, wire.PathMsgSend,
 				wire.MsgSendRequest{To: to, Body: body, Interrupt: interrupt}); err != nil {
 				return err
 			}
 			cmd.Printf("Sent to %s.\n", to)
 			return nil
 		}}
-	c.Flags().StringVar(&to, "to", "", "recipient: agent:<name> | user:<name> | <name> (required)")
-	c.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
-	_ = c.MarkFlagRequired("to")
-	return c
+	cmd.Flags().StringVar(&to, "to", "", "recipient: agent:<name> | user:<name> | <name> (required)")
+	cmd.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
+	_ = cmd.MarkFlagRequired("to")
+	return cmd
 }
 
-func msgList() *cobra.Command {
+func msgList(c brokerCaller) *cobra.Command {
 	var worker string
 	var all bool
-	c := &cobra.Command{Use: "list", Short: "Read the typed event inbox",
+	cmd := &cobra.Command{Use: "list", Short: "Read the typed event inbox",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			raw, err := msgCallFn(cmd.Context(), wire.PathMsgList, wire.MsgListRequest{All: all, Worker: worker})
+			raw, err := msgCall(cmd.Context(), c, wire.PathMsgList, wire.MsgListRequest{All: all, Worker: worker})
 			if err != nil {
 				return err
 			}
@@ -82,7 +79,7 @@ func msgList() *cobra.Command {
 			}
 			return nil
 		}}
-	c.Flags().StringVar(&worker, "worker", "", "manager only: read this worker's project inbox")
-	c.Flags().BoolVar(&all, "all", false, "include already-read events")
-	return c
+	cmd.Flags().StringVar(&worker, "worker", "", "manager only: read this worker's project inbox")
+	cmd.Flags().BoolVar(&all, "all", false, "include already-read events")
+	return cmd
 }

@@ -99,6 +99,10 @@ func stateRel(st state.State, path string) string {
 	return filepath.Join(filepath.Base(st.Dir), filepath.Base(path))
 }
 
+// stateDirName is the instance-relative name of the state directory, derived
+// from state.ForConfig so user-facing text never hardcodes it.
+func stateDirName() string { return filepath.Base(state.ForConfig("").Dir) }
+
 // checkListeningProcess is the pid-then-port ladder shared by the broker and
 // remote-proxy checks: a recorded process must exist, be alive, and actually
 // listen on addr. It distinguishes three failure modes so the fix is
@@ -500,7 +504,7 @@ func checkProjectSharedDirs(ctx context.Context, project string, list sharedDirL
 			return checkResult{name, false,
 				"could not read the project's shared directories: " + err.Error(),
 				"the hub answered, so this is not a down instance — check the controller PAT " +
-					"(`.lever-state/`) and that the hub knows a project named " + project}
+					"(`" + stateDirName() + "/`) and that the hub knows a project named " + project}
 		}
 		return checkResult{name, true, "not checked (hub not reachable): " + err.Error(), ""}
 	}
@@ -555,7 +559,7 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 			return checkResult{name, false,
 				"could not read the hub's agent records: " + err.Error(),
 				"the hub answered, so this is not a down instance — check the controller PAT " +
-					"(`.lever-state/`) and that the hub knows a project named " + project}
+					"(`" + stateDirName() + "/`) and that the hub knows a project named " + project}
 		}
 		return checkResult{name, true, "not checked (hub not reachable): " + err.Error(), ""}
 	}

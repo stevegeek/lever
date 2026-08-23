@@ -9,10 +9,14 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 )
 
-// NewRoot builds the in-jail orchestration CLI (`lever-manager`).
-func NewRoot() *cobra.Command {
+// NewRoot builds the in-jail orchestration CLI (`lever-manager`), talking to
+// the broker over mTLS from the container's bootstrap + identity.
+func NewRoot() *cobra.Command { return newRoot(newMTLSCaller()) }
+
+// newRoot builds the CLI over c; tests pass a caller aimed at a fake broker.
+func newRoot(c brokerCaller) *cobra.Command {
 	root := &cobra.Command{Use: "lever-manager", Short: "In-jail worker orchestration"}
 	root.AddCommand(cli.VersionCmd())
-	root.AddCommand(newAgentCmd(), newMsgCmd(), newWatchCmd())
+	root.AddCommand(newAgentCmd(c), newMsgCmd(c), newWatchCmd(c))
 	return root
 }

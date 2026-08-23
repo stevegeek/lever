@@ -96,7 +96,7 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 	}
 
 	// Re-apply: same state dir, fresh deps — the persisted key is adopted.
-	w2, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w2, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("second buildApplyDeps: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	sb := &stubBackend{registeredResult: true}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestBuildApplyDepsWiresRearmBootstrap(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestBuildApplyDepsWiresRemoteProxy(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -417,15 +417,13 @@ func TestRemoteServeCmdIsDetachedAndLogged(t *testing.T) {
 // the test process's own pid is always alive, same as
 // TestRemoteStatusReportsLivePidAndListener in remote_test.go) AND something
 // actually listening on the configured port, Start must not spawn.
-// brokerSelfExe is pointed at a nonexistent binary so a WRONGLY-taken spawn
+// selfExe is pointed at a nonexistent binary so a WRONGLY-taken spawn
 // branch fails loudly (cmd.Start() errors) instead of silently succeeding —
 // same "prove the branch, not just the observable" shape as
 // TestStartBrokerReusesMatchingBrokerIdentity's directory-as-pidfile trick in
 // apply_closures_test.go.
 func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
-	prev := brokerSelfExe
-	brokerSelfExe = func() string { return "/no/such/lever-binary" }
-	t.Cleanup(func() { brokerSelfExe = prev })
+	selfExe := "/no/such/lever-binary"
 
 	dir := t.TempDir()
 	st := state.ForConfig(dir)
@@ -450,7 +448,7 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: port,
-		version: "v-test", cfgHash: "hash-test"}
+		version: "v-test", cfgHash: "hash-test", selfExe: selfExe}
 	if err := rc.Start(context.Background()); err != nil {
 		t.Fatalf("Start on an already-serving proxy must reuse (nil), got: %v", err)
 	}
@@ -465,12 +463,10 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 //
 // The running proxy is a real child process here, NOT this test's own pid: the
 // mismatch path kills what remote.pid names, and the self-pid trick used above
-// would kill the test. brokerSelfExe points at a nonexistent binary so the
+// would kill the test. selfExe points at a nonexistent binary so the
 // respawn fails loudly — proving Start reached the spawn rather than reusing.
 func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
-	prev := brokerSelfExe
-	brokerSelfExe = func() string { return "/no/such/lever-binary" }
-	t.Cleanup(func() { brokerSelfExe = prev })
+	selfExe := "/no/such/lever-binary"
 
 	dir := t.TempDir()
 	st := state.ForConfig(dir)
@@ -496,7 +492,7 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml",
-		port: ln.Addr().(*net.TCPAddr).Port, version: "v-test", cfgHash: "hash-NEW"}
+		port: ln.Addr().(*net.TCPAddr).Port, version: "v-test", cfgHash: "hash-NEW", selfExe: selfExe}
 
 	if err := rc.Start(context.Background()); err == nil {
 		t.Fatal("Start reused a proxy running a DIFFERENT remote config — a changed allowed_users/base_url would be silently ignored")
@@ -521,7 +517,7 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 // process that is definitely not running (the doctor checks' own
 // implausibly-high-pid convention — see TestCheckBrokerAliveStalePID) must
 // fall through to a fresh spawn, not a false "already serving".
-// brokerSelfExe points at `true` so the spawn succeeds harmlessly (exits 0
+// selfExe points at `true` so the spawn succeeds harmlessly (exits 0
 // immediately, no lingering process) — mirrors
 // buildDepsAgainstFakeBroker's broker-spawn tests in apply_closures_test.go.
 //
@@ -530,10 +526,7 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 // not-listening error is the proof the spawn happened and was then checked.
 // (A nil here would mean the liveness check had been lost.)
 func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
-	prev := brokerSelfExe
-	brokerSelfExe = func() string { return "/usr/bin/true" }
-	t.Cleanup(func() { brokerSelfExe = prev })
-	shortenRemoteProxyStartWait(t)
+	selfExe := "/usr/bin/true"
 
 	dir := t.TempDir()
 	st := state.ForConfig(dir)
@@ -544,7 +537,7 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48997}
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: "/x/lever.yaml", port: 48997, selfExe: selfExe})
 	err := rc.Start(context.Background())
 	if err == nil {
 		t.Fatal("a stand-in that never listens must not report the proxy as serving")
@@ -559,26 +552,21 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 
 // shortenRemoteProxyStartWait keeps the spawn tests fast: they use a stand-in
 // that never binds, so they always pay the full wait.
-func shortenRemoteProxyStartWait(t *testing.T) {
-	t.Helper()
-	timeout, interval := remoteProxyStartTimeout, remoteProxyStartInterval
-	t.Cleanup(func() { remoteProxyStartTimeout, remoteProxyStartInterval = timeout, interval })
-	remoteProxyStartTimeout, remoteProxyStartInterval = 50*time.Millisecond, 5*time.Millisecond
+func shortenRemoteProxyStartWait(rc *remoteController) *remoteController {
+	rc.startTimeout, rc.startInterval = 50*time.Millisecond, 5*time.Millisecond
+	return rc
 }
 
 // TestRemoteControllerStartSpawnsWhenNeverStarted covers the third
 // precondition: no remote.pid at all (a fresh instance, or remote access
 // just enabled) must spawn, exactly like the stale-pid case.
 func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
-	prev := brokerSelfExe
-	brokerSelfExe = func() string { return "/usr/bin/true" }
-	t.Cleanup(func() { brokerSelfExe = prev })
-	shortenRemoteProxyStartWait(t)
+	selfExe := "/usr/bin/true"
 
 	dir := t.TempDir()
 	st := state.ForConfig(dir) // no remote.pid at all
 
-	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48996}
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: "/x/lever.yaml", port: 48996, selfExe: selfExe})
 	// As above: the stand-in never binds, so the spawn is proved by the
 	// liveness check's complaint rather than by a nil.
 	err := rc.Start(context.Background())
@@ -1016,7 +1004,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 
 	// --- First apply: bootstrap-token then scion-server, via the real Deps
 	// wiring (mirrors runStep's "bootstrap-token"/"scion-server" arms).
-	w, err := buildApplyDeps(ctx, app, p, bf, nil)
+	w, err := buildApplyDeps(ctx, app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
@@ -1075,7 +1063,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	// dir (what a real re-apply invocation does). The PAT is already
 	// persisted, so bootstrap-token must be a complete no-op — in
 	// particular, no second throwaway server start.
-	w2, err := buildApplyDeps(ctx, app, p, bf, nil)
+	w2, err := buildApplyDeps(ctx, app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps (2nd apply): %v", err)
 	}
@@ -1116,10 +1104,6 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 // `lever apply` printing "is up" and exiting 0, with the operator's next
 // signal a 502 in a browser.
 func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
-	savedTimeout, savedInterval := remoteProxyStartTimeout, remoteProxyStartInterval
-	t.Cleanup(func() { remoteProxyStartTimeout, remoteProxyStartInterval = savedTimeout, savedInterval })
-	remoteProxyStartTimeout, remoteProxyStartInterval = 50*time.Millisecond, 5*time.Millisecond
-
 	dir := t.TempDir()
 	st := state.ForConfig(dir)
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
@@ -1147,7 +1131,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
 
-	rc := &remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: port}
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: port})
 	err = rc.awaitListening(context.Background(), child)
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
@@ -1197,9 +1181,7 @@ func TestLastLogLine(t *testing.T) {
 // Here the recorded proxy is alive but nothing listens on the NEW port, which
 // is exactly that sequence.
 func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
-	prev := brokerSelfExe
-	brokerSelfExe = func() string { return "/no/such/lever-binary" }
-	t.Cleanup(func() { brokerSelfExe = prev })
+	selfExe := "/no/such/lever-binary"
 
 	dir := t.TempDir()
 	st := state.ForConfig(dir)
@@ -1230,7 +1212,7 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	_ = ln.Close()
 
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: freePort,
-		version: "v-test", cfgHash: "hash-test"}
+		version: "v-test", cfgHash: "hash-test", selfExe: selfExe}
 	if err := rc.Start(context.Background()); err == nil {
 		t.Fatal("Start must not silently succeed here")
 	}
@@ -1280,10 +1262,6 @@ func TestDetachedSelfCmd(t *testing.T) {
 // TestAwaitListeningHonoursContext: a cancelled apply must not keep polling
 // for the proxy's bind.
 func TestAwaitListeningHonoursContext(t *testing.T) {
-	savedTimeout, savedInterval := remoteProxyStartTimeout, remoteProxyStartInterval
-	t.Cleanup(func() { remoteProxyStartTimeout, remoteProxyStartInterval = savedTimeout, savedInterval })
-	remoteProxyStartTimeout, remoteProxyStartInterval = time.Minute, time.Second
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1298,7 +1276,8 @@ func TestAwaitListeningHonoursContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	rc := &remoteController{state: state.ForConfig(t.TempDir()), port: port}
+	rc := &remoteController{state: state.ForConfig(t.TempDir()), port: port,
+		startTimeout: time.Minute, startInterval: time.Second}
 	start := time.Now()
 	if err := rc.awaitListening(ctx, child); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)

@@ -18,7 +18,6 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/backend/registry"
-	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -61,7 +60,7 @@ func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 // env. Used for `lever broker serve` and `lever remote serve`; each serve
 // process writes its own pid file, not this.
 //
-// On a fresh apply the state dir (.lever-state) does not exist yet — it's
+// On a fresh apply the state dir (state.State.Dir) does not exist yet — it's
 // created by EnsureKeys inside the spawned child, too late for this open —
 // so the log's parent is created here, or the whole bring-up hard-fails
 // before the daemon is ever spawned.
@@ -99,6 +98,19 @@ func remoteServeCmd(self, configPath, outLog string) (*exec.Cmd, *os.File, error
 	return detachedSelfCmd(self, outLog, nil, "remote", "serve", configPath)
 }
 
+// logFunc is the sink for apply's loud, user-facing lines (Deps.Log and the
+// controllers' restart notices). A nil logFunc prints to stderr, so a
+// controller built directly (tests) never loses a line.
+type logFunc func(format string, args ...any)
+
+func (f logFunc) printf(format string, args ...any) {
+	if f == nil {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+		return
+	}
+	f(format, args...)
+}
+
 // remoteController owns the apply-time remote-proxy lifecycle: spawning the
 // detached `lever remote serve` child, exactly like brokerController.Start
 // spawns `lever broker serve` (same Setsid pattern via remoteServeCmd).
@@ -114,9 +126,16 @@ func remoteServeCmd(self, configPath, outLog string) (*exec.Cmd, *os.File, error
 type remoteController struct {
 	state      state.State
 	configPath string
+	selfExe    string // the binary re-exec'd as `remote serve`; see applyOpts.SelfExe
 	port       int    // app.EffectiveRemotePort()
 	version    string // this binary, for the reuse stamp
 	cfgHash    string // brokerctl.RemoteConfigHash(app), for the reuse stamp
+	// startTimeout/startInterval bound awaitListening's wait for the spawned
+	// proxy to bind; zero means remoteProxyStartTimeout/Interval. Set short by
+	// tests whose stand-in never binds.
+	startTimeout  time.Duration
+	startInterval time.Duration
+	log           logFunc // apply's user-facing line sink (applyWiring.log)
 }
 
 func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", rc.port) }
@@ -160,12 +179,12 @@ func (rc *remoteController) Start(ctx context.Context) error {
 		// config, `tailscale serve` still pointed at it, and the fresh spawn
 		// then OVERWROTE remote.pid, so no `lever` verb could ever stop the
 		// leaked process again. An independent review caught it.
-		fmt.Fprintln(os.Stderr, "lever: the remote proxy predates this binary or its remote config changed — restarting it")
+		rc.log.printf("lever: the remote proxy predates this binary or its remote config changed — restarting it")
 		if err := brokerctl.StopRemoteProxy(rc.state); err != nil {
 			return fmt.Errorf("restarting the remote proxy: %w", err)
 		}
 	}
-	cmd, logf, err := remoteServeCmd(brokerSelfExe(), rc.configPath, rc.state.RemoteLog())
+	cmd, logf, err := remoteServeCmd(rc.selfExe, rc.configPath, rc.state.RemoteLog())
 	if err != nil {
 		return err
 	}
@@ -181,16 +200,17 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	// process that never served. Best-effort: a write failure costs the next
 	// apply a redundant restart, never a stale process kept alive.
 	if err := rc.state.WriteRemoteStamp(rc.version, rc.cfgHash); err != nil {
-		fmt.Fprintf(os.Stderr, "lever: could not record the remote proxy stamp (%v) — the next apply will restart it\n", err)
+		rc.log.printf("lever: could not record the remote proxy stamp (%v) — the next apply will restart it", err)
 	}
 	return nil
 }
 
-// remoteProxyStartTimeout/Interval bound the wait for the spawned proxy to
-// bind. Package vars so tests run fast. Generous against a loaded host, and
-// still far below anything a human would notice: both listeners are host
-// loopback binds that happen before the proxy touches the jail.
-var (
+// remoteProxyStartTimeout/Interval are the default bounds on the wait for the
+// spawned proxy to bind (remoteController.startTimeout/startInterval).
+// Generous against a loaded host, and still far below anything a human would
+// notice: both listeners are host loopback binds that happen before the proxy
+// touches the jail.
+const (
 	remoteProxyStartTimeout  = 5 * time.Second
 	remoteProxyStartInterval = 50 * time.Millisecond
 )
@@ -215,8 +235,10 @@ var errChildGone = errors.New("child exited")
 // proxy) may hold the port, and concluding "listening" then would stamp a
 // config nothing is enforcing.
 func (rc *remoteController) awaitListening(ctx context.Context, child *exec.Cmd) error {
-	attempts := int(remoteProxyStartTimeout/remoteProxyStartInterval) + 1
-	err := retry.Until(ctx, attempts, remoteProxyStartInterval, func() (bool, error) {
+	timeout := cmp.Or(rc.startTimeout, remoteProxyStartTimeout)
+	interval := cmp.Or(rc.startInterval, remoteProxyStartInterval)
+	attempts := int(timeout/interval) + 1
+	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
 		if err := child.Process.Signal(syscall.Signal(0)); err != nil {
 			// The child is gone; whatever may be listening is not it.
 			return false, errChildGone
@@ -426,7 +448,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			w, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
+			w, err := buildApplyDeps(cmd.Context(), app, path, bf, applyOpts{Cmd: cmd})
 			if err != nil {
 				return err
 			}
@@ -445,7 +467,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 // this binary + this broker config, i.e. whether apply's broker-reuse shortcut may keep
 // it (#19). A broker predating the identity fields reports them empty —
 // mismatch — so old brokers are always restarted rather than trusted.
-func brokerReusable(got broker.EpochResponse, wantVersion, wantHash string) bool {
+func brokerReusable(got wire.EpochResponse, wantVersion, wantHash string) bool {
 	return got.Version == wantVersion && got.ConfigHash == wantHash
 }
 
@@ -466,6 +488,8 @@ type brokerController struct {
 	brokerHost string      // host agents dial the broker by (IP if resolved, else hostname)
 	runUser    string      // in-machine run user for the broker child
 	runUID     string      // in-machine run uid for the broker child
+	selfExe    string      // the binary re-exec'd as `broker serve`; see applyOpts.SelfExe
+	log        logFunc     // apply's user-facing line sink (applyWiring.log)
 	// admin is the loopback client for the broker's admin API. Its timeout
 	// bounds every /epoch and /bootstrap call on its own, so a wedged broker
 	// cannot hang an apply step whose ctx carries no deadline.
@@ -475,18 +499,6 @@ type brokerController struct {
 // brokerAdminTimeout bounds one admin-API round trip (loopback; the broker
 // answers /epoch and /bootstrap from memory).
 const brokerAdminTimeout = 5 * time.Second
-
-// brokerSelfExe returns the executable Start re-execs as `broker serve`. It is a
-// var so tests can point it at an inert command.
-//
-// This seam is load-bearing, not cosmetic. In production os.Args[0] is the
-// lever binary and re-execing it is exactly right. Under `go test` os.Args[0]
-// is the TEST BINARY, so a spawn becomes `<pkg>.test broker serve …` — and
-// brokerServeCmd detaches the child with Setsid precisely so it outlives its
-// parent. Nothing then reaps it: the processes survive the run, accumulate
-// across runs, and re-spawn each other. A full suite run left 724 of them
-// behind before this seam existed.
-var brokerSelfExe = func() string { return os.Args[0] }
 
 // Start spawns `lever broker serve <config>` as a daemonized child (its own
 // session, via brokerServeCmd) so it outlives the apply invocation.
@@ -502,7 +514,7 @@ var brokerSelfExe = func() string { return os.Args[0] }
 func (bc *brokerController) Start(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	var er broker.EpochResponse
+	var er wire.EpochResponse
 	// Anything but a decodable 200 — connection refused, a non-200, a body that
 	// is not the epoch JSON — means no broker of ours is serving: fall through
 	// to the spawn.
@@ -510,12 +522,12 @@ func (bc *brokerController) Start(ctx context.Context) error {
 		if brokerReusable(er, cli.VersionString(), brokerctl.ConfigHash(bc.app)) {
 			return nil // same binary + same broker config; keep the process + PID
 		}
-		fmt.Fprintf(os.Stderr, "lever: broker predates this binary or its tool config changed — restarting it (was %q)\n", er.Version)
+		bc.log.printf("lever: broker predates this binary or its tool config changed — restarting it (was %q)", er.Version)
 		if err := brokerctl.StopBroker(bc.state); err != nil {
 			return fmt.Errorf("stopping the stale broker before restart: %w", err)
 		}
 	}
-	cmd, logf, err := brokerServeCmd(brokerSelfExe(), bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
+	cmd, logf, err := brokerServeCmd(bc.selfExe, bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
 	if err != nil {
 		return err
 	}
@@ -653,6 +665,28 @@ type applyWiring struct {
 	cmd        *cobra.Command // for Log; nil ⇒ stderr
 }
 
+// applyOpts carries the per-invocation knobs of buildApplyDeps that are not
+// derived from the config.
+type applyOpts struct {
+	// Cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
+	// user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
+	// that never exercise a Log-emitting path), in which case Log falls back
+	// to stderr.
+	Cmd *cobra.Command
+	// SelfExe is the executable the broker and remote controllers re-exec as
+	// `broker serve` / `remote serve`. Empty means os.Args[0].
+	//
+	// This seam is load-bearing, not cosmetic. In production os.Args[0] is
+	// the lever binary and re-execing it is exactly right. Under `go test`
+	// os.Args[0] is the TEST BINARY, so a spawn becomes `<pkg>.test broker
+	// serve …` — and brokerServeCmd detaches the child with Setsid precisely
+	// so it outlives its parent. Nothing then reaps it: the processes survive
+	// the run, accumulate across runs, and re-spawn each other. A full suite
+	// run left 724 of them behind before this seam existed. Tests point it at
+	// an inert command.
+	SelfExe string
+}
+
 // buildApplyDeps wires the live dependencies for apply.Run.
 // It eagerly calls EnsureUp so the backend resolves the in-machine
 // run-user and UID before the JailRunner and scion.Client are constructed —
@@ -660,29 +694,9 @@ type applyWiring struct {
 // the user/uid known before Run can be called at all.
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
-// cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
-// user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
-// that never exercise a Log-emitting path), in which case Log falls back to
-// stderr.
-func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (*applyWiring, error) {
-	machine := machineName(app.Name)
-	b, err := bf(app.Backend, machine)
+func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, opts applyOpts) (*applyWiring, error) {
+	b, err := bringUpBackend(ctx, app, bf)
 	if err != nil {
-		return nil, err
-	}
-	cfg := backend.Config{
-		MachineName:    machine,
-		ProjectTree:    app.Tree,
-		AllowedPorts:   app.EffectiveAllowedPorts(),
-		ScionSource:    app.Scion.Source,
-		ScionVersion:   app.Scion.Version,
-		ScionBinary:    app.Scion.Binary,
-		ScionWebUI:     app.ScionWebAssets(),
-		ClosedInternet: app.ClosedInternetEgress(),
-		Disk:           app.Disk,
-	}
-	// Bring the jail up now so we can resolve the run-user/uid for the JailRunner.
-	if err := b.EnsureUp(ctx, cfg); err != nil {
 		return nil, err
 	}
 	jr := b.JailRunner()
@@ -703,9 +717,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return nil, err
 	}
 
-	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: cmd}
+	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd}
 	aliasV4 := b.HostAliasV4()
 	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
+	selfExe := cmp.Or(opts.SelfExe, os.Args[0])
 
 	// bc owns the broker lifecycle (start/health/mint) and the re-arm
 	// recombination — see brokerController's doc. Built here, after
@@ -719,6 +734,8 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		brokerHost: w.brokerHost,
 		runUser:    b.RunUser(),
 		runUID:     b.RunUID(),
+		selfExe:    selfExe,
+		log:        w.log,
 		admin:      &http.Client{Timeout: brokerAdminTimeout},
 	}
 
@@ -730,12 +747,52 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	rc := &remoteController{
 		state:      st,
 		configPath: configPath,
+		selfExe:    selfExe,
 		port:       app.EffectiveRemotePort(),
 		version:    cli.VersionString(),
 		cfgHash:    brokerctl.RemoteConfigHash(app),
+		log:        w.log,
 	}
 
-	w.deps = apply.Deps{
+	w.deps = w.newDeps(bc, rc, sessionSecret)
+	return w, nil
+}
+
+// bringUpBackend constructs the backend for app's machine and brings the jail
+// up, so the run-user/uid and host alias are resolved before anything is
+// built over the jail runner.
+func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory) (backend.Backend, error) {
+	machine := machineName(app.Name)
+	b, err := bf(app.Backend, machine)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.EnsureUp(ctx, backendConfigFor(app, machine)); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// backendConfigFor is the backend.Config apply brings the jail up with.
+func backendConfigFor(app *config.App, machine string) backend.Config {
+	return backend.Config{
+		MachineName:    machine,
+		ProjectTree:    app.Tree,
+		AllowedPorts:   app.EffectiveAllowedPorts(),
+		ScionSource:    app.Scion.Source,
+		ScionVersion:   app.Scion.Version,
+		ScionBinary:    app.Scion.Binary,
+		ScionWebUI:     app.ScionWebAssets(),
+		ClosedInternet: app.ClosedInternetEgress(),
+		Disk:           app.Disk,
+	}
+}
+
+// newDeps assembles the apply.Deps over the wiring and the two host daemon
+// controllers.
+func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessionSecret string) apply.Deps {
+	b, sc, st := w.b, w.sc, w.state
+	return apply.Deps{
 		LoadImage: b.LoadImage,
 		// ImageLoaded skips a redundant image re-import when the jail already
 		// holds the exact bytes (same image ID as the host) — see the Deps field
@@ -814,7 +871,6 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		EnsureAgentTemplate: w.ensureAgentTemplate,
 		Log:                 w.log,
 	}
-	return w, nil
 }
 
 // removeJailFile backs Deps.RemoveJailFile through the jail runner.

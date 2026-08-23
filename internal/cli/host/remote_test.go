@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"io"
 	"net"
 	"os"
@@ -48,7 +49,7 @@ func TestRemoteServeDisabledErrors(t *testing.T) {
 	t.Chdir(dir)
 
 	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := execCmd(t, cmd, p)
+	_, err := clitest.Exec(t, cmd, p)
 	if err == nil {
 		t.Fatal("remote serve with remote disabled should error")
 	}
@@ -63,7 +64,7 @@ func TestRemoteServeLimaBackendErrors(t *testing.T) {
 	t.Chdir(dir)
 
 	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := execCmd(t, cmd, p)
+	_, err := clitest.Exec(t, cmd, p)
 	if err == nil {
 		t.Fatal("remote serve on the lima backend should error")
 	}
@@ -90,7 +91,7 @@ func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
 	t.Chdir(dir)
 
 	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := execCmd(t, cmd, p)
+	_, err := clitest.Exec(t, cmd, p)
 	if err == nil {
 		t.Fatal("expected a bind error on privileged port 1 (proves the gates passed and Serve was reached)")
 	}
@@ -198,7 +199,7 @@ func TestRemoteStatusNotRunningNoConfig(t *testing.T) {
 	t.Chdir(dir)
 
 	cmd := newRemoteStatusCmd()
-	out, err := execCmd(t, cmd, p)
+	out, err := clitest.Exec(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}
@@ -222,7 +223,7 @@ func TestRemoteStatusShowsBaseURLWhenSet(t *testing.T) {
 	t.Chdir(dir)
 
 	cmd := newRemoteStatusCmd()
-	out, err := execCmd(t, cmd, p)
+	out, err := clitest.Exec(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}
@@ -246,7 +247,7 @@ func TestRemoteStatusNeverPrintsPATValue(t *testing.T) {
 	}
 
 	cmd := newRemoteStatusCmd()
-	out, err := execCmd(t, cmd, p)
+	out, err := clitest.Exec(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}
@@ -274,7 +275,7 @@ func TestRemoteStatusReportsLivePidAndListener(t *testing.T) {
 	}
 
 	cmd := newRemoteStatusCmd()
-	out, err := execCmd(t, cmd, p)
+	out, err := clitest.Exec(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}

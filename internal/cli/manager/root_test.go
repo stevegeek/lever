@@ -1,21 +1,12 @@
 package manager
 
 import (
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
-func names(root *cobra.Command) map[string]bool {
-	m := map[string]bool{}
-	for _, c := range root.Commands() {
-		m[c.Name()] = true
-	}
-	return m
-}
-
 func TestManagerRootHasOrchestrationOnly(t *testing.T) {
-	n := names(NewRoot())
+	n := clitest.Names(NewRoot())
 	for _, want := range []string{"agent", "msg", "watch", "version"} {
 		if !n[want] {
 			t.Errorf("manager root missing %q", want)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -33,37 +35,11 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Run the remote-access proxy (foreground)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := resolveConfigPath(argOrEmpty(args))
+			path, app, err := loadRemoteApp(args)
 			if err != nil {
 				return err
-			}
-			app, err := config.Load(path)
-			if err != nil {
-				return err
-			}
-			if !app.RemoteEnabled() {
-				return fmt.Errorf("remote access is disabled — set remote.enabled: true in the config")
-			}
-			// Orbstack-only for now — but NOT because of how the proxy
-			// reaches the hub. It dials through the jail
-			// (remoteproxy.JailDial), which is backend-agnostic and needs no
-			// guest→host forwarding at all. The gate stays because the Lima
-			// path has never been live-validated; lifting it is a live-test
-			// question, not a code one. Same wording in config.validateRemote,
-			// which fires first for every path that loads config.
-			if app.Backend != "orbstack" {
-				return fmt.Errorf("remote access requires the orbstack backend in v1 (the Lima path is not live-validated yet)")
 			}
 			st := stateFor(path)
-
-			// The hub's address INSIDE the guest, which is where the dialer
-			// lands — so this is also the correct Host header. It is
-			// deliberately not a host-reachable address: see
-			// scion.DefaultHubEndpoint.
-			target, err := url.Parse(scion.DefaultHubEndpoint)
-			if err != nil {
-				return err
-			}
 			auditFn, auditCloser, err := remoteproxy.OpenAudit(st.RemoteAudit())
 			if err != nil {
 				return err
@@ -74,64 +50,111 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			// handshake: the handshake IS hub traffic, and must travel the
 			// same route into this instance's own jail.
 			dial := remoteproxy.JailDial(jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr()))
-
-			// The local OIDC provider, and the driver that logs in with it.
-			// Both live in THIS process because an authorization code must be
-			// mintable only by an in-process call — see the provider's own
-			// documentation for what that property is holding up. The guest
-			// reaches this listener through the forwarder `lever apply`
-			// installed (internal/backend/guest.EnsureHubLogin).
-			provider := remoteproxy.NewProvider(remoteproxy.ProviderConfig{
-				Port: app.EffectiveRemoteLoginPort(),
-				// The hub dials the GUEST port; the forwarder carries it here.
-				// Two numbers on purpose — see config.GuestLoginIssuerPort.
-				IssuerPort: config.GuestLoginIssuerPort,
-				Audit:      auditFn,
-			})
-			login := remoteproxy.NewLoginDriver(remoteproxy.LoginConfig{
-				Hub:         target,
-				DialContext: dial,
-				Provider:    provider,
-				Audit:       auditFn,
-			})
-
-			handler := remoteproxy.NewHandler(remoteproxy.Config{
-				Target:      target,
-				DialContext: dial,
-				PAT:         func() string { pat, _ := st.LoadRemotePAT(); return pat },
-				ServeHost:   remoteServeHost(app.Remote.BaseURL),
-				// So the Host gate admits `lever doctor`'s loopback /healthz
-				// probe without widening the allowlist beyond this one port.
-				ListenPort:   app.EffectiveRemotePort(),
-				AllowedUsers: app.Remote.AllowedUsers,
-				Session:      login,
-				Audit:        auditFn,
-			})
+			provider, handler, err := buildRemoteHandler(app, st, dial, auditFn)
+			if err != nil {
+				return err
+			}
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			port := app.EffectiveRemotePort()
 			cmd.Printf("remote proxy %q serving on 127.0.0.1:%d (login provider on 127.0.0.1:%d, issuer %s)\n",
-				app.Name, port, provider.Port(), provider.IssuerURL())
-			return remoteproxy.Serve(ctx, remoteproxy.ServeConfig{
-				Port:     port,
-				Handler:  handler,
-				PIDPath:  st.RemotePID(),
-				Provider: provider,
-				// Record the config THIS process actually loaded, not the one
-				// whoever started it believes is running. `lever apply` reuses
-				// a live proxy only when this record matches the config it is
-				// applying, and apply is not the only thing that starts
-				// proxies — this command is reachable by hand, and the pid
-				// file apply reads is written by every serve. Stamping here is
-				// what stops a hand-started proxy from inheriting the record
-				// of an apply-started one. See ServeConfig.Stamp.
-				Stamp: func() error {
-					return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app))
-				},
-			})
+				app.Name, app.EffectiveRemotePort(), provider.Port(), provider.IssuerURL())
+			return serveRemote(ctx, app, st, provider, handler)
 		},
 	}
+}
+
+// loadRemoteApp resolves and loads the config for `remote serve`, applying the
+// two gates every proxy start must pass.
+func loadRemoteApp(args []string) (string, *config.App, error) {
+	path, err := resolveConfigPath(argOrEmpty(args))
+	if err != nil {
+		return "", nil, err
+	}
+	app, err := config.Load(path)
+	if err != nil {
+		return "", nil, err
+	}
+	if !app.RemoteEnabled() {
+		return "", nil, fmt.Errorf("remote access is disabled — set remote.enabled: true in the config")
+	}
+	// Orbstack-only for now — but NOT because of how the proxy
+	// reaches the hub. It dials through the jail
+	// (remoteproxy.JailDial), which is backend-agnostic and needs no
+	// guest→host forwarding at all. The gate stays because the Lima
+	// path has never been live-validated; lifting it is a live-test
+	// question, not a code one. Same wording in config.validateRemote,
+	// which fires first for every path that loads config.
+	if app.Backend != "orbstack" {
+		return "", nil, fmt.Errorf("remote access requires the orbstack backend in v1 (the Lima path is not live-validated yet)")
+	}
+	return path, app, nil
+}
+
+// buildRemoteHandler assembles the local OIDC provider, the login driver over
+// it, and the proxy handler that fronts the hub.
+func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), auditFn func(remoteproxy.AuditLine)) (*remoteproxy.Provider, http.Handler, error) {
+	// The hub's address INSIDE the guest, which is where the dialer
+	// lands — so this is also the correct Host header. It is
+	// deliberately not a host-reachable address: see
+	// scion.DefaultHubEndpoint.
+	target, err := url.Parse(scion.DefaultHubEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// The local OIDC provider, and the driver that logs in with it.
+	// Both live in THIS process because an authorization code must be
+	// mintable only by an in-process call — see the provider's own
+	// documentation for what that property is holding up. The guest
+	// reaches this listener through the forwarder `lever apply`
+	// installed (internal/backend/guest.EnsureHubLogin).
+	provider := remoteproxy.NewProvider(remoteproxy.ProviderConfig{
+		Port: app.EffectiveRemoteLoginPort(),
+		// The hub dials the GUEST port; the forwarder carries it here.
+		// Two numbers on purpose — see config.GuestLoginIssuerPort.
+		IssuerPort: config.GuestLoginIssuerPort,
+		Audit:      auditFn,
+	})
+	login := remoteproxy.NewLoginDriver(remoteproxy.LoginConfig{
+		Hub:         target,
+		DialContext: dial,
+		Provider:    provider,
+		Audit:       auditFn,
+	})
+
+	handler := remoteproxy.NewHandler(remoteproxy.Config{
+		Target:      target,
+		DialContext: dial,
+		PAT:         func() string { pat, _ := st.LoadRemotePAT(); return pat },
+		ServeHost:   remoteServeHost(app.Remote.BaseURL),
+		// So the Host gate admits `lever doctor`'s loopback /healthz
+		// probe without widening the allowlist beyond this one port.
+		ListenPort:   app.EffectiveRemotePort(),
+		AllowedUsers: app.Remote.AllowedUsers,
+		Session:      login,
+		Audit:        auditFn,
+	})
+	return provider, handler, nil
+}
+
+// serveRemote runs the proxy until ctx ends, stamping the config THIS process
+// actually loaded, not the one whoever started it believes is running. `lever
+// apply` reuses a live proxy only when this record matches the config it is
+// applying, and apply is not the only thing that starts proxies — this
+// command is reachable by hand, and the pid file apply reads is written by
+// every serve. Stamping here is what stops a hand-started proxy from
+// inheriting the record of an apply-started one. See ServeConfig.Stamp.
+func serveRemote(ctx context.Context, app *config.App, st state.State, provider *remoteproxy.Provider, handler http.Handler) error {
+	return remoteproxy.Serve(ctx, remoteproxy.ServeConfig{
+		Port:     app.EffectiveRemotePort(),
+		Handler:  handler,
+		PIDPath:  st.RemotePID(),
+		Provider: provider,
+		Stamp: func() error {
+			return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app))
+		},
+	})
 }
 
 // jailResolveTimeout bounds one attempt to read the jail's run user. The

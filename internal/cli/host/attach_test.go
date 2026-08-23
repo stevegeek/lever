@@ -2,6 +2,7 @@ package host
 
 import (
 	"fmt"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"strings"
 	"testing"
 
@@ -74,7 +75,7 @@ func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	_, err := execCmd(t, root, "attach", "scratch")
+	_, err := clitest.Exec(t, root, "attach", "scratch")
 	if err == nil {
 		t.Fatal("expected attach to fail when the jail is not up")
 	}
@@ -94,7 +95,7 @@ func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	_, err := execCmd(t, root, "attach")
+	_, err := clitest.Exec(t, root, "attach")
 	if err == nil {
 		t.Fatal("expected attach to fail when the jail is not up")
 	}

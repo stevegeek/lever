@@ -90,8 +90,7 @@ provide a hypervisor boundary between the agent workload and the host kernel (gu
 2026-07-02 after the native-Linux backend was rejected on that ground), no host filesystem beyond
 the project tree (§2.1), a network namespace Lever controls with egress enforced in it (§2.2), and a
 host-reachable broker endpoint. The full contract, the per-backend guarantee matrix, the `lima`
-template mechanism, the `apple-container` roadmap entry, and the rejected Docker Desktop and
-`linux-docker` backends are on the [containment backends](/reference/backends/) page. Config
+template mechanism, and the rejected Docker Desktop and `linux-docker` backends are on the [containment backends](/reference/backends/) page. Config
 validation rejects any backend name that is not implemented rather than falling back to OrbStack,
 so a containment posture is never silently substituted.
 

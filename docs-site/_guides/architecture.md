@@ -56,13 +56,12 @@ graph TD
 - **The OrbStack VM is the only hardware-virtualization boundary.** The jail (an OrbStack
   *isolated machine*) and the containers inside it are kernel namespaces, so nesting adds no
   per-level CPU cost. With the `orbstack`/`lima` backends a single kernel is shared across the
-  manager and all workers — a security trade noted in [security-model.md §8](/security-model/compromise/);
-  a per-agent-VM backend (`apple-container`, roadmap) would give each agent its own kernel.
+  manager and all workers — a security trade noted in [security-model.md §8](/security-model/compromise/).
 - **The jail is the containment boundary**, not Scion. The egress allowlist is enforced in the
   jail's network namespace, outside the agent containers.
 - **OrbStack is the reference *backend*, not a hard dependency.** The jail is a contract;
-  OrbStack and `lima` implement it, `apple-container` is on the roadmap, and Docker Desktop and a
-  no-VM `linux-docker` backend are rejected. See [containment backends](/reference/backends/).
+  OrbStack and `lima` implement it; Docker Desktop and a no-VM `linux-docker` backend are
+  rejected. See [containment backends](/reference/backends/).
 
 ## 2. The project model: a project is a directory
 

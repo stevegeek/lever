@@ -23,10 +23,10 @@ a single product, and one of its guarantees decides whether a backend can even e
 
 See [security model §2.4](/security-model/jail/) for the full contract in context.
 
-Run `lever backends` to print the live matrix; this page mirrors it, then adds the roadmap and
-rejected backends the command doesn't list. `lever backends` prints only **implemented**
-candidates, a candidate exists in code iff a registry constructor exists for it, so roadmap and
-rejected entries live here as documentation, not in the binary. Select a backend with the
+Run `lever backends` to print the live matrix; this page mirrors it, then adds the rejected
+backends the command doesn't list. `lever backends` prints only **implemented** candidates (a
+candidate exists in code iff a registry constructor exists for it), so rejected entries live here
+as documentation, not in the binary. Select a backend with the
 [`backend:` key](/reference/config/) in `lever.yaml`; an unrecognised name is rejected at config
 load rather than silently substituted, so a containment posture is never quietly swapped for
 another.
@@ -75,19 +75,6 @@ property doesn't depend on the auto-inference alone.
 `host.lima.internal` (live-confirmed reaching host-loopback services, resolving to `192.168.5.2` in
 testing) is the host alias, the direct analog of OrbStack's `host.orb.internal`: it's how an agent
 reaches the broker and any allowlisted host tool port.
-
-## Roadmap
-
-### `apple-container`
-
-[Apple's `container`](https://github.com/apple/container) runs each Linux container in its **own
-lightweight VM**, so every agent gets its own kernel, the strongest isolation of any Mac option
-(guarantee 0 satisfied *per agent*, not just per jail). Not yet built, for two reasons:
-
-- **A different topology.** With a VM per agent there is no single netns to hang one egress
-  chokepoint on; guarantees 2-3 would need per-VM enforcement or a gateway, not the single-jail
-  chain the other backends share.
-- **Immature networking.** Full support needs macOS 26.
 
 ## Rejected
 

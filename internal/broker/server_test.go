@@ -135,3 +135,43 @@ func TestServeListenersRejectsNonLoopbackAdmin(t *testing.T) {
 		t.Fatal("ServeListeners did not fail closed on a non-loopback admin listener")
 	}
 }
+
+// Every jail JSON route is POST-only and /tools is GET-only: a wrong method
+// 405s at the mux before any handler (and so before any audit line) runs.
+// The admin mux follows the same pattern.
+func TestRoutesRejectWrongMethod(t *testing.T) {
+	b := New(testConfig(t))
+	jail := b.JailHandler()
+	admin := b.AdminHandler()
+	cases := []struct {
+		h      http.Handler
+		method string
+		path   string
+	}{
+		{jail, http.MethodGet, wire.PathProvision},
+		{jail, http.MethodGet, wire.PathWorkerStart},
+		{jail, http.MethodGet, wire.PathWorkerList},
+		{jail, http.MethodGet, wire.PathMsgSend},
+		{jail, http.MethodGet, wire.PathMsgList},
+		{jail, http.MethodGet, wire.PathDirectiveConsume},
+		{jail, http.MethodGet, wire.PathDirectiveCheck},
+		{jail, http.MethodGet, wire.PathEnrol},
+		{jail, http.MethodGet, wire.PathRenew},
+		{jail, http.MethodGet, wire.PathRequest},
+		{jail, http.MethodPost, wire.PathTools},
+		{admin, http.MethodGet, wire.PathRegister},
+		{admin, http.MethodPost, wire.PathEpoch},
+		{admin, http.MethodGet, wire.PathBumpEpoch},
+		{admin, http.MethodGet, wire.PathRevoke},
+		{admin, http.MethodGet, wire.PathBootstrap},
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest(tc.method, tc.path, bytes.NewReader([]byte(`{}`)))
+		r.TLS = leafFor(t, b, "manager")
+		w := httptest.NewRecorder()
+		tc.h.ServeHTTP(w, r)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s: status = %d, want 405", tc.method, tc.path, w.Code)
+		}
+	}
+}

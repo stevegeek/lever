@@ -17,7 +17,10 @@ type agentPolicy struct {
 
 // Policy holds the per-agent request/delegation policy. It is NOT safe for
 // concurrent mutation: build it fully at boot with AllowObtain/AllowDelegate,
-// then query MayObtainRule concurrently.
+// then query MayObtainRule concurrently. Unlike registry.Registry, nothing
+// mutates it once the broker serves — the policy comes from lever.yaml alone,
+// there is no runtime route that changes a grant, and a policy change means a
+// broker restart (brokerctl.ConfigHash) — so it carries no mutex.
 type Policy struct {
 	agents map[string]*agentPolicy
 }

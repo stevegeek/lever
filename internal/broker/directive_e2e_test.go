@@ -16,6 +16,7 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -116,7 +117,7 @@ func TestOperatorDirectiveEndToEndAdversarial(t *testing.T) {
 	// doctored after signing).
 	idB := "e2e00000-0000-4000-8000-00000000000b"
 	raw, _ := json.Marshal(directiveStatement(idB, "manager", 1, toolAction))
-	sig, err := opsig.Sign(priv, opsig.NamespaceDirective, raw)
+	sig, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceDirective, raw)
 	if err != nil {
 		t.Fatal(err)
 	}

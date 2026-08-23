@@ -20,8 +20,10 @@ import (
 // per-CN cooldown and lifetime cap so a persistent failure can never
 // heal-storm.
 const (
-	// autoReenrol* mirror config.AutoReenrolMode values (the broker package
-	// stays decoupled from config; brokerctl passes the resolved string).
+	// autoReenrol* mirror config.AutoReenrolAll/Manager/Off by hand: the
+	// broker package must not import config, so brokerctl passes the resolved
+	// mode as a string (string(app.EffectiveAutoReenrol())). Keep the two
+	// sets in step.
 	autoReenrolAll     = "all"
 	autoReenrolManager = "manager"
 	autoReenrolOff     = "off"
@@ -74,7 +76,7 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	}
 
 	// Identity gate: only configured identities are healable.
-	spec, isWorker := b.workers[cn]
+	spec, isWorker := b.workerSpec(cn)
 	if cn != b.manager && !isWorker {
 		return
 	}
@@ -123,8 +125,8 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	}
 
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
-	// helper's step-discriminated wrap ("ticket:"/"stage:") reproduces the two
-	// audit lines this path emitted before the shared extraction.
+	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
+	// audit line.
 	if err := b.stageFreshTicket(cn, dir); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return

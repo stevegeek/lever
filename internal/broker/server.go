@@ -19,20 +19,22 @@ import (
 // call time — tools must be registered before JailHandler() is called.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(wire.PathProvision, b.handleProvision)
-	mux.HandleFunc(wire.PathWorkerStart, b.handleWorkerStart)
-	mux.HandleFunc(wire.PathWorkerStop, b.handleWorkerStop)
-	mux.HandleFunc(wire.PathWorkerSuspend, b.handleWorkerSuspend)
-	mux.HandleFunc(wire.PathWorkerResume, b.handleWorkerResume)
-	mux.HandleFunc(wire.PathWorkerList, b.handleWorkerList)
-	mux.HandleFunc(wire.PathMsgSend, b.handleMsgSend)
-	mux.HandleFunc(wire.PathMsgList, b.handleMsgList)
-	mux.HandleFunc(wire.PathDirectiveConsume, b.handleDirectiveConsume)
-	mux.HandleFunc(wire.PathDirectiveCheck, b.handleDirectiveCheck)
-	mux.HandleFunc(wire.PathEnrol, b.handleEnrol)
-	mux.HandleFunc(wire.PathRenew, b.handleRenew)
-	mux.HandleFunc(wire.PathRequest, b.handleRequest)
-	mux.HandleFunc(wire.PathTools, b.handleTools)
+	// Method patterns: every JSON route is POST-only; /tools is the lone GET.
+	// A wrong method 405s at the mux, before any handler runs.
+	mux.HandleFunc("POST "+wire.PathProvision, b.handleProvision)
+	mux.HandleFunc("POST "+wire.PathWorkerStart, b.handleWorkerStart)
+	mux.HandleFunc("POST "+wire.PathWorkerStop, b.handleWorkerStop)
+	mux.HandleFunc("POST "+wire.PathWorkerSuspend, b.handleWorkerSuspend)
+	mux.HandleFunc("POST "+wire.PathWorkerResume, b.handleWorkerResume)
+	mux.HandleFunc("POST "+wire.PathWorkerList, b.handleWorkerList)
+	mux.HandleFunc("POST "+wire.PathMsgSend, b.handleMsgSend)
+	mux.HandleFunc("POST "+wire.PathMsgList, b.handleMsgList)
+	mux.HandleFunc("POST "+wire.PathDirectiveConsume, b.handleDirectiveConsume)
+	mux.HandleFunc("POST "+wire.PathDirectiveCheck, b.handleDirectiveCheck)
+	mux.HandleFunc("POST "+wire.PathEnrol, b.handleEnrol)
+	mux.HandleFunc("POST "+wire.PathRenew, b.handleRenew)
+	mux.HandleFunc("POST "+wire.PathRequest, b.handleRequest)
+	mux.HandleFunc("GET "+wire.PathTools, b.handleTools)
 
 	for _, name := range b.reg.Names() {
 		if name == ReservedLLMTool {
@@ -66,11 +68,11 @@ func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
 // Routes /register, /epoch, /bump-epoch, /revoke, /bootstrap — no capability-gated or agent-facing endpoints.
 func (b *Broker) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(wire.PathRegister, b.handleRegister)
-	mux.HandleFunc(wire.PathEpoch, b.handleEpoch)
-	mux.HandleFunc(wire.PathBumpEpoch, b.handleBumpEpoch)
-	mux.HandleFunc(wire.PathRevoke, b.handleRevoke)
-	mux.HandleFunc(wire.PathBootstrap, b.handleBootstrap)
+	mux.HandleFunc("POST "+wire.PathRegister, b.handleRegister)
+	mux.HandleFunc("GET "+wire.PathEpoch, b.handleEpoch)
+	mux.HandleFunc("POST "+wire.PathBumpEpoch, b.handleBumpEpoch)
+	mux.HandleFunc("POST "+wire.PathRevoke, b.handleRevoke)
+	mux.HandleFunc("POST "+wire.PathBootstrap, b.handleBootstrap)
 	return mux
 }
 

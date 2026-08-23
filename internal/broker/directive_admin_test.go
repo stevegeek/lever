@@ -58,24 +58,6 @@ func (f *fakeDirectiveRuntime) Message(ctx context.Context, o scion.MsgOpts) err
 	return f.fakeRuntime.Message(ctx, o)
 }
 
-// directiveTestBroker builds a Broker wired for the directive admin channel:
-// a real ssh-keygen operator key/allowed_signers pair, instance "testinst",
-// a 24h expiry cap, a declared "worker" WorkerSpec, and a message-capturing
-// fake runtime.
-func directiveTestBroker(t *testing.T) (b *Broker, priv string, allowedSigners string, rt *fakeDirectiveRuntime) {
-	t.Helper()
-	priv, as := genOperatorKey(t)
-	cfg := testConfig(t)
-	cfg.DirectiveVerifier = &opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	cfg.InstanceID = "testinst"
-	cfg.DirectiveExpiryMax = 24 * time.Hour
-	rt = &fakeDirectiveRuntime{fakeRuntime: fakeRuntime{agents: map[string][]scion.Agent{}}}
-	cfg.Runtime = rt
-	cfg.Workers = []WorkerSpec{{Name: "worker", WorkspaceSubdir: "workers/worker"}}
-	cfg.InstanceProject = testInstanceProject
-	return New(cfg), priv, as, rt
-}
-
 // serveDirectiveAdmin binds b.DirectiveAdminHandler() on a real unix socket
 // and returns the socket path. Uses os.MkdirTemp (not t.TempDir) because
 // t.TempDir paths can exceed macOS's ~104-byte unix socket path limit.
@@ -130,7 +112,7 @@ func instructionAction(text string) opsig.Action {
 // the response status and body.
 func postSigned(t *testing.T, client *http.Client, path, priv, namespace string, raw []byte) (int, []byte) {
 	t.Helper()
-	sig, err := opsig.Sign(priv, namespace, raw)
+	sig, err := opsig.SignContext(context.Background(), priv, namespace, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +229,7 @@ func TestDirectiveSendRejectsBadSignatureAndNothingDelivered(t *testing.T) {
 	id := "11111111-2222-4333-8444-555555555502"
 	st := directiveStatement(id, "manager", 1, instructionAction("hi"))
 	raw, _ := json.Marshal(st)
-	sig, err := opsig.Sign(priv, opsig.NamespaceDirective, raw)
+	sig, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceDirective, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +425,7 @@ func TestDirectiveListAndRevokeRequireFreshSignedEnvelope(t *testing.T) {
 	// Tampered: valid signature, mutated envelope bytes.
 	env := adminEnvelope("list", nil)
 	rawOK, _ := json.Marshal(env)
-	sig, err := opsig.Sign(priv, opsig.NamespaceAdmin, rawOK)
+	sig, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceAdmin, rawOK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,6 +521,10 @@ func TestDirectiveRoutesDisabledWithoutVerifier(t *testing.T) {
 		{http.MethodPost, "/directive/list"},
 		{http.MethodPost, "/directive/revoke"},
 		{http.MethodPost, "/directive/selftest"},
+		// Wrong method on a disabled channel is still 404, never 405: the
+		// channel must stay invisible.
+		{http.MethodGet, "/directive/send"},
+		{http.MethodPost, "/directive/resolve?agent=manager"},
 	}
 	for _, c := range checks {
 		req, err := http.NewRequest(c.method, "http://unix"+c.path, bytes.NewReader([]byte(`{}`)))
@@ -596,7 +582,7 @@ func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 	id := "11111111-2222-4333-8444-555555555551"
 	st := directiveStatement(id, "manager", 1, instructionAction("first"))
 	raw, _ := json.Marshal(st)
-	sig, err := opsig.Sign(priv, opsig.NamespaceDirective, raw)
+	sig, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceDirective, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +600,7 @@ func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 	id2 := "11111111-2222-4333-8444-555555555552"
 	st2 := directiveStatement(id2, "manager", 1, instructionAction("second"))
 	raw2, _ := json.Marshal(st2)
-	sig2, err := opsig.Sign(priv, opsig.NamespaceDirective, raw2)
+	sig2, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceDirective, raw2)
 	if err != nil {
 		t.Fatal(err)
 	}

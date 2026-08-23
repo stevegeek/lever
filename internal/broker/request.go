@@ -49,7 +49,7 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.CapRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("request", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

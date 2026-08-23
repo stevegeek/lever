@@ -8,31 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/scion"
 )
-
-func reenrolBroker(t *testing.T, rt WorkerRuntime, mode string) (*Broker, WorkerSpec, string) {
-	t.Helper()
-	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch",
-		HostWorkspace: filepath.Join(t.TempDir(), "ws"),
-		BootstrapDir:  filepath.Join(t.TempDir(), ".lever")}
-	managerDir := filepath.Join(t.TempDir(), ".lever")
-	b := New(Config{
-		Tickets:             caTicketStore(t),
-		Registry:            registry.New(),
-		Runtime:             rt,
-		Workers:             []WorkerSpec{spec},
-		BrokerCAPEM:         "CA-PEM",
-		BrokerURL:           "https://10.0.0.2:8080",
-		ManagerIdentity:     "test-manager",
-		ManagerSlug:         "appname",
-		InstanceProject:     testInstanceProject,
-		AutoReenrol:         mode,
-		ManagerBootstrapDir: managerDir,
-	})
-	return b, spec, managerDir
-}
 
 func stagedCN(t *testing.T, dir string) string {
 	t.Helper()

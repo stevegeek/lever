@@ -52,23 +52,6 @@ func agentClient(t *testing.T, b *Broker, cert tls.Certificate) *http.Client {
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
 }
 
-// signedCert builds a real tls.Certificate for cn signed by the broker CA.
-// It generates its own ephemeral key so callers that need the key alongside the
-// cert should use csrWithKey + b.ca.SignCSR directly (as the enrol step does).
-func signedCert(t *testing.T, b *Broker, cn string) tls.Certificate {
-	t.Helper()
-	csrPEM, keyPEM := csrWithKey(t, cn)
-	certPEM, err := b.ca.SignCSR(csrPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pair, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pair
-}
-
 // TestE2EProvisionEnrolRequestExercise exercises the full four-step flow over
 // real mTLS and a fake upstream MCP backend.
 func TestE2EProvisionEnrolRequestExercise(t *testing.T) {

@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/opsig"
 )
 
 // validate checks one broker.tools entry's shape, failing closed. External
@@ -332,8 +332,8 @@ func (a *App) validateWorker(g Worker) error {
 // validateOperator fails closed on operator-directive-channel config
 // mistakes: allowed_signers, if set, must be a path confined inside the
 // instance root (like manager.prompt_file); the expiry pair must be sane —
-// directive_expiry <= directive_expiry_max <= 24h, the hard ceiling the
-// directive-signing protocol assumes. Checked unconditionally (even with the
+// directive_expiry <= directive_expiry_max <= opsig.MaxExpiry, the hard
+// ceiling the directive-signing protocol assumes. Checked unconditionally (even with the
 // channel disabled) so a nonsensical expiry pair is caught at config-load
 // time rather than silently ignored until allowed_signers is later set.
 func (a *App) validateOperator() error {
@@ -346,7 +346,7 @@ func (a *App) validateOperator() error {
 	if a.Operator.DirectiveExpiryMax < 0 {
 		return fmt.Errorf("config: operator: directive_expiry_max %s must not be negative", a.Operator.DirectiveExpiryMax)
 	}
-	if a.EffectiveDirectiveExpiryMax() > 24*time.Hour {
+	if a.EffectiveDirectiveExpiryMax() > opsig.MaxExpiry {
 		return fmt.Errorf("config: operator: directive_expiry_max %s exceeds the 24h hard ceiling", a.EffectiveDirectiveExpiryMax())
 	}
 	if a.EffectiveDirectiveExpiry() > a.EffectiveDirectiveExpiryMax() {
@@ -551,7 +551,7 @@ func (a *App) validateBrokerGrants() error {
 	// Known tools + their op sets.
 	toolOps := map[string]map[string]bool{}
 	// Built-in reserved pseudo-tool: llm (broker /llm proxy, no backend subprocess).
-	toolOps["llm"] = map[string]bool{"generate": true}
+	toolOps[registry.ReservedLLMTool] = map[string]bool{registry.ReservedLLMOp: true}
 	for _, t := range a.Broker.Tools {
 		if t.Name == "" {
 			return fmt.Errorf("config: broker.tools entry has empty name")

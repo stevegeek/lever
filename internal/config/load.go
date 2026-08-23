@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/broker/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -115,6 +116,10 @@ func Load(path string) (*App, error) {
 			r, strings.Join(scionAgentRoles, ", "))
 	}
 	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
+	// APIKeyFile is a host-side secret like CredentialFile: expanded against
+	// the instance dir (and ~/), not confined, because the key should live
+	// outside the agent-writable tree.
+	app.Broker.APIKeyFile = resolvePath(app.Broker.APIKeyFile, app.dir)
 	// SigningKey is a host-side path OUTSIDE the instance tree by design (the
 	// operator's private key must never live where a compromised agent could
 	// read it) — expanded like CredentialFile/Scion.Source, but deliberately
@@ -133,11 +138,11 @@ func Load(path string) (*App, error) {
 func (a *App) injectLLMGrants() {
 	add := func(obtain *[]Grant) {
 		for _, g := range *obtain {
-			if g.Tool == "llm" && g.Op == "generate" {
+			if g.Tool == registry.ReservedLLMTool && g.Op == registry.ReservedLLMOp {
 				return
 			}
 		}
-		*obtain = append(*obtain, Grant{Tool: "llm", Op: "generate"})
+		*obtain = append(*obtain, Grant{Tool: registry.ReservedLLMTool, Op: registry.ReservedLLMOp})
 	}
 	if a.EffectiveManagerLLMAuth() == LLMAuthAPIKey {
 		add(&a.Manager.Obtain)

@@ -267,7 +267,7 @@ type Operator struct {
 // docs/superpowers/specs/2026-08-16-remote-agent-access-design.md.
 type Remote struct {
 	Enabled bool `yaml:"enabled"`
-	// Port is the host loopback port the proxy binds. Zero = 8445
+	// Port is the host loopback port the proxy binds. Zero = DefaultRemotePort
 	// (EffectiveRemotePort). Must not collide with the broker's jail/admin
 	// ports — validated.
 	Port int `yaml:"port"`
@@ -292,7 +292,7 @@ type Remote struct {
 	// the provider unable to bind its own port. The guest half has no config
 	// key at all, so no configuration can make the two halves collide.
 	//
-	// Zero = 8447 (EffectiveRemoteLoginPort). Validated against the proxy
+	// Zero = DefaultRemoteLoginPort (EffectiveRemoteLoginPort). Validated against the proxy
 	// port, the broker's listeners, and the guest port's host mirror.
 	LoginPort int `yaml:"login_port"`
 }

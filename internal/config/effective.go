@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/stevegeek/lever/internal/opsig"
 )
 
 // Default broker ports, used when the config leaves jail_port/admin_port unset
@@ -16,6 +18,17 @@ const (
 	DefaultBrokerJailPort  = 8443
 	DefaultBrokerAdminPort = 8444
 )
+
+// Default remote-access ports, used when remote.port / remote.login_port are
+// unset. The block reads 8443 jail, 8444 admin, 8445 proxy, 8446 the jail's
+// mirrored login forwarder (GuestLoginIssuerPort), 8447 the provider.
+const (
+	DefaultRemotePort      = 8445
+	DefaultRemoteLoginPort = 8447
+)
+
+// DefaultDirectiveExpiry is operator.directive_expiry when unset.
+const DefaultDirectiveExpiry = 10 * time.Minute
 
 // llmAuthModes scans every agent's effective LLM-auth mode and reports whether
 // any is api-key and whether any is subscription. The single source of truth for
@@ -97,12 +110,9 @@ func (a *App) ScionWebAssets() bool {
 }
 
 // EffectiveRemotePort is the proxy's host loopback port: the configured
-// value, or 8445 — adjacent to the broker's 8443/8444 block.
+// value, or DefaultRemotePort — adjacent to the broker's 8443/8444 block.
 func (a *App) EffectiveRemotePort() int {
-	if a.Remote.Port > 0 {
-		return a.Remote.Port
-	}
-	return 8445
+	return cmp.Or(max(a.Remote.Port, 0), DefaultRemotePort)
 }
 
 // EffectiveAllowedPorts is the complete set of HOST loopback ports the jail may
@@ -146,17 +156,12 @@ func (a *App) EffectiveAllowedPorts() []int {
 }
 
 // EffectiveRemoteLoginPort is the HOST loopback port the local OIDC provider
-// binds: the configured value, or 8447.
+// binds: the configured value, or DefaultRemoteLoginPort.
 //
-// 8447, not 8446: 8446 is the guest-side issuer port
-// (GuestLoginIssuerPort, mirrored from backend.GuestLoginIssuerPort), which the container runtime mirrors onto the
-// host at the same number. The block reads 8443 jail, 8444 admin, 8445 proxy,
-// 8446 the jail's mirrored forwarder, 8447 the provider.
+// 8447, not 8446: 8446 is the guest-side issuer port (GuestLoginIssuerPort),
+// which the container runtime mirrors onto the host at the same number.
 func (a *App) EffectiveRemoteLoginPort() int {
-	if a.Remote.LoginPort > 0 {
-		return a.Remote.LoginPort
-	}
-	return 8447
+	return cmp.Or(max(a.Remote.LoginPort, 0), DefaultRemoteLoginPort)
 }
 
 // EffectiveAutoReenrol is the natural-lapse healer gate: the configured value,
@@ -237,23 +242,17 @@ func (a *App) DirectivesEnabled() bool {
 }
 
 // EffectiveDirectiveExpiry is the configured operator.directive_expiry, or
-// 10 minutes when unset (0).
+// DefaultDirectiveExpiry when unset (0).
 func (a *App) EffectiveDirectiveExpiry() time.Duration {
-	if a.Operator.DirectiveExpiry <= 0 {
-		return 10 * time.Minute
-	}
-	return a.Operator.DirectiveExpiry
+	return cmp.Or(max(a.Operator.DirectiveExpiry, 0), DefaultDirectiveExpiry)
 }
 
 // EffectiveDirectiveExpiryMax is the configured operator.directive_expiry_max,
-// or 24 hours when unset (0). This is a hard ceiling: validateOperator
+// or opsig.MaxExpiry when unset (0). That is a hard ceiling: validateOperator
 // rejects a configured value above it, so a loaded *App never has to clamp
 // here — a config asking for more never gets past Load.
 func (a *App) EffectiveDirectiveExpiryMax() time.Duration {
-	if a.Operator.DirectiveExpiryMax <= 0 {
-		return 24 * time.Hour
-	}
-	return a.Operator.DirectiveExpiryMax
+	return cmp.Or(max(a.Operator.DirectiveExpiryMax, 0), opsig.MaxExpiry)
 }
 
 // OperatorPrincipal is the ssh-keygen allowed_signers principal for this

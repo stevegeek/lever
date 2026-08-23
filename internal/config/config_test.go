@@ -131,6 +131,29 @@ func TestCredentialFileResolved(t *testing.T) {
 	}
 }
 
+// TestAPIKeyFileResolvedAgainstConfigDir: a relative broker.api_key_file is
+// resolved against the config's directory like credential_file, so a config
+// loaded from another cwd (`lever broker serve`) still finds the key.
+func TestAPIKeyFileResolvedAgainstConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "secrets", "api-key")
+	if err := os.WriteFile(key, []byte("sk-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "lever.yaml")
+	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: api-key\n  api_key_file: secrets/api-key\nmanager: {}\n")
+	app, err := Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Broker.APIKeyFile != key {
+		t.Fatalf("APIKeyFile = %q, want %q", app.Broker.APIKeyFile, key)
+	}
+}
+
 func TestValidateRejectsUnknownBackend(t *testing.T) {
 	p := writeTmp(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n")
 	_, err := Load(p)

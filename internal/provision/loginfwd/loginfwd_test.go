@@ -1,4 +1,4 @@
-package guest
+package loginfwd
 
 import (
 	"context"
@@ -13,20 +13,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	lexec "github.com/stevegeek/lever/internal/exec"
 )
 
+func fakeRunner() *lexec.FakeRunner         { return lexec.NewFakeRunner() }
+func fakeResult(stdout string) lexec.Result { return lexec.Result{Stdout: stdout} }
+
 // buildForwarderForHost compiles the EMBEDDED forwarder source for the machine
-// running the test, exactly the way buildLoginForwarder compiles it for the
+// running the test, exactly the way Build compiles it for the
 // guest (same source, same module file, same offline build). It is what proves
 // the embedded program is real Go and does what it claims — a string constant
 // that no longer compiles would otherwise only surface on a live apply.
 func buildForwarderForHost(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(loginForwardSource), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(loginForwardGoMod), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o600); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
 	bin := filepath.Join(dir, "lever-login-forward")
@@ -122,5 +127,45 @@ func TestLoginForwarderRefusesANonLoopbackListen(t *testing.T) {
 		if !strings.Contains(string(out), "lever-login-forward:") {
 			t.Fatalf("-listen %q: %s", listen, out)
 		}
+	}
+}
+
+// TestBuildCrossCompilesWithTheResolvedGo pins the argv: the absolute go
+// binary, an offline module build, and -trimpath for a reproducible hash.
+func TestBuildCrossCompilesWithTheResolvedGo(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	f := fakeRunner()
+	f.Script("go env GOROOT", fakeResult("/opt/go\n"))
+	f.Script("/opt/go/bin/go build", fakeResult(""))
+	out, err := Build(context.Background(), f, "arm64", "m")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if filepath.Base(out) != "lever-login-forward" || !strings.Contains(out, "lever-loginfwd-m") {
+		t.Fatalf("output path %q", out)
+	}
+	for _, name := range []string{"main.go", "go.mod"} {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(out), name)); err != nil {
+			t.Fatalf("%s not staged: %v", name, err)
+		}
+	}
+	build := f.Calls[len(f.Calls)-1]
+	if build.Name != "/opt/go/bin/go" || strings.Join(build.Args, " ") != "build -trimpath -o "+out+" ." {
+		t.Fatalf("build call = %+v", build)
+	}
+	if build.Dir != filepath.Dir(out) {
+		t.Fatalf("build ran in %q, want %q", build.Dir, filepath.Dir(out))
+	}
+	for k, v := range map[string]string{"GOOS": "linux", "GOARCH": "arm64", "CGO_ENABLED": "0", "GOPROXY": "off", "GOFLAGS": "-mod=mod"} {
+		if build.Env[k] != v {
+			t.Errorf("env %s = %q, want %q", k, build.Env[k], v)
+		}
+	}
+}
+
+func TestBuildFailsWithoutGo(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	if _, err := Build(context.Background(), fakeRunner(), "arm64", "m"); err == nil {
+		t.Fatal("expected an error when go is not resolvable")
 	}
 }

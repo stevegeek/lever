@@ -99,7 +99,7 @@ func LoadNoHostChecks(path string) (*App, error) {
 	// At most one scion mode. NOT "exactly one": config.Load also runs for
 	// commands that never bring anything up (doctor, msg, attach), and a
 	// minimal config legitimately declares no scion block at all — the missing
-	// mode is reported at bring-up by resolveScionBinary instead.
+	// mode is reported at bring-up by scionbin.Resolve instead.
 	scionModes := 0
 	for _, v := range []string{app.Scion.Binary, app.Scion.Source, app.Scion.Version} {
 		if v != "" {

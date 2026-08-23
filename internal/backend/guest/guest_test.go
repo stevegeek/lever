@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -148,7 +149,7 @@ func TestGOARCHUnrecognizedErrors(t *testing.T) {
 }
 
 // stageFakeBuildOutput creates the file a faked `go build` would have written,
-// at the exact path resolveScionBinary passes to `-o`. InstallRootBinaryIfChanged
+// at the exact path scionbin.Resolve passes to `-o`. InstallRootBinaryIfChanged
 // hashes that file for real, so it has to exist even when the build is a stub.
 func stageFakeBuildOutput(t *testing.T, machine string) {
 	t.Helper()
@@ -449,6 +450,34 @@ func TestInstallIfChangedFailsOnUnreadableLocalFile(t *testing.T) {
 		t.Error("nothing may be installed when the artifact cannot be read")
 	}
 }
+
+// writeELF64 writes a minimal 64-bit little-endian ELF header for the given
+// machine (elf.EM_* value) and object type — enough for scionbin.VerifyELFArch
+// to accept or reject it. The full check is tested in internal/provision/
+// scionbin; the copies here exist so EnsureScion's binary-mode flow can be
+// exercised end to end through the guest transport.
+func writeELF64(t *testing.T, dir string, machine uint16, etype uint16) string {
+	t.Helper()
+	h := make([]byte, 64)
+	copy(h, []byte{0x7f, 'E', 'L', 'F'})
+	h[4] = 2 // EI_CLASS: 64-bit
+	h[5] = 1 // EI_DATA: little-endian
+	h[6] = 1 // EI_VERSION
+	binary.LittleEndian.PutUint16(h[16:], etype)
+	binary.LittleEndian.PutUint16(h[18:], machine)
+	binary.LittleEndian.PutUint32(h[20:], 1)  // e_version
+	binary.LittleEndian.PutUint16(h[52:], 64) // e_ehsize
+	path := filepath.Join(dir, "scion")
+	if err := os.WriteFile(path, h, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const (
+	emAArch64 = 183 // elf.EM_AARCH64
+	etExec    = 2
+)
 
 // THE load-bearing test for issue #27. "No Go toolchain on the jail host" means
 // exactly this: in binary mode nothing ever invokes `go`. If it regresses, the

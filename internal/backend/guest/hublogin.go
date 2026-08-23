@@ -3,13 +3,13 @@ package guest
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/provision/loginfwd"
+	"github.com/stevegeek/lever/internal/scion/layout"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,24 +30,17 @@ import (
 //     avoided.
 //
 // So: a logic-free forwarder listens on the guest's loopback at the provider's
-// port and carries bytes to the host (loginfwd/main.go), and the hub's
-// oidc_login block names http://127.0.0.1:<port> as the issuer. The hub reads
-// that block once, at startup, so EnsureHubLogin reports whether it changed
-// and the caller restarts the hub when it did.
-
-//go:embed loginfwd/main.go
-var loginForwardSource string
+// port and carries bytes to the host (internal/provision/loginfwd, which also
+// BUILDS it on the host), and the hub's oidc_login block names
+// http://127.0.0.1:<port> as the issuer. The hub reads that block once, at
+// startup, so EnsureHubLogin reports whether it changed and the caller
+// restarts the hub when it did.
 
 const (
 	// LoginForwardPath is where the guest-side forwarder is installed. Beside
 	// scionDestPath, for the same reason: it is a part of scion's environment
 	// that lever puts there.
 	LoginForwardPath = "/usr/local/bin/lever-login-forward"
-
-	// scionSettingsRel and scionServerYAMLRel are scion's machine-level
-	// config files, relative to the guest run user's home.
-	scionSettingsRel   = ".scion/settings.yaml"
-	scionServerYAMLRel = ".scion/server.yaml"
 
 	// loginForwardLog is where the forwarder's own stderr goes in the guest.
 	// It carries connection-level failures only; no request ever passes
@@ -208,30 +201,20 @@ func (g Guest) removeHubLoginSettings(ctx context.Context) (bool, error) {
 // installs it if the guest does not already hold those exact bytes, and makes
 // sure it is running with the arguments this spec asks for.
 func (g Guest) ensureLoginForwarder(ctx context.Context, spec backend.HubLogin) error {
-	bin, err := g.buildLoginForwarder(ctx)
+	arch, err := g.GOARCH(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("guest: detect guest architecture: %w", err)
+	}
+	bin, err := loginfwd.Build(ctx, g.Host, arch, g.Machine)
+	if err != nil {
+		return fmt.Errorf("guest: %w", err)
 	}
 	// Same hash-skip as the scion binary: compare against the file in the
 	// guest, so a deleted or replaced binary re-installs rather than being
 	// assumed present.
-	want, err := hashFile(bin)
+	replaced, err := g.InstallRootBinaryIfChanged(ctx, bin, LoginForwardPath)
 	if err != nil {
-		return fmt.Errorf("guest: hashing %s: %w", bin, err)
-	}
-	replaced := true
-	// Absolute path, not a bare name: UserRun passes no env, so a bare name
-	// resolves on the guest run-user's PATH, which precedes /usr/bin with
-	// run-user-writable directories (see InstallRootBinaryIfChanged).
-	if res, err := g.UserRun(ctx, "/usr/bin/sha256sum", LoginForwardPath); err == nil {
-		if f := strings.Fields(res.Stdout); len(f) > 0 && f[0] == want {
-			replaced = false
-		}
-	}
-	if replaced {
-		if err := g.InstallRootBinary(ctx, bin, LoginForwardPath); err != nil {
-			return err
-		}
+		return fmt.Errorf("guest: %w", err)
 	}
 	// A freshly installed binary must displace whatever is running, or the
 	// guest keeps serving the old code from the old process.
@@ -240,50 +223,6 @@ func (g Guest) ensureLoginForwarder(ctx context.Context, spec backend.HubLogin) 
 	}
 	return nil
 }
-
-// buildLoginForwarder cross-compiles the forwarder for the guest, from a copy
-// of its own source.
-//
-// The source is embedded rather than built from lever's checkout because lever
-// is normally an installed BINARY with no source tree beside it — while the
-// guest still needs a linux executable for its own architecture. The program
-// is stdlib-only, so the build needs a Go toolchain and nothing else: no
-// module download, no network, no dependency on where lever came from.
-func (g Guest) buildLoginForwarder(ctx context.Context) (string, error) {
-	arch, err := g.GOARCH(ctx)
-	if err != nil {
-		return "", fmt.Errorf("guest: detect guest architecture: %w", err)
-	}
-	dir := filepath.Join(os.TempDir(), "lever-loginfwd-"+g.Machine)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("guest: login forwarder build dir: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(loginForwardSource), 0o600); err != nil {
-		return "", fmt.Errorf("guest: stage login forwarder source: %w", err)
-	}
-	// A module of its own: the source is compiled outside lever's module, and
-	// go build refuses to work without one. Nothing is ever downloaded for it.
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(loginForwardGoMod), 0o600); err != nil {
-		return "", fmt.Errorf("guest: stage login forwarder go.mod: %w", err)
-	}
-	goBin, err := g.goBinary(ctx)
-	if err != nil {
-		return "", err
-	}
-	out := filepath.Join(dir, "lever-login-forward")
-	// -trimpath keeps the output independent of the build directory, so the
-	// hash-skip above compares like with like across hosts and runs.
-	if _, err := g.Host.RunIn(ctx, dir, map[string]string{"GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": "0", "GOFLAGS": "-mod=mod", "GOPROXY": "off"},
-		goBin, "build", "-trimpath", "-o", out, "."); err != nil {
-		return "", fmt.Errorf("guest: cross-compile the login forwarder (remote access needs a Go toolchain on this host): %w", err)
-	}
-	return out, nil
-}
-
-// loginForwardGoMod is the module file the embedded source is built with. The
-// Go directive is deliberately conservative: the program uses nothing newer,
-// and a floor above the host's toolchain would fail the build for no reason.
-const loginForwardGoMod = "module lever-login-forward\n\ngo 1.22\n"
 
 // loginForwardMatch is the pgrep/pkill pattern for ANY login forwarder,
 // whatever arguments it carries. Anchored, so it cannot match the script that
@@ -354,19 +293,6 @@ exit 1
 		shellSingleQuote(loginForwardLog), listening, loginForwardLog)
 }
 
-// goBinary resolves the REAL go binary (GOROOT/bin/go) rather than trusting
-// `go` on PATH from an arbitrary working directory. Same reasoning as
-// fetchScionModule: a version manager that resolves `go` by walking up for a
-// project file (asdf, mise) cannot resolve it from a directory outside any
-// project — which is exactly where both the module cache and this build live.
-func (g Guest) goBinary(ctx context.Context) (string, error) {
-	root, err := g.Host.Run(ctx, nil, "go", "env", "GOROOT")
-	if err != nil {
-		return "", fmt.Errorf("resolve go toolchain (is go on PATH?): %w", err)
-	}
-	return filepath.Join(strings.TrimSpace(root.Stdout), "bin", "go"), nil
-}
-
 // ensureHubLoginSettings writes the oidc_login block into the guest's
 // ~/.scion/settings.yaml, and reports whether the file changed.
 func (g Guest) ensureHubLoginSettings(ctx context.Context, spec backend.HubLogin) (bool, error) {
@@ -375,7 +301,7 @@ func (g Guest) ensureHubLoginSettings(ctx context.Context, spec backend.HubLogin
 		// Deliberately fatal rather than "assume empty": treating an
 		// unreadable settings file as absent would rewrite scion's machine
 		// configuration from nothing.
-		return false, fmt.Errorf("guest: read %s: %w", scionSettingsRel, err)
+		return false, fmt.Errorf("guest: read %s: %w", layout.SettingsRel, err)
 	}
 	existing, hasServerYAML, err := parseScionSettingsRead(res.Stdout)
 	if err != nil {
@@ -400,7 +326,7 @@ func (g Guest) ensureHubLoginSettings(ctx context.Context, spec backend.HubLogin
 // script that writes a temp file and mv's it over the destination.
 func (g Guest) writeScionSettings(ctx context.Context, content []byte) error {
 	if err := g.pipeInto(ctx, g.UserPrefix, bytes.NewReader(content), writeScionSettingsScript); err != nil {
-		return fmt.Errorf("guest: write %s: %w", scionSettingsRel, err)
+		return fmt.Errorf("guest: write %s: %w", layout.SettingsRel, err)
 	}
 	return nil
 }
@@ -412,7 +338,7 @@ func (g Guest) writeScionSettings(ctx context.Context, content []byte) error {
 var readScionSettingsScript = fmt.Sprintf(`set -u
 if [ -f "$HOME/%s" ]; then echo "LEGACY 1"; else echo "LEGACY 0"; fi
 if [ -f "$HOME/%s" ]; then cat "$HOME/%s"; fi
-`, scionServerYAMLRel, scionSettingsRel, scionSettingsRel)
+`, layout.ServerYAMLRel, layout.SettingsRel, layout.SettingsRel)
 
 // parseScionSettingsRead splits readScionSettingsScript's output into the
 // settings file's content and the legacy-server.yaml answer.
@@ -427,29 +353,14 @@ func parseScionSettingsRead(out string) (settings []byte, hasServerYAML bool, er
 // writeScionSettingsScript is the guest-side half of writeScionSettings: read
 // stdin into a temp file beside the settings file, then swap it in.
 var writeScionSettingsScript = fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s.lever-tmp" && mv "$HOME/%s.lever-tmp" "$HOME/%s"`,
-	filepath.Dir(scionSettingsRel), scionSettingsRel, scionSettingsRel, scionSettingsRel)
-
-// v1OIDCLogin is scion's oidc_login block as it appears under `server:` in
-// settings.yaml (pkg/config/settings_v1.go V1OIDCLoginConfig).
-//
-// Four keys, and deliberately not the other two. client_secret is omitted
-// because there is no secret: lever's provider is a public client and scion
-// only sends the parameter when it is non-empty. scopes is omitted because
-// scion's default is already exactly "openid email profile" (pkg/hub/
-// oauth.go oidcScopes), and a config file should not restate a default.
-type v1OIDCLogin struct {
-	Enabled     bool   `yaml:"enabled"`
-	DisplayName string `yaml:"display_name"`
-	IssuerURL   string `yaml:"issuer_url"`
-	ClientID    string `yaml:"client_id"`
-}
+	filepath.Dir(layout.SettingsRel), layout.SettingsRel, layout.SettingsRel, layout.SettingsRel)
 
 // hubSettingsConverged returns the settings file content lever wants for a hub
 // with remote login ON, and whether it differs from what is already there. It
 // converges THREE things under `server:`, each restart-worthy on its own
 // because scion reads the whole file once at startup:
 //
-//   - `oidc_login`: lever's login block (v1OIDCLogin), replaced whenever it
+//   - `oidc_login`: lever's login block (layout.OIDCLogin), replaced whenever it
 //     differs from what this spec wants.
 //   - `auth.display_name`: an operator name, added only when nothing names one
 //     (setOperatorDisplayName) — it clears scion's first-run wizard.
@@ -465,17 +376,15 @@ type v1OIDCLogin struct {
 // re-serialisation that only moves whitespace must not read as a change, or
 // every apply would restart the hub.
 func hubSettingsConverged(existing []byte, spec backend.HubLogin, hasServerYAML bool) ([]byte, bool, error) {
-	var doc yaml.Node
-	if len(bytes.TrimSpace(existing)) > 0 {
-		if err := yaml.Unmarshal(existing, &doc); err != nil {
-			return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", scionSettingsRel, err)
-		}
+	doc, err := layout.ParseSettings(existing)
+	if err != nil {
+		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
 	}
-	root := documentRoot(&doc)
+	root := layout.DocumentRoot(doc)
 	if root == nil {
-		return nil, false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", scionSettingsRel)
+		return nil, false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", layout.SettingsRel)
 	}
-	server := mapGet(root, "server")
+	server := layout.MapGet(root, layout.KeyServer)
 	if server == nil && hasServerYAML {
 		// Adding a `server` key here would silently move scion's whole server
 		// configuration from the legacy server.yaml to this file, because
@@ -485,35 +394,35 @@ func hubSettingsConverged(existing []byte, spec backend.HubLogin, hasServerYAML 
 		return nil, false, fmt.Errorf("guest: the jail has a legacy ~/%s and no `server:` key in ~/%s — "+
 			"adding one would make scion ignore server.yaml entirely. Consolidate them first "+
 			"(`scion config migrate --server` in the jail), then re-run `lever apply`",
-			scionServerYAMLRel, scionSettingsRel)
+			layout.ServerYAMLRel, layout.SettingsRel)
 	}
 	if server == nil {
-		server = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		mapSet(root, "server", server)
+		server = layout.NewMapping()
+		layout.MapSet(root, layout.KeyServer, server)
 	}
 	if server.Kind != yaml.MappingNode {
-		return nil, false, fmt.Errorf("guest: `server:` in the jail's %s is not a mapping", scionSettingsRel)
+		return nil, false, fmt.Errorf("guest: `server:` in the jail's %s is not a mapping", layout.SettingsRel)
 	}
 
-	var want yaml.Node
-	if err := want.Encode(v1OIDCLogin{
+	want, err := layout.OIDCLogin{
 		Enabled:     true,
 		DisplayName: loginDisplayName,
 		IssuerURL:   fmt.Sprintf("http://127.0.0.1:%d", spec.IssuerPort),
 		ClientID:    spec.ClientID,
-	}); err != nil {
+	}.Node()
+	if err != nil {
 		return nil, false, fmt.Errorf("guest: build the oidc_login block: %w", err)
 	}
 	changed := true
-	if cur := mapGet(server, "oidc_login"); cur != nil {
-		same, err := sameYAML(cur, &want)
+	if cur := layout.MapGet(server, layout.KeyOIDCLogin); cur != nil {
+		same, err := layout.SameYAML(cur, want)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("guest: compare the oidc_login block: %w", err)
 		}
 		changed = !same
 	}
 	if changed {
-		mapSet(server, "oidc_login", &want)
+		layout.MapSet(server, layout.KeyOIDCLogin, want)
 	}
 	// Both writes feed one "changed": either alone must restart the hub, since
 	// scion reads the whole file once at startup.
@@ -527,7 +436,7 @@ func hubSettingsConverged(existing []byte, spec backend.HubLogin, hasServerYAML 
 		return existing, false, nil
 	}
 
-	out, err := encodeSettings(&doc)
+	out, err := encodeSettings(doc)
 	if err != nil {
 		return nil, false, err
 	}
@@ -543,22 +452,22 @@ func hubSettingsConverged(existing []byte, spec backend.HubLogin, hasServerYAML 
 // a user on a re-apply. `auth` holds unrelated keys too (user_access_mode), so
 // the block is merged into, never replaced.
 func setOperatorDisplayName(server *yaml.Node) bool {
-	auth := mapGet(server, "auth")
+	auth := layout.MapGet(server, layout.KeyAuth)
 	if auth != nil {
 		if auth.Kind != yaml.MappingNode {
 			// Not a shape lever can reason about — leave it for the operator.
 			return false
 		}
-		for _, k := range []string{"display_name", "email", "username"} {
-			if n := mapGet(auth, k); n != nil && n.Value != "" {
+		for _, k := range []string{layout.KeyDisplayName, layout.KeyEmail, layout.KeyUsername} {
+			if n := layout.MapGet(auth, k); n != nil && n.Value != "" {
 				return false
 			}
 		}
 	} else {
-		auth = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		mapSet(server, "auth", auth)
+		auth = layout.NewMapping()
+		layout.MapSet(server, layout.KeyAuth, auth)
 	}
-	mapSet(auth, "display_name", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: operatorDisplayName})
+	layout.MapSet(auth, layout.KeyDisplayName, layout.StringNode(operatorDisplayName))
 	return true
 }
 
@@ -576,20 +485,20 @@ func setOperatorDisplayName(server *yaml.Node) bool {
 // has made a choice, and re-applying must not silently undo it. Same reason
 // setOperatorDisplayName leaves a name the operator already set.
 func enableMessageBroker(server *yaml.Node) bool {
-	mb := mapGet(server, "message_broker")
+	mb := layout.MapGet(server, layout.KeyMessageBroker)
 	if mb != nil {
 		if mb.Kind != yaml.MappingNode {
 			// Not a shape lever can reason about — leave it for the operator.
 			return false
 		}
-		if n := mapGet(mb, "enabled"); n != nil && n.Value != "" {
+		if n := layout.MapGet(mb, layout.KeyEnabled); n != nil && n.Value != "" {
 			return false
 		}
 	} else {
-		mb = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		mapSet(server, "message_broker", mb)
+		mb = layout.NewMapping()
+		layout.MapSet(server, layout.KeyMessageBroker, mb)
 	}
-	mapSet(mb, "enabled", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"})
+	layout.MapSet(mb, layout.KeyEnabled, layout.BoolNode(true))
 	return true
 }
 
@@ -598,16 +507,16 @@ func enableMessageBroker(server *yaml.Node) bool {
 // wrote, then drops an `auth` mapping that is left empty. Any other value, or
 // any other key beside it, is an operator's own and stays.
 func clearOperatorDisplayName(server *yaml.Node) bool {
-	auth := mapGet(server, "auth")
+	auth := layout.MapGet(server, layout.KeyAuth)
 	if auth == nil || auth.Kind != yaml.MappingNode {
 		return false
 	}
-	if n := mapGet(auth, "display_name"); n == nil || n.Value != operatorDisplayName {
+	if n := layout.MapGet(auth, layout.KeyDisplayName); n == nil || n.Value != operatorDisplayName {
 		return false
 	}
-	mapDelete(auth, "display_name")
+	layout.MapDelete(auth, layout.KeyDisplayName)
 	if len(auth.Content) == 0 {
-		mapDelete(server, "auth")
+		layout.MapDelete(server, layout.KeyAuth)
 	}
 	return true
 }
@@ -632,21 +541,21 @@ func hubSettingsWithoutLogin(existing []byte) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(existing)) == 0 {
 		return existing, false, nil
 	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(existing, &doc); err != nil {
-		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", scionSettingsRel, err)
+	doc, err := layout.ParseSettings(existing)
+	if err != nil {
+		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
 	}
-	root := documentRoot(&doc)
+	root := layout.DocumentRoot(doc)
 	if root == nil {
 		return existing, false, nil
 	}
-	server := mapGet(root, "server")
+	server := layout.MapGet(root, layout.KeyServer)
 	if server == nil || server.Kind != yaml.MappingNode {
 		return existing, false, nil
 	}
 	changed := false
-	if mapGet(server, "oidc_login") != nil {
-		mapDelete(server, "oidc_login")
+	if layout.MapGet(server, layout.KeyOIDCLogin) != nil {
+		layout.MapDelete(server, layout.KeyOIDCLogin)
 		changed = true
 	}
 	if clearOperatorDisplayName(server) {
@@ -656,93 +565,19 @@ func hubSettingsWithoutLogin(existing []byte) ([]byte, bool, error) {
 		return existing, false, nil
 	}
 
-	out, err := encodeSettings(&doc)
+	out, err := encodeSettings(doc)
 	if err != nil {
 		return nil, false, err
 	}
 	return out, true, nil
 }
 
-// encodeSettings renders an edited settings document back to bytes.
+// encodeSettings renders an edited settings document back to bytes, naming
+// the file in the error.
 func encodeSettings(doc *yaml.Node) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	// Two-space indent: scion's own settings files are written that way, and
-	// this file is read by people as often as by programs.
-	enc.SetIndent(2)
-	if err := enc.Encode(doc); err != nil {
-		return nil, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
-	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
-	}
-	return buf.Bytes(), nil
-}
-
-// documentRoot returns the mapping at the top of a parsed document, creating
-// the document structure when the file was empty. nil when the file holds
-// something that is not a mapping (a list, a scalar), which callers refuse
-// rather than overwrite.
-func documentRoot(doc *yaml.Node) *yaml.Node {
-	if doc.Kind == 0 {
-		root := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		doc.Kind = yaml.DocumentNode
-		doc.Content = []*yaml.Node{root}
-		return root
-	}
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
-		return nil
-	}
-	if doc.Content[0].Kind != yaml.MappingNode {
-		return nil
-	}
-	return doc.Content[0]
-}
-
-// mapGet returns the value node for key in a mapping, or nil.
-func mapGet(m *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}
-
-// mapSet replaces key's value in a mapping, or appends the pair when absent.
-// Appending keeps the file's existing order intact, so a diff of a changed
-// settings file shows only what lever added.
-func mapSet(m *yaml.Node, key string, val *yaml.Node) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content[i+1] = val
-			return
-		}
-	}
-	m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, val)
-}
-
-// mapDelete removes a key/value pair from a mapping, leaving the rest of the
-// file's order intact.
-func mapDelete(m *yaml.Node, key string) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return
-		}
-	}
-}
-
-// sameYAML reports whether two nodes serialise identically — the semantic
-// comparison the change detection rests on.
-func sameYAML(a, b *yaml.Node) (bool, error) {
-	ab, err := yaml.Marshal(a)
+	out, err := layout.EncodeSettings(doc)
 	if err != nil {
-		return false, fmt.Errorf("guest: compare the oidc_login block: %w", err)
+		return nil, fmt.Errorf("guest: render %s: %w", layout.SettingsRel, err)
 	}
-	bb, err := yaml.Marshal(b)
-	if err != nil {
-		return false, fmt.Errorf("guest: compare the oidc_login block: %w", err)
-	}
-	return bytes.Equal(ab, bb), nil
+	return out, nil
 }

@@ -1,4 +1,13 @@
-package guest
+// Package webassets builds scion's web UI (the vite SPA under scion's web/)
+// on the HOST and returns a finished dist/client directory, cached per source
+// digest. It runs host-side for the same reason the scion binary is
+// cross-compiled host-side: the guest carries no toolchain at all — no Go, and
+// no node — and giving it one would also mean giving the jail npm's egress.
+// Keeping the build out here keeps the registry traffic on the host.
+//
+// Staging the result into a guest is internal/backend/guest's job; this
+// package only knows node, npm and the cache directory.
+package webassets
 
 import (
 	"archive/tar"
@@ -15,57 +24,25 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
-
-// ScionWebAssetsDir is where lever stages scion's built SPA inside the guest,
-// and therefore the value it passes to `scion server start --web-assets-dir`.
-// It sits beside scionDestPath because both answer the same question — where
-// does lever put scion's parts in the guest — and both ends of the contract
-// (the staging below, the flag in internal/apply) must name the SAME path.
-//
-// /usr/local/share is the FHS home for architecture-independent data installed
-// outside the package manager, which is exactly what a built SPA is.
-const ScionWebAssetsDir = "/usr/local/share/scion/web"
-
-// webAssetsSentinel is the file scion itself treats as proof that an asset set
-// is usable: cmd/server_foreground.go warns "assets are incomplete (main.js
-// missing)" when it cannot stat this path, and pkg/hub/web.go's Go-rendered
-// app shell loads exactly this URL. lever reuses it rather than inventing its
-// own completeness signal, so "lever thinks the build is complete" and "scion
-// will serve a working UI" cannot drift apart. Slash-separated: it is both a
-// URL path and a path under the dist root.
-const webAssetsSentinel = "assets/main.js"
 
 // webAssetsExclude drops vite's sourcemaps from the staged payload. They are
 // 71% of the build output (8.2MB of 11.5MB at pin e82a2a08, 79 files) and they
 // ship to every guest on every pin, to debug a SPA lever does not develop. A
-// filepath.Match pattern against each file's base name (see writeWebAssetsTar).
+// filepath.Match pattern against each file's base name (see WriteTar).
 //
 // Deliberately not configurable. Nobody has asked to debug scion's minified
 // bundle from inside a lever guest; a knob can be added the day someone does.
 const webAssetsExclude = "*.map"
 
-// webDigestFile records, INSIDE the staged guest directory, the digest of the
-// asset tree lever put there. Unlike the scion binary — which is verified by
-// hashing the installed file itself (see InstallRootBinaryIfChanged) — a tree
-// of ~700 files cannot be re-hashed over the transport cheaply, and a
-// host/guest hash agreement would be a brittle second implementation of the
-// same walk. So this one is a marker, with the marker's honest limitation:
-// it attests what lever installed, not what is there now.
-//
-// The limitation is bounded deliberately. The skip ALSO requires
-// webAssetsSentinel to exist, so a wiped or half-wiped directory re-stages;
-// what a marker misses is an out-of-band edit of an individual asset, in a
-// root-owned directory inside the VM, whose worst outcome is a stale UI. No
-// security boundary rests on it — that is the proxy's PAT and origin gate.
-const webDigestFile = ".lever-web-digest"
-
-// webBuildMarker is written into a host build directory as the LAST step of a
+// BuildMarker is written into a host build directory as the LAST step of a
 // successful build, so an interrupted `npm ci` (or a build killed mid-vite)
 // leaves a directory that is visibly incomplete and gets rebuilt. It holds the
 // digest it was built from, which makes a stale directory self-describing when
 // someone inspects the cache by hand.
-const webBuildMarker = ".lever-web-build"
+const BuildMarker = ".lever-web-build"
 
 // minNodeMajor mirrors scion's own web/package.json `engines.node` (">=20.0.0").
 // Checked explicitly because npm only WARNS about an engines mismatch by
@@ -87,68 +64,26 @@ var ErrNodeToolchain = errors.New("node/npm toolchain not usable")
 const NodeToolchainFix = `put a REAL node+npm on PATH (not just an asdf/mise shim), e.g. export PATH="$HOME/.asdf/installs/nodejs/<ver>/bin:$PATH"; ` +
 	"`node --version` should print"
 
-// BuildsWebAssets reports whether lever both WANTS and CAN build scion's SPA
-// for this spec.
-//
-// Binary mode is the exempt case, and deliberately not an error: with a
-// prebuilt binary lever has no scion SOURCE to build the SPA from, and the
-// operator who produced that binary may well have embedded the assets already
-// (upstream's `make all` does). Skipping leaves those embedded assets serving;
-// failing would break a working setup. config.App.ScionWebAssets is the
-// user-facing form of this predicate and must agree with it — it decides both
-// WebUI here and whether --web-assets-dir reaches the hub.
-func (s ScionSpec) BuildsWebAssets() bool {
-	return s.WebUI && s.Binary == "" && (s.Source != "" || s.Version != "")
-}
-
-// EnsureScionWebAssets builds scion's SPA on the HOST and stages it into the
-// guest at ScionWebAssetsDir.
-//
-// It runs host-side for the same reason the scion binary is cross-compiled
-// host-side: the guest carries no toolchain at all — no Go, and no node — and
-// giving it one would also mean giving the jail npm's egress. Keeping the
-// build out here keeps the registry traffic on the host.
-//
-// The work is skipped at two levels, so a re-apply on an unchanged pin costs
-// two cheap probes and no npm: the host build directory is keyed by a digest
-// of the scion web sources (a fetched module version is immutable, so the same
-// pin always hits the same directory), and the guest staging is skipped when
-// the guest already holds that same digest.
-func (g Guest) EnsureScionWebAssets(ctx context.Context, spec ScionSpec) error {
-	if !spec.BuildsWebAssets() {
-		return nil
-	}
-	srcWeb, err := g.webSourceDir(ctx, spec)
-	if err != nil {
-		return err
-	}
-	dist, digest, err := g.buildWebAssets(ctx, srcWeb)
-	if err != nil {
-		return err
-	}
-	return g.stageWebAssets(ctx, dist, digest)
-}
-
-// webSourceDir resolves the host directory holding scion's npm project (the
-// module's or checkout's `web/`). The Version branch reuses fetchScionModule,
+// SourceDir resolves the host directory holding scion's npm project (the
+// module's or checkout's `web/`). The Version branch reuses scionbin.FetchModule,
 // so the SPA is built from exactly the source tree the pinned binary was
 // compiled from — one download, one pin, no way for the two to disagree.
 //
-// That is a second `go mod download` in the same apply (resolveScionBinary ran
+// That is a second `go mod download` in the same apply (scionbin.Resolve ran
 // the first). It is deliberate: the call is idempotent and costs ~0.3s against
 // a warm module cache, which is cheaper than threading the resolved directory
 // out of the binary path and through two backends to get here.
-func (g Guest) webSourceDir(ctx context.Context, spec ScionSpec) (string, error) {
+func SourceDir(ctx context.Context, r exec.Runner, spec scionbin.Spec) (string, error) {
 	root := spec.Source
 	if spec.Version != "" {
-		_, dir, err := g.fetchScionModule(ctx, spec.Version)
+		_, dir, err := scionbin.FetchModule(ctx, r, spec.Version)
 		if err != nil {
 			return "", err
 		}
 		root = dir
 	}
 	if root == "" {
-		// Unreachable via BuildsWebAssets; a guard against a future caller
+		// Unreachable via Spec.BuildsWebAssets; a guard against a future caller
 		// that skips the predicate rather than a condition users can hit.
 		return "", errors.New("no scion source to build web assets from")
 	}
@@ -159,7 +94,7 @@ func (g Guest) webSourceDir(ctx context.Context, spec ScionSpec) (string, error)
 	return web, nil
 }
 
-// WebBuildCacheRoot is the host directory holding per-pin scion web builds.
+// CacheRoot is the host directory holding per-pin scion web builds.
 //
 // A user CACHE directory, not TempDir where the cross-compiled scion binary
 // goes: that binary is one file that Go's build cache reproduces in seconds,
@@ -167,7 +102,7 @@ func (g Guest) webSourceDir(ctx context.Context, spec ScionSpec) (string, error)
 // tmp sweep costs a full re-download. Exported so `lever doctor` can probe the
 // node toolchain from the SAME directory the build will run in — see
 // CheckNodeToolchain.
-func WebBuildCacheRoot() (string, error) {
+func CacheRoot() (string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user cache dir: %w", err)
@@ -182,7 +117,7 @@ func WebBuildCacheRoot() (string, error) {
 // A version manager that resolves node by walking UP from the working directory
 // (asdf, mise) can answer differently in different directories, so a probe run
 // in the user's project — which may have its own .tool-versions — proves
-// nothing about the build, which runs under WebBuildCacheRoot. Both `lever
+// nothing about the build, which runs under CacheRoot. Both `lever
 // apply` and `lever doctor` therefore probe in the build's own directory, and
 // get the same answer for the same reason.
 func CheckNodeToolchain(ctx context.Context, r exec.Runner, probeDir string) (string, error) {
@@ -217,15 +152,20 @@ func nodeMajor(out string) (int, error) {
 	return n, nil
 }
 
-// buildWebAssets produces a built dist/client on the host and returns its path
-// plus the digest identifying it. It builds only when the cache does not
-// already hold a COMPLETE build for that digest.
-func (g Guest) buildWebAssets(ctx context.Context, srcWeb string) (dist, digest string, err error) {
-	digest, err = hashWebSource(srcWeb)
+// Build produces a built dist/client on the host and returns its path plus
+// the digest identifying it. It builds only when the cache does not already
+// hold a COMPLETE build for that digest.
+//
+// The host build directory is keyed by a digest of the scion web sources (a
+// fetched module version is immutable, so the same pin always hits the same
+// directory), so a re-apply on an unchanged pin costs one cheap probe and no
+// npm.
+func Build(ctx context.Context, r exec.Runner, srcWeb string) (dist, digest string, err error) {
+	digest, err = HashSource(srcWeb)
 	if err != nil {
 		return "", "", fmt.Errorf("hashing scion web sources at %s: %w", srcWeb, err)
 	}
-	root, err := WebBuildCacheRoot()
+	root, err := CacheRoot()
 	if err != nil {
 		return "", "", err
 	}
@@ -242,7 +182,7 @@ func (g Guest) buildWebAssets(ctx context.Context, srcWeb string) (dist, digest 
 	// only to then say node is unusable. The probe runs under root rather than
 	// the build directory (which does not exist yet) — same directory
 	// ancestry, so a walk-up version manager resolves identically.
-	if _, err := CheckNodeToolchain(ctx, g.Host, root); err != nil {
+	if _, err := CheckNodeToolchain(ctx, r, root); err != nil {
 		return "", "", fmt.Errorf("%w\n    fix: %s", err, NodeToolchainFix)
 	}
 	// Build in a private directory and rename it into place, rather than
@@ -274,18 +214,18 @@ func (g Guest) buildWebAssets(ctx context.Context, srcWeb string) (dist, digest 
 	// fails if the lock and manifest disagree, which is what makes a given pin
 	// build the same way twice. --no-audit/--no-fund drop two registry
 	// round-trips that only produce console noise.
-	if _, err := g.Host.RunIn(ctx, staging, nil, "npm", "ci", "--no-audit", "--no-fund"); err != nil {
+	if _, err := r.RunIn(ctx, staging, nil, "npm", "ci", "--no-audit", "--no-fund"); err != nil {
 		return "", "", fmt.Errorf("npm ci for scion web assets in %s: %w", staging, err)
 	}
-	if _, err := g.Host.RunIn(ctx, staging, nil, "npm", "run", "build"); err != nil {
+	if _, err := r.RunIn(ctx, staging, nil, "npm", "run", "build"); err != nil {
 		return "", "", fmt.Errorf("npm run build for scion web assets in %s: %w", staging, err)
 	}
-	if _, err := os.Stat(filepath.Join(staging, "dist", "client", filepath.FromSlash(webAssetsSentinel))); err != nil {
-		return "", "", fmt.Errorf("scion web build produced no %s — the build reported success but its output is unusable", webAssetsSentinel)
+	if _, err := os.Stat(filepath.Join(staging, "dist", "client", filepath.FromSlash(layout.WebAssetsSentinel))); err != nil {
+		return "", "", fmt.Errorf("scion web build produced no %s — the build reported success but its output is unusable", layout.WebAssetsSentinel)
 	}
 	// Marker before the rename, so what lands at buildDir is complete the
 	// instant it is visible there. Nothing may observe a half-built cache.
-	if err := os.WriteFile(filepath.Join(staging, webBuildMarker), []byte(digest), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(staging, BuildMarker), []byte(digest), 0o644); err != nil {
 		return "", "", fmt.Errorf("marking scion web build complete: %w", err)
 	}
 	if err := os.Rename(staging, buildDir); err != nil {
@@ -312,10 +252,10 @@ func (g Guest) buildWebAssets(ctx context.Context, srcWeb string) (dist, digest 
 // marker alone would survive someone clearing dist/, and the sentinel alone
 // would accept a build interrupted after vite but before the rest.
 func webBuildComplete(buildDir string) bool {
-	if _, err := os.Stat(filepath.Join(buildDir, webBuildMarker)); err != nil {
+	if _, err := os.Stat(filepath.Join(buildDir, BuildMarker)); err != nil {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(buildDir, "dist", "client", filepath.FromSlash(webAssetsSentinel)))
+	_, err := os.Stat(filepath.Join(buildDir, "dist", "client", filepath.FromSlash(layout.WebAssetsSentinel)))
 	return err == nil
 }
 
@@ -336,7 +276,7 @@ func skipWebSourcePath(rel string) bool {
 	return false
 }
 
-// hashWebSource digests the build INPUTS under root: every regular file's
+// HashSource digests the build INPUTS under root: every regular file's
 // relative path and contents, walked in the deterministic order WalkDir
 // guarantees (lexical).
 //
@@ -346,7 +286,7 @@ func skipWebSourcePath(rel string) bool {
 // that case correct for free instead of silently serving a stale UI. Paths are
 // hashed alongside contents so a rename is a change; the NUL separators keep
 // path and content boundaries unambiguous.
-func hashWebSource(root string) (string, error) {
+func HashSource(root string) (string, error) {
 	h := sha256.New()
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -440,31 +380,13 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// stageWebAssets streams the built dist/client into the guest, unless the guest
-// already holds this digest. The tree travels as a tar archive written by
-// lever itself (writeWebAssetsTar) on the stdin of a guest-side extract script
-// — argv only, through the Runner's stdin seam, like InstallRootBinary.
-func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
-	if g.stagedWebDigest(ctx) == digest {
-		return nil
-	}
-	pr, pw := io.Pipe()
-	go func() { _ = pw.CloseWithError(writeWebAssetsTar(pw, dist)) }()
-	err := g.pipeInto(ctx, g.RootPrefix, pr, stageWebAssetsScript(digest))
-	_ = pr.Close()
-	if err != nil {
-		return fmt.Errorf("stage scion web assets into guest at %s: %w", ScionWebAssetsDir, err)
-	}
-	return nil
-}
-
-// writeWebAssetsTar writes dist as a tar archive to w: regular files and
+// WriteTar writes dist as a tar archive to w: regular files and
 // symlinks, paths relative to dist, sourcemaps (webAssetsExclude) dropped.
 // Written by lever rather than the host's tar so the archive is the same from
 // every host: no AppleDouble `._name` members from macOS bsdtar turning
 // xattrs into files, no host uid/gid to restore (the entries carry none — the
 // extract side runs as guest root and --no-same-owner makes it root's anyway).
-func writeWebAssetsTar(w io.Writer, dist string) error {
+func WriteTar(w io.Writer, dist string) error {
 	tw := tar.NewWriter(w)
 	err := filepath.WalkDir(dist, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -512,57 +434,4 @@ func writeWebAssetsTar(w io.Writer, dist string) error {
 		return fmt.Errorf("archive %s: %w", dist, err)
 	}
 	return tw.Close()
-}
-
-// stagedWebDigest reads the digest the guest currently holds, or "" when there
-// is none. `test -f` on the sentinel guards the marker's blind spot: a
-// directory whose contents were removed but whose marker survived would
-// otherwise be accepted forever. Fail-closed by returning "" — an unreadable
-// guest re-stages, which costs 12MB of transport rather than an unusable UI.
-func (g Guest) stagedWebDigest(ctx context.Context) string {
-	script := fmt.Sprintf("test -f %s && cat %s",
-		shellSingleQuote(filepath.Join(ScionWebAssetsDir, filepath.FromSlash(webAssetsSentinel))),
-		shellSingleQuote(filepath.Join(ScionWebAssetsDir, webDigestFile)))
-	// Absolute path, not a bare name: UserRun passes no env, so a bare name
-	// resolves on the guest run-user's PATH, which precedes /usr/bin with
-	// run-user-writable directories (the same reasoning as
-	// InstallRootBinaryIfChanged's /usr/bin/sha256sum). A shim planted there
-	// could echo the current digest for a tree it had replaced and pin the
-	// staged UI stale forever, with no guest root needed.
-	res, err := g.UserRun(ctx, "/bin/bash", "-c", script)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(res.Stdout)
-}
-
-// stageWebAssetsScript is the guest-side half of stageWebAssets: extract the
-// archive on stdin into a temp directory, record the digest inside it, then
-// swap it in. Split out so a test can assert it without a guest.
-//
-// A directory swap cannot be a single atomic mv the way a file replace can, so
-// the rm+mv pair leaves a brief window with no assets; a failure inside it
-// leaves the destination absent rather than half-written, which the next apply
-// re-stages because stagedWebDigest reads "".
-//
-// --no-same-owner: extraction runs as guest root, and GNU tar as root restores
-// the ARCHIVE's ownership by default; lever's archive carries none, and the
-// flag makes that explicit.
-//
-// `bash` and `tar` stay bare names, unlike the run-user probe in
-// stagedWebDigest: they resolve on guest ROOT's PATH, which no run-user can
-// write to, so planting a shim there already requires the root this command
-// runs as. Paths and the digest are shell-quoted because they are interpolated
-// into the script.
-func stageWebAssetsScript(digest string) string {
-	tmp := ScionWebAssetsDir + ".tmp"
-	return fmt.Sprintf("rm -rf %s && mkdir -p %s && tar -xf - --no-same-owner -C %s && printf %%s %s > %s && rm -rf %s && mv %s %s",
-		shellSingleQuote(tmp),
-		shellSingleQuote(tmp),
-		shellSingleQuote(tmp),
-		shellSingleQuote(digest),
-		shellSingleQuote(filepath.Join(tmp, webDigestFile)),
-		shellSingleQuote(ScionWebAssetsDir),
-		shellSingleQuote(tmp),
-		shellSingleQuote(ScionWebAssetsDir))
 }

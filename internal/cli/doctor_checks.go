@@ -18,11 +18,11 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 )
@@ -712,9 +712,9 @@ func checkGoToolchain(scion config.ScionConfig, p doctorProbes) checkResult {
 // file (asdf, mise) gives different answers in different directories, so a
 // probe run in the user's project — which may have its own .tool-versions —
 // would not be evidence about the build, which runs elsewhere. Same reason
-// fetchScionModule resolves the real go binary rather than trusting a shim.
+// scionbin.FetchModule resolves the real go binary rather than trusting a shim.
 func nodeToolchainProbe(r leverexec.Runner) (string, error) {
-	root, err := guest.WebBuildCacheRoot()
+	root, err := webassets.CacheRoot()
 	if err != nil {
 		return "", err
 	}
@@ -723,7 +723,7 @@ func nodeToolchainProbe(r leverexec.Runner) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return guest.CheckNodeToolchain(ctx, r, root)
+	return webassets.CheckNodeToolchain(ctx, r, root)
 }
 
 // checkNodeToolchain verifies node+npm can build scion's web UI when the
@@ -740,8 +740,8 @@ func checkNodeToolchain(app *config.App, p doctorProbes) checkResult {
 	version, err := p.nodeToolchain()
 	if err != nil {
 		fix := ""
-		if errors.Is(err, guest.ErrNodeToolchain) {
-			fix = guest.NodeToolchainFix
+		if errors.Is(err, webassets.ErrNodeToolchain) {
+			fix = webassets.NodeToolchainFix
 		}
 		return checkResult{name, false, err.Error(), fix}
 	}

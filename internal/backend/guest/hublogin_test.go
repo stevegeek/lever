@@ -7,6 +7,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/scion/layout"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -652,7 +653,7 @@ func TestEnableMessageBroker(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(tt.server), &doc); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			server := mapGet(doc.Content[0], "server")
+			server := layout.MapGet(doc.Content[0], "server")
 			if server == nil {
 				t.Fatal("no server key in the fixture")
 			}
@@ -661,9 +662,9 @@ func TestEnableMessageBroker(t *testing.T) {
 				t.Errorf("changed = %v, want %v", got, tt.wantChanged)
 			}
 
-			mb := mapGet(server, "message_broker")
+			mb := layout.MapGet(server, "message_broker")
 			if tt.wantEnabled == "" {
-				if mb != nil && mb.Kind == yaml.MappingNode && mapGet(mb, "enabled") != nil {
+				if mb != nil && mb.Kind == yaml.MappingNode && layout.MapGet(mb, "enabled") != nil {
 					t.Error("enabled was written into a shape lever should not touch")
 				}
 				return
@@ -671,7 +672,7 @@ func TestEnableMessageBroker(t *testing.T) {
 			if mb == nil {
 				t.Fatal("message_broker block is missing")
 			}
-			n := mapGet(mb, "enabled")
+			n := layout.MapGet(mb, "enabled")
 			if n == nil {
 				t.Fatal("enabled key is missing")
 			}

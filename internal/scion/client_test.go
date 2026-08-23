@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/exec"
@@ -85,5 +86,11 @@ func TestParseJSONEmptyIsNoError(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Fatalf("want empty, got %+v", out)
+	}
+}
+
+func TestDefaultHubEndpointDerivesFromPort(t *testing.T) {
+	if want := fmt.Sprintf("http://127.0.0.1:%d", DefaultHubPort); DefaultHubEndpoint != want {
+		t.Fatalf("DefaultHubEndpoint = %q, want %q", DefaultHubEndpoint, want)
 	}
 }

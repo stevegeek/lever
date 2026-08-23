@@ -119,8 +119,13 @@ const (
 // roles and the instance did not name one.
 const agentRoleBaseline = "baseline"
 
-// roleFlagSupported reports whether the installed scion accepts `start --role`
-// (scion#1089). It asks the binary rather than the pin, because a commit hash
+// RolesSupported reports whether the installed scion understands agent roles —
+// whether it accepts `start --role` (scion#1089). Exported for the pre-role
+// record guard (hubapi.VerifyAgentRole), which must know whether an EXISTING
+// record's empty stored role is merely "this scion has no roles" or "this
+// scion will read that as full".
+//
+// It asks the binary rather than the pin, because a commit hash
 // says nothing about which features it carries — and getting this wrong in
 // either direction is costly: too eager breaks pre-#1089 pins, too shy hands
 // agents FULL authority on pins at or after scion#1090.
@@ -137,21 +142,12 @@ const agentRoleBaseline = "baseline"
 //
 // A probe is one local `scion start --help` on paths that already start or
 // resume a container, so the cost is noise next to what follows it.
-func (c *Client) roleFlagSupported(ctx context.Context) (bool, error) {
+func (c *Client) RolesSupported(ctx context.Context) (bool, error) {
 	out, err := c.run(ctx, "", "start", "--help")
 	if err != nil {
 		return false, err
 	}
 	return strings.Contains(out, "--role"), nil
-}
-
-// RolesSupported reports whether the installed scion understands agent roles.
-//
-// Exported for the pre-role record guard (internal/apply's VerifyAgentRole),
-// which must know whether an EXISTING record's empty stored role is merely
-// "this scion has no roles" or "this scion will read that as full".
-func (c *Client) RolesSupported(ctx context.Context) (bool, error) {
-	return c.roleFlagSupported(ctx)
 }
 
 type StartOpts struct {
@@ -244,11 +240,11 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	// passing it on a pin at or after that commit hands every agent
 	// create/lifecycle/secret-read authority. An opaque commit hash tells lever
 	// nothing about which side of that line a pin sits on, so it asks the
-	// binary (see roleFlagSupported) instead of trusting the operator to know.
+	// binary (see RolesSupported) instead of trusting the operator to know.
 	//
 	// Pre-#1089 scion has no roles at all, so omitting the flag there widens
 	// nothing: agents get the old fixed scope set.
-	supported, err := c.roleFlagSupported(ctx)
+	supported, err := c.RolesSupported(ctx)
 	switch {
 	case err != nil:
 		// Fail closed. This probe is a local exec of the binary we are about to

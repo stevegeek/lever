@@ -394,3 +394,39 @@ func TestAlreadyRunningDoesNotCoverNotRunning(t *testing.T) {
 		t.Fatal("notRunning matched an AGENT-level message; it must only cover the daemon")
 	}
 }
+
+func TestIsBrokerUnavailable(t *testing.T) {
+	for _, msg := range []string{
+		"no_runtime_broker",
+		"start-manager: No runtime brokers available",
+		"resume: no runtime broker available",
+		"context deadline exceeded from the Hub during start-manager",
+	} {
+		if !IsBrokerUnavailable(errors.New(msg)) {
+			t.Errorf("%q must read as broker-unavailable", msg)
+		}
+	}
+	for _, err := range []error{nil, errors.New("agent 'x' is not running"), errors.New("permission denied")} {
+		if IsBrokerUnavailable(err) {
+			t.Errorf("%v must not read as broker-unavailable", err)
+		}
+	}
+}
+
+func TestIsAgentAbsent(t *testing.T) {
+	for _, msg := range []string{
+		"Hub is not responding",
+		"dial tcp 127.0.0.1:8080: connect: Connection Refused",
+		"hub: Project Not Found (404)",
+		"no git origin remote found",
+	} {
+		if !IsAgentAbsent(errors.New(msg)) {
+			t.Errorf("%q must read as agent-absent", msg)
+		}
+	}
+	for _, err := range []error{nil, errors.New("No runtime brokers available"), errors.New("timeout")} {
+		if IsAgentAbsent(err) {
+			t.Errorf("%v must not read as agent-absent", err)
+		}
+	}
+}

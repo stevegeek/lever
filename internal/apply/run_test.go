@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/url"
@@ -1202,6 +1203,10 @@ type firstListErrRunner struct {
 	listSeen int
 }
 
+func (r *firstListErrRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.inner.RunStdin(ctx, stdin, env, name, args...)
+}
+
 func (r *firstListErrRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
 	if name == "scion" && isObserveList(args) {
 		r.listSeen++
@@ -1227,6 +1232,10 @@ type failNListsRunner struct {
 	inner     *agentLifecycleRunner
 	failCount int
 	listSeen  int
+}
+
+func (r *failNListsRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.inner.RunStdin(ctx, stdin, env, name, args...)
 }
 
 func (r *failNListsRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
@@ -3311,6 +3320,10 @@ func TestRemoteOffSkipsTheHubRestartWhenThePlanDoesNotManageTheHub(t *testing.T)
 // the other apply tests use, so a whole Run can complete around it.
 type stoppedHubRunner struct {
 	inner *agentLifecycleRunner
+}
+
+func (r *stoppedHubRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (exec.Result, error) {
+	return r.inner.RunStdin(ctx, stdin, env, name, args...)
 }
 
 func (r *stoppedHubRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {

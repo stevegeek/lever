@@ -2,6 +2,8 @@ package jail
 
 import (
 	"context"
+	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,7 +12,7 @@ import (
 )
 
 func TestLoadImageArgs(t *testing.T) {
-	got := LoadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")
+	got := loadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -18,12 +20,12 @@ func TestLoadImageArgs(t *testing.T) {
 		"podman", "load",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("LoadImageArgs:\n got  %v\n want %v", got, want)
+		t.Errorf("loadImageArgs:\n got  %v\n want %v", got, want)
 	}
 }
 
 func TestImageInspectArgs(t *testing.T) {
-	got := ImageInspectArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:latest")
+	got := imageInspectArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:latest")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -31,7 +33,7 @@ func TestImageInspectArgs(t *testing.T) {
 		"podman", "image", "inspect", "--format", "{{.Id}}", "scionlocal/lever-claude:latest",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("ImageInspectArgs:\n got  %v\n want %v", got, want)
+		t.Errorf("imageInspectArgs:\n got  %v\n want %v", got, want)
 	}
 }
 
@@ -157,7 +159,7 @@ func TestPruneImagesSuccess(t *testing.T) {
 }
 
 func TestPruneImagesArgs(t *testing.T) {
-	got := PruneImagesArgs(orbPrefix("lever-demo", "leveruser"), "501")
+	got := pruneImagesArgs(orbPrefix("lever-demo", "leveruser"), "501")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -165,6 +167,55 @@ func TestPruneImagesArgs(t *testing.T) {
 		"podman", "image", "prune", "-f",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("PruneImagesArgs:\n got  %v\n want %v", got, want)
+		t.Errorf("pruneImagesArgs:\n got  %v\n want %v", got, want)
+	}
+}
+
+// TestLoadImageStreamsSaveIntoPodmanLoad: the producer's bytes reach the jail's
+// `podman load` as stdin, through the prefix argv — no host shell, no pipeline
+// string.
+func TestLoadImageStreamsSaveIntoPodmanLoad(t *testing.T) {
+	r := exec.NewFakeRunner()
+	r.Script("orb", exec.Result{})
+	err := loadImage(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", func(w io.Writer) error {
+		_, err := io.WriteString(w, "tarball-bytes")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("loadImage: %v", err)
+	}
+	if len(r.Calls) != 1 {
+		t.Fatalf("want one host call, got %+v", r.Calls)
+	}
+	got := append([]string{r.Calls[0].Name}, r.Calls[0].Args...)
+	if !reflect.DeepEqual(got, loadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")) {
+		t.Fatalf("argv = %v", got)
+	}
+	if r.Calls[0].Stdin != "tarball-bytes" {
+		t.Fatalf("stdin = %q", r.Calls[0].Stdin)
+	}
+}
+
+// A failing producer is reported as the cause, not masked by the consumer's
+// short read.
+func TestLoadImageReportsSaveFailure(t *testing.T) {
+	r := exec.NewFakeRunner()
+	r.Script("orb", exec.Result{})
+	err := loadImage(context.Background(), r, orbPrefix("m", "u"), "501", func(io.Writer) error {
+		return errors.New("docker save: no such image")
+	})
+	if err == nil || !strings.Contains(err.Error(), "docker save: no such image") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadImageReportsLoadFailure(t *testing.T) {
+	r := exec.NewFakeRunner() // unscripted orb -> load fails
+	err := loadImage(context.Background(), r, orbPrefix("m", "u"), "501", func(w io.Writer) error {
+		_, err := io.WriteString(w, "x")
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "podman load") {
+		t.Fatalf("err = %v", err)
 	}
 }

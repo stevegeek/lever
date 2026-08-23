@@ -3,6 +3,7 @@ package hubapi
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -24,6 +25,10 @@ func (s *scriptedRunner) RunIn(_ context.Context, dir string, env map[string]str
 }
 
 func (s *scriptedRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (leverexec.Result, error) {
+	return s.RunIn(ctx, "", env, name, args...)
+}
+
+func (s *scriptedRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (leverexec.Result, error) {
 	return s.RunIn(ctx, "", env, name, args...)
 }
 

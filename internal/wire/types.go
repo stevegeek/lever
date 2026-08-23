@@ -224,3 +224,16 @@ type RevokeRequest struct {
 type BootstrapResponse struct {
 	Ticket string `json:"ticket"`
 }
+
+// WorkerListResponse is the /worker/list reply envelope. It is generic over
+// the agent record so that this package stays a leaf: the broker instantiates
+// it with the host-side scion.Agent, and clients pick the type they decode into.
+type WorkerListResponse[T any] struct {
+	Agents []T `json:"agents"`
+}
+
+// MsgListResponse is the /msg/list reply envelope. Generic over the event type
+// for the same reason as WorkerListResponse.
+type MsgListResponse[T any] struct {
+	Events []T `json:"events"`
+}

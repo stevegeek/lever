@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -27,7 +26,7 @@ func msgCall(ctx context.Context, endpoint string, body any) (json.RawMessage, e
 // print "Inbox empty." and the watch bridge drop events forever, silently. An
 // absent/empty "events" key stays benign: it decodes to a nil slice (empty inbox).
 func decodeMsgEvents(raw json.RawMessage) ([]scion.Event, error) {
-	var res broker.MsgListResponse
+	var res wire.MsgListResponse[scion.Event]
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("decode /msg/list response: %w", err)
 	}

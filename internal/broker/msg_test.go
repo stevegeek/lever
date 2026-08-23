@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func TestResolveMsgTarget(t *testing.T) {
@@ -211,7 +212,7 @@ func TestMsgList_managerReadsWorker(t *testing.T) {
 	if rt.inboxProject != "/lever" {
 		t.Fatalf("inboxProject = %q, want /lever (the instance project)", rt.inboxProject)
 	}
-	var out MsgListResponse
+	var out wire.MsgListResponse[scion.Event]
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("bad response JSON: %v", err)
 	}
@@ -347,7 +348,7 @@ func msgListEvents(t *testing.T, b *Broker, rt *fakeMsgRuntime, body, cn string)
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
-	var resp MsgListResponse
+	var resp wire.MsgListResponse[scion.Event]
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

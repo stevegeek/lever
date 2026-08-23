@@ -6,20 +6,20 @@ import (
 	"net/http"
 
 	"github.com/stevegeek/lever/internal/agent"
-	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
 // workerResult is the CLI's merged decode target across ALL worker endpoints:
 // the single-worker verbs return {worker, phase} (wire.WorkerResponse) and
-// /worker/list returns {agents} (broker.WorkerListResponse). Embedding both
+// /worker/list returns {agents} (wire.WorkerListResponse). Embedding both
 // wire types (their json-tagged fields promote through the anonymous embeds)
 // sources every field from the one declaration rather than a re-typed copy,
 // while keeping one decode type for the generic postBroker.
 type workerResult struct {
 	wire.WorkerResponse
-	broker.WorkerListResponse
+	wire.WorkerListResponse[scion.Agent]
 }
 
 // postBroker POSTs body as JSON to baseURL+endpoint using client, decoding the

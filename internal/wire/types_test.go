@@ -71,3 +71,18 @@ func TestTypesKeepTheirWireShape(t *testing.T) {
 		})
 	}
 }
+
+func TestListResponsesJSONTags(t *testing.T) {
+	got, err := json.Marshal(WorkerListResponse[string]{Agents: []string{"a"}})
+	if err != nil || string(got) != `{"agents":["a"]}` {
+		t.Fatalf("WorkerListResponse = %s, %v", got, err)
+	}
+	got, err = json.Marshal(MsgListResponse[int]{Events: []int{1}})
+	if err != nil || string(got) != `{"events":[1]}` {
+		t.Fatalf("MsgListResponse = %s, %v", got, err)
+	}
+	var empty MsgListResponse[int]
+	if err := json.Unmarshal([]byte(`{}`), &empty); err != nil || empty.Events != nil {
+		t.Fatalf("absent events = %v, %v", empty.Events, err)
+	}
+}

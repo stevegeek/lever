@@ -64,12 +64,6 @@ func (b *Broker) identity(name string) (cn, slug string, isManager, ok bool) {
 	return "", "", false, false
 }
 
-// WorkerListResponse is the wire envelope for /worker/list. It stays here
-// (not in internal/wire) because its payload is the host-side scion record.
-type WorkerListResponse struct {
-	Agents []scion.Agent `json:"agents"`
-}
-
 // runtimeReady returns true when the scion runtime is wired. When the runtime
 // is nil (no LEVER_JAIL_USER/UID env, e.g. a manual `lever broker serve` with
 // no prior `lever apply`), it writes a 502 and an audit line and returns false.
@@ -380,5 +374,5 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, WorkerListResponse{Agents: agents})
+	writeJSON(w, wire.WorkerListResponse[scion.Agent]{Agents: agents})
 }

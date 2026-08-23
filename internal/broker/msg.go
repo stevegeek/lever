@@ -115,12 +115,6 @@ func eventsForAgent(events []scion.Event, agentID string) []scion.Event {
 	return kept
 }
 
-// MsgListResponse is the /msg/list reply. It stays here (not in internal/wire)
-// because its payload is the host-side scion event type.
-type MsgListResponse struct {
-	Events []scion.Event `json:"events"`
-}
-
 func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	// A revoked agent loses its messaging channel too — otherwise a
 	// compromised-then-revoked agent could keep steering other agents via
@@ -199,5 +193,5 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "list "+subject)
-	writeJSON(w, MsgListResponse{Events: eventsForAgent(events, subjectID)})
+	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: eventsForAgent(events, subjectID)})
 }

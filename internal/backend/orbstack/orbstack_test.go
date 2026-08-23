@@ -388,16 +388,13 @@ func TestEnsureMachineRunningIsNoop(t *testing.T) {
 }
 
 func TestEnsureMachineStartTimesOutWhenUnreachable(t *testing.T) {
-	origAttempts, origInterval := orbStartProbeAttempts, orbStartProbeInterval
-	orbStartProbeAttempts, orbStartProbeInterval = 2, time.Millisecond
-	defer func() { orbStartProbeAttempts, orbStartProbeInterval = origAttempts, origInterval }()
-
 	f := exec.NewFakeRunner()
 	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
 	f.Script("orb start lever-jail", exec.Result{})
 	// "orb -m lever-jail true" is deliberately unscripted: FakeRunner errors on
 	// every unscripted call, simulating a machine that never becomes reachable.
 	b := New(f, "lever-jail")
+	b.probeAttempts, b.probeInterval = 2, time.Millisecond
 
 	err := b.ensureMachine(context.Background(), "/Users/x/tree")
 	if err == nil {

@@ -519,46 +519,29 @@ func TestWorkerList(t *testing.T) {
 // TestWorkerNilRuntime_returns502 proves that when the scion runtime is unwired
 // (nil) the worker handlers return 502, not a panic from a nil-interface call.
 func TestWorkerNilRuntime_returns502(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
 	// Runtime nil: unwired, simulates a manual `lever broker serve`.
-	b := newTestBroker(t, nil, spec)
-
-	// /worker/start with manager CN must return 502, not panic.
-	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"go"}`, "test-manager")
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("/worker/start nil-runtime: status = %d, want 502", rec.Code)
-	}
-
-	// /worker/list with manager CN must also return 502, not panic.
-	req := httptest.NewRequest("POST", "/worker/list", nil)
-	req.TLS = fakeTLSWithCN("test-manager")
-	rec2 := httptest.NewRecorder()
-	b.JailHandler().ServeHTTP(rec2, req)
-	if rec2.Code != http.StatusBadGateway {
-		t.Fatalf("/worker/list nil-runtime: status = %d, want 502", rec2.Code)
-	}
+	// Both verbs with the manager CN must return 502, not panic.
+	assertNilRuntimeVerbs(t, "test-manager", http.StatusBadGateway)
 }
 
 // TestWorkerNilRuntime_authzPrecedence proves that even with nil runtime, an
 // unauthenticated or non-manager caller gets 403 (authz runs before the nil check).
 func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
+	assertNilRuntimeVerbs(t, "intruder", http.StatusForbidden)
+}
+
+// assertNilRuntimeVerbs calls /worker/start and /worker/list as cn on a broker
+// whose scion runtime is nil and pins the status both must answer.
+func assertNilRuntimeVerbs(t *testing.T, cn string, want int) {
+	t.Helper()
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	b := newTestBroker(t, nil, spec)
-
-	// Non-manager CN on /worker/start must get 403, not 502.
-	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder")
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("/worker/start intruder nil-runtime: status = %d, want 403", rec.Code)
-	}
-
-	// Non-manager CN on /worker/list must get 403, not 502.
-	req := httptest.NewRequest("POST", "/worker/list", nil)
-	req.TLS = fakeTLSWithCN("intruder")
-	rec2 := httptest.NewRecorder()
-	b.JailHandler().ServeHTTP(rec2, req)
-	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("/worker/list intruder nil-runtime: status = %d, want 403", rec2.Code)
+	for _, path := range []string{"/worker/start", "/worker/list"} {
+		rec := callWorker(t, b, path, `{"worker":"worker","task":"go"}`, cn)
+		if rec.Code != want {
+			t.Fatalf("%s %s nil-runtime: status = %d, want %d", path, cn, rec.Code, want)
+		}
 	}
 }
 

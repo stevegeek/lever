@@ -55,6 +55,24 @@ func callRead(t *testing.T, s *Server, caller, table, capB64 string) *httptest.R
 	return rpc(t, s, body, h)
 }
 
+// assertVerifyDenies mints a token for "worker" with cons, calls read as
+// caller for table, and pins the deny shape: a JSON-RPC error and the handler
+// never run. tweak, when non-nil, adjusts the server before the call.
+func assertVerifyDenies(t *testing.T, cons map[string]string, tweak func(*Server), caller, table, why string) {
+	t.Helper()
+	kp, _ := token.Generate()
+	var ran bool
+	s := serverBoundTo(t, kp, &ran)
+	if tweak != nil {
+		tweak(s)
+	}
+	tok := mintTok(t, kp, "worker", cons)
+	w := callRead(t, s, caller, table, tok)
+	if ran || !strings.Contains(w.Body.String(), "error") {
+		t.Fatalf("%s; ran=%v body=%s", why, ran, w.Body.String())
+	}
+}
+
 func TestVerifyAllowsValidCallAndRunsHandler(t *testing.T) {
 	kp, _ := token.Generate()
 	var ran bool
@@ -69,60 +87,29 @@ func TestVerifyAllowsValidCallAndRunsHandler(t *testing.T) {
 }
 
 func TestVerifyDeniesMissingCallerWithoutRunningHandler(t *testing.T) {
-	kp, _ := token.Generate()
-	var ran bool
-	s := serverBoundTo(t, kp, &ran)
-	tok := mintTok(t, kp, "worker", map[string]string{"table": "A"})
-	w := callRead(t, s, "", "A", tok)
-	if ran || !strings.Contains(w.Body.String(), "error") {
-		t.Fatalf("missing X-Lever-Caller must deny; ran=%v body=%s", ran, w.Body.String())
-	}
+	assertVerifyDenies(t, map[string]string{"table": "A"}, nil, "", "A", "missing X-Lever-Caller must deny")
 }
 
 func TestVerifyDeniesWrongCallerWithoutRunningHandler(t *testing.T) {
-	kp, _ := token.Generate()
-	var ran bool
-	s := serverBoundTo(t, kp, &ran)
-	tok := mintTok(t, kp, "worker", map[string]string{"table": "A"}) // bound to worker
-	w := callRead(t, s, "analyst", "A", tok)                         // caller analyst
-	if ran || !strings.Contains(w.Body.String(), "error") {
-		t.Fatalf("bound_agent mismatch must deny; ran=%v", ran)
-	}
+	// Token bound to worker; caller analyst.
+	assertVerifyDenies(t, map[string]string{"table": "A"}, nil, "analyst", "A", "bound_agent mismatch must deny")
 }
 
 func TestVerifyDeniesConstraintViolationWithoutRunningHandler(t *testing.T) {
-	kp, _ := token.Generate()
-	var ran bool
-	s := serverBoundTo(t, kp, &ran)
-	tok := mintTok(t, kp, "worker", map[string]string{"table": "A"}) // constrained to A
-	w := callRead(t, s, "worker", "B", tok)                          // requests B
-	if ran || !strings.Contains(w.Body.String(), "error") {
-		t.Fatalf("constraint mismatch must deny; ran=%v", ran)
-	}
+	// Token constrained to A; request asks for B.
+	assertVerifyDenies(t, map[string]string{"table": "A"}, nil, "worker", "B", "constraint mismatch must deny")
 }
 
 func TestVerifyDeniesBackstopViolationWithoutRunningHandler(t *testing.T) {
-	kp, _ := token.Generate()
-	var ran bool
-	s := serverBoundTo(t, kp, &ran)
 	// Token permits table C (no table constraint), but the backstop forbids C.
-	tok := mintTok(t, kp, "worker", nil)
-	w := callRead(t, s, "worker", "C", tok)
-	if ran || !strings.Contains(w.Body.String(), "error") {
-		t.Fatalf("backstop must deny table C even with a permissive token; ran=%v", ran)
-	}
+	assertVerifyDenies(t, nil, nil, "worker", "C", "backstop must deny table C even with a permissive token")
 }
 
 func TestVerifyDeniesStaleEpochWithoutRunningHandler(t *testing.T) {
-	kp, _ := token.Generate()
-	var ran bool
-	s := serverBoundTo(t, kp, &ran)
-	s.epoch = 1 // broker has moved to epoch 1; token was minted at 0 (epochTTL=1h so no refetch)
-	tok := mintTok(t, kp, "worker", map[string]string{"table": "A"})
-	w := callRead(t, s, "worker", "A", tok)
-	if ran || !strings.Contains(w.Body.String(), "error") {
-		t.Fatalf("stale-epoch token must deny; ran=%v", ran)
-	}
+	// The broker has moved to epoch 1; the token was minted at 0 (epochTTL=1h
+	// so no refetch).
+	staleEpoch := func(s *Server) { s.epoch = 1 }
+	assertVerifyDenies(t, map[string]string{"table": "A"}, staleEpoch, "worker", "A", "stale-epoch token must deny")
 }
 
 // TestVerifyDeniesBeforeRegisterWithoutPanic ensures that serving tools/call

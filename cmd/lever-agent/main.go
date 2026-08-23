@@ -32,6 +32,10 @@ func main() {
 	}
 }
 
+// errNoIdentity means the id-dir holds no enrolled identity. Every verb that
+// needs one wraps it ("<verb>: no identity in <dir>").
+var errNoIdentity = errors.New("no identity")
+
 func run(argv []string) error {
 	if len(argv) < 2 {
 		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call>")
@@ -210,7 +214,7 @@ func cmdServeCapability(args []string) error {
 	}
 	id, ok := agent.LoadIdentity(*idDir)
 	if !ok {
-		return fmt.Errorf("serve-capability: no identity in %s — run 'lever-agent boot' first", *idDir)
+		return fmt.Errorf("serve-capability: %w in %s — run 'lever-agent boot' first", errNoIdentity, *idDir)
 	}
 	bURL, err := resolveBrokerURL(*brokerURL, *bootstrapPath)
 	if err != nil {
@@ -250,7 +254,7 @@ type renewOpts struct {
 func renewOnce(ctx context.Context, opts renewOpts) error {
 	id, ok := agent.LoadIdentity(opts.idDir)
 	if !ok {
-		return fmt.Errorf("renew: no identity in %s", opts.idDir)
+		return fmt.Errorf("renew: %w in %s", errNoIdentity, opts.idDir)
 	}
 	bURL, err := resolveBrokerURL(opts.brokerURL, opts.bootstrapPath)
 	if err != nil {
@@ -375,7 +379,7 @@ func cmdProvision(args []string) error {
 
 	id, ok := agent.LoadIdentity(*idDir)
 	if !ok {
-		return fmt.Errorf("provision: no identity in %s — run 'lever-agent boot' first", *idDir)
+		return fmt.Errorf("provision: %w in %s — run 'lever-agent boot' first", errNoIdentity, *idDir)
 	}
 
 	// Resolve broker URL: explicit flag wins, else from bootstrap file. The CA
@@ -442,7 +446,7 @@ func cmdCLI(verb string, args []string) error {
 	}
 	id, ok := agent.LoadIdentity(a.idDir)
 	if !ok {
-		return fmt.Errorf("%s: no identity in %s", verb, a.idDir)
+		return fmt.Errorf("%s: %w in %s", verb, errNoIdentity, a.idDir)
 	}
 	bURL, err := resolveBrokerURL(a.brokerURL, a.bootstrapPath)
 	if err != nil {

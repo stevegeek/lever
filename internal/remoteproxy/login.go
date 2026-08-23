@@ -195,6 +195,20 @@ func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) 
 // bounded itself.
 var errLoginPanicked = errors.New("remoteproxy: login: the shared login attempt panicked")
 
+// Login refusals the driver decides itself (as opposed to the hub's own
+// reasons, which travel verbatim in the message). Tests match on these.
+var (
+	// errForeignProvider: the hub redirected to an authorization endpoint that
+	// is not this proxy's, so it is configured against another OIDC provider.
+	errForeignProvider = errors.New("remoteproxy: login: the hub is configured against a different OIDC provider")
+	// errForeignClientID: the hub asked for a client_id other than LoginClientID.
+	// The message is completed in place ("... client_id %q, not lever's %q").
+	errForeignClientID = errors.New("remoteproxy: login: the hub asked for client_id")
+	// errNoSessionMinted: the callback answered without replacing the
+	// login-state cookie with a session.
+	errNoSessionMinted = errors.New("remoteproxy: login: the hub answered without turning the login-state cookie into a session")
+)
+
 // Invalidate drops a cached session, so the next request logs in again. It is
 // how a session the hub no longer accepts (it restarted, or the session
 // expired) heals without operator action.
@@ -294,8 +308,7 @@ func (d *LoginDriver) begin(ctx context.Context, client *http.Client) (loginStar
 	// against a different OIDC provider, and lever must not mint a code for
 	// somebody else's login.
 	if !strings.HasPrefix(loc, DeadAuthorizationEndpoint) {
-		return loginStart{}, fmt.Errorf("remoteproxy: login: the hub is configured against a different OIDC provider "+
-			"(it redirected somewhere other than %s)", DeadAuthorizationEndpoint)
+		return loginStart{}, fmt.Errorf("%w (it redirected somewhere other than %s)", errForeignProvider, DeadAuthorizationEndpoint)
 	}
 	u, err := url.Parse(loc)
 	if err != nil {
@@ -307,8 +320,8 @@ func (d *LoginDriver) begin(ctx context.Context, client *http.Client) (loginStar
 		return loginStart{}, fmt.Errorf("remoteproxy: login: the hub's redirect carried no state or redirect_uri")
 	}
 	if st.clientID != LoginClientID {
-		return loginStart{}, fmt.Errorf("remoteproxy: login: the hub asked for client_id %q, not lever's %q — "+
-			"the guest ~/.scion/settings.yaml oidc_login block does not match this proxy", st.clientID, LoginClientID)
+		return loginStart{}, fmt.Errorf("%w %q, not lever's %q — "+
+			"the guest ~/.scion/settings.yaml oidc_login block does not match this proxy", errForeignClientID, st.clientID, LoginClientID)
 	}
 	return st, nil
 }
@@ -354,8 +367,7 @@ func (d *LoginDriver) callback(ctx context.Context, client *http.Client, redirec
 	if c := jarCookie(client.Jar, d.hub); c != "" && c != stateCookie {
 		return c, nil
 	}
-	return "", fmt.Errorf("remoteproxy: login: the hub answered %s without turning the login-state %s cookie into a session",
-		resp.Status, sessionCookieName)
+	return "", fmt.Errorf("%w (it answered %s and left the %s cookie as it was)", errNoSessionMinted, resp.Status, sessionCookieName)
 }
 
 // jarCookie returns the scion_sess value the jar holds for u, or "".

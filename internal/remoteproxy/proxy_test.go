@@ -46,67 +46,63 @@ func TestInjectsPATStripsClientAuth(t *testing.T) {
 	}
 }
 
-func TestCrossOriginRejected(t *testing.T) {
+// gateProbe serves one GET /api/v1/agents through a handler bound to
+// serveHost, with hdr added to the request (a repeated key sends every value),
+// and returns the response status and how many times the hub was reached.
+func gateProbe(t *testing.T, serveHost string, hdr http.Header) (status, hubHits int) {
+	t.Helper()
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT, ServeHost: serveHost})
 	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Origin", "https://evil.example")
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
+	return rw.Code, hub.hits()
+}
+
+// assertGateRefuses pins the deny shape of the origin gate: 403 and the hub
+// never reached.
+func assertGateRefuses(t *testing.T, serveHost string, hdr http.Header) {
+	t.Helper()
+	status, hits := gateProbe(t, serveHost, hdr)
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", status)
 	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
+	if hits != 0 {
+		t.Fatalf("hub was hit %d times, want 0", hits)
 	}
+}
+
+// assertGateForwards pins the allow shape: 200 and exactly one hub hit.
+func assertGateForwards(t *testing.T, serveHost string, hdr http.Header) {
+	t.Helper()
+	status, hits := gateProbe(t, serveHost, hdr)
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if hits != 1 {
+		t.Fatalf("hub hit count = %d, want 1", hits)
+	}
+}
+
+func TestCrossOriginRejected(t *testing.T) {
+	assertGateRefuses(t, "mac.ts.net", http.Header{"Origin": {"https://evil.example"}})
 }
 
 func TestSameOriginAllowed(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Origin", "https://mac.ts.net")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != 200 {
-		t.Fatalf("status = %d, want 200", rw.Code)
-	}
-	if n := hub.hits(); n != 1 {
-		t.Fatalf("hub hit count = %d, want 1", n)
-	}
+	assertGateForwards(t, "mac.ts.net", http.Header{"Origin": {"https://mac.ts.net"}})
 }
 
 func TestSecFetchCrossSiteRejected(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
-	}
+	assertGateRefuses(t, "mac.ts.net", http.Header{"Sec-Fetch-Site": {"cross-site"}})
 }
 
 func TestHeaderFreeCurlAllowed(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil) // no Origin, no Sec-Fetch-Site
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != 200 {
-		t.Fatalf("status = %d, want 200", rw.Code)
-	}
-	if n := hub.hits(); n != 1 {
-		t.Fatalf("hub hit count = %d, want 1", n)
-	}
+	assertGateForwards(t, "mac.ts.net", nil) // no Origin, no Sec-Fetch-Site
 }
 
 func TestAllowedUsersPinning(t *testing.T) {
@@ -291,19 +287,7 @@ func TestStripsSetCookieFromHubResponse(t *testing.T) {
 // the PAT injected. base_url is optional in config, so ServeHost=="" is a
 // reachable misconfiguration, not a hypothetical.
 func TestOriginNullWithEmptyServeHostDenied(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: ""})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Origin", "null")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
-	}
+	assertGateRefuses(t, "", http.Header{"Origin": {"null"}})
 }
 
 // TestEmptyServeHostDeniesAnyOriginBearingRequest pins that an unconfigured
@@ -313,19 +297,7 @@ func TestEmptyServeHostDeniesAnyOriginBearingRequest(t *testing.T) {
 	origins := []string{"null", "foo", "/evil", "https://evil.example", "https://mac.ts.net"}
 	for _, o := range origins {
 		t.Run(o, func(t *testing.T) {
-			hub := newRecordingHub(t)
-			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-				ServeHost: ""})
-			req := proxyRequest("GET", "/api/v1/agents", nil)
-			req.Header.Set("Origin", o)
-			rw := httptest.NewRecorder()
-			h.ServeHTTP(rw, req)
-			if rw.Code != http.StatusForbidden {
-				t.Fatalf("Origin %q: status = %d, want 403", o, rw.Code)
-			}
-			if n := hub.hits(); n != 0 {
-				t.Fatalf("Origin %q: hub was hit %d times, want 0", o, n)
-			}
+			assertGateRefuses(t, "", http.Header{"Origin": {o}})
 		})
 	}
 }
@@ -336,18 +308,7 @@ func TestEmptyServeHostDeniesAnyOriginBearingRequest(t *testing.T) {
 // Sec-Fetch-Site header must also be refused, since "unconfigured" can
 // never be distinguished from "misconfigured" from inside the handler.
 func TestEmptyServeHostDeniesHeaderFreeRequestToo(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: ""})
-	req := proxyRequest("GET", "/api/v1/agents", nil) // no Origin, no Sec-Fetch-Site
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
-	}
+	assertGateRefuses(t, "", nil) // no Origin, no Sec-Fetch-Site
 }
 
 // TestInboundTailscaleHeadersStrippedFromForward: the handler trusts a
@@ -413,56 +374,20 @@ func TestPATReadOnceProperty(t *testing.T) {
 // ServeHost must not pass (guards against an accidental HasSuffix/Contains
 // regression).
 func TestSubdomainOriginRejected(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Origin", "https://evil.mac.ts.net")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
-	}
+	assertGateRefuses(t, "mac.ts.net", http.Header{"Origin": {"https://evil.mac.ts.net"}})
 }
 
 // TestSuffixOriginRejected pins the exact-match rule from the other
 // direction: ServeHost as a PREFIX of the Origin host must not pass.
 func TestSuffixOriginRejected(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Origin", "https://mac.ts.net.evil.example")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
-	}
+	assertGateRefuses(t, "mac.ts.net", http.Header{"Origin": {"https://mac.ts.net.evil.example"}})
 }
 
 // TestServeHostCaseInsensitiveMatch pins the intentional EqualFold
 // case-insensitivity: an Origin host that differs from ServeHost only in
 // case must still be accepted.
 func TestServeHostCaseInsensitiveMatch(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Origin", "https://MAC.TS.NET")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != 200 {
-		t.Fatalf("status = %d, want 200", rw.Code)
-	}
-	if n := hub.hits(); n != 1 {
-		t.Fatalf("hub hit count = %d, want 1", n)
-	}
+	assertGateForwards(t, "mac.ts.net", http.Header{"Origin": {"https://MAC.TS.NET"}})
 }
 
 // TestMultiValueAndLowercaseSetCookieStripped: the hub may emit more than
@@ -494,39 +419,13 @@ func TestMultiValueAndLowercaseSetCookieStripped(t *testing.T) {
 // allowed host first and an attacker-controlled host second. Reject
 // outright rather than pick a value.
 func TestMultipleOriginHeadersRejected(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Add("Origin", "https://mac.ts.net")
-	req.Header.Add("Origin", "https://evil.example")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
-	}
+	assertGateRefuses(t, "mac.ts.net", http.Header{"Origin": {"https://mac.ts.net", "https://evil.example"}})
 }
 
 // TestMultipleSecFetchSiteHeadersRejected: same smuggling concern as
 // multi-value Origin, for Sec-Fetch-Site.
 func TestMultipleSecFetchSiteHeadersRejected(t *testing.T) {
-	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Add("Sec-Fetch-Site", "same-origin")
-	req.Header.Add("Sec-Fetch-Site", "cross-site")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-	if n := hub.hits(); n != 0 {
-		t.Fatalf("hub was hit %d times, want 0", n)
-	}
+	assertGateRefuses(t, "mac.ts.net", http.Header{"Sec-Fetch-Site": {"same-origin", "cross-site"}})
 }
 
 // TestSecFetchSiteAllowlist: Sec-Fetch-Site must be an allowlist of

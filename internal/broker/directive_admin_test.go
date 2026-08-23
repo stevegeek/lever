@@ -146,20 +146,22 @@ func fieldNameFor(path string) string {
 
 func postSend(t *testing.T, client *http.Client, priv string, st opsig.Statement) (int, []byte) {
 	t.Helper()
-	raw, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return postSigned(t, client, "/directive/send", priv, opsig.NamespaceDirective, raw)
+	return postStatement(t, client, "/directive/send", priv, st)
 }
 
 func postSelftest(t *testing.T, client *http.Client, priv string, st opsig.Statement) (int, []byte) {
+	t.Helper()
+	return postStatement(t, client, "/directive/selftest", priv, st)
+}
+
+// postStatement marshals st and posts it signed under the directive namespace.
+func postStatement(t *testing.T, client *http.Client, path, priv string, st opsig.Statement) (int, []byte) {
 	t.Helper()
 	raw, err := json.Marshal(st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return postSigned(t, client, "/directive/selftest", priv, opsig.NamespaceDirective, raw)
+	return postSigned(t, client, path, priv, opsig.NamespaceDirective, raw)
 }
 
 func adminEnvelope(op string, params map[string]string) opsig.Envelope {
@@ -285,22 +287,29 @@ func TestDirectiveSendRejectsStaleGenerationAndUnknownTargetAndDupID(t *testing.
 	}
 }
 
-func TestDirectiveSendRejectsToolCallForUnknownTool(t *testing.T) {
+// assertSendRejectsUnknownTool submits one directive of the given kind that
+// names an unregistered tool and pins the registered-tool gate: 400, and
+// nothing stored.
+func assertSendRejectsUnknownTool(t *testing.T, kind, id string) {
+	t.Helper()
 	b, priv, _, _ := directiveTestBroker(t)
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
 	b.directives.BumpGeneration("manager")
 
-	id := "11111111-2222-4333-8444-555555555521"
-	action := opsig.Action{Kind: "tool_call", Tool: "no-such-tool", Op: "read", ArgBinding: "exact", Uses: 1}
+	action := opsig.Action{Kind: kind, Tool: "no-such-tool", Op: "read", ArgBinding: "exact", Uses: 1}
 	code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, action))
 	if code != http.StatusBadRequest {
-		t.Fatalf("unknown-tool send status = %d, want 400, body=%s", code, body)
+		t.Fatalf("unknown-tool %s send status = %d, want 400, body=%s", kind, code, body)
 	}
 	if recs := b.directives.List(time.Now()); len(recs) != 0 {
-		t.Fatalf("store not empty after rejected tool_call: %+v", recs)
+		t.Fatalf("store not empty after rejected %s: %+v", kind, recs)
 	}
+}
+
+func TestDirectiveSendRejectsToolCallForUnknownTool(t *testing.T) {
+	assertSendRejectsUnknownTool(t, "tool_call", "11111111-2222-4333-8444-555555555521")
 }
 
 // TestDirectiveSendAcceptsApprovalForRegisteredTool covers the "approval"
@@ -340,21 +349,7 @@ func TestDirectiveSendAcceptsApprovalForRegisteredTool(t *testing.T) {
 // TestDirectiveSendRejectsToolCallForUnknownTool: the registered-tool gate
 // must reject an approval referencing an unregistered tool.
 func TestDirectiveSendRejectsApprovalForUnknownTool(t *testing.T) {
-	b, priv, _, _ := directiveTestBroker(t)
-	sock := serveDirectiveAdmin(t, b)
-	client := directiveClient(sock)
-
-	b.directives.BumpGeneration("manager")
-
-	id := "11111111-2222-4333-8444-555555555532"
-	action := opsig.Action{Kind: "approval", Tool: "no-such-tool", Op: "read", ArgBinding: "exact", Uses: 1}
-	code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, action))
-	if code != http.StatusBadRequest {
-		t.Fatalf("unknown-tool approval send status = %d, want 400, body=%s", code, body)
-	}
-	if recs := b.directives.List(time.Now()); len(recs) != 0 {
-		t.Fatalf("store not empty after rejected approval: %+v", recs)
-	}
+	assertSendRejectsUnknownTool(t, "approval", "11111111-2222-4333-8444-555555555532")
 }
 
 // TestDirectiveSendRejectsExpiryBeyondInstanceCap proves the handler's own

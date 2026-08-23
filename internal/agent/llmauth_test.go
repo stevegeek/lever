@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,7 +116,7 @@ func TestRequestLLMTokenEmptyTokenErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("empty token must error")
 	}
-	if !strings.Contains(err.Error(), "empty token") {
-		t.Fatalf("want an empty-token error, got: %v", err)
+	if !errors.Is(err, errEmptyLLMToken) {
+		t.Fatalf("want errEmptyLLMToken, got: %v", err)
 	}
 }

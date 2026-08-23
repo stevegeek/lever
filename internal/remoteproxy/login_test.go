@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -391,8 +392,8 @@ func TestLoginRefusesAHubConfiguredAgainstAnotherProvider(t *testing.T) {
 	if err == nil {
 		t.Fatal("logged in against a provider that is not ours")
 	}
-	if !strings.Contains(err.Error(), "different OIDC provider") {
-		t.Fatalf("error = %v", err)
+	if !errors.Is(err, errForeignProvider) {
+		t.Fatalf("error = %v, want errForeignProvider", err)
 	}
 }
 
@@ -403,8 +404,8 @@ func TestLoginRefusesAnUnexpectedClientID(t *testing.T) {
 	if err == nil {
 		t.Fatal("minted a code for another relying party's client_id")
 	}
-	if !strings.Contains(err.Error(), "client_id") {
-		t.Fatalf("error = %v", err)
+	if !errors.Is(err, errForeignClientID) {
+		t.Fatalf("error = %v, want errForeignClientID", err)
 	}
 }
 
@@ -658,8 +659,8 @@ func TestALoginNeedsANewCookieNotTheStateOne(t *testing.T) {
 	if err == nil {
 		t.Fatal("the login-state cookie was accepted as a session")
 	}
-	if !strings.Contains(err.Error(), "state") {
-		t.Fatalf("error = %v, want it to name the unreplaced login-state cookie", err)
+	if !errors.Is(err, errNoSessionMinted) {
+		t.Fatalf("error = %v, want errNoSessionMinted", err)
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/wire"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,36 +13,24 @@ import (
 
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func TestRequestConstraintMintsNarrowedToken(t *testing.T) {
 	// The constraint loop (request.go:63-66) must bake every requested constraint
 	// into the minted token so it can ONLY be used for that exact param value.
 	b := New(restrictedConfig(t))
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "A"},
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "A"}})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	var resp wire.CapResponse
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	raw, _ := base64.RawURLEncoding.DecodeString(resp.Token)
+	raw := mintedToken(t, w)
 	// Verifies only when the request carries table=A...
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "analyst", Capability: token.Capability{Tool: "db", Operation: "read"},
-		Params: map[string]string{"table": "A"}, Now: time.Now(), MinEpoch: 0,
-	}); err != nil {
+	if err := verifyAs(b, raw, "analyst", "db", "read", map[string]string{"table": "A"}); err != nil {
 		t.Fatalf("constrained token must verify with table=A: %v", err)
 	}
 	// ...and is denied when the constrained param is absent.
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "analyst", Capability: token.Capability{Tool: "db", Operation: "read"},
-		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
-	}); err == nil {
+	if err := verifyAs(b, raw, "analyst", "db", "read", nil); err == nil {
 		t.Fatal("constrained token must NOT verify without the baked-in table constraint")
 	}
 }
@@ -52,12 +39,7 @@ func TestRequestDeniesConstraintValueOutsideAllowedSet(t *testing.T) {
 	// ValidateConstraints (request.go:58) must fail closed when a requested value is
 	// outside the tool's AllowedValues — no token is minted.
 	b := New(restrictedConfig(t))
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "secrets"},
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "secrets"}})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (table=secrets is outside AllowedValues {A,B})", w.Code)
 	}
@@ -69,49 +51,61 @@ func reqBody(t *testing.T, cr wire.CapRequest) *bytes.Reader {
 	return bytes.NewReader(body)
 }
 
-func TestRequestSelfObtainMintsUsableToken(t *testing.T) {
-	b := New(testConfig(t))
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst"}))
-	r.TLS = leafFor(t, b, "analyst") // analyst self-obtains db.read
+// postRequest sends cr to /request as the given caller CN.
+func postRequest(t *testing.T, b *Broker, cn string, cr wire.CapRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest("POST", "/request", reqBody(t, cr))
+	r.TLS = leafFor(t, b, cn)
 	w := httptest.NewRecorder()
 	b.handleRequest(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
+	return w
+}
+
+// mintedToken decodes the raw token out of a 200 /request response.
+func mintedToken(t *testing.T, w *httptest.ResponseRecorder) []byte {
+	t.Helper()
 	var resp wire.CapResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	raw, _ := base64.RawURLEncoding.DecodeString(resp.Token)
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "analyst", Capability: token.Capability{Tool: "db", Operation: "read"},
-		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
-	}); err != nil {
+	return raw
+}
+
+// verifyAs checks raw against the broker's key as caller using tool.op with
+// params (nil for none), at now and epoch 0.
+func verifyAs(b *Broker, raw []byte, caller, tool, op string, params map[string]string) error {
+	if params == nil {
+		params = map[string]string{}
+	}
+	return token.Verify(b.keys.Public, raw, token.Request{
+		Caller: caller, Capability: token.Capability{Tool: tool, Operation: op},
+		Params: params, Now: time.Now(), MinEpoch: 0,
+	})
+}
+
+func TestRequestSelfObtainMintsUsableToken(t *testing.T) {
+	b := New(testConfig(t))
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst"}) // analyst self-obtains db.read
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	raw := mintedToken(t, w)
+	if err := verifyAs(b, raw, "analyst", "db", "read", nil); err != nil {
 		t.Fatalf("minted token failed to verify for analyst: %v", err)
 	}
 }
 
 func TestRequestDelegationMintsTokenBoundToRecipient(t *testing.T) {
 	b := New(testConfig(t))
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"}))
-	r.TLS = leafFor(t, b, "manager") // manager delegates db.read to worker
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "manager", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"}) // manager delegates db.read to worker
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	var resp wire.CapResponse
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	raw, _ := base64.RawURLEncoding.DecodeString(resp.Token)
+	raw := mintedToken(t, w)
 	// Bound to worker: verifies for worker, NOT for manager.
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "worker", Capability: token.Capability{Tool: "db", Operation: "read"},
-		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
-	}); err != nil {
+	if err := verifyAs(b, raw, "worker", "db", "read", nil); err != nil {
 		t.Fatalf("token should verify for worker: %v", err)
 	}
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "manager", Capability: token.Capability{Tool: "db", Operation: "read"},
-		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
-	}); err == nil {
+	if err := verifyAs(b, raw, "manager", "db", "read", nil); err == nil {
 		t.Fatal("delegated token must NOT verify for the delegator (manager)")
 	}
 }
@@ -119,10 +113,7 @@ func TestRequestDelegationMintsTokenBoundToRecipient(t *testing.T) {
 func TestRequestDeniesUngrantedDelegation(t *testing.T) {
 	b := New(testConfig(t))
 	// analyst may self-obtain db.read but has no delegate grant.
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (analyst cannot delegate)", w.Code)
 	}
@@ -130,10 +121,7 @@ func TestRequestDeniesUngrantedDelegation(t *testing.T) {
 
 func TestRequestDeniesUnregisteredOperation(t *testing.T) {
 	b := New(testConfig(t))
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{Tool: "db", Op: "drop", BoundTo: "analyst"}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "drop", BoundTo: "analyst"})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (db.drop not a registered op)", w.Code)
 	}
@@ -146,29 +134,16 @@ func TestRequestCoarseToolCoercesFineShapedOpToWildcard(t *testing.T) {
 	// minted token must carry "*" (what the gateway's coarse path verifies).
 	cfg, audit := coarseConfig(t, true)
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "utilities", Op: "get_weather", BoundTo: "analyst"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s, want 200 (coarse tool + wildcard grant must mint)", w.Code, w.Body.String())
 	}
-	var resp wire.CapResponse
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	raw, _ := base64.RawURLEncoding.DecodeString(resp.Token)
+	raw := mintedToken(t, w)
 	// The minted token's op is "*", not "get_weather".
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "analyst", Capability: token.Capability{Tool: "utilities", Operation: registry.WildcardOp},
-		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
-	}); err != nil {
+	if err := verifyAs(b, raw, "analyst", "utilities", registry.WildcardOp, nil); err != nil {
 		t.Fatalf("minted token must verify against the wildcard op: %v", err)
 	}
-	if err := token.Verify(b.keys.Public, raw, token.Request{
-		Caller: "analyst", Capability: token.Capability{Tool: "utilities", Operation: "get_weather"},
-		Params: map[string]string{}, Now: time.Now(), MinEpoch: 0,
-	}); err == nil {
+	if err := verifyAs(b, raw, "analyst", "utilities", "get_weather", nil); err == nil {
 		t.Fatal("minted token must NOT verify against the originally requested fine op (op must be coerced, not preserved)")
 	}
 	if !strings.Contains(audit.String(), "get_weather -> *") {
@@ -181,12 +156,7 @@ func TestRequestCoarseToolDeniesFineShapedRequestWithoutWildcardGrant(t *testing
 	// {tool, "*"} grant is still denied, even though the tool is coarse.
 	cfg, _ := coarseConfig(t, false)
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "utilities", Op: "get_weather", BoundTo: "analyst"})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (no wildcard grant; coercion must not widen access)", w.Code)
 	}
@@ -196,10 +166,7 @@ func TestRequestFineToolExactGrantExactOpStillMints(t *testing.T) {
 	// Fine tools are untouched by the coercion: an exact grant + exact op
 	// request still mints normally.
 	b := New(testConfig(t))
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst"}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s, want 200 (fine tool, exact grant, exact op)", w.Code, w.Body.String())
 	}
@@ -227,12 +194,7 @@ func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
 	// tmux pane forensics.
 	cfg, audit := coarseConfig(t, false) // analyst has no wildcard grant
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "utilities", Op: "get_weather", BoundTo: "analyst"})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (no wildcard grant)", w.Code)
 	}
@@ -254,12 +216,7 @@ func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
 func TestRequestDenyLeaksReason(t *testing.T) {
 	cfg, _ := coarseConfig(t, false) // analyst has no wildcard grant
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "utilities", Op: "get_weather", BoundTo: "analyst",
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "utilities", Op: "get_weather", BoundTo: "analyst"})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", w.Code)
 	}
@@ -277,12 +234,8 @@ func TestRequestPolicyDenyDetailPinsFullSuffixWithCoercionAndDelegation(t *testi
 	// a suffix-builder regression would have passed silently.
 	cfg, audit := coarseConfig(t, false) // analyst holds no wildcard grant
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "utilities", Op: "get_weather", BoundTo: "worker", // delegation attempt
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	// A delegation attempt: bound to worker.
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "utilities", Op: "get_weather", BoundTo: "worker"})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", w.Code)
 	}
@@ -299,18 +252,12 @@ func TestRequestDeniesRevokedCallerMintingAndDelegation(t *testing.T) {
 	b := New(testConfig(t))
 	b.Revoke("manager")
 	// A revoked manager may not self-obtain...
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{Tool: "db", Op: "read", BoundTo: "manager"}))
-	r.TLS = leafFor(t, b, "manager")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "manager", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "manager"})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("revoked self-obtain: status = %d, want 403", w.Code)
 	}
 	// ...nor delegate a token bound to a still-valid agent (the channel this closes).
-	r2 := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"}))
-	r2.TLS = leafFor(t, b, "manager")
-	w2 := httptest.NewRecorder()
-	b.handleRequest(w2, r2)
+	w2 := postRequest(t, b, "manager", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"})
 	if w2.Code != http.StatusForbidden {
 		t.Fatalf("revoked delegation: status = %d, want 403", w2.Code)
 	}
@@ -324,18 +271,11 @@ func TestRequestAllowAuditCarriesMintLedger(t *testing.T) {
 	var buf bytes.Buffer
 	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "A"},
-	}))
-	r.TLS = leafFor(t, b, "analyst")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "A"}})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	var resp wire.CapResponse
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	raw, _ := base64.RawURLEncoding.DecodeString(resp.Token)
+	raw := mintedToken(t, w)
 	id := token.ID(raw)
 	if id == "" {
 		t.Fatal("minted token must carry a token id")
@@ -360,12 +300,7 @@ func TestRequestDelegationAuditNamesDelegateRule(t *testing.T) {
 	var buf bytes.Buffer
 	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
-		Tool: "db", Op: "read", BoundTo: "analyst",
-	}))
-	r.TLS = leafFor(t, b, "manager")
-	w := httptest.NewRecorder()
-	b.handleRequest(w, r)
+	w := postRequest(t, b, "manager", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}

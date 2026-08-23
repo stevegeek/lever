@@ -2,6 +2,7 @@ package agent
 
 import (
 	"crypto/tls"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -130,7 +131,7 @@ func TestCAPoolRejectsBadPEM(t *testing.T) {
 		t.Fatal("caPool must reject an empty CA PEM")
 	}
 	_, err := caPool([]byte("-----BEGIN CERTIFICATE-----\nnotpem\n-----END CERTIFICATE-----"))
-	if err == nil || !strings.Contains(err.Error(), "agent: bad CA PEM") {
+	if !errors.Is(err, errBadCAPEM) {
 		t.Fatalf("caPool must reject a malformed CA PEM, got %v", err)
 	}
 }
@@ -146,7 +147,7 @@ func TestReloadingTransportRejectsBadPEM(t *testing.T) {
 	dir := t.TempDir()
 	writeLeaf(t, dir, caInst, time.Now())
 	_, err = reloadingTransport(dir, []byte("garbage"))
-	if err == nil || !strings.Contains(err.Error(), "agent: bad CA PEM") {
+	if !errors.Is(err, errBadCAPEM) {
 		t.Fatalf("reloadingTransport must reject a malformed CA PEM, got %v", err)
 	}
 }
@@ -323,7 +324,7 @@ func TestGatewayProxyIdleConnTimeout(t *testing.T) {
 
 func TestGatewayRejectsNonLoopbackListen(t *testing.T) {
 	err := Gateway(GatewayConfig{Listen: "0.0.0.0:8462", BrokerURL: "https://broker.example", CAPEM: []byte("ca"), IDDir: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "loopback") {
+	if !errors.Is(err, errNotLoopback) {
 		t.Fatalf("Gateway must reject a non-loopback listen addr, got err=%v", err)
 	}
 }

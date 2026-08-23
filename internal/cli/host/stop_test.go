@@ -25,7 +25,7 @@ import (
 // resumable for the next `lever up`, while `scion stop` would REMOVE the
 // container and discard the session.
 func TestStopSuspendsManager(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
 	// Seed the controller PAT so the suspend client's HubTokenSource resolves it:
@@ -66,7 +66,7 @@ func TestStopSuspendsManager(t *testing.T) {
 // stop must preserve the staged bootstrap ticket + manifest so a following
 // `lever up` can resume fast, without re-applying.
 func TestStopDoesNotClearStagedState(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	tree := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(filepath.Join(tree, ".lever"), 0o700); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestStopDoesNotClearStagedState(t *testing.T) {
 // never came up), stop skips the best-effort suspend and still proceeds to
 // power off, rather than failing the command.
 func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
 	f := leverexec.NewFakeRunner() // no scripts: any call would error loudly
@@ -137,7 +137,7 @@ func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 // StopBroker exactly — see its doc; the mechanism itself is unit-tested in
 // internal/brokerctl, this only pins that stop.go actually calls it).
 func TestStopAlsoStopsRemoteProxy(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
 	st := state.ForConfig(dir)

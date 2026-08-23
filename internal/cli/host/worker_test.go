@@ -9,21 +9,16 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// workerInstanceDir writes a canonical lever.yaml declaring one worker ("scratch")
+// workerInstanceDir writes a "demo" instance declaring the "scratch" worker
 // with a real tree/workers/scratch subdir, and returns the instance dir.
 func workerInstanceDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := writeInstance(t, managerYAML+scratchWorkerYAML)
 	if err := os.MkdirAll(filepath.Join(dir, "workspace", "workers", "scratch"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := "name: demo\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img:1\nworkers:\n  - name: scratch\n    dir: workers/scratch\n"
-	if err := os.WriteFile(filepath.Join(dir, config.CanonicalName), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir

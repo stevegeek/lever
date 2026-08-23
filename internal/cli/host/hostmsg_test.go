@@ -1,43 +1,17 @@
 package host
 
 import (
-	"bytes"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/config"
 	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// hostMsgInstanceDir writes a canonical lever.yaml declaring a "scratch" worker
-// alongside the manager, so --to can resolve both branches of attachTarget.
-func hostMsgInstanceDir(t *testing.T, name string) string {
-	t.Helper()
-	dir := t.TempDir()
-	body := "name: " + name + `
-backend: orbstack
-tree: workspace
-broker:
-  llm_auth: subscription
-manager:
-  image: img:1
-workers:
-  - name: scratch
-    dir: workers/scratch
-`
-	if err := os.WriteFile(filepath.Join(dir, config.CanonicalName), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 func TestHostMsgSendToManager(t *testing.T) {
-	dir := hostMsgInstanceDir(t, "assistant")
+	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
 	// Seed the controller PAT so `msg send`'s scion client authenticates with
@@ -51,12 +25,8 @@ func TestHostMsgSendToManager(t *testing.T) {
 	fr.Script("scion", leverexec.Result{})
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	root.SetArgs([]string{"msg", "send", "hello", "there", "--to", "assistant"})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-
-	if err := root.Execute(); err != nil {
+	_, err := execCmd(t, root, "msg", "send", "hello", "there", "--to", "assistant")
+	if err != nil {
 		t.Fatalf("msg send: %v", err)
 	}
 
@@ -82,19 +52,15 @@ func TestHostMsgSendToManager(t *testing.T) {
 }
 
 func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
-	dir := hostMsgInstanceDir(t, "assistant")
+	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
 	fr := leverexec.NewFakeRunner()
 	fr.Script("scion", leverexec.Result{})
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	root.SetArgs([]string{"msg", "send", "check", "in", "--to", "scratch", "--interrupt"})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-
-	if err := root.Execute(); err != nil {
+	_, err := execCmd(t, root, "msg", "send", "check", "in", "--to", "scratch", "--interrupt")
+	if err != nil {
 		t.Fatalf("msg send: %v", err)
 	}
 
@@ -112,18 +78,13 @@ func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 }
 
 func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
-	dir := hostMsgInstanceDir(t, "assistant")
+	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
 	fr := leverexec.NewFakeRunner()
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	root.SetArgs([]string{"msg", "send", "hi", "--to", "nope"})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-
-	err := root.Execute()
+	_, err := execCmd(t, root, "msg", "send", "hi", "--to", "nope")
 	if err == nil {
 		t.Fatal("want error for unknown --to")
 	}
@@ -138,18 +99,13 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 }
 
 func TestHostMsgSendJailDownFailsFast(t *testing.T) {
-	dir := hostMsgInstanceDir(t, "assistant")
+	dir := writeInstanceNamed(t, "assistant", managerYAML+scratchWorkerYAML)
 	t.Chdir(dir)
 
 	fr := leverexec.NewFakeRunner()
 	sb := &stubBackend{runner: fr, resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-assistant")}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	root.SetArgs([]string{"msg", "send", "hi", "--to", "assistant"})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-
-	err := root.Execute()
+	_, err := execCmd(t, root, "msg", "send", "hi", "--to", "assistant")
 	if err == nil {
 		t.Fatal("want error when jail is down")
 	}

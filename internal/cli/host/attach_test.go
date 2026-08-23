@@ -1,7 +1,6 @@
 package host
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -70,17 +69,12 @@ func TestAttachTargetUnknownListsValidNames(t *testing.T) {
 // the NAME for a config path would fail at config.Load("scratch") with a
 // file-not-found error, never reaching the jail-not-up hint.
 func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	root.SetArgs([]string{"attach", "scratch"})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-
-	err := root.Execute()
+	_, err := execCmd(t, root, "attach", "scratch")
 	if err == nil {
 		t.Fatal("expected attach to fail when the jail is not up")
 	}
@@ -95,17 +89,12 @@ func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 // finding: `lever attach` against a down jail must fail fast with a
 // `lever up` hint, never provision the machine (no buildApplyDeps/EnsureUp).
 func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	root.SetArgs([]string{"attach"})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-
-	err := root.Execute()
+	_, err := execCmd(t, root, "attach")
 	if err == nil {
 		t.Fatal("expected attach to fail when the jail is not up")
 	}

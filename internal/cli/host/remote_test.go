@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,37 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
-
-// writeRemoteConfig writes a minimal canonical lever.yaml into dir, with
-// extra appended raw (e.g. a "remote:\n  enabled: true\n" block). Mirrors
-// writeDirectiveConfig / writeTmpConfig's pattern for CLI-level tests: no
-// tree directory needs to actually exist on disk for config.Load to
-// succeed (see directive_test.go).
-func writeRemoteConfig(t *testing.T, dir, backend, extra string) string {
-	t.Helper()
-	body := "name: x\nbackend: " + backend + "\ntree: workspace\nbroker:\n  llm_auth: subscription\n" + extra
-	p := filepath.Join(dir, "lever.yaml")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
-func runRemote(t *testing.T, cmd *cobra.Command, argv ...string) (string, error) {
-	t.Helper()
-	cmd.SetArgs(argv)
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	err := cmd.Execute()
-	return out.String(), err
-}
 
 func TestRemoteCommandWired(t *testing.T) {
 	root := newRootWith(defaultFactory)
@@ -70,11 +43,11 @@ func TestRemoteCommandWired(t *testing.T) {
 
 func TestRemoteServeDisabledErrors(t *testing.T) {
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "orbstack", "")
+	p := writeInstanceInto(t, dir, instanceYAML("x", ""))
 	t.Chdir(dir)
 
 	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := runRemote(t, cmd, p)
+	_, err := execCmd(t, cmd, p)
 	if err == nil {
 		t.Fatal("remote serve with remote disabled should error")
 	}
@@ -85,11 +58,11 @@ func TestRemoteServeDisabledErrors(t *testing.T) {
 
 func TestRemoteServeLimaBackendErrors(t *testing.T) {
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "lima", "remote:\n  enabled: true\n")
+	p := writeInstanceInto(t, dir, "name: x\nbackend: lima\ntree: workspace\nbroker:\n  llm_auth: subscription\nremote:\n  enabled: true\n")
 	t.Chdir(dir)
 
 	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := runRemote(t, cmd, p)
+	_, err := execCmd(t, cmd, p)
 	if err == nil {
 		t.Fatal("remote serve on the lima backend should error")
 	}
@@ -112,11 +85,11 @@ func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
 	// invoked, by using a port that's already bound so Serve fails fast
 	// with a bind error rather than blocking forever.
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "orbstack", "remote:\n  enabled: true\n  port: 1\n  base_url: \"https://mac.tail1234.ts.net\"\n")
+	p := writeInstanceInto(t, dir, instanceYAML("x", "remote:\n  enabled: true\n  port: 1\n  base_url: \"https://mac.tail1234.ts.net\"\n"))
 	t.Chdir(dir)
 
 	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := runRemote(t, cmd, p)
+	_, err := execCmd(t, cmd, p)
 	if err == nil {
 		t.Fatal("expected a bind error on privileged port 1 (proves the gates passed and Serve was reached)")
 	}
@@ -152,9 +125,9 @@ func freeRemotePort(t *testing.T) int {
 // write.
 func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "orbstack", fmt.Sprintf(
+	p := writeInstanceInto(t, dir, instanceYAML("x", fmt.Sprintf(
 		"remote:\n  enabled: true\n  port: %d\n  login_port: %d\n  base_url: \"https://mac.tail1234.ts.net\"\n",
-		freeRemotePort(t), freeRemotePort(t)))
+		freeRemotePort(t), freeRemotePort(t))))
 	t.Chdir(dir)
 
 	st := state.ForConfig(dir)
@@ -220,11 +193,11 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 // checks.
 func TestRemoteStatusNotRunningNoConfig(t *testing.T) {
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "orbstack", "")
+	p := writeInstanceInto(t, dir, instanceYAML("x", ""))
 	t.Chdir(dir)
 
 	cmd := newRemoteStatusCmd()
-	out, err := runRemote(t, cmd, p)
+	out, err := execCmd(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}
@@ -244,11 +217,11 @@ func TestRemoteStatusNotRunningNoConfig(t *testing.T) {
 
 func TestRemoteStatusShowsBaseURLWhenSet(t *testing.T) {
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "orbstack", "remote:\n  enabled: true\n  base_url: \"https://mac.tail1234.ts.net\"\n")
+	p := writeInstanceInto(t, dir, instanceYAML("x", "remote:\n  enabled: true\n  base_url: \"https://mac.tail1234.ts.net\"\n"))
 	t.Chdir(dir)
 
 	cmd := newRemoteStatusCmd()
-	out, err := runRemote(t, cmd, p)
+	out, err := execCmd(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}
@@ -259,7 +232,7 @@ func TestRemoteStatusShowsBaseURLWhenSet(t *testing.T) {
 
 func TestRemoteStatusNeverPrintsPATValue(t *testing.T) {
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "orbstack", "remote:\n  enabled: true\n  base_url: \"https://mac.tail1234.ts.net\"\n")
+	p := writeInstanceInto(t, dir, instanceYAML("x", "remote:\n  enabled: true\n  base_url: \"https://mac.tail1234.ts.net\"\n"))
 	t.Chdir(dir)
 
 	st := state.ForConfig(dir)
@@ -272,7 +245,7 @@ func TestRemoteStatusNeverPrintsPATValue(t *testing.T) {
 	}
 
 	cmd := newRemoteStatusCmd()
-	out, err := runRemote(t, cmd, p)
+	out, err := execCmd(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}
@@ -286,7 +259,7 @@ func TestRemoteStatusNeverPrintsPATValue(t *testing.T) {
 
 func TestRemoteStatusReportsLivePidAndListener(t *testing.T) {
 	dir := t.TempDir()
-	p := writeRemoteConfig(t, dir, "orbstack", "remote:\n  enabled: true\n  port: 0\n  base_url: \"https://mac.tail1234.ts.net\"\n")
+	p := writeInstanceInto(t, dir, instanceYAML("x", "remote:\n  enabled: true\n  port: 0\n  base_url: \"https://mac.tail1234.ts.net\"\n"))
 	t.Chdir(dir)
 
 	st := state.ForConfig(dir)
@@ -300,7 +273,7 @@ func TestRemoteStatusReportsLivePidAndListener(t *testing.T) {
 	}
 
 	cmd := newRemoteStatusCmd()
-	out, err := runRemote(t, cmd, p)
+	out, err := execCmd(t, cmd, p)
 	if err != nil {
 		t.Fatalf("remote status: %v\noutput: %s", err, out)
 	}

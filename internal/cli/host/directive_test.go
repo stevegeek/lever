@@ -1,7 +1,6 @@
 package host
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -55,16 +54,6 @@ func genDirectiveKey(t *testing.T, dir, instance string) (string, string) {
 		t.Fatal(err)
 	}
 	return priv, as
-}
-
-// writeDirectiveConfig writes a minimal canonical lever.yaml into dir. extra
-// is appended raw (e.g. "operator:\n  signing_key: /path\n").
-func writeDirectiveConfig(t *testing.T, dir, name, extra string) {
-	t.Helper()
-	body := "name: " + name + "\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\n" + extra
-	if err := os.WriteFile(filepath.Join(dir, "lever.yaml"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
 }
 
 type capturedReq struct {
@@ -140,17 +129,6 @@ func startDirectiveUDS(t *testing.T, dir string, routes map[string]canned) *reqR
 	return rec
 }
 
-func runDirective(t *testing.T, argv ...string) (string, error) {
-	t.Helper()
-	root := newRootWith(defaultFactory)
-	root.SetArgs(argv)
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	err := root.Execute()
-	return out.String(), err
-}
-
 func TestDirectiveCommandsWired(t *testing.T) {
 	root := NewRoot()
 	var subs map[string]bool
@@ -178,7 +156,7 @@ func TestDirectiveCommandsWired(t *testing.T) {
 func TestDirectiveSendSignsAndPosts(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, as := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
@@ -186,7 +164,7 @@ func TestDirectiveSendSignsAndPosts(t *testing.T) {
 		"/directive/send":    {body: `{"id":"whatever","delivered":true}`},
 	})
 
-	out, err := runDirective(t, "directive", "send", "worker1", "--instruction", "hello there")
+	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hello there")
 	if err != nil {
 		t.Fatalf("directive send: %v\noutput: %s", err, out)
 	}
@@ -240,7 +218,7 @@ func TestDirectiveSendSignsAndPosts(t *testing.T) {
 func TestDirectiveSendActionFlag(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
@@ -249,7 +227,7 @@ func TestDirectiveSendActionFlag(t *testing.T) {
 	})
 
 	action := `{"kind":"tool_call","tool":"qmd","op":"search","args":{"q":"x"},"arg_binding":"exact","uses":1}`
-	out, err := runDirective(t, "directive", "send", "worker1", "--action", action)
+	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--action", action)
 	if err != nil {
 		t.Fatalf("directive send --action: %v\noutput: %s", err, out)
 	}
@@ -274,7 +252,7 @@ func TestDirectiveSendActionFlag(t *testing.T) {
 func TestDirectiveSendNotBeforeFlag(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
@@ -283,7 +261,7 @@ func TestDirectiveSendNotBeforeFlag(t *testing.T) {
 	})
 
 	nb := time.Now().Add(30 * time.Minute).Truncate(time.Second).Format(time.RFC3339)
-	out, err := runDirective(t, "directive", "send", "worker1", "--instruction", "hi", "--not-before", nb)
+	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--not-before", nb)
 	if err != nil {
 		t.Fatalf("directive send --not-before: %v\noutput: %s", err, out)
 	}
@@ -306,14 +284,14 @@ func TestDirectiveSendNotBeforeFlag(t *testing.T) {
 func TestDirectiveListStateFilter(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	startDirectiveUDS(t, dir, map[string]canned{
 		"/directive/list": {body: `{"directives":[{"id":"a","state":"active"},{"id":"b","state":"consumed"}]}`},
 	})
 
-	out, err := runDirective(t, "directive", "list", "--state", "active")
+	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "list", "--state", "active")
 	if err != nil {
 		t.Fatalf("directive list --state: %v\noutput: %s", err, out)
 	}
@@ -328,11 +306,11 @@ func TestDirectiveListStateFilter(t *testing.T) {
 func TestDirectiveSendActionAndInstructionMutuallyExclusive(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	// No server started at all — this must fail before any network call.
-	_, err := runDirective(t, "directive", "send", "worker1", "--instruction", "hi", "--action", `{"kind":"instruction","text":"hi"}`)
+	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--action", `{"kind":"instruction","text":"hi"}`)
 	if err == nil {
 		t.Fatal("--instruction + --action together should error")
 	}
@@ -341,10 +319,10 @@ func TestDirectiveSendActionAndInstructionMutuallyExclusive(t *testing.T) {
 func TestDirectiveSendRequiresOneOfInstructionOrAction(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
-	_, err := runDirective(t, "directive", "send", "worker1")
+	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1")
 	if err == nil {
 		t.Fatal("neither --instruction nor --action should error")
 	}
@@ -353,12 +331,12 @@ func TestDirectiveSendRequiresOneOfInstructionOrAction(t *testing.T) {
 func TestDirectiveSendInvalidActionRejectedClientSide(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	// No server started — an invalid action must be rejected before any
 	// resolve/send round-trip.
-	_, err := runDirective(t, "directive", "send", "worker1", "--action", `{"kind":"sudo"}`)
+	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--action", `{"kind":"sudo"}`)
 	if err == nil {
 		t.Fatal("invalid action kind should be rejected client-side")
 	}
@@ -367,7 +345,7 @@ func TestDirectiveSendInvalidActionRejectedClientSide(t *testing.T) {
 func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n  directive_expiry_max: 1h\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n  directive_expiry_max: 1h\n"))
 	t.Chdir(dir)
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
@@ -375,7 +353,7 @@ func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
 		"/directive/send":    {body: `{"id":"x","delivered":true}`},
 	})
 
-	_, err := runDirective(t, "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
+	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
 	if err == nil {
 		t.Fatal("expiry beyond the configured cap should error")
 	}
@@ -387,7 +365,7 @@ func TestDirectiveSendExpiryBeyondCapErrorsClientSide(t *testing.T) {
 func TestDirectiveSendOverCapErrorsBeforeResolve(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n  directive_expiry_max: 1h\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n  directive_expiry_max: 1h\n"))
 	t.Chdir(dir)
 
 	// Track whether resolve was called by recording any GET request to /directive/resolve.
@@ -396,7 +374,7 @@ func TestDirectiveSendOverCapErrorsBeforeResolve(t *testing.T) {
 		"/directive/send":    {body: `{"id":"x","delivered":true}`},
 	})
 
-	_, err := runDirective(t, "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
+	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--expires", "2h")
 	if err == nil {
 		t.Fatal("expiry beyond the configured cap should error")
 	}
@@ -408,11 +386,11 @@ func TestDirectiveSendOverCapErrorsBeforeResolve(t *testing.T) {
 func TestDirectiveSendMissingKeyErrors(t *testing.T) {
 	dir := directiveTestDir(t)
 	// No operator.signing_key in config, no --key flag.
-	writeDirectiveConfig(t, dir, "testinst", "")
+	writeInstanceInto(t, dir, instanceYAML("testinst", ""))
 	t.Chdir(dir)
 
 	// No server started — a missing key must be caught before any dial.
-	_, err := runDirective(t, "directive", "send", "worker1", "--instruction", "hi")
+	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi")
 	if err == nil {
 		t.Fatal("missing signing key should error")
 	}
@@ -421,14 +399,14 @@ func TestDirectiveSendMissingKeyErrors(t *testing.T) {
 func TestDirectiveListSendsSignedEnvelope(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, as := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
 		"/directive/list": {body: `{"directives":[]}`},
 	})
 
-	out, err := runDirective(t, "directive", "list")
+	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "list")
 	if err != nil {
 		t.Fatalf("directive list: %v\noutput: %s", err, out)
 	}
@@ -463,14 +441,14 @@ func TestDirectiveListSendsSignedEnvelope(t *testing.T) {
 func TestDirectiveRevokeSendsSignedEnvelope(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, as := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
 		"/directive/revoke": {body: `{"revoked":true}`},
 	})
 
-	out, err := runDirective(t, "directive", "revoke", "abc-123")
+	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "revoke", "abc-123")
 	if err != nil {
 		t.Fatalf("directive revoke: %v\noutput: %s", err, out)
 	}
@@ -505,14 +483,14 @@ func TestDirectiveRevokeSendsSignedEnvelope(t *testing.T) {
 func TestDirectiveSelftestOK(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, as := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
 		"/directive/selftest": {body: `{"ok":true}`},
 	})
 
-	out, err := runDirective(t, "directive", "selftest")
+	out, err := execCmd(t, newRootWith(defaultFactory), "directive", "selftest")
 	if err != nil {
 		t.Fatalf("directive selftest: %v\noutput: %s", err, out)
 	}
@@ -540,14 +518,14 @@ func TestDirectiveSelftestOK(t *testing.T) {
 func TestDirectiveSelftestFailureExitsNonZero(t *testing.T) {
 	dir := directiveTestDir(t)
 	priv, _ := genDirectiveKey(t, dir, "testinst")
-	writeDirectiveConfig(t, dir, "testinst", "operator:\n  signing_key: "+priv+"\n")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
 	startDirectiveUDS(t, dir, map[string]canned{
 		"/directive/selftest": {status: http.StatusBadRequest, body: `{"error":"signature verification failed"}`},
 	})
 
-	_, err := runDirective(t, "directive", "selftest")
+	_, err := execCmd(t, newRootWith(defaultFactory), "directive", "selftest")
 	if err == nil {
 		t.Fatal("selftest failure should return a non-nil error (non-zero exit)")
 	}

@@ -22,32 +22,15 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// writeTmpConfig writes a minimal app.yaml with a real tree directory structure
-// and returns the config file path. Mirrors config_test.go's writeTmp.
+// writeTmpConfig writes a "demo" instance declaring the worker "worker" with a
+// real tree/workers/worker subdir and returns the config file path.
 func writeTmpConfig(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	tree := filepath.Join(dir, "tree")
-	if err := os.MkdirAll(filepath.Join(tree, "workers", "worker"), 0o755); err != nil {
+	dir := writeInstance(t, "manager:\n  image: scionlocal/lever-claude:latest\n  allow_ports: [3305]\nworkers:\n  - name: worker\n    dir: workers/worker\n")
+	if err := os.MkdirAll(filepath.Join(dir, "workspace", "workers", "worker"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `name: demo
-backend: orbstack
-tree: ./tree
-broker:
-  llm_auth: subscription
-manager:
-  image: scionlocal/lever-claude:latest
-  allow_ports: [3305]
-workers:
-  - name: worker
-    dir: workers/worker
-`
-	p := filepath.Join(dir, "app.yaml")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return p
+	return filepath.Join(dir, config.CanonicalName)
 }
 
 // Egress is an explicit posture, decoupled from llm_auth: closed only when
@@ -358,7 +341,7 @@ func TestBuildApplyDepsWiresRemoteProxy(t *testing.T) {
 }
 
 func TestApplyDryRunDiscoversConfig(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
 	cmd := newApplyCmd(nil) // nil backend safe for --dry-run

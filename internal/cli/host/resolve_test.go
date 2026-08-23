@@ -10,18 +10,6 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// instanceDir creates a temp dir containing a canonical lever.yaml for the given
-// app name (with a confined tree subdir) and returns the dir.
-func instanceDir(t *testing.T, name string) string {
-	t.Helper()
-	dir := t.TempDir()
-	body := "name: " + name + "\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img:1\n"
-	if err := os.WriteFile(filepath.Join(dir, config.CanonicalName), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 func TestResolveConfigPathExplicitWins(t *testing.T) {
 	got, err := resolveConfigPath("/some/explicit.yaml")
 	if err != nil {
@@ -33,7 +21,7 @@ func TestResolveConfigPathExplicitWins(t *testing.T) {
 }
 
 func TestResolveConfigPathCwdOnlyNoWalkUp(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 
 	// In the instance root → found.
 	t.Chdir(dir)
@@ -69,7 +57,7 @@ func TestInstanceAppMachine(t *testing.T) {
 		t.Fatalf("no config: err = %v", err)
 	}
 	// no flag → derived from discovered config
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 	ia := loadInstanceApp()
 	if ia.err != nil || ia.app == nil || ia.path == "" {
@@ -98,7 +86,7 @@ func TestInstanceAppBackend(t *testing.T) {
 }
 
 func TestLoadAppPath(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 	path, app, err := loadAppPath(nil)
 	if err != nil || app == nil || app.Name != "demo" || filepath.Base(path) != config.CanonicalName {

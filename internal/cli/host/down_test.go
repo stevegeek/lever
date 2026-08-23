@@ -118,7 +118,7 @@ func TestRemoveRemotePATMissingIsNoop(t *testing.T) {
 // every request fails with no lever verb that repairs it. `lever stop` has
 // always done this (TestStopAlsoStopsRemoteProxy); destroy must too.
 func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
-	dir := instanceDir(t, "demo")
+	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
 	st := state.ForConfig(dir)

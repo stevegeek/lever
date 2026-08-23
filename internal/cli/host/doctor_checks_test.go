@@ -69,25 +69,6 @@ func writeRemotePID(t *testing.T, st state.State, pid int) {
 	writePIDFile(t, st, st.RemotePID(), pid)
 }
 
-// writeDoctorConfig writes a minimal lever.yaml on the orbstack backend with
-// extra appended raw (e.g. "remote:\n  enabled: true\n"), or nothing when
-// extra is "", and loads it. Mirrors apply_test.go's writeTmpConfig /
-// config_test.go's writeTmp.
-func writeDoctorConfig(t *testing.T, extra string) *config.App {
-	t.Helper()
-	dir := t.TempDir()
-	p := filepath.Join(dir, config.CanonicalName)
-	body := "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n" + extra
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	app, err := config.Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return app
-}
-
 func TestCheckBrokerAliveNotStarted(t *testing.T) {
 	r := checkBrokerAlive(state.ForConfig(t.TempDir()), 8443, okProbes)
 	if r.ok {
@@ -613,9 +594,9 @@ func TestCheckOperatorSkills(t *testing.T) {
 func writeDirectivesConfig(t *testing.T, signersRel string) *config.App {
 	t.Helper()
 	if signersRel == "" {
-		return writeDoctorConfig(t, "")
+		return loadInstance(t, "")
 	}
-	return writeDoctorConfig(t, "operator:\n  allowed_signers: "+signersRel+"\n")
+	return loadInstance(t, "operator:\n  allowed_signers: "+signersRel+"\n")
 }
 
 // writeAllowedSigners generates a real ed25519 SSH keypair and writes a
@@ -747,7 +728,7 @@ func writeRemotePAT(t *testing.T, st state.State, mode os.FileMode) {
 // TestCheckRemoteDisabled covers the default, opt-in-only state: remote
 // access unconfigured is a pass — most instances never turn it on.
 func TestCheckRemoteDisabled(t *testing.T) {
-	app := writeDoctorConfig(t, "")
+	app := loadInstance(t, "")
 	st := state.ForConfig(t.TempDir())
 	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if !r.ok {
@@ -759,7 +740,7 @@ func TestCheckRemoteDisabled(t *testing.T) {
 }
 
 func TestCheckRemoteNoPIDFile(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir()) // no remote.pid — never started
 	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if r.ok {
@@ -771,7 +752,7 @@ func TestCheckRemoteNoPIDFile(t *testing.T) {
 }
 
 func TestCheckRemotePATMissing(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	// remote.pat intentionally left absent.
@@ -787,7 +768,7 @@ func TestCheckRemotePATMissing(t *testing.T) {
 // A remote.pat that exists but is group/other-accessible must fail too —
 // same posture as checkCredentialFile.
 func TestCheckRemotePATBadPermissions(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o644)
@@ -801,7 +782,7 @@ func TestCheckRemotePATBadPermissions(t *testing.T) {
 }
 
 func TestCheckRemoteHealthz500(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
@@ -824,7 +805,7 @@ func TestCheckRemoteHealthz500(t *testing.T) {
 // end-to-end healthz probe returns 200, and the login provider is serving
 // discovery with no authorization endpoint.
 func TestCheckRemoteHealthy(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
@@ -846,7 +827,7 @@ func TestCheckRemoteHealthy(t *testing.T) {
 // what to DO (a login port granted since the instance came up needs `lever
 // down` + `lever up`). The cause must win over the symptom.
 func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
@@ -885,7 +866,7 @@ func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
 // through the guest forwarder. Nothing legitimate calls it — the proxy drives
 // the login server-side and mints in-process.
 func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
@@ -919,7 +900,7 @@ func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
 // must send the first configured allowed_users entry, or a pinned instance
 // would 403 its own doctor check even when everything is actually healthy.
 func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
-	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"steve@example.com\", \"other@example.com\"]\n")
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"steve@example.com\", \"other@example.com\"]\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)

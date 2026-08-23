@@ -1,57 +1,35 @@
 package cli
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/stevegeek/lever/internal/agent"
 	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // workerResult is the CLI's merged decode target across ALL worker endpoints:
-// the single-worker verbs return {worker, phase} (broker.WorkerResponse) and
+// the single-worker verbs return {worker, phase} (wire.WorkerResponse) and
 // /worker/list returns {agents} (broker.WorkerListResponse). Embedding both
-// broker wire types (their json-tagged fields promote through the anonymous
-// embeds) sources every field from the broker's own declarations rather than a
-// re-typed copy, while keeping one decode type for the generic postBroker.
+// wire types (their json-tagged fields promote through the anonymous embeds)
+// sources every field from the one declaration rather than a re-typed copy,
+// while keeping one decode type for the generic postBroker.
 type workerResult struct {
-	broker.WorkerResponse
+	wire.WorkerResponse
 	broker.WorkerListResponse
 }
 
 // postBroker POSTs body as JSON to baseURL+endpoint using client, decoding the
-// response into T. Split out for unit-testing without mTLS; workerCall
-// specializes it to the worker-command response shape.
+// response into T (httpjson.Post with a typed return). Split out for
+// unit-testing without mTLS; workerCall specializes it to the worker-command
+// response shape.
 func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (T, error) {
-	var zero T
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return zero, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+endpoint, bytes.NewReader(raw))
-	if err != nil {
-		return zero, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return zero, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(resp.Body)
-		trimmed := bytes.TrimSpace(msg)
-		if len(trimmed) > 0 {
-			return zero, fmt.Errorf("broker %s returned %d: %s", endpoint, resp.StatusCode, trimmed)
-		}
-		return zero, fmt.Errorf("broker %s returned %d", endpoint, resp.StatusCode)
-	}
 	var res T
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := httpjson.Post(ctx, client, baseURL+endpoint, body, &res); err != nil {
+		var zero T
 		return zero, err
 	}
 	return res, nil

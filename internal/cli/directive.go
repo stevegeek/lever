@@ -1,23 +1,23 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // newDirectiveCmd is the operator's authenticated channel to a running agent:
@@ -86,37 +86,33 @@ func newDirectiveID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
-// udsDo issues a request against sock+path (method/body as given), returning
-// the decoded JSON response body into out (skipped if out is nil). A non-2xx
-// status is an error carrying the response body for diagnosis.
-func udsDo(ctx context.Context, sock, method, path string, body []byte, out any) error {
-	cl := udsClient(sock)
-	var rdr io.Reader
-	if body != nil {
-		rdr = bytes.NewReader(body)
+// udsURL is the placeholder authority every directive request carries: the
+// UDS transport (udsClient) ignores the host, so only the path matters.
+const udsURL = "http://lever"
+
+// udsErr wraps an httpjson error from the directive channel: a failure to
+// reach the socket gets the "is the broker running?" hint, anything the
+// broker answered (status/decode) is reported as-is under the directive prefix.
+func udsErr(err error) error {
+	if err == nil {
+		return nil
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://lever"+path, rdr)
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := cl.Do(req)
-	if err != nil {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
 		return fmt.Errorf("directive: contacting broker's directive channel (is `lever broker serve` running with operator directives enabled?): %w", err)
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("directive: %s %s: %d: %s", method, path, resp.StatusCode, bytes.TrimSpace(respBody))
-	}
-	if out != nil {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("directive: %s %s: bad response: %w", method, path, err)
-		}
-	}
-	return nil
+	return fmt.Errorf("directive: %w", err)
+}
+
+// udsPost POSTs in as JSON to path on sock, decoding the 200 reply into out
+// (nil to discard). A non-200 status is an error carrying the response body.
+func udsPost(ctx context.Context, sock, path string, in, out any) error {
+	return udsErr(httpjson.Post(ctx, udsClient(sock), udsURL+path, in, out))
+}
+
+// udsGet GETs path on sock, decoding the 200 reply into out.
+func udsGet(ctx context.Context, sock, path string, out any) error {
+	return udsErr(httpjson.Get(ctx, udsClient(sock), udsURL+path, out))
 }
 
 // signAndPostStatement marshals st, prints it for operator review (the
@@ -134,14 +130,10 @@ func signAndPostStatement(cmd *cobra.Command, sock, keyPath, path string, st ops
 	if err != nil {
 		return fmt.Errorf("directive: sign: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]string{
-		"statement": base64.StdEncoding.EncodeToString(raw),
-		"signature": base64.StdEncoding.EncodeToString(sig),
-	})
-	if err != nil {
-		return err
-	}
-	return udsDo(cmd.Context(), sock, http.MethodPost, path, reqBody, out)
+	return udsPost(cmd.Context(), sock, path, wire.DirectiveSubmitRequest{
+		Statement: base64.StdEncoding.EncodeToString(raw),
+		Signature: base64.StdEncoding.EncodeToString(sig),
+	}, out)
 }
 
 // signAndPostEnvelope builds, signs (opsig.NamespaceAdmin), and POSTs an
@@ -156,14 +148,10 @@ func signAndPostEnvelope(cmd *cobra.Command, sock, keyPath, appName, op string, 
 	if err != nil {
 		return fmt.Errorf("directive: sign: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]string{
-		"envelope":  base64.StdEncoding.EncodeToString(raw),
-		"signature": base64.StdEncoding.EncodeToString(sig),
-	})
-	if err != nil {
-		return err
-	}
-	return udsDo(cmd.Context(), sock, http.MethodPost, path, reqBody, out)
+	return udsPost(cmd.Context(), sock, path, wire.DirectiveEnvelopeRequest{
+		Envelope:  base64.StdEncoding.EncodeToString(raw),
+		Signature: base64.StdEncoding.EncodeToString(sig),
+	}, out)
 }
 
 func newDirectiveSendCmd() *cobra.Command {
@@ -211,9 +199,9 @@ func newDirectiveSendCmd() *cobra.Command {
 				return fmt.Errorf("directive send: expiry %s exceeds this instance's cap %s", expiry, app.EffectiveDirectiveExpiryMax())
 			}
 
-			var resolved broker.DirectiveResolveResponse
-			if err := udsDo(cmd.Context(), st.DirectiveSock(), http.MethodGet,
-				"/directive/resolve?agent="+url.QueryEscape(agent), nil, &resolved); err != nil {
+			var resolved wire.DirectiveResolveResponse
+			if err := udsGet(cmd.Context(), st.DirectiveSock(),
+				wire.PathDirectiveResolve+"?agent="+url.QueryEscape(agent), &resolved); err != nil {
 				return err
 			}
 
@@ -242,11 +230,11 @@ func newDirectiveSendCmd() *cobra.Command {
 				Action:      action,
 			}
 
-			var out map[string]any
-			if err := signAndPostStatement(cmd, st.DirectiveSock(), keyPath, "/directive/send", st2, &out); err != nil {
+			var out wire.DirectiveSendResponse
+			if err := signAndPostStatement(cmd, st.DirectiveSock(), keyPath, wire.PathDirectiveSend, st2, &out); err != nil {
 				return err
 			}
-			cmd.Printf("directive %v sent: delivered=%v\n", out["id"], out["delivered"])
+			cmd.Printf("directive %v sent: delivered=%v\n", out.ID, out.Delivered)
 			return nil
 		},
 	}
@@ -273,10 +261,8 @@ func newDirectiveListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var out struct {
-				Directives []json.RawMessage `json:"directives"`
-			}
-			if err := signAndPostEnvelope(cmd, st.DirectiveSock(), keyPath, app.Name, "list", nil, "/directive/list", &out); err != nil {
+			var out wire.DirectiveListResponse[json.RawMessage]
+			if err := signAndPostEnvelope(cmd, st.DirectiveSock(), keyPath, app.Name, "list", nil, wire.PathDirectiveList, &out); err != nil {
 				return err
 			}
 			printed := 0
@@ -319,12 +305,12 @@ func newDirectiveRevokeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var out map[string]any
+			var out wire.DirectiveRevokeResponse
 			if err := signAndPostEnvelope(cmd, st.DirectiveSock(), keyPath, app.Name, "revoke",
-				map[string]string{"id": id}, "/directive/revoke", &out); err != nil {
+				map[string]string{"id": id}, wire.PathDirectiveRevoke, &out); err != nil {
 				return err
 			}
-			cmd.Printf("directive %s revoked=%v\n", id, out["revoked"])
+			cmd.Printf("directive %s revoked=%v\n", id, out.Revoked)
 			return nil
 		},
 	}
@@ -366,8 +352,8 @@ func newDirectiveSelftestCmd() *cobra.Command {
 			// default error handler prints "Error: ..." for a non-nil RunE
 			// return, which — combined with a non-zero exit (main.go) — IS the
 			// failure verdict; printing it twice here would just be noise.
-			var out map[string]any
-			if err := signAndPostStatement(cmd, st.DirectiveSock(), keyPath, "/directive/selftest", stmt, &out); err != nil {
+			var out wire.DirectiveSelftestResponse
+			if err := signAndPostStatement(cmd, st.DirectiveSock(), keyPath, wire.PathDirectiveSelftest, stmt, &out); err != nil {
 				return fmt.Errorf("selftest FAILED: %w", err)
 			}
 			cmd.Println("selftest OK: signing key verifies against the broker's allowed_signers")

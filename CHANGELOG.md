@@ -95,10 +95,10 @@ that does not know this convention acts on the request and appears to ignore it,
 because the automatic per-turn mirror lands in the Messages inbox and carries no
 thread. Worth stating in your agent's instructions; lever does not scaffold it.
 
-## [Unreleased]
+### Changed
 
-Landed just after the 0.17.1 cut, so they ship with the next release. Neither
-changes behaviour, and the 0.17.1 binaries are unaffected.
+Two corrections that landed just after the 0.17.1 cut. Neither changes
+behaviour, and the 0.17.1 binaries are unaffected.
 
 - Corrected the converge-off rationale in `internal/apply/run.go`. It asserted
   that Scion offers no way to read the running hub's argv; `daemon.SaveArgs`

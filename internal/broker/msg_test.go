@@ -319,22 +319,23 @@ func TestMsgSend_deniesRevokedCaller(t *testing.T) {
 	}
 }
 
-func TestMsgList_deniesRevokedCaller(t *testing.T) {
+// assertRevokedManagerDenied revokes the manager and pins that path answers 403.
+func assertRevokedManagerDenied(t *testing.T, path, body string) {
+	t.Helper()
 	b, _, _ := newMsgTestBroker(t, true)
 	b.Revoke("manager")
-	rec := callWorker(t, b, "/msg/list", `{"all":false}`, "manager")
+	rec := callWorker(t, b, path, body, "manager")
 	if rec.Code != 403 {
-		t.Fatalf("revoked msg list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+		t.Fatalf("revoked %s: status = %d, want 403 (%s)", path, rec.Code, rec.Body.String())
 	}
 }
 
+func TestMsgList_deniesRevokedCaller(t *testing.T) {
+	assertRevokedManagerDenied(t, "/msg/list", `{"all":false}`)
+}
+
 func TestWorkerList_deniesRevokedManager(t *testing.T) {
-	b, _, _ := newMsgTestBroker(t, true)
-	b.Revoke("manager")
-	rec := callWorker(t, b, "/worker/list", `{}`, "manager")
-	if rec.Code != 403 {
-		t.Fatalf("revoked worker list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
-	}
+	assertRevokedManagerDenied(t, "/worker/list", `{}`)
 }
 
 // The hub scopes `scion notifications` to the authenticated USER, and lever
@@ -375,35 +376,30 @@ func withAgentIDs(b *Broker) {
 	}
 }
 
-func TestMsgList_workerSeesOnlyItsOwnEvents(t *testing.T) {
+// assertFleetCut lists the fleet feed as cn with body and pins that exactly
+// one event — wantID — survives the cut.
+func assertFleetCut(t *testing.T, body, cn, wantID, why string) {
+	t.Helper()
 	b, rt, _ := newMsgTestBroker(t, true)
 	withAgentIDs(b)
 	rt.events = fleetEvents()
-	got := msgListEvents(t, b, rt, `{"all":true}`, "scratch")
-	if len(got) != 1 || got[0]["id"] != "e2" {
-		t.Fatalf("a worker must see only its own events, got %+v", got)
+	got := msgListEvents(t, b, rt, body, cn)
+	if len(got) != 1 || got[0]["id"] != wantID {
+		t.Fatalf("%s, got %+v", why, got)
 	}
 }
 
+func TestMsgList_workerSeesOnlyItsOwnEvents(t *testing.T) {
+	assertFleetCut(t, `{"all":true}`, "scratch", "e2", "a worker must see only its own events")
+}
+
 func TestMsgList_managerSeesOnlyItsOwnEventsByDefault(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(t, true)
-	withAgentIDs(b)
-	rt.events = fleetEvents()
-	got := msgListEvents(t, b, rt, `{"all":true}`, "manager")
-	if len(got) != 1 || got[0]["id"] != "e1" {
-		t.Fatalf("the manager's default inbox is its own, got %+v", got)
-	}
+	assertFleetCut(t, `{"all":true}`, "manager", "e1", "the manager's default inbox is its own")
 }
 
 // The documented manager-only selector must now actually select.
 func TestMsgList_managerWorkerSelectorSelects(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(t, true)
-	withAgentIDs(b)
-	rt.events = fleetEvents()
-	got := msgListEvents(t, b, rt, `{"all":true,"worker":"worker"}`, "manager")
-	if len(got) != 1 || got[0]["id"] != "e3" {
-		t.Fatalf("--worker must select that worker's events, got %+v", got)
-	}
+	assertFleetCut(t, `{"all":true,"worker":"worker"}`, "manager", "e3", "--worker must select that worker's events")
 }
 
 // An event lever cannot attribute is dropped, not passed through: attribution is

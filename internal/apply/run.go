@@ -52,12 +52,18 @@ const apiKeyPlaceholder = "sk-ant-placeholder0lever0broker0injects0the0real0key0
 // site while the field/tag definition lives in exactly one place.
 type BootstrapMaterial = wire.Bootstrap
 
-// bootTracker records whether THIS apply run actually minted fresh bootstrap
-// material (as opposed to the mint-manager-bootstrap step tolerating an
-// already-spent latch — e.g. an idempotent re-apply against the same broker
-// process; see ErrBootstrapLatched). start-manager's create path needs exactly
-// that "did we mint fresh material this run" signal.
-type bootTracker struct {
+// run is one apply execution: the config it converges, the collaborators it
+// acts through, and the one piece of cross-step state the plan carries.
+// Every step executor is a method on it so the per-step signatures stop
+// repeating (ctx, app, d, boot, name, jp, ...).
+type run struct {
+	app *config.App
+	d   Deps
+	// minted records whether THIS apply run actually minted fresh bootstrap
+	// material (as opposed to the mint-manager-bootstrap step tolerating an
+	// already-spent latch — e.g. an idempotent re-apply against the same broker
+	// process; see ErrBootstrapLatched). start-manager's create path needs
+	// exactly that "did we mint fresh material this run" signal.
 	minted bool
 }
 
@@ -304,13 +310,13 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 	if err := d.check(); err != nil {
 		return err
 	}
-	var boot bootTracker
+	r := &run{app: app, d: d}
 	// The plan is kept, not just ranged over: the converge-to-off reconciliation
 	// below needs to know whether this run manages the hub at all (see
 	// disableHubLogin).
 	steps := Plan(app, opts)
 	for _, step := range steps {
-		if err := runStep(ctx, app, step, d, &boot); err != nil {
+		if err := r.step(ctx, step); err != nil {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
 		}
 	}
@@ -332,7 +338,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		// loopback port beside lever's own broker listeners. Left running
 		// after the feature is off, it keeps that port bridged into the jail
 		// for whatever binds it next. See Deps.DisableHubLogin.
-		if err := disableHubLogin(ctx, app, d, steps); err != nil {
+		if err := r.disableHubLogin(ctx, steps); err != nil {
 			return fmt.Errorf("hub login: %w", err)
 		}
 		// Two things this convergence deliberately does NOT undo, said here so
@@ -423,19 +429,19 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 // keeps them until a stop + up rather than until the next apply. That check is
 // also what makes d.Scion safe to dereference below without a nil guard: the
 // scion-server step ran earlier in this same Run and dereferenced it first.
-func disableHubLogin(ctx context.Context, app *config.App, d Deps, steps []Step) error {
-	changed, err := d.DisableHubLogin(ctx)
+func (r *run) disableHubLogin(ctx context.Context, steps []Step) error {
+	changed, err := r.d.DisableHubLogin(ctx)
 	if err != nil {
 		return err
 	}
 	if !changed || !planHas(steps, KindScionServer) {
 		return nil
 	}
-	d.Log("lever: remote access is off — restarting the hub so it stops offering the remote login")
-	if err := d.Scion.ServerStop(ctx); err != nil {
+	r.d.Log("lever: remote access is off — restarting the hub so it stops offering the remote login")
+	if err := r.d.Scion.ServerStop(ctx); err != nil {
 		return fmt.Errorf("restart the hub: %w", err)
 	}
-	return d.Scion.ServerStart(ctx, hubServerOpts(app, d.HubSessionSecret))
+	return r.d.Scion.ServerStart(ctx, hubServerOpts(r.app, r.d.HubSessionSecret))
 }
 
 // planHas reports whether the plan includes a step of this kind.
@@ -448,37 +454,37 @@ func planHas(steps []Step, kind StepKind) bool {
 	return false
 }
 
-// runStep is the thin dispatch over StepKind: it routes each step to its
+// step is the thin dispatch over StepKind: it routes each step to its
 // executor. The non-trivial case bodies live in per-kind run* helpers below,
-// each closing over only (ctx, app, s, d, boot) — no hidden state. The default
+// each a method on run — no hidden state beyond it. The default
 // arm is a hard error so a Plan emitting an unknown kind fails loudly.
-func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTracker) error {
+func (r *run) step(ctx context.Context, s Step) error {
 	switch s.Kind {
 	case KindBrokerUp:
-		return runBrokerUp(ctx, d)
+		return runBrokerUp(ctx, r.d)
 	case KindLoadImage:
-		return runLoadImage(ctx, s, d)
+		return runLoadImage(ctx, s, r.d)
 	case KindInitMachine:
-		return d.Scion.InitMachine(ctx)
+		return r.d.Scion.InitMachine(ctx)
 	case KindConfigRegistry:
-		return d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
+		return r.d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
 	case KindBootstrapToken:
-		return d.EnsureControllerPAT(ctx)
+		return r.d.EnsureControllerPAT(ctx)
 	case KindScionServer:
-		return runScionServer(ctx, app, d)
+		return r.scionServer(ctx)
 	case KindCredential:
-		return runCredential(ctx, s, d)
+		return runCredential(ctx, s, r.d)
 	case KindRegisterProject:
-		return runRegisterProject(ctx, app, s, d)
+		return r.registerProject(ctx, s)
 	case KindAgentTemplate:
-		return runAgentTemplate(ctx, app, s, d)
+		return r.agentTemplate(ctx, s)
 	case KindMintManagerBootstrap:
-		return runMintManagerBootstrap(ctx, s, d, boot)
+		return r.mintManagerBootstrap(ctx, s)
 	case KindStartManager:
-		return stepStartManager(ctx, app, s, d, boot)
+		return r.startManager(ctx, s)
 	case KindRemoteProxy:
-		// Only reached when Plan included the step, i.e. app.RemoteEnabled().
-		return d.StartRemoteProxy(ctx)
+		// Only reached when Plan included the step, i.e. r.app.RemoteEnabled().
+		return r.d.StartRemoteProxy(ctx)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
@@ -507,23 +513,23 @@ func runStep(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTra
 // also tear down a forwarder a previous, successful apply had legitimately
 // left running. The next apply converges it: EnsureHubLogin is idempotent, and
 // with remote access turned off DisableHubLogin removes it outright.
-func runScionServer(ctx context.Context, app *config.App, d Deps) error {
-	changed, err := d.EnsureHubLogin(ctx)
+func (r *run) scionServer(ctx context.Context) error {
+	changed, err := r.d.EnsureHubLogin(ctx)
 	if err != nil {
 		return fmt.Errorf("hub login: %w", err)
 	}
 	if changed {
-		d.Log("lever: the hub's login configuration changed — restarting the hub so it is read")
+		r.d.Log("lever: the hub's login configuration changed — restarting the hub so it is read")
 		// Stop-then-start, not `scion server restart`: scion's own restart
 		// refuses outright when the daemon is not running, and the hub
 		// being already down is an ordinary state here — after a `lever
 		// stop`, a VM reboot, or a crash. ServerStop tolerates that (see
 		// its doc); ServerStart below tolerates the opposite.
-		if err := d.Scion.ServerStop(ctx); err != nil {
+		if err := r.d.Scion.ServerStop(ctx); err != nil {
 			return fmt.Errorf("hub login: restart the hub: %w", err)
 		}
 	}
-	return d.Scion.ServerStart(ctx, hubServerOpts(app, d.HubSessionSecret))
+	return r.d.Scion.ServerStart(ctx, hubServerOpts(r.app, r.d.HubSessionSecret))
 }
 
 // hubServerOpts is the ONE description of how lever starts the hub for a given
@@ -561,15 +567,15 @@ func runBrokerUp(ctx context.Context, d Deps) error {
 // runAgentTemplate runs the agent-template step. Logs on change only: it is a
 // provisioning-time change the operator cannot otherwise see, and silence on a
 // no-op keeps a re-apply quiet.
-func runAgentTemplate(ctx context.Context, app *config.App, s Step, d Deps) error {
+func (r *run) agentTemplate(ctx context.Context, s Step) error {
 	// The JAIL-side path, not the host one: the scion client behind this closure
 	// runs inside the jail, where the host tree is visible only at the mount.
-	changed, err := d.EnsureAgentTemplate(ctx, JailPath(s.Target, app.Tree, d.JailMount))
+	changed, err := r.d.EnsureAgentTemplate(ctx, JailPath(s.Target, r.app.Tree, r.d.JailMount))
 	if err != nil {
 		return err
 	}
 	if changed {
-		d.Log("lever: agents will no longer be launched with scion's placeholder system prompt (new agents only; existing ones keep the prompt they were provisioned with)")
+		r.d.Log("lever: agents will no longer be launched with scion's placeholder system prompt (new agents only; existing ones keep the prompt they were provisioned with)")
 	}
 	return nil
 }
@@ -613,8 +619,8 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 // runRegisterProject runs the register-project step: observe before doing
 // anything destructive, then (only when the registration is unsound) clear the
 // stale marker + project-config registration(s) and re-init + hub-link.
-func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) error {
-	jp := JailPath(s.Target, app.Tree, d.JailMount)
+func (r *run) registerProject(ctx context.Context, s Step) error {
+	jp := JailPath(s.Target, r.app.Tree, r.d.JailMount)
 
 	// Idempotent register: observe BEFORE doing anything destructive. A
 	// suspended manager (or worker) agent record survives a `lever stop` +
@@ -628,16 +634,16 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	// error, or an unsound registration (zero, duplicate, or torn), falls
 	// through unchanged to the existing destructive path below — fail
 	// open, never a hard apply failure over an observe read.
-	if ok, err := d.ScionProjectRegistered(ctx, jp); err == nil && ok {
+	if ok, err := r.d.ScionProjectRegistered(ctx, jp); err == nil && ok {
 		// Sound registration, so nothing below runs — but the recorded hub
 		// ENDPOINT can still be stale. Minting the controller PAT links the
 		// project against a throwaway hub on its own port, and that link
 		// survives precisely because this path skips the re-init. Repair it
 		// here, where the skip happens.
-		if err := d.RepairScionHubEndpoint(ctx, jp); err != nil {
+		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
 		}
-		return d.StripProjectSharedDirs(ctx, path.Base(jp))
+		return r.d.StripProjectSharedDirs(ctx, path.Base(jp))
 	}
 
 	// Remove a stale `.scion` marker FILE left in the tree by a previous
@@ -658,37 +664,37 @@ func runRegisterProject(ctx context.Context, app *config.App, s Step, d Deps) er
 	// manually in the jail moments later succeeded (same view, no race).
 	// So the removal must go THROUGH the jail's own filesystem view — the
 	// same view the subsequent in-jail init uses — which is what
-	// d.RemoveJailFile does.
-	if err := d.RemoveJailFile(ctx, path.Join(jp, layout.ProjectMarker)); err != nil {
+	// r.d.RemoveJailFile does.
+	if err := r.d.RemoveJailFile(ctx, path.Join(jp, layout.ProjectMarker)); err != nil {
 		return err
 	}
 	// Clear any stale project-config registration(s) for this workspace path
 	// before re-init, so `scion init` mints exactly ONE registration per
 	// workspace instead of leaving the previous apply's dir behind.
-	if err := d.RemoveScionProjectConfigs(ctx, jp); err != nil {
+	if err := r.d.RemoveScionProjectConfigs(ctx, jp); err != nil {
 		return err
 	}
-	if err := d.Scion.InitProject(ctx, jp); err != nil {
+	if err := r.d.Scion.InitProject(ctx, jp); err != nil {
 		return err
 	}
-	if err := d.Scion.HubLink(ctx, jp); err != nil {
+	if err := r.d.Scion.HubLink(ctx, jp); err != nil {
 		return err
 	}
-	return d.StripProjectSharedDirs(ctx, path.Base(jp))
+	return r.d.StripProjectSharedDirs(ctx, path.Base(jp))
 }
 
 // runMintManagerBootstrap runs the mint-manager-bootstrap step: mint the
 // manager's one-time enrol ticket and stage it (0600) for lever-agent to read.
 // Idempotent against the LIVE broker latch (not a stale file): a spent latch is
 // tolerated only when a ticket is already staged.
-func runMintManagerBootstrap(ctx context.Context, s Step, d Deps, boot *bootTracker) error {
+func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 	// Idempotent (tied to the LIVE broker latch, not a stale file): mint; if the
 	// latch is already consumed (same broker process as a prior apply), tolerate
 	// it — the manager has its bootstrap.json from then. After a broker restart
 	// the latch reopens, mint succeeds, and a fresh ticket is deposited, so a
 	// partially-failed first apply (bootstrap written but manager never enrolled)
 	// recovers on re-apply. (*boot is not read after this step.)
-	m, err := d.MintManagerBootstrap(ctx)
+	m, err := r.d.MintManagerBootstrap(ctx)
 	if err != nil {
 		if errors.Is(err, ErrBootstrapLatched) {
 			// A spent latch is only tolerable when a bootstrap ticket is already
@@ -704,50 +710,68 @@ func runMintManagerBootstrap(ctx context.Context, s Step, d Deps, boot *bootTrac
 		}
 		return err
 	}
-	boot.minted = true
+	r.minted = true
 	// Deposit it as a 0600 file in the mount (the lever-agent reads it).
 	return StageBootstrapMaterial(s.Target, m)
 }
 
-// stepStartManager runs the start-manager plan step: observe the manager
-// record, then act on the delta (create / no-op / resume / forced resume /
-// loud recovery) and verify the container is actually live. Split out of
-// runStep's dispatch; the three unresumable tails share recoverDeleteAndCreate.
-func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot *bootTracker) error {
-	task := ""
-	if p := app.ManagerPromptPath(); p != "" {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return fmt.Errorf("reading manager prompt %s: %w", p, err)
-		}
-		task = strings.TrimSpace(string(b))
-	}
-	jp := JailPath(app.Tree, app.Tree, d.JailMount)
+// startManager runs the start-manager plan step: observe the manager record,
+// then act on the delta (create / no-op / resume / forced resume / loud
+// recovery) and verify the container is actually live. The three unresumable
+// tails share recoverDeleteAndCreate.
+func (r *run) startManager(ctx context.Context, s Step) error {
+	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
 	// Gate on runtime-broker readiness before any create/resume: the workstation
 	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
 	// up (waitHubReady only proved the latter), so acting now would race it. This
 	// is the proactive complement to the broker-unavailable retry below — wait
 	// for a ready broker rather than only reacting when a call fails against a
 	// not-yet-ready one. Fail-soft (never errors on timeout); the retry backstops.
-	if err := d.WaitBrokerReady(ctx, jp); err != nil {
+	if err := r.d.WaitBrokerReady(ctx, jp); err != nil {
 		return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
 	}
-	apiKey := app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey
+	opts, err := r.managerStartOpts(ctx, jp)
+	if err != nil {
+		return err
+	}
+	rec, err := r.observeManager(ctx, jp)
+	if err != nil {
+		return err
+	}
+	if err := r.convergeManager(ctx, jp, rec, opts); err != nil {
+		return err
+	}
+	return r.waitManagerLive(ctx, jp)
+}
+
+// managerStartOpts builds the `scion start` options for the manager: the task
+// prompt (when configured) and, in api-key mode, the project env + placeholder
+// secret the container needs before it boots.
+//
+// LEVER_BOOTSTRAP reconciliation: we do NOT set LEVER_BOOTSTRAP here.
+// lever-agent boot's canonical-path default (./.lever/bootstrap.json relative
+// to CWD) suffices: scion sets --workspace = jp (the in-jail project tree),
+// and the container's CWD is /workspace, so ./.lever/bootstrap.json resolves
+// to jp/.lever/bootstrap.json — exactly where mint-manager-bootstrap wrote the
+// manager's bootstrap.json. Injecting an env var would be redundant and add a
+// scion StartOpts.Env dependency that the file convention avoids.
+func (r *run) managerStartOpts(ctx context.Context, jp string) (scion.StartOpts, error) {
+	task := ""
+	if p := r.app.ManagerPromptPath(); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return scion.StartOpts{}, fmt.Errorf("reading manager prompt %s: %w", p, err)
+		}
+		task = strings.TrimSpace(string(b))
+	}
+	apiKey := r.app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey
 	if apiKey {
-		if err := prepareAPIKeyMode(ctx, d, jp); err != nil {
-			return err
+		if err := r.prepareAPIKeyMode(ctx, jp); err != nil {
+			return scion.StartOpts{}, err
 		}
 	}
-	// LEVER_BOOTSTRAP reconciliation: we do NOT set
-	// LEVER_BOOTSTRAP here. lever-agent boot's canonical-path default
-	// (./.lever/bootstrap.json relative to CWD) suffices: scion sets
-	// --workspace = jp (the in-jail project tree), and the container's CWD is
-	// /workspace, so ./.lever/bootstrap.json resolves to jp/.lever/bootstrap.json —
-	// exactly where mint-manager-bootstrap wrote the manager's bootstrap.json.
-	// Injecting an env var would be redundant and add a scion StartOpts.Env
-	// dependency that the file convention avoids.
-	opts := scion.StartOpts{
-		Worker: app.Name, Task: task, Project: jp, Image: app.ManagerImage(), Harness: "claude",
+	return scion.StartOpts{
+		Worker: r.app.Name, Task: task, Project: jp, Image: r.app.ManagerImage(), Harness: "claude",
 		// Workspace = the in-jail project tree, so the manager edits the real
 		// host files in place (verified 2026-06-16). Without it scion mounts a
 		// managed copy of the externalized config dir, not the live tree.
@@ -755,21 +779,20 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 		// api-key: start with --harness-auth api-key (satisfied by the placeholder
 		// secret set above); the real credential arrives in-container.
 		APIKey: apiKey,
-	}
-	rec, err := observeManager(ctx, d, jp, app.Name)
-	if err != nil {
-		return err
-	}
+	}, nil
+}
 
+// convergeManager acts on the observed manager record (nil when absent): create,
+// keep, resume, forced resume, or the loud delete+fresh recovery.
+func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) error {
 	switch {
 	case rec == nil:
-		if err := startManagerCreate(ctx, d, boot, opts); err != nil {
-			return err
-		}
+		return r.startManagerCreate(ctx, opts)
 	case rec.Phase == scion.PhaseRunning:
-		// No-op — fall through to the liveness verify below, which still
-		// confirms the container is actually up: a running RECORD with a
-		// dead container must fail loudly, not silently pass.
+		// No-op — the liveness verify in startManager still confirms the
+		// container is actually up: a running RECORD with a dead container
+		// must fail loudly, not silently pass.
+		return nil
 	case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
 		// Resume rides the SAME runtime-broker-race retry as a create Start
 		// (see scion.IsBrokerUnavailable's doc): on a cold VM the runtime broker may
@@ -777,11 +800,9 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 		// identical transient window. Only once the retry budget is exhausted
 		// (or the error is not the transient one at all) is the session
 		// declared unrecoverable.
-		if err := resumeOrRecover(ctx, d, boot, app.Name, jp, opts, resumeVerbPlain(func() error {
-			return d.Scion.Resume(ctx, app.Name, jp)
-		})); err != nil {
-			return err
-		}
+		return r.resumeOrRecover(ctx, jp, opts, resumeVerbPlain(func() error {
+			return r.d.Scion.Resume(ctx, r.app.Name, jp)
+		}))
 	case rec.Phase == scion.PhaseError:
 		// A crashed/wedged manager record. Since scion#895 (`resume
 		// --force`, pin >= 68507153) the error phase IS recoverable — try
@@ -791,11 +812,9 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 		// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
 		// container state, resume failed, and the then-unconditional
 		// delete+fresh destroyed the manager conversation (#3).
-		if err := resumeOrRecover(ctx, d, boot, app.Name, jp, opts, resumeVerbForce(func() error {
-			return d.Scion.ResumeForce(ctx, app.Name, jp)
-		})); err != nil {
-			return err
-		}
+		return r.resumeOrRecover(ctx, jp, opts, resumeVerbForce(func() error {
+			return r.d.Scion.ResumeForce(ctx, r.app.Name, jp)
+		}))
 	default:
 		// Any other phase — scion's full enum also has created,
 		// provisioning, cloning, starting, and stopping (see
@@ -810,13 +829,10 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 		// still let `up` converge, so this takes the SAME loud delete+fresh
 		// recovery as a failed resume, rather than hard-failing (bricking)
 		// the apply with no path forward but a hard `lever destroy`.
-		if err := recoverDeleteAndCreate(ctx, d, boot, app.Name, jp, opts,
-			fmt.Sprintf("start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", app.Name, rec.Phase),
-			fmt.Sprintf("manager in phase %q", rec.Phase)); err != nil {
-			return err
-		}
+		return r.recoverDeleteAndCreate(ctx, jp, opts,
+			fmt.Sprintf("start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", r.app.Name, rec.Phase),
+			fmt.Sprintf("manager in phase %q", rec.Phase))
 	}
-	return waitManagerLive(ctx, d, jp, app.Name)
 }
 
 // prepareAPIKeyMode conveys LEVER_LLM_AUTH=api-key to the manager container so
@@ -833,11 +849,11 @@ func stepStartManager(ctx context.Context, app *config.App, s Step, d Deps, boot
 // Without it scion's env-gather/auth-resolution refuses to launch the container
 // (and thus lever-agent boot, which writes the real token). Set once here;
 // later-started workers inherit the same Hub secret.
-func prepareAPIKeyMode(ctx context.Context, d Deps, jp string) error {
-	if err := d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
+func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
+	if err := r.d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
 		return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
 	}
-	if err := d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
+	if err := r.d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
 		return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
 	}
 	return nil
@@ -863,23 +879,23 @@ func prepareAPIKeyMode(ctx context.Context, d Deps, jp string) error {
 // transient broker-not-ready blip is retried, and only a persistent or
 // genuinely-different error is fatal.
 //
-// The role gate only covers the phases stepStartManager keeps the record in:
+// The role gate only covers the phases convergeManager keeps the record in:
 // rec == nil creates one, and its default branch deletes and recreates it,
 // both of which stamp a role themselves. It returns rather than falling into
 // recoverDeleteAndCreate on purpose. That recovery discards the conversation,
 // and refusing here exists to give the operator the choice — losing the
 // session is one of the two ways out, not something a guard may take on
 // their behalf.
-func observeManager(ctx context.Context, d Deps, jp, name string) (*scion.Agent, error) {
-	agents, err := listAgentsRetry(ctx, d, jp)
+func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, error) {
+	agents, err := r.listAgentsRetry(ctx, jp)
 	if err != nil {
 		return nil, fmt.Errorf("start-manager: observing agents: %w", err)
 	}
-	rec := scion.FindAgent(agents, name)
+	rec := scion.FindAgent(agents, r.app.Name)
 	if rec != nil {
 		switch rec.Phase {
 		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
-			if err := d.VerifyAgentRole(ctx, path.Base(jp), name); err != nil {
+			if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
 				return nil, fmt.Errorf("start-manager: %w", err)
 			}
 		}
@@ -887,7 +903,7 @@ func observeManager(ctx context.Context, d Deps, jp, name string) (*scion.Agent,
 	return rec, nil
 }
 
-// resumeVerb is one of the two resumable arms of stepStartManager: a
+// resumeVerb is one of the two resumable arms of convergeManager: a
 // suspended/stopped record via `scion resume`, an error record via `scion
 // resume --force`. Each carries its own verbatim wording for the loud
 // session-lost notice and the delete-failure clause (both take the resume
@@ -939,23 +955,23 @@ func resumeVerbForce(run func() error) resumeVerb {
 // manager's downtime — exactly the expired-leaf case. The unspent ticket is
 // harmless when the leaf is still valid (boot's ValidCert passes and skips
 // enrol, leaving it unredeemed).
-func resumeOrRecover(ctx context.Context, d Deps, boot *bootTracker, name, jp string, opts scion.StartOpts, v resumeVerb) error {
-	if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+func (r *run) resumeOrRecover(ctx context.Context, jp string, opts scion.StartOpts, v resumeVerb) error {
+	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
 	rerr := retryOnBrokerUnavailable(ctx, v.resume)
 	if rerr == nil {
 		return nil
 	}
-	if managerConcurrentlyRecovered(ctx, d, name, jp) {
-		d.Log("start-manager: %s failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", v.label, rerr)
+	if r.managerConcurrentlyRecovered(ctx, jp) {
+		r.d.Log("start-manager: %s failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", v.label, rerr)
 		return nil
 	}
 	// LOUD recovery: the conversation could not be restored. This MUST reach
 	// the user — resume failing means the durable session (the whole point of
 	// suspending, not stopping, at power-off; see internal/cli/host/stop.go) is about to be
 	// discarded.
-	return recoverDeleteAndCreate(ctx, d, boot, name, jp, opts,
+	return r.recoverDeleteAndCreate(ctx, jp, opts,
 		fmt.Sprintf(v.lostFmt, rerr), fmt.Sprintf(v.lostWhy, rerr))
 }
 
@@ -992,10 +1008,10 @@ func retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 // there is correlated with the resume failure it is re-checking). NOTE:
 // waitManagerLive's List is deliberately NOT routed here — it carries its own
 // consume-an-attempt tolerance within its liveness budget.
-func listAgentsRetry(ctx context.Context, d Deps, jp string) ([]scion.Agent, error) {
+func (r *run) listAgentsRetry(ctx context.Context, jp string) ([]scion.Agent, error) {
 	var agents []scion.Agent
 	if err := retryOnBrokerUnavailable(ctx, func() error {
-		a, e := d.Scion.List(ctx, jp)
+		a, e := r.d.Scion.List(ctx, jp)
 		if e != nil {
 			return e
 		}
@@ -1022,12 +1038,12 @@ func listAgentsRetry(ctx context.Context, d Deps, jp string) ([]scion.Agent, err
 // one level up. (Errors that survive the retry budget count as not-recovered:
 // fail toward the loud path, which at least tells the user what it is about
 // to do.)
-func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) bool {
-	agents, err := listAgentsRetry(ctx, d, jp)
+func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool {
+	agents, err := r.listAgentsRetry(ctx, jp)
 	if err != nil {
 		return false
 	}
-	if a := scion.FindAgent(agents, name); a != nil {
+	if a := scion.FindAgent(agents, r.app.Name); a != nil {
 		return a.Phase == scion.PhaseRunning
 	}
 	return false
@@ -1047,18 +1063,18 @@ func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) 
 // resume, which restores an existing one), so lever-agent boot ALWAYS re-enrols after a create.
 // If the broker's single-use /bootstrap latch was already consumed by an
 // earlier apply against this same broker process (mint-manager-bootstrap
-// tolerated ErrBootstrapLatched — see its doc — leaving boot.minted false),
+// tolerated ErrBootstrapLatched — see its doc — leaving r.minted false),
 // a plain create is guaranteed to 403 and the container exits 1. So: before
 // Start, ensure this apply run has fresh, enrolable material — either it was
-// already minted earlier in this same run (boot.minted, e.g.
+// already minted earlier in this same run (r.minted, e.g.
 // mint-manager-bootstrap succeeded outright, or an earlier create in this
-// same Run already re-armed), or d.RearmBootstrap mints one now.
-func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts scion.StartOpts) error {
-	if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
+// same Run already re-armed), or r.d.RearmBootstrap mints one now.
+func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) error {
+	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
 	return retryOnBrokerUnavailable(ctx, func() error {
-		startErr := d.Scion.Start(ctx, opts)
+		startErr := r.d.Scion.Start(ctx, opts)
 		// Idempotent: a manager already running/existing (re-apply, or a
 		// create-race the observe step missed) is success, not error.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
@@ -1080,31 +1096,31 @@ func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts sci
 // which surfaces BOTH the original failure (baked into the clause) and the
 // delete failure — there is no safe fallback, since a fresh Start over an
 // undeleted, un-resumable record would just 409 again.
-func recoverDeleteAndCreate(ctx context.Context, d Deps, boot *bootTracker, name, jp string, opts scion.StartOpts, logMsg, deleteFailReason string) error {
-	d.Log("%s", logMsg)
-	if derr := d.Scion.Delete(ctx, name, jp); derr != nil {
+func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.StartOpts, logMsg, deleteFailReason string) error {
+	r.d.Log("%s", logMsg)
+	if derr := r.d.Scion.Delete(ctx, r.app.Name, jp); derr != nil {
 		return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 	}
-	return startManagerCreate(ctx, d, boot, opts)
+	return r.startManagerCreate(ctx, opts)
 }
 
 // ensureFreshBootstrap guarantees fresh, enrolable bootstrap material exists
 // before a manager Start OR Resume. If this apply run already minted fresh
-// material (boot.minted), it's a no-op. Otherwise, when d.RearmBootstrap is
+// material (r.minted), it's a no-op. Otherwise, when r.d.RearmBootstrap is
 // set, it re-arms the broker's spent latch and mints+stages fresh material
 // (recording it into *boot so a SECOND create in the same Run — e.g. a
 // failed-resume recovery that immediately re-creates — does not re-arm
 // twice). A RearmBootstrap that fails is a hard error — a create without
 // enrolable bootstrap is guaranteed to 403, so failing loudly now is strictly
 // better than booting a manager doomed to crash-loop.
-func ensureFreshBootstrap(ctx context.Context, d Deps, boot *bootTracker) error {
-	if boot.minted {
+func (r *run) ensureFreshBootstrap(ctx context.Context) error {
+	if r.minted {
 		return nil
 	}
-	if err := d.RearmBootstrap(ctx); err != nil {
+	if err := r.d.RearmBootstrap(ctx); err != nil {
 		return fmt.Errorf("start-manager: re-arming the broker's spent bootstrap latch: %w", err)
 	}
-	boot.minted = true
+	r.minted = true
 	return nil
 }
 
@@ -1115,7 +1131,7 @@ var (
 	managerLiveInterval = 1 * time.Second
 )
 
-// waitManagerLive polls d.Scion.List until slug's record shows BOTH
+// waitManagerLive polls r.d.Scion.List until the manager's record shows BOTH
 // Phase=="running" AND a live container, or attempts run out. This is the
 // backstop for both false-success classes above this layer: a blind `scion
 // start`'s 409 "already exists" error text matches the AlreadyRunning
@@ -1126,10 +1142,10 @@ var (
 // record — not CLI exit codes or error wording — is what makes start-manager's
 // success meaningful. The live-container predicate is scion.ContainerLive,
 // shared with the broker's worker liveness gate.
-func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
+func (r *run) waitManagerLive(ctx context.Context, jp string) error {
 	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
-		return d.Scion.List(c, jp)
-	}, slug, managerLiveAttempts, managerLiveInterval)
+		return r.d.Scion.List(c, jp)
+	}, r.app.Name, managerLiveAttempts, managerLiveInterval)
 	if err == nil {
 		return nil
 	}
@@ -1138,7 +1154,7 @@ func waitManagerLive(ctx context.Context, d Deps, jp, slug string) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return fmt.Errorf("start-manager: manager %q %w", slug, err)
+	return fmt.Errorf("start-manager: manager %q %w", r.app.Name, err)
 }
 
 // JailPath maps a host path under tree to its location inside the jail (mount +

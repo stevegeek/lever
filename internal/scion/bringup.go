@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stevegeek/lever/internal/retry"
 )
 
 // AlreadyRunning reports whether err is a scion "already running" error — used to
@@ -40,9 +43,11 @@ func notRunning(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "server daemon is not running")
 }
 
-// hubReadyAttempts/hubReadyInterval are package vars so tests can shrink them.
-var hubReadyAttempts = 30
-var hubReadyInterval = 1 * time.Second
+// hubReadyAttempts/hubReadyInterval are the default waitHubReady budget.
+const (
+	hubReadyAttempts = 30
+	hubReadyInterval = 1 * time.Second
+)
 
 // waitHubReady polls a lightweight, PROJECT-INDEPENDENT hub call until it
 // succeeds or attempts run out. `list --all` lists agents across all projects
@@ -51,25 +56,22 @@ var hubReadyInterval = 1 * time.Second
 // when run (as here) before any project is registered (verified live 2026-06-17).
 func (c *Client) waitHubReady(ctx context.Context) error {
 	var lastErr error
-	for i := 0; i < hubReadyAttempts; i++ {
-		if _, err := c.run(ctx, "", "list", "--all", "--format", "json"); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(hubReadyInterval):
-		}
+	err := retry.Until(ctx, c.hubReadyAttempts, c.hubReadyInterval, func() (bool, error) {
+		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json")
+		return lastErr == nil, nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return fmt.Errorf("hub not ready after %d attempts: %w", c.hubReadyAttempts, lastErr)
 	}
-	return fmt.Errorf("hub not ready after %d attempts: %w", hubReadyAttempts, lastErr)
+	return err
 }
 
-// brokerReadyAttempts/brokerReadyInterval bound WaitRuntimeBrokerReady; package
-// vars so tests can shrink them.
-var brokerReadyAttempts = 30
-var brokerReadyInterval = 1 * time.Second
+// brokerReadyAttempts/brokerReadyInterval are the default WaitRuntimeBrokerReady
+// budget.
+const (
+	brokerReadyAttempts = 30
+	brokerReadyInterval = 1 * time.Second
+)
 
 // runtimeBroker is the subset of a `scion hub brokers --format json` row we read
 // to judge readiness. A broker registers with the hub before it finishes
@@ -103,28 +105,25 @@ func (b runtimeBroker) ready() bool {
 // it is passed to dodge the "no project" resolution failure a bare call hits.
 func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {
 	args := append([]string{"hub", "brokers", "--format", "json"}, projectFlag(project)...)
-	for i := 0; i < brokerReadyAttempts; i++ {
-		if out, err := c.run(ctx, "", args...); err == nil {
-			// parseJSON (not raw Unmarshal): scion prints the dev-auth WARNING
-			// banner into the same stream, and parseJSON strips it + ANSI before
-			// decoding — matching List/messaging. A parse miss leaves brokers empty
-			// (not ready), so it stays fail-soft.
-			var brokers []runtimeBroker
-			if parseJSON(out, &brokers) == nil {
-				for _, b := range brokers {
-					if b.ready() {
-						return nil
-					}
-				}
-			}
+	err := retry.Until(ctx, c.brokerReadyAttempts, c.brokerReadyInterval, func() (bool, error) {
+		out, err := c.run(ctx, "", args...)
+		if err != nil {
+			return false, nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(brokerReadyInterval):
+		// parseJSON (not raw Unmarshal): scion prints the dev-auth WARNING
+		// banner into the same stream, and parseJSON strips it + ANSI before
+		// decoding — matching List/messaging. A parse miss leaves brokers empty
+		// (not ready), so it stays fail-soft.
+		var brokers []runtimeBroker
+		if parseJSON(out, &brokers) != nil {
+			return false, nil
 		}
+		return slices.ContainsFunc(brokers, runtimeBroker.ready), nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return nil
 	}
-	return nil
+	return err
 }
 
 // InitMachine seeds the machine-level scion dir + default harness configs

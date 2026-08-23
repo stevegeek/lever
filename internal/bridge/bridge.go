@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -70,14 +71,8 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 
 // Run polls forever at the given interval (thin loop, not unit-tested).
 func (b *Bridge) Run(ctx context.Context, interval time.Duration) error {
-	for {
-		if _, err := b.PollOnce(ctx); err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
-		}
-	}
+	return retry.Until(ctx, 0, interval, func() (bool, error) {
+		_, err := b.PollOnce(ctx)
+		return false, err
+	})
 }

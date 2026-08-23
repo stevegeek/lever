@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/exec"
 )
@@ -44,6 +45,13 @@ type Client struct {
 	hubTokenSource func() string
 	agentRole      string
 	r              exec.Runner
+
+	// Poll budgets for waitHubReady / WaitRuntimeBrokerReady. New sets the
+	// defaults; tests shrink them on the instance.
+	hubReadyAttempts    int
+	hubReadyInterval    time.Duration
+	brokerReadyAttempts int
+	brokerReadyInterval time.Duration
 }
 
 func New(r exec.Runner, o Options) *Client {
@@ -57,6 +65,11 @@ func New(r exec.Runner, o Options) *Client {
 		hubTokenSource: o.HubTokenSource,
 		agentRole:      o.AgentRole,
 		r:              r,
+
+		hubReadyAttempts:    hubReadyAttempts,
+		hubReadyInterval:    hubReadyInterval,
+		brokerReadyAttempts: brokerReadyAttempts,
+		brokerReadyInterval: brokerReadyInterval,
 	}
 }
 

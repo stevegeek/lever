@@ -11,6 +11,7 @@ package orbstack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/retry"
 )
 
 // distro is the isolated-machine base image (arch-tagless: OrbStack selects the
@@ -30,22 +32,27 @@ const distro = "ubuntu"
 // orbVersionRe matches "Version: 2.2.1 (2020100)" lines from `orb version`.
 var orbVersionRe = regexp.MustCompile(`Version:\s*(\d+)\.(\d+)\.(\d+)`)
 
-// orbStartProbeAttempts/orbStartProbeInterval bound the readiness wait after
+// startProbeAttempts/startProbeInterval bound the readiness wait after
 // `orb start` resumes a machine that was powered off (e.g. by `lever stop`):
 // OrbStack takes a moment before the guest is reachable, so ensureMachine
 // cannot assume instant readiness before EnsureUp proceeds to
-// resolveRunUser/guest provisioning. Package vars so tests run fast.
-var (
-	orbStartProbeAttempts = 30
-	orbStartProbeInterval = 500 * time.Millisecond
+// resolveRunUser/guest provisioning.
+const (
+	startProbeAttempts = 30
+	startProbeInterval = 500 * time.Millisecond
 )
 
 type OrbStack struct {
 	common.Base
+
+	// probeAttempts/probeInterval bound waitMachineReachable; New sets the
+	// defaults and tests shrink them on the instance.
+	probeAttempts int
+	probeInterval time.Duration
 }
 
 func New(r exec.Runner, machine string) *OrbStack {
-	o := &OrbStack{}
+	o := &OrbStack{probeAttempts: startProbeAttempts, probeInterval: startProbeInterval}
 	o.Base = common.Base{
 		R:         r,
 		Machine:   machine,
@@ -201,19 +208,14 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 // reachable the instant `orb start` returns.
 func (o *OrbStack) waitMachineReachable(ctx context.Context) error {
 	var lastErr error
-	for attempt := 0; attempt < orbStartProbeAttempts; attempt++ {
-		_, err := o.R.Run(ctx, nil, "orb", "-m", o.Machine, "true")
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(orbStartProbeInterval):
-		}
+	err := retry.Until(ctx, o.probeAttempts, o.probeInterval, func() (bool, error) {
+		_, lastErr = o.R.Run(ctx, nil, "orb", "-m", o.Machine, "true")
+		return lastErr == nil, nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return fmt.Errorf("machine %q not reachable after orb start: %w", o.Machine, lastErr)
 	}
-	return fmt.Errorf("machine %q not reachable after orb start: %w", o.Machine, lastErr)
+	return err
 }
 
 func machineListed(stdout, name string) bool {

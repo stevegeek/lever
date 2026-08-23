@@ -11,15 +11,24 @@ import (
 )
 
 // ReadSecret reads a 0600 secret file, whitespace-trimmed. An absent file
-// returns ("", nil) so callers can branch on "" meaning "need to mint". A file
-// present with permissions other than 0600 is treated as tampered or
-// misconfigured and returns an error (mirrors the api_key_file
-// defense-in-depth check in brokerctl). `what` names the file in errors.
+// returns ("", nil) so callers can branch on "" meaning "need to mint"; use
+// ReadRequiredSecret when absence is an error. A file present with
+// permissions other than 0600 is treated as tampered or misconfigured and
+// returns an error (mirrors the api_key_file defense-in-depth check in
+// brokerctl). `what` names the file in errors.
 func ReadSecret(path, what string) (string, error) {
-	fi, err := os.Stat(path)
+	v, err := ReadRequiredSecret(path, what)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
+	return v, err
+}
+
+// ReadRequiredSecret is ReadSecret for operator-supplied files that must
+// exist: an absent file is an error (wrapping fs.ErrNotExist) rather than
+// "". Callers that need to distinguish absent from empty use this.
+func ReadRequiredSecret(path, what string) (string, error) {
+	fi, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("state: %s: %w", what, err)
 	}

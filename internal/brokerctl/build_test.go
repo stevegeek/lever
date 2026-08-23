@@ -1,6 +1,7 @@
 package brokerctl
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,5 +222,23 @@ func TestBuildBrokerRegistersExternalTools(t *testing.T) {
 	db, _ := cfg.Identity.Registry.Lookup("db")
 	if !db.FirstParty || db.External {
 		t.Fatalf("supervised tool envelope changed: %+v", db)
+	}
+}
+
+func TestBuildBrokerAbsentAPIKeyFileIsNotReportedAsEmpty(t *testing.T) {
+	kp, _ := token.Generate()
+	caInst, _ := ca.Generate()
+	app := &config.App{
+		Broker: config.Broker{
+			LLMAuth:    config.LLMAuthAPIKey,
+			APIKeyFile: filepath.Join(t.TempDir(), "missing-key"),
+		},
+	}
+	_, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected fs.ErrNotExist for absent api_key_file, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "empty") {
+		t.Fatalf("absent file must not be reported as empty: %v", err)
 	}
 }

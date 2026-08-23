@@ -1,7 +1,9 @@
 package state
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -193,5 +195,15 @@ func TestEnsureSessionSecretRejectsEmptyFile(t *testing.T) {
 	}
 	if _, err := s.EnsureSessionSecret(); err == nil {
 		t.Fatal("empty session-secret must error, not silently regenerate")
+	}
+}
+
+func TestReadRequiredSecretAbsentIsNotExist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+	if _, err := ReadRequiredSecret(path, "thing"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadRequiredSecret(absent) = %v, want fs.ErrNotExist", err)
+	}
+	if v, err := ReadSecret(path, "thing"); err != nil || v != "" {
+		t.Fatalf("ReadSecret(absent) = %q, %v; want \"\", nil", v, err)
 	}
 }

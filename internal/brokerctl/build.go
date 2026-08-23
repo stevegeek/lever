@@ -108,11 +108,11 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 
 	// Load the api_key_file into the broker config so the /llm proxy has the
 	// key. This is host-side only; the key never enters a container.
-	// Defense-in-depth: ReadSecret re-checks 0600 here even though
+	// Defense-in-depth: ReadRequiredSecret re-checks 0600 here even though
 	// config.Validate also checks it — brokerctl may be invoked outside the
-	// apply/validate path. An absent file reads as "" and is rejected below.
+	// apply/validate path. An absent file is its own error (not "is empty").
 	if app.AnyAPIKeyAgent() {
-		key, err := state.ReadSecret(app.Broker.APIKeyFile, "api_key_file")
+		key, err := state.ReadRequiredSecret(app.Broker.APIKeyFile, "api_key_file")
 		if err != nil {
 			return broker.Config{}, fmt.Errorf("brokerctl: %w", err)
 		}

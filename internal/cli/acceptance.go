@@ -507,15 +507,3 @@ func (h *acceptanceHarness) checkRevocation(ctx context.Context) (bool, error) {
 	}
 	return false, fmt.Errorf("token still accepted after bump-epoch (must be 403): %s", out)
 }
-
-// lastLine returns the last non-empty line of s (the CLI prints the token/result
-// on its own line; preceding lines may be diagnostics).
-func lastLine(s string) string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			return lines[i]
-		}
-	}
-	return ""
-}

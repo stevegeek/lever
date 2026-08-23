@@ -23,18 +23,71 @@ import (
 func okDial(string) error   { return nil }
 func failDial(string) error { return errors.New("connection refused") }
 
-func writeBrokerPID(t *testing.T, st brokerctl.State, pid int) {
+// okProbes/failProbes are doctorProbes whose TCP dial always succeeds/fails.
+// Every other probe panics if reached: a check that should never leave the
+// host must not silently run a real subprocess or HTTP request in a test.
+var (
+	okProbes   = doctorProbes{dial: okDial}
+	failProbes = doctorProbes{dial: failDial}
+)
+
+// healthyRemoteProbes makes the remote-access chain look green: the proxy
+// answers healthz 200, the local OIDC provider serves discovery with NO
+// authorization endpoint (the 404 the whole design rests on — see
+// remoteproxy.Provider.handleAuthorize), and the hub starts logins against
+// lever's dead authorization endpoint. Every probe is stubbed rather than
+// left real: the login probes talk to loopback ports, and a test must never
+// reach a proxy running on this host.
+func healthyRemoteProbes() doctorProbes {
+	return doctorProbes{
+		dial:          okDial,
+		remoteHealthz: func(int, string) (int, error) { return 200, nil },
+		remoteLogin: func(int) (loginProbeResult, error) {
+			return loginProbeResult{discovery: 200, authorize: 404, authzURL: "https://lever.invalid/authorize"}, nil
+		},
+		remoteJailLogin: func(context.Context, leverexec.Runner, string) (int, string, error) {
+			return 302, remoteproxy.DeadAuthorizationEndpoint, nil
+		},
+	}
+}
+
+// writePIDFile records pid at path inside st.Dir, creating the state dir.
+func writePIDFile(t *testing.T, st brokerctl.State, path string, pid int) {
 	t.Helper()
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(st.PID(), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
+func writeBrokerPID(t *testing.T, st brokerctl.State, pid int) { writePIDFile(t, st, st.PID(), pid) }
+func writeRemotePID(t *testing.T, st brokerctl.State, pid int) {
+	writePIDFile(t, st, st.RemotePID(), pid)
+}
+
+// writeDoctorConfig writes a minimal lever.yaml on the orbstack backend with
+// extra appended raw (e.g. "remote:\n  enabled: true\n"), or nothing when
+// extra is "", and loads it. Mirrors apply_test.go's writeTmpConfig /
+// config_test.go's writeTmp.
+func writeDoctorConfig(t *testing.T, extra string) *config.App {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, config.CanonicalName)
+	body := "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n" + extra
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
 func TestCheckBrokerAliveNotStarted(t *testing.T) {
-	r := checkBrokerAlive(brokerctl.StateDir(t.TempDir()), 8443, okDial)
+	r := checkBrokerAlive(brokerctl.StateDir(t.TempDir()), 8443, okProbes)
 	if r.ok {
 		t.Fatal("no broker.pid must fail the check")
 	}
@@ -46,7 +99,7 @@ func TestCheckBrokerAliveNotStarted(t *testing.T) {
 func TestCheckBrokerAliveStalePID(t *testing.T) {
 	st := brokerctl.StateDir(t.TempDir())
 	writeBrokerPID(t, st, 2147483646) // no such process
-	r := checkBrokerAlive(st, 8443, okDial)
+	r := checkBrokerAlive(st, 8443, okProbes)
 	if r.ok {
 		t.Fatal("a stale pid (process gone) must fail even if a dial would succeed")
 	}
@@ -58,7 +111,7 @@ func TestCheckBrokerAliveStalePID(t *testing.T) {
 func TestCheckBrokerAliveAliveButNotListening(t *testing.T) {
 	st := brokerctl.StateDir(t.TempDir())
 	writeBrokerPID(t, st, os.Getpid()) // alive
-	r := checkBrokerAlive(st, 8443, failDial)
+	r := checkBrokerAlive(st, 8443, failProbes)
 	if r.ok {
 		t.Fatal("alive process but nothing on the jail port must fail")
 	}
@@ -70,14 +123,14 @@ func TestCheckBrokerAliveAliveButNotListening(t *testing.T) {
 func TestCheckBrokerAliveHealthy(t *testing.T) {
 	st := brokerctl.StateDir(t.TempDir())
 	writeBrokerPID(t, st, os.Getpid())
-	r := checkBrokerAlive(st, 8443, okDial)
+	r := checkBrokerAlive(st, 8443, okProbes)
 	if !r.ok {
 		t.Fatalf("alive process + listening port must pass; got %+v", r)
 	}
 }
 
 func TestCheckToolBackendsNoneDeclared(t *testing.T) {
-	r := checkToolBackends(nil, failDial)
+	r := checkToolBackends(nil, failProbes)
 	if !r.ok {
 		t.Fatalf("no tools declared => pass (nothing to probe); got %+v", r)
 	}
@@ -89,7 +142,7 @@ func TestCheckToolBackendsAllReachable(t *testing.T) {
 		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
 		{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:3201"},
 	}
-	r := checkToolBackends(tools, okDial)
+	r := checkToolBackends(tools, okProbes)
 	if !r.ok {
 		t.Fatalf("all external backends reachable + supervised command resolvable => pass; got %+v", r)
 	}
@@ -108,7 +161,7 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
 		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
 	}
-	r := checkToolBackends(tools, dial)
+	r := checkToolBackends(tools, doctorProbes{dial: dial})
 	if r.ok {
 		t.Fatal("a down backend must fail the check")
 	}
@@ -129,7 +182,7 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 
 func TestCheckToolBackendsSupervisedMissing(t *testing.T) {
 	tools := []config.Tool{{Name: "db", Command: []string{"definitely-not-on-path-xyz"}}}
-	got := checkToolBackends(tools, func(string) error { return nil })
+	got := checkToolBackends(tools, okProbes)
 	if got.ok {
 		t.Fatalf("supervised tool with missing binary should fail the check")
 	}
@@ -137,7 +190,7 @@ func TestCheckToolBackendsSupervisedMissing(t *testing.T) {
 
 func TestCheckToolBackendsExternalDown(t *testing.T) {
 	tools := []config.Tool{{Name: "x", External: true, Backend: "127.0.0.1:59999"}}
-	got := checkToolBackends(tools, func(string) error { return fmt.Errorf("refused") })
+	got := checkToolBackends(tools, failProbes)
 	if got.ok {
 		t.Fatalf("down external backend should fail the check")
 	}
@@ -149,9 +202,8 @@ func TestCheckToolBackendsExternalDown(t *testing.T) {
 // resolvable supervised command with an always-failing dial: if the
 // supervised branch ever dialed Backend, this would wrongly fail.
 func TestCheckToolBackendsSupervisedNeverDialed(t *testing.T) {
-	failDial := func(string) error { return fmt.Errorf("refused") }
 	tools := []config.Tool{{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:59999"}}
-	if got := checkToolBackends(tools, failDial); !got.ok {
+	if got := checkToolBackends(tools, failProbes); !got.ok {
 		t.Fatalf("supervised tool's Backend must never be dialed; got %+v", got)
 	}
 }
@@ -163,7 +215,7 @@ func TestCheckToolBackendsSupervisedNeverDialed(t *testing.T) {
 // not-on-PATH bare name.
 func TestCheckToolBackendsSupervisedAbsolutePathMissing(t *testing.T) {
 	tools := []config.Tool{{Name: "db", Command: []string{"/nonexistent/definitely-not-here-xyz"}}}
-	got := checkToolBackends(tools, func(string) error { return nil })
+	got := checkToolBackends(tools, okProbes)
 	if got.ok {
 		t.Fatalf("supervised tool with a missing absolute-path command should fail the check")
 	}
@@ -422,7 +474,7 @@ func TestCheckMcpJsonInTreeNested(t *testing.T) {
 // PATH that isn't actually resolvable blows up as "exit status 126" deep
 // inside apply instead of an up-front, actionable diagnosis.
 func TestCheckGoToolchainBuildNotRequired(t *testing.T) {
-	r := checkGoToolchain(config.ScionConfig{})
+	r := checkGoToolchain(config.ScionConfig{}, doctorProbes{})
 	if !r.ok {
 		t.Fatalf("no source and no version pinned => no build => pass; got %+v", r)
 	}
@@ -432,11 +484,9 @@ func TestCheckGoToolchainBuildNotRequired(t *testing.T) {
 }
 
 func TestCheckGoToolchainProbeOK(t *testing.T) {
-	orig := goVersionProbe
-	defer func() { goVersionProbe = orig }()
-	goVersionProbe = func() (string, error) { return "go version go1.26.4 darwin/arm64\n", nil }
+	p := doctorProbes{goVersion: func() (string, error) { return "go version go1.26.4 darwin/arm64\n", nil }}
 
-	r := checkGoToolchain(config.ScionConfig{Version: "666333f9"})
+	r := checkGoToolchain(config.ScionConfig{Version: "666333f9"}, p)
 	if !r.ok {
 		t.Fatalf("a working go on PATH must pass; got %+v", r)
 	}
@@ -446,11 +496,9 @@ func TestCheckGoToolchainProbeOK(t *testing.T) {
 }
 
 func TestCheckGoToolchainProbeError(t *testing.T) {
-	orig := goVersionProbe
-	defer func() { goVersionProbe = orig }()
-	goVersionProbe = func() (string, error) { return "", errors.New("exit status 126") }
+	p := doctorProbes{goVersion: func() (string, error) { return "", errors.New("exit status 126") }}
 
-	r := checkGoToolchain(config.ScionConfig{Source: "/Users/stephen/ai/scion"})
+	r := checkGoToolchain(config.ScionConfig{Source: "/Users/stephen/ai/scion"}, p)
 	if r.ok {
 		t.Fatal("a broken go (e.g. a dead asdf shim) must fail the check")
 	}
@@ -559,24 +607,13 @@ func TestCheckOperatorSkills(t *testing.T) {
 
 // writeDirectivesConfig writes a minimal lever.yaml with operator.allowed_signers
 // set to signersRel (relative to the instance root), or omitted entirely when
-// signersRel is "". Mirrors apply_test.go's writeTmpConfig / config_test.go's
-// writeTmp.
+// signersRel is "".
 func writeDirectivesConfig(t *testing.T, signersRel string) *config.App {
 	t.Helper()
-	dir := t.TempDir()
-	p := filepath.Join(dir, config.CanonicalName)
-	body := "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n"
-	if signersRel != "" {
-		body += "operator:\n  allowed_signers: " + signersRel + "\n"
+	if signersRel == "" {
+		return writeDoctorConfig(t, "")
 	}
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	app, err := config.Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return app
+	return writeDoctorConfig(t, "operator:\n  allowed_signers: "+signersRel+"\n")
 }
 
 // writeAllowedSigners generates a real ed25519 SSH keypair and writes a
@@ -693,37 +730,6 @@ func TestCheckDirectivesBrokerRunningSocketAbsent(t *testing.T) {
 	}
 }
 
-// writeRemoteDoctorConfig writes a minimal lever.yaml on the orbstack
-// backend with remoteBlock appended raw (e.g. "remote:\n  enabled: true\n"),
-// or omitted entirely when remoteBlock is "". Mirrors writeDirectivesConfig's
-// pattern.
-func writeRemoteDoctorConfig(t *testing.T, remoteBlock string) *config.App {
-	t.Helper()
-	dir := t.TempDir()
-	p := filepath.Join(dir, config.CanonicalName)
-	body := "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n" + remoteBlock
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	app, err := config.Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return app
-}
-
-// writeRemotePID records pid at st.RemotePID(), creating the state dir.
-// Mirrors writeBrokerPID for the proxy's own pid file.
-func writeRemotePID(t *testing.T, st brokerctl.State, pid int) {
-	t.Helper()
-	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // writeRemotePAT writes a remote.pat file at the given mode, creating the
 // state dir first.
 func writeRemotePAT(t *testing.T, st brokerctl.State, mode os.FileMode) {
@@ -739,9 +745,9 @@ func writeRemotePAT(t *testing.T, st brokerctl.State, mode os.FileMode) {
 // TestCheckRemoteDisabled covers the default, opt-in-only state: remote
 // access unconfigured is a pass — most instances never turn it on.
 func TestCheckRemoteDisabled(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "")
+	app := writeDoctorConfig(t, "")
 	st := brokerctl.StateDir(t.TempDir())
-	r := checkRemote(context.Background(), app, st, okDial, nil)
+	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if !r.ok {
 		t.Fatalf("remote disabled must pass: %+v", r)
 	}
@@ -751,9 +757,9 @@ func TestCheckRemoteDisabled(t *testing.T) {
 }
 
 func TestCheckRemoteNoPIDFile(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := brokerctl.StateDir(t.TempDir()) // no remote.pid — never started
-	r := checkRemote(context.Background(), app, st, okDial, nil)
+	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if r.ok {
 		t.Fatal("enabled but never started (no remote.pid) must fail")
 	}
@@ -763,11 +769,11 @@ func TestCheckRemoteNoPIDFile(t *testing.T) {
 }
 
 func TestCheckRemotePATMissing(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := brokerctl.StateDir(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	// remote.pat intentionally left absent.
-	r := checkRemote(context.Background(), app, st, okDial, nil)
+	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if r.ok {
 		t.Fatal("missing remote.pat must fail")
 	}
@@ -779,11 +785,11 @@ func TestCheckRemotePATMissing(t *testing.T) {
 // A remote.pat that exists but is group/other-accessible must fail too —
 // same posture as checkCredentialFile.
 func TestCheckRemotePATBadPermissions(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := brokerctl.StateDir(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o644)
-	r := checkRemote(context.Background(), app, st, okDial, nil)
+	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if r.ok {
 		t.Fatal("a group/other-readable remote.pat must fail")
 	}
@@ -793,20 +799,17 @@ func TestCheckRemotePATBadPermissions(t *testing.T) {
 }
 
 func TestCheckRemoteHealthz500(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := brokerctl.StateDir(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
-	saved := remoteHealthzProbe
-	t.Cleanup(func() { remoteHealthzProbe = saved })
-	remoteHealthzProbe = func(int, string) (int, error) { return 500, nil }
 	// Everything healthz depends on is green, so the 500 is the only failure
-	// left to report. Stubbed rather than left real: the login probes talk to
-	// loopback ports, and a test must never reach a proxy running on this host.
-	stubHealthyLoginProbe(t)
+	// left to report.
+	p := healthyRemoteProbes()
+	p.remoteHealthz = func(int, string) (int, error) { return 500, nil }
 
-	r := checkRemote(context.Background(), app, st, okDial, nil)
+	r := checkRemote(context.Background(), app, st, p, nil)
 	if r.ok {
 		t.Fatal("a non-200 from the healthz probe must fail")
 	}
@@ -815,38 +818,16 @@ func TestCheckRemoteHealthz500(t *testing.T) {
 	}
 }
 
-// stubHealthyLoginProbe makes the local OIDC provider look healthy: discovery
-// served, and NO authorization endpoint (the 404 that the whole design rests
-// on — see remoteproxy.Provider.handleAuthorize).
-func stubHealthyLoginProbe(t *testing.T) {
-	t.Helper()
-	saved := remoteLoginProbe
-	t.Cleanup(func() { remoteLoginProbe = saved })
-	remoteLoginProbe = func(int) (loginProbeResult, error) {
-		return loginProbeResult{discovery: 200, authorize: 404, authzURL: "https://lever.invalid/authorize"}, nil
-	}
-	savedJail := remoteJailLoginProbe
-	t.Cleanup(func() { remoteJailLoginProbe = savedJail })
-	remoteJailLoginProbe = func(context.Context, leverexec.Runner, string) (int, string, error) {
-		return 302, remoteproxy.DeadAuthorizationEndpoint, nil
-	}
-}
-
 // enabled+all-green: pid alive, port listening, PAT present at 0600, the
 // end-to-end healthz probe returns 200, and the login provider is serving
 // discovery with no authorization endpoint.
 func TestCheckRemoteHealthy(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := brokerctl.StateDir(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
-	saved := remoteHealthzProbe
-	t.Cleanup(func() { remoteHealthzProbe = saved })
-	remoteHealthzProbe = func(int, string) (int, error) { return 200, nil }
-	stubHealthyLoginProbe(t)
-
-	r := checkRemote(context.Background(), app, st, okDial, nil)
+	r := checkRemote(context.Background(), app, st, healthyRemoteProbes(), nil)
 	if !r.ok {
 		t.Fatalf("pid alive + listening + PAT present + healthz 200 must pass: %+v", r)
 	}
@@ -863,27 +844,25 @@ func TestCheckRemoteHealthy(t *testing.T) {
 // what to DO (a login port granted since the instance came up needs `lever
 // down` + `lever up`). The cause must win over the symptom.
 func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := brokerctl.StateDir(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
 	// The host-side provider is healthy; the GUEST half is not — the hub
 	// cannot reach the provider through the forwarder, and answers 500.
-	stubHealthyLoginProbe(t)
-	remoteJailLoginProbe = func(context.Context, leverexec.Runner, string) (int, string, error) {
+	p := healthyRemoteProbes()
+	p.remoteJailLogin = func(context.Context, leverexec.Runner, string) (int, string, error) {
 		return 500, "", nil
 	}
 	// What the live proxy answers while the login chain is broken.
 	healthzProbed := false
-	saved := remoteHealthzProbe
-	t.Cleanup(func() { remoteHealthzProbe = saved })
-	remoteHealthzProbe = func(int, string) (int, error) {
+	p.remoteHealthz = func(int, string) (int, error) {
 		healthzProbed = true
 		return 502, nil
 	}
 
-	r := checkRemote(context.Background(), app, st, okDial, leverexec.NewFakeRunner())
+	r := checkRemote(context.Background(), app, st, p, leverexec.NewFakeRunner())
 	if r.ok {
 		t.Fatal("a hub that cannot reach the login provider must fail the check")
 	}
@@ -904,16 +883,10 @@ func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
 // through the guest forwarder. Nothing legitimate calls it — the proxy drives
 // the login server-side and mints in-process.
 func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := brokerctl.StateDir(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
-	savedHealthz := remoteHealthzProbe
-	t.Cleanup(func() { remoteHealthzProbe = savedHealthz })
-	remoteHealthzProbe = func(int, string) (int, error) { return 200, nil }
-	saved := remoteLoginProbe
-	t.Cleanup(func() { remoteLoginProbe = saved })
-
 	for _, tc := range []struct {
 		name  string
 		probe loginProbeResult
@@ -925,8 +898,9 @@ func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
 		{"discovery is not served", loginProbeResult{discovery: 500, authorize: 404}, "discovery"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			remoteLoginProbe = func(int) (loginProbeResult, error) { return tc.probe, nil }
-			r := checkRemote(context.Background(), app, st, okDial, nil)
+			p := healthyRemoteProbes()
+			p.remoteLogin = func(int) (loginProbeResult, error) { return tc.probe, nil }
+			r := checkRemote(context.Background(), app, st, p, nil)
 			if r.ok {
 				t.Fatalf("%s must fail the check", tc.name)
 			}
@@ -943,21 +917,19 @@ func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
 // must send the first configured allowed_users entry, or a pinned instance
 // would 403 its own doctor check even when everything is actually healthy.
 func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
-	app := writeRemoteDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"steve@example.com\", \"other@example.com\"]\n")
+	app := writeDoctorConfig(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"steve@example.com\", \"other@example.com\"]\n")
 	st := brokerctl.StateDir(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
 	var gotLogin string
-	saved := remoteHealthzProbe
-	t.Cleanup(func() { remoteHealthzProbe = saved })
-	remoteHealthzProbe = func(_ int, tsLogin string) (int, error) {
+	p := healthyRemoteProbes()
+	p.remoteHealthz = func(_ int, tsLogin string) (int, error) {
 		gotLogin = tsLogin
 		return 200, nil
 	}
-	stubHealthyLoginProbe(t)
 
-	if r := checkRemote(context.Background(), app, st, okDial, nil); !r.ok {
+	if r := checkRemote(context.Background(), app, st, p, nil); !r.ok {
 		t.Fatalf("expected pass, got %+v", r)
 	}
 	if gotLogin != "steve@example.com" {
@@ -966,23 +938,20 @@ func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
 }
 
 func TestCheckClaudeVersion(t *testing.T) {
-	saved := claudeVersionProbe
-	t.Cleanup(func() { claudeVersionProbe = saved })
-
-	claudeVersionProbe = func(string) (string, error) { return "2.1.207", nil }
-	if got := checkClaudeVersion("img", claudeVersionProbe); !got.ok || !strings.Contains(got.detail, "2.1.207") {
+	probes := func(v string, err error) doctorProbes {
+		return doctorProbes{claudeVersion: func(string) (string, error) { return v, err }}
+	}
+	if got := checkClaudeVersion("img", probes("2.1.207", nil)); !got.ok || !strings.Contains(got.detail, "2.1.207") {
 		t.Fatalf("expected pass reporting the version, got %+v", got)
 	}
 
 	// Missing label (older image) → informational pass, not a hard fail.
-	claudeVersionProbe = func(string) (string, error) { return "", nil }
-	if got := checkClaudeVersion("img", claudeVersionProbe); !got.ok {
+	if got := checkClaudeVersion("img", probes("", nil)); !got.ok {
 		t.Fatalf("missing label should be informational, not a failure, got %+v", got)
 	}
 
 	// Inspect error → fail with actionable fix.
-	claudeVersionProbe = func(string) (string, error) { return "", fmt.Errorf("no such image") }
-	if got := checkClaudeVersion("img", claudeVersionProbe); got.ok {
+	if got := checkClaudeVersion("img", probes("", fmt.Errorf("no such image"))); got.ok {
 		t.Fatalf("inspect error should fail the check")
 	}
 }
@@ -1090,7 +1059,7 @@ func TestCheckNodeToolchainNotRequired(t *testing.T) {
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r := checkNodeToolchain(c.app)
+			r := checkNodeToolchain(c.app, doctorProbes{})
 			if !r.ok {
 				t.Fatalf("no web UI to build => pass; got %+v", r)
 			}
@@ -1102,14 +1071,12 @@ func TestCheckNodeToolchainNotRequired(t *testing.T) {
 }
 
 func TestCheckNodeToolchainProbeOK(t *testing.T) {
-	orig := nodeToolchainProbe
-	defer func() { nodeToolchainProbe = orig }()
-	nodeToolchainProbe = func() (string, error) { return "v25.9.0", nil }
+	p := doctorProbes{nodeToolchain: func() (string, error) { return "v25.9.0", nil }}
 
 	r := checkNodeToolchain(&config.App{
 		Scion:  config.ScionConfig{Version: "e82a2a08"},
 		Remote: config.Remote{Enabled: true},
-	})
+	}, p)
 	if !r.ok {
 		t.Fatalf("a working node on PATH must pass; got %+v", r)
 	}
@@ -1119,16 +1086,14 @@ func TestCheckNodeToolchainProbeOK(t *testing.T) {
 }
 
 func TestCheckNodeToolchainProbeError(t *testing.T) {
-	orig := nodeToolchainProbe
-	defer func() { nodeToolchainProbe = orig }()
-	nodeToolchainProbe = func() (string, error) {
+	p := doctorProbes{nodeToolchain: func() (string, error) {
 		return "", fmt.Errorf("%w: node --version: exit status 126", guest.ErrNodeToolchain)
-	}
+	}}
 
 	r := checkNodeToolchain(&config.App{
 		Scion:  config.ScionConfig{Source: "/Users/stephen/ai/scion"},
 		Remote: config.Remote{Enabled: true},
-	})
+	}, p)
 	if r.ok {
 		t.Fatal("a broken node (e.g. a dead asdf shim) must fail the check")
 	}
@@ -1146,9 +1111,8 @@ func TestCheckNodeToolchainProbeError(t *testing.T) {
 // start a login is what exercises both — it has to fetch discovery through the
 // forwarder before it can answer.
 func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
-	saved := remoteJailLoginProbe
-	t.Cleanup(func() { remoteJailLoginProbe = saved })
 	jr := leverexec.NewFakeRunner()
+	st := brokerctl.StateDir(t.TempDir())
 
 	for _, tc := range []struct {
 		name     string
@@ -1166,10 +1130,10 @@ func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
 		{"unexpected status", 418, "", nil, false, "want 302"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			remoteJailLoginProbe = func(context.Context, leverexec.Runner, string) (int, string, error) {
+			p := doctorProbes{remoteJailLogin: func(context.Context, leverexec.Runner, string) (int, string, error) {
 				return tc.status, tc.redirect, tc.err
-			}
-			detail, _, ok := checkRemoteLoginPath(context.Background(), jr)
+			}}
+			detail, _, ok := checkRemoteLoginPath(context.Background(), jr, st, p)
 			if ok != tc.ok {
 				t.Fatalf("ok = %v, want %v (detail %q)", ok, tc.ok, detail)
 			}
@@ -1191,5 +1155,70 @@ func TestRemoteJailLoginScriptShape(t *testing.T) {
 	}
 	if strings.Contains(remoteJailLoginScript, "Authorization") {
 		t.Fatalf("the login route is public; sending a credential would test the wrong thing:\n%s", remoteJailLoginScript)
+	}
+}
+
+func TestStateRel(t *testing.T) {
+	st := brokerctl.StateDir(filepath.Join(t.TempDir(), "inst"))
+	if got := stateRel(st, st.RemoteLog()); got != ".lever-state/remote.log" {
+		t.Fatalf("stateRel = %q", got)
+	}
+	if got := stateRel(st, st.Log()); got != ".lever-state/broker.log" {
+		t.Fatalf("stateRel = %q", got)
+	}
+}
+
+// checkListeningProcess is the ladder both the broker and remote checks climb;
+// each rung names the pid file and the log the caller passed in.
+func TestCheckListeningProcess(t *testing.T) {
+	status := func(pid int, found, alive bool) func() (int, bool, bool) {
+		return func() (int, bool, bool) { return pid, found, alive }
+	}
+	for _, tc := range []struct {
+		name   string
+		status func() (int, bool, bool)
+		dial   dialFunc
+		ok     bool
+		detail string
+		fix    string
+	}{
+		{"never started", status(0, false, false), okDial, false, "no x.pid — the thing was never started", "start it"},
+		{"stale pid", status(42, true, false), okDial, false, "x.pid names pid 42, but that process is gone", "start it"},
+		{"not listening", status(42, true, true), failDial, false, "pid 42 is alive but nothing is listening on 127.0.0.1:1", "inspect .lever-state/x.log, then restart"},
+		{"healthy", status(42, true, true), okDial, true, "pid 42, serving on 127.0.0.1:1", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := checkListeningProcess("n", "x.pid", "the thing", ".lever-state/x.log", "start it", tc.status, "127.0.0.1:1", tc.dial)
+			if r.ok != tc.ok || !strings.Contains(r.detail, tc.detail) || !strings.Contains(r.fix, tc.fix) {
+				t.Fatalf("got %+v, want ok=%v detail~%q fix~%q", r, tc.ok, tc.detail, tc.fix)
+			}
+		})
+	}
+}
+
+// claudeVersionProbe maps docker's "<no value>" (label absent) to "", and
+// reports docker's own stderr on failure.
+func TestClaudeVersionProbe(t *testing.T) {
+	r := leverexec.NewFakeRunner()
+	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} labelled", leverexec.Result{Stdout: "2.1.207\n"})
+	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} bare", leverexec.Result{Stdout: "<no value>\n"})
+	if v, err := claudeVersionProbe(r, "labelled"); err != nil || v != "2.1.207" {
+		t.Fatalf("labelled: %q, %v", v, err)
+	}
+	if v, err := claudeVersionProbe(r, "bare"); err != nil || v != "" {
+		t.Fatalf("bare: %q, %v", v, err)
+	}
+	if _, err := claudeVersionProbe(r, "missing"); err == nil {
+		t.Fatal("an inspect failure must be an error")
+	}
+}
+
+// productionProbes wires every field: a nil probe would panic the first time
+// a check on a real instance reached it.
+func TestProductionProbesWiresEveryField(t *testing.T) {
+	p := productionProbes(leverexec.NewFakeRunner())
+	if p.dial == nil || p.goVersion == nil || p.nodeToolchain == nil || p.claudeVersion == nil ||
+		p.remoteHealthz == nil || p.remoteLogin == nil || p.remoteJailLogin == nil {
+		t.Fatalf("productionProbes left a probe nil: %+v", p)
 	}
 }

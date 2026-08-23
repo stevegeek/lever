@@ -5,6 +5,84 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+A code-quality refactor across the module. No new features; the user-visible
+differences below are side effects of tightening seams. Contributors should
+read the Changed/Internal entries before rebasing open branches.
+
+### Changed
+
+- **Broker jail and admin routes are method-restricted and body-capped.**
+  Every route is registered with a method pattern, so a request with the
+  wrong method gets 405 instead of being decoded. Request bodies are read
+  through `http.MaxBytesReader`: 64 KiB for jail and admin JSON, 4 KiB for
+  the small verbs, 256 KiB for signed envelopes, 4 MiB for the tool gateway.
+- **captool (and the agent's MCP server) cap request bodies at 1 MiB**
+  (`mcp.MaxBodyBytes`). The MCP `initialize` reply reports the real server
+  version instead of a placeholder.
+- **`lever apply --dry-run` no longer lists a jail-up step.** The step was a
+  no-op; the backend brings the machine up inside the steps that need it.
+- **`broker.api_key_file` is resolved against the config file's directory**
+  when relative, like every other path in `lever.yaml`. An absolute path is
+  unchanged.
+- **The bridge events file is created owner-only** (0600, directory 0700).
+  An existing file keeps its mode; delete it to adopt the new one.
+- **The per-agent `settings.json` env block no longer carries
+  `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY` or `NODE_EXTRA_CA_CERTS`.**
+  Claude reaches the broker through the loopback gateway and never presented
+  the leaf itself. The image still exports the same paths as container env for
+  other in-container tooling.
+- **Web assets are tarred by lever itself** (`archive/tar`) instead of
+  shelling out to the host `tar`, so the archive is identical on every host.
+- **`LEVER_FORCE_HOST_NETWORK` is read once, when the jail transport is
+  constructed**, not on every call. Set it before `lever apply`, not during.
+- **`lever apply` talks to the broker admin socket with a 5 s client
+  timeout** instead of an unbounded one.
+- **Some CLI error strings changed.** Broker calls from `lever` and
+  `lever-agent` go through one JSON-over-HTTP helper (`internal/httpjson`),
+  so a failed call now reports the single `POST <url>: <status>: <body>`
+  shape rather than per-call wording. Scripts that matched the old text need
+  updating.
+- **`lever-agent` binaries report a version.** The Makefile passes
+  `-ldflags` (`LEVER_AGENT_LDFLAGS`) into every `lever-agent` build.
+
+### Internal
+
+- **Integration tests are behind `-tags integration`.** The live VM, hubapi
+  and `lever-tool-db` host tests no longer run under `go test ./...`; run
+  `make test-integration` (or `go test -tags integration ./...`).
+- **New packages:** `internal/retry` (one bounded poll loop, `retry.Until`),
+  `internal/httpjson` (JSON-over-HTTP client), `internal/mcp` (JSON-RPC
+  framing and `tools/call` projection shared by the agent server and
+  captool), `internal/state` (host state dir), `internal/daemon` (host daemon
+  bookkeeping), `internal/provision/*` (host build pipelines moved out of
+  `internal/guest`), `internal/scion/layout` (scion's on-disk paths and
+  settings keys), `internal/agent` (lever-agent domain logic moved out of
+  `cmd/lever-agent`), and `internal/cli/host` + `internal/cli/manager` (the
+  host and in-jail halves of `internal/cli`).
+- **Wire contract in `internal/wire`.** Broker request/response types and
+  route paths are declared once and used by the broker, the CLI, the agent
+  and captool. `wire` is a leaf package; list replies are generic
+  (`wire.WorkerListResponse[T]`, `wire.MsgListResponse[T]`) so
+  `lever-manager` no longer links `internal/broker`.
+- **`internal/config` split by concern; `Validate` is pure.** Host probes
+  (binary presence, file modes, toolchain access) moved to `CheckHost`;
+  `LoadNoHostChecks` exists for tests. `config` no longer imports
+  `internal/backend`.
+- **`broker.Config` is grouped into sub-structs** (`Identity`, `Persistence`,
+  `LLM`, `Dispatch`, `Directives`). `Config.Agents` is gone; the declared
+  `Workers` are the source of truth.
+- **Smaller seams:** `exec.Runner` gained `RunStdin`; `internal/jail` is a
+  pure transport; `backend.NewBase` holds private state with a shared
+  version gate and machine status; `opsig.Sign`/`Verify` are ctx-bounded
+  (the old un-bounded wrappers are deleted); `apply.Run` requires every
+  `Deps` collaborator; `remoteproxy` has one hub URL in `LoginDriver` and a
+  typed audit `Decision`; doctor checks are table-driven.
+- Dead code reachable only from tests is deleted (including
+  `agent.MCPServer.Handler`); staticcheck and gofmt are clean;
+  `CONTRIBUTING.md` lists every `internal/` package.
+
 ## [0.19.0] - 2026-08-23
 
 ### Added

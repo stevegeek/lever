@@ -52,9 +52,9 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Msg }
 
-// ErrNoTransport is returned by every Client method when the Client was built
+// errNoTransport is returned by every Client method when the Client was built
 // without a Doer. It is a programming error, not a hub or transport failure.
-var ErrNoTransport = errors.New("hubapi: client has no transport")
+var errNoTransport = errors.New("hubapi: client has no transport")
 
 // SharedDir mirrors the fields of scion's api.SharedDir that lever inspects.
 type SharedDir struct {
@@ -72,7 +72,7 @@ type project struct {
 // do issues one request, guarding against a Client built without a transport.
 func (c *Client) do(ctx context.Context, method, path string) (int, []byte, error) {
 	if c.T == nil {
-		return 0, nil, ErrNoTransport
+		return 0, nil, errNoTransport
 	}
 	return c.T.Do(ctx, method, path)
 }

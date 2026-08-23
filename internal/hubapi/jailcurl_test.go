@@ -97,8 +97,8 @@ func TestJailCurlNamesMissingCurl(t *testing.T) {
 		err: errors.New("exit status 127"),
 	}
 	_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
-	if !errors.Is(err, ErrCurlMissing) {
-		t.Fatalf("want ErrCurlMissing, got %v", err)
+	if !errors.Is(err, errCurlMissing) {
+		t.Fatalf("want errCurlMissing, got %v", err)
 	}
 }
 

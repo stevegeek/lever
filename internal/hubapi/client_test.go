@@ -201,8 +201,8 @@ func TestSharedDirsListsProjectMounts(t *testing.T) {
 
 func TestClientWithoutTransportErrorsRatherThanPanics(t *testing.T) {
 	err := (&Client{}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
-	if !errors.Is(err, ErrNoTransport) {
-		t.Fatalf("want ErrNoTransport, got %v", err)
+	if !errors.Is(err, errNoTransport) {
+		t.Fatalf("want errNoTransport, got %v", err)
 	}
 }
 

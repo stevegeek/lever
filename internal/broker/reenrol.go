@@ -20,8 +20,10 @@ import (
 // per-CN cooldown and lifetime cap so a persistent failure can never
 // heal-storm.
 const (
-	// autoReenrol* mirror config.AutoReenrolMode values (the broker package
-	// stays decoupled from config; brokerctl passes the resolved string).
+	// autoReenrol* mirror config.AutoReenrolAll/Manager/Off by hand: the
+	// broker package must not import config, so brokerctl passes the resolved
+	// mode as a string (string(app.EffectiveAutoReenrol())). Keep the two
+	// sets in step.
 	autoReenrolAll     = "all"
 	autoReenrolManager = "manager"
 	autoReenrolOff     = "off"

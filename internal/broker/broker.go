@@ -48,31 +48,56 @@ type RevocationState struct {
 	Revoked  []string `json:"revoked"`
 }
 
-// Config assembles a Broker. Zero GrantTTL/TicketTTL are defaulted.
+// Config assembles a Broker. Zero GrantTTL/TicketTTL are defaulted. The
+// fields are grouped by concern; brokerctl.Build fills the identity and
+// persistence groups and brokerctl's serve path decorates the rest.
 type Config struct {
-	Keys            token.KeyPair
-	CA              *ca.CA
-	Tickets         *ca.TicketStore
-	Rules           *rules.Policy
-	Registry        *registry.Registry
-	ManagerIdentity string   // the cert CN permitted to call /provision
-	Agents          []string // valid worker identities that may be provisioned
-	GrantTTL        time.Duration
-	TicketTTL       time.Duration
-	ServerName      string // the server cert hostname agents dial (host.orb.internal)
-	Log             *slog.Logger
+	// ---- Identity, keys and policy ----
+
+	Keys     token.KeyPair
+	CA       *ca.CA
+	Tickets  *ca.TicketStore
+	Rules    *rules.Policy
+	Registry *registry.Registry
+	// ManagerIdentity is the cert CN permitted to call /provision and the
+	// worker/msg routes.
+	ManagerIdentity string
+	// ManagerSlug is the manager's scion agent slug — the app name (apply's
+	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
+	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
+	// only by its slug, so a message routed to agent:<CN> fails with
+	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
+	// (embedders/tests that never message the manager).
+	ManagerSlug string
+	// Agents lists the worker identities /provision may issue a ticket for.
+	Agents     []string
+	GrantTTL   time.Duration
+	TicketTTL  time.Duration
+	ServerName string // the server cert hostname agents dial (host.orb.internal)
+	Log        *slog.Logger
+	// Version and ConfigHash identify this broker process: the binary's
+	// version string and a digest of the broker-relevant configuration it was
+	// started with. Reported by /epoch so apply's broker-reuse shortcut can
+	// detect a stale broker (old binary or old tool set) and restart it
+	// instead of silently reusing it (#19). Both optional (empty = unreported).
+	Version    string
+	ConfigHash string
+
+	// ---- Persisted state ----
+
 	// RevocationState seeds the epoch floor + revoke list at construction
 	// (loaded from the state dir) so a restart never silently un-revokes.
 	RevocationState RevocationState
 	// PersistRevocation is called (under the broker lock) whenever revocation
 	// state changes, to write it through to the state dir. nil ⇒ no persistence.
 	PersistRevocation func(RevocationState) error
-
 	// DirectiveState seeds the persistent operator-directive store at
 	// construction (loaded from the state dir); PersistDirectives writes it
 	// through on every mutation. Modeled on RevocationState/PersistRevocation.
 	DirectiveState    DirectiveState
 	PersistDirectives func(DirectiveState) error
+
+	// ---- LLM proxy ----
 
 	// APIKey is the real Anthropic Console key bytes (loaded host-side from the
 	// 0600 api_key_file by brokerctl). nil ⇒ no /llm route is served.
@@ -81,14 +106,23 @@ type Config struct {
 	// Set by tests to a fake upstream. NEVER derived from a client request.
 	LLMUpstream string
 
-	// Worker dispatch (host-side). Runtime is the scion client the broker drives;
-	// Workers are the config-derived, path-authoritative worker descriptions;
-	// BrokerCAPEM/BrokerURL are copied into each worker's staged bootstrap so it
-	// trusts the same CA and dials the same broker as the manager.
+	// ---- Worker dispatch and messaging (host-side) ----
+
+	// Runtime is the scion client the broker drives; Workers are the
+	// config-derived, path-authoritative worker descriptions; BrokerCAPEM/
+	// BrokerURL are copied into each worker's staged bootstrap so it trusts
+	// the same CA and dials the same broker as the manager.
 	Runtime     WorkerRuntime
 	Workers     []WorkerSpec
 	BrokerCAPEM string
 	BrokerURL   string
+	// InstanceProject is the single Scion project (-g) that the manager and
+	// all workers are agents in; = the jail mount root. Used when a message
+	// is addressed to the manager's agent identity, and as the constant -g
+	// for every worker dispatch/lifecycle/list call.
+	InstanceProject string
+	// WorkerToWorker enables worker→worker messaging; default false (deny).
+	WorkerToWorker bool
 	// VerifyAgentRole refuses to RESUME a worker whose hub record stores no
 	// authorization role while the installed scion resolves that to full hub
 	// authority (see hubapi.VerifyAgentRole). A worker created by a scion older
@@ -123,20 +157,7 @@ type Config struct {
 	// Empty disables manager healing (audited as an error on lapse).
 	ManagerBootstrapDir string
 
-	// InstanceProject is the single Scion project (-g) that the manager and
-	// all workers are agents in; = the jail mount root. Used when a message
-	// is addressed to the manager's agent identity, and as the constant -g
-	// for every worker dispatch/lifecycle/list call.
-	InstanceProject string
-	// ManagerSlug is the manager's scion agent slug — the app name (apply's
-	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
-	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
-	// only by its slug, so a message routed to agent:<CN> fails with
-	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
-	// (embedders/tests that never message the manager).
-	ManagerSlug string
-	// WorkerToWorker enables worker→worker messaging; default false (deny).
-	WorkerToWorker bool
+	// ---- Operator directives ----
 
 	// DirectiveVerifier gates the operator-directive UDS admin channel: nil
 	// means directives are disabled and every /directive/* route 404s.
@@ -152,14 +173,6 @@ type Config struct {
 	// DirectiveExpiryMax clamps how far in the future a submitted directive's
 	// expires_at may sit (on top of opsig's own 24h hard cap).
 	DirectiveExpiryMax time.Duration
-
-	// Version and ConfigHash identify this broker process: the binary's
-	// version string and a digest of the broker-relevant configuration it was
-	// started with. Reported by /epoch so apply's broker-reuse shortcut can
-	// detect a stale broker (old binary or old tool set) and restart it
-	// instead of silently reusing it (#19). Both optional (empty = unreported).
-	Version    string
-	ConfigHash string
 }
 
 // Broker is the running capability authority + brokered-tool proxy.
@@ -262,26 +275,30 @@ func New(c Config) *Broker {
 		c.AutoReenrol = autoReenrolAll
 	}
 	return &Broker{
+		// identity, keys and policy
 		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
-		manager: c.ManagerIdentity, agents: agents,
+		manager: c.ManagerIdentity, managerSlug: c.ManagerSlug, agents: agents,
 		grantTTL: c.GrantTTL, ticketTTL: c.TicketTTL, log: c.Log,
-		minEpoch: c.RevocationState.MinEpoch,
-		revoked:  revoked,
-		persist:  c.PersistRevocation,
-		apiKey:   c.APIKey, llmUpstream: up,
-		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, resolveAgentID: c.ResolveAgentID, tree: c.Tree, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		version: c.Version, configHash: c.ConfigHash,
+		// persisted state
+		minEpoch: c.RevocationState.MinEpoch, revoked: revoked, persist: c.PersistRevocation,
+		directives: directives,
+		// llm proxy
+		apiKey: c.APIKey, llmUpstream: up,
+		// worker dispatch and messaging
+		runtime: c.Runtime, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		instanceProject: c.InstanceProject, workerToWorker: c.WorkerToWorker,
+		verifyRole: c.VerifyAgentRole, resolveAgentID: c.ResolveAgentID, tree: c.Tree,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval,
-		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
-		reenrolEvents:     make(chan string, reenrolQueueDepth),
-		reenrolNow:        time.Now,
-		reenrolLast:       map[string]time.Time{},
-		reenrolTries:      map[string]int{},
-		directives:        directives,
+		reenrolEvents: make(chan string, reenrolQueueDepth),
+		reenrolNow:    time.Now,
+		reenrolLast:   map[string]time.Time{},
+		reenrolTries:  map[string]int{},
+		// operator directives
 		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
 		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,
 		dirRate: newRateWindow(),
-		version: c.Version, configHash: c.ConfigHash,
 	}
 }
 

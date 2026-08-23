@@ -55,13 +55,9 @@ func (b *Broker) JailHandler() http.Handler {
 	return mux
 }
 
-// EpochResponse aliases wire.EpochResponse for callers that still name it
-// through this package (internal/cli/apply.go).
-type EpochResponse = wire.EpochResponse
-
 // handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
 func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
+	writeJSON(w, wire.EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.

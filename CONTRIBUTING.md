@@ -23,6 +23,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/cli` | Shared by both binaries: the release `Version` constant and the `version` command. |
 | `internal/cli/host` | Cobra commands for `lever` (host control plane). |
 | `internal/cli/manager` | Cobra commands for `lever-manager` (runs inside the agent container). |
+| `internal/cli/clitest` | Test-only helpers shared by `cli/host` and `cli/manager` tests. |
 | `internal/daemon` | Pid-file and listener bookkeeping shared by the host-side daemons. |
 | `internal/config` | `lever.yaml` schema, loading and validation. |
 | `internal/egress` | Jail egress allowlist as iptables/ip6tables rules. |

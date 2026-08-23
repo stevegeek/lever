@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -117,7 +118,7 @@ func TestWriteRenewServicesNoBootstrapIsNoop(t *testing.T) {
 	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), missing, "", "subscription"); err != nil {
 		t.Fatalf("writeRenewServices: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("services file should not exist for a non-brokered agent; stat err = %v", err)
 	}
 }
@@ -138,7 +139,7 @@ func TestWriteRenewServicesEmptyBrokerURLIsNoop(t *testing.T) {
 	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), bootstrap, "", "api-key"); err != nil {
 		t.Fatalf("writeRenewServices: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("services file should not exist for a brokerless bootstrap; stat err = %v", err)
 	}
 }

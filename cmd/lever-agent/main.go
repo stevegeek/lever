@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -219,7 +220,7 @@ func writeClaudeSettingsEnv(path string) func(map[string]string) error {
 			if err := json.Unmarshal(b, &settings); err != nil {
 				return fmt.Errorf("settings %s: parse existing: %w", path, err)
 			}
-		} else if !os.IsNotExist(err) {
+		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("settings %s: read: %w", path, err)
 		}
 		env, _ := settings["env"].(map[string]any)
@@ -378,7 +379,7 @@ func cmdServeCapability(args []string) error {
 			continue
 		}
 		rec := httptest.NewRecorder()
-		req, err := http.NewRequest("POST", "/", bytes.NewReader(line))
+		req, err := http.NewRequest(http.MethodPost, "/", bytes.NewReader(line))
 		if err != nil {
 			continue
 		}

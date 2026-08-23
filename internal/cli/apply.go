@@ -531,7 +531,7 @@ var brokerSelfExe = func() string { return os.Args[0] }
 func (bc *brokerController) Start(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if req, err := http.NewRequestWithContext(probeCtx, "GET", bc.adminURL+"/epoch", nil); err == nil {
+	if req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, bc.adminURL+"/epoch", nil); err == nil {
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			var er broker.EpochResponse
 			decodeErr := json.NewDecoder(resp.Body).Decode(&er)
@@ -564,7 +564,7 @@ func (bc *brokerController) Healthy(ctx context.Context) error {
 	deadline := time.Now().Add(10 * time.Second)
 	epochURL := bc.adminURL + "/epoch"
 	for {
-		req, err := http.NewRequestWithContext(ctx, "GET", epochURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, epochURL, nil)
 		if err != nil {
 			return err
 		}
@@ -592,7 +592,7 @@ func (bc *brokerController) Healthy(ctx context.Context) error {
 // apply.ErrBootstrapLatched so the mint step tolerates it on an idempotent
 // re-apply against the same broker process.
 func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", bc.adminURL+"/bootstrap", bytes.NewReader(nil))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, bc.adminURL+"/bootstrap", bytes.NewReader(nil))
 	if err != nil {
 		return apply.BootstrapMaterial{}, err
 	}

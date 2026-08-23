@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,7 +88,7 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	}
 
 	// The staged bootstrap is gone.
-	if _, err := os.Stat(bootstrap); !os.IsNotExist(err) {
+	if _, err := os.Stat(bootstrap); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("bootstrap.json must be removed, stat err = %v", err)
 	}
 	// The HostWorkspace and its work product survive.

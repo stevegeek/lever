@@ -862,7 +862,7 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 	// Through a REAL listener, so Host is the loopback address httptest chose.
 	// Set it to the tailnet name the Config serves, which is what `tailscale
 	// serve` forwards — otherwise the Host gate refuses it (see hostAllowed).
-	req, err := http.NewRequest("GET", proxy.URL+"/api/v1/agents/x/transcript", nil)
+	req, err := http.NewRequest(http.MethodGet, proxy.URL+"/api/v1/agents/x/transcript", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

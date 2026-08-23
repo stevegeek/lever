@@ -32,7 +32,7 @@ func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoi
 	if err != nil {
 		return zero, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+endpoint, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return zero, err
 	}

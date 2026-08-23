@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +39,7 @@ func TestReloadStopsBrokerBeforeApply(t *testing.T) {
 	if err == nil {
 		t.Fatal("reload should surface the backend error")
 	}
-	if _, statErr := os.Stat(pidPath); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(pidPath); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("broker pid file still present — StopBroker did not run before apply (err=%v)", err)
 	}
 }

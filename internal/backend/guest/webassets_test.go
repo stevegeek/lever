@@ -2,6 +2,8 @@ package guest
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -252,7 +254,7 @@ func TestCopyTreeNormalisesReadOnlySourceModes(t *testing.T) {
 			t.Fatalf("%s copied read-only (%04o); npm could not write it", rel, fi.Mode().Perm())
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dst, "node_modules")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dst, "node_modules")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("node_modules was copied; it must be reinstalled by npm ci, not carried over")
 	}
 }

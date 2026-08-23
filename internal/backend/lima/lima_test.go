@@ -2,6 +2,8 @@ package lima
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -125,7 +127,7 @@ func TestEnsureUpFreshHostFullSequence(t *testing.T) {
 	if !strings.Contains(tmpPath, "lever-lima-") {
 		t.Fatalf("create tmpfile path should be under a lever-lima- prefix, got %q", tmpPath)
 	}
-	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(tmpPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected tmpfile %q to be removed after EnsureUp, stat err=%v", tmpPath, err)
 	}
 }

@@ -1,6 +1,8 @@
 package brokerctl
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -33,7 +35,7 @@ func TestRemovePIDFileIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	removePIDFile(st)
-	if _, err := os.Stat(st.PID()); !os.IsNotExist(err) {
+	if _, err := os.Stat(st.PID()); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("pid file should be gone after removePIDFile")
 	}
 }

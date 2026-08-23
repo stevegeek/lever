@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -422,30 +423,10 @@ func (p *Provider) record(r *http.Request, decision string, status int, reason s
 // scheme match is case-insensitive per RFC 7235; the token is returned as-is.
 func bearerToken(header string) (string, bool) {
 	const prefix = "bearer "
-	if len(header) <= len(prefix) || !equalFoldASCII(header[:len(prefix)], prefix) {
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return "", false
 	}
 	return header[len(prefix):], true
-}
-
-// equalFoldASCII compares two equal-length ASCII strings case-insensitively.
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range len(a) {
-		x, y := a[i], b[i]
-		if 'A' <= x && x <= 'Z' {
-			x += 'a' - 'A'
-		}
-		if 'A' <= y && y <= 'Z' {
-			y += 'a' - 'A'
-		}
-		if x != y {
-			return false
-		}
-	}
-	return true
 }
 
 // randomSecret returns secretBytes of crypto/rand entropy, hex-encoded.

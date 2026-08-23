@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -2168,7 +2169,7 @@ func TestRemoveStaleMarker(t *testing.T) {
 	if err := removeStaleMarker(d1); err != nil {
 		t.Fatalf("removeStaleMarker(file): %v", err)
 	}
-	if _, err := os.Stat(mf); !os.IsNotExist(err) {
+	if _, err := os.Stat(mf); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("marker file should be gone, stat err=%v", err)
 	}
 
@@ -2215,7 +2216,7 @@ func TestRegisterRemovesStaleMarkerBeforeInit(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("stale marker should have been removed before init, stat err=%v", err)
 	}
 }
@@ -2290,7 +2291,7 @@ func TestRegisterHostFallbackWhenRemoveJailFileNil(t *testing.T) {
 	if err := Run(context.Background(), app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("host-side fallback should have removed the marker, stat err=%v", err)
 	}
 }

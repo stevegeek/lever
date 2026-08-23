@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -41,7 +42,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 						if serr := st.StopRemoteProxy(); serr != nil {
 							cmd.PrintErrf("warning: stopping remote proxy: %v\n", serr)
 						}
-						if serr := os.Remove(st.RemoteStamp()); serr != nil && !os.IsNotExist(serr) {
+						if serr := os.Remove(st.RemoteStamp()); serr != nil && !errors.Is(serr, fs.ErrNotExist) {
 							cmd.PrintErrf("warning: removing the remote proxy stamp: %v\n", serr)
 						}
 						clearStagedRuntimeState(app)

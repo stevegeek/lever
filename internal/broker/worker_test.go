@@ -6,7 +6,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -646,7 +648,7 @@ func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 		t.Fatalf("revoked manager dispatch: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
 	// No bootstrap staged, no start attempted.
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("revoked dispatch must not stage bootstrap")
 	}
 }

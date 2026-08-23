@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -73,7 +75,7 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			// the bootstrap dir lives inside, holds the worker's work product and is
 			// never touched.
 			bootstrap := filepath.Join(spec.BootstrapDir, "bootstrap.json")
-			if err := os.Remove(bootstrap); err != nil && !os.IsNotExist(err) {
+			if err := os.Remove(bootstrap); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				cmd.PrintErrf("warning: removing staged bootstrap %s: %v\n", bootstrap, err)
 			}
 			_ = os.Remove(spec.BootstrapDir) // removed only if now empty

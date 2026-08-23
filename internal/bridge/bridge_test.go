@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ func TestPollOncePropagatesInboxErrorWithoutWriting(t *testing.T) {
 	if _, err := b.PollOnce(context.Background()); err == nil {
 		t.Fatal("PollOnce must propagate the Inbox error")
 	}
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
+	if _, err := os.Stat(file); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("PollOnce must not create the events file when Inbox fails")
 	}
 }

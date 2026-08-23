@@ -1,3 +1,5 @@
+//go:build integration
+
 package hubapi
 
 import (
@@ -20,11 +22,12 @@ import (
 // Unit tests cannot cover that — they stub the runner, so the script never
 // meets a real shell. This is exactly where a backend difference would hide.
 //
-// Skipped unless LEVER_VM_PREFIX is set. Run it as:
+// Gated behind the `integration` build tag and skipped unless LEVER_VM_PREFIX
+// is set. Run it as:
 //
 //	# Lima (start a VM, then serve JSON on :8080 inside it)
 //	LEVER_VM_PREFIX='limactl,shell,levercurltest' \
-//	  go test ./internal/hubapi/ -run TestJailCurlAgainstRealVM -v
+//	  go test -tags integration ./internal/hubapi/ -run TestJailCurlAgainstRealVM -v
 //
 //	# OrbStack
 //	LEVER_VM_PREFIX='orb,-m,lever-assistant' ...

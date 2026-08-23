@@ -66,7 +66,7 @@ unless `LEVER_IMAGE_FORCE=1`.
 
 ```bash
 go test ./...          # unit and acceptance-fixture tests
-go test -tags integration ./...  # also the tests that build binaries or need OrbStack (brokerctl, backend/orbstack)
+make test-integration  # `-tags integration` tests; each skips unless its env/tooling is present  # also brokerctl (builds lever-tool-db) and backend/orbstack
 make test-apikey-e2e   # live api-key /llm path with a fake upstream; needs OrbStack + podman
 make test-lima-e2e     # live lima backend gate; needs Lima >= 2.0
 lever acceptance       # six-check live gate against a running instance

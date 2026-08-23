@@ -49,28 +49,84 @@ func tcpDial(addr string) error {
 	return c.Close()
 }
 
-// checkBrokerAlive verifies the recorded broker process is alive AND actually
-// listening on the jail port. It distinguishes three failure modes so the fix
-// is unambiguous: never started, died (stale pid), and alive-but-not-serving.
-func checkBrokerAlive(st brokerctl.State, jailPort int, dial dialFunc) checkResult {
-	const name = "broker running"
-	pid, found, alive := st.BrokerPIDStatus()
+// doctorProbes is every host-side observation doctor makes that reaches
+// outside the process: TCP dials, HTTP requests to the remote proxy, and
+// subprocesses. Checks take the struct rather than a package variable so a
+// test builds its own value and never races another test's override.
+// productionProbes builds the real one.
+type doctorProbes struct {
+	// dial reports whether something listens on a TCP address.
+	dial dialFunc
+	// goVersion runs `go version` on the host PATH.
+	goVersion func() (string, error)
+	// nodeToolchain validates node+npm for the scion web-asset build and
+	// returns the node version.
+	nodeToolchain func() (string, error)
+	// claudeVersion reads the baked Claude Code version label of an image.
+	claudeVersion func(imageRef string) (string, error)
+	// remoteHealthz issues GET /healthz through the remote-access proxy.
+	remoteHealthz func(port int, tsLogin string) (int, error)
+	// remoteLogin inspects the local OIDC provider on its loopback port.
+	remoteLogin func(port int) (loginProbeResult, error)
+	// remoteJailLogin asks the hub, from inside the jail, to start a login.
+	remoteJailLogin func(ctx context.Context, jr leverexec.Runner, hubURL string) (status int, redirect string, err error)
+}
+
+// productionProbes wires the real probes. Host subprocesses (go, node,
+// docker) run through r.
+func productionProbes(r leverexec.Runner) doctorProbes {
+	return doctorProbes{
+		dial:            tcpDial,
+		goVersion:       func() (string, error) { return goVersionProbe(r) },
+		nodeToolchain:   func() (string, error) { return nodeToolchainProbe(r) },
+		claudeVersion:   func(imageRef string) (string, error) { return claudeVersionProbe(r, imageRef) },
+		remoteHealthz:   remoteHealthzProbe,
+		remoteLogin:     remoteLoginProbe,
+		remoteJailLogin: remoteJailLoginProbe,
+	}
+}
+
+// doctorHTTPClient is the client every loopback HTTP probe shares: the proxy
+// and its login provider answer on 127.0.0.1, so a short timeout is enough to
+// tell "down" from "up".
+var doctorHTTPClient = &http.Client{Timeout: 3 * time.Second}
+
+// stateRel renders a state-dir file the way doctor's fix text names it:
+// relative to the instance root (".lever-state/remote.log"), never the
+// absolute path.
+func stateRel(st brokerctl.State, path string) string {
+	return filepath.Join(filepath.Base(st.Dir), filepath.Base(path))
+}
+
+// checkListeningProcess is the pid-then-port ladder shared by the broker and
+// remote-proxy checks: a recorded process must exist, be alive, and actually
+// listen on addr. It distinguishes three failure modes so the fix is
+// unambiguous — never started, died (stale pid), and alive-but-not-serving.
+// On success the returned result is the pass line; the caller may keep
+// probing and replace it.
+func checkListeningProcess(name, pidFile, what, logFile, startFix string, status func() (pid int, found, alive bool), addr string, dial dialFunc) checkResult {
+	pid, found, alive := status()
 	switch {
 	case !found:
-		return checkResult{name, false, "no broker.pid — the broker was never started (or was cleanly stopped)", "run `lever apply` or `lever up`"}
+		return checkResult{name, false, fmt.Sprintf("no %s — %s was never started (or was cleanly stopped)", pidFile, what), startFix}
 	case !alive:
-		return checkResult{name, false, fmt.Sprintf("broker.pid names pid %d, but that process is gone (stale pid file)", pid), "run `lever apply` or `lever up`"}
+		return checkResult{name, false, fmt.Sprintf("%s names pid %d, but that process is gone (stale pid file)", pidFile, pid), startFix}
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", jailPort)
 	if err := dial(addr); err != nil {
-		return checkResult{name, false, fmt.Sprintf("pid %d is alive but nothing is listening on %s", pid, addr), "inspect .lever-state/broker.log, then restart with `lever apply`"}
+		return checkResult{name, false, fmt.Sprintf("pid %d is alive but nothing is listening on %s", pid, addr), "inspect " + logFile + ", then restart with `lever apply`"}
 	}
 	return checkResult{name, true, fmt.Sprintf("pid %d, serving on %s", pid, addr), ""}
 }
 
+// checkBrokerAlive verifies the recorded broker process is alive AND actually
+// listening on the jail port.
+func checkBrokerAlive(st brokerctl.State, jailPort int, p doctorProbes) checkResult {
+	return checkListeningProcess("broker running", "broker.pid", "the broker", stateRel(st, st.Log()),
+		"run `lever apply` or `lever up`", st.BrokerPIDStatus, fmt.Sprintf("127.0.0.1:%d", jailPort), p.dial)
+}
+
 // remoteHealthzProbe issues GET /healthz against the local remote-access
-// proxy and returns the response status code. A package-level var so tests
-// can inject a fake outcome (mirrors goVersionProbe/claudeVersionProbe).
+// proxy and returns the response status code.
 //
 // tsLogin, when non-empty, is sent as Tailscale-User-Login. The proxy's own
 // allowed_users gate (remoteproxy.Handler) trusts that header exactly as
@@ -79,7 +135,7 @@ func checkBrokerAlive(st brokerctl.State, jailPort int, dial dialFunc) checkResu
 // the first configured allowed user rather than let a pinned instance 403
 // its own liveness probe. An unpinned instance (allowed_users empty) sends
 // no header at all, matching an ordinary curl/native-client request.
-var remoteHealthzProbe = func(port int, tsLogin string) (int, error) {
+func remoteHealthzProbe(port int, tsLogin string) (int, error) {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/healthz", port), nil)
 	if err != nil {
 		return 0, err
@@ -87,8 +143,7 @@ var remoteHealthzProbe = func(port int, tsLogin string) (int, error) {
 	if tsLogin != "" {
 		req.Header.Set("Tailscale-User-Login", tsLogin)
 	}
-	client := http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := doctorHTTPClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -104,8 +159,7 @@ type loginProbeResult struct {
 	authzURL  string // the authorization_endpoint discovery advertises
 }
 
-// remoteLoginProbe inspects the local OIDC provider on its loopback port. A
-// package-level var so tests can inject an outcome (like remoteHealthzProbe).
+// remoteLoginProbe inspects the local OIDC provider on its loopback port.
 //
 // It checks the two things that can silently break the login path — discovery
 // not being served at all, and the security property the whole design rests
@@ -113,12 +167,11 @@ type loginProbeResult struct {
 // /authorize (the proxy drives the login server-side and mints codes
 // in-process), so anything but a 404 means this build can mint an
 // authorization code over HTTP, on a port every jailed agent can reach.
-var remoteLoginProbe = func(port int) (loginProbeResult, error) {
-	client := http.Client{Timeout: 3 * time.Second}
+func remoteLoginProbe(port int) (loginProbeResult, error) {
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	var out loginProbeResult
 
-	resp, err := client.Get(base + "/.well-known/openid-configuration")
+	resp, err := doctorHTTPClient.Get(base + "/.well-known/openid-configuration")
 	if err != nil {
 		return out, err
 	}
@@ -131,7 +184,7 @@ var remoteLoginProbe = func(port int) (loginProbeResult, error) {
 		out.authzURL = doc.AuthorizationEndpoint
 	}
 
-	aresp, err := client.Get(base + "/authorize")
+	aresp, err := doctorHTTPClient.Get(base + "/authorize")
 	if err != nil {
 		return out, err
 	}
@@ -155,9 +208,8 @@ var remoteLoginProbe = func(port int) (loginProbeResult, error) {
 const remoteJailLoginScript = `exec /usr/bin/curl -sS --connect-timeout 5 --max-time 20 ` +
 	`-o /dev/null -w '%{http_code} %{redirect_url}' "$1"`
 
-// remoteJailLoginProbe runs that request and parses its answer. A
-// package-level var so tests can inject an outcome.
-var remoteJailLoginProbe = func(ctx context.Context, jr leverexec.Runner, hubURL string) (status int, redirect string, err error) {
+// remoteJailLoginProbe runs that request and parses its answer.
+func remoteJailLoginProbe(ctx context.Context, jr leverexec.Runner, hubURL string) (status int, redirect string, err error) {
 	res, err := jr.Run(ctx, nil, "sh", "-c", remoteJailLoginScript, "_", hubURL+"/auth/login/oidc")
 	if err != nil {
 		return 0, "", fmt.Errorf("%v: %s", err, strings.TrimSpace(res.Stderr))
@@ -209,11 +261,11 @@ func isLoopbackURL(raw string) bool {
 // chain worked at the time of the FIRST login since the hub started — not
 // that it is reachable this second. The forwarder dying after that (a guest
 // reboot, say) surfaces on the next cold login, not here.
-func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner) (detail string, fix string, ok bool) {
+func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner, st brokerctl.State, p doctorProbes) (detail string, fix string, ok bool) {
 	if jr == nil {
 		return "", "", true // no jail transport wired (tests)
 	}
-	status, redirect, err := remoteJailLoginProbe(ctx, jr, scionpkg.DefaultHubEndpoint)
+	status, redirect, err := p.remoteJailLogin(ctx, jr, scionpkg.DefaultHubEndpoint)
 	switch {
 	case err != nil:
 		return fmt.Sprintf("could not ask the hub to start a login from inside the jail: %v", err),
@@ -228,7 +280,7 @@ func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner) (detail stri
 				"closed chain is deliberately never rebuilt in place (internal/backend/guest.ApplyEgress, the I2 property)", false
 	case status != http.StatusFound:
 		return fmt.Sprintf("the hub answered %d when asked to start a login, want 302", status),
-			"inspect .lever-state/remote.log", false
+			"inspect " + stateRel(st, st.RemoteLog()), false
 	case !strings.HasPrefix(redirect, remoteproxy.DeadAuthorizationEndpoint):
 		return fmt.Sprintf("the hub starts logins against %q, not lever's provider", redirect),
 			"another OIDC provider is configured in the jail's ~/.scion/settings.yaml — remove it and re-run `lever apply`", false
@@ -261,23 +313,19 @@ func checkRemoteLoginPath(ctx context.Context, jr leverexec.Runner) (detail stri
 // (delete remote.pat, then `lever apply`) is the same shape as the
 // documented controller-PAT re-mint, default expiry 90d (see the
 // remote-access guide).
-func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, dial dialFunc, jr leverexec.Runner) checkResult {
+func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, p doctorProbes, jr leverexec.Runner) checkResult {
 	const name = "remote access"
 	if !app.RemoteEnabled() {
 		return checkResult{name, true, "disabled", ""}
 	}
 	const applyFix = "run `lever apply`"
-	pid, found, alive := remotePIDStatus(state.RemotePID())
-	switch {
-	case !found:
-		return checkResult{name, false, "no remote.pid — the proxy was never started (or was cleanly stopped)", applyFix}
-	case !alive:
-		return checkResult{name, false, fmt.Sprintf("remote.pid names pid %d, but that process is gone (stale pid file)", pid), applyFix}
-	}
+	remoteLog := stateRel(state, state.RemoteLog())
 	port := app.EffectiveRemotePort()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	if err := dial(addr); err != nil {
-		return checkResult{name, false, fmt.Sprintf("pid %d is alive but nothing is listening on %s", pid, addr), "inspect .lever-state/remote.log, then restart with `lever apply`"}
+	alive := checkListeningProcess(name, "remote.pid", "the proxy", remoteLog, applyFix,
+		func() (int, bool, bool) { return remotePIDStatus(state.RemotePID()) }, addr, p.dial)
+	if !alive.ok {
+		return alive
 	}
 	fi, err := os.Stat(state.RemotePAT())
 	switch {
@@ -295,14 +343,14 @@ func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, di
 	// the one actionable message ("a login port granted since the instance came
 	// up needs `lever down` + `lever up`") was the very next check.
 	loginPort := app.EffectiveRemoteLoginPort()
-	login, err := remoteLoginProbe(loginPort)
+	login, err := p.remoteLogin(loginPort)
 	switch {
 	case err != nil:
 		return checkResult{name, false, fmt.Sprintf("the login provider on 127.0.0.1:%d is unreachable: %v", loginPort, err),
-			"inspect .lever-state/remote.log — without it the hub cannot log the browser in, and the web UI stays at 401"}
+			"inspect " + remoteLog + " — without it the hub cannot log the browser in, and the web UI stays at 401"}
 	case login.discovery != http.StatusOK:
 		return checkResult{name, false, fmt.Sprintf("the login provider answered %d to OIDC discovery, want 200", login.discovery),
-			"inspect .lever-state/remote.log"}
+			"inspect " + remoteLog}
 	case login.authorize != http.StatusNotFound:
 		// Loud on purpose: a provider that answers /authorize can mint an
 		// authorization code over HTTP, and every jailed agent can reach that
@@ -318,20 +366,20 @@ func checkRemote(ctx context.Context, app *config.App, state brokerctl.State, di
 		return checkResult{name, false, fmt.Sprintf("OIDC discovery advertises an authorization endpoint on loopback (%s), which the jail can reach", login.authzURL),
 			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
 	}
-	if detail, fix, ok := checkRemoteLoginPath(ctx, jr); !ok {
+	if detail, fix, ok := checkRemoteLoginPath(ctx, jr, state, p); !ok {
 		return checkResult{name, false, detail, fix}
 	}
 
 	// Last, because it depends on everything above: this is the only probe
 	// that goes end to end through the proxy to the hub.
-	status, err := remoteHealthzProbe(port, firstOrEmpty(app.Remote.AllowedUsers))
+	status, err := p.remoteHealthz(port, firstOrEmpty(app.Remote.AllowedUsers))
 	if err != nil {
-		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect .lever-state/remote.log — the hub may be down, or the proxy misconfigured"}
+		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect " + remoteLog + " — the hub may be down, or the proxy misconfigured"}
 	}
 	if status != http.StatusOK {
-		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect .lever-state/remote.log and .lever-state/remote-audit.jsonl"}
+		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect " + remoteLog + " and " + stateRel(state, state.RemoteAudit())}
 	}
-	return checkResult{name, true, fmt.Sprintf("pid %d, serving on %s, PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", pid, addr, loginPort), ""}
+	return checkResult{name, true, alive.detail + fmt.Sprintf(", PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", loginPort), ""}
 }
 
 // firstOrEmpty returns the first element of ss, or "" when ss is empty.
@@ -349,7 +397,7 @@ func firstOrEmpty(ss []string) string {
 // validation already rejects an unresolvable supervised command, so a config
 // that loaded is expected to pass the resolution half here — this check is the
 // operator-facing confirmation and the external-liveness probe.
-func checkToolBackends(tools []config.Tool, dial dialFunc) checkResult {
+func checkToolBackends(tools []config.Tool, p doctorProbes) checkResult {
 	const name = "tool backends"
 	var down []string
 	probed := 0
@@ -357,7 +405,7 @@ func checkToolBackends(tools []config.Tool, dial dialFunc) checkResult {
 		probed++
 		if t.External {
 			addr := backendHostPort(t.Backend)
-			if err := dial(addr); err != nil {
+			if err := p.dial(addr); err != nil {
 				down = append(down, fmt.Sprintf("%s (external, %s)", t.Name, addr))
 			}
 			continue
@@ -619,23 +667,22 @@ func checkMcpJsonInTree(tree string) checkResult {
 	return checkResult{name, true, "none in tree", ""}
 }
 
-// goVersionProbe resolves and runs `go version` on the host PATH. It is a
-// package-level var so tests can inject a fake outcome (mirrors dialFunc).
-// The production implementation distinguishes "not on PATH at all" from "on
-// PATH but broken" (e.g. a dead asdf/mise shim, which typically fails with
-// exit status 126) by resolving via exec.LookPath first.
-var goVersionProbe = func() (string, error) {
+// goVersionProbe resolves and runs `go version` on the host PATH. It
+// distinguishes "not on PATH at all" from "on PATH but broken" (e.g. a dead
+// asdf/mise shim, which typically fails with exit status 126) by resolving via
+// exec.LookPath first.
+func goVersionProbe(r leverexec.Runner) (string, error) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, goBin, "version").CombinedOutput()
+	res, err := r.Run(ctx, nil, goBin, "version")
 	if err != nil {
 		return "", fmt.Errorf("%s version: %w", goBin, err)
 	}
-	return string(out), nil
+	return res.Stdout, nil
 }
 
 // checkGoToolchain verifies a real, working Go toolchain is resolvable on
@@ -644,12 +691,12 @@ var goVersionProbe = func() (string, error) {
 // broken shim (e.g. asdf/mise without the version installed) fails with an
 // opaque "exit status 126" deep inside apply; this turns it into an
 // up-front, actionable diagnosis. No build requested => no go needed => pass.
-func checkGoToolchain(scion config.ScionConfig) checkResult {
+func checkGoToolchain(scion config.ScionConfig, p doctorProbes) checkResult {
 	const name = "go toolchain"
 	if scion.Source == "" && scion.Version == "" {
 		return checkResult{name, true, "scion build not required", ""}
 	}
-	out, err := goVersionProbe()
+	out, err := p.goVersion()
 	if err != nil {
 		return checkResult{name, false, "go toolchain not usable: " + err.Error(),
 			`put a REAL Go toolchain on PATH (not just an asdf/mise shim), e.g. export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"; ` + "`go version` should print"}
@@ -658,8 +705,7 @@ func checkGoToolchain(scion config.ScionConfig) checkResult {
 }
 
 // nodeToolchainProbe resolves and validates node+npm for the scion web-asset
-// build, returning the node version. A package-level var so tests can inject a
-// fake outcome (mirrors goVersionProbe).
+// build, returning the node version.
 //
 // It probes inside the build's own cache directory, and creates that directory
 // to do so. A version manager that resolves node by walking UP for a project
@@ -667,7 +713,7 @@ func checkGoToolchain(scion config.ScionConfig) checkResult {
 // probe run in the user's project — which may have its own .tool-versions —
 // would not be evidence about the build, which runs elsewhere. Same reason
 // fetchScionModule resolves the real go binary rather than trusting a shim.
-var nodeToolchainProbe = func() (string, error) {
+func nodeToolchainProbe(r leverexec.Runner) (string, error) {
 	root, err := guest.WebBuildCacheRoot()
 	if err != nil {
 		return "", err
@@ -677,7 +723,7 @@ var nodeToolchainProbe = func() (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return guest.CheckNodeToolchain(ctx, leverexec.RealRunner{}, root)
+	return guest.CheckNodeToolchain(ctx, r, root)
 }
 
 // checkNodeToolchain verifies node+npm can build scion's web UI when the
@@ -686,12 +732,12 @@ var nodeToolchainProbe = func() (string, error) {
 // deep in npm or — worse, before the build existed — as scion's bare "Web UI
 // Not Available" page in the browser, long after the cause. No UI to build =>
 // no node needed => pass.
-func checkNodeToolchain(app *config.App) checkResult {
+func checkNodeToolchain(app *config.App, p doctorProbes) checkResult {
 	const name = "node toolchain"
 	if !app.ScionWebAssets() {
 		return checkResult{name, true, "scion web UI build not required", ""}
 	}
-	version, err := nodeToolchainProbe()
+	version, err := p.nodeToolchain()
 	if err != nil {
 		fix := ""
 		if errors.Is(err, guest.ErrNodeToolchain) {
@@ -942,16 +988,21 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 }
 
 // claudeVersionProbe reads the baked Claude Code version from an image's
-// `claude_code_version` label via `docker image inspect`. Overridable in tests.
-var claudeVersionProbe = func(imageRef string) (string, error) {
+// `claude_code_version` label via `docker image inspect`. The image ID
+// inspect in internal/jail (hostImageID) reads a different field and is not
+// exported, so this is its own invocation.
+func claudeVersionProbe(r leverexec.Runner, imageRef string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "image", "inspect",
-		"--format", `{{index .Config.Labels "claude_code_version"}}`, imageRef).CombinedOutput()
+	res, err := r.Run(ctx, nil, "docker", "image", "inspect",
+		"--format", `{{index .Config.Labels "claude_code_version"}}`, imageRef)
 	if err != nil {
-		return "", fmt.Errorf("%s", strings.TrimSpace(string(out)))
+		if msg := strings.TrimSpace(res.Stderr + res.Stdout); msg != "" {
+			return "", errors.New(msg)
+		}
+		return "", err
 	}
-	v := strings.TrimSpace(string(out))
+	v := strings.TrimSpace(res.Stdout)
 	if v == "<no value>" { // label absent
 		v = ""
 	}
@@ -962,9 +1013,9 @@ var claudeVersionProbe = func(imageRef string) (string, error) {
 // image. It reads a label (no container run). A missing label means a
 // pre-label image and is reported informationally, not as a failure; an
 // inspect error (image not built/loaded) is a real fault.
-func checkClaudeVersion(imageRef string, probe func(string) (string, error)) checkResult {
+func checkClaudeVersion(imageRef string, p doctorProbes) checkResult {
 	const name = "agent claude version"
-	v, err := probe(imageRef)
+	v, err := p.claudeVersion(imageRef)
 	if err != nil {
 		return checkResult{name, false, "could not inspect image " + imageRef + ": " + err.Error(),
 			"build/load the agent image (`lever apply`) before this check can read its baked version"}

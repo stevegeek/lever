@@ -278,22 +278,20 @@ func TestMCPRemoveArgsUserScope(t *testing.T) {
 	}
 }
 
-// TestClaudeMCPAddIsIdempotent verifies claudeMCPAdd removes before adding and
+// TestClaudeMCPAddIsIdempotent verifies claudeMCP.Add removes before adding and
 // ignores a failing remove (absent server), so a re-boot (scion resume) can't
 // fail the pre-start hook on "already exists".
 func TestClaudeMCPAddIsIdempotent(t *testing.T) {
 	var calls [][]string
-	orig := runCommand
-	defer func() { runCommand = orig }()
-	runCommand = func(name string, args ...string) ([]byte, error) {
+	c := claudeMCP{run: func(name string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string{name}, args...))
 		if len(args) > 1 && args[1] == "remove" {
 			return []byte("No MCP server named \"db\""), errors.New("exit status 1") // absent → non-zero
 		}
 		return nil, nil
-	}
-	if err := claudeMCPAdd("db", "--transport", "http", "https://broker/mcp/db/"); err != nil {
-		t.Fatalf("a failing remove must be ignored; claudeMCPAdd returned %v", err)
+	}}
+	if err := c.Add("db", "--transport", "http", "https://broker/mcp/db/"); err != nil {
+		t.Fatalf("a failing remove must be ignored; claudeMCP.Add returned %v", err)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("want remove then add (2 calls), got %d: %v", len(calls), calls)
@@ -309,15 +307,13 @@ func TestClaudeMCPAddIsIdempotent(t *testing.T) {
 
 // TestClaudeMCPAddSurfacesAddError: a failing ADD (not remove) must surface.
 func TestClaudeMCPAddSurfacesAddError(t *testing.T) {
-	orig := runCommand
-	defer func() { runCommand = orig }()
-	runCommand = func(name string, args ...string) ([]byte, error) {
+	c := claudeMCP{run: func(name string, args ...string) ([]byte, error) {
 		if len(args) > 1 && args[1] == "add" {
 			return []byte("boom"), errors.New("exit status 1")
 		}
 		return nil, nil
-	}
-	if err := claudeMCPAdd("db", "--transport", "http", "u"); err == nil {
+	}}
+	if err := c.Add("db", "--transport", "http", "u"); err == nil {
 		t.Fatal("a failing add must return an error")
 	}
 }

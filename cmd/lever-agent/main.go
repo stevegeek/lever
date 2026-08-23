@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -114,7 +115,7 @@ func cmdBoot(args []string) error {
 		DiscoverTools: !tools.set,
 		SettingsPath:  *settingsPath,
 		LLMAuth:       *llmAuth,
-		MCPAdd:        claudeMCPAdd,
+		MCPAdd:        newClaudeMCP().Add,
 	}
 	if *enrolOnly {
 		// Enrol + write identity only: skip the env overlay, the llm token and
@@ -163,22 +164,30 @@ func mcpRemoveArgs(name string) []string {
 	return []string{"mcp", "remove", "--scope", "user", name}
 }
 
-// runCommand is the exec seam (overridden in tests) so claudeMCPAdd's
+// claudeMCP registers MCP servers through the `claude` CLI. run executes one
+// command and returns its combined output; tests substitute a recorder so the
 // remove-then-add ordering and error handling are testable without a real
 // `claude` binary.
-var runCommand = func(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput()
+type claudeMCP struct {
+	run func(name string, args ...string) ([]byte, error)
 }
 
-// claudeMCPAdd registers an MCP server, idempotently. `claude mcp add` exits
+// newClaudeMCP is the production registrar, exec'ing `claude` from PATH.
+func newClaudeMCP() claudeMCP {
+	return claudeMCP{run: func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	}}
+}
+
+// Add registers an MCP server, idempotently. `claude mcp add` exits
 // non-zero if the server already exists, and the scion pre-start hook runs boot
 // under `set -eu` on every container start — so on a resume (same persistent
 // /home/scion), an unconditional add would fail the hook and block bring-up.
 // Removing first (ignoring "no such server", which also exits non-zero) makes it
 // a clean upsert regardless of prior state.
-func claudeMCPAdd(name string, argv ...string) error {
-	_, _ = runCommand("claude", mcpRemoveArgs(name)...) // ignore: absent is fine
-	out, err := runCommand("claude", mcpAddArgs(name, argv)...)
+func (c claudeMCP) Add(name string, argv ...string) error {
+	_, _ = c.run("claude", mcpRemoveArgs(name)...) // ignore: absent is fine
+	out, err := c.run("claude", mcpAddArgs(name, argv)...)
 	if err != nil {
 		return fmt.Errorf("claude mcp add %s: %w: %s", name, err, out)
 	}
@@ -397,57 +406,45 @@ func cmdProvision(args []string) error {
 	return nil
 }
 
+// cliArgs is what one capability verb (request, delegate, call) parsed from
+// its flags, plus the remaining key=value constraints.
+type cliArgs struct {
+	verb                            string
+	idDir, brokerURL, bootstrapPath string
+	tool, op, to, token             string
+	constraints                     map[string]string
+}
+
+// cliSession is a parsed verb with its identity and broker client resolved.
+type cliSession struct {
+	cliArgs
+	id        agent.Identity
+	brokerURL string
+	client    *http.Client
+}
+
+// cliVerbs dispatches each capability verb to its action.
+var cliVerbs = map[string]func(context.Context, cliSession) error{
+	"request":  cliRequest,
+	"delegate": cliDelegate,
+	"call":     cliCall,
+}
+
+// cmdCLI runs one capability verb: parse, validate, resolve identity + broker,
+// then dispatch through cliVerbs.
 func cmdCLI(verb string, args []string) error {
-	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
-	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
-	// verb-specific flags
-	var tool, op, to, tokenStr string
-	switch verb {
-	case "request", "delegate":
-		fs.StringVar(&tool, "tool", "", "tool name")
-		fs.StringVar(&op, "op", "", "operation")
-		if verb == "delegate" {
-			fs.StringVar(&to, "to", "", "recipient agent CN")
-		}
-	case "call":
-		fs.StringVar(&tool, "tool", "", "tool name")
-		fs.StringVar(&op, "op", "", "operation name (maps to params.name in the JSON-RPC envelope)")
-		fs.StringVar(&tokenStr, "token", "", "base64url capability token")
-	}
-	if err := fs.Parse(args); err != nil {
+	a, err := parseCLIArgs(verb, args)
+	if err != nil {
 		return err
 	}
-
-	// Validate the caller's own arguments before touching the identity, the
-	// filesystem or the network, so a bad invocation names the bad argument
-	// instead of surfacing as whatever unrelated thing fails first. lever-agent
-	// is on $PATH inside every agent jail, so these verbs are the same mint path
-	// the capability MCP tool exposes and carried the same hazard: `delegate`
-	// with no recipient sent an EMPTY bind target, which the broker defaults to
-	// the caller ("default: self-obtain"), printing a SELF-bound token as an
-	// ordinary success. See requestArgs/delegateArgs in
-	// internal/agent/mcpserver.go — the checks are deliberately not shared,
-	// because the surfaces differ: here flags and constraints occupy separate
-	// namespaces, so a positional `to=...` is unambiguously a constraint, while
-	// the MCP tool has one flat argument map in which it is ambiguous.
-	switch verb {
-	case "request", "delegate":
-		if strings.TrimSpace(tool) == "" {
-			return fmt.Errorf(`%s: missing required argument "-tool"`, verb)
-		}
-		if strings.TrimSpace(op) == "" {
-			return fmt.Errorf(`%s: missing required argument "-op"`, verb)
-		}
-		if verb == "delegate" && strings.TrimSpace(to) == "" {
-			return errors.New(`delegate: missing required argument "-to" (the recipient agent CN); use "request" to mint a token for yourself`)
-		}
+	if err := validateCLIArgs(a); err != nil {
+		return err
 	}
-
-	id, ok := agent.LoadIdentity(*idDir)
+	id, ok := agent.LoadIdentity(a.idDir)
 	if !ok {
-		return fmt.Errorf("%s: no identity in %s", verb, *idDir)
+		return fmt.Errorf("%s: no identity in %s", verb, a.idDir)
 	}
-	bURL, err := resolveBrokerURL(*brokerURL, *bootstrapPath)
+	bURL, err := resolveBrokerURL(a.brokerURL, a.bootstrapPath)
 	if err != nil {
 		return fmt.Errorf("%s: %w", verb, err)
 	}
@@ -455,56 +452,109 @@ func cmdCLI(verb string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: build mTLS client: %w", verb, err)
 	}
-	ctx := context.Background()
+	return cliVerbs[verb](context.Background(), cliSession{cliArgs: a, id: id, brokerURL: bURL, client: client})
+}
 
-	// Build remaining constraints from any extra key=value args.
-	constraints := map[string]string{}
-	for _, a := range fs.Args() {
-		k, v, ok := strings.Cut(a, "=")
-		if ok {
-			constraints[k] = v
+// parseCLIArgs registers the verb's flags and parses args into a cliArgs.
+// Extra positional key=value args become constraints.
+func parseCLIArgs(verb string, args []string) (cliArgs, error) {
+	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
+	a := cliArgs{verb: verb, constraints: map[string]string{}}
+	switch verb {
+	case "request", "delegate":
+		fs.StringVar(&a.tool, "tool", "", "tool name")
+		fs.StringVar(&a.op, "op", "", "operation")
+		if verb == "delegate" {
+			fs.StringVar(&a.to, "to", "", "recipient agent CN")
+		}
+	case "call":
+		fs.StringVar(&a.tool, "tool", "", "tool name")
+		fs.StringVar(&a.op, "op", "", "operation name (maps to params.name in the JSON-RPC envelope)")
+		fs.StringVar(&a.token, "token", "", "base64url capability token")
+	}
+	if err := fs.Parse(args); err != nil {
+		return cliArgs{}, err
+	}
+	a.idDir, a.brokerURL, a.bootstrapPath = *idDir, *brokerURL, *bootstrapPath
+	for _, arg := range fs.Args() {
+		if k, v, ok := strings.Cut(arg, "="); ok {
+			a.constraints[k] = v
 		}
 	}
+	return a, nil
+}
 
-	switch verb {
-	case "request":
-		cn, err := id.CN()
-		if err != nil {
-			return err
+// validateCLIArgs checks the caller's own arguments before anything touches
+// the identity, the filesystem or the network, so a bad invocation names the
+// bad argument instead of surfacing as whatever unrelated thing fails first.
+// lever-agent is on $PATH inside every agent jail, so these verbs are the same
+// mint path the capability MCP tool exposes and carried the same hazard:
+// `delegate` with no recipient sent an EMPTY bind target, which the broker
+// defaults to the caller ("default: self-obtain"), printing a SELF-bound token
+// as an ordinary success. See requestArgs/delegateArgs in
+// internal/agent/mcpserver.go — the checks are deliberately not shared,
+// because the surfaces differ: here flags and constraints occupy separate
+// namespaces, so a positional `to=...` is unambiguously a constraint, while
+// the MCP tool has one flat argument map in which it is ambiguous.
+func validateCLIArgs(a cliArgs) error {
+	switch a.verb {
+	case "request", "delegate":
+		if strings.TrimSpace(a.tool) == "" {
+			return fmt.Errorf(`%s: missing required argument "-tool"`, a.verb)
 		}
-		tok, err := agent.Request(ctx, bURL, client, tool, op, cn, constraints)
-		if err != nil {
-			return err
+		if strings.TrimSpace(a.op) == "" {
+			return fmt.Errorf(`%s: missing required argument "-op"`, a.verb)
 		}
-		fmt.Println(tok)
-	case "delegate":
-		// Parity with the MCP tool: naming yourself hands nothing off, and it
-		// routes through the OBTAIN policy rather than the delegate one, so it
-		// succeeds with no delegate grant and audits like a self-obtain.
-		cn, err := id.CN()
-		if err != nil {
-			return err
-		}
-		if to == cn {
-			return errors.New(`delegate: "-to" names this agent; use "request" to mint a token for yourself`)
-		}
-		tok, err := agent.Request(ctx, bURL, client, tool, op, to, constraints)
-		if err != nil {
-			return err
-		}
-		fmt.Println(tok)
-	case "call":
-		// agent.Call POSTs the JSON-RPC tools/call to the gateway and hands back
-		// the raw body and the error separately so we can print the body BEFORE
-		// surfacing a non-200 error — the acceptance harness's deny checks rely
-		// on both the printed output and the non-zero exit.
-		out, err := agent.Call(ctx, bURL, client, tool, op, tokenStr, constraints)
-		fmt.Print(out)
-		if err != nil {
-			return err
+		if a.verb == "delegate" && strings.TrimSpace(a.to) == "" {
+			return errors.New(`delegate: missing required argument "-to" (the recipient agent CN); use "request" to mint a token for yourself`)
 		}
 	}
 	return nil
+}
+
+// cliRequest mints a token bound to this agent and prints it.
+func cliRequest(ctx context.Context, s cliSession) error {
+	cn, err := s.id.CN()
+	if err != nil {
+		return err
+	}
+	tok, err := agent.Request(ctx, s.brokerURL, s.client, s.tool, s.op, cn, s.constraints)
+	if err != nil {
+		return err
+	}
+	fmt.Println(tok)
+	return nil
+}
+
+// cliDelegate mints a token bound to another agent and prints it. Parity with
+// the MCP tool: naming yourself hands nothing off, and it routes through the
+// OBTAIN policy rather than the delegate one, so it succeeds with no delegate
+// grant and audits like a self-obtain.
+func cliDelegate(ctx context.Context, s cliSession) error {
+	cn, err := s.id.CN()
+	if err != nil {
+		return err
+	}
+	if s.to == cn {
+		return errors.New(`delegate: "-to" names this agent; use "request" to mint a token for yourself`)
+	}
+	tok, err := agent.Request(ctx, s.brokerURL, s.client, s.tool, s.op, s.to, s.constraints)
+	if err != nil {
+		return err
+	}
+	fmt.Println(tok)
+	return nil
+}
+
+// cliCall POSTs the JSON-RPC tools/call to the gateway. agent.Call hands back
+// the raw body and the error separately so the body is printed BEFORE a
+// non-200 error surfaces — the acceptance harness's deny checks rely on both
+// the printed output and the non-zero exit.
+func cliCall(ctx context.Context, s cliSession) error {
+	out, err := agent.Call(ctx, s.brokerURL, s.client, s.tool, s.op, s.token, s.constraints)
+	fmt.Print(out)
+	return err
 }
 
 // resolveBrokerURL returns brokerURL if set, else reads it from bootstrapPath

@@ -1149,6 +1149,9 @@ func TestStateRel(t *testing.T) {
 	if got := stateRel(st, st.Log()); got != ".lever-state/broker.log" {
 		t.Fatalf("stateRel = %q", got)
 	}
+	if got := stateDirName(); got != ".lever-state" {
+		t.Fatalf("stateDirName = %q", got)
+	}
 }
 
 // checkListeningProcess is the ladder both the broker and remote checks climb;

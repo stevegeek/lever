@@ -59,7 +59,7 @@ func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 // env. Used for `lever broker serve` and `lever remote serve`; each serve
 // process writes its own pid file, not this.
 //
-// On a fresh apply the state dir (.lever-state) does not exist yet — it's
+// On a fresh apply the state dir (state.State.Dir) does not exist yet — it's
 // created by EnsureKeys inside the spawned child, too late for this open —
 // so the log's parent is created here, or the whole bring-up hard-fails
 // before the daemon is ever spawned.

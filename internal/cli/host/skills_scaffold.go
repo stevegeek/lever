@@ -17,8 +17,9 @@ import (
 
 // The scaffold engine behind `lever init` and doctor's skills check: writes
 // the embedded skills into the instance tree, hash-guarding owner edits via
-// hashes recorded in .lever-state/skills.json, with owner-blessed
-// customizations tracked in .lever-state/skills-adopted.json (`init --adopt`).
+// hashes recorded in the state dir's state.State.Skills file, with
+// owner-blessed customizations tracked in state.State.SkillsAdopted
+// (`init --adopt`).
 // Pure file operations — no jail interaction.
 
 type skillAction string
@@ -87,7 +88,8 @@ func loadHashState(path string) (map[string]string, error) {
 }
 
 // saveHashState writes a path → hash map to path (0644 — hashes are not
-// secrets), creating the state dir if needed.
+// secrets), creating the state dir if needed. Atomic, so a crash mid-write
+// never leaves a torn record that would misreport every skill as edited.
 func saveHashState(path string, m map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -96,7 +98,7 @@ func saveHashState(path string, m map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	return state.WriteFileAtomic(path, append(b, '\n'), 0o644)
 }
 
 func loadSkillState(st state.State) (map[string]string, error) {
@@ -147,7 +149,7 @@ func syncSkills(app *config.App, stateDir state.State, force, check bool) ([]ski
 			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 				return nil, err
 			}
-			if err := os.WriteFile(abs, tgt.content, 0o644); err != nil {
+			if err := state.WriteFileAtomic(abs, tgt.content, 0o644); err != nil {
 				return nil, err
 			}
 			// Content is the framework scaffold again — any adoption record
@@ -237,9 +239,9 @@ func writeClaudeMDWithBlock(path, s, block string) error {
 	begin := strings.Index(s, skillMarkerBegin)
 	end := strings.Index(s, skillMarkerEnd)
 	if begin == -1 || end == -1 || end < begin {
-		return os.WriteFile(path, []byte(s+"\n"+block+"\n"), 0o644)
+		return state.WriteFileAtomic(path, []byte(s+"\n"+block+"\n"), 0o644)
 	}
-	return os.WriteFile(path, []byte(s[:begin]+block+s[end+len(skillMarkerEnd):]), 0o644)
+	return state.WriteFileAtomic(path, []byte(s[:begin]+block+s[end+len(skillMarkerEnd):]), 0o644)
 }
 
 // claudeMDBlockCurrent reports whether s carries the current marker block.
@@ -270,7 +272,7 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 				return "", err
 			}
 		}
-		return skillCreated, os.WriteFile(path, []byte(block+"\n"), 0o644)
+		return skillCreated, state.WriteFileAtomic(path, []byte(block+"\n"), 0o644)
 	case err != nil:
 		return "", err
 	}

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/fsutil"
 )
 
 // ReadSecret reads a 0600 secret file, whitespace-trimmed. An absent file
@@ -48,7 +50,7 @@ func WriteSecret(path, what, v string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("state: state dir: %w", err)
 	}
-	if err := WriteFileAtomic(path, []byte(v), 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(path, []byte(v), 0o600); err != nil {
 		return fmt.Errorf("state: write %s: %w", what, err)
 	}
 	return nil

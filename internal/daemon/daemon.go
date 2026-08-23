@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/fsutil"
 )
 
 // WritePIDFile records the running process's pid at path (0600), creating
@@ -26,7 +26,7 @@ func WritePIDFile(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("daemon: pid dir: %w", err)
 	}
-	if err := state.WriteFileAtomic(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
 		return fmt.Errorf("daemon: write pid: %w", err)
 	}
 	return nil

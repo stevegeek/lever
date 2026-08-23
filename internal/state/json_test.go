@@ -65,14 +65,3 @@ func TestSaveJSONIsAtomicAndReplaces(t *testing.T) {
 		}
 	}
 }
-
-func TestWriteFileAtomicHonoursPerm(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "f")
-	if err := WriteFileAtomic(p, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(p)
-	if err != nil || fi.Mode().Perm() != 0o644 {
-		t.Fatalf("mode = %v err = %v, want 0644", fi.Mode().Perm(), err)
-	}
-}

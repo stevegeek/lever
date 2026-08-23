@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/fsutil"
 )
 
 // RemoteIdentity is everything a `lever remote serve` process reads at
@@ -102,7 +104,7 @@ func (s State) WriteRemoteStamp(version, hash string) error {
 		_ = os.Remove(s.RemoteStamp())
 		return err
 	}
-	if err := WriteFileAtomic(s.RemoteStamp(), []byte(remoteStampContent(version, hash, pid)), 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(s.RemoteStamp(), []byte(remoteStampContent(version, hash, pid)), 0o600); err != nil {
 		_ = os.Remove(s.RemoteStamp())
 		return err
 	}

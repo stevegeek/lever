@@ -11,6 +11,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -98,7 +99,7 @@ func saveHashState(path string, m map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return state.WriteFileAtomic(path, append(b, '\n'), 0o644)
+	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0o644)
 }
 
 func loadSkillState(st state.State) (map[string]string, error) {

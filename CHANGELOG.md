@@ -106,6 +106,8 @@ read the Changed/Internal entries before rebasing open branches.
   (the old un-bounded wrappers are deleted); `apply.Run` requires every
   `Deps` collaborator; `remoteproxy` has one hub URL in `LoginDriver` and a
   typed audit `Decision`; doctor checks are table-driven.
+- The broker and proxy pid files and the remote stamp are written atomically
+  (temp file + rename), so a crash mid-write leaves no torn file.
 - **The remote stamp hash shape changed.** `lever remote serve` now records
   a `state.RemoteIdentity` digest instead of a digest of `config.Remote`; the
   covered fields are the same. The first `lever apply` after upgrading sees

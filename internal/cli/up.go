@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
-	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -106,11 +105,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an application up (if needed) and attach the manager",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := resolveConfigPath(argOrEmpty(args))
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}

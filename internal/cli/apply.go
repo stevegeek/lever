@@ -433,11 +433,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an agent-manager application up from a config",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := resolveConfigPath(argOrEmpty(args))
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}

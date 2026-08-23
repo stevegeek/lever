@@ -69,11 +69,7 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring up a real jail and drive the six acceptance capability checks (live gate)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := resolveConfigPath(argOrEmpty(args))
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}

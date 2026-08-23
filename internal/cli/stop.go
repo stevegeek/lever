@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
-	"github.com/stevegeek/lever/internal/config"
 )
 
 // newStopCmd powers the jail machine off while keeping its disk, so a
@@ -24,32 +23,21 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// broker too — mirroring `destroy`'s broker-stop block. UNLIKE
 			// destroy, staged runtime state (bootstrap ticket, manifest) is left
 			// alone: stop preserves everything for a fast resume.
+			ia := loadInstanceApp()
 			var appName string
 			var state brokerctl.State // set alongside appName; valid whenever appName != ""
-			if path, perr := resolveConfigPath(""); perr == nil {
-				state = stateFor(path)
-				if app, lerr := config.Load(path); lerr == nil {
-					appName = app.Name
-					if *machine == "" {
-						if serr := state.StopBroker(); serr != nil {
-							cmd.PrintErrf("warning: stopping broker: %v\n", serr)
-						}
-						// Tear the remote-access proxy down alongside the
-						// broker: both are host-side daemons tied to the
-						// current instance (not an explicit --machine
-						// target), and idempotent, so this is safe even when
-						// no proxy was ever started (no remote.pid ⇒ no-op).
-						if serr := state.StopRemoteProxy(); serr != nil {
-							cmd.PrintErrf("warning: stopping remote proxy: %v\n", serr)
-						}
-					}
+			if ia.app != nil {
+				state = stateFor(ia.path)
+				appName = ia.app.Name
+				if *machine == "" {
+					stopHostDaemons(cmd, state)
 				}
 			}
 			if *machine != "" {
 				cmd.PrintErrln("note: --machine given; the broker is not stopped (run `lever stop` from the instance root to do that).")
 			}
 
-			m, b, err := resolveJailBackend(factory, *machine, *backendFlag)
+			m, b, err := resolveJailBackendFor(factory, ia, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
@@ -92,4 +80,17 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
+}
+
+// stopHostDaemons stops the host-side daemons tied to the current instance:
+// the broker, then the remote-access proxy. Both are idempotent, so this is
+// safe even when no proxy was ever started (no remote.pid ⇒ no-op). Failures
+// are warnings: the VM-side teardown that follows must still run.
+func stopHostDaemons(cmd *cobra.Command, st brokerctl.State) {
+	if err := st.StopBroker(); err != nil {
+		cmd.PrintErrf("warning: stopping broker: %v\n", err)
+	}
+	if err := st.StopRemoteProxy(); err != nil {
+		cmd.PrintErrf("warning: stopping remote proxy: %v\n", err)
+	}
 }

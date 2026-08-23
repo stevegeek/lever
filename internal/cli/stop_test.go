@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
@@ -187,5 +188,17 @@ func TestStopWithExplicitMachineDoesNotStopBroker(t *testing.T) {
 	}
 	if got := out.String(); !bytes.Contains([]byte(got), []byte("broker is not stopped")) {
 		t.Fatalf("expected a note that the broker is not stopped, got: %q", got)
+	}
+}
+
+// TestStopHostDaemonsIsQuietWhenNothingRuns: with no broker.pid and no
+// remote.pid both stops are no-ops and nothing is warned about.
+func TestStopHostDaemonsIsQuietWhenNothingRuns(t *testing.T) {
+	var errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetErr(&errOut)
+	stopHostDaemons(cmd, brokerctl.StateDir(t.TempDir()))
+	if errOut.Len() != 0 {
+		t.Fatalf("unexpected warnings: %s", errOut.String())
 	}
 }

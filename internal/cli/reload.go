@@ -3,7 +3,6 @@ package cli
 import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
-	"github.com/stevegeek/lever/internal/config"
 )
 
 // newReloadCmd applies config changes to an ALREADY-RUNNING instance without a
@@ -24,11 +23,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 		// A config/bring-up failure is a diagnosis, not a usage error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := resolveConfigPath(argOrEmpty(args))
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}

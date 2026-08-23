@@ -3,11 +3,11 @@ package main
 import (
 	"os"
 
-	"github.com/stevegeek/lever/internal/cli"
+	"github.com/stevegeek/lever/internal/cli/manager"
 )
 
 func main() {
-	if err := cli.NewManagerRoot().Execute(); err != nil {
+	if err := manager.NewRoot().Execute(); err != nil {
 		os.Exit(1)
 	}
 }

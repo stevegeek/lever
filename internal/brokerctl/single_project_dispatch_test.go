@@ -242,7 +242,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		{Slug: "b", Phase: "running"},
 	}
 	listCallsBefore := rt.listCalls // the two /worker/start calls above each phase-check via List
-	rec := call("GET", "/worker/list", "")
+	rec := call("POST", "/worker/list", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list status = %d (%s)", rec.Code, rec.Body.String())
 	}

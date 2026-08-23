@@ -120,5 +120,5 @@ func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("directive", caller, "allow", "check "+req.ID, "state", state)
-	writeJSON(w, wire.DirectiveCheckResponse{ID: req.ID, State: state})
+	writeJSON(w, wire.DirectiveCheckResponse{ID: req.ID, State: string(state)})
 }

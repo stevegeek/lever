@@ -12,11 +12,25 @@ import (
 // clock condition, so a replay window cannot reopen under skew.
 const tombstoneMargin = 48 * time.Hour
 
+// DirectiveStatus is a directive record's lifecycle state. The persisted and
+// wire form is the bare lowercase word.
+type DirectiveStatus string
+
+const (
+	DirectiveActive      DirectiveStatus = "active"
+	DirectiveConsumed    DirectiveStatus = "consumed"
+	DirectiveRevoked     DirectiveStatus = "revoked"
+	DirectiveInvalidated DirectiveStatus = "invalidated"
+	// DirectiveExpired is never stored: List/Check report an active record
+	// past ExpiresAt as expired (effectiveStatus).
+	DirectiveExpired DirectiveStatus = "expired"
+)
+
 // DirectiveRecord is one operator directive in host-side persistent state.
 // Statement holds the EXACT signed bytes; nothing acted-on lives outside it.
 type DirectiveRecord struct {
-	ID         string    `json:"id"`
-	State      string    `json:"state"` // active | consumed | revoked | invalidated
+	ID         string          `json:"id"`
+	State      DirectiveStatus `json:"state"`
 	Statement  []byte    `json:"statement,omitempty"`
 	Signature  []byte    `json:"signature,omitempty"`
 	TargetCN   string    `json:"target_cn"`
@@ -120,7 +134,7 @@ func (s *DirectiveStore) Submit(rec DirectiveRecord, now time.Time) error {
 	if s.findLocked(rec.ID) != nil {
 		return fmt.Errorf("directive %q already seen", rec.ID)
 	}
-	rec.State = "active"
+	rec.State = DirectiveActive
 	cp := rec
 	s.recs = append(s.recs, &cp)
 	if err := s.persistLocked(); err != nil {
@@ -141,19 +155,19 @@ func (s *DirectiveStore) Consume(id, callerCN string, now time.Time) (DirectiveR
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.findLocked(id)
-	if r == nil || r.State != "active" ||
+	if r == nil || r.State != DirectiveActive ||
 		r.TargetCN != callerCN || r.TargetGen != s.gens[callerCN] ||
 		now.Before(r.NotBefore) || !now.Before(r.ExpiresAt) {
 		return DirectiveRecord{}, false
 	}
-	r.State = "consumed"
+	r.State = DirectiveConsumed
 	r.ConsumedAt = now
 	if err := s.persistLocked(); err != nil {
 		// Fail closed: never hand out an action whose consumed-ness isn't
 		// durable — a restart before the next successful persist would
 		// replay it. Roll back to active so the operator can re-send and a
 		// later retry can still succeed.
-		r.State = "active"
+		r.State = DirectiveActive
 		r.ConsumedAt = time.Time{}
 		return DirectiveRecord{}, false
 	}
@@ -162,14 +176,14 @@ func (s *DirectiveStore) Consume(id, callerCN string, now time.Time) (DirectiveR
 
 // Check reports the directive's state, but ONLY to its target at the current
 // generation — everyone else gets the same ("", false) as a missing id.
-func (s *DirectiveStore) Check(id, callerCN string, now time.Time) (string, bool) {
+func (s *DirectiveStore) Check(id, callerCN string, now time.Time) (DirectiveStatus, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.findLocked(id)
 	if r == nil || r.TargetCN != callerCN || r.TargetGen != s.gens[callerCN] {
 		return "", false
 	}
-	return effectiveState(r, now), true
+	return effectiveStatus(r, now), true
 }
 
 // RevokeDirective marks an active directive revoked (tombstone retained).
@@ -177,10 +191,10 @@ func (s *DirectiveStore) RevokeDirective(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.findLocked(id)
-	if r == nil || r.State != "active" {
+	if r == nil || r.State != DirectiveActive {
 		return false
 	}
-	r.State = "revoked"
+	r.State = DirectiveRevoked
 	// Apply in memory regardless of persist outcome (error already logged by
 	// persistLocked): refusing to revoke on a disk error would fail OPEN —
 	// an operator trying to invalidate a directive must not be told "still
@@ -198,15 +212,15 @@ func (s *DirectiveStore) List(now time.Time) []DirectiveRecord {
 	for _, r := range s.recs {
 		cp := *r
 		cp.Statement, cp.Signature = nil, nil
-		cp.State = effectiveState(r, now)
+		cp.State = effectiveStatus(r, now)
 		out = append(out, cp)
 	}
 	return out
 }
 
-func effectiveState(r *DirectiveRecord, now time.Time) string {
-	if r.State == "active" && !now.Before(r.ExpiresAt) {
-		return "expired"
+func effectiveStatus(r *DirectiveRecord, now time.Time) DirectiveStatus {
+	if r.State == DirectiveActive && !now.Before(r.ExpiresAt) {
+		return DirectiveExpired
 	}
 	return r.State
 }
@@ -219,8 +233,8 @@ func (s *DirectiveStore) BumpGeneration(cn string) {
 	defer s.mu.Unlock()
 	s.gens[cn]++
 	for _, r := range s.recs {
-		if r.TargetCN == cn && r.State == "active" {
-			r.State = "invalidated"
+		if r.TargetCN == cn && r.State == DirectiveActive {
+			r.State = DirectiveInvalidated
 		}
 	}
 	// Apply in memory regardless of persist outcome (error already logged by

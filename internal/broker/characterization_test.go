@@ -308,7 +308,7 @@ func TestDirectiveAdminRoutesReject405OnWrongMethod(t *testing.T) {
 // the lone GET route — enrolled agent resolves to (cn, slug, generation).
 func TestDirectiveResolveHappyPath(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager") // generation 0 -> 1 (as enrol would)
+	b.directives.BumpGeneration("manager") // generation 0 -> 1 (as enrol would)
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 	resp, err := client.Get("http://unix/directive/resolve?agent=manager")

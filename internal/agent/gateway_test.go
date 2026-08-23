@@ -189,7 +189,7 @@ func TestNewReloadingClientPresentsRotatingCert(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &recordingBackend{}
-	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCertSANs("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestGatewayProxyPresentsRotatingCert(t *testing.T) {
 	// Fake mTLS broker: RequireAnyClientCert records the presented leaf without
 	// needing it to chain (we assert on the serial, not on verification).
 	backend := &recordingBackend{}
-	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCertSANs("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}

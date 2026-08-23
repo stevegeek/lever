@@ -1,7 +1,7 @@
 package broker
 
 // e2e_test.go exercises the full provision→enrol→request→exercise path over
-// real mTLS: a live httptest.Server with the broker CA's ServerTLSConfig, real
+// real mTLS: a live httptest.Server with the broker CA's ServerTLSConfigSource, real
 // TLS clients that pin the broker CA, and a fake upstream MCP backend.
 
 import (
@@ -19,18 +19,15 @@ import (
 const e2eServerName = "broker.test"
 
 // jailServer starts an httptest server using the broker's JailHandler() over
-// real mTLS (broker CA ServerTLSConfig). Tools must be registered before this
+// real mTLS (broker CA ServerTLSConfigSource). Tools must be registered before this
 // call because JailHandler() binds gateway routes at call time.
 func jailServer(t *testing.T, b *Broker) *httptest.Server {
 	t.Helper()
-	certPEM, keyPEM, err := b.ca.IssueServerCert(e2eServerName)
+	src, err := b.ca.NewServerCertSource(e2eServerName, []string{e2eServerName}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsCfg, err := b.ca.ServerTLSConfig(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tlsCfg := b.ca.ServerTLSConfigSource(src, nil)
 	srv := httptest.NewUnstartedServer(b.JailHandler())
 	srv.TLS = tlsCfg
 	srv.StartTLS()

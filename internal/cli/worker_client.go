@@ -24,8 +24,8 @@ type workerResult struct {
 }
 
 // postBroker POSTs body as JSON to baseURL+endpoint using client, decoding the
-// response into T. Split out for unit-testing without mTLS. Generic sibling of
-// the old worker-only postWorker; postWorker/workerCall now specialize it.
+// response into T. Split out for unit-testing without mTLS; workerCall
+// specializes it to the worker-command response shape.
 func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (T, error) {
 	var zero T
 	raw, err := json.Marshal(body)
@@ -55,13 +55,6 @@ func postBroker[T any](ctx context.Context, client *http.Client, baseURL, endpoi
 		return zero, err
 	}
 	return res, nil
-}
-
-// postWorker is postBroker specialized to the worker-command response shape.
-// Kept as a named function (rather than inlining postBroker[workerResult] at
-// call sites) so existing callers/tests are unaffected.
-func postWorker(ctx context.Context, client *http.Client, baseURL, endpoint string, body any) (workerResult, error) {
-	return postBroker[workerResult](ctx, client, baseURL, endpoint, body)
 }
 
 // brokerCall builds the manager's mTLS client from its bootstrap + identity and

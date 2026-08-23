@@ -81,19 +81,3 @@ func DecodePublicKey(s string) (ed25519.PublicKey, error) {
 	}
 	return ed25519.PublicKey(b), nil
 }
-
-// LoadPublicKey reads a hex public key.
-func LoadPublicKey(path string) (ed25519.PublicKey, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("token: read public: %w", err)
-	}
-	b, err := hex.DecodeString(string(raw))
-	if err != nil {
-		return nil, fmt.Errorf("token: decode public: %w", err)
-	}
-	if len(b) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("token: public key is %d bytes, want %d", len(b), ed25519.PublicKeySize)
-	}
-	return ed25519.PublicKey(b), nil
-}

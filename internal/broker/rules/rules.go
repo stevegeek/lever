@@ -2,7 +2,7 @@
 // capabilities it may obtain for itself and which it may delegate (mint bound
 // to another agent). It is the delegation/obtain policy. The
 // policy is default-deny; build it with AllowObtain/AllowDelegate (typically
-// from lever.yaml) and query it with MayObtain.
+// from lever.yaml) and query it with MayObtainRule.
 package rules
 
 type capKey struct {
@@ -17,7 +17,7 @@ type agentPolicy struct {
 
 // Policy holds the per-agent request/delegation policy. It is NOT safe for
 // concurrent mutation: build it fully at boot with AllowObtain/AllowDelegate,
-// then query MayObtain concurrently.
+// then query MayObtainRule concurrently.
 type Policy struct {
 	agents map[string]*agentPolicy
 }
@@ -60,19 +60,13 @@ func (p *Policy) AllowDelegate(agent, tool, op string, to ...string) {
 	}
 }
 
-// MayObtain reports whether requester may mint a token for (tool, op) bound to
-// boundTo. requester == boundTo is a self-obtain (checked against the obtain
-// set); otherwise it is a delegation (checked against the delegate set and its
-// recipient list). Fails closed.
-func (p *Policy) MayObtain(requester, boundTo, tool, op string) bool {
-	_, ok := p.MayObtainRule(requester, boundTo, tool, op)
-	return ok
-}
-
-// MayObtainRule is MayObtain plus, on allow, a stable identifier of the
-// matched policy rule ("obtain:<agent>:<tool>.<op>" or
-// "delegate:<agent>-><recipient>:<tool>.<op>") for the audit trail. Denied
-// requests return ("", false).
+// MayObtainRule reports whether requester may mint a token for (tool, op)
+// bound to boundTo and, on allow, a stable identifier of the matched policy
+// rule ("obtain:<agent>:<tool>.<op>" or
+// "delegate:<agent>-><recipient>:<tool>.<op>") for the audit trail.
+// requester == boundTo is a self-obtain (checked against the obtain set);
+// otherwise it is a delegation (checked against the delegate set and its
+// recipient list). Fails closed: denied requests return ("", false).
 func (p *Policy) MayObtainRule(requester, boundTo, tool, op string) (string, bool) {
 	ap, ok := p.agents[requester]
 	if !ok {

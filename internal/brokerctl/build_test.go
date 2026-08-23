@@ -41,10 +41,10 @@ func TestBuildBrokerAssemblesRulesAndRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Rules.MayObtain("manager", "worker", "db", "read") {
+	if _, ok := cfg.Rules.MayObtainRule("manager", "worker", "db", "read"); !ok {
 		t.Fatal("manager must be allowed to delegate db.read to worker")
 	}
-	if cfg.Rules.MayObtain("worker", "worker", "db", "read") {
+	if _, ok := cfg.Rules.MayObtainRule("worker", "worker", "db", "read"); ok {
 		t.Fatal("worker has no obtain grant — must be denied a self-path")
 	}
 	tool, ok := cfg.Registry.Lookup("db")

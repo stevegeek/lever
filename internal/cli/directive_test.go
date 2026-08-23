@@ -141,7 +141,7 @@ func startDirectiveUDS(t *testing.T, dir string, routes map[string]canned) *reqR
 
 func runDirective(t *testing.T, argv ...string) (string, error) {
 	t.Helper()
-	root := NewRootWithBackend(defaultFactory)
+	root := newHostRootWith(defaultFactory)
 	root.SetArgs(argv)
 	var out bytes.Buffer
 	root.SetOut(&out)

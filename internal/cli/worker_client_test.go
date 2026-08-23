@@ -21,7 +21,7 @@ func TestWorkerCall_postsAndDecodes(t *testing.T) {
 	defer srv.Close()
 
 	// Inject a client + base URL (bypass mTLS bootstrap for the unit test).
-	res, err := postWorker(context.Background(), srv.Client(), srv.URL, "/worker/start",
+	res, err := postBroker[workerResult](context.Background(), srv.Client(), srv.URL, "/worker/start",
 		map[string]string{"worker": "worker", "task": "go"})
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestPostBroker_surfacesBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := postWorker(context.Background(), srv.Client(), srv.URL, "/worker/start", map[string]string{})
+	_, err := postBroker[workerResult](context.Background(), srv.Client(), srv.URL, "/worker/start", map[string]string{})
 	if err == nil {
 		t.Fatal("want error for non-200 response")
 	}

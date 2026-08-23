@@ -50,7 +50,7 @@ func TestHostMsgSendToManager(t *testing.T) {
 	fr := leverexec.NewFakeRunner()
 	fr.Script("scion", leverexec.Result{})
 	sb := &stubBackend{runner: fr}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	root.SetArgs([]string{"msg", "send", "hello", "there", "--to", "assistant"})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -88,7 +88,7 @@ func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 	fr := leverexec.NewFakeRunner()
 	fr.Script("scion", leverexec.Result{})
 	sb := &stubBackend{runner: fr}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	root.SetArgs([]string{"msg", "send", "check", "in", "--to", "scratch", "--interrupt"})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -117,7 +117,7 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 
 	fr := leverexec.NewFakeRunner()
 	sb := &stubBackend{runner: fr}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	root.SetArgs([]string{"msg", "send", "hi", "--to", "nope"})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -143,7 +143,7 @@ func TestHostMsgSendJailDownFailsFast(t *testing.T) {
 
 	fr := leverexec.NewFakeRunner()
 	sb := &stubBackend{runner: fr, resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-assistant")}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	root.SetArgs([]string{"msg", "send", "hi", "--to", "assistant"})
 	var out bytes.Buffer
 	root.SetOut(&out)

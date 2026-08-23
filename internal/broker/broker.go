@@ -336,7 +336,3 @@ func (b *Broker) audit(op, caller, decision, detail string, kvs ...any) {
 	args := append([]any{"op", op, "caller", caller, "decision", decision, "detail", detail}, kvs...)
 	b.log.Info("broker.decision", args...)
 }
-
-// Directives exposes the operator-directive store (enrol bumps generations;
-// admin/agent handlers submit/consume).
-func (b *Broker) Directives() *DirectiveStore { return b.directives }

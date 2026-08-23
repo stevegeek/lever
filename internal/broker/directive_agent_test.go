@@ -5,7 +5,7 @@ package broker
 // failure surface (unknown id, wrong target, replay, expiry, stale
 // generation — all byte-identical), revoked-caller and certless denial, and
 // the per-CN rate limit. Directives are seeded directly via the store
-// (b.Directives().Submit), bypassing the signed /directive/send admin
+// (b.directives.Submit), bypassing the signed /directive/send admin
 // channel, per Task 5's brief — these routes never verify signatures
 // themselves.
 
@@ -53,7 +53,7 @@ func submitDirective(t *testing.T, b *Broker, st opsig.Statement) []byte {
 		TargetCN: st.TargetAgent.CN, TargetGen: st.TargetAgent.Generation,
 		Kind: st.Action.Kind, NotBefore: nbf, ExpiresAt: exp,
 	}
-	if err := b.Directives().Submit(rec, time.Now()); err != nil {
+	if err := b.directives.Submit(rec, time.Now()); err != nil {
 		t.Fatalf("submit directive %q: %v", st.DirectiveID, err)
 	}
 	return raw
@@ -102,7 +102,7 @@ const wantDirectiveRateLimit = 30
 
 func TestConsumeHappyPathToolCall(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager") // generation 0 -> 1
+	b.directives.BumpGeneration("manager") // generation 0 -> 1
 
 	id := "11111111-2222-4333-8444-555555555601"
 	action := toolCallAction("db", "read", `{"table":"A"}`)
@@ -162,7 +162,7 @@ func TestConsumeHappyPathToolCall(t *testing.T) {
 // with b.instanceID.
 func TestConsumeRevalidatesStoredStatementRejectsInvalid(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	id := "11111111-2222-4333-8444-555555555640"
 	now := time.Now()
@@ -176,7 +176,7 @@ func TestConsumeRevalidatesStoredStatementRejectsInvalid(t *testing.T) {
 		ID: id, Statement: raw, TargetCN: "manager", TargetGen: 1,
 		Kind: "instruction", NotBefore: now.Add(-time.Minute), ExpiresAt: now.Add(10 * time.Minute),
 	}
-	if err := b.Directives().Submit(dr, now); err != nil {
+	if err := b.directives.Submit(dr, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +192,7 @@ func TestConsumeRevalidatesStoredStatementRejectsInvalid(t *testing.T) {
 
 func TestConsumeHappyPathInstruction(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager") // generation 0 -> 1
+	b.directives.BumpGeneration("manager") // generation 0 -> 1
 
 	id := "11111111-2222-4333-8444-555555555602"
 	action := instructionAction("check the backlog")
@@ -245,7 +245,7 @@ func TestConsumeOpaque404ForWrongAgentUnknownIDConsumedExpiredStaleGen(t *testin
 	// "worker"-CN certificate.
 	{
 		b, _, _, _ := directiveTestBroker(t)
-		b.Directives().BumpGeneration("manager")
+		b.directives.BumpGeneration("manager")
 		id := "11111111-2222-4333-8444-555555555610"
 		submitDirective(t, b, directiveStatement(id, "manager", 1, instructionAction("x")))
 		srv := jailServer(t, b)
@@ -269,7 +269,7 @@ func TestConsumeOpaque404ForWrongAgentUnknownIDConsumedExpiredStaleGen(t *testin
 	// the second attempt against the same id must be opaque 404.
 	{
 		b, _, _, _ := directiveTestBroker(t)
-		b.Directives().BumpGeneration("manager")
+		b.directives.BumpGeneration("manager")
 		id := "11111111-2222-4333-8444-555555555611"
 		submitDirective(t, b, directiveStatement(id, "manager", 1, instructionAction("x")))
 		srv := jailServer(t, b)
@@ -285,7 +285,7 @@ func TestConsumeOpaque404ForWrongAgentUnknownIDConsumedExpiredStaleGen(t *testin
 	// expired: NotBefore/ExpiresAt both already in the past at submit time.
 	{
 		b, _, _, _ := directiveTestBroker(t)
-		b.Directives().BumpGeneration("manager")
+		b.directives.BumpGeneration("manager")
 		id := "11111111-2222-4333-8444-555555555612"
 		submitDirective(t, b, expiredStatement(id, "manager", 1, instructionAction("x")))
 		srv := jailServer(t, b)
@@ -300,10 +300,10 @@ func TestConsumeOpaque404ForWrongAgentUnknownIDConsumedExpiredStaleGen(t *testin
 	// the record invalidated).
 	{
 		b, _, _, _ := directiveTestBroker(t)
-		b.Directives().BumpGeneration("manager") // 0 -> 1
+		b.directives.BumpGeneration("manager") // 0 -> 1
 		id := "11111111-2222-4333-8444-555555555613"
 		submitDirective(t, b, directiveStatement(id, "manager", 1, instructionAction("x")))
-		b.Directives().BumpGeneration("manager") // 1 -> 2; invalidates the above
+		b.directives.BumpGeneration("manager") // 1 -> 2; invalidates the above
 		srv := jailServer(t, b)
 		defer srv.Close()
 		client := agentClient(t, b, signedCert(t, b, "manager"))
@@ -348,7 +348,7 @@ func TestConsumeDirectivesDisabledOpaque404(t *testing.T) {
 
 func TestConsumeRevokedCallerDenied(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 	id := "11111111-2222-4333-8444-555555555620"
 	submitDirective(t, b, directiveStatement(id, "manager", 1, instructionAction("x")))
 	b.Revoke("manager")
@@ -365,7 +365,7 @@ func TestConsumeRevokedCallerDenied(t *testing.T) {
 
 func TestCheckTargetGatedOpaque(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 	id := "11111111-2222-4333-8444-555555555630"
 	submitDirective(t, b, directiveStatement(id, "manager", 1, instructionAction("x")))
 
@@ -407,7 +407,7 @@ func TestCheckTargetGatedOpaque(t *testing.T) {
 
 func TestConsumeRateLimited(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	srv := jailServer(t, b)
 	defer srv.Close()

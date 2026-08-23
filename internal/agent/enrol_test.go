@@ -56,14 +56,19 @@ func testBroker(t *testing.T) *brokerEnv {
 		Agents:          []string{"worker"},
 		ServerName:      "127.0.0.1",
 	})
-	certPEM, keyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	src, err := caInst.NewServerCertSource("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsCfg, err := caInst.ServerTLSConfig(certPEM, keyPEM)
+	tlsCfg := caInst.ServerTLSConfigSource(src, nil)
+	// httptest.StartTLS injects its own self-signed cert when Certificates is
+	// empty, and the TLS stack only consults GetCertificate for SNI-bearing
+	// hellos — an IP-dialled client sends none. Pin the source's cert.
+	srvCert, err := src.GetCertificate(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	tlsCfg.Certificates = []tls.Certificate{*srvCert}
 	srv := httptest.NewUnstartedServer(b.JailHandler())
 	srv.TLS = tlsCfg
 	srv.StartTLS()

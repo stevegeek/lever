@@ -198,7 +198,7 @@ func TestDirectiveSendVerifiesStoresAndDelivers(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager") // generation 0 -> 1
+	b.directives.BumpGeneration("manager") // generation 0 -> 1
 
 	id := "11111111-2222-4333-8444-555555555501"
 	st := directiveStatement(id, "manager", 1, instructionAction("do the thing"))
@@ -217,7 +217,7 @@ func TestDirectiveSendVerifiesStoresAndDelivers(t *testing.T) {
 		t.Fatalf("send response = %+v, want id=%s delivered=true", resp, id)
 	}
 
-	recs := b.Directives().List(time.Now())
+	recs := b.directives.List(time.Now())
 	if len(recs) != 1 || recs[0].ID != id || recs[0].State != "active" {
 		t.Fatalf("store after send = %+v", recs)
 	}
@@ -242,7 +242,7 @@ func TestDirectiveSendRejectsBadSignatureAndNothingDelivered(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	id := "11111111-2222-4333-8444-555555555502"
 	st := directiveStatement(id, "manager", 1, instructionAction("hi"))
@@ -256,7 +256,7 @@ func TestDirectiveSendRejectsBadSignatureAndNothingDelivered(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("tampered send status = %d, want 400", code)
 	}
-	if recs := b.Directives().List(time.Now()); len(recs) != 0 {
+	if recs := b.directives.List(time.Now()); len(recs) != 0 {
 		t.Fatalf("store not empty after rejected send: %+v", recs)
 	}
 	if len(rt.messages) != 0 {
@@ -269,7 +269,7 @@ func TestDirectiveSendRejectsStaleGenerationAndUnknownTargetAndDupID(t *testing.
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager") // generation -> 1
+	b.directives.BumpGeneration("manager") // generation -> 1
 
 	// Stale generation: statement signed for generation 2, store is at 1.
 	staleID := "11111111-2222-4333-8444-555555555511"
@@ -297,7 +297,7 @@ func TestDirectiveSendRejectsStaleGenerationAndUnknownTargetAndDupID(t *testing.
 		t.Fatalf("dup id status = %d, want 409", code)
 	}
 
-	recs := b.Directives().List(time.Now())
+	recs := b.directives.List(time.Now())
 	if len(recs) != 1 {
 		t.Fatalf("store should hold exactly the one successful send, got %+v", recs)
 	}
@@ -308,7 +308,7 @@ func TestDirectiveSendRejectsToolCallForUnknownTool(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	id := "11111111-2222-4333-8444-555555555521"
 	action := opsig.Action{Kind: "tool_call", Tool: "no-such-tool", Op: "read", ArgBinding: "exact", Uses: 1}
@@ -316,7 +316,7 @@ func TestDirectiveSendRejectsToolCallForUnknownTool(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("unknown-tool send status = %d, want 400, body=%s", code, body)
 	}
-	if recs := b.Directives().List(time.Now()); len(recs) != 0 {
+	if recs := b.directives.List(time.Now()); len(recs) != 0 {
 		t.Fatalf("store not empty after rejected tool_call: %+v", recs)
 	}
 }
@@ -332,7 +332,7 @@ func TestDirectiveSendAcceptsApprovalForRegisteredTool(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	id := "11111111-2222-4333-8444-555555555531"
 	// "db"/"read" is the tool registered by testConfig.
@@ -342,7 +342,7 @@ func TestDirectiveSendAcceptsApprovalForRegisteredTool(t *testing.T) {
 		t.Fatalf("approval send status = %d, want 200, body=%s", code, body)
 	}
 
-	recs := b.Directives().List(time.Now())
+	recs := b.directives.List(time.Now())
 	if len(recs) != 1 || recs[0].ID != id || recs[0].Kind != "approval" {
 		t.Fatalf("store after approval send = %+v", recs)
 	}
@@ -362,7 +362,7 @@ func TestDirectiveSendRejectsApprovalForUnknownTool(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	id := "11111111-2222-4333-8444-555555555532"
 	action := opsig.Action{Kind: "approval", Tool: "no-such-tool", Op: "read", ArgBinding: "exact", Uses: 1}
@@ -370,7 +370,7 @@ func TestDirectiveSendRejectsApprovalForUnknownTool(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("unknown-tool approval send status = %d, want 400, body=%s", code, body)
 	}
-	if recs := b.Directives().List(time.Now()); len(recs) != 0 {
+	if recs := b.directives.List(time.Now()); len(recs) != 0 {
 		t.Fatalf("store not empty after rejected approval: %+v", recs)
 	}
 }
@@ -393,7 +393,7 @@ func TestDirectiveSendRejectsExpiryBeyondInstanceCap(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	now := time.Now()
 	st := opsig.Statement{
@@ -408,7 +408,7 @@ func TestDirectiveSendRejectsExpiryBeyondInstanceCap(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("over-instance-cap send status = %d, want 400, body=%s", code, body)
 	}
-	if recs := b.Directives().List(time.Now()); len(recs) != 0 {
+	if recs := b.directives.List(time.Now()); len(recs) != 0 {
 		t.Fatalf("store not empty after over-cap send: %+v", recs)
 	}
 	if len(rt.messages) != 0 {
@@ -421,7 +421,7 @@ func TestDirectiveListAndRevokeRequireFreshSignedEnvelope(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 	id := "11111111-2222-4333-8444-555555555531"
 	if code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, instructionAction("x"))); code != http.StatusOK {
 		t.Fatalf("seed send status = %d, body=%s", code, body)
@@ -507,7 +507,7 @@ func TestSelftestVerifyOnlyNoSideEffects(t *testing.T) {
 	if err := json.Unmarshal(body, &resp); err != nil || !resp.OK {
 		t.Fatalf("selftest response = %s, err=%v", body, err)
 	}
-	if recs := b.Directives().List(time.Now()); len(recs) != 0 {
+	if recs := b.directives.List(time.Now()); len(recs) != 0 {
 		t.Fatalf("selftest must not store: %+v", recs)
 	}
 	if len(rt.messages) != 0 {
@@ -591,7 +591,7 @@ func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 
-	b.Directives().BumpGeneration("manager")
+	b.directives.BumpGeneration("manager")
 
 	id := "11111111-2222-4333-8444-555555555551"
 	st := directiveStatement(id, "manager", 1, instructionAction("first"))
@@ -623,7 +623,7 @@ func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 		t.Fatalf("post-revocation send status = %d, want 400 (key must be dead immediately)", code)
 	}
 
-	recs := b.Directives().List(time.Now())
+	recs := b.directives.List(time.Now())
 	if len(recs) != 1 || recs[0].ID != id {
 		t.Fatalf("store changed after revoked-key send: %+v", recs)
 	}

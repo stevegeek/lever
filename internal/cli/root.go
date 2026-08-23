@@ -73,9 +73,6 @@ func formatVersion(base, rev string, dirty bool, modVersion string) string {
 // NewHostRoot builds the host control-plane CLI (`lever`): provisioning only.
 func NewHostRoot() *cobra.Command { return newHostRootWith(defaultFactory) }
 
-// NewRootWithBackend is the host root with an injected backend (test seam).
-func NewRootWithBackend(bf BackendFactory) *cobra.Command { return newHostRootWith(bf) }
-
 func newHostRootWith(bf BackendFactory) *cobra.Command {
 	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)"}
 	root.AddCommand(versionCmd())

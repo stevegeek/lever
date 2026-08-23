@@ -37,7 +37,7 @@ func TestStopSuspendsManager(t *testing.T) {
 	f := leverexec.NewFakeRunner()
 	f.Script("scion", leverexec.Result{Stdout: "ok"})
 	sb := &stubBackend{runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -83,7 +83,7 @@ func TestStopDoesNotClearStagedState(t *testing.T) {
 	// Jail unreachable: skips the suspend branch entirely, isolating this test
 	// to the staged-state behavior.
 	sb := &stubBackend{resolveRunUserErr: errors.New("machine not up")}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -113,7 +113,7 @@ func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 
 	f := leverexec.NewFakeRunner() // no scripts: any call would error loudly
 	sb := &stubBackend{resolveRunUserErr: errors.New("machine not up"), runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -153,7 +153,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	}
 
 	sb := &stubBackend{}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -173,7 +173,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 // for the current instance.
 func TestStopWithExplicitMachineDoesNotStopBroker(t *testing.T) {
 	sb := &stubBackend{}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)

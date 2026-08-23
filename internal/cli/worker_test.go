@@ -59,7 +59,7 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	f := leverexec.NewFakeRunner()
 	f.Script("scion", leverexec.Result{Stdout: "ok"})
 	sb := &stubBackend{runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -115,7 +115,7 @@ func TestWorkerPurgeRequiresForce(t *testing.T) {
 
 	f := leverexec.NewFakeRunner() // no scripts: any scion call errors loudly
 	sb := &stubBackend{runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -139,7 +139,7 @@ func TestWorkerPurgeUnknownWorker(t *testing.T) {
 
 	f := leverexec.NewFakeRunner()
 	sb := &stubBackend{runner: f}
-	root := NewRootWithBackend(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := newHostRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)

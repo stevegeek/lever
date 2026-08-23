@@ -121,10 +121,14 @@ func (c *Client) waitHubReady(ctx context.Context) error {
 		return lastErr == nil, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
-		return fmt.Errorf("hub not ready after %d attempts: %w", c.hubReadyAttempts, lastErr)
+		return fmt.Errorf("%w after %d attempts: %w", ErrHubNotReady, c.hubReadyAttempts, lastErr)
 	}
 	return err
 }
+
+// ErrHubNotReady is wrapped by waitHubReady when the hub never answers within
+// its budget; the last probe error is wrapped alongside it.
+var ErrHubNotReady = errors.New("hub not ready")
 
 // brokerReadyAttempts/brokerReadyInterval are the default WaitRuntimeBrokerReady
 // budget.

@@ -10,10 +10,16 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-func TestEnvSetArgvAndProjectScope(t *testing.T) {
+// okScion returns a runner that answers every scion verb with success, and a
+// client over it, for tests that only inspect the argv.
+func okScion() (*proc.FakeRunner, *Client) {
 	f := proc.NewFakeRunner()
 	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	return f, New(f, Options{})
+}
+
+func TestEnvSetArgvAndProjectScope(t *testing.T) {
+	f, c := okScion()
 	if err := c.EnvSet(context.Background(), "/jail/work", "LEVER_LLM_AUTH", "api-key"); err != nil {
 		t.Fatal(err)
 	}
@@ -38,9 +44,7 @@ func TestEnvSetArgvAndProjectScope(t *testing.T) {
 // `hub secret set` cannot express the mode at all, so the call goes through the
 // --secret form of `hub env set`, which writes the same row.
 func TestSecretSetIsAlwaysInjected(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	if err := c.SecretSet(context.Background(), "ANTHROPIC_API_KEY", "sk-ant-placeholder"); err != nil {
 		t.Fatal(err)
 	}
@@ -77,9 +81,7 @@ func TestSecretSetOldPinErrorNamesTheCause(t *testing.T) {
 }
 
 func TestBringupArgv(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	_ = c.InitMachine(context.Background())
 	_ = c.ConfigSetGlobal(context.Background(), "image_registry", "scionlocal")
 	_ = c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false})
@@ -104,9 +106,7 @@ func TestBringupArgv(t *testing.T) {
 }
 
 func TestServerStartArgvWithPort(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 41000, DevAuth: false}); err != nil {
 		t.Fatal(err)
 	}
@@ -120,9 +120,7 @@ func TestServerStartArgvWithPort(t *testing.T) {
 }
 
 func TestServerStartArgvWithoutPort(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	if err := c.ServerStart(context.Background(), ServerOpts{DevAuth: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -140,9 +138,7 @@ func TestServerStartArgvWithoutPort(t *testing.T) {
 // that flag into the agents' hub endpoint, which no jail agent can reach
 // (see ServerOpts.EnableWeb). internal/apply proves the consequence.
 func TestServerStartEmitsEnableWebOnly(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
@@ -161,9 +157,7 @@ func TestServerStartEmitsEnableWebOnly(t *testing.T) {
 // web/dist/client/.gitkeep), so the hub must be pointed at the assets lever
 // built and staged, or it serves its "Web UI Not Available" page.
 func TestServerStartEmitsWebAssetsDir(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true, WebAssetsDir: "/usr/local/share/scion/web"}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
@@ -179,9 +173,7 @@ func TestServerStartEmitsWebAssetsDir(t *testing.T) {
 // any non-empty value as an override that REPLACES embedded assets rather than
 // falling back to them — so the flag never travels alone.
 func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, WebAssetsDir: "/usr/local/share/scion/web"}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
@@ -195,9 +187,7 @@ func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
 // daemon persists it to server-args.json and a `scion server restart` replays
 // it — the whole point: sessions survive hub restarts.
 func TestServerStartEmitsSessionSecret(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
@@ -212,9 +202,7 @@ func TestServerStartEmitsSessionSecret(t *testing.T) {
 // An empty SessionSecret omits the flag entirely (scion generates a per-boot
 // random key) — the throwaway mint-window hub takes this path.
 func TestServerStartOmitsSessionSecretWhenEmpty(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -241,9 +229,7 @@ func TestServerStartFailureRedactsSessionSecret(t *testing.T) {
 }
 
 func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	// EnableWeb left at its zero value must not appear in the argv. Note what
 	// that does and does not buy: it is NOT how a hub is made API-only —
 	// scion's workstation defaults enable the frontend for any start that does
@@ -289,9 +275,8 @@ func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 		{WebPort: 8080, EnableWeb: true, WebAssetsDir: "/usr/local/share/scion/web"},
 		{WebPort: 8080, WebAssetsDir: "/usr/local/share/scion/web"},
 	} {
-		f := proc.NewFakeRunner()
-		f.Script("scion", proc.Result{Stdout: "ok"})
-		if err := New(f, Options{}).ServerStart(context.Background(), o); err != nil {
+		f, c := okScion()
+		if err := c.ServerStart(context.Background(), o); err != nil {
 			t.Fatalf("%+v: %v", o, err)
 		}
 		if len(f.Calls) == 0 {
@@ -305,9 +290,7 @@ func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 }
 
 func TestServerStopArgv(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	c := New(f, Options{})
+	f, c := okScion()
 	if err := c.ServerStop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -395,38 +378,40 @@ func TestAlreadyRunningDoesNotCoverNotRunning(t *testing.T) {
 	}
 }
 
-func TestIsBrokerUnavailable(t *testing.T) {
-	for _, msg := range []string{
-		"no_runtime_broker",
-		"start-manager: No runtime brokers available",
-		"resume: no runtime broker available",
-		"context deadline exceeded from the Hub during start-manager",
-	} {
-		if !IsBrokerUnavailable(errors.New(msg)) {
-			t.Errorf("%q must read as broker-unavailable", msg)
+// assertPredicate checks an error-classifying predicate against the wordings
+// it must accept and the errors it must reject.
+func assertPredicate(t *testing.T, name string, pred func(error) bool, accept []string, reject []error) {
+	t.Helper()
+	for _, msg := range accept {
+		if !pred(errors.New(msg)) {
+			t.Errorf("%s: %q must match", name, msg)
 		}
 	}
-	for _, err := range []error{nil, errors.New("agent 'x' is not running"), errors.New("permission denied")} {
-		if IsBrokerUnavailable(err) {
-			t.Errorf("%v must not read as broker-unavailable", err)
+	for _, err := range reject {
+		if pred(err) {
+			t.Errorf("%s: %v must not match", name, err)
 		}
 	}
 }
 
+func TestIsBrokerUnavailable(t *testing.T) {
+	assertPredicate(t, "IsBrokerUnavailable", IsBrokerUnavailable,
+		[]string{
+			"no_runtime_broker",
+			"start-manager: No runtime brokers available",
+			"resume: no runtime broker available",
+			"context deadline exceeded from the Hub during start-manager",
+		},
+		[]error{nil, errors.New("agent 'x' is not running"), errors.New("permission denied")})
+}
+
 func TestIsAgentAbsent(t *testing.T) {
-	for _, msg := range []string{
-		"Hub is not responding",
-		"dial tcp 127.0.0.1:8080: connect: Connection Refused",
-		"hub: Project Not Found (404)",
-		"no git origin remote found",
-	} {
-		if !IsAgentAbsent(errors.New(msg)) {
-			t.Errorf("%q must read as agent-absent", msg)
-		}
-	}
-	for _, err := range []error{nil, errors.New("No runtime brokers available"), errors.New("timeout")} {
-		if IsAgentAbsent(err) {
-			t.Errorf("%v must not read as agent-absent", err)
-		}
-	}
+	assertPredicate(t, "IsAgentAbsent", IsAgentAbsent,
+		[]string{
+			"Hub is not responding",
+			"dial tcp 127.0.0.1:8080: connect: Connection Refused",
+			"hub: Project Not Found (404)",
+			"no git origin remote found",
+		},
+		[]error{nil, errors.New("No runtime brokers available"), errors.New("timeout")})
 }

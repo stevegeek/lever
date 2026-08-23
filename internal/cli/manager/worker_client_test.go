@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/cli/clitest"
+	"github.com/stevegeek/lever/internal/httpjson"
 )
 
 func TestWorkerCall_postsAndDecodes(t *testing.T) {
@@ -49,11 +51,9 @@ func TestHTTPCaller_surfacesBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for non-200 response")
 	}
-	if !strings.Contains(err.Error(), "policy: may not obtain/delegate") {
-		t.Fatalf("error should surface the response body, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "403") {
-		t.Fatalf("error should still include the status code, got: %v", err)
+	clitest.WantErrContaining(t, err, "policy: may not obtain/delegate") // the body
+	if got := httpjson.Status(err); got != http.StatusForbidden {
+		t.Fatalf("httpjson.Status(err) = %d, want 403: %v", got, err)
 	}
 }
 
@@ -67,14 +67,10 @@ func TestMTLSCaller_missingBootstrapOrIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := c.Call(context.Background(), "/worker/list", struct{}{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "manager bootstrap:") {
-		t.Fatalf("err = %v, want a manager bootstrap error", err)
-	}
+	clitest.WantErrContaining(t, err, "manager bootstrap:")
 	if err := os.WriteFile(c.bootstrapPath, []byte(`{"broker_url":"https://127.0.0.1:1"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	err = c.Call(context.Background(), "/worker/list", struct{}{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "manager identity not found in "+c.idDir) {
-		t.Fatalf("err = %v, want a missing-identity error naming %s", err, c.idDir)
-	}
+	clitest.WantErrContaining(t, err, "manager identity not found in "+c.idDir)
 }

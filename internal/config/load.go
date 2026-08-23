@@ -55,7 +55,23 @@ func resolvePath(p, baseDir string) string {
 	return p
 }
 
+// Load reads, resolves, validates (Validate) and host-checks (CheckHost) the
+// config at path.
 func Load(path string) (*App, error) {
+	app, err := LoadNoHostChecks(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := app.CheckHost(); err != nil {
+		return nil, err
+	}
+	return app, nil
+}
+
+// LoadNoHostChecks is Load without CheckHost: the shape is validated but
+// nothing on the host is probed (tool binaries, the api-key file's mode, the
+// tree's .git, the Go toolchain).
+func LoadNoHostChecks(path string) (*App, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

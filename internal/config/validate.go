@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -19,6 +17,8 @@ import (
 // tools are fronted, not spawned: backend required, command forbidden,
 // backend a literal loopback IP unless explicitly opted out. gate applies to
 // external tools only; coarse replaces the operations list with the wildcard.
+// Whether a supervised command is actually spawnable is a host probe
+// (Tool.checkHost).
 func (t Tool) validate() error {
 	if !t.Gate.valid() {
 		return fmt.Errorf("config: broker tool %q gate %q invalid (want fine|coarse)", t.Name, t.Gate)
@@ -40,14 +40,6 @@ func (t Tool) validate() error {
 		}
 		if len(t.Command) == 0 {
 			return fmt.Errorf("config: broker tool %q has no command (a supervised tool needs one; did you mean external: true?)", t.Name)
-		}
-		bin := t.Command[0]
-		if !strings.ContainsRune(bin, '/') {
-			if _, err := LookPathIn(bin, ToolSupervisorPATH); err != nil {
-				return fmt.Errorf("config: broker tool %q command %q not found on the supervisor PATH (%s); use an absolute path or install it there", t.Name, bin, ToolSupervisorPATH)
-			}
-		} else if !IsExecutableFile(bin) {
-			return fmt.Errorf("config: broker tool %q command %q is not an executable file", t.Name, bin)
 		}
 		return nil
 	}
@@ -176,6 +168,8 @@ func registryAllowed(ref string, prefixes []string) bool {
 	return false
 }
 
+// Validate checks the config's shape. It is pure: nothing on the host is
+// read or probed — that is CheckHost, which Load runs right after.
 func (a *App) Validate() error {
 	if a.Name == "" {
 		return fmt.Errorf("config: name is required")
@@ -194,9 +188,6 @@ func (a *App) Validate() error {
 	}
 	if a.Tree == "" {
 		return fmt.Errorf("config: tree is required")
-	}
-	if err := a.validateNonGitTree(); err != nil {
-		return err
 	}
 	if a.Manager.Image != "" {
 		if err := a.Security.validateImage("manager.image", a.Manager.Image); err != nil {
@@ -454,41 +445,6 @@ func (a *App) validateRemote() error {
 			return fmt.Errorf("config: remote: allowed_users contains an empty entry")
 		}
 	}
-	// Remote access needs a Go toolchain on the host: the guest-side login
-	// forwarder is cross-compiled for the guest's architecture at apply time
-	// (internal/backend/guest.EnsureHubLogin).
-	//
-	// Only `scion.binary:` is checked here, because that is the mode this
-	// requirement is NEW for — the other two already need Go to build scion
-	// itself, and their missing-toolchain diagnosis lives in `lever doctor`
-	// and in the build's own failure. Checking at config load rather than
-	// during apply is deliberate: EnsureHubLogin runs in the scion-server
-	// step, well after the bootstrap-token step has opened a mint window and
-	// touched the hub, and "your host has no compiler" is not something to
-	// discover half way through that.
-	if a.Scion.Binary != "" {
-		if _, err := exec.LookPath("go"); err != nil {
-			return fmt.Errorf("config: remote: remote access needs a Go toolchain on this host — it cross-compiles the " +
-				"guest's login forwarder at apply time — but `go` is not on PATH. Install Go (or put a REAL go on PATH, " +
-				"not just an asdf/mise shim), or set remote.enabled: false")
-		}
-	}
-	return nil
-}
-
-// validateNonGitTree refuses a tree that is ITSELF a git repository (has its
-// own .git). R4's sibling isolation assumes a non-git tree; per-worker git
-// workflows are deferred (spec §13). It deliberately does not walk up to
-// ancestors: the pinned Scion's --workspace guard plain-mounts
-// the exact tree dir, so an ancestor .git elsewhere in the checkout is never
-// exposed and is harmless — a plain subdirectory inside a larger git repo is
-// fine.
-func (a *App) validateNonGitTree() error {
-	if treeIsGitRepo(a.Tree) {
-		return fmt.Errorf("config: tree %q is itself a git repository; lever targets non-git trees "+
-			"(per-worker git workflows are deferred, spec §13). A plain subdirectory inside a larger "+
-			"git repo is fine — point tree at a non-git directory (or a subdir) instead", a.Tree)
-	}
 	return nil
 }
 
@@ -497,7 +453,7 @@ func (a *App) validateNonGitTree() error {
 // undeclared agent. A worker with no grants is fine (default-deny ⇒ no path).
 func (a *App) validateBroker() error {
 	// LLM-auth: validate the enum and, when any agent is api-key, require an
-	// api_key_file that exists at 0600 (fail closed on a world/group-readable key).
+	// api_key_file (that it exists at 0600 is a host probe: CheckHost).
 	if !a.Broker.LLMAuth.valid() {
 		return fmt.Errorf("config: broker.llm_auth %q invalid (want subscription|api-key)", a.Broker.LLMAuth)
 	}
@@ -533,13 +489,6 @@ func (a *App) validateBroker() error {
 	if a.AnyAPIKeyAgent() {
 		if a.Broker.APIKeyFile == "" {
 			return fmt.Errorf("config: broker.api_key_file is required when llm_auth is api-key")
-		}
-		fi, err := os.Stat(a.Broker.APIKeyFile)
-		if err != nil {
-			return fmt.Errorf("config: broker.api_key_file %q: %w", a.Broker.APIKeyFile, err)
-		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			return fmt.Errorf("config: broker.api_key_file %q must be 0600, got %#o", a.Broker.APIKeyFile, perm)
 		}
 	}
 	return a.validateBrokerGrants()

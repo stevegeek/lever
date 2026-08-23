@@ -1,4 +1,4 @@
-// Package jail provides a JailRunner: an proc.Runner that executes commands
+// Package jail provides a JailRunner: a proc.Runner that executes commands
 // INSIDE a jail via a backend-supplied argv prefix — e.g.
 // ["orb","-m",m,"-u",u] (OrbStack) or ["limactl","shell",vm] (Lima) — followed
 // by `env [-C dir] K=V… cmd args`. GNU `env` sets the jail environment (and

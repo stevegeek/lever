@@ -83,7 +83,9 @@ read the Changed/Internal entries before rebasing open branches.
   `internal/httpjson` (JSON-over-HTTP client), `internal/mcp` (JSON-RPC
   framing and `tools/call` projection shared by the agent server and
   captool), `internal/state` (host state dir), `internal/daemon` (host daemon
-  bookkeeping), `internal/provision/*` (host build pipelines moved out of
+  bookkeeping), `internal/fsutil` and `internal/testutil` (stdlib-only
+  leaves), `internal/backend/types` (the data types the `Backend` contract
+  carries), `internal/provision/*` (host build pipelines moved out of
   `internal/guest`), `internal/scion/layout` (scion's on-disk paths and
   settings keys), `internal/agent` (lever-agent domain logic moved out of
   `cmd/lever-agent`), and `internal/cli/host` + `internal/cli/manager` (the
@@ -100,7 +102,7 @@ read the Changed/Internal entries before rebasing open branches.
 - **`broker.Config` is grouped into sub-structs** (`Identity`, `Persistence`,
   `LLM`, `Dispatch`, `Directives`). `Config.Agents` is gone; the declared
   `Workers` are the source of truth.
-- **Smaller seams:** `exec.Runner` gained `RunStdin`; `internal/jail` is a
+- **Smaller seams:** `proc.Runner` gained `RunStdin`; `internal/jail` is a
   pure transport; `backend.NewBase` holds private state with a shared
   version gate and machine status; `opsig.Sign`/`Verify` are ctx-bounded
   (the old un-bounded wrappers are deleted); `apply.Run` requires every

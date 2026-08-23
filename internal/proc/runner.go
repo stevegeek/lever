@@ -1,4 +1,4 @@
-// Package exec is the single seam to external commands (orb, docker, scion,
+// Package proc is the single seam to external commands (orb, docker, scion,
 // iptables). Real execution uses os/exec; tests inject FakeRunner so backend
 // logic is verifiable offline. Mirrors the Ruby ScionClient runner pattern.
 package proc

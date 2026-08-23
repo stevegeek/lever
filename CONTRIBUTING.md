@@ -15,9 +15,9 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/` | Shared packages for all four binaries (listed below). |
 | `internal/agent` | In-jail lever-agent core: keypair, enrolment, capability MCP server, loopback gateway, token renewal. |
 | `internal/apply` | `lever apply`/`up` bring-up: the pure `Plan` and the `Run` executor. |
-| `internal/backend` | The containment `Backend` contract and the `Candidates` guarantee matrix. `common` (shared machinery for reach-the-guest backends), `guest` (the in-guest half of provisioning: argv-prefix transport, in-guest scripts, installing what `internal/provision` built, scion state and hub-login settings surgery), `lima`, `orbstack`, `registry` (name → constructor, jail argv), `backendtest` (shared fakes for backend tests). |
+| `internal/backend` | The containment `Backend` contract. `types` (stdlib-only leaf: the data types the contract carries for its guest-side verbs), `common` (shared machinery for reach-the-guest backends), `guest` (the in-guest half of provisioning: argv-prefix transport, in-guest scripts, installing what `internal/provision` built, scion state and hub-login settings surgery), `lima`, `orbstack`, `registry` (name → constructor, jail argv, and the `Candidates` guarantee matrix), `backendtest` (shared fakes for backend tests). |
 | `internal/bridge` | Poll-based scion-event → events-file bridge the manager watches. |
-| `internal/broker` | The capability broker: enrol, request/delegate, MCP gateway, llm proxy, directives. `registry` (tool/operation registry and constraint mapping), `rules` (obtain/delegate policy). |
+| `internal/broker` | The capability broker: enrol, request/delegate, MCP gateway, llm proxy, directives. `registry` (tool/operation registry and constraint mapping), `rules` (obtain/delegate policy), `brokertest` (test-only: a broker under test with its CA, server and mTLS clients). |
 | `internal/brokerctl` | Host-side controller for the broker daemon: keys, `serve`, tool supervisor, stop. |
 | `internal/cap` | Capability primitives: `ca` (instance CA, mTLS, rotation), `token` (Ed25519 capability tokens). |
 | `internal/cli` | Shared by both binaries: the release `Version` constant and the `version` command. |
@@ -27,10 +27,11 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/daemon` | Pid-file and listener bookkeeping shared by the host-side daemons. |
 | `internal/config` | `lever.yaml` schema, loading and validation. |
 | `internal/egress` | Jail egress allowlist as iptables/ip6tables rules. |
+| `internal/fsutil` | Stdlib-only file helpers (`WriteFileAtomic`). |
 | `internal/proc` | The single seam to external commands (`Runner`, `FakeRunner`). |
 | `internal/httpjson` | JSON-over-HTTP client helper (`Post`, typed decode, the one error shape) used by every broker caller. |
 | `internal/hubapi` | Minimal scion Hub REST client for what the scion CLI does not expose. |
-| `internal/jail` | `JailRunner`: an `exec.Runner` that runs commands inside the jail. |
+| `internal/jail` | `JailRunner`: a `proc.Runner` that runs commands inside the jail. |
 | `internal/mcp` | JSON-RPC 2.0 framing and the `tools/call` projection shared by the agent MCP server and `captool`; `MaxBodyBytes`. |
 | `internal/opsig` | Operator-directive signature protocol. |
 | `internal/provision` | Host-side build pipelines that produce a local artefact for the guest: `scionbin` (scion binary: prebuilt/source/pinned module, ELF arch check), `webassets` (scion's SPA via npm, cached per source digest; the node probe `lever doctor` shares), `loginfwd` (the remote-access login forwarder — see below), and the shared `GoBinary` resolver. |
@@ -39,6 +40,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys, the oidc_login block and YAML edit helpers). |
 | `internal/skills` | Framework-authored SKILL.md files scaffolded into instances. |
 | `internal/state` | The `.lever-state` directory layout and its file helpers: JSON state, 0600 secrets, pid files, the remote-proxy stamp. |
+| `internal/testutil` | Stdlib-only assertion helpers shared by test packages (`WantErrIs`, `WantErrContaining`). |
 | `internal/wire` | Leaf package: agent⇄broker request/response types, route paths and bootstrap material. Imports no other lever package. |
 | `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |
 | `examples/` | Runnable instances used by docs and tests. |

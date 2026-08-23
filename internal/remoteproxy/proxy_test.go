@@ -230,7 +230,7 @@ func TestAuditLineNeverCarriesPAT(t *testing.T) {
 	if len(noPatLines) != 1 {
 		t.Fatalf("got %d audit lines for 1 request, want 1", len(noPatLines))
 	}
-	wantDecisions := []string{"allow", "deny-origin", "deny-user"}
+	wantDecisions := []Decision{DecisionAllow, DecisionDenyOrigin, DecisionDenyUser}
 	for i, l := range lines {
 		if l.Decision != wantDecisions[i] {
 			t.Fatalf("line[%d].Decision = %q, want %q", i, l.Decision, wantDecisions[i])
@@ -960,7 +960,7 @@ func TestAuditFieldsAreBoundedOnEveryDecisionPath(t *testing.T) {
 		host     string
 		allowed  []string
 		pat      string
-		decision string
+		decision Decision
 	}{
 		{"denied before any identity check", "evil.example", nil, "scion_pat_x", "deny-host"},
 		{"denied by the allowlist", testServeHost, []string{"a@example.com"}, "scion_pat_x", "deny-user"},

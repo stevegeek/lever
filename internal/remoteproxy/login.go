@@ -439,11 +439,11 @@ func (d *LoginDriver) recordLogin(operator string, status int, err error) {
 		TSLogin:  operator,
 		Method:   http.MethodGet,
 		Path:     oidcLoginPath,
-		Decision: "oidc-session",
+		Decision: DecisionOIDCSession,
 		Status:   status,
 	}
 	if err != nil {
-		line.Decision, line.Error = "oidc-session-failed", err.Error()
+		line.Decision, line.Error = DecisionOIDCSessionFailed, err.Error()
 	}
 	d.audit(line)
 }

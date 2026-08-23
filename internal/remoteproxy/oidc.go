@@ -261,12 +261,12 @@ func (p *Provider) buildHandler() http.Handler {
 // A hit is therefore either a misconfiguration or an in-jail probe, which is
 // why it is audited.
 func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	p.record(r, "deny-authorize", http.StatusNotFound, "the local OIDC provider has no authorization endpoint by design")
+	p.record(r, DecisionDenyAuthorize, http.StatusNotFound, "the local OIDC provider has no authorization endpoint by design")
 	http.NotFound(w, r)
 }
 
 func (p *Provider) handleNotFound(w http.ResponseWriter, r *http.Request) {
-	p.record(r, "oidc-not-found", http.StatusNotFound, "")
+	p.record(r, DecisionOIDCNotFound, http.StatusNotFound, "")
 	http.NotFound(w, r)
 }
 
@@ -275,7 +275,7 @@ func (p *Provider) handleNotFound(w http.ResponseWriter, r *http.Request) {
 // the hub never fetches it (no id_token is ever issued or parsed), and
 // advertising a URI nothing serves would be a lie.
 func (p *Provider) handleDiscovery(w http.ResponseWriter, r *http.Request) {
-	p.record(r, "oidc-discovery", http.StatusOK, "")
+	p.record(r, DecisionOIDCDiscovery, http.StatusOK, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                p.issuer,
 		"authorization_endpoint":                DeadAuthorizationEndpoint,
@@ -297,12 +297,12 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 // variations of the other parameters.
 func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		p.record(r, "oidc-token-refused", http.StatusMethodNotAllowed, "token endpoint takes POST")
+		p.record(r, DecisionOIDCTokenRefused, http.StatusMethodNotAllowed, "token endpoint takes POST")
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		p.record(r, "oidc-token-refused", http.StatusBadRequest, "malformed form body")
+		p.record(r, DecisionOIDCTokenRefused, http.StatusBadRequest, "malformed form body")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
@@ -311,11 +311,11 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	if why != "" {
 		// why is one of a fixed set of reasons; it never quotes the code, the
 		// redirect_uri or anything else the caller sent.
-		p.record(r, "oidc-token-refused", http.StatusBadRequest, why)
+		p.record(r, DecisionOIDCTokenRefused, http.StatusBadRequest, why)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
-	p.record(r, "oidc-token", http.StatusOK, "")
+	p.record(r, DecisionOIDCToken, http.StatusOK, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token": g.accessToken,
 		"token_type":   "Bearer",
@@ -359,7 +359,7 @@ func (p *Provider) redeem(code, grantType, redirectURI, clientID string) (*grant
 func (p *Provider) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	tok, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
-		p.record(r, "oidc-userinfo-refused", http.StatusUnauthorized, "no bearer token")
+		p.record(r, DecisionOIDCUserinfoRefused, http.StatusUnauthorized, "no bearer token")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 		return
 	}
@@ -372,11 +372,11 @@ func (p *Provider) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Unlock()
 	if !found {
-		p.record(r, "oidc-userinfo-refused", http.StatusUnauthorized, "unknown or expired access token")
+		p.record(r, DecisionOIDCUserinfoRefused, http.StatusUnauthorized, "unknown or expired access token")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 		return
 	}
-	p.record(r, "oidc-userinfo", http.StatusOK, "")
+	p.record(r, DecisionOIDCUserinfo, http.StatusOK, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sub":            g.identity.Subject,
 		"email":          g.identity.Email,
@@ -405,7 +405,7 @@ func (p *Provider) sweepLocked(now time.Time) {
 // record emits one audit line per provider request. TSLogin is left empty: the
 // caller is the hub's back channel (or an in-jail prober), never a browser
 // whose tailnet identity the proxy verified.
-func (p *Provider) record(r *http.Request, decision string, status int, reason string) {
+func (p *Provider) record(r *http.Request, decision Decision, status int, reason string) {
 	if p.audit == nil {
 		return
 	}

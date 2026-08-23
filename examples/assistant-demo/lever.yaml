@@ -20,10 +20,6 @@ tree: workspace              # only workspace/ is mounted; this file + manager.m
 
 scion:
   version: e82a2a08          # pin a scion commit; fetched + cross-compiled into the jail
-  # (`version:` needs >= dbf52f22, 2026-08-12 — from ce96122c the CLI stores
-  # secret values verbatim, which lever requires, and dbf52f22 is the first
-  # commit after that which the Go module proxy can fetch. Also >= b4c9911d:
-  # workers mount only their subtree via relative --workspace, upstream #815)
 
 broker:
   llm_auth: subscription     # personal setup: your Claude OAuth token (see manager.credential_file)

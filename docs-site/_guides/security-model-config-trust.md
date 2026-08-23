@@ -69,7 +69,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute). |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
-| worker `dir` | already rejected absolute/`..` (unchanged). |
+| worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |
 | `scion.binary`, `scion.source` | must not resolve inside `tree` (an agent could otherwise supply the engine on the next bring-up); `binary`, `source`, `version` are mutually exclusive (checked in `config.Load`). |
 | `scion.binary` | regular file, Linux ELF, architecture matches the guest's; checked host-side at bring-up (`verifyELFArch`) before the file is copied into the jail. |
 
@@ -82,11 +82,14 @@ the Go module proxy and is **checksum-verified** against `sum.golang.org`, where
 artifact carries no integrity guarantee lever can check. The architecture check catches an honest
 mistake, not a substituted file. Choosing `binary:` makes its provenance yours to guarantee.
 
-**What was already sound:** the execution plumbing is argv-clean, no shell injection in the hot
-paths; the `bash -c` scripts in internal/backend/guest (scion install, scion settings write, web-assets staging) single-quote every dynamic value via `shellSingleQuote`; the remaining two (agent template, login-forwarder disable) interpolate only compile-time constants;
-`jailPath` never fabricates an in-jail path for an out-of-tree target; the credential value is
-scrubbed from error output at its one call site (by literal match, so a value that parses as a
-flag is masked too — it travels as plaintext argv since the scion CLI marks it `encoding=raw` (ce96122c, 2026-08-10); an older pin fails at apply with a pin-floor error).
+**Execution plumbing:** argv-clean, no shell injection in the hot paths; the `bash -c` scripts in
+internal/backend/guest (scion install, scion settings write, web-assets staging) single-quote every
+dynamic value via `shellSingleQuote`; the remaining two (agent template, login-forwarder disable)
+interpolate only compile-time constants; `jailPath` never fabricates an in-jail path for an
+out-of-tree target; the credential value is scrubbed from error output at its one call site (by
+literal match, so a value that parses as a flag is masked too). The value travels as plaintext argv;
+the scion CLI stores it verbatim (`encoding=raw`). A `scion.version` pin that does not support this
+fails at apply with an explanatory error.
 
 ### 5.4 The manager holds no worker-dispatch authority
 
@@ -107,7 +110,7 @@ configuration, there is no in-jail config file for a compromised manager to tamp
 
 Image **registry allowlist** and **digest pinning** are opt-in `security:` policy
 (§5.3), enable them to bound *which* registry an image comes from and to require vetted, immutable
-images. Still open: `redactArgs` (internal/scion/client.go) masks by argv position, not by secret key name. The
+images. `redactArgs` (internal/scion/client.go) masks by argv position, not by secret key name. The
 dominant in-jail risks are [§6](/security-model/credentials/) (the projected credential) and [§8](/security-model/compromise/) (open-egress exfiltration): **closed
 in api-key mode** (the default) by the capability broker ([§6.1](/security-model/credentials/)) plus `egress: closed`, and
 still present under the subscription opt-in.

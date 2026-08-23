@@ -55,9 +55,9 @@ token, **not** credential availability, and a worker's mode is fixed by the conf
 (nothing the manager can rewrite), so it could never *conjure* a token the host did not project; the
 validation gate is about preventing a misleading config, not about containment.
 
-To *support* mixed instances later would require per-container egress and/or projecting the OAuth secret
-only into subscription agents' projects (not as a hub-wide secret), deferred; until then, mixed is a
-hard config error.
+Supporting mixed instances would require per-container egress and/or projecting the OAuth secret
+only into subscription agents' projects (not as a hub-wide secret). Neither exists; mixed is a hard
+config error.
 
 ### 6.2 What the broker enforces
 
@@ -99,9 +99,8 @@ The capability model itself — identities, minting, delegation, revocation — 
   host-side. Projecting it to every container is safe precisely because the instance is uniformly
   api-key (§6.1). lever writes it with `hub env set --secret --always`, not `hub secret set`: both
   create the same Hub secret row, but only the `env` form can set the injection mode, and a secret
-  stored with scion's default (`as_needed`) is filtered out of the container environment
-  ([scion#944](https://github.com/GoogleCloudPlatform/scion/pull/944)) — present in the Hub, never
-  delivered. The same `--always` applies to the non-secret `LEVER_LLM_AUTH` variable.
+  stored with scion's default (`as_needed`) is filtered out of the container environment — present
+  in the Hub, never delivered. The same `--always` applies to the non-secret `LEVER_LLM_AUTH` variable.
 - **Operator directives authenticate the requester; they mint no capability.** A separate,
   operator-signed channel lets an agent verify that an instruction genuinely came from the human
   operator (its own SSH signing key, held to a similar host-side trust posture as the credentials
@@ -114,8 +113,8 @@ The capability model itself — identities, minting, delegation, revocation — 
 **External MCP servers (broker-fronted).** A `broker.tools` entry with `external: true` is a
 host server the broker *fronts but does not spawn*: it registers from config, is gated on the
 broker's mTLS listener like any third-party tool (token verified, then **stripped** — the server
-never sees a capability), and replaces the old ambient pattern (per-server `allow_ports` holes + a
-`.mcp.json` pointing at the host alias). Three honest boundaries:
+never sees a capability), and has no per-server `allow_ports` hole and no `.mcp.json` pointing at the host alias. Three
+boundaries:
 
 - **`gate: coarse` is wholesale trust.** One wildcard capability (`{tool,"*"}`) admits every
   MCP call the server exposes, including destructive ones. It is honored *only* for a
@@ -130,76 +129,51 @@ never sees a capability), and replaces the old ambient pattern (per-server `allo
   process can still hit the server's `127.0.0.1` port directly — host processes are already
   inside the host trust boundary; the broker does not claim to sandbox them from each other.
 
-**In-jail hub reachability (honest residual).** The capability broker above is the audited seam
-for agent lifecycle, but the in-jail scion Hub API itself remains reachable from inside an agent
+**In-jail hub reachability (residual).** The capability broker above is the audited seam for
+agent lifecycle, but the in-jail scion Hub API itself remains reachable from inside an agent
 container, using that agent's own scion token (distinct from [§4.2](/security-model/worker-isolation/)'s
-host-only controller PAT — this is the per-agent token scion mints for status/heartbeat use). The
-2026-07-06 create/delete-unaudited vector is closed **structurally**, not by a runtime guard: the
-real hub always starts with `--dev-auth=false` (`internal/apply/run.go`, the `ServerStart(...,
-DevAuth: false)` call, hardcoded, no config field turns it on). Since scion's tiered-roles work
-(scion#1089) a named **role** determines an agent token's scopes, and lever stamps `--role
-baseline` on every agent, manager and workers alike (`internal/scion/lifecycle.go`).
+host-only controller PAT — this is the per-agent token scion mints for status/heartbeat use). Two
+controls bound what that token can do:
 
-**Relying on Scion's own default would not be safe.** One PR after roles landed, `2181aff6`
-(#1090) flipped the default for an *unspecified* role from baseline to **full** — agent create,
-agent lifecycle and project-secret-read. So lever pins the role rather than inheriting it. It
-decides by asking the installed binary whether `start --role` exists, not by reasoning about
-the pinned commit: a hash says nothing about which side of #1090 it sits on. On a pre-#1089
-Scion the flag is omitted, which widens nothing because roles do not exist there; if the probe
-cannot answer, the start fails rather than guessing, because guessing wrong grants full
-authority. `scion.agent_role` overrides the choice for operators who need a different bundle.
-Baseline carries
-`project:read`, `agent:status:update`, `agent:token:refresh`, `project:agent:notify` and
-`agent:port:forward` — heartbeat, self-token-refresh, and read/enumeration, but **no**
-`agent:create`, `agent:lifecycle`, or `project:secret:read`. So a lever agent's token cannot
-create or lifecycle agents, or read project secrets; those verbs 403 on the missing scope.
+- **Dev auth is off, hardcoded.** The real hub always starts with `--dev-auth=false`
+  (`internal/apply/run.go`, the `ServerStart(..., DevAuth: false)` call); no config field turns it on.
+- **Every agent is stamped `--role baseline`.** A named scion **role** determines an agent token's
+  scopes. lever passes `--role baseline` on `scion start` for every agent, manager and workers alike
+  (`internal/scion/lifecycle.go`); `scion.agent_role` overrides the role for operators who need a
+  different bundle. Baseline carries `project:read`, `agent:status:update`, `agent:token:refresh`,
+  `project:agent:notify` and `agent:port:forward` — heartbeat, self-token-refresh, and
+  read/enumeration — but **no** `agent:create`, `agent:lifecycle`, or `project:secret:read`. Those
+  verbs 403 on the missing scope, including agent `DELETE`, which scion gates on lifecycle scope plus
+  project isolation.
 
-**That rests on lever stamping the role, and on nothing else.** An earlier version of this guide
-claimed the ceiling was "doubly held" by a project `max_agent_role` defaulting to baseline and a
-hub-admin ceiling. Neither half is true: Scion's `projectMax` defaults to **full** and narrows only
-when the `scion.io/max-agent-role` annotation is set, which lever does not set and which hub
-`default_max_agent_role` leaves empty in file/SQLite mode; the user ceiling is an explicit
-`userCeiling := AgentRoleFull` pass-through. So the explicit `--role baseline` on `scion start` is
-the **only** thing holding agents down, which is why lever probes the binary rather than trusting a
-default, and why a bring-up fails rather than guessing when it cannot tell.
+**The explicit stamp is the only ceiling.** Scion's own default for an unspecified role is **full**
+(agent create, agent lifecycle, project-secret-read). Its project ceiling (`projectMax`) also defaults
+to full and narrows only when the `scion.io/max-agent-role` annotation is set, which lever does not
+set, and the user ceiling is a pass-through. So lever never relies on a scion default: it decides
+whether to pass `--role` by probing the installed binary for the flag, and if the probe cannot answer
+the start fails rather than guessing. The probe does **not** memoise its answer: `scion.source` and
+`scion.binary` name *paths*, so swapping the artifact behind one leaves the broker-identity hash
+byte-identical and a long-lived broker survives it; a remembered answer could disarm the stamp and
+the record guard below silently.
 
-Three consequences worth stating rather than implying. A `scion resume` carries no role flag at all,
-so a resume of a declared worker with **no** hub record falls through to creation and takes the hub
-default. Setting the project annotation would close that structurally; that is not yet done. And
-the capability probe deliberately does **not** memoise its answer: `scion.source` and
-`scion.binary` name *paths*, so swapping the artifact behind one leaves lever's broker-identity
-hash byte-identical and a long-lived broker survives it. A remembered "no `--role`" would then
-disarm the stamp and the check below at once, with no error and no audit line.
+**Stored roles are immutable, and lever refuses unrolled records.** The role is written into the
+agent record on the *create* path only; `scion resume` carries no role flag and the hub exposes no
+route to set a stored role. The hub resolves a record with **no** stored role to full, at dispatch
+and on every token refresh. So `lever apply` reads the hub's record before it keeps an agent and
+**fails the bring-up** when the record stores no role — including for an agent already `running`,
+which refreshes its own token on the same rule. The ways out are to delete the agent so lever
+recreates it with `--role baseline` (losing its conversation), or to stamp `agentRole: baseline`
+into the stored records in `~/.scion/hub.db` with the hub stopped (this only narrows).
+`lever doctor` reports unrolled records (`agent authorization roles` check,
+`internal/cli/doctor_checks.go`). A resume of a declared worker with no hub record falls through to
+creation, which stamps the role; lever does not set the project annotation.
 
-The third is a **pin-bump hazard, and lever refuses rather than absorb it**. The role is written
-into the agent record on the *create* path only, and it is immutable afterwards. An agent record
-created on a Scion older than scion#1089 therefore stores no role at all — and on a Scion at or
-after [scion#1102](https://github.com/GoogleCloudPlatform/scion/pull/1102) the hub resolves an
-unset stored role to **full**, both at dispatch and, since
-[scion#1101](https://github.com/GoogleCloudPlatform/scion/pull/1101), on every token refresh.
-Advancing a pin across that boundary would otherwise promote every pre-existing agent in silence,
-because resume neither re-stamps the role nor fails.
-
-So `lever apply` reads the hub's record before it keeps an agent, and **fails the bring-up** when
-the record stores no role while the installed Scion understands roles — including for an agent
-already `running`, which refreshes its own token on the same rule. It cannot repair the record:
-`scion resume` has no `--role` flag and the hub exposes no route to set a stored role, so the ways
-out are to delete the agent and let lever recreate it with `--role baseline` (losing its
-conversation), to stamp `agentRole: baseline` into the stored records in `~/.scion/hub.db` with the
-hub stopped (this only narrows), or to stay on a pin older than scion#1089. Refusing hands that choice to the
-operator rather than taking it: the recovery that would "fix" the record is the same delete that
-destroys the session. `lever doctor` reports unrolled records on *any* pin, so the bump can be
-planned before it is attempted. Agent `DELETE` was the lone
-ungated verb until [scion#1097](https://github.com/GoogleCloudPlatform/scion/pull/1097)
-(`9282f01f`, 2026-08-10) added a lifecycle-scope + project-isolation gate on `performAgentDelete`;
-the shipped example pin `e82a2a08` includes it, so a baseline agent's token is refused on delete. A
-pin older than `9282f01f` keeps the gap; lever's controller-PAT model cannot close it from outside. **Egress mode
-gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically so the
-in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable
+**Egress mode gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically
+so the in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable
 identically under `open` or `closed`. The real (if narrow) bound is tenancy: this is a
-single-operator, single-project instance — an operator-run manager and every worker already
-belong to that same operator's own instance, so an agent reaching this path has no cross-tenant
-blast radius to escalate into ([§8](/security-model/compromise/)).
+single-operator, single-project instance — an operator-run manager and every worker already belong
+to that same operator's own instance, so an agent reaching this path has no cross-tenant blast
+radius to escalate into ([§8](/security-model/compromise/)).
 
 ### 6.3 Leaf rotation and the re-read invariant
 

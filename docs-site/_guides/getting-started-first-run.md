@@ -27,10 +27,6 @@ backend: orbstack
 tree: workspace          # a confined SUBDIR; the root itself is never mounted
 scion:
   version: e82a2a08      # pin a scion commit; fetched + cross-compiled into the jail
-  # (`version:` needs >= dbf52f22, 2026-08-12 — from ce96122c the CLI stores
-  # secret values verbatim, which lever requires, and dbf52f22 is the first
-  # commit after that which the Go module proxy can fetch. Also >= b4c9911d:
-  # workers mount only their subtree via relative --workspace, upstream #815)
 # api-key is the secure default (the real key never enters the container) but
 # needs a Console API key. This demo opts into subscription (your Claude OAuth
 # token), so egress stays open and the token is projected to the agents.

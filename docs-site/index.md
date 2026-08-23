@@ -52,10 +52,8 @@ confined to a subtree with narrower tool grants.
 
 **Platforms:** macOS on Apple Silicon with [OrbStack](https://orbstack.dev), or
 Lima (macOS `vz`, Linux QEMU/KVM; Lima >= 2.0.0, checked at bring-up). The
-Linux/Lima path is validated end-to-end. Known Lima gaps: `lever stop` -> `up`
-comes back with a fresh manager conversation
-([#3](https://github.com/stevegeek/lever/issues/3)); `remote:` requires the
-`orbstack` backend (rejected at config load otherwise).
+Linux/Lima path is validated end-to-end. On Lima, `lever stop` -> `up` starts a fresh manager conversation, and
+`remote:` requires the `orbstack` backend (rejected at config load otherwise).
 
 Prebuilt `lever` binaries ship per release (darwin/linux, amd64/arm64). A Go
 1.26+ toolchain is required at runtime with `scion.version`/`scion.source` (Scion

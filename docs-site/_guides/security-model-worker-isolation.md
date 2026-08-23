@@ -10,7 +10,7 @@ Part of the [security model](/security-model/). Sections keep their original § 
 
 The jail ([§2](/security-model/jail/)-[§3](/security-model/)) protects host secrets and the LAN. *Within* the jail, the manager and every worker
 are agents in the **same Scion project** — Lever registers exactly one project per instance
-([architecture.md §2](/architecture/)), not a separate project per agent as an earlier design did.
+([architecture.md §2](/architecture/)).
 Two structural properties bound what one agent can reach inside that shared project.
 
 ### 4.1 Defense by absence: a worker only ever mounts its own subdirectory
@@ -33,13 +33,8 @@ operator-directive channel resolves that literal name to the manager regardless 
 How the subdir mount is delivered: worker confinement uses a **project-relative `--workspace`**
 mount with a containment guard (rejecting `..`/symlink escape), which Scion resolves within the
 project root and mounts as exactly that subtree (an absolute `--workspace` instead mounts that
-exact host path — Scion branches on `filepath.IsAbs`). Merged upstream in
-[scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815); requires a `scion.version`
-pin of `b4c9911d` or later (the shipped examples pin `e82a2a08`, which is higher — lever's
-credential writes need `ce96122c` or later). Live-validated 2026-07-10 on the
-pre-merge fork implementation of the same guard (worker `scratch` mounted
-`/lever/workers/scratch`, not `/lever`); the upstream implementation has not yet been
-live-revalidated.
+exact host path — Scion branches on `filepath.IsAbs`). The shipped examples pin a `scion.version`
+that supports this; an unsupported pin fails at `lever apply` with an explanatory error.
 
 This guarantee also holds only on a **non-git tree root**: a git repository at the tree root can
 pull Scion's mount builder into a worktree branch that also bind-mounts the whole `.git` object
@@ -56,9 +51,8 @@ mechanism, viewed at the manager's wider scope. A compromised *manager* therefor
 whole-tree reach ([§7](/security-model/compromise/)); this isolation guarantee is about one *worker* reaching another worker's
 subdirectory, not about bounding the manager.
 
-**Scion's default shared directory is removed, because it would defeat this.** Since
-[scion#925](https://github.com/GoogleCloudPlatform/scion/pull/925), the hub stamps a `scratchpad`
-shared directory on every new project and mounts it **read-write into every agent of that project**,
+**Scion's default shared directory is removed, because it would defeat this.** The hub stamps a
+`scratchpad` shared directory on every new project and mounts it **read-write into every agent of that project**,
 at `/scion-volumes/scratchpad`. That is a writable channel between the manager and every worker, and
 between any two workers — exactly the reach §4.1 denies. So `lever apply` removes the directory from
 the hub's project record after registration, on both the fresh and the already-registered path,
@@ -70,30 +64,16 @@ inside the jail, like every other Scion interaction: the hub binds the jail's lo
 Lima template suppresses guest→host forwarding on purpose, so a host-side call could not reach it
 there at all.
 
-**A hub-wide opt-out now exists upstream, and it does not retire the removal.** When lever first
-shipped the removal there was no way to switch the default off at all in file/SQLite mode: the
-setting lived in Scion's operational settings, which are Postgres-gated, and the admin endpoint
-answered `501`. In response to lever's request
-([scion#1098](https://github.com/GoogleCloudPlatform/scion/issues/1098)),
-[scion#1103](https://github.com/GoogleCloudPlatform/scion/pull/1103) added a `settings.yaml` key
-that works in file/SQLite mode:
+**A hub-wide opt-out exists, and it does not replace the removal.** Scion's `settings.yaml` accepts:
 
 ```yaml
 project_defaults:
   default_scratchpad: false
 ```
 
-It acts **at project creation time**. It stops the hub stamping the directory on a *new* project;
-it does not remove one from a project the hub already records. So it narrows what the removal has
-to do, and never replaces it — any instance registered before the key was set still needs the
-delete, and lever still verifies the record either way. Two caveats if you set it yourself: Scion
-reads the top-level `project_defaults` section only when the same `settings.yaml` also carries a
-top-level `server:` section, and ignores it silently otherwise; and the key first shipped in a
-window when Scion could not be fetched through the Go module proxy at all — a root `AGENTS.md`
-sat beside the existing `agents.md`, and the proxy cannot build a zip for two names differing only
-in case. [scion#1153](https://github.com/GoogleCloudPlatform/scion/pull/1153) merged the two files
-on 2026-08-12, so `scion.version` reaches any commit from there on; anything earlier still needs
-[`scion.source` or `scion.binary`](/reference/config/).
+It acts **at project creation time**: it stops the hub stamping the directory on a *new* project,
+and it does not remove one from a project the hub already records. lever does not set this key;
+it performs and verifies the removal either way.
 
 `lever doctor` reports any shared directory the hub still records for the project. That check reads
 the hub record, so it describes newly started agents: an agent that started before the removal
@@ -163,25 +143,25 @@ the manager's `127.0.0.1:8462` and be authenticated to the broker **as the manag
 credential — full cross-agent impersonation.
 
 Lever closes this by giving every agent its **own** network namespace. Agents run under rootless
-podman's default **pasta** networking (lever no longer forces `--network=host`), so each container's
+podman's default **pasta** networking (lever does not pass `--network=host`), so each container's
 `127.0.0.1` is private to that container; one agent cannot reach another's gateway proxy at all
-(live-validated: a second container's `curl` to a co-resident agent's `127.0.0.1:8462` is refused).
+(a second container's `curl` to a co-resident agent's `127.0.0.1:8462` is refused).
 
-Two things that host networking used to provide are preserved without it:
+Two properties a shared namespace would give for free are preserved without it:
 
 - **Hub reachability.** The agent's Scion runtime connects to the jail-local hub on loopback. With a
-  private netns the hub is no longer directly reachable, so lever stages a pasta
-  `--map-host-loopback` option (guest `containers.conf.d`) mapping the address podman already resolves
+  private netns the hub is not directly reachable, so lever stages a pasta
+  `--map-host-loopback 169.254.1.2` option (guest `containers.conf.d`), the address podman resolves
   `host.containers.internal` to; Scion's auto-computed container hub endpoint
   (`host.containers.internal:PORT` for podman) then reaches the jail-loopback hub across the netns
-  boundary. The mapping exposes the jail's loopback to each agent — the same surface `--network=host`
-  already gave them, now minus the per-agent gateways that host networking made jail-wide. Nothing
+  boundary. The mapping exposes the jail's loopback to each agent, minus the per-agent gateways,
+  which stay private to each container. Nothing
   unauthenticated should bind the jail loopback beyond the hub and the allowlisted local tools; the
   broker's control surfaces are host-side, not on the jail loopback.
 - **Egress containment.** The allowlist is enforced on the jail's `OUTPUT` chain. pasta's userspace
   egress re-emerges as `OUTPUT` traffic in the jail netns, so it still traverses `LEVER_EGRESS`
-  unchanged — a per-agent bridge/`FORWARD` topology would have bypassed it, but pasta does not
-  (live-validated: private-range probes from inside an agent netns still hit the chain's DROP rules).
+  unchanged — a per-agent bridge/`FORWARD` topology would bypass it, but pasta does not
+  (private-range probes from inside an agent netns hit the chain's DROP rules).
 
 Escape hatch: setting `LEVER_FORCE_HOST_NETWORK=1` on the host restores `--network=host` for
 debugging — this reopens the shared-loopback gap above and is not isolation-safe.

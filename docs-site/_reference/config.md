@@ -157,31 +157,16 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 
 Provide **at most one** of `version`, `source` or `binary` (they are mutually exclusive). Omit all three to rely on a scion already present in the jail.
 
-**Whichever you use, the scion must be `ce96122c` (2026-08-10) or later.** That commit
-([scion#1111](https://github.com/GoogleCloudPlatform/scion/pull/1111)) made the scion CLI store a
-secret value verbatim instead of base64-decoding it. lever sends its credentials as plaintext, so an
-older scion rejects them at `lever apply` with `value must be base64-encoded`, and lever names the
-pin in the error. Do not work around it by encoding the value yourself: a scion at or past
-`ce96122c` would then store the encoded text and hand the agent a credential that fails every model
-call.
-
-**For `version:` the floor is higher: `dbf52f22` (2026-08-12).** Between `4c045fc8` and `dbf52f22`
-the scion repository carried both `AGENTS.md` and `agents.md`, and the Go module proxy cannot build
-a zip for two names differing only in case — so no commit in that window is fetchable at all, whatever
-its behaviour. `ce96122c` falls inside it. `source:` and `binary:` do not use the proxy and take the
-`ce96122c` floor directly.
-
-One caveat on the rejection above: it is loud only because a credential is not valid base64
-(`sk-ant-…` contains `-`, which is outside the alphabet). A credential whose text happened to be
-valid base64 would instead be decoded into binary and stored without complaint. Treat the pin floor
-as the guarantee, not the error message.
+lever requires a recent scion; the examples pin a supported commit. An unsupported scion fails at
+`lever apply` with an error that names the minimum. Do not work around a `value must be
+base64-encoded` error by encoding the credential yourself; upgrade the pin.
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `version` | string | no | - | A scion module version/commit (a commit hash like `e82a2a08`, or a `vX.Y.Z` tag) fetched via the Go module system and cross-compiled into the jail at provision time. **No vendored source tree**, this is the recommended way to pin Scion. Requires a Go toolchain on the host — plus node >= 20 + npm when [`remote.enabled`](#remote), which builds the hub's web UI from the same fetched module (see below). |
 | `source` | path | no | - | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. Requires a Go toolchain on the host, but no module fetch. Also needs node >= 20 + npm when [`remote.enabled`](#remote); the web UI is rebuilt whenever you edit `web/`. |
 | `binary` | path | no | - | Path to an **already-built linux scion binary**, installed into the jail as-is. Unlike the two above it needs **no Go toolchain, no module cache and no egress** on the machine hosting the jail — and no node, since lever builds no web UI for it: with [`remote.enabled`](#remote) the hub serves whatever assets that binary embeds (upstream's `make all` embeds them), or its "Web UI Not Available" page if it embeds none — build it on a workstation and ship it. Relative paths resolve against the config file's directory. lever checks the ELF header against the guest's architecture before installing, so a wrong-arch build fails immediately instead of as `exec format error` at manager start. **Its integrity is yours to guarantee**: unlike `version`, no module-proxy checksum stands behind it. |
-| `agent_role` | string | no | - | Overrides the [role](https://github.com/GoogleCloudPlatform/scion/pull/1089) lever stamps on every `scion start`: `none`, `readonly`, `baseline` or `full`. **You do not need to set it.** Empty means lever picks `baseline` itself whenever the installed scion understands roles at all — it probes the binary for the `--role` flag rather than guessing from the pin, because [scion#1090](https://github.com/GoogleCloudPlatform/scion/pull/1090) flipped the default for an unspecified role from `baseline` to **full** (agent create, lifecycle and project-secret-read), and a commit hash cannot tell lever which side of that change a pin sits on. `readonly` cannot heartbeat, so a live agent cannot run on it. `full` grants exactly the hub authority the jail model exists to withhold. Naming a role on a scion that has no `--role` flag is a hard error, never a silent downgrade. |
+| `agent_role` | string | no | - | Overrides the role lever stamps on every `scion start`: `none`, `readonly`, `baseline` or `full`. **You do not need to set it.** Empty means lever picks `baseline` whenever the installed scion supports `--role` (lever probes the binary for the flag); scion's own default for an unspecified role is `full` (agent create, lifecycle and project-secret-read). `readonly` cannot heartbeat, so a live agent cannot run on it. `full` grants exactly the hub authority the jail model exists to withhold. Naming a role on a scion that has no `--role` flag is a hard error, never a silent downgrade. |
 
 Whichever mode you use, lever records the installed binary's sha256 in the jail and skips the copy when it already matches, so an unchanged scion is not re-streamed on every `lever up`.
 

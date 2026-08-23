@@ -31,12 +31,12 @@ The model never checks a signature; all cryptography is host-side.
 | Layer | Where | What it does |
 |---|---|---|
 | 1. Delivery gate | Broker, host-side | A forged, unsigned, or altered directive never reaches an agent's inbox. This is a real cryptographic property over the signed artifact. |
-| 2. Agent-side live verification | Agent, over its own mTLS channel to the broker | Stops low-effort in-context spoofing by binding consumption to the caller's verified identity. Depends on per-agent network-namespace isolation ([§4.3](/security-model/worker-isolation/), shipped 0.7.0) — without it, co-resident agents shared a gateway loopback and this binding would not be trustworthy. |
-| 3. Host-enforced action binding | Broker, at tool-call time | The intended end state: the broker itself enforces the specific bound action when the tool is called. **Not implemented.** |
+| 2. Agent-side live verification | Agent, over its own mTLS channel to the broker | Stops low-effort in-context spoofing by binding consumption to the caller's verified identity. Depends on per-agent network-namespace isolation ([§4.3](/security-model/worker-isolation/)): without it, co-resident agents would share a gateway loopback and this binding would not be trustworthy. |
+| 3. Host-enforced action binding | Broker, at tool-call time | **Not implemented.** The broker does not enforce the bound action when the tool is called; execution goes through the agent's ordinary capability path (see scope note). |
 
 > **Scope.** The shipped mechanism delivers authenticated, integrity-protected, replay-proof
 > **delivery and verification** of an operator-signed action bound to a specific target agent. It
-> does **not** yet enforce that action at tool-call time. On consume, the broker returns the
+> does **not** enforce that action at tool-call time. On consume, the broker returns the
 > validated action descriptor to the agent, which then makes the call through its ordinary
 > capability path — still subject to every existing host-side grant check (`rules.MayObtain` at
 > mint, `token.Verify` at call, [§6.2](/security-model/credentials/)). **A directive therefore grants no new capability.**
@@ -56,8 +56,8 @@ never as authority that overrides a refusal of a sensitive or outbound action).
 
 ### 11.2 Trust model
 
-**Trusted:** the host-side broker, the host CLI, the host filesystem, and — since per-agent netns
-landed in 0.7.0 — each agent's own mTLS channel to the broker.
+**Trusted:** the host-side broker, the host CLI, the host filesystem, and each agent's own mTLS
+channel to the broker (per-agent netns, [§4.3](/security-model/worker-isolation/)).
 
 **Treated as hostile:** everything inside the jail — any agent (manager or worker), the Scion hub,
 anything readable from a container. Attackers in this model can inject arbitrary text into any
@@ -104,9 +104,9 @@ slug name. The broker keeps a persistent per-CN generation counter:
 Consume requires the caller's *live* CN and current generation to match the directive's
 `target_agent`, so one agent cannot consume a directive addressed to another, and a recycled slug
 cannot inherit a predecessor's pending directives. This gate is only as trustworthy as the mTLS
-identity behind it, which is why it depends on the per-agent network namespace work in
-[§4.3](/security-model/worker-isolation/): before that shipped, co-resident agents shared one
-gateway loopback and a compromised sibling could have presented as another agent's identity.
+identity behind it, which is why it depends on the per-agent network namespace of
+[§4.3](/security-model/worker-isolation/): with a shared gateway loopback, a compromised sibling
+could present as another agent's identity.
 
 ### 11.5 Key posture
 
@@ -135,7 +135,7 @@ gateway loopback and a compromised sibling could have presented as another agent
 | Attack | Defence / mechanism |
 |---|---|
 | Forged directive placed in an agent's inbox | Layer 1 — never verifies, never stored, never delivered (§11.1). |
-| Cross-agent consume (agent A consumes a directive addressed to agent B) | mTLS CN + generation gate at consume; depends on 0.7.0 per-agent netns (§11.4, [§4.3](/security-model/worker-isolation/)). |
+| Cross-agent consume (agent A consumes a directive addressed to agent B) | mTLS CN + generation gate at consume; depends on per-agent netns (§11.4, [§4.3](/security-model/worker-isolation/)). |
 | In-context spoof — injected text claiming to be a "verified directive" | Structured, bound actions plus the "only a `directive_consume` you emitted yourself, this turn" rule — enforced for bound actions (`tool_call`/`approval`), only bar-raising for `instruction`. |
 | Continuation / boundary confusion (attacker text appended after a real consume) | Bound actions carry no free text and the agent acts only on the *returned* action, never on surrounding text. |
 | Token or id swap | The action acted on comes only from the consume response — nothing lives outside the signed statement for an attacker to substitute. |

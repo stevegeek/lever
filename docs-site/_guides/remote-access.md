@@ -98,7 +98,7 @@ response and injects a PAT instead of ever running an OAuth login.
 
 **Requires the `orbstack` backend.** Not because of how the proxy reaches the hub — it dials
 *through* the jail, the rule every other lever hub call follows, and that needs no guest→host
-forwarding on any backend. The gate is there because the Lima path has never been live-validated.
+forwarding on any backend. The Lima path is not validated.
 `remote.enabled: true` on any other backend is rejected at config load with a clear error.
 
 **How the proxy reaches the hub.** The hub binds `127.0.0.1:8080` **inside the jail**. The proxy

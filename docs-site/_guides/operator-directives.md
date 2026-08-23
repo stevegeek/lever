@@ -40,7 +40,7 @@ plus per-CN generations) persists to `.lever-state/directives.json` with atomic 
 consume/submit fail closed on a persistence error rather than report a success that isn't durable.
 `invalidated` is set on an active directive when its target CN re-enrols (generation bump).
 
-This depends on per-agent network-namespace isolation (shipped in 0.7.0); see
+This depends on per-agent network-namespace isolation; see
 [worker isolation §4.3](/security-model/worker-isolation/).
 
 ## Directive kinds

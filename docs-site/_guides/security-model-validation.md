@@ -18,7 +18,7 @@ Validated (by hand or by an automated gate):
 - Container boot enrols the agent and registers the broker tools over mTLS.
 - Single-project model ([§4](/security-model/worker-isolation/)): one Scion project per instance,
   hub with dev-auth off, lifecycle driven only by a host-only controller PAT, worker isolation via
-  Scion's relative `--workspace` ([scion#815](https://github.com/GoogleCloudPlatform/scion/pull/815)).
+  Scion's relative `--workspace`.
 - Mid-session leaf rotation: the agent's leaf is renewed every 12h and every long-lived broker
   client re-reads it per handshake ([§6.3](/security-model/credentials/), [agent identity](/agent-identity/)).
 - `lima` backend (`make test-lima-e2e`): the six `lever acceptance` checks under both egress
@@ -52,7 +52,8 @@ Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 - **LAN unreachable; host loopback reachable and clampable.** From inside the jail the LAN router
   was unreachable (100% packet loss) while a host loopback tool server answered via the alias (over
   both IPv4 and IPv6); an egress allowlist then permitted one tool port and dropped the rest, and
-  the rule still held for a rootless `--network=host` container (the topology agents actually use).
+  the rule also held for a rootless `--network=host` container; agents run under pasta, whose
+  egress re-emerges on the same `OUTPUT` chain ([§4.3](/security-model/worker-isolation/)).
 - **The runtime runs inside the jail.** Rootless podman runs containers (native `overlayfs`); the
   Scion binary builds and runs; a rootless host-networked container obeys the egress allowlist.
 

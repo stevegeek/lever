@@ -121,8 +121,8 @@ command and flag is in the [CLI reference](docs-site/_reference/cli.md).
 
 - macOS on Apple Silicon with [OrbStack](https://orbstack.dev), or [Lima](https://lima-vm.io) ≥ 2.0.0
   (macOS or Linux). See [containment backends](docs-site/_reference/backends.md).
-- [Scion](https://github.com/GoogleCloudPlatform/scion) as the runtime engine, `ce96122c` or later
-  (`scion.version:` pins need `dbf52f22` or later). A Go toolchain on the host with
+- [Scion](https://github.com/GoogleCloudPlatform/scion) as the runtime engine, pinned in `lever.yaml`
+  (the examples pin a supported commit). A Go toolchain on the host with
   `scion.version:`/`scion.source:`; none with `scion.binary:`. See [config reference](docs-site/_reference/config.md#scion).
 - Docker, to build the agent image locally.
 - An LLM coding-agent harness (the agent image bakes Claude Code).

@@ -41,8 +41,8 @@ another.
 
 macOS on Apple Silicon with [OrbStack](https://orbstack.dev). The runtime, the Scion server/broker,
 rootless podman, and every agent run inside one OrbStack **isolated machine** that shares no host
-files and has its own network namespace. This is the validated substrate today and the reference the
-other backends are measured against. Its trade: a **single kernel** shared across the manager and all
+files and has its own network namespace. This is the reference substrate the other backends are
+measured against. Its trade: a **single kernel** shared across the manager and all
 workers (a kernel-level container escape reaches the whole jail — see [security model §8](/security-model/compromise/)).
 
 ### `lima` — the non-OrbStack path
@@ -55,20 +55,18 @@ template** (stock Lima templates are not used), built from three mechanisms:
 - **Exactly one writable mount**: the project tree, at `/lever`. Nothing else, in particular not
   Lima's stock `~` read-only home mount.
 - **All automatic guest→host port-forwarding suppressed.** Lima's default forwards *every* guest
-  listener to the host's `127.0.0.1`, live-confirmed 2026-07-02: on a stock template, a guest-side
-  `0.0.0.0` listener is reachable at the host's loopback. Left on, a jailed agent could squat a
+  listener to the host's `127.0.0.1`: on a stock template, a guest-side `0.0.0.0` listener is
+  reachable at the host's loopback. Left on, a jailed agent could squat a
   host-loopback port and impersonate a local service (a dev server, a credential helper). The
   lever template's `portForwards` block carries an ignore-all rule for both `0.0.0.0` and
   `127.0.0.1` guest binds, closing it.
 - **Lima's bundled containerd disabled** (`containerd: {system: false, user: false}`). Lever
   provisions rootless podman/Docker itself, exactly as it does for `orbstack`.
 
-Requires **Lima ≥ 2.0.0**, checked at bring-up. The floor exists because Lima 2.0 changed
-`portForwards` ignore-rule semantics (`guestIPMustBeZero` auto-inference for a `0.0.0.0` guest
-bind); an older `limactl` could silently forward guest ports despite the rendered ignore rules
-being present. The template also sets `guestIPMustBeZero: true` explicitly, so the containment
-property doesn't depend on the auto-inference alone.
+Requires **Lima ≥ 2.0.0**, checked at bring-up: the ignore rules depend on Lima 2.0's
+`portForwards` semantics, and an older `limactl` forwards guest ports despite the rendered ignore
+rules. The template sets `guestIPMustBeZero: true` explicitly, so the containment property does
+not depend on Lima's auto-inference.
 
-`host.lima.internal` (live-confirmed reaching host-loopback services, resolving to `192.168.5.2` in
-testing) is the host alias, the direct analog of OrbStack's `host.orb.internal`: it's how an agent
+`host.lima.internal` (resolving to `192.168.5.2`) is the host alias, the direct analog of OrbStack's `host.orb.internal`: it's how an agent
 reaches the broker and any allowlisted host tool port.

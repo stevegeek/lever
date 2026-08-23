@@ -7,7 +7,6 @@ import (
 
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
@@ -15,8 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func testHubLogin() backend.HubLogin {
-	return backend.HubLogin{IssuerPort: config.GuestLoginIssuerPort, HostPort: 8447,
+func testHubLogin() HubLogin {
+	return HubLogin{IssuerPort: config.GuestLoginIssuerPort, HostPort: 8447,
 		HostAddress: "host.orb.internal", ClientID: "lever-remote"}
 }
 

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -175,15 +174,15 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 
 // The four scenarios below pin scionProjectRegistered's exactly-one-valid-
 // registration predicate: registered requires BOTH exactly one matching entry
-// AND the in-tree marker. Pure-Go over backend.ScionProjectState (mirroring
+// AND the in-tree marker. Pure-Go over ScionProjectState (mirroring
 // how internal/cli's checkScionProject is tested), since the underlying
 // marker+entries read is already covered by TestParseScionState* above and by
 // ReadScionProjectState's real production use — nothing new is parsed here.
 
 func TestScionProjectRegisteredOneMatchingEntryPlusMarker(t *testing.T) {
-	st := backend.ScionProjectState{
+	st := ScionProjectState{
 		MarkerPresent: true,
-		Entries:       []backend.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
+		Entries:       []ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
 	}
 	if !scionProjectRegistered(st, "/lever") {
 		t.Fatal("exactly one matching entry + marker present must be registered")
@@ -191,16 +190,16 @@ func TestScionProjectRegisteredOneMatchingEntryPlusMarker(t *testing.T) {
 }
 
 func TestScionProjectRegisteredZeroEntries(t *testing.T) {
-	st := backend.ScionProjectState{MarkerPresent: true}
+	st := ScionProjectState{MarkerPresent: true}
 	if scionProjectRegistered(st, "/lever") {
 		t.Fatal("zero entries must not be registered")
 	}
 }
 
 func TestScionProjectRegisteredDuplicateEntries(t *testing.T) {
-	st := backend.ScionProjectState{
+	st := ScionProjectState{
 		MarkerPresent: true,
-		Entries: []backend.ScionProjectEntry{
+		Entries: []ScionProjectEntry{
 			{Name: "lever__aaaa1111", WorkspacePath: "/lever"},
 			{Name: "lever__bbbb2222", WorkspacePath: "/lever"},
 		},
@@ -213,9 +212,9 @@ func TestScionProjectRegisteredDuplicateEntries(t *testing.T) {
 func TestScionProjectRegisteredEntryWithoutMarker(t *testing.T) {
 	// The bad-teardown signature: one entry claims the workspace, but the
 	// in-tree marker is gone.
-	st := backend.ScionProjectState{
+	st := ScionProjectState{
 		MarkerPresent: false,
-		Entries:       []backend.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
+		Entries:       []ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
 	}
 	if scionProjectRegistered(st, "/lever") {
 		t.Fatal("an entry without the in-tree marker must not be registered")
@@ -226,9 +225,9 @@ func TestScionProjectRegisteredEntryWithoutMarker(t *testing.T) {
 // DIFFERENT workspace (e.g. a worker's registration) doesn't count toward this
 // workspace's check.
 func TestScionProjectRegisteredIgnoresOtherWorkspacePaths(t *testing.T) {
-	st := backend.ScionProjectState{
+	st := ScionProjectState{
 		MarkerPresent: true, // this workspace's own marker
-		Entries:       []backend.ScionProjectEntry{{Name: "worker__cccc3333", WorkspacePath: "/lever/workers/worker"}},
+		Entries:       []ScionProjectEntry{{Name: "worker__cccc3333", WorkspacePath: "/lever/workers/worker"}},
 	}
 	if scionProjectRegistered(st, "/lever") {
 		t.Fatal("an entry for a different workspace path must not count as this one's registration")

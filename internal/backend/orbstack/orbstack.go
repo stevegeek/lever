@@ -50,12 +50,13 @@ type OrbStack struct {
 	probeInterval time.Duration
 }
 
-func New(r proc.Runner, machine string) *OrbStack {
+func New(r proc.Runner, machine string, opts common.Options) *OrbStack {
 	o := &OrbStack{probeAttempts: startProbeAttempts, probeInterval: startProbeInterval}
 	o.Base = common.NewBase(common.Config{
 		Runner:    r,
 		Machine:   machine,
 		HostAlias: "host.orb.internal",
+		Options:   opts,
 		Hooks: common.Hooks{
 			JailPrefix: JailPrefix,
 			Guest: func(r proc.Runner, machine string) guest.Guest {
@@ -74,13 +75,18 @@ func New(r proc.Runner, machine string) *OrbStack {
 	return o
 }
 
-// Profile returns orbstack's declared guarantees. The value lives once in
-// backend.Candidates (the single source of the guarantee matrix); returning it
-// here keeps the runtime profile and the documented one identical.
-func (o *OrbStack) Profile() backend.Profile {
-	p, _ := backend.ProfileFor("orbstack")
-	return p
+// Profile is orbstack's declared guarantees — the one value the runtime
+// Profile() method, the registry's guarantee matrix and `lever backends` all
+// report, so they cannot disagree.
+var Profile = backend.Profile{
+	Name:             "orbstack",
+	SeparateKernel:   false, // shares the one OrbStack VM kernel across manager+workers
+	FSBoundedBy:      "isolated machine: no host files + project tree mounted at /lever",
+	EgressEnforcedAt: "jail netns iptables/ip6tables",
+	VersionFragile:   true, // depends on OrbStack --isolated behaviours
 }
+
+func (o *OrbStack) Profile() backend.Profile { return Profile }
 
 func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {
@@ -97,23 +103,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.ensureMachine(ctx, cfg.ProjectTree); err != nil {
 		return err
 	}
-	if err := o.ReadRunUser(ctx); err != nil {
-		return err
-	}
-	if err := o.Guest().EnsureRuntimes(ctx, o.RunUser()); err != nil {
-		return err
-	}
-	if cfg.HasScion() {
-		if err := o.Guest().EnsureScion(ctx, guest.ScionSpec{
-			Binary:  cfg.ScionBinary,
-			Source:  cfg.ScionSource,
-			Version: cfg.ScionVersion,
-			WebUI:   cfg.ScionWebUI,
-		}); err != nil {
-			return err
-		}
-	}
-	return o.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+	return o.Provision(ctx, cfg)
 }
 
 // ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning: it

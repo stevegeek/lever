@@ -1,18 +1,14 @@
 // Package backend defines the substrate contract every containment backend
-// satisfies. The declared backends and their guarantees live in candidates.go
-// (the single source of the guarantee matrix); construction is in
-// internal/backend/registry.
+// satisfies. Each implementation declares its own guarantees as a Profile;
+// internal/backend/registry is the single table that names the implemented
+// backends and exposes the guarantee matrix derived from it.
 //
 // # Dependency direction
 //
-// This package is the CONTRACT, so it owns every data type the Backend
-// interface names — including HubLogin (hublogin.go) and ScionProjectState
-// (scionstate.go), which the guest helper (internal/backend/guest) fills in
-// and consumes. guest imports backend for those types; backend never imports
-// guest. The types could live in guest only if backend imported guest, which
-// would make the contract depend on one implementation's helper — the wrong
-// direction, not merely a cycle to dodge. common (the shared implementation
-// base) imports both, as an implementation should.
+// internal/backend/guest is the leaf: it owns the guest-side data types the
+// Backend interface names (HubLogin, ScionProjectState) and imports nothing
+// from this package. backend imports guest and re-exports those types as
+// aliases (types.go); common (the shared implementation base) imports both.
 package backend
 
 import (

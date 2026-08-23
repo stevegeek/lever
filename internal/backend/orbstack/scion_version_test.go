@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -27,7 +28,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("bash -c", proc.Result{})
 
 	backendtest.StageFakeBuildOutput(t, "lever-vtest")
-	o := New(f, "lever-vtest")
+	o := New(f, "lever-vtest", common.Options{})
 	if err := o.Guest().EnsureScion(context.Background(), guest.ScionSpec{Version: pin}); err != nil {
 		t.Fatalf("EnsureScion(version): %v", err)
 	}
@@ -55,7 +56,7 @@ func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	f.Script("orb -m lever-vtest uname -m", proc.Result{Stdout: "arm64\n"})
 	f.Script("/opt/go/bin/go mod download -json", proc.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
-	o := New(f, "lever-vtest")
+	o := New(f, "lever-vtest", common.Options{})
 	if err := o.Guest().EnsureScion(context.Background(), guest.ScionSpec{Version: "deadbeef"}); err == nil {
 		t.Fatal("expected error when go mod download reports a bad revision")
 	} else if !strings.Contains(err.Error(), "unknown revision") {

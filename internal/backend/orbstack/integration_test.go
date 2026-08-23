@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -17,7 +18,7 @@ import (
 // Requires OrbStack running. Creates and DELETES a throwaway jail.
 func TestRealOrbStack(t *testing.T) {
 	machine := "lever-it-" + os.Getenv("USER")
-	b := New(proc.RealRunner{}, machine)
+	b := New(proc.RealRunner{}, machine, common.Options{})
 	ctx := context.Background()
 	t.Cleanup(func() { _ = b.Teardown(ctx) })
 

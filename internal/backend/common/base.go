@@ -49,12 +49,23 @@ type Hooks struct {
 	ResolveHostAlias func(ctx context.Context) (v4, v6 string, err error)
 }
 
+// Options is the caller-supplied part of a backend's construction — what the
+// registry decides once and every embedder passes through to NewBase.
+type Options struct {
+	// ForceHostNetwork is the host-side debugging escape hatch
+	// (jail.ForceHostNetworkEnv) that makes every in-jail scion command fall
+	// back to a shared netns. The registry reads it from the environment;
+	// Base never consults the environment itself.
+	ForceHostNetwork bool
+}
+
 // Config is what a Base needs from its embedder, set once at construction.
 type Config struct {
 	Runner    proc.Runner // host runner (the prefix binary runs on the host)
 	Machine   string      // jail identifier
 	HostAlias string      // DNS name an agent uses to reach allowlisted host tools
 	Hooks     Hooks
+	Options   Options
 }
 
 // Base carries the shared jail state and implements the prefix/guest-delegating
@@ -66,16 +77,16 @@ type Base struct {
 	machine   string
 	hostAlias string
 	hooks     Hooks
+	opts      Options
 
 	user    string // resolved in-jail run user
 	uid     string // resolved in-jail run-user uid
 	aliasV4 string // resolved IPv4 of hostAlias as seen from the jail
-	aliasV6 string // resolved IPv6 of hostAlias as seen from the jail
 }
 
 // NewBase builds the shared half of a prefix-reached backend.
 func NewBase(cfg Config) Base {
-	return Base{r: cfg.Runner, machine: cfg.Machine, hostAlias: cfg.HostAlias, hooks: cfg.Hooks}
+	return Base{r: cfg.Runner, machine: cfg.Machine, hostAlias: cfg.HostAlias, hooks: cfg.Hooks, opts: cfg.Options}
 }
 
 // Runner returns the host runner the backend was built with.
@@ -101,10 +112,6 @@ func (b *Base) HostToolAlias() string { return b.hostAlias }
 // HostAliasV4 returns the resolved IPv4 of HostToolAlias as seen from the jail,
 // valid after EnsureUp/ApplyEgress. Empty if not yet resolved.
 func (b *Base) HostAliasV4() string { return b.aliasV4 }
-
-// HostAliasV6 returns the resolved IPv6 of HostToolAlias as seen from the jail,
-// valid after an ApplyEgress that rebuilt the chain. Empty if not yet resolved.
-func (b *Base) HostAliasV6() string { return b.aliasV6 }
 
 // MountDest returns the path inside the jail where the project tree is bind-mounted.
 func (b *Base) MountDest() string { return MountDest }
@@ -140,22 +147,44 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 	return nil
 }
 
+// Provision is the shared tail of every embedder's EnsureUp, run once the
+// machine exists: resolve the run user, install the guest runtimes, install
+// scion when cfg asks for one, then apply egress. One copy rather than one
+// per backend: the ScionSpec literal drifted between the two once (ScionBinary
+// was added to both literals while the guard around them was updated in
+// neither — see backend.Config.HasScion).
+func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
+	if err := b.ReadRunUser(ctx); err != nil {
+		return err
+	}
+	if err := b.Guest().EnsureRuntimes(ctx, b.RunUser()); err != nil {
+		return err
+	}
+	if cfg.HasScion() {
+		if err := b.Guest().EnsureScion(ctx, guest.ScionSpec{
+			Binary:  cfg.ScionBinary,
+			Source:  cfg.ScionSource,
+			Version: cfg.ScionVersion,
+			WebUI:   cfg.ScionWebUI,
+		}); err != nil {
+			return err
+		}
+	}
+	return b.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+}
+
 // ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records the
 // resolved host alias, preserving the I2 no-reopen property. Called by each
 // embedder's EnsureUp as its last step; it is not part of the Backend
-// contract because nothing outside a backend drives it.
+// contract because nothing outside a backend drives it. Only the IPv4 alias
+// is kept: nothing reads the v6 one back, and the I2 skip path cannot supply
+// it (existingClosedAlias parses only v4 from the live chain).
 func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	v4, v6, rebuilt, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, allowedPorts, closedInternet)
+	v4, _, _, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, allowedPorts, closedInternet)
 	if err != nil {
 		return err
 	}
-	if rebuilt {
-		b.aliasV4, b.aliasV6 = v4, v6
-	} else {
-		// I2 skip path: v6 is not authoritative here (existingClosedAlias only
-		// parses v4 from the live chain) — do not clobber a prior aliasV6.
-		b.aliasV4 = v4
-	}
+	b.aliasV4 = v4
 	return nil
 }
 
@@ -165,14 +194,13 @@ func (b *Base) JailRunner() proc.Runner {
 	return b.jail()
 }
 
-// jail builds the transport for the current run user; the host-network escape
-// hatch is read here, at construction, so the transport itself stays pure.
+// jail builds the transport for the current run user.
 func (b *Base) jail() *jail.Runner {
 	return jail.New(jail.Config{
 		Host:             b.r,
 		Prefix:           b.jailPrefix(),
 		UID:              b.RunUID(),
-		ForceHostNetwork: jail.ForceHostNetworkFromEnv(),
+		ForceHostNetwork: b.opts.ForceHostNetwork,
 	})
 }
 

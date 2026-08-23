@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -34,7 +35,7 @@ func scriptRealizedConfig(f *proc.FakeRunner, vm, json string) {
 func TestVerifyRealizedConfigAcceptsMatch(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
-	l := New(f, "lever-x")
+	l := New(f, "lever-x", common.Options{})
 
 	if err := l.verifyRealizedConfig(context.Background(), "/Users/x/tree"); err != nil {
 		t.Fatalf("verifyRealizedConfig on a matching config: %v", err)
@@ -131,7 +132,7 @@ func TestVerifyRealizedConfigDetectsDrift(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := proc.NewFakeRunner()
 			scriptRealizedConfig(f, "lever-x", tc.json)
-			l := New(f, "lever-x")
+			l := New(f, "lever-x", common.Options{})
 
 			err := l.verifyRealizedConfig(context.Background(), "/Users/x/tree")
 			if err == nil {
@@ -165,7 +166,7 @@ func TestEnsureUpFailsClosedOnDriftedRunningVM(t *testing.T) {
 		`{"guestIP":"0.0.0.0","guestIPMustBeZero":true,"guestPortRange":[1,65535],"proto":"any","ignore":true},` +
 		`{"guestIP":"127.0.0.1","guestPortRange":[1,65535],"proto":"any","ignore":true}` +
 		`],"containerd":{"system":false,"user":false}}}` + "\n"})
-	l := New(f, "lever-x")
+	l := New(f, "lever-x", common.Options{})
 
 	err := l.EnsureUp(context.Background(), backend.Config{MachineName: "lever-x", ProjectTree: "/Users/x/tree"})
 	if err == nil {
@@ -197,7 +198,7 @@ func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
 	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \n"})
 	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
 	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
-	l := New(f, "lever-x")
+	l := New(f, "lever-x", common.Options{})
 
 	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: "lever-x", ProjectTree: "/Users/x/tree"}); err != nil {
 		t.Fatalf("EnsureUp with a matching freshly-created config: %v", err)
@@ -220,7 +221,7 @@ func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
 func TestEnsureUpIsIdempotentWhenRunningAndMatching(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptedVM(f) // scripts a matching realized config for "/Users/x/tree" too
-	l := New(f, "lever-x")
+	l := New(f, "lever-x", common.Options{})
 
 	if err := l.EnsureUp(context.Background(), backend.Config{
 		MachineName: "lever-x", ProjectTree: "/Users/x/tree",

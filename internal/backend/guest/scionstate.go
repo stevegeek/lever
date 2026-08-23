@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
@@ -24,7 +23,7 @@ const workspacePathOf = `grep -E '^` + layout.WorkspacePathKey + `:' "$s" 2>/dev
 // ~/.scion/project-configs registration with the workspace path it claims. It
 // runs a read-only script through the machine-only UserPrefix, so it needs no
 // run user and works before EnsureUp (only the jail machine must be up).
-func (g Guest) ReadScionProjectState(ctx context.Context, workspacePath string) (backend.ScionProjectState, error) {
+func (g Guest) ReadScionProjectState(ctx context.Context, workspacePath string) (ScionProjectState, error) {
 	// Emit a line-parseable report (test/ls/grep only — nothing is mutated):
 	//   MARKER 1|0
 	//   ENTRY <project-configs-dir> <workspace_path>
@@ -42,7 +41,7 @@ done
 `
 	res, err := g.UserRun(ctx, "bash", "-lc", script)
 	if err != nil {
-		return backend.ScionProjectState{}, fmt.Errorf("guest: read scion project state: %w", err)
+		return ScionProjectState{}, fmt.Errorf("guest: read scion project state: %w", err)
 	}
 	return parseScionState(res.Stdout), nil
 }
@@ -101,10 +100,10 @@ func (g Guest) ScionProjectRegistered(ctx context.Context, workspacePath string)
 // scionProjectRegistered is the pure exactly-one-valid-registration predicate,
 // factored out so it is unit-testable without a fake runner (mirrors how
 // internal/cli's checkScionProject is a pure function over the same
-// backend.ScionProjectState shape, just with the opposite polarity: that one
+// ScionProjectState shape, just with the opposite polarity: that one
 // flags corruption for `lever doctor`, this one gates a destructive apply
 // step).
-func scionProjectRegistered(st backend.ScionProjectState, workspacePath string) bool {
+func scionProjectRegistered(st ScionProjectState, workspacePath string) bool {
 	n := 0
 	for _, e := range st.Entries {
 		if e.WorkspacePath == workspacePath {
@@ -117,8 +116,8 @@ func scionProjectRegistered(st backend.ScionProjectState, workspacePath string) 
 // parseScionState turns the report lines into a ScionProjectState. Unknown or
 // malformed lines are ignored (fail-safe: a check reading this treats "no
 // entries" as "nothing stale").
-func parseScionState(out string) backend.ScionProjectState {
-	var st backend.ScionProjectState
+func parseScionState(out string) ScionProjectState {
+	var st ScionProjectState
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 {
@@ -129,7 +128,7 @@ func parseScionState(out string) backend.ScionProjectState {
 			st.MarkerPresent = len(f) >= 2 && f[1] == "1"
 		case "ENTRY":
 			if len(f) >= 3 {
-				st.Entries = append(st.Entries, backend.ScionProjectEntry{Name: f[1], WorkspacePath: f[2]})
+				st.Entries = append(st.Entries, ScionProjectEntry{Name: f[1], WorkspacePath: f[2]})
 			}
 		}
 	}
@@ -184,4 +183,28 @@ for s in ` + projectSettingsGlob + `; do
   echo "REPAIRED $s $have -> $want"
 done
 `
+}
+
+// ScionProjectState is the scion project-registration state `lever doctor`
+// inspects to catch the "registered but the in-tree marker is gone" corruption
+// a bad teardown leaves behind (a bare container kill, rather than scion
+// suspend/down). It is read-only: the fields come from files in the jail, not
+// from talking to scion. The Backend interface names it through the
+// backend.ScionProjectState alias.
+type ScionProjectState struct {
+	// MarkerPresent reports whether the in-tree marker (<MountDest>/.scion)
+	// exists — scion's record, inside the bind-mounted tree, that the project is
+	// initialized.
+	MarkerPresent bool
+	// Entries are scion's per-project registrations from the jail user's
+	// ~/.scion/project-configs (one dir per project), each with the workspace
+	// path it claims. Duplicates for one path, or an entry for the tree while
+	// MarkerPresent is false, are the corruption doctor flags.
+	Entries []ScionProjectEntry
+}
+
+// ScionProjectEntry is one ~/.scion/project-configs registration.
+type ScionProjectEntry struct {
+	Name          string // the project-configs directory name, e.g. "lever__c857bb16"
+	WorkspacePath string // settings.yaml workspace_path, e.g. "/lever"
 }

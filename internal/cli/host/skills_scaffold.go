@@ -149,7 +149,7 @@ func syncSkills(app *config.App, stateDir state.State, force, check bool) ([]ski
 			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 				return nil, err
 			}
-			if err := state.WriteFileAtomic(abs, tgt.content, 0o644); err != nil {
+			if err := os.WriteFile(abs, tgt.content, 0o644); err != nil {
 				return nil, err
 			}
 			// Content is the framework scaffold again — any adoption record
@@ -239,9 +239,9 @@ func writeClaudeMDWithBlock(path, s, block string) error {
 	begin := strings.Index(s, skillMarkerBegin)
 	end := strings.Index(s, skillMarkerEnd)
 	if begin == -1 || end == -1 || end < begin {
-		return state.WriteFileAtomic(path, []byte(s+"\n"+block+"\n"), 0o644)
+		return os.WriteFile(path, []byte(s+"\n"+block+"\n"), 0o644)
 	}
-	return state.WriteFileAtomic(path, []byte(s[:begin]+block+s[end+len(skillMarkerEnd):]), 0o644)
+	return os.WriteFile(path, []byte(s[:begin]+block+s[end+len(skillMarkerEnd):]), 0o644)
 }
 
 // claudeMDBlockCurrent reports whether s carries the current marker block.
@@ -272,7 +272,7 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 				return "", err
 			}
 		}
-		return skillCreated, state.WriteFileAtomic(path, []byte(block+"\n"), 0o644)
+		return skillCreated, os.WriteFile(path, []byte(block+"\n"), 0o644)
 	case err != nil:
 		return "", err
 	}

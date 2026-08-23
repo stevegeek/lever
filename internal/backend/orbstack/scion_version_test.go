@@ -33,15 +33,11 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 		t.Fatalf("EnsureScion(version): %v", err)
 	}
 
-	var build *proc.Call
-	for i := range f.Calls {
-		if c := f.Calls[i]; c.Name == "/opt/go/bin/go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			build = &f.Calls[i]
-		}
-	}
-	if build == nil {
+	bi := f.CallIndex(proc.Subcommand("/opt/go/bin/go", "build"))
+	if bi < 0 {
 		t.Fatal("expected a cross-compile build with the resolved absolute go binary")
 	}
+	build := f.Calls[bi]
 	if build.Dir != moduleDir {
 		t.Fatalf("build ran in %q, want the pinned module dir %q", build.Dir, moduleDir)
 	}

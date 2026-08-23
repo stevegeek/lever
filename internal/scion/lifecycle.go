@@ -49,7 +49,7 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 	var lastPhase, lastContainer string
 	var lastErr error
 	if attempts <= 0 {
-		return fmt.Errorf("did not come up (last phase %q, container %q) — scion reported success but the harness is not live", lastPhase, lastContainer)
+		return notLiveErr(lastPhase, lastContainer)
 	}
 	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
 		agents, err := list(ctx)
@@ -77,9 +77,17 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 		// match here and misclassify exhaustion as cancellation (dropping the
 		// caller's subject prefix). True cancellation of ctx returns ctx.Err()
 		// via the select above, unwrapped.
-		return fmt.Errorf("did not come up (last error observing agents: %v)", lastErr)
+		return fmt.Errorf("%w (last error observing agents: %v)", ErrAgentNotLive, lastErr)
 	}
-	return fmt.Errorf("did not come up (last phase %q, container %q) — scion reported success but the harness is not live", lastPhase, lastContainer)
+	return notLiveErr(lastPhase, lastContainer)
+}
+
+// ErrAgentNotLive is wrapped by WaitAgentLive when its budget exhausts without
+// observing a live record; the message carries the last observation.
+var ErrAgentNotLive = errors.New("did not come up")
+
+func notLiveErr(lastPhase, lastContainer string) error {
+	return fmt.Errorf("%w (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, lastPhase, lastContainer)
 }
 
 // FindAgent returns a pointer to the first agent whose Slug matches, or nil

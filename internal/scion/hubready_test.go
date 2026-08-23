@@ -2,7 +2,7 @@ package scion
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
 	"time"
 
@@ -26,19 +26,23 @@ func TestWaitHubReadyTimesOut(t *testing.T) {
 	c := New(f, Options{})
 	c.hubReadyAttempts, c.hubReadyInterval = 2, 0
 	err := c.waitHubReady(context.Background())
-	if err == nil {
-		t.Fatal("expected timeout error when hub never comes up")
-	}
-	if !strings.Contains(err.Error(), "hub not ready") {
-		t.Fatalf("error should mention hub not ready: %q", err.Error())
+	if !errors.Is(err, ErrHubNotReady) {
+		t.Fatalf("expected ErrHubNotReady when hub never comes up, got %v", err)
 	}
 }
 
 // TestWaitRuntimeBrokerReadyReturnsWhenOnline: an online broker in the listing
 // resolves the gate immediately (one hub call, no error).
 func TestWaitRuntimeBrokerReadyReturnsWhenOnline(t *testing.T) {
+	assertBrokerGateStopsAtOnline(t, `[{"status":"online","connectionState":"connected"}]`)
+}
+
+// assertBrokerGateStopsAtOnline scripts `scion hub brokers` with out and
+// checks the gate returns nil after exactly one call.
+func assertBrokerGateStopsAtOnline(t *testing.T, out string) {
+	t.Helper()
 	f := proc.NewFakeRunner()
-	f.Script("scion hub brokers", proc.Result{Stdout: `[{"status":"online","connectionState":"connected"}]`})
+	f.Script("scion hub brokers", proc.Result{Stdout: out})
 	c := New(f, Options{})
 	c.brokerReadyInterval = 0
 	if err := c.WaitRuntimeBrokerReady(context.Background(), "/lever"); err != nil {
@@ -54,18 +58,8 @@ func TestWaitRuntimeBrokerReadyReturnsWhenOnline(t *testing.T) {
 // (via parseJSON, like List/messaging) and still see the online broker, rather
 // than failing the parse and silently no-opping.
 func TestWaitRuntimeBrokerReadyStripsDevAuthBanner(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion hub brokers", proc.Result{
-		Stdout: "WARNING: development auth is enabled — do not use in production\n[{\"status\":\"online\",\"connectionState\":\"connected\"}]",
-	})
-	c := New(f, Options{})
-	c.brokerReadyInterval = 0
-	if err := c.WaitRuntimeBrokerReady(context.Background(), "/lever"); err != nil {
-		t.Fatalf("gate must see the broker through the dev-auth banner: %v", err)
-	}
-	if len(f.Calls) != 1 {
-		t.Errorf("hub-brokers calls = %d, want 1 (banner stripped, broker seen online)", len(f.Calls))
-	}
+	assertBrokerGateStopsAtOnline(t,
+		"WARNING: development auth is enabled — do not use in production\n[{\"status\":\"online\",\"connectionState\":\"connected\"}]")
 }
 
 // TestWaitRuntimeBrokerReadyOfflineIsNotReadyThenFailSoft: a broker that is

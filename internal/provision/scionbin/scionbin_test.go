@@ -2,9 +2,12 @@ package scionbin
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -23,8 +26,9 @@ func TestValidateNamesAllThreeKeys(t *testing.T) {
 func TestResolveSourceMissingNeverBuilds(t *testing.T) {
 	f := proc.NewFakeRunner()
 	_, err := Resolve(context.Background(), f, Spec{Source: "/does/not/exist"}, "arm64", "m")
-	if err == nil || !strings.Contains(err.Error(), "scion source") {
-		t.Fatalf("error should mention scion source; got: %v", err)
+	var srcErr *SourceError
+	if !errors.As(err, &srcErr) || srcErr.Path != "/does/not/exist" || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("error should be a SourceError wrapping the stat failure; got: %v", err)
 	}
 	if len(f.Calls) != 0 {
 		t.Fatalf("go must not run when the source is missing: %+v", f.Calls)
@@ -69,15 +73,11 @@ func TestResolveVersionBuildsFromPinnedModule(t *testing.T) {
 	if _, err := Resolve(context.Background(), f, Spec{Version: pin}, "arm64", "m"); err != nil {
 		t.Fatalf("Resolve(version): %v", err)
 	}
-	var build *proc.Call
-	for i := range f.Calls {
-		if c := f.Calls[i]; c.Name == "/opt/go/bin/go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			build = &f.Calls[i]
-		}
-	}
-	if build == nil {
+	bi := f.CallIndex(proc.Subcommand("/opt/go/bin/go", "build"))
+	if bi < 0 {
 		t.Fatal("expected a cross-compile build with the resolved absolute go binary")
 	}
+	build := f.Calls[bi]
 	if build.Dir != moduleDir {
 		t.Fatalf("build ran in %q, want the pinned module dir %q", build.Dir, moduleDir)
 	}
@@ -107,7 +107,7 @@ func TestFetchModuleErrors(t *testing.T) {
 // "No Go toolchain on the jail host" (issue #27) means exactly this: in binary
 // mode nothing ever invokes `go`.
 func TestResolveBinaryModeNeverInvokesGo(t *testing.T) {
-	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	f := proc.NewFakeRunner()
 	out, err := Resolve(context.Background(), f, Spec{Binary: bin}, "arm64", "m")
 	if err != nil {
@@ -122,7 +122,7 @@ func TestResolveBinaryModeNeverInvokesGo(t *testing.T) {
 }
 
 func TestResolveBinaryModeRejectsWrongArch(t *testing.T) {
-	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	if _, err := Resolve(context.Background(), proc.NewFakeRunner(), Spec{Binary: bin}, "amd64", "m"); err == nil {
 		t.Fatal("expected an arch mismatch error")
 	}

@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -76,13 +77,20 @@ func TestStartArgv(t *testing.T) {
 // would make lever unable to start an agent at all on that pin. Nothing is
 // widened by omitting it, because the roles system does not exist there.
 func TestStartOmitsRoleFlagWhenUnsupported(t *testing.T) {
+	assertStartArgvLacks(t, "--role", "must not carry --role on a scion that has no such flag")
+}
+
+// assertStartArgvLacks starts a plain agent on a roles-less scion and fails
+// when the start argv carries flag.
+func assertStartArgvLacks(t *testing.T, flag, why string) {
+	t.Helper()
 	f := fakeScion(false)
 	c := New(f, Options{})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if got := startArgv(f); strings.Contains(got, "--role") {
-		t.Fatalf("argv %q must not carry --role on a scion that has no such flag", got)
+	if got := startArgv(f); strings.Contains(got, flag) {
+		t.Fatalf("argv %q %s", got, why)
 	}
 }
 
@@ -216,14 +224,7 @@ func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
 }
 
 func TestStartOmitsWorkspaceWhenEmpty(t *testing.T) {
-	f := fakeScion(false)
-	c := New(f, Options{})
-	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if got := startArgv(f); strings.Contains(got, "--workspace") {
-		t.Fatalf("argv %q should not contain --workspace when Workspace empty", got)
-	}
+	assertStartArgvLacks(t, "--workspace", "should not contain --workspace when Workspace empty")
 }
 
 func TestResumeStopSuspendArgv(t *testing.T) {
@@ -385,8 +386,8 @@ func TestWaitAgentLiveRecordVanishesMidPollResetsToEmpty(t *testing.T) {
 		return []Agent{{Slug: "other", Phase: "running", ContainerStatus: "running"}}, nil
 	}
 	err := WaitAgentLive(context.Background(), list, "mgr", 2, time.Millisecond)
-	if err == nil {
-		t.Fatal("WaitAgentLive should fail when the record never becomes live")
+	if !errors.Is(err, ErrAgentNotLive) {
+		t.Fatalf("WaitAgentLive should fail when the record never becomes live: %v", err)
 	}
 	if strings.Contains(err.Error(), "starting") || strings.Contains(err.Error(), "Up 1s") {
 		t.Fatalf("error must reflect the reset last observation, not the stale earlier phase: %v", err)
@@ -458,7 +459,7 @@ func TestWaitAgentLiveZeroAttemptsExhaustsImmediately(t *testing.T) {
 		return []Agent{{Slug: "mgr", Phase: "running", ContainerStatus: "running"}}, nil
 	}
 	err := WaitAgentLive(context.Background(), list, "mgr", 0, time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "did not come up") {
+	if !errors.Is(err, ErrAgentNotLive) {
 		t.Fatalf("err = %v, want exhaustion", err)
 	}
 	if calls != 0 {

@@ -135,8 +135,8 @@ func TestImageLoadedUsesHostSeam(t *testing.T) {
 func TestPruneImagesErrorPropagates(t *testing.T) {
 	r := proc.NewFakeRunner() // no script for the prefix binary -> Run errors
 	err := PruneImages(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501")
-	if err == nil {
-		t.Fatal("PruneImages must propagate the runner error")
+	if !errors.Is(err, proc.ErrUnscripted) {
+		t.Fatalf("PruneImages must propagate the runner error, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "prune images") {
 		t.Errorf("error missing context prefix: %v", err)
@@ -202,11 +202,12 @@ func TestLoadImageStreamsSaveIntoPodmanLoad(t *testing.T) {
 func TestLoadImageReportsSaveFailure(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
+	saveErr := errors.New("docker save: no such image")
 	err := loadImage(context.Background(), r, orbPrefix("m", "u"), "501", func(io.Writer) error {
-		return errors.New("docker save: no such image")
+		return saveErr
 	})
-	if err == nil || !strings.Contains(err.Error(), "docker save: no such image") {
-		t.Fatalf("err = %v", err)
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("err = %v, want the producer's error as the cause", err)
 	}
 }
 
@@ -216,8 +217,8 @@ func TestLoadImageReportsLoadFailure(t *testing.T) {
 		_, err := io.WriteString(w, "x")
 		return err
 	})
-	if err == nil || !strings.Contains(err.Error(), "podman load") {
-		t.Fatalf("err = %v", err)
+	if !errors.Is(err, proc.ErrUnscripted) || !strings.Contains(err.Error(), "podman load") {
+		t.Fatalf("err = %v, want the load failure wrapped under podman load", err)
 	}
 }
 

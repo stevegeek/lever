@@ -95,21 +95,21 @@ func TestTemplateContainmentProperties(t *testing.T) {
 }
 
 func TestRenderTemplateDiskDefault(t *testing.T) {
-	out, err := RenderTemplate("/tmp/tree", "")
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	if !strings.Contains(out, "disk: 24GiB") {
-		t.Fatalf("expected default disk line, got:\n%s", out)
-	}
+	assertDiskLine(t, "", "disk: 24GiB")
 }
 
 func TestRenderTemplateDiskOverride(t *testing.T) {
-	out, err := RenderTemplate("/tmp/tree", "48GiB")
+	assertDiskLine(t, "48GiB", "disk: 48GiB")
+}
+
+// assertDiskLine renders the template with disk and checks the disk line.
+func assertDiskLine(t *testing.T, disk, want string) {
+	t.Helper()
+	out, err := RenderTemplate("/tmp/tree", disk)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !strings.Contains(out, "disk: 48GiB") {
-		t.Fatalf("expected overridden disk line, got:\n%s", out)
+	if !strings.Contains(out, want) {
+		t.Fatalf("expected %q line, got:\n%s", want, out)
 	}
 }

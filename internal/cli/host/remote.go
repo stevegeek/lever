@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -84,8 +83,8 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			provider := remoteproxy.NewProvider(remoteproxy.ProviderConfig{
 				Port: app.EffectiveRemoteLoginPort(),
 				// The hub dials the GUEST port; the forwarder carries it here.
-				// Two numbers on purpose — see backend.GuestLoginIssuerPort.
-				IssuerPort: backend.GuestLoginIssuerPort,
+				// Two numbers on purpose — see config.GuestLoginIssuerPort.
+				IssuerPort: config.GuestLoginIssuerPort,
 				Audit:      auditFn,
 			})
 			login := remoteproxy.NewLoginDriver(remoteproxy.LoginConfig{
@@ -291,7 +290,7 @@ func newRemoteStatusCmd() *cobra.Command {
 			// collision within one instance. `lever doctor` is what reports
 			// whether it is actually healthy.
 			cmd.Printf("login provider port: %d on host loopback; the jail reaches it from 127.0.0.1:%d\n",
-				app.EffectiveRemoteLoginPort(), backend.GuestLoginIssuerPort)
+				app.EffectiveRemoteLoginPort(), config.GuestLoginIssuerPort)
 
 			if app.Remote.BaseURL != "" {
 				cmd.Printf("serve URL: %s\n", app.Remote.BaseURL)

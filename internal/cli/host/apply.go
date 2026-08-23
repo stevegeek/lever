@@ -865,7 +865,7 @@ func (w *applyWiring) ensureHubLogin(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return w.b.EnsureHubLogin(ctx, backend.HubLogin{
-		IssuerPort:  backend.GuestLoginIssuerPort,
+		IssuerPort:  config.GuestLoginIssuerPort,
 		HostPort:    w.app.EffectiveRemoteLoginPort(),
 		HostAddress: w.brokerHost,
 		ClientID:    remoteproxy.LoginClientID,

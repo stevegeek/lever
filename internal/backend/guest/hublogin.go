@@ -87,7 +87,7 @@ func (g Guest) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool,
 	if spec.IssuerPort == spec.HostPort {
 		// OrbStack mirrors the guest listener onto the host at the same
 		// number, so one number for both halves means the provider cannot
-		// bind its own port. See backend.GuestLoginIssuerPort.
+		// bind its own port. See config.GuestLoginIssuerPort.
 		return false, fmt.Errorf("guest: hub login: the guest issuer port and the host port must differ (both are %d)", spec.HostPort)
 	}
 	// The forwarder first: once the hub restarts with oidc_login set, its very

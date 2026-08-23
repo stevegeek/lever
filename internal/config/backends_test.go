@@ -21,7 +21,4 @@ func TestKnownBackendsMatchCandidates(t *testing.T) {
 	if got := config.BackendNames(); !slices.Equal(got, backend.Names()) {
 		t.Fatalf("config.BackendNames() = %v, backend.Names() = %v", got, backend.Names())
 	}
-	if config.GuestLoginIssuerPort != backend.GuestLoginIssuerPort {
-		t.Fatalf("config.GuestLoginIssuerPort = %d, backend.GuestLoginIssuerPort = %d", config.GuestLoginIssuerPort, backend.GuestLoginIssuerPort)
-	}
 }

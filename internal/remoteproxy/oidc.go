@@ -97,7 +97,7 @@ type ProviderConfig struct {
 	// accepts (a non-loopback http issuer makes it refuse to start). It is a
 	// DIFFERENT number from Port: OrbStack mirrors a guest listener onto the
 	// host at the same port, so one number for both halves left the provider
-	// unable to bind its own (see backend.GuestLoginIssuerPort).
+	// unable to bind its own (see config.GuestLoginIssuerPort).
 	//
 	// Zero means "the same as Port", which is what a test wants when nothing
 	// sits between the hub and the provider.

@@ -5,16 +5,18 @@ import (
 	"reflect"
 	"strings"
 
+	"testing"
+
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/scion/layout"
-	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
 func testHubLogin() backend.HubLogin {
-	return backend.HubLogin{IssuerPort: backend.GuestLoginIssuerPort, HostPort: 8447,
+	return backend.HubLogin{IssuerPort: config.GuestLoginIssuerPort, HostPort: 8447,
 		HostAddress: "host.orb.internal", ClientID: "lever-remote"}
 }
 
@@ -206,7 +208,7 @@ func TestLoginForwardScriptUsesAbsolutePathsAndTheRightArgv(t *testing.T) {
 	// Two DIFFERENT ports: the guest listener is mirrored onto the host at its
 	// own number, so a forwarder that listened and dialled on one number left
 	// the host provider unable to bind (live failure — see
-	// backend.GuestLoginIssuerPort).
+	// config.GuestLoginIssuerPort).
 	want := LoginForwardPath + " -listen 127.0.0.1:8446 -target host.orb.internal:8447"
 	if !strings.Contains(script, want) {
 		t.Fatalf("script does not start the forwarder as %q:\n%s", want, script)
@@ -416,7 +418,7 @@ func TestDisableHubLoginReportsNoChangeWhenItCannotRead(t *testing.T) {
 // TestEnsureHubLoginRefusesOnePortForBothHalves: the guest listener is
 // mirrored onto the host at the same number, so one number for both halves
 // means the host provider cannot bind its own port — the live failure
-// backend.GuestLoginIssuerPort exists to prevent. Config keeps the two apart,
+// config.GuestLoginIssuerPort exists to prevent. Config keeps the two apart,
 // and this is the backstop for any other caller.
 func TestEnsureHubLoginRefusesOnePortForBothHalves(t *testing.T) {
 	spec := testHubLogin()

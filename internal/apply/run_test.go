@@ -152,12 +152,7 @@ type flakyStartRunner struct {
 func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		if isObserveList(args) {
-			r.listCalls++
-			r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
-			if r.listCalls == 1 {
-				return proc.Result{Stdout: "[]"}, nil
-			}
-			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
+			return absentThenRunningList(r.FakeRunner, &r.listCalls, r.slug, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 		}
 		hasStart, hasServer, isProbe := false, false, false
 		for _, a := range args {
@@ -210,12 +205,7 @@ type alreadyUpRunner struct {
 func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		if isObserveList(args) {
-			r.listCalls++
-			r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
-			if r.listCalls == 1 {
-				return proc.Result{Stdout: "[]"}, nil
-			}
-			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
+			return absentThenRunningList(r.FakeRunner, &r.listCalls, r.slug, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 		}
 		hasServer, hasStart := false, false
 		for _, a := range args {
@@ -950,10 +940,7 @@ func TestStartManagerCreateRearmsSpentLatchWhenNoFreshMintThisRun(t *testing.T) 
 	deps := Deps{
 		MintManagerBootstrap: spentLatchMint(t, app.Tree),
 		Scion:                scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) error {
-			rearmCalls++
-			return nil
-		},
+		RearmBootstrap:       countRearm(&rearmCalls),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -979,10 +966,7 @@ func TestStartManagerCreateSkipsRearmWhenFreshMintAlreadyHappened(t *testing.T) 
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, no latch
 		},
-		RearmBootstrap: func(context.Context) error {
-			rearmCalls++
-			return nil
-		},
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1011,10 +995,7 @@ func TestStartManagerRecoveryRearmsBeforeFreshCreate(t *testing.T) {
 		MintManagerBootstrap: spentLatchMint(t, app.Tree),
 		Scion:                scion.New(r, scion.Options{}),
 		Log:                  func(string, ...any) {},
-		RearmBootstrap: func(context.Context) error {
-			rearmCalls++
-			return nil
-		},
+		RearmBootstrap:       countRearm(&rearmCalls),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1044,10 +1025,7 @@ func TestStartManagerResumeRearmsWhenNoFreshMaterial(t *testing.T) {
 		// A spent latch -> no fresh material minted this run (boot.minted
 		// stays false), modelling the persisted-broker state in which an
 		// expired leaf would otherwise stay dead.
-		RearmBootstrap: func(context.Context) error {
-			rearmCalls++
-			return nil
-		},
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1073,10 +1051,7 @@ func TestStartManagerResumeSkipsRearmWhenAlreadyMinted(t *testing.T) {
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, latch was open
 		},
-		RearmBootstrap: func(context.Context) error {
-			rearmCalls++
-			return nil
-		},
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1097,11 +1072,8 @@ func TestStartManagerNoOpRunningNeverRearms(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "running"}
 	rearmCalls := 0
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) error {
-			rearmCalls++
-			return nil
-		},
+		Scion:          scion.New(r, scion.Options{}),
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1344,8 +1316,7 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &flakyStartRunner{FakeRunner: proc.NewFakeRunner(), slug: "hello", startFails: 2}
-	r.Script("scion", proc.Result{Stdout: "ok"})
+	r := &flakyStartRunner{FakeRunner: scionOKRunner(), slug: "hello", startFails: 2}
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
 	}
@@ -2167,13 +2138,7 @@ func TestRegisterToleratesNilRemoveScionProjectConfigs(t *testing.T) {
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var sawInit bool
-	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
-			sawInit = true
-		}
-	}
-	if !sawInit {
+	if !sawScionCall(f, "init --non-interactive") {
 		t.Fatal("scion init should still run when RemoveScionProjectConfigs is nil")
 	}
 }
@@ -2327,16 +2292,7 @@ func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
 	if len(removeConfigCalls) != 1 || removeConfigCalls[0] != "/lever" {
 		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever\"", removeConfigCalls)
 	}
-	var sawInit, sawHubLink bool
-	for _, c := range f.Calls {
-		j := strings.Join(c.Args, " ")
-		if strings.Contains(j, "init --non-interactive") {
-			sawInit = true
-		}
-		if strings.Contains(j, "hub link") {
-			sawHubLink = true
-		}
-	}
+	sawInit, sawHubLink := sawScionCall(f, "init --non-interactive"), sawScionCall(f, "hub link")
 	if !sawInit || !sawHubLink {
 		t.Fatalf("scion init and hub link must both run when not registered; init=%v hublink=%v", sawInit, sawHubLink)
 	}
@@ -2370,13 +2326,7 @@ func TestRegisterFallsThroughToDestructivePathOnObserveError(t *testing.T) {
 	if len(removeConfigCalls) != 1 {
 		t.Fatalf("observe error must fall through to the destructive path; RemoveScionProjectConfigs calls = %+v", removeConfigCalls)
 	}
-	var sawInit bool
-	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
-			sawInit = true
-		}
-	}
-	if !sawInit {
+	if !sawScionCall(f, "init --non-interactive") {
 		t.Fatal("scion init should still run when the observe read errors")
 	}
 }
@@ -2396,13 +2346,7 @@ func TestRegisterToleratesNilScionProjectRegistered(t *testing.T) {
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var sawInit bool
-	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
-			sawInit = true
-		}
-	}
-	if !sawInit {
+	if !sawScionCall(f, "init --non-interactive") {
 		t.Fatal("scion init should still run when ScionProjectRegistered is nil")
 	}
 }

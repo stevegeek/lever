@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -88,4 +89,36 @@ func wantErrContaining(t testing.TB, err error, substrs ...string) {
 			return
 		}
 	}
+}
+
+// absentThenRunningList records the observe-List call on f and answers it:
+// the first call reports slug absent (so start-manager takes the create path),
+// every later call reports it running/running (so the liveness verify
+// converges). listCalls is the caller's counter.
+func absentThenRunningList(f *proc.FakeRunner, listCalls *int, slug string, c proc.Call) (proc.Result, error) {
+	*listCalls++
+	f.Calls = append(f.Calls, c)
+	if *listCalls == 1 {
+		return proc.Result{Stdout: "[]"}, nil
+	}
+	return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, slug)}, nil
+}
+
+// countRearm returns a RearmBootstrap that increments *n and succeeds.
+func countRearm(n *int) func(context.Context) error {
+	return func(context.Context) error {
+		*n++
+		return nil
+	}
+}
+
+// sawScionCall reports whether any recorded argv on f contains fragment
+// (e.g. "init --non-interactive") as a space-joined substring.
+func sawScionCall(f *proc.FakeRunner, fragment string) bool {
+	for _, c := range f.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), fragment) {
+			return true
+		}
+	}
+	return false
 }

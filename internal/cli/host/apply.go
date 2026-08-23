@@ -116,7 +116,7 @@ type remoteController struct {
 	configPath string
 	port       int    // app.EffectiveRemotePort()
 	version    string // this binary, for the reuse stamp
-	cfgHash    string // state.RemoteConfigHash(app), for the reuse stamp
+	cfgHash    string // brokerctl.RemoteConfigHash(app), for the reuse stamp
 }
 
 func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", rc.port) }
@@ -732,7 +732,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		configPath: configPath,
 		port:       app.EffectiveRemotePort(),
 		version:    cli.VersionString(),
-		cfgHash:    state.RemoteConfigHash(app),
+		cfgHash:    brokerctl.RemoteConfigHash(app),
 	}
 
 	w.deps = apply.Deps{

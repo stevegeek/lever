@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
@@ -158,7 +159,7 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := state.RemoteConfigHash(app)
+	want := brokerctl.RemoteConfigHash(app)
 	deadline := time.Now().Add(5 * time.Second)
 	for !st.RemoteStampMatches(cli.VersionString(), want) {
 		if time.Now().After(deadline) {

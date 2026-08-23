@@ -5,13 +5,28 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/stevegeek/lever/internal/config"
 )
 
+// RemoteIdentity is everything a `lever remote serve` process reads at
+// startup and never re-reads: the `remote:` block plus the instance name and
+// backend. brokerctl.RemoteConfigHash builds one from config.App; state
+// deliberately does not import config.
+type RemoteIdentity struct {
+	Enabled      bool
+	Port         int
+	BaseURL      string
+	AllowedUsers []string
+	LoginPort    int
+	// Name selects the JAIL the proxy dials and Backend gates which
+	// transport it uses. Renaming the instance would otherwise leave a
+	// running proxy fronting the OLD machine's hub while apply happily
+	// reused it.
+	Name    string
+	Backend string
+}
+
 // RemoteConfigHash identifies the configuration a `lever remote serve` process
-// is running WITH — everything under `remote:` that the proxy reads at startup
-// and never re-reads.
+// is running WITH.
 //
 // It exists because the proxy caches all of it in the handler it builds once:
 // ServeHost comes from base_url, the allowed-user set is captured by value, and
@@ -29,17 +44,8 @@ import (
 // Like brokerctl.ConfigHash, a marshal failure yields "" — a guaranteed mismatch, so the
 // proxy restarts. Failing toward a restart is right for a component whose whole
 // job is refusing unauthorized requests.
-func RemoteConfigHash(app *config.App) string {
-	// Name and Backend are in here because the proxy captures them too, not
-	// just the `remote:` block: Name selects the JAIL it dials (remote.go
-	// machineName) and Backend gates which transport it uses. Renaming the
-	// instance would otherwise leave a running proxy fronting the OLD
-	// machine's hub while apply happily reused it.
-	return HashJSON(struct {
-		Remote  config.Remote
-		Name    string
-		Backend string
-	}{app.Remote, app.Name, app.Backend})
+func RemoteConfigHash(id RemoteIdentity) string {
+	return HashJSON(id)
 }
 
 // remoteStampContent is the stamp's on-disk form: the lever version, the
@@ -96,7 +102,7 @@ func (s State) WriteRemoteStamp(version, hash string) error {
 		_ = os.Remove(s.RemoteStamp())
 		return err
 	}
-	if err := os.WriteFile(s.RemoteStamp(), []byte(remoteStampContent(version, hash, pid)), 0o600); err != nil {
+	if err := WriteFileAtomic(s.RemoteStamp(), []byte(remoteStampContent(version, hash, pid)), 0o600); err != nil {
 		_ = os.Remove(s.RemoteStamp())
 		return err
 	}

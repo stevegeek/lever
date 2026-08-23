@@ -1,34 +1,22 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/broker/brokertest"
 	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/broker/rules"
 	"github.com/stevegeek/lever/internal/cap/ca"
-	"github.com/stevegeek/lever/internal/cap/token"
 )
 
 // brokerEnv holds all test-side handles for a broker under test.
-type brokerEnv struct {
-	Broker   *broker.Broker
-	Server   *httptest.Server
-	CA       *ca.CA
-	Keys     token.KeyPair
-	Rules    *rules.Policy
-	Registry *registry.Registry
-}
+type brokerEnv = brokertest.Env
 
 // testBroker builds a broker that permits provisioning worker "worker" and a CA
 // server cert, and returns a brokerEnv with all relevant handles for test setup
@@ -36,45 +24,7 @@ type brokerEnv struct {
 // from, so callers can drive them directly without any production accessor).
 func testBroker(t *testing.T) *brokerEnv {
 	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	caInst, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	reg := registry.New()
-	pol := rules.NewPolicy()
-	b := broker.New(broker.Config{
-		Identity: broker.IdentityConfig{
-			Keys:            kp,
-			CA:              caInst,
-			Tickets:         ca.NewTicketStore(),
-			Rules:           pol,
-			Registry:        reg,
-			ManagerIdentity: "manager",
-		},
-		Dispatch: broker.DispatchConfig{Workers: []broker.WorkerSpec{{Name: "worker"}}},
-	})
-	src, err := caInst.NewServerCertSource("127.0.0.1", nil, []string{"127.0.0.1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tlsCfg := caInst.ServerTLSConfigSource(src, nil)
-	// httptest.StartTLS injects its own self-signed cert when Certificates is
-	// empty, and the TLS stack only consults GetCertificate for SNI-bearing
-	// hellos — an IP-dialled client sends none. Pin the source's cert.
-	srvCert, err := src.GetCertificate(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tlsCfg.Certificates = []tls.Certificate{*srvCert}
-	srv := httptest.NewUnstartedServer(b.JailHandler())
-	srv.TLS = tlsCfg
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	return &brokerEnv{Broker: b, Server: srv, CA: caInst, Keys: kp, Rules: pol, Registry: reg}
+	return brokertest.NewTestBroker(t, brokertest.Config{})
 }
 
 // allowLLM registers the broker's built-in llm pseudo-tool and grants agent
@@ -118,45 +68,8 @@ func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 // POSTs /provision {worker}, and returns the ticket string.
 func provisionAs(t *testing.T, b *broker.Broker, srv *httptest.Server, caInst *ca.CA, worker string) string {
 	t.Helper()
-
-	// Build a manager cert signed by the broker CA (mirrors signedCert in broker e2e_test).
-	csrPEM, keyPEM := csrWithKey(t, "manager")
-	certPEM, err := caInst.SignCSR(csrPEM)
-	if err != nil {
-		t.Fatalf("provisionAs: sign manager CSR: %v", err)
-	}
-	managerCert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatalf("provisionAs: build manager tls.Certificate: %v", err)
-	}
-
-	// Build an mTLS client that trusts the broker CA and presents the manager cert.
-	pool := x509.NewCertPool()
-	pool.AddCert(caInst.Cert)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		RootCAs:      pool,
-		Certificates: []tls.Certificate{managerCert},
-	}}}
-
-	body, _ := json.Marshal(map[string]string{"worker": worker})
-	resp, err := client.Post(srv.URL+"/provision", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("provisionAs: POST /provision: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("provisionAs: status %d", resp.StatusCode)
-	}
-	var result struct {
-		Ticket string `json:"ticket"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("provisionAs: decode: %v", err)
-	}
-	if result.Ticket == "" {
-		t.Fatal("provisionAs: empty ticket")
-	}
-	return result.Ticket
+	manager := brokertest.Client(caInst, brokertest.Cert(t, caInst, "manager"), "")
+	return brokertest.ProvisionWorker(t, manager, srv.URL, worker)
 }
 
 // parseLeaf decodes the first certificate from certPEM.

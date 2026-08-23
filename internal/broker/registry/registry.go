@@ -148,8 +148,13 @@ func (r *Registry) Names() []string {
 
 // MapParams builds the constraint-keyed parameter set the token layer verifies
 // against, from the request's actual MCP arguments, using the operation's
-// CaveatParam renames (see mcp.MapConstraintParams, which captool shares).
-// Errors if tool/op is unregistered.
+// CaveatParam renames. Errors if tool/op is unregistered.
+//
+// The mapping itself is mcp.MapConstraintParams — the registry's only use of
+// that package. It lives there, not here, because the broker (through this
+// method) and captool (verify.go) must compute byte-identical param sets or a
+// token minted against one would fail verification against the other; mcp is
+// a stdlib-only leaf, so the import costs the registry no transitive baggage.
 func (r *Registry) MapParams(tool, op string, args map[string]string) (map[string]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

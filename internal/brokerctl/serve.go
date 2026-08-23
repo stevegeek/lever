@@ -158,7 +158,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 
-	sup := NewSupervisor(app.Broker.Tools, adminURL, st.ToolLogDir())
+	sup := NewSupervisor(ToolSpecs(app.Broker.Tools), adminURL, st.ToolLogDir())
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}

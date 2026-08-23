@@ -29,3 +29,19 @@ func ConfigHash(app *config.App) string {
 		Scion   config.ScionConfig
 	}{app.Broker, app.Workers, app.Scion})
 }
+
+// RemoteConfigHash digests the config a `lever remote serve` process captures
+// at startup — see state.RemoteConfigHash for why. This is the only place
+// that maps config.App onto state.RemoteIdentity, so state stays free of
+// config types.
+func RemoteConfigHash(app *config.App) string {
+	return state.RemoteConfigHash(state.RemoteIdentity{
+		Enabled:      app.Remote.Enabled,
+		Port:         app.Remote.Port,
+		BaseURL:      app.Remote.BaseURL,
+		AllowedUsers: app.Remote.AllowedUsers,
+		LoginPort:    app.Remote.LoginPort,
+		Name:         app.Name,
+		Backend:      app.Backend,
+	})
+}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend/registry"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/remoteproxy"
@@ -126,7 +127,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 				// what stops a hand-started proxy from inheriting the record
 				// of an apply-started one. See ServeConfig.Stamp.
 				Stamp: func() error {
-					return st.WriteRemoteStamp(cli.VersionString(), state.RemoteConfigHash(app))
+					return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app))
 				},
 			})
 		},
@@ -155,7 +156,7 @@ const jailResolveTimeout = 15 * time.Second
 // rebuilt jail with a different run user therefore needs a proxy restart — and
 // `lever apply` does NOT give you one: its reuse check compares the lever
 // version, the `remote:` block, the instance name and the backend
-// (state.RemoteConfigHash), none of which a jail rebuild changes, so a
+// (brokerctl.RemoteConfigHash), none of which a jail rebuild changes, so a
 // matching stamp keeps the old process and its stale prefix. Use `lever stop`
 // + `lever up` after rebuilding the jail. (Verified against
 // remoteController.Start; the comment used to claim the opposite.)

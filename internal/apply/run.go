@@ -1040,28 +1040,6 @@ func listAgentsRetry(ctx context.Context, d Deps, jp string) ([]scion.Agent, err
 	return agents, nil
 }
 
-// startManagerCreate runs the create-manager retry loop: `scion start` races
-// the runtime-broker registration (see brokerStartAttempts) and treats an
-// "already running"/"already exists" 409 as success (idempotent re-apply, or a
-// create-race against a record the observe step just missed — scion's own
-// lazy hub-sync can transiently read a live record as absent; see the plan's
-// Evidence base). Shared by the absent-record branch and the post-delete
-// recovery branches above (a failed resume, or an unresumable phase, falls
-// back to exactly this same create path), so all three take the identical
-// retry behavior — including the bootstrap re-arm below, which is why it
-// lives HERE rather than duplicated at each of the three call sites.
-//
-// A freshly-created scion agent record has no agent home to reuse (unlike
-// resume, which restores an existing one — see the resume-reconciliation
-// plan's Evidence base), so lever-agent boot ALWAYS re-enrols after a create.
-// If the broker's single-use /bootstrap latch was already consumed by an
-// earlier apply against this same broker process (mint-manager-bootstrap
-// tolerated ErrBootstrapLatched — see its doc — leaving boot.minted false),
-// a plain create is guaranteed to 403 and the container exits 1. So: before
-// Start, ensure this apply run has fresh, enrolable material — either it was
-// already minted earlier in this same run (boot.minted, e.g.
-// mint-manager-bootstrap succeeded outright, or an earlier create in this
-// same Run already re-armed), or d.RearmBootstrap mints one now.
 // managerConcurrentlyRecovered re-observes the manager record after a FAILED
 // resume, before the loud delete+fresh recovery destroys the session. The
 // broker's auto-re-enrol healer (#22) lives in the broker daemon — started by
@@ -1088,6 +1066,28 @@ func managerConcurrentlyRecovered(ctx context.Context, d Deps, name, jp string) 
 	return false
 }
 
+// startManagerCreate runs the create-manager retry loop: `scion start` races
+// the runtime-broker registration (see brokerStartAttempts) and treats an
+// "already running"/"already exists" 409 as success (idempotent re-apply, or a
+// create-race against a record the observe step just missed — scion's own
+// lazy hub-sync can transiently read a live record as absent; see the plan's
+// Evidence base). Shared by the absent-record branch and the post-delete
+// recovery branches above (a failed resume, or an unresumable phase, falls
+// back to exactly this same create path), so all three take the identical
+// retry behavior — including the bootstrap re-arm below, which is why it
+// lives HERE rather than duplicated at each of the three call sites.
+//
+// A freshly-created scion agent record has no agent home to reuse (unlike
+// resume, which restores an existing one — see the resume-reconciliation
+// plan's Evidence base), so lever-agent boot ALWAYS re-enrols after a create.
+// If the broker's single-use /bootstrap latch was already consumed by an
+// earlier apply against this same broker process (mint-manager-bootstrap
+// tolerated ErrBootstrapLatched — see its doc — leaving boot.minted false),
+// a plain create is guaranteed to 403 and the container exits 1. So: before
+// Start, ensure this apply run has fresh, enrolable material — either it was
+// already minted earlier in this same run (boot.minted, e.g.
+// mint-manager-bootstrap succeeded outright, or an earlier create in this
+// same Run already re-armed), or d.RearmBootstrap mints one now.
 func startManagerCreate(ctx context.Context, d Deps, boot *bootTracker, opts scion.StartOpts) error {
 	if err := ensureFreshBootstrap(ctx, d, boot); err != nil {
 		return err

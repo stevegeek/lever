@@ -478,17 +478,6 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 	return c
 }
 
-// buildApplyDeps wires the live dependencies for apply.Run.
-// It eagerly calls EnsureUp so the backend resolves the in-machine
-// run-user and UID before the JailRunner and scion.Client are constructed.
-// JailUp is therefore a no-op in the returned Deps — the jail is already
-// confirmed up and the user/uid are known.
-// configPath is the resolved config file path; it is passed to `lever broker
-// serve` and used to locate the broker state dir.
-// cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
-// user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
-// that never exercise a Log-emitting path), in which case Log falls back to
-// stderr.
 // brokerReusable reports whether a running broker's /epoch identity matches
 // this binary + this broker config, i.e. whether apply's M2 shortcut may keep
 // it (#19). A broker predating the identity fields reports them empty —
@@ -693,6 +682,17 @@ func leverMayClaimTemplate(current string) bool {
 	}
 }
 
+// buildApplyDeps wires the live dependencies for apply.Run.
+// It eagerly calls EnsureUp so the backend resolves the in-machine
+// run-user and UID before the JailRunner and scion.Client are constructed.
+// JailUp is therefore a no-op in the returned Deps — the jail is already
+// confirmed up and the user/uid are known.
+// configPath is the resolved config file path; it is passed to `lever broker
+// serve` and used to locate the broker state dir.
+// cmd is the invoking cobra command, used only to wire Deps.Log (a loud,
+// user-facing progress line — see apply.Deps.Log); may be nil (e.g. tests
+// that never exercise a Log-emitting path), in which case Log falls back to
+// stderr.
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, cmd *cobra.Command) (apply.Deps, backend.Backend, *scion.Client, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)

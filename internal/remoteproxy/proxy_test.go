@@ -774,15 +774,16 @@ func TestSlowHubHeadersAreBounded(t *testing.T) {
 
 	var lines []AuditLine
 	h := NewHandler(Config{
-		Target:                mustURL(t, "http://127.0.0.1:1"),
-		PAT:                   func() string { return "scion_pat_x" },
-		ServeHost:             "mac.ts.net",
-		ResponseHeaderTimeout: 150 * time.Millisecond,
-		Audit:                 func(line AuditLine) { lines = append(lines, line) },
+		Target:    mustURL(t, "http://127.0.0.1:1"),
+		PAT:       func() string { return "scion_pat_x" },
+		ServeHost: "mac.ts.net",
+		Audit:     func(line AuditLine) { lines = append(lines, line) },
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, ln.Addr().String())
 		},
 	})
+
+	setResponseHeaderTimeout(t, h, 150*time.Millisecond)
 
 	rw := httptest.NewRecorder()
 	start := time.Now()
@@ -823,14 +824,14 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 	hubAddr := mustURL(t, hub.URL).Host
 
 	h := NewHandler(Config{
-		Target:                mustURL(t, "http://127.0.0.1:1"),
-		PAT:                   func() string { return "scion_pat_x" },
-		ServeHost:             "mac.ts.net",
-		ResponseHeaderTimeout: timeout,
+		Target:    mustURL(t, "http://127.0.0.1:1"),
+		PAT:       func() string { return "scion_pat_x" },
+		ServeHost: "mac.ts.net",
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, hubAddr)
 		},
 	})
+	setResponseHeaderTimeout(t, h, timeout)
 	proxy := httptest.NewServer(h)
 	defer proxy.Close()
 
@@ -1021,4 +1022,17 @@ func TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy(t *testing.T) {
 			t.Fatalf("audited ts_login is %d bytes, want at most %d", len(l.TSLogin), maxAuditFieldLen+len("…"))
 		}
 	}
+}
+
+// setResponseHeaderTimeout lowers the header wait on the Transport NewHandler
+// built for a DialContext config, so a test can exercise the 502 path without
+// waiting out the production bound. The seam is the built instance, not a
+// Config field: production has no reason to set it.
+func setResponseHeaderTimeout(t *testing.T, h http.Handler, d time.Duration) {
+	t.Helper()
+	tr, ok := h.(*gate).rp.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("handler has no jail transport — the config needs DialContext")
+	}
+	tr.ResponseHeaderTimeout = d
 }

@@ -558,3 +558,26 @@ func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 		t.Fatalf("shell request logged in again (%d handshakes) — the session was not reused", logins)
 	}
 }
+
+// TestLoginFailureNamesTheConfiguredLog pins the denial text the operator
+// reads when the hub login fails: it points at the proxy's log, taken from
+// Config.LogPath, with DefaultLogPath when the caller set none.
+func TestLoginFailureNamesTheConfiguredLog(t *testing.T) {
+	hub := newRecordingHub(t)
+	for _, tc := range []struct{ logPath, want string }{
+		{"", "hub login failed — see .lever-state/remote.log"},
+		{"/srv/x/.lever-state/remote.log", "hub login failed — see /srv/x/.lever-state/remote.log"},
+	} {
+		sess := &stubSession{err: errors.New("hub refused")}
+		h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+			ServeHost: "mac.ts.net", Session: sess, LogPath: tc.logPath})
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, proxyRequest("GET", "/", nil))
+		if rw.Code != http.StatusBadGateway {
+			t.Fatalf("LogPath %q: status = %d, want 502", tc.logPath, rw.Code)
+		}
+		if got := strings.TrimSpace(rw.Body.String()); got != tc.want {
+			t.Fatalf("LogPath %q: body = %q, want %q", tc.logPath, got, tc.want)
+		}
+	}
+}

@@ -105,9 +105,6 @@ type ProviderConfig struct {
 	// Audit receives one line per request the provider answers; nil disables
 	// (tests). Values never carry a code, token or cookie.
 	Audit func(line AuditLine)
-	// Now is the clock. nil ⇒ time.Now. A test seam: production leaves it
-	// unset; tests set it to drive code/token expiry deterministically.
-	Now func() time.Time
 }
 
 // Provider is the host-side OIDC provider: three endpoints the hub consumes,
@@ -145,12 +142,9 @@ func NewProvider(cfg ProviderConfig) *Provider {
 		port:   cfg.Port,
 		issuer: fmt.Sprintf("http://127.0.0.1:%d", issuerPort),
 		audit:  cfg.Audit,
-		now:    cfg.Now,
+		now:    time.Now, // tests swap the clock in-package to drive expiry
 		codes:  map[string]*grant{},
 		tokens: map[string]*grant{},
-	}
-	if p.now == nil {
-		p.now = time.Now
 	}
 	p.handler = p.buildHandler()
 	return p

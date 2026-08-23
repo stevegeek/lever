@@ -401,10 +401,17 @@ func secretSetErr(key string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "value must be base64-encoded") {
+	if isBase64Rejection(err) {
 		return fmt.Errorf("%w (setting %s): %v", errBase64Pin, key, err)
 	}
 	return err
+}
+
+// isBase64Rejection reports whether err is the hub refusing a plaintext secret
+// value. Wording from scion's hub env-set handler; like the other predicates
+// here it is the one place that text is known.
+func isBase64Rejection(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "value must be base64-encoded")
 }
 
 // errBase64Pin names the pin floor rather than the symptom: the hub rejects a

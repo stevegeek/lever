@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -37,10 +36,8 @@ func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
 	})
 
 	root := NewRoot()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"msg", "send", "hello", "--to", "scratch", "--interrupt"})
-	if err := root.Execute(); err != nil {
+	out, err := execCmd(t, root, "msg", "send", "hello", "--to", "scratch", "--interrupt")
+	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if gotPath != "/msg/send" {
@@ -52,8 +49,8 @@ func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
 			t.Fatalf("body[%s] = %v, want %v (body=%v)", k, gotBody[k], v, gotBody)
 		}
 	}
-	if !strings.Contains(out.String(), "Sent to scratch.") {
-		t.Fatalf("out=%q", out.String())
+	if !strings.Contains(out, "Sent to scratch.") {
+		t.Fatalf("out=%q", out)
 	}
 }
 
@@ -65,9 +62,7 @@ func TestMsgSend_bodyIsJoinedArgs(t *testing.T) {
 	})
 
 	root := NewRoot()
-	root.SetOut(&bytes.Buffer{})
-	root.SetArgs([]string{"msg", "send", "--to", "scratch", "hello", "there"})
-	if err := root.Execute(); err != nil {
+	if _, err := execCmd(t, root, "msg", "send", "--to", "scratch", "hello", "there"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if gotBody["body"] != "hello there" {
@@ -91,10 +86,8 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 	})
 
 	root := NewRoot()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"msg", "list", "--worker", "scratch", "--all"})
-	if err := root.Execute(); err != nil {
+	out, err := execCmd(t, root, "msg", "list", "--worker", "scratch", "--all")
+	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if gotPath != "/msg/list" {
@@ -106,8 +99,8 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 			t.Fatalf("body[%s] = %v, want %v (body=%v)", k, gotBody[k], v, gotBody)
 		}
 	}
-	if !strings.Contains(out.String(), "[e1] WAITING_FOR_INPUT poet needs input") {
-		t.Fatalf("out=%q", out.String())
+	if !strings.Contains(out, "[e1] WAITING_FOR_INPUT poet needs input") {
+		t.Fatalf("out=%q", out)
 	}
 }
 
@@ -119,9 +112,7 @@ func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 	})
 
 	root := NewRoot()
-	root.SetOut(&bytes.Buffer{})
-	root.SetArgs([]string{"msg", "list"})
-	if err := root.Execute(); err != nil {
+	if _, err := execCmd(t, root, "msg", "list"); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	want := map[string]any{"all": false, "worker": ""}
@@ -141,19 +132,15 @@ func TestMsgList_malformedResponseIsAnError(t *testing.T) {
 	})
 
 	root := NewRoot()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&bytes.Buffer{})
-	root.SetArgs([]string{"msg", "list"})
-	err := root.Execute()
+	out, err := execCmd(t, root, "msg", "list")
 	if err == nil {
-		t.Fatalf("expected decode error, got nil (out=%q)", out.String())
+		t.Fatalf("expected decode error, got nil (out=%q)", out)
 	}
 	if !strings.Contains(err.Error(), "decode /msg/list response") {
 		t.Fatalf("err = %v, want a decode /msg/list response error", err)
 	}
-	if strings.Contains(out.String(), "Inbox empty.") {
-		t.Fatalf("malformed response must not render as an empty inbox; out=%q", out.String())
+	if strings.Contains(out, "Inbox empty.") {
+		t.Fatalf("malformed response must not render as an empty inbox; out=%q", out)
 	}
 }
 
@@ -163,13 +150,11 @@ func TestMsgList_emptyInboxPrintsFallback(t *testing.T) {
 	})
 
 	root := NewRoot()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"msg", "list"})
-	if err := root.Execute(); err != nil {
+	out, err := execCmd(t, root, "msg", "list")
+	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if strings.TrimSpace(out.String()) != "Inbox empty." {
-		t.Fatalf("out=%q", out.String())
+	if strings.TrimSpace(out) != "Inbox empty." {
+		t.Fatalf("out=%q", out)
 	}
 }

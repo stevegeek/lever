@@ -130,7 +130,7 @@ func instructionAction(text string) opsig.Action {
 // the response status and body.
 func postSigned(t *testing.T, client *http.Client, path, priv, namespace string, raw []byte) (int, []byte) {
 	t.Helper()
-	sig, err := opsig.Sign(priv, namespace, raw)
+	sig, err := opsig.SignContext(context.Background(), priv, namespace, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestDirectiveSendRejectsBadSignatureAndNothingDelivered(t *testing.T) {
 	id := "11111111-2222-4333-8444-555555555502"
 	st := directiveStatement(id, "manager", 1, instructionAction("hi"))
 	raw, _ := json.Marshal(st)
-	sig, err := opsig.Sign(priv, opsig.NamespaceDirective, raw)
+	sig, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceDirective, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestDirectiveListAndRevokeRequireFreshSignedEnvelope(t *testing.T) {
 	// Tampered: valid signature, mutated envelope bytes.
 	env := adminEnvelope("list", nil)
 	rawOK, _ := json.Marshal(env)
-	sig, err := opsig.Sign(priv, opsig.NamespaceAdmin, rawOK)
+	sig, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceAdmin, rawOK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +596,7 @@ func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 	id := "11111111-2222-4333-8444-555555555551"
 	st := directiveStatement(id, "manager", 1, instructionAction("first"))
 	raw, _ := json.Marshal(st)
-	sig, err := opsig.Sign(priv, opsig.NamespaceDirective, raw)
+	sig, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceDirective, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +614,7 @@ func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 	id2 := "11111111-2222-4333-8444-555555555552"
 	st2 := directiveStatement(id2, "manager", 1, instructionAction("second"))
 	raw2, _ := json.Marshal(st2)
-	sig2, err := opsig.Sign(priv, opsig.NamespaceDirective, raw2)
+	sig2, err := opsig.SignContext(context.Background(), priv, opsig.NamespaceDirective, raw2)
 	if err != nil {
 		t.Fatal(err)
 	}

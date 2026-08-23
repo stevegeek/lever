@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -215,7 +216,7 @@ func TestDirectiveSendSignsAndPosts(t *testing.T) {
 		t.Fatalf("signature not base64: %v", err)
 	}
 	v := opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	if err := v.Verify(opsig.NamespaceDirective, raw, sig); err != nil {
+	if err := v.VerifyContext(context.Background(), opsig.NamespaceDirective, raw, sig); err != nil {
 		t.Fatalf("signature does not verify: %v", err)
 	}
 	var st opsig.Statement
@@ -447,7 +448,7 @@ func TestDirectiveListSendsSignedEnvelope(t *testing.T) {
 	raw, _ := base64.StdEncoding.DecodeString(payload.Envelope)
 	sig, _ := base64.StdEncoding.DecodeString(payload.Signature)
 	v := opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	if err := v.Verify(opsig.NamespaceAdmin, raw, sig); err != nil {
+	if err := v.VerifyContext(context.Background(), opsig.NamespaceAdmin, raw, sig); err != nil {
 		t.Fatalf("envelope signature does not verify: %v", err)
 	}
 	var env opsig.Envelope
@@ -489,7 +490,7 @@ func TestDirectiveRevokeSendsSignedEnvelope(t *testing.T) {
 	raw, _ := base64.StdEncoding.DecodeString(payload.Envelope)
 	sig, _ := base64.StdEncoding.DecodeString(payload.Signature)
 	v := opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	if err := v.Verify(opsig.NamespaceAdmin, raw, sig); err != nil {
+	if err := v.VerifyContext(context.Background(), opsig.NamespaceAdmin, raw, sig); err != nil {
 		t.Fatalf("envelope signature does not verify: %v", err)
 	}
 	var env opsig.Envelope
@@ -526,7 +527,7 @@ func TestDirectiveSelftestOK(t *testing.T) {
 	raw, _ := base64.StdEncoding.DecodeString(payload.Statement)
 	sig, _ := base64.StdEncoding.DecodeString(payload.Signature)
 	v := opsig.Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	if err := v.Verify(opsig.NamespaceDirective, raw, sig); err != nil {
+	if err := v.VerifyContext(context.Background(), opsig.NamespaceDirective, raw, sig); err != nil {
 		t.Fatalf("selftest signature does not verify: %v", err)
 	}
 	var st opsig.Statement

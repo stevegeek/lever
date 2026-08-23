@@ -280,14 +280,6 @@ func SignContext(ctx context.Context, keyPath, namespace string, msg []byte) ([]
 	return out.Bytes(), nil
 }
 
-// Sign is SignContext with context.Background().
-//
-// Deprecated: use SignContext so the subprocess is bounded by the caller's
-// context. Kept until the callers move.
-func Sign(keyPath, namespace string, msg []byte) ([]byte, error) {
-	return SignContext(context.Background(), keyPath, namespace, msg)
-}
-
 // Verifier verifies operator signatures against an allowed_signers file
 // with a fixed expected principal. Only exit status 0 is accepted.
 type Verifier struct {
@@ -318,12 +310,4 @@ func (v Verifier) VerifyContext(ctx context.Context, namespace string, msg, sig 
 		return fmt.Errorf("%w: signature: %s", ErrInvalid, errb.String())
 	}
 	return nil
-}
-
-// Verify is VerifyContext with context.Background().
-//
-// Deprecated: use VerifyContext so the subprocess is bounded by the
-// request's context. Kept until the callers move.
-func (v Verifier) Verify(namespace string, msg, sig []byte) error {
-	return v.VerifyContext(context.Background(), namespace, msg, sig)
 }

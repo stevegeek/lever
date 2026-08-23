@@ -16,45 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/broker/rules"
-	"github.com/stevegeek/lever/internal/cap/ca"
-	"github.com/stevegeek/lever/internal/cap/token"
 )
-
-// llmBrokerConfig builds a broker wired for the /llm proxy: the reserved llm
-// pseudo-tool registered, worker permitted to self-obtain llm.generate, and a
-// fake upstream + real key.
-func llmBrokerConfig(t *testing.T, apiKey, upstreamURL string) Config {
-	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rl := rules.NewPolicy()
-	rl.AllowObtain("worker", ReservedLLMTool, ReservedLLMOp)
-	reg := registry.New()
-	if err := reg.Register(registry.Tool{
-		Name:       ReservedLLMTool,
-		Backend:    "lever:llm-proxy",
-		Operations: map[string]registry.Operation{ReservedLLMOp: {Name: ReservedLLMOp}},
-		FirstParty: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return Config{
-		Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
-		ManagerIdentity: "manager", Agents: []string{"manager", "worker"},
-		GrantTTL: time.Hour, ServerName: e2eServerName,
-		APIKey: []byte(apiKey), LLMUpstream: upstreamURL,
-	}
-}
 
 func TestE2ELLMProxyOverRealMTLS(t *testing.T) {
 	var gotKey, gotAuth string

@@ -13,40 +13,8 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/broker/rules"
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 )
-
-// restrictedConfig builds a broker whose "db" tool restricts the "table"
-// constraint to {A,B} via AllowedValues, and lets analyst self-obtain db.read.
-// Used to exercise the broker's mint-time constraint validation + baking.
-func restrictedConfig(t *testing.T) Config {
-	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rl := rules.NewPolicy()
-	rl.AllowObtain("analyst", "db", "read")
-	reg := registry.New()
-	if err := reg.Register(registry.Tool{
-		Name: "db", Backend: "http://127.0.0.1:3201",
-		Operations:    map[string]registry.Operation{"read": {Name: "read"}},
-		AllowedValues: map[string][]string{"table": {"A", "B"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return Config{
-		Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
-		ManagerIdentity: "manager", Agents: []string{"manager", "analyst"},
-		GrantTTL: time.Hour, ServerName: "host.orb.internal",
-	}
-}
 
 func TestRequestConstraintMintsNarrowedToken(t *testing.T) {
 	// The constraint loop (request.go:63-66) must bake every requested constraint
@@ -169,41 +137,6 @@ func TestRequestDeniesUnregisteredOperation(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (db.drop not a registered op)", w.Code)
 	}
-}
-
-// coarseConfig builds a broker with a single coarse, externally-fronted tool
-// "utilities" (registry has ONLY the synthetic WildcardOp, mirroring a real
-// gate:coarse tool). grantWildcard controls whether "analyst" holds the
-// {utilities, "*"} obtain grant. The returned buffer captures audit log
-// output so tests can assert on the op-coercion detail.
-func coarseConfig(t *testing.T, grantWildcard bool) (Config, *bytes.Buffer) {
-	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rl := rules.NewPolicy()
-	if grantWildcard {
-		rl.AllowObtain("analyst", "utilities", registry.WildcardOp)
-	}
-	reg := registry.New()
-	if err := reg.Register(registry.Tool{
-		Name: "utilities", Backend: "127.0.0.1:3103", External: true, Coarse: true,
-		Operations: map[string]registry.Operation{registry.WildcardOp: {Name: registry.WildcardOp}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	return Config{
-		Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
-		ManagerIdentity: "manager", Agents: []string{"manager", "analyst"},
-		GrantTTL: time.Hour, ServerName: "host.orb.internal",
-		Log: slog.New(slog.NewTextHandler(&buf, nil)),
-	}, &buf
 }
 
 func TestRequestCoarseToolCoercesFineShapedOpToWildcard(t *testing.T) {

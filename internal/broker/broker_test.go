@@ -1,42 +1,9 @@
 package broker
 
 import (
-	"io"
-	"log/slog"
 	"testing"
 	"time"
-
-	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/broker/rules"
-	"github.com/stevegeek/lever/internal/cap/ca"
-	"github.com/stevegeek/lever/internal/cap/token"
 )
-
-func testConfig(t *testing.T) Config {
-	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rl := rules.NewPolicy()
-	rl.AllowObtain("analyst", "db", "read")
-	rl.AllowDelegate("manager", "db", "read", "worker")
-	reg := registry.New()
-	_ = reg.Register(registry.Tool{
-		Name: "db", Backend: "http://127.0.0.1:3201",
-		Operations: map[string]registry.Operation{"read": {Name: "read"}},
-	})
-	return Config{
-		Keys: kp, CA: c, Tickets: ca.NewTicketStore(), Rules: rl, Registry: reg,
-		ManagerIdentity: "manager", Agents: []string{"manager", "analyst", "worker"},
-		GrantTTL: time.Hour, TicketTTL: 10 * time.Minute, ServerName: "host.orb.internal",
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-}
 
 func TestEpochBumpAndRevoke(t *testing.T) {
 	b := New(testConfig(t))

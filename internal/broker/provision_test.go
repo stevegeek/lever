@@ -2,31 +2,12 @@ package broker
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"github.com/stevegeek/lever/internal/wire"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
-
-// leafFor builds a verified-chain TLS state whose client cert CN is `cn`.
-func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
-	t.Helper()
-	csr := makeCSRForCN(t, cn)
-	certPEM, err := b.ca.SignCSR(csr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	blk, _ := pem.Decode(certPEM)
-	leaf, err := x509.ParseCertificate(blk.Bytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
-}
 
 func TestProvisionIssuesTicketForManager(t *testing.T) {
 	b := New(testConfig(t))

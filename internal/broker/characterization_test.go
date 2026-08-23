@@ -16,22 +16,11 @@ import (
 	"encoding/pem"
 	"github.com/stevegeek/lever/internal/wire"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
-
-// auditConfig returns testConfig with the audit log captured in a buffer, so
-// tests can pin exact broker.decision lines.
-func auditConfig(t *testing.T) (Config, *bytes.Buffer) {
-	t.Helper()
-	cfg := testConfig(t)
-	var buf bytes.Buffer
-	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
-	return cfg, &buf
-}
 
 // --- A1: exact deny audit lines on the copy-pasted authn+revocation preambles ---
 

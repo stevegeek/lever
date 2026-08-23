@@ -8,31 +8,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/broker/rules"
-	"github.com/stevegeek/lever/internal/cap/ca"
-	"github.com/stevegeek/lever/internal/cap/token"
 )
-
-// toolsBroker builds a minimal broker with an empty registry so we can
-// register exactly the tools each test needs.
-func toolsBroker(t *testing.T) *Broker {
-	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return New(Config{
-		Keys: kp, CA: c, Tickets: ca.NewTicketStore(),
-		Rules:           rules.NewPolicy(),
-		Registry:        registry.New(),
-		ManagerIdentity: "manager",
-		Agents:          []string{"manager", "worker"},
-	})
-}
 
 func TestToolsListsRegisteredToolsForAgent(t *testing.T) {
 	b := toolsBroker(t)

@@ -2,9 +2,6 @@ package broker
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -130,37 +125,6 @@ func TestWorkerSpecLookup(t *testing.T) {
 	if _, ok := b.workerSpec("nope"); ok {
 		t.Fatal("expected absent spec to be missing")
 	}
-}
-
-// fakeTLSWithCN returns a synthetic TLS connection state whose verified client
-// cert CN is cn. Sufficient for RequireAgent in tests that don't need a real CA.
-func fakeTLSWithCN(cn string) *tls.ConnectionState {
-	return &tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{
-			{Subject: pkix.Name{CommonName: cn}},
-		},
-	}
-}
-
-// caTicketStore returns a fresh, empty TicketStore for tests.
-func caTicketStore(_ *testing.T) *ca.TicketStore {
-	return ca.NewTicketStore()
-}
-
-// newTestBroker builds a Broker with a fake runtime, a real ticket store, and a
-// temp bootstrap dir for the given single worker.
-func newTestBroker(t *testing.T, rt WorkerRuntime, spec WorkerSpec) *Broker {
-	t.Helper()
-	return New(Config{
-		Tickets:         caTicketStore(t),
-		Registry:        registry.New(),
-		Runtime:         rt,
-		Workers:         []WorkerSpec{spec},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-		InstanceProject: testInstanceProject,
-	})
 }
 
 // callWorker drives a handler with a synthetic verified client cert CN.
@@ -494,7 +458,7 @@ func TestWorkerStart_authz(t *testing.T) {
 func TestWorkerRoutes_authBeforeDecode(t *testing.T) {
 	for _, path := range []string{"/worker/start", "/worker/stop", "/worker/suspend", "/worker/resume"} {
 		t.Run(path, func(t *testing.T) {
-			b, _, audit := newMsgTestBroker(true)
+			b, _, audit := newMsgTestBroker(t, true)
 			if rec := callWorker(t, b, path, `{`, "intruder"); rec.Code != http.StatusForbidden {
 				t.Fatalf("intruder bad body: status = %d, want 403", rec.Code)
 			}
@@ -518,19 +482,10 @@ func TestWorkerList(t *testing.T) {
 			{Slug: "helper", Phase: "suspended"},
 		},
 	}}
-	b := New(Config{
-		Tickets:  caTicketStore(t),
-		Registry: registry.New(),
-		Runtime:  rt,
-		Workers: []WorkerSpec{
-			{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()},
-			{Name: "helper", WorkspaceSubdir: "workers/helper", BootstrapDir: t.TempDir()},
-		},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-		InstanceProject: testInstanceProject,
-	})
+	b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt,
+		WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()},
+		WorkerSpec{Name: "helper", WorkspaceSubdir: "workers/helper", BootstrapDir: t.TempDir()},
+	)))
 	req := httptest.NewRequest("POST", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec := httptest.NewRecorder()
@@ -566,15 +521,8 @@ func TestWorkerList(t *testing.T) {
 func TestWorkerNilRuntime_returns502(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
-	b := New(Config{
-		Tickets:         caTicketStore(t),
-		Registry:        registry.New(),
-		Runtime:         nil, // unwired: simulates manual `lever broker serve`
-		Workers:         []WorkerSpec{spec},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-	})
+	// Runtime nil: unwired, simulates a manual `lever broker serve`.
+	b := newTestBroker(t, nil, spec)
 
 	// /worker/start with manager CN must return 502, not panic.
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"go"}`, "test-manager")
@@ -596,15 +544,7 @@ func TestWorkerNilRuntime_returns502(t *testing.T) {
 // unauthenticated or non-manager caller gets 403 (authz runs before the nil check).
 func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
-	b := New(Config{
-		Tickets:         caTicketStore(t),
-		Registry:        registry.New(),
-		Runtime:         nil,
-		Workers:         []WorkerSpec{spec},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-	})
+	b := newTestBroker(t, nil, spec)
 
 	// Non-manager CN on /worker/start must get 403, not 502.
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder")

@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -85,8 +87,8 @@ func TestApplyDryRun(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "jail-up") {
-		t.Errorf("dry-run output should contain 'jail-up'; got:\n%s", got)
+	if !strings.Contains(got, "broker-up") {
+		t.Errorf("dry-run output should contain 'broker-up'; got:\n%s", got)
 	}
 	if !strings.Contains(got, "start-manager") {
 		t.Errorf("dry-run output should contain 'start-manager'; got:\n%s", got)
@@ -111,10 +113,11 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if deps.RemoveJailFile == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.RemoveJailFile")
 	}
@@ -157,10 +160,11 @@ func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if len(deps.HubSessionSecret) != 64 {
 		t.Fatalf("Deps.HubSessionSecret length = %d, want 64 (32 bytes hex)", len(deps.HubSessionSecret))
 	}
@@ -181,10 +185,11 @@ func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 	}
 
 	// Re-apply: same state dir, fresh deps — the persisted key is adopted.
-	deps2, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w2, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("second buildApplyDeps: %v", err)
 	}
+	deps2 := w2.deps
 	if deps2.HubSessionSecret != deps.HubSessionSecret {
 		t.Fatal("re-apply changed the session secret — must adopt, not rotate")
 	}
@@ -204,10 +209,11 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if deps.RemoveScionProjectConfigs == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.RemoveScionProjectConfigs")
 	}
@@ -232,10 +238,11 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	sb := &stubBackend{registeredResult: true}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if deps.ScionProjectRegistered == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.ScionProjectRegistered")
 	}
@@ -275,10 +282,11 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if deps.EnsureControllerPAT == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.EnsureControllerPAT")
 	}
@@ -312,10 +320,11 @@ func TestBuildApplyDepsWiresRearmBootstrap(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if deps.RearmBootstrap == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.RearmBootstrap")
 	}
@@ -335,10 +344,11 @@ func TestBuildApplyDepsWiresRemoteProxy(t *testing.T) {
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if deps.StartRemoteProxy == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.StartRemoteProxy")
 	}
@@ -359,7 +369,7 @@ func TestApplyDryRunDiscoversConfig(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if got := out.String(); !strings.Contains(got, "jail-up") || !strings.Contains(got, "start-manager") {
+	if got := out.String(); !strings.Contains(got, "broker-up") || !strings.Contains(got, "start-manager") {
 		t.Errorf("dry-run via discovery produced:\n%s", got)
 	}
 }
@@ -1023,10 +1033,11 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 
 	// --- First apply: bootstrap-token then scion-server, via the real Deps
 	// wiring (mirrors runStep's "bootstrap-token"/"scion-server" arms).
-	deps, _, _, err := buildApplyDeps(ctx, app, p, bf, nil)
+	w, err := buildApplyDeps(ctx, app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	if deps.EnsureControllerPAT == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.EnsureControllerPAT")
 	}
@@ -1081,10 +1092,11 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	// dir (what a real re-apply invocation does). The PAT is already
 	// persisted, so bootstrap-token must be a complete no-op — in
 	// particular, no second throwaway server start.
-	deps2, _, _, err := buildApplyDeps(ctx, app, p, bf, nil)
+	w2, err := buildApplyDeps(ctx, app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps (2nd apply): %v", err)
 	}
+	deps2 := w2.deps
 	if err := deps2.EnsureControllerPAT(ctx); err != nil {
 		t.Fatalf("bootstrap-token step (2nd apply): %v", err)
 	}
@@ -1153,7 +1165,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
 
 	rc := &remoteController{state: state, configPath: filepath.Join(dir, "lever.yaml"), port: port}
-	err = rc.awaitListening(child)
+	err = rc.awaitListening(context.Background(), child)
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
 	}
@@ -1172,7 +1184,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 		t.Skipf("could not re-bind %d: %v", port, err)
 	}
 	defer func() { _ = ln2.Close() }()
-	if err := rc.awaitListening(child); err != nil {
+	if err := rc.awaitListening(context.Background(), child); err != nil {
 		t.Fatalf("a listening proxy must pass: %v", err)
 	}
 }
@@ -1252,5 +1264,63 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	// proxy. (Here the respawn fails, so nothing rewrites the file.)
 	if _, err := os.Stat(state.RemotePID()); err == nil {
 		t.Fatal("remote.pid still names the stopped proxy — `lever remote status` and the next apply both read it as the live one")
+	}
+}
+
+// TestDetachedSelfCmd pins the shared daemon spawn shape both serve commands
+// ride on: argv = self + args, Setsid, extra env appended to the parent's,
+// and the out log created (parent dir included) and wired to both streams.
+func TestDetachedSelfCmd(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "state", "x.log")
+	cmd, f, err := detachedSelfCmd("/usr/local/bin/lever", out, []string{"K=v"}, "remote", "serve", "/x/lever.yaml")
+	if err != nil {
+		t.Fatalf("detachedSelfCmd: %v", err)
+	}
+	defer f.Close()
+	if got := strings.Join(cmd.Args, " "); got != "/usr/local/bin/lever remote serve /x/lever.yaml" {
+		t.Fatalf("argv = %q", got)
+	}
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("child must be Setsid")
+	}
+	if !slices.Contains(cmd.Env, "K=v") || len(cmd.Env) != len(os.Environ())+1 {
+		t.Fatalf("env must be the parent's plus K=v, got %d entries", len(cmd.Env))
+	}
+	if cmd.Stdout != f || cmd.Stderr != f {
+		t.Fatal("stdout and stderr must both go to the out log")
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("out log not created: %v", err)
+	}
+}
+
+// TestAwaitListeningHonoursContext: a cancelled apply must not keep polling
+// for the proxy's bind.
+func TestAwaitListeningHonoursContext(t *testing.T) {
+	savedTimeout, savedInterval := remoteProxyStartTimeout, remoteProxyStartInterval
+	t.Cleanup(func() { remoteProxyStartTimeout, remoteProxyStartInterval = savedTimeout, savedInterval })
+	remoteProxyStartTimeout, remoteProxyStartInterval = time.Minute, time.Second
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rc := &remoteController{state: brokerctl.StateDir(t.TempDir()), port: port}
+	start := time.Now()
+	if err := rc.awaitListening(ctx, child); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatal("awaitListening kept waiting after the context was cancelled")
 	}
 }

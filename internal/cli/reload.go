@@ -3,7 +3,6 @@ package cli
 import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
-	"github.com/stevegeek/lever/internal/config"
 )
 
 // newReloadCmd applies config changes to an ALREADY-RUNNING instance without a
@@ -24,11 +23,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 		// A config/bring-up failure is a diagnosis, not a usage error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := resolveConfigPath(argOrEmpty(args))
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
@@ -39,11 +34,11 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			if err := stateFor(path).StopBroker(); err != nil {
 				return err
 			}
-			deps, _, _, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
+			w, err := buildApplyDeps(cmd.Context(), app, path, bf, cmd)
 			if err != nil {
 				return err
 			}
-			if err := apply.Run(cmd.Context(), app, deps); err != nil {
+			if err := apply.Run(cmd.Context(), app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
 			cmd.Printf("application %q reloaded (broker restarted on the current config).\n", app.Name)

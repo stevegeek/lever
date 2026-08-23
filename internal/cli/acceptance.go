@@ -69,11 +69,7 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring up a real jail and drive the six acceptance capability checks (live gate)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := resolveConfigPath(argOrEmpty(args))
-			if err != nil {
-				return err
-			}
-			app, err := config.Load(path)
+			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
@@ -94,18 +90,19 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 // broker via the in-jail `lever-agent` CLI; a check that cannot yet be driven
 // records a failure, never a vacuous pass.
 func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, configPath string, bf BackendFactory) error {
-	// 1. Bring the real jail up BROKER-ONLY: jail-up (machine + egress allowlist),
-	//    broker-up (host broker + tools), mint-manager-bootstrap. The VM-level gate
+	// 1. Bring the real jail up BROKER-ONLY: the jail itself (machine + egress
+	//    allowlist, inside buildApplyDeps), then broker-up (host broker +
+	//    tools) and mint-manager-bootstrap. The VM-level gate
 	//    drives lever-agent directly and never invokes scion, so all the
 	//    scion/container/registration steps (incl. init-machine, which needs a
 	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
 	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
-	deps, b, _, err := buildApplyDeps(ctx, app, configPath, bf, cmd)
+	w, err := buildApplyDeps(ctx, app, configPath, bf, cmd)
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}
-	deps.BrokerOnly = true
-	if err := apply.Run(ctx, app, deps); err != nil {
+	b := w.b
+	if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{BrokerOnly: true}); err != nil {
 		return fmt.Errorf("acceptance: apply: %w", err)
 	}
 

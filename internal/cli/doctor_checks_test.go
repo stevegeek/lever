@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/brokerctl"
@@ -312,7 +313,7 @@ func TestHubProjectKeyMatchesTheTokenMintKey(t *testing.T) {
 	if got := hubProjectKey("/lever"); got != "lever" {
 		t.Fatalf("hubProjectKey(/lever) = %q, want lever", got)
 	}
-	if hubProjectKey("/lever") != filepath.Base(jailProjectPath("/anything", "/lever")) {
+	if hubProjectKey("/lever") != filepath.Base(apply.JailPath("/anything", "/anything", "/lever")) {
 		t.Error("hubProjectKey must match the key ensureControllerPAT mints the PAT with")
 	}
 }

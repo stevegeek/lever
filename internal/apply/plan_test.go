@@ -1,9 +1,11 @@
 package apply
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // planStepNames extracts the Kind from each Step.
@@ -33,7 +35,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 		Broker:  config.Broker{JailPort: 8443, AdminPort: 8444},
 	}
 	got := planStepNames(Plan(app, PlanOpts{BrokerOnly: true}))
-	want := []string{"jail-up", "broker-up", "mint-manager-bootstrap"}
+	want := []string{"broker-up", "mint-manager-bootstrap"}
 	if len(got) != len(want) {
 		t.Fatalf("broker-only plan = %v, want exactly %v", got, want)
 	}
@@ -73,7 +75,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, string(s.Kind))
 	}
-	want := []string{"jail-up", "broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -84,8 +86,8 @@ func TestPlanOrder(t *testing.T) {
 	}
 	// register-project targets the instance tree — ONE registration regardless
 	// of worker count (workers no longer register their own scion projects).
-	// (0:jail-up 1:broker-up 2:load-image 3:init-machine 4:config-registry 5:bootstrap-token 6:scion-server 7:register-project 8:mint-manager-bootstrap 9:start-manager)
-	if steps[7].Target != "/t" {
+	// (0:broker-up 1:load-image 2:init-machine 3:config-registry 4:bootstrap-token 5:scion-server 6:register-project 7:agent-template 8:mint-manager-bootstrap 9:start-manager)
+	if steps[6].Target != "/t" {
 		t.Fatalf("register-project target=%q", steps[7].Target)
 	}
 }
@@ -231,8 +233,8 @@ func TestPlanInsertsBrokerSteps(t *testing.T) {
 	if _, ok := idx["mint-manager-bootstrap"]; !ok {
 		t.Fatal("plan must include mint-manager-bootstrap")
 	}
-	if !(idx["jail-up"] < idx["broker-up"]) {
-		t.Fatal("broker-up must come after jail-up")
+	if idx["broker-up"] != 0 {
+		t.Fatal("broker-up must be the first step")
 	}
 	if !(idx["mint-manager-bootstrap"] < idx["start-manager"]) {
 		t.Fatal("mint-manager-bootstrap must come before start-manager")
@@ -301,5 +303,14 @@ func TestPlanAgentTemplateIsOrdered(t *testing.T) {
 	}
 	if sm := idx["start-manager"]; at > sm {
 		t.Errorf("agent-template (%d) must run BEFORE start-manager (%d): the prompt is staged at provisioning and never re-staged", at, sm)
+	}
+}
+
+// TestDefaultHubPortMatchesScionEndpoint pins DefaultHubPort to the port half
+// of scion.DefaultHubEndpoint: hubServerOpts binds the hub on the former, every
+// client dials the latter.
+func TestDefaultHubPortMatchesScionEndpoint(t *testing.T) {
+	if want := fmt.Sprintf("http://127.0.0.1:%d", DefaultHubPort); scion.DefaultHubEndpoint != want {
+		t.Fatalf("scion.DefaultHubEndpoint = %q, want %q", scion.DefaultHubEndpoint, want)
 	}
 }

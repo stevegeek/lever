@@ -61,8 +61,8 @@ func TestRemoveControllerPAT(t *testing.T) {
 	if err := os.WriteFile(pat, []byte("stale-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeControllerPAT(st); err != nil {
-		t.Fatalf("removeControllerPAT: %v", err)
+	if err := removeIfPresent(st.ControllerPAT()); err != nil {
+		t.Fatalf("removeIfPresent: %v", err)
 	}
 	if _, err := os.Stat(pat); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("controller.pat should be removed, stat err = %v", err)
@@ -71,7 +71,7 @@ func TestRemoveControllerPAT(t *testing.T) {
 
 func TestRemoveControllerPATMissingIsNoop(t *testing.T) {
 	// No PAT staged: destroy must not error.
-	if err := removeControllerPAT(brokerctl.StateDir(t.TempDir())); err != nil {
+	if err := removeIfPresent(brokerctl.StateDir(t.TempDir()).ControllerPAT()); err != nil {
 		t.Fatalf("missing PAT must be a no-op, got %v", err)
 	}
 }
@@ -91,8 +91,8 @@ func TestRemoveRemotePAT(t *testing.T) {
 	if err := os.WriteFile(pat, []byte("stale-remote-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeRemotePAT(st); err != nil {
-		t.Fatalf("removeRemotePAT: %v", err)
+	if err := removeIfPresent(st.RemotePAT()); err != nil {
+		t.Fatalf("removeIfPresent: %v", err)
 	}
 	if _, err := os.Stat(pat); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("remote.pat should be removed, stat err = %v", err)
@@ -101,7 +101,7 @@ func TestRemoveRemotePAT(t *testing.T) {
 
 func TestRemoveRemotePATMissingIsNoop(t *testing.T) {
 	// No remote PAT staged (remote never enabled): destroy must not error.
-	if err := removeRemotePAT(brokerctl.StateDir(t.TempDir())); err != nil {
+	if err := removeIfPresent(brokerctl.StateDir(t.TempDir()).RemotePAT()); err != nil {
 		t.Fatalf("missing remote PAT must be a no-op, got %v", err)
 	}
 }

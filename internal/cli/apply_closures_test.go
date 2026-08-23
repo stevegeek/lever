@@ -62,10 +62,11 @@ func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps,
 
 	sb := &stubBackend{}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
-	deps, _, _, err := buildApplyDeps(context.Background(), app, p, bf, nil)
+	w, err := buildApplyDeps(context.Background(), app, p, bf, nil)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
+	deps := w.deps
 	return deps, app, stateFor(p), p
 }
 
@@ -234,7 +235,7 @@ func TestMintManagerBootstrapNon200(t *testing.T) {
 	if errors.Is(err, apply.ErrBootstrapLatched) {
 		t.Fatal("a 500 must NOT be treated as a spent latch")
 	}
-	if !strings.Contains(err.Error(), "returned 500") {
+	if !strings.Contains(err.Error(), "status 500") {
 		t.Fatalf("error should name the status code, got: %v", err)
 	}
 }
@@ -280,7 +281,7 @@ func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
 			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net"}
 		}
 		sb := &stubBackend{}
-		if _, _, _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, nil); err != nil {
+		if _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, nil); err != nil {
 			t.Fatalf("buildApplyDeps: %v", err)
 		}
 		if !sb.up {

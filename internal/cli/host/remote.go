@@ -134,6 +134,9 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		AllowedUsers: app.Remote.AllowedUsers,
 		Session:      login,
 		Audit:        auditFn,
+		// The proxy's own log, named the way doctor names it (relative to
+		// the instance root) so the denial text stays byte-identical.
+		LogPath: stateRel(st, st.RemoteLog()),
 	})
 	return provider, handler, nil
 }

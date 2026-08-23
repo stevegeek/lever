@@ -99,9 +99,9 @@ func stateRel(st state.State, path string) string {
 	return filepath.Join(filepath.Base(st.Dir), filepath.Base(path))
 }
 
-// stateDirName is the instance-relative name of the state directory, derived
-// from state.ForConfig so user-facing text never hardcodes it.
-func stateDirName() string { return filepath.Base(state.ForConfig("").Dir) }
+// stateDirName is the instance-relative name of the state directory, so
+// user-facing text never hardcodes it.
+func stateDirName() string { return state.DirName }
 
 // checkListeningProcess is the pid-then-port ladder shared by the broker and
 // remote-proxy checks: a recorded process must exist, be alive, and actually

@@ -11,9 +11,13 @@ import "path/filepath"
 // logs, secrets).
 type State struct{ Dir string }
 
-// ForConfig returns the .lever-state directory beside the config.
+// DirName is the state directory's name beside lever.yaml. User-facing text
+// that names the directory should use it rather than a literal.
+const DirName = ".lever-state"
+
+// ForConfig returns the DirName directory beside the config.
 func ForConfig(configDir string) State {
-	return State{Dir: filepath.Join(configDir, ".lever-state")}
+	return State{Dir: filepath.Join(configDir, DirName)}
 }
 
 func (s State) CACert() string        { return filepath.Join(s.Dir, "ca.crt") }

@@ -594,14 +594,9 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	r.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
 	r.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
 	l := New(r, "lever-x", common.Options{})
-	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
-	// live chain, so a re-apply that hits the skip must leave a prior
-	// aliasV6 untouched rather than zeroing it.
+	// A prior apply closed the chain; the re-apply below must hit the skip path.
 	if err := l.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("first ApplyEgress: %v", err)
-	}
-	if l.HostAliasV6() != "fd07::fe" {
-		t.Fatalf("the rebuild must record v6; got %q", l.HostAliasV6())
 	}
 	r.Open, r.Flushed, r.Resolved = false, false, false
 
@@ -618,9 +613,6 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	if l.HostAliasV4() != "0.250.250.254" {
 		t.Fatalf("alias should be read from the existing chain, got %q", l.HostAliasV4())
-	}
-	if l.HostAliasV6() != "fd07::fe" {
-		t.Fatalf("skip path must not clobber a prior aliasV6; got %q", l.HostAliasV6())
 	}
 }
 

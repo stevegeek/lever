@@ -82,7 +82,6 @@ type Base struct {
 	user    string // resolved in-jail run user
 	uid     string // resolved in-jail run-user uid
 	aliasV4 string // resolved IPv4 of hostAlias as seen from the jail
-	aliasV6 string // resolved IPv6 of hostAlias as seen from the jail
 }
 
 // NewBase builds the shared half of a prefix-reached backend.
@@ -113,10 +112,6 @@ func (b *Base) HostToolAlias() string { return b.hostAlias }
 // HostAliasV4 returns the resolved IPv4 of HostToolAlias as seen from the jail,
 // valid after EnsureUp/ApplyEgress. Empty if not yet resolved.
 func (b *Base) HostAliasV4() string { return b.aliasV4 }
-
-// HostAliasV6 returns the resolved IPv6 of HostToolAlias as seen from the jail,
-// valid after an ApplyEgress that rebuilt the chain. Empty if not yet resolved.
-func (b *Base) HostAliasV6() string { return b.aliasV6 }
 
 // MountDest returns the path inside the jail where the project tree is bind-mounted.
 func (b *Base) MountDest() string { return MountDest }
@@ -155,19 +150,15 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 // ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records the
 // resolved host alias, preserving the I2 no-reopen property. Called by each
 // embedder's EnsureUp as its last step; it is not part of the Backend
-// contract because nothing outside a backend drives it.
+// contract because nothing outside a backend drives it. Only the IPv4 alias
+// is kept: nothing reads the v6 one back, and the I2 skip path cannot supply
+// it (existingClosedAlias parses only v4 from the live chain).
 func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	v4, v6, rebuilt, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, allowedPorts, closedInternet)
+	v4, _, _, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, allowedPorts, closedInternet)
 	if err != nil {
 		return err
 	}
-	if rebuilt {
-		b.aliasV4, b.aliasV6 = v4, v6
-	} else {
-		// I2 skip path: v6 is not authoritative here (existingClosedAlias only
-		// parses v4 from the live chain) — do not clobber a prior aliasV6.
-		b.aliasV4 = v4
-	}
+	b.aliasV4 = v4
 	return nil
 }
 

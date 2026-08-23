@@ -1,7 +1,13 @@
 // Package registry holds the broker's view of registered MCP tools: their
 // backends, operations, the caveat→param mapping that lets the gateway turn a
 // request's real arguments into the constraint-keyed param set the token layer
-// verifies, and optional allowed-value rules. The registry is concurrency-safe; tools register at boot.
+// verifies, and optional allowed-value rules.
+//
+// The registry is concurrency-safe (Registry.mu) because, unlike
+// rules.Policy, it is mutated while the broker serves: the config-seeded
+// envelope is loaded at boot, but each first-party tool then merges its
+// registration through the admin /register route (Register) while the jail
+// listener is already answering /request, /tools and gateway lookups.
 package registry
 
 import (

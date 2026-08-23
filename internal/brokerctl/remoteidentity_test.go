@@ -1,9 +1,11 @@
 package brokerctl
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // TestRemoteConfigHashTracksRemoteOnly: the hash must move when anything the
@@ -58,5 +60,30 @@ func TestRemoteConfigHashCoversWhatTheProxyCaptures(t *testing.T) {
 	rebacked.Backend = "lima"
 	if RemoteConfigHash(&rebacked) == h {
 		t.Error("a changed backend must not reuse a proxy built for the other transport")
+	}
+}
+
+// TestRemoteIdentityMirrorsConfigRemote: RemoteConfigHash copies config.Remote
+// onto state.RemoteIdentity field by field. A field added to config.Remote
+// without a counterpart here would silently escape the hash, and a running
+// proxy would keep the old value across apply. Name and Backend are the two
+// App-level extras the proxy also captures.
+func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
+	remote := reflect.TypeFor[config.Remote]()
+	identity := reflect.TypeFor[state.RemoteIdentity]()
+	for i := range remote.NumField() {
+		f := remote.Field(i)
+		g, ok := identity.FieldByName(f.Name)
+		if !ok {
+			t.Errorf("config.Remote.%s has no state.RemoteIdentity counterpart — add it to RemoteConfigHash", f.Name)
+			continue
+		}
+		if g.Type != f.Type {
+			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
+		}
+	}
+	const appExtras = 2 // Name, Backend
+	if got, want := identity.NumField(), remote.NumField()+appExtras; got != want {
+		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend)", got, want)
 	}
 }

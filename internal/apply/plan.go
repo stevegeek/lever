@@ -6,7 +6,7 @@ package apply
 import "github.com/stevegeek/lever/internal/config"
 
 // StepKind names a bring-up operation. It is a lever-owned enum: the constants
-// below are the complete, authoritative set (runStep's dispatch has a case for
+// below are the complete, authoritative set (run.step's dispatch has a case for
 // each, plus a hard-error default). The type is a string alias, so untyped
 // literals still convert implicitly — the protection is named-constants-at-every-
 // site + find-refs, not compile-time exhaustiveness (the repo runs no exhaustive

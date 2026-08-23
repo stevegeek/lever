@@ -52,13 +52,6 @@ type Config struct {
 	// through its own jail instead of a host port that at most one instance
 	// could own. Nil uses the default net dialer (tests).
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	// ResponseHeaderTimeout bounds the wait for the hub's response HEADERS.
-	// 0 uses DefaultResponseHeaderTimeout. A test seam: production leaves
-	// it unset; tests lower it to exercise the 502 path. It does not bound
-	// the body, so a streamed response and an upgraded connection are
-	// unaffected — the timer stops once the headers land. Only meaningful
-	// alongside DialContext, which is when this package owns the Transport.
-	ResponseHeaderTimeout time.Duration
 	// PAT returns the remote PAT at call time (lazy, like HubTokenSource) —
 	// a PAT minted mid-apply is picked up without restart. Empty = 503.
 	PAT func() string
@@ -93,7 +86,16 @@ type Config struct {
 	Session SessionSource
 	// Audit receives one line per decision; nil disables (tests).
 	Audit func(line AuditLine)
+	// LogPath is where the operator is told to look when the hub login
+	// fails — the proxy's own log, named in that denial's response text.
+	// Optional; "" uses DefaultLogPath.
+	LogPath string
 }
+
+// DefaultLogPath is the proxy log location named in the hub-login-failed
+// denial when Config.LogPath is unset: the remote proxy's stderr, relative to
+// the instance root (see state.State.RemoteLog).
+const DefaultLogPath = ".lever-state/remote.log"
 
 // SessionSource hands out hub web sessions per verified operator, and takes
 // them back when the hub stops honoring them. *LoginDriver implements it; the
@@ -250,13 +252,13 @@ func truncateAudit(v string) string {
 	return v[:maxAuditFieldLen] + "…"
 }
 
-// DefaultResponseHeaderTimeout bounds the wait for the hub's response
-// headers when Config leaves it unset. Generous on purpose: it is a
-// last-resort guard against a wedged jail, not a latency budget. The hub
-// answers a healthy request in milliseconds, and the slowest legitimate case
-// — a cold hub still starting inside a machine that just came up — is far
-// under this.
-const DefaultResponseHeaderTimeout = 45 * time.Second
+// responseHeaderTimeout bounds the wait for the hub's response headers.
+// Generous on purpose: it is a last-resort guard against a wedged jail, not a
+// latency budget. The hub answers a healthy request in milliseconds, and the
+// slowest legitimate case — a cold hub still starting inside a machine that
+// just came up — is far under this. Tests lower it on the built Transport
+// (see setResponseHeaderTimeout in proxy_test.go).
+const responseHeaderTimeout = 45 * time.Second
 
 // secFetchSiteAllowed reports whether v is a Sec-Fetch-Site value a
 // same-origin or same-site request can carry. Anything else — including
@@ -310,114 +312,136 @@ func NewHandler(cfg Config) http.Handler {
 	return &gate{cfg: cfg, rp: newReverseProxy(cfg)}
 }
 
-// newReverseProxy builds the upstream half: Rewrite injects the PAT and the
-// shell session and strips every client-supplied identity; ModifyResponse
-// strips the hub's cookie and completes the audit line; ErrorHandler does
-// the same on the 502 path. With DialContext set it also owns the Transport.
+// newReverseProxy builds the upstream half: rewriteUpstream injects the PAT
+// and the shell session and strips every client-supplied identity;
+// completeAudit strips the hub's cookie and completes the audit line;
+// upstreamFailed does the same on the 502 path. With DialContext set it also
+// owns the Transport (jailTransport).
 func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(cfg.Target)
-			// Strip any client-supplied identity — the injected PAT is the
-			// only identity the hub ever sees. The Cookie header in
-			// particular must never reach the hub's cookie→bearer bridge,
-			// or a client-supplied scion_sess would be honored as an
-			// alternate credential. Tailscale-* headers are stripped too:
-			// the AllowedUsers gate trusts them (under the loopback-bind
-			// precondition documented above), but the hub must never see a
-			// client-supplied identity claim of its own.
-			pr.Out.Header.Del("Authorization")
-			pr.Out.Header.Del("Cookie")
-			for k := range pr.Out.Header {
-				if strings.HasPrefix(strings.ToLower(k), "tailscale-") {
-					pr.Out.Header.Del(k)
-				}
-			}
-			var pat, cookie string
-			if s := stateFrom(pr.In); s != nil {
-				pat, cookie = s.pat, s.cookie
-			}
-			pr.Out.Header.Set("Authorization", "Bearer "+pat)
-			// The hub session opens the UI shell, which the PAT cannot. It is
-			// re-checked against the path here as well as at the gate: this is
-			// the single funnel every upstream request passes through, so the
-			// "an API call never rides the session" property holds even if a
-			// future caller populates the cookie somewhere it shouldn't.
-			if cookie != "" && !isAPIPath(pr.In.URL.Path) {
-				pr.Out.Header.Set("Cookie", sessionCookieName+"="+cookie)
-			}
-			pr.SetXForwarded()
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			// The hub mints a fresh session cookie on every cookie-less
-			// request. The client must never hold a hub credential, cookie
-			// included. Header.Del operates on the canonicalized key, so
-			// this removes every Set-Cookie value regardless of how many
-			// the hub sent or what case it used.
-			resp.Header.Del("Set-Cookie")
-			if s := stateFrom(resp.Request); s != nil {
-				if s.retryable && sessionRejected(resp) {
-					// The hub does not know this session (it restarted, or the
-					// session lapsed). Say so, and audit nothing: the gate
-					// replaces the session and repeats the request, and that
-					// attempt is the one that answers the operator. The login
-					// itself is audited by the driver.
-					s.retry = true
-					return nil
-				}
-				if s.line != nil && cfg.Audit != nil {
-					s.line.Status = resp.StatusCode
-					cfg.Audit(*s.line)
-				}
-			}
-			return nil
-		},
-		// The upstream round trip can fail outright (hub down/unreachable),
-		// which bypasses ModifyResponse entirely. Complete the audit call here
-		// too, so "exactly one AuditLine per request" holds on this path as
-		// well.
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			if s := stateFrom(r); s != nil && s.line != nil {
-				s.line.Status = http.StatusBadGateway
-				if err != nil {
-					s.line.Error = err.Error()
-				}
-				switch {
-				case cfg.Audit != nil:
-					cfg.Audit(*s.line)
-				case err != nil:
-					// No audit sink wired: the cause still must not vanish, or a
-					// 502 says nothing about whether the jail, the hub, or the
-					// PAT is at fault.
-					daemon.Warnf("remote proxy upstream: %v", err)
-				}
-			}
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-		},
+		Rewrite:        rewriteUpstream(cfg.Target),
+		ModifyResponse: completeAudit(cfg.Audit),
+		ErrorHandler:   upstreamFailed(cfg.Audit),
 	}
 	if cfg.DialContext != nil {
-		// The standard Transport with only its dial replaced. Not a
-		// hand-rolled RoundTripper: httputil.ReverseProxy leans on
-		// http.Transport's own 101/upgrade handling to carry the hub's
-		// WebSocket attach streams, and that is not part of the RoundTripper
-		// contract.
-		t := http.DefaultTransport.(*http.Transport).Clone()
-		t.DialContext = cfg.DialContext
-		// A jail dial has no host-side socket to proxy. Leaving Proxy set
-		// would let an HTTP_PROXY in the operator's environment silently
-		// redirect hub traffic — carrying the injected PAT — off the host.
-		t.Proxy = nil
-		// Nothing else bounds getting a response out of the hub. The jail
-		// dial returns as soon as the child starts, so a wedged machine or a
-		// hung jail transport binary would otherwise hold the request open
-		// forever: no answer, no audit line, and a live child — the exact
-		// diagnosable-502 this transport exists to produce, lost. This bounds
-		// the headers only, so streamed bodies and upgraded connections run
-		// as long as they like.
-		t.ResponseHeaderTimeout = cmp.Or(cfg.ResponseHeaderTimeout, DefaultResponseHeaderTimeout)
-		rp.Transport = t
+		rp.Transport = jailTransport(cfg.DialContext)
 	}
 	return rp
+}
+
+// rewriteUpstream is the ReverseProxy Rewrite hook: point the request at
+// target, replace every client-supplied identity with the gate's PAT, and
+// attach the shell session where (and only where) the gate granted one.
+func rewriteUpstream(target *url.URL) func(*httputil.ProxyRequest) {
+	return func(pr *httputil.ProxyRequest) {
+		pr.SetURL(target)
+		// Strip any client-supplied identity — the injected PAT is the
+		// only identity the hub ever sees. The Cookie header in
+		// particular must never reach the hub's cookie→bearer bridge,
+		// or a client-supplied scion_sess would be honored as an
+		// alternate credential. Tailscale-* headers are stripped too:
+		// the AllowedUsers gate trusts them (under the loopback-bind
+		// precondition documented above), but the hub must never see a
+		// client-supplied identity claim of its own.
+		pr.Out.Header.Del("Authorization")
+		pr.Out.Header.Del("Cookie")
+		for k := range pr.Out.Header {
+			if strings.HasPrefix(strings.ToLower(k), "tailscale-") {
+				pr.Out.Header.Del(k)
+			}
+		}
+		var pat, cookie string
+		if s := stateFrom(pr.In); s != nil {
+			pat, cookie = s.pat, s.cookie
+		}
+		pr.Out.Header.Set("Authorization", "Bearer "+pat)
+		// The hub session opens the UI shell, which the PAT cannot. It is
+		// re-checked against the path here as well as at the gate: this is
+		// the single funnel every upstream request passes through, so the
+		// "an API call never rides the session" property holds even if a
+		// future caller populates the cookie somewhere it shouldn't.
+		if cookie != "" && !isAPIPath(pr.In.URL.Path) {
+			pr.Out.Header.Set("Cookie", sessionCookieName+"="+cookie)
+		}
+		pr.SetXForwarded()
+	}
+}
+
+// completeAudit is the ReverseProxy ModifyResponse hook: strip the hub's
+// session cookie, flag a rejected session for the gate's one retry, and
+// otherwise complete the audit line with the real upstream status.
+func completeAudit(audit func(AuditLine)) func(*http.Response) error {
+	return func(resp *http.Response) error {
+		// The hub mints a fresh session cookie on every cookie-less
+		// request. The client must never hold a hub credential, cookie
+		// included. Header.Del operates on the canonicalized key, so
+		// this removes every Set-Cookie value regardless of how many
+		// the hub sent or what case it used.
+		resp.Header.Del("Set-Cookie")
+		if s := stateFrom(resp.Request); s != nil {
+			if s.retryable && sessionRejected(resp) {
+				// The hub does not know this session (it restarted, or the
+				// session lapsed). Say so, and audit nothing: the gate
+				// replaces the session and repeats the request, and that
+				// attempt is the one that answers the operator. The login
+				// itself is audited by the driver.
+				s.retry = true
+				return nil
+			}
+			if s.line != nil && audit != nil {
+				s.line.Status = resp.StatusCode
+				audit(*s.line)
+			}
+		}
+		return nil
+	}
+}
+
+// upstreamFailed is the ReverseProxy ErrorHandler: the upstream round trip
+// failed outright (hub down/unreachable), which bypasses ModifyResponse
+// entirely. Complete the audit call here too, so "exactly one AuditLine per
+// request" holds on this path as well.
+func upstreamFailed(audit func(AuditLine)) func(http.ResponseWriter, *http.Request, error) {
+	return func(w http.ResponseWriter, r *http.Request, err error) {
+		if s := stateFrom(r); s != nil && s.line != nil {
+			s.line.Status = http.StatusBadGateway
+			if err != nil {
+				s.line.Error = err.Error()
+			}
+			switch {
+			case audit != nil:
+				audit(*s.line)
+			case err != nil:
+				// No audit sink wired: the cause still must not vanish, or a
+				// 502 says nothing about whether the jail, the hub, or the
+				// PAT is at fault.
+				daemon.Warnf("remote proxy upstream: %v", err)
+			}
+		}
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}
+}
+
+// jailTransport is the standard Transport with only its dial replaced. Not a
+// hand-rolled RoundTripper: httputil.ReverseProxy leans on http.Transport's
+// own 101/upgrade handling to carry the hub's WebSocket attach streams, and
+// that is not part of the RoundTripper contract.
+func jailTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = dial
+	// A jail dial has no host-side socket to proxy. Leaving Proxy set
+	// would let an HTTP_PROXY in the operator's environment silently
+	// redirect hub traffic — carrying the injected PAT — off the host.
+	t.Proxy = nil
+	// Nothing else bounds getting a response out of the hub. The jail
+	// dial returns as soon as the child starts, so a wedged machine or a
+	// hung jail transport binary would otherwise hold the request open
+	// forever: no answer, no audit line, and a live child — the exact
+	// diagnosable-502 this transport exists to produce, lost. This bounds
+	// the headers only, so streamed bodies and upgraded connections run
+	// as long as they like.
+	t.ResponseHeaderTimeout = responseHeaderTimeout
+	return t
 }
 
 // checkOrigin applies the browser-provenance rules (see the package doc):
@@ -468,9 +492,13 @@ func (g *gate) deny(w http.ResponseWriter, line *AuditLine, status int, decision
 
 // denyNoSession is the one denial three paths share: the hub login failed.
 func (g *gate) denyNoSession(w http.ResponseWriter, line *AuditLine) {
-	g.deny(w, line, http.StatusBadGateway, DecisionDenyNoSession, "hub login failed — see .lever-state/remote.log")
+	g.deny(w, line, http.StatusBadGateway, DecisionDenyNoSession,
+		"hub login failed — see "+cmp.Or(g.cfg.LogPath, DefaultLogPath))
 }
 
+// ServeHTTP is authorize → (answer a sign-in navigation | attach the shell
+// session) → forward. The audit line is opened here and completed by
+// whichever of those answers the request.
 func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cfg := g.cfg
 	// The identity the front end asserted, read once and used whole for
@@ -484,47 +512,10 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	login := r.Header.Get("Tailscale-User-Login")
 	line := AuditLine{Time: time.Now().UTC(), TSLogin: truncateAudit(login), Method: truncateAudit(r.Method), Path: truncateAudit(r.URL.Path)}
 
-	// Fail closed on an unconfigured ServeHost: it can never
-	// legitimately match a request's Origin, so refuse everything
-	// rather than let an accidental empty-string comparison decide.
-	// Applies regardless of whether this particular request carries an
-	// Origin header at all.
-	if cfg.ServeHost == "" {
-		g.deny(w, &line, http.StatusForbidden, DecisionDenyOrigin, "remote host not configured")
+	pat, ok := g.authorize(w, r, &line, login)
+	if !ok {
 		return
 	}
-
-	// Host first: it is the only gate a header-free request cannot walk
-	// through. See hostAllowed.
-	if !hostAllowed(r.Host, cfg.ServeHost, cfg.ListenPort) {
-		g.deny(w, &line, http.StatusForbidden, DecisionDenyHost, "unexpected Host")
-		return
-	}
-
-	if decision, msg := checkOrigin(r, cfg.ServeHost); decision != "" {
-		g.deny(w, &line, http.StatusForbidden, decision, msg)
-		return
-	}
-	if len(cfg.AllowedUsers) > 0 {
-		// Duplicates are refused for the same reason Origin and
-		// Sec-Fetch-Site are: Header.Get returns only the FIRST value, so a
-		// second one is a header the gate silently ignores while something
-		// downstream might not.
-		if logins := r.Header.Values("Tailscale-User-Login"); len(logins) > 1 {
-			g.deny(w, &line, http.StatusForbidden, DecisionDenyUser, "multiple Tailscale-User-Login headers refused")
-			return
-		}
-		if !slices.Contains(cfg.AllowedUsers, login) {
-			g.deny(w, &line, http.StatusForbidden, DecisionDenyUser, "tailscale identity not allowed")
-			return
-		}
-	}
-	pat := cfg.PAT() // read once; reused below for both the check and the injected header
-	if pat == "" {
-		g.deny(w, &line, http.StatusServiceUnavailable, DecisionDenyNoPAT, "remote PAT missing — run `lever apply` to mint it")
-		return
-	}
-
 	line.Decision = DecisionAllow
 	// Status is filled in by ModifyResponse/ErrorHandler once the
 	// upstream round trip completes; the audit call happens there too,
@@ -538,20 +529,14 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (DeadAuthorizationEndpoint) — the whole login is driven server-side
 	// instead (see login.go). Run that driver, then send the browser back
 	// into the app; if the session it hands out is a stale cached one,
-	// the shell GETs that follow heal it through the retry below. The
+	// the shell GETs that follow heal it through the retry in forward. The
 	// driver cannot recurse into this branch: its own step 1 GETs
 	// /auth/login/oidc with its own client, dialled straight at the hub.
 	// /auth/callback/ is NOT intercepted — the hub must keep receiving
 	// its own callbacks (isLoginPath excludes it).
 	if cfg.Session != nil && isLoginPath(r.URL.Path) &&
 		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
-		if _, err := cfg.Session.Cookie(r.Context(), login); err != nil {
-			g.denyNoSession(w, &line)
-			return
-		}
-		line.Decision, line.Status = DecisionLoginRedirect, http.StatusFound
-		g.audit(line)
-		http.Redirect(w, r, loginReturnTarget(r.URL.Query().Get("returnTo")), http.StatusFound)
+		g.serveLogin(w, r, &line, login)
 		return
 	}
 
@@ -566,11 +551,80 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		state.cookie = cookie
-		// Only a bodiless method may be repeated: the retry below re-runs
-		// the request, and a body has already been consumed by then.
+		// Only a bodiless method may be repeated: the retry in forward
+		// re-runs the request, and a body has already been consumed by then.
 		state.retryable = r.Method == http.MethodGet || r.Method == http.MethodHead
 	}
+	g.forward(w, r, state, login)
+}
 
+// authorize runs every check that decides whether the request may reach the
+// hub at all — ServeHost configured, Host, Origin/Sec-Fetch-Site, the
+// identity allowlist, a PAT on hand — denying (and auditing) on the first
+// failure. It returns the PAT, read once here and reused for the injected
+// header, and whether the request passed.
+func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine, login string) (string, bool) {
+	cfg := g.cfg
+	// Fail closed on an unconfigured ServeHost: it can never
+	// legitimately match a request's Origin, so refuse everything
+	// rather than let an accidental empty-string comparison decide.
+	// Applies regardless of whether this particular request carries an
+	// Origin header at all.
+	if cfg.ServeHost == "" {
+		g.deny(w, line, http.StatusForbidden, DecisionDenyOrigin, "remote host not configured")
+		return "", false
+	}
+
+	// Host first: it is the only gate a header-free request cannot walk
+	// through. See hostAllowed.
+	if !hostAllowed(r.Host, cfg.ServeHost, cfg.ListenPort) {
+		g.deny(w, line, http.StatusForbidden, DecisionDenyHost, "unexpected Host")
+		return "", false
+	}
+
+	if decision, msg := checkOrigin(r, cfg.ServeHost); decision != "" {
+		g.deny(w, line, http.StatusForbidden, decision, msg)
+		return "", false
+	}
+	if len(cfg.AllowedUsers) > 0 {
+		// Duplicates are refused for the same reason Origin and
+		// Sec-Fetch-Site are: Header.Get returns only the FIRST value, so a
+		// second one is a header the gate silently ignores while something
+		// downstream might not.
+		if logins := r.Header.Values("Tailscale-User-Login"); len(logins) > 1 {
+			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "multiple Tailscale-User-Login headers refused")
+			return "", false
+		}
+		if !slices.Contains(cfg.AllowedUsers, login) {
+			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "tailscale identity not allowed")
+			return "", false
+		}
+	}
+	pat := cfg.PAT()
+	if pat == "" {
+		g.deny(w, line, http.StatusServiceUnavailable, DecisionDenyNoPAT, "remote PAT missing — run `lever apply` to mint it")
+		return "", false
+	}
+	return pat, true
+}
+
+// serveLogin answers an intercepted sign-in navigation: drive the hub login
+// for this operator, then send the browser back into the app.
+func (g *gate) serveLogin(w http.ResponseWriter, r *http.Request, line *AuditLine, login string) {
+	if _, err := g.cfg.Session.Cookie(r.Context(), login); err != nil {
+		g.denyNoSession(w, line)
+		return
+	}
+	line.Decision, line.Status = DecisionLoginRedirect, http.StatusFound
+	g.audit(*line)
+	http.Redirect(w, r, loginReturnTarget(r.URL.Query().Get("returnTo")), http.StatusFound)
+}
+
+// forward hands the authorized request to the reverse proxy. A retryable
+// shell request is held back just long enough to learn whether the hub
+// accepted the session; if it did not, the session is replaced and the
+// request repeated once.
+func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, login string) {
 	if !state.retryable {
 		r = r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
 		g.rp.ServeHTTP(w, r)
@@ -590,15 +644,15 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// login page it cannot complete (the login is server-side; the SPA's
 	// login button leads to an authorization endpoint that does not
 	// resolve, by design — see Provider.handleAuthorize).
-	cfg.Session.Invalidate(login, state.cookie)
-	cookie, err := cfg.Session.Cookie(r.Context(), login)
+	g.cfg.Session.Invalidate(login, state.cookie)
+	cookie, err := g.cfg.Session.Cookie(r.Context(), login)
 	if err != nil {
-		g.denyNoSession(w, &line)
+		g.denyNoSession(w, state.line)
 		return
 	}
 	// retryable is deliberately not set: one retry, then the hub's answer
 	// stands whatever it is.
-	again := &ctxState{pat: pat, line: &line, cookie: cookie}
+	again := &ctxState{pat: state.pat, line: state.line, cookie: cookie}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }
 

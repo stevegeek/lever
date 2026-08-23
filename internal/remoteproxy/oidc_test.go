@@ -18,7 +18,11 @@ var testIdentity = Identity{Subject: "lever-remote:op@example.test", Email: "op@
 func newTestProvider(t *testing.T, now func() time.Time) (*Provider, *auditSink) {
 	t.Helper()
 	sink := &auditSink{}
-	return NewProvider(ProviderConfig{Port: 8446, Audit: sink.add, Now: now}), sink
+	p := NewProvider(ProviderConfig{Port: 8446, Audit: sink.add})
+	if now != nil {
+		p.now = now // the in-package clock seam; nil keeps the real clock
+	}
+	return p, sink
 }
 
 // auditSink collects audit lines for the assertions that nothing secret ever

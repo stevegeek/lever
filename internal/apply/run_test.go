@@ -1906,7 +1906,7 @@ func TestRunScionServerOmitsWebFlagsWhenRemoteDisabled(t *testing.T) {
 
 // TestRunRemoteProxyStepInvokesStartWhenEnabled proves the remote-proxy
 // step's executor wiring: Plan only includes the step when
-// app.RemoteEnabled() (see plan_test.go), and runStep must invoke the
+// app.RemoteEnabled() (see plan_test.go), and run.step must invoke the
 // injected Deps.StartRemoteProxy for it — exactly once, exactly like every
 // other step's Deps func.
 func TestRunRemoteProxyStepInvokesStartWhenEnabled(t *testing.T) {
@@ -2840,19 +2840,19 @@ func TestDefaultReadCredRejectsWorldReadable(t *testing.T) {
 	}
 }
 
-// loadImageStep drives just the load-image case of runStep with the given deps.
+// loadImageStep drives just the load-image case of run.step with the given deps.
 func loadImageStep(d Deps) error {
-	return runStep(context.Background(), &config.App{}, Step{Kind: "load-image", Target: "img"}, fillDeps(d), &bootTracker{})
+	return (&run{app: &config.App{}, d: fillDeps(d)}).step(context.Background(), Step{Kind: "load-image", Target: "img"})
 }
 
 // TestRunStepUnknownKind pins the switch's default arm: a Step whose Kind is
 // not a known StepKind is a hard error (never a silent no-op), and the message
 // echoes the offending kind. This guards the dispatch table against a Plan that
-// emits a kind runStep has no case for.
+// emits a kind run.step has no case for.
 func TestRunStepUnknownKind(t *testing.T) {
-	err := runStep(context.Background(), &config.App{}, Step{Kind: "no-such-kind"}, Deps{}, &bootTracker{})
+	err := (&run{app: &config.App{}}).step(context.Background(), Step{Kind: "no-such-kind"})
 	if err == nil {
-		t.Fatal("runStep with an unknown kind must error")
+		t.Fatal("run.step with an unknown kind must error")
 	}
 	if !strings.Contains(err.Error(), "no-such-kind") {
 		t.Fatalf("error %q must name the unknown kind", err)
@@ -3361,17 +3361,15 @@ func TestAgentTemplateGetsTheJailPath(t *testing.T) {
 		Manager: config.Manager{Image: "img"},
 	}
 	var got string
-	if err := runAgentTemplate(context.Background(),
-		app,
-		Step{Kind: KindAgentTemplate, Target: app.Tree},
-		Deps{
-			JailMount: "/lever",
-			EnsureAgentTemplate: func(_ context.Context, projectDir string) (bool, error) {
-				got = projectDir
-				return false, nil
-			},
-		}); err != nil {
-		t.Fatalf("runAgentTemplate: %v", err)
+	r := &run{app: app, d: Deps{
+		JailMount: "/lever",
+		EnsureAgentTemplate: func(_ context.Context, projectDir string) (bool, error) {
+			got = projectDir
+			return false, nil
+		},
+	}}
+	if err := r.agentTemplate(context.Background(), Step{Kind: KindAgentTemplate, Target: app.Tree}); err != nil {
+		t.Fatalf("agentTemplate: %v", err)
 	}
 	if got != "/lever" {
 		t.Fatalf("projectDir = %q, want the jail path %q — the host path does not exist inside the jail", got, "/lever")

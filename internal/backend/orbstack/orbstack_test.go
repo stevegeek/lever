@@ -462,47 +462,18 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 
-	var sawBuild, sawInstall bool
-	for _, c := range f.Calls {
-		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			if c.Dir != src {
-				t.Errorf("build Dir: want %q got %q", src, c.Dir)
-			}
-			if c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
-				t.Errorf("build env: want linux/arm64 got %+v", c.Env)
-			}
-			var sawCmd bool
-			var binArg string
-			for i, a := range c.Args {
-				if a == "./cmd/scion" {
-					sawCmd = true
-				}
-				if a == "-o" && i+1 < len(c.Args) {
-					binArg = c.Args[i+1]
-				}
-			}
-			if !sawCmd {
-				t.Errorf("build args should contain ./cmd/scion; got %+v", c.Args)
-			}
-			if !strings.Contains(binArg, "lever-scion-lever-jail") {
-				t.Errorf("build output path should include per-machine name lever-scion-lever-jail; got %q", binArg)
-			}
-			sawBuild = true
+	backendtest.AssertScionBuild(t, f, src, machine)
+	// The install: root prefix, guest-side atomic script, binary on stdin.
+	sawInstall := f.Called(func(c proc.Call) bool {
+		if !c.HasPrefix("orb", "-u", "root", "-m", machine, "bash", "-c") {
+			return false
 		}
-		// The install: root prefix, guest-side atomic script, binary on stdin.
-		if c.Name == "orb" && len(c.Args) >= 6 && reflect.DeepEqual(c.Args[:6], []string{"-u", "root", "-m", "lever-jail", "bash", "-c"}) {
-			script := c.Args[len(c.Args)-1]
-			if strings.Contains(script, "scion.tmp") &&
-				strings.Contains(script, "mv") &&
-				strings.Contains(script, "/usr/local/bin/scion") &&
-				c.Stdin == "fake-scion-lever-jail" {
-				sawInstall = true
-			}
-		}
-	}
-	if !sawBuild {
-		t.Fatalf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
-	}
+		script := c.Args[len(c.Args)-1]
+		return strings.Contains(script, "scion.tmp") &&
+			strings.Contains(script, "mv") &&
+			strings.Contains(script, "/usr/local/bin/scion") &&
+			c.Stdin == "fake-scion-"+machine
+	})
 	if !sawInstall {
 		t.Fatalf("expected atomic scion install into jail via the root prefix; calls=%+v", f.Calls)
 	}
@@ -679,17 +650,7 @@ func TestRunUserUIDAfterEnsureUp(t *testing.T) {
 // reported success. Every other binary-mode test calls EnsureScion directly and
 // so cannot see it — this one drives the real entry point.
 func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "scion")
-	h := make([]byte, 64)
-	copy(h, []byte{0x7f, 'E', 'L', 'F'})
-	h[4], h[5], h[6] = 2, 1, 1 // 64-bit, little-endian, v1
-	h[16] = 2                  // ET_EXEC
-	h[18] = 183                // EM_AARCH64
-	h[20] = 1                  // e_version
-	h[52] = 64                 // e_ehsize
-	if err := os.WriteFile(bin, h, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 
 	f := proc.NewFakeRunner()
 	scriptedMachine(f)

@@ -3,6 +3,7 @@ package backendtest
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
@@ -84,6 +85,27 @@ func TestGuestClosedChain(t *testing.T) {
 	}
 	if _, err := r.Run(context.Background(), nil, "orb", "-u", "root", "-m", "m", "ip6tables", "-F", "LEVER_EGRESS"); err != nil {
 		t.Fatalf("firewall not scripted: %v", err)
+	}
+}
+
+func TestWriteELF64IsParseableHeader(t *testing.T) {
+	p := WriteELF64(t, t.TempDir(), EMAArch64, ETExec)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 64 || string(b[:4]) != "\x7fELF" || b[18] != 183 || b[16] != 2 {
+		t.Fatalf("header = %x", b)
+	}
+}
+
+func TestAssertScionBuild(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("go build", proc.Result{})
+	_, _ = f.RunIn(context.Background(), "/src", map[string]string{"GOOS": "linux", "GOARCH": "arm64"},
+		"go", "build", "-o", "/tmp/lever-scion-m", "./cmd/scion")
+	if !AssertScionBuild(t, f, "/src", "m") {
+		t.Fatal("AssertScionBuild should find the build")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -110,7 +111,7 @@ func TestFetchModuleErrors(t *testing.T) {
 // "No Go toolchain on the jail host" (issue #27) means exactly this: in binary
 // mode nothing ever invokes `go`.
 func TestResolveBinaryModeNeverInvokesGo(t *testing.T) {
-	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	f := proc.NewFakeRunner()
 	out, err := Resolve(context.Background(), f, Spec{Binary: bin}, "arm64", "m")
 	if err != nil {
@@ -125,7 +126,7 @@ func TestResolveBinaryModeNeverInvokesGo(t *testing.T) {
 }
 
 func TestResolveBinaryModeRejectsWrongArch(t *testing.T) {
-	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	if _, err := Resolve(context.Background(), proc.NewFakeRunner(), Spec{Binary: bin}, "amd64", "m"); err == nil {
 		t.Fatal("expected an arch mismatch error")
 	}

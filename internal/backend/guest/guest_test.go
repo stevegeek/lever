@@ -3,7 +3,6 @@ package guest
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
@@ -167,33 +166,9 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 				t.Fatalf("EnsureScion: %v", err)
 			}
 
-			var sawBuild, sawInstall bool
+			backendtest.AssertScionBuild(t, f, src, "lever-jail")
+			var sawInstall bool
 			for _, c := range f.Calls {
-				if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-					if c.Dir != src {
-						t.Errorf("build Dir: want %q got %q", src, c.Dir)
-					}
-					if c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
-						t.Errorf("build env: want linux/arm64 got %+v", c.Env)
-					}
-					var sawCmd bool
-					var binArg string
-					for i, a := range c.Args {
-						if a == "./cmd/scion" {
-							sawCmd = true
-						}
-						if a == "-o" && i+1 < len(c.Args) {
-							binArg = c.Args[i+1]
-						}
-					}
-					if !sawCmd {
-						t.Errorf("build args should contain ./cmd/scion; got %+v", c.Args)
-					}
-					if !strings.Contains(binArg, "lever-scion-lever-jail") {
-						t.Errorf("build output path should include per-machine name lever-scion-lever-jail; got %q", binArg)
-					}
-					sawBuild = true
-				}
 				// The install is `<rootPrefix> bash -c <script>` with the binary
 				// on stdin: argv only, no host shell, no quoted prefix words.
 				if c.Stdin == "fake-scion-lever-jail" {
@@ -208,9 +183,6 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 						sawInstall = true
 					}
 				}
-			}
-			if !sawBuild {
-				t.Fatalf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
 			}
 			if !sawInstall {
 				t.Fatalf("expected atomic scion install via RootPrefix %v with the binary on stdin; calls=%+v", shape.rootPrefix, f.Calls)
@@ -441,41 +413,13 @@ func TestInstallIfChangedFailsOnUnreadableLocalFile(t *testing.T) {
 	}
 }
 
-// writeELF64 writes a minimal 64-bit little-endian ELF header for the given
-// machine (elf.EM_* value) and object type — enough for scionbin.VerifyELFArch
-// to accept or reject it. The full check is tested in internal/provision/
-// scionbin; the copies here exist so EnsureScion's binary-mode flow can be
-// exercised end to end through the guest transport.
-func writeELF64(t *testing.T, dir string, machine uint16, etype uint16) string {
-	t.Helper()
-	h := make([]byte, 64)
-	copy(h, []byte{0x7f, 'E', 'L', 'F'})
-	h[4] = 2 // EI_CLASS: 64-bit
-	h[5] = 1 // EI_DATA: little-endian
-	h[6] = 1 // EI_VERSION
-	binary.LittleEndian.PutUint16(h[16:], etype)
-	binary.LittleEndian.PutUint16(h[18:], machine)
-	binary.LittleEndian.PutUint32(h[20:], 1)  // e_version
-	binary.LittleEndian.PutUint16(h[52:], 64) // e_ehsize
-	path := filepath.Join(dir, "scion")
-	if err := os.WriteFile(path, h, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-const (
-	emAArch64 = 183 // elf.EM_AARCH64
-	etExec    = 2
-)
-
 // THE load-bearing test for issue #27. "No Go toolchain on the jail host" means
 // exactly this: in binary mode nothing ever invokes `go`. If it regresses, the
 // feature is silently useless on the machine it exists for.
 func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 	for _, shape := range prefixShapes("lever-jail") {
 		t.Run(shape.name, func(t *testing.T) {
-			bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
+			bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 			f := proc.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", proc.Result{Stdout: "aarch64\n"})
 			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", proc.Result{Code: 1})
@@ -499,7 +443,7 @@ func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 
 func TestEnsureScionBinaryModeRejectsWrongArch(t *testing.T) {
 	// The guest is amd64, the supplied binary is arm64. Nothing may be written.
-	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	shape := prefixShapes("lever-jail")[0]
 	f := proc.NewFakeRunner()
 	f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", proc.Result{Stdout: "x86_64\n"})

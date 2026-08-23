@@ -5,6 +5,7 @@ package backendtest
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,4 +225,71 @@ func AssertNoNodeTooling(t *testing.T, f *proc.FakeRunner) {
 			t.Fatalf("an instance that serves no UI must not need node: %v %v", c.Name, c.Args)
 		}
 	}
+}
+
+// ELF header constants for WriteELF64 (debug/elf's EM_*/ET_* values).
+const (
+	EMX8664   uint16 = 62  // elf.EM_X86_64
+	EMAArch64 uint16 = 183 // elf.EM_AARCH64
+	ETExec    uint16 = 2
+	ETDyn     uint16 = 3
+)
+
+// WriteELF64 writes a minimal but structurally valid 64-bit little-endian ELF
+// header for the given machine and object type to dir/scion and returns its
+// path. Program and section header counts are zero, so debug/elf parses the
+// header and stops — enough to exercise scionbin.VerifyELFArch (and the
+// binary-mode install flows built on it) without a real binary as test data.
+func WriteELF64(t *testing.T, dir string, machine uint16, etype uint16) string {
+	t.Helper()
+	h := make([]byte, 64)
+	copy(h, []byte{0x7f, 'E', 'L', 'F'})
+	h[4] = 2 // EI_CLASS: 64-bit
+	h[5] = 1 // EI_DATA: little-endian
+	h[6] = 1 // EI_VERSION
+	binary.LittleEndian.PutUint16(h[16:], etype)
+	binary.LittleEndian.PutUint16(h[18:], machine)
+	binary.LittleEndian.PutUint32(h[20:], 1)  // e_version
+	binary.LittleEndian.PutUint16(h[52:], 64) // e_ehsize
+	path := filepath.Join(dir, "scion")
+	if err := os.WriteFile(path, h, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// AssertScionBuild finds the host `go build` of ./cmd/scion and checks it ran
+// in src, cross-compiled for linux/arm64, and wrote the per-machine output
+// path. It returns false (after recording errors) when no build ran.
+func AssertScionBuild(t *testing.T, f *proc.FakeRunner, src, machine string) bool {
+	t.Helper()
+	i := f.CallIndex(proc.Subcommand("go", "build"))
+	if i < 0 {
+		t.Errorf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
+		return false
+	}
+	c := f.Calls[i]
+	if c.Dir != src {
+		t.Errorf("build Dir: want %q got %q", src, c.Dir)
+	}
+	if c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
+		t.Errorf("build env: want linux/arm64 got %+v", c.Env)
+	}
+	var sawCmd bool
+	var binArg string
+	for j, a := range c.Args {
+		if a == "./cmd/scion" {
+			sawCmd = true
+		}
+		if a == "-o" && j+1 < len(c.Args) {
+			binArg = c.Args[j+1]
+		}
+	}
+	if !sawCmd {
+		t.Errorf("build args should contain ./cmd/scion; got %+v", c.Args)
+	}
+	if !strings.Contains(binArg, "lever-scion-"+machine) {
+		t.Errorf("build output path should include per-machine name lever-scion-%s; got %q", machine, binArg)
+	}
+	return true
 }

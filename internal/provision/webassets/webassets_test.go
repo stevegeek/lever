@@ -93,16 +93,34 @@ func TestNodeMajor(t *testing.T) {
 	}
 }
 
+// Toolchain versions a supported host answers with.
+const (
+	nodeOK = "v25.9.0"
+	npmOK  = "11.12.1"
+)
+
+// scriptToolchain scripts a usable node/npm pair.
+func scriptToolchain(f *proc.FakeRunner) {
+	f.Script("node --version", proc.Result{Stdout: nodeOK + "\n"})
+	f.Script("npm --version", proc.Result{Stdout: npmOK + "\n"})
+}
+
+// scriptBuild scripts the toolchain probes and a succeeding npm ci/build.
+func scriptBuild(f *proc.FakeRunner) {
+	scriptToolchain(f)
+	f.Script("npm ci", proc.Result{})
+	f.Script("npm run build", proc.Result{})
+}
+
 func TestCheckNodeToolchain(t *testing.T) {
 	t.Run("accepts a supported node", func(t *testing.T) {
 		f := proc.NewFakeRunner()
-		f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
-		f.Script("npm --version", proc.Result{Stdout: "11.12.1\n"})
+		scriptToolchain(f)
 		got, err := CheckNodeToolchain(context.Background(), f, "/probe")
 		if err != nil {
 			t.Fatalf("CheckNodeToolchain: %v", err)
 		}
-		if got != "v25.9.0" {
+		if got != nodeOK {
 			t.Fatalf("version=%q", got)
 		}
 		// Both probes must run in the build's own directory — a walk-up
@@ -118,31 +136,25 @@ func TestCheckNodeToolchain(t *testing.T) {
 	t.Run("rejects a broken shim", func(t *testing.T) {
 		f := proc.NewFakeRunner()
 		_, err := CheckNodeToolchain(context.Background(), f, "/probe")
-		if err == nil {
-			t.Fatal("expected an error when node is unusable")
-		}
-		if !strings.Contains(err.Error(), "node/npm toolchain not usable") {
-			t.Fatalf("error should name the toolchain; got %v", err)
+		if !errors.Is(err, ErrNodeToolchain) {
+			t.Fatalf("expected ErrNodeToolchain when node is unusable; got %v", err)
 		}
 	})
 
-	t.Run("rejects node below the engines floor", func(t *testing.T) {
-		f := proc.NewFakeRunner()
-		f.Script("node --version", proc.Result{Stdout: "v18.19.1\n"})
-		_, err := CheckNodeToolchain(context.Background(), f, "/probe")
-		if err == nil || !strings.Contains(err.Error(), "too old") {
-			t.Fatalf("want a too-old error naming the floor; got %v", err)
-		}
-	})
-
-	t.Run("rejects a working node with no npm", func(t *testing.T) {
-		f := proc.NewFakeRunner()
-		f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
-		_, err := CheckNodeToolchain(context.Background(), f, "/probe")
-		if err == nil || !strings.Contains(err.Error(), "npm --version") {
-			t.Fatalf("want an npm error; got %v", err)
-		}
-	})
+	// Each rejection is ErrNodeToolchain and names its cause in the message.
+	for _, tc := range []struct{ name, node, cause string }{
+		{"rejects node below the engines floor", "v18.19.1", "too old"},
+		{"rejects a working node with no npm", nodeOK, "npm --version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := proc.NewFakeRunner()
+			f.Script("node --version", proc.Result{Stdout: tc.node + "\n"})
+			_, err := CheckNodeToolchain(context.Background(), f, "/probe")
+			if !errors.Is(err, ErrNodeToolchain) || !strings.Contains(err.Error(), tc.cause) {
+				t.Fatalf("want ErrNodeToolchain naming %q; got %v", tc.cause, err)
+			}
+		})
+	}
 }
 
 // The digest must key on build INPUTS only. Build output written back into the
@@ -300,10 +312,7 @@ func TestBuildWebAssetsRejectsAnEmptyBuild(t *testing.T) {
 	isolateCacheDir(t)
 	src := fakeScionSource(t)
 	f := proc.NewFakeRunner()
-	f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
-	f.Script("npm --version", proc.Result{Stdout: "11.12.1\n"})
-	f.Script("npm ci", proc.Result{})
-	f.Script("npm run build", proc.Result{})
+	scriptBuild(f)
 
 	_, _, err := Build(context.Background(), f, filepath.Join(src, "web"))
 	if err == nil {
@@ -320,10 +329,7 @@ func TestBuildWebAssetsUsesReproducibleInstall(t *testing.T) {
 	isolateCacheDir(t)
 	src := fakeScionSource(t)
 	f := proc.NewFakeRunner()
-	f.Script("node --version", proc.Result{Stdout: "v25.9.0\n"})
-	f.Script("npm --version", proc.Result{Stdout: "11.12.1\n"})
-	f.Script("npm ci", proc.Result{})
-	f.Script("npm run build", proc.Result{})
+	scriptBuild(f)
 	_, _, _ = Build(context.Background(), f, filepath.Join(src, "web"))
 
 	var sawCI, sawBuild bool
@@ -360,7 +366,7 @@ func TestBuildWebAssetsFailsEarlyWithoutNode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a toolchain error")
 	}
-	if !strings.Contains(err.Error(), "node/npm toolchain not usable") || !strings.Contains(err.Error(), "asdf/mise shim") {
+	if !errors.Is(err, ErrNodeToolchain) || !strings.Contains(err.Error(), "asdf/mise shim") {
 		t.Fatalf("error must diagnose and remediate; got %v", err)
 	}
 	for _, c := range f.Calls {

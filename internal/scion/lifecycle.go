@@ -2,9 +2,12 @@ package scion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/stevegeek/lever/internal/retry"
 )
 
 // ContainerLive reports whether a scion `list --format json` containerStatus
@@ -43,16 +46,11 @@ func ContainerLive(status string) bool {
 func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {
 	var lastPhase, lastContainer string
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
+	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
 		agents, err := list(ctx)
 		if err != nil {
 			lastErr = err
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(interval):
-			}
-			continue
+			return false, nil
 		}
 		lastErr = nil
 		// Reset first so a record that vanished mid-poll reports "" (its true
@@ -61,14 +59,10 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 		if a := FindAgent(agents, slug); a != nil {
 			lastPhase, lastContainer = a.Phase, a.ContainerStatus
 		}
-		if lastPhase == "running" && ContainerLive(lastContainer) {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
-		}
+		return lastPhase == "running" && ContainerLive(lastContainer), nil
+	})
+	if !errors.Is(err, retry.ErrExhausted) {
+		return err
 	}
 	if lastErr != nil {
 		// %v, not %w: this is a terminal "budget exhausted" condition, and a

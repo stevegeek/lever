@@ -86,9 +86,9 @@ func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
 		epochHits++
 		_ = json.NewEncoder(w).Encode(broker.EpochResponse{
-			Epoch:       1,
-			Version: cli.VersionString(),
-			ConfigHash:  brokerctl.ConfigHash(app),
+			Epoch:      1,
+			Version:    cli.VersionString(),
+			ConfigHash: brokerctl.ConfigHash(app),
 		})
 	})
 	mux.HandleFunc("/bootstrap", func(http.ResponseWriter, *http.Request) {
@@ -127,9 +127,9 @@ func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(broker.EpochResponse{
-			Epoch:       1,
-			Version: "some-older-binary",
-			ConfigHash:  brokerctl.ConfigHash(app),
+			Epoch:      1,
+			Version:    "some-older-binary",
+			ConfigHash: brokerctl.ConfigHash(app),
 		})
 	})
 	srv := httptest.NewServer(mux)

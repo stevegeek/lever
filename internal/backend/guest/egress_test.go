@@ -5,34 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/exec"
 )
-
-// closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for `iptables -S`
-// and records whether the chain was flushed or the alias re-resolved.
-type closedChainRunner struct {
-	*exec.FakeRunner
-	flushed, resolved bool
-}
-
-func (r *closedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
-	argv := strings.Join(args, " ")
-	if name == "orb" {
-		switch {
-		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
-			return exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"}, nil
-		case strings.Contains(argv, "-F LEVER_EGRESS"):
-			r.flushed = true
-		case strings.Contains(argv, "getent ahosts"):
-			r.resolved = true
-		}
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
-
-func (r *closedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
-	return r.RunIn(ctx, "", env, name, args...)
-}
 
 // orbGuest returns a Guest shaped like orbstack's, for argv-identical assertions.
 func orbGuest(host exec.Runner, machine string) Guest {
@@ -54,7 +29,7 @@ func noopResolve(t *testing.T) func(context.Context) (string, string, error) {
 }
 
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &closedChainRunner{FakeRunner: exec.NewFakeRunner()}
+	r := &backendtest.ClosedChainRunner{FakeRunner: exec.NewFakeRunner(), Host: "orb"}
 	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
 	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
 	g := orbGuest(r, "lever-jail")
@@ -65,10 +40,10 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	// I2: an already-closed chain must NOT be flushed or re-resolved — that would
 	// briefly open egress for a running agent.
-	if r.flushed {
+	if r.Flushed {
 		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
 	}
-	if r.resolved {
+	if r.Resolved {
 		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
 	}
 	if v4 != "0.250.250.254" {

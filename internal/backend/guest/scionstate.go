@@ -9,19 +9,19 @@ import (
 )
 
 // ReadScionProjectState reads scion's project-registration state from the guest
-// for `lever doctor`: the in-tree marker (<mountDest>/.scion) and each
+// for `lever doctor`: the in-tree marker (<workspacePath>/.scion) and each
 // ~/.scion/project-configs registration with the workspace path it claims. It
 // runs a read-only script through the machine-only UserPrefix, so it needs no
 // run user and works before EnsureUp (only the jail machine must be up).
-func (g Guest) ReadScionProjectState(ctx context.Context, mountDest string) (backend.ScionProjectState, error) {
+func (g Guest) ReadScionProjectState(ctx context.Context, workspacePath string) (backend.ScionProjectState, error) {
 	// Emit a line-parseable report (test/ls/grep only — nothing is mutated):
 	//   MARKER 1|0
 	//   ENTRY <project-configs-dir> <workspace_path>
 	// The space-separated ENTRY format assumes no whitespace in a workspace
-	// path; safe because mountDest is the backend constant "/lever" and worker
-	// paths are "/lever/workers/<sanitized-name>".
+	// path; safe because workspacePath is the backend's mount constant "/lever"
+	// and worker paths are "/lever/workers/<sanitized-name>".
 	script := `
-if [ -e ` + shellSingleQuote(mountDest+"/.scion") + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
+if [ -e ` + shellSingleQuote(workspacePath+"/.scion") + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
 for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
   [ -e "$s" ] || continue
   d=$(basename "$(dirname "$(dirname "$s")")")
@@ -29,7 +29,7 @@ for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
   echo "ENTRY $d $wp"
 done
 `
-	res, err := g.userRun(ctx, "bash", "-lc", script)
+	res, err := g.UserRun(ctx, "bash", "-lc", script)
 	if err != nil {
 		return backend.ScionProjectState{}, fmt.Errorf("guest: read scion project state: %w", err)
 	}
@@ -43,7 +43,7 @@ done
 // no-op when nothing matches. wp is a lever constant (/lever or
 // /lever/workers/<sanitized-name>), never user input.
 func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
-	if _, err := g.userRun(ctx, "bash", "-lc", scionConfigRemoveScript(wp)); err != nil {
+	if _, err := g.UserRun(ctx, "bash", "-lc", scionConfigRemoveScript(wp)); err != nil {
 		return fmt.Errorf("guest: remove scion project configs for %s: %w", wp, err)
 	}
 	return nil
@@ -146,7 +146,7 @@ func (g Guest) RepairScionHubEndpoint(ctx context.Context, wp, endpoint string) 
 	if endpoint == "" {
 		return nil
 	}
-	if _, err := g.userRun(ctx, "bash", "-lc", scionHubEndpointRepairScript(wp, endpoint)); err != nil {
+	if _, err := g.UserRun(ctx, "bash", "-lc", scionHubEndpointRepairScript(wp, endpoint)); err != nil {
 		return fmt.Errorf("guest: repair scion hub endpoint for %s: %w", wp, err)
 	}
 	return nil

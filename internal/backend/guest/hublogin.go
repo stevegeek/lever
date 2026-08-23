@@ -133,11 +133,11 @@ func (g Guest) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool,
 //
 // Every apply of every instance with remote access off pays for both halves, so
 // both have to be quiet when there is nothing to do: the guest script exits
-// early on a missing binary, and hubLoginSettingsWithout reports
+// early on a missing binary, and hubSettingsWithoutLogin reports
 // (unchanged, false) for every "nothing there" shape. A converged instance
 // costs two round trips, writes nothing, and reports false.
 func (g Guest) DisableHubLogin(ctx context.Context) (bool, error) {
-	if _, err := g.rootRun(ctx, "bash", "-c", disableLoginForwardScript); err != nil {
+	if _, err := g.RootRun(ctx, "bash", "-c", disableLoginForwardScript); err != nil {
 		return false, fmt.Errorf("guest: stop the login forwarder: %w", err)
 	}
 	// The settings edit is NOT gated on having found the binary. It used to be,
@@ -148,7 +148,7 @@ func (g Guest) DisableHubLogin(ctx context.Context) (bool, error) {
 	// forever — advertising a login for a provider that no longer runs, with no
 	// lever verb that removes it. Convergence must not depend on a step that
 	// already succeeded. removeHubLoginSettings is itself a quiet no-op when
-	// there is nothing to remove (see hubLoginSettingsWithout).
+	// there is nothing to remove (see hubSettingsWithoutLogin).
 	return g.removeHubLoginSettings(ctx)
 }
 
@@ -186,7 +186,7 @@ echo "FOUND 1"
 // meant to edit it, and reporting no change would tell the caller the guest is
 // converged when it is not.
 func (g Guest) removeHubLoginSettings(ctx context.Context) (bool, error) {
-	res, err := g.userRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
+	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
 		return false, nil
 	}
@@ -194,7 +194,7 @@ func (g Guest) removeHubLoginSettings(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	updated, changed, err := hubLoginSettingsWithout(existing)
+	updated, changed, err := hubSettingsWithoutLogin(existing)
 	if err != nil || !changed {
 		return false, nil
 	}
@@ -220,10 +220,10 @@ func (g Guest) ensureLoginForwarder(ctx context.Context, spec backend.HubLogin) 
 		return fmt.Errorf("guest: hashing %s: %w", bin, err)
 	}
 	replaced := true
-	// Absolute path, not a bare name: userRun passes no env, so a bare name
+	// Absolute path, not a bare name: UserRun passes no env, so a bare name
 	// resolves on the guest run-user's PATH, which precedes /usr/bin with
 	// run-user-writable directories (see InstallRootBinaryIfChanged).
-	if res, err := g.userRun(ctx, "/usr/bin/sha256sum", LoginForwardPath); err == nil {
+	if res, err := g.UserRun(ctx, "/usr/bin/sha256sum", LoginForwardPath); err == nil {
 		if f := strings.Fields(res.Stdout); len(f) > 0 && f[0] == want {
 			replaced = false
 		}
@@ -235,7 +235,7 @@ func (g Guest) ensureLoginForwarder(ctx context.Context, spec backend.HubLogin) 
 	}
 	// A freshly installed binary must displace whatever is running, or the
 	// guest keeps serving the old code from the old process.
-	if _, err := g.userRun(ctx, "/bin/bash", "-c", loginForwardScript(spec, replaced)); err != nil {
+	if _, err := g.UserRun(ctx, "/bin/bash", "-c", loginForwardScript(spec, replaced)); err != nil {
 		return fmt.Errorf("guest: start the login forwarder on 127.0.0.1:%d: %w", spec.IssuerPort, err)
 	}
 	return nil
@@ -317,7 +317,7 @@ const loginForwardMatch = "^" + LoginForwardPath
 // `force` is set when the binary was just replaced, since a process running
 // the right arguments would otherwise go on serving the old code.
 //
-// Absolute paths throughout: userRun passes no env, so a bare command name
+// Absolute paths throughout: UserRun passes no env, so a bare command name
 // resolves on the guest run-user's PATH, which has run-user-writable
 // directories ahead of /usr/bin. bash's own /dev/tcp is used for the liveness
 // probe precisely because it is a builtin — there is no netcat to shadow.
@@ -370,7 +370,7 @@ func (g Guest) goBinary(ctx context.Context) (string, error) {
 // ensureHubLoginSettings writes the oidc_login block into the guest's
 // ~/.scion/settings.yaml, and reports whether the file changed.
 func (g Guest) ensureHubLoginSettings(ctx context.Context, spec backend.HubLogin) (bool, error) {
-	res, err := g.userRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
+	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
 		// Deliberately fatal rather than "assume empty": treating an
 		// unreadable settings file as absent would rewrite scion's machine
@@ -381,7 +381,7 @@ func (g Guest) ensureHubLoginSettings(ctx context.Context, spec backend.HubLogin
 	if err != nil {
 		return false, err
 	}
-	updated, changed, err := hubLoginSettings(existing, spec, hasServerYAML)
+	updated, changed, err := hubSettingsConverged(existing, spec, hasServerYAML)
 	if err != nil {
 		return false, err
 	}
@@ -394,21 +394,12 @@ func (g Guest) ensureHubLoginSettings(ctx context.Context, spec backend.HubLogin
 	return true, nil
 }
 
-// writeScionSettings streams new settings content over the guest's file.
+// writeScionSettings streams new settings content over the guest's file, as
+// the RUN USER (it is that user's own config, not root's). Same transport and
+// atomicity as InstallRootBinary: the content is the stdin of a guest-side
+// script that writes a temp file and mv's it over the destination.
 func (g Guest) writeScionSettings(ctx context.Context, content []byte) error {
-	tmp, err := os.CreateTemp("", "lever-scion-settings-*.yaml")
-	if err != nil {
-		return fmt.Errorf("guest: stage %s: %w", scionSettingsRel, err)
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("guest: stage %s: %w", scionSettingsRel, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("guest: stage %s: %w", scionSettingsRel, err)
-	}
-	if _, err := g.Host.Run(ctx, nil, "bash", "-c", writeScionSettingsScript(g.UserPrefix, tmp.Name())); err != nil {
+	if err := g.pipeInto(ctx, g.UserPrefix, bytes.NewReader(content), writeScionSettingsScript); err != nil {
 		return fmt.Errorf("guest: write %s: %w", scionSettingsRel, err)
 	}
 	return nil
@@ -433,24 +424,10 @@ func parseScionSettingsRead(out string) (settings []byte, hasServerYAML bool, er
 	return []byte(rest), strings.TrimSpace(strings.TrimPrefix(line, "LEGACY ")) == "1", nil
 }
 
-// writeScionSettingsScript streams a host-local file over the settings file in
-// the guest, as the RUN USER (it is that user's own config, not root's).
-//
-// Mirrors InstallRootBinary's transport and atomicity: the Runner has no stdin
-// channel, so the host `cat` is piped into a guest-side `bash -c`, which
-// writes a temp file and mv's it over the destination. `set -o pipefail` so a
-// host-side failure is not masked by a successful guest-side one; bash, not
-// sh, because dash lacks pipefail.
-func writeScionSettingsScript(userPrefix []string, localPath string) string {
-	words := make([]string, 0, len(userPrefix))
-	for _, w := range userPrefix {
-		words = append(words, shellSingleQuote(w))
-	}
-	inner := fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s.lever-tmp" && mv "$HOME/%s.lever-tmp" "$HOME/%s"`,
-		filepath.Dir(scionSettingsRel), scionSettingsRel, scionSettingsRel, scionSettingsRel)
-	return fmt.Sprintf("set -o pipefail; cat %s | %s bash -c %s",
-		shellSingleQuote(localPath), strings.Join(words, " "), shellSingleQuote(inner))
-}
+// writeScionSettingsScript is the guest-side half of writeScionSettings: read
+// stdin into a temp file beside the settings file, then swap it in.
+var writeScionSettingsScript = fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s.lever-tmp" && mv "$HOME/%s.lever-tmp" "$HOME/%s"`,
+	filepath.Dir(scionSettingsRel), scionSettingsRel, scionSettingsRel, scionSettingsRel)
 
 // v1OIDCLogin is scion's oidc_login block as it appears under `server:` in
 // settings.yaml (pkg/config/settings_v1.go V1OIDCLoginConfig).
@@ -467,15 +444,27 @@ type v1OIDCLogin struct {
 	ClientID    string `yaml:"client_id"`
 }
 
-// hubLoginSettings returns the settings file content that declares lever's
-// oidc_login block, and whether it differs from what is already there.
+// hubSettingsConverged returns the settings file content lever wants for a hub
+// with remote login ON, and whether it differs from what is already there. It
+// converges THREE things under `server:`, each restart-worthy on its own
+// because scion reads the whole file once at startup:
+//
+//   - `oidc_login`: lever's login block (v1OIDCLogin), replaced whenever it
+//     differs from what this spec wants.
+//   - `auth.display_name`: an operator name, added only when nothing names one
+//     (setOperatorDisplayName) — it clears scion's first-run wizard.
+//   - `message_broker.enabled: true`, added only when the key is absent
+//     (enableMessageBroker) — it makes native chat work.
+//
+// hubSettingsWithoutLogin is the OFF path; see it for which of these it
+// reverts and why.
 //
 // It edits the parsed document rather than rewriting the file, so every other
 // key — and every comment — survives. "Changed" is decided semantically, by
 // comparing the block that is there against the block lever wants: a
 // re-serialisation that only moves whitespace must not read as a change, or
 // every apply would restart the hub.
-func hubLoginSettings(existing []byte, spec backend.HubLogin, hasServerYAML bool) ([]byte, bool, error) {
+func hubSettingsConverged(existing []byte, spec backend.HubLogin, hasServerYAML bool) ([]byte, bool, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(existing)) > 0 {
 		if err := yaml.Unmarshal(existing, &doc); err != nil {
@@ -538,18 +527,11 @@ func hubLoginSettings(existing []byte, spec backend.HubLogin, hasServerYAML bool
 		return existing, false, nil
 	}
 
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	// Two-space indent: scion's own settings files are written that way, and
-	// this file is read by people as often as by programs.
-	enc.SetIndent(2)
-	if err := enc.Encode(&doc); err != nil {
-		return nil, false, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
+	out, err := encodeSettings(&doc)
+	if err != nil {
+		return nil, false, err
 	}
-	if err := enc.Close(); err != nil {
-		return nil, false, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
-	}
-	return buf.Bytes(), true, nil
+	return out, true, nil
 }
 
 // setOperatorDisplayName names an operator in `server.auth` when nothing there
@@ -630,12 +612,23 @@ func clearOperatorDisplayName(server *yaml.Node) bool {
 	return true
 }
 
-// hubLoginSettingsWithout returns the settings content with lever's
-// oidc_login block removed, and whether anything changed. Every "nothing to
-// do" shape — an empty file, a file that is not a mapping, no `server:` key,
-// no block under it — is (unchanged, false, nil): removal is convergence, not
-// an assertion about what was there.
-func hubLoginSettingsWithout(existing []byte) ([]byte, bool, error) {
+// hubSettingsWithoutLogin returns the settings content for a hub with remote
+// login OFF, and whether anything changed. Of the three edits
+// hubSettingsConverged makes it reverts two — the `oidc_login` block, and the
+// `auth.display_name` lever wrote (clearOperatorDisplayName) — because both
+// exist only to serve the login path.
+//
+// `message_broker.enabled` is deliberately left as it is. It enables native
+// chat, a hub feature that does not depend on remote login; turning remote
+// access off must not also silently break chat for the operator on the host.
+// The key is absent-only on the way in (an operator's `false` is never
+// overridden) and, for the same reason, untouched on the way out: the
+// documented opt-out is to set it to false in the jail's settings.
+//
+// Every "nothing to do" shape — an empty file, a file that is not a mapping,
+// no `server:` key, no block under it — is (unchanged, false, nil): removal
+// is convergence, not an assertion about what was there.
+func hubSettingsWithoutLogin(existing []byte) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(existing)) == 0 {
 		return existing, false, nil
 	}
@@ -663,16 +656,27 @@ func hubLoginSettingsWithout(existing []byte) ([]byte, bool, error) {
 		return existing, false, nil
 	}
 
+	out, err := encodeSettings(&doc)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// encodeSettings renders an edited settings document back to bytes.
+func encodeSettings(doc *yaml.Node) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
+	// Two-space indent: scion's own settings files are written that way, and
+	// this file is read by people as often as by programs.
 	enc.SetIndent(2)
-	if err := enc.Encode(&doc); err != nil {
-		return nil, false, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
+	if err := enc.Encode(doc); err != nil {
+		return nil, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
 	}
 	if err := enc.Close(); err != nil {
-		return nil, false, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
+		return nil, fmt.Errorf("guest: render %s: %w", scionSettingsRel, err)
 	}
-	return buf.Bytes(), true, nil
+	return buf.Bytes(), nil
 }
 
 // documentRoot returns the mapping at the top of a parsed document, creating

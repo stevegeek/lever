@@ -2,6 +2,7 @@ package guest
 
 import (
 	"context"
+	"reflect"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
@@ -42,9 +43,9 @@ func oidcBlock(t *testing.T, b []byte) map[string]any {
 }
 
 func TestHubLoginSettingsCreatesTheBlockInAnEmptyFile(t *testing.T) {
-	out, changed, err := hubLoginSettings(nil, testHubLogin(), false)
+	out, changed, err := hubSettingsConverged(nil, testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
 	if !changed {
 		t.Fatal("changed = false for a file that had no oidc_login")
@@ -75,9 +76,9 @@ server:
 telemetry:
   enabled: false
 `)
-	out, changed, err := hubLoginSettings(existing, testHubLogin(), false)
+	out, changed, err := hubSettingsConverged(existing, testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
 	if !changed {
 		t.Fatal("changed = false")
@@ -108,11 +109,11 @@ telemetry:
 // TestHubLoginSettingsIsIdempotent is what keeps a re-apply from restarting
 // the hub — and every agent's connection to it — for no reason.
 func TestHubLoginSettingsIsIdempotent(t *testing.T) {
-	first, changed, err := hubLoginSettings([]byte("server:\n  user_access_mode: open\n"), testHubLogin(), false)
+	first, changed, err := hubSettingsConverged([]byte("server:\n  user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil || !changed {
 		t.Fatalf("first pass: changed=%v err=%v", changed, err)
 	}
-	second, changed, err := hubLoginSettings(first, testHubLogin(), false)
+	second, changed, err := hubSettingsConverged(first, testHubLogin(), false)
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
@@ -125,13 +126,13 @@ func TestHubLoginSettingsIsIdempotent(t *testing.T) {
 }
 
 func TestHubLoginSettingsDetectsADifferentPort(t *testing.T) {
-	first, _, err := hubLoginSettings(nil, testHubLogin(), false)
+	first, _, err := hubSettingsConverged(nil, testHubLogin(), false)
 	if err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	spec := testHubLogin()
 	spec.IssuerPort = 9500
-	out, changed, err := hubLoginSettings(first, spec, false)
+	out, changed, err := hubSettingsConverged(first, spec, false)
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestHubLoginSettingsDetectsADifferentPort(t *testing.T) {
 // from it and ignores server.yaml (pkg/config/hub_config.go). Adding the key
 // beside an unmigrated server.yaml would silently drop that file's contents.
 func TestHubLoginSettingsRefusesToStealFromLegacyServerYAML(t *testing.T) {
-	_, _, err := hubLoginSettings([]byte("version: 1\n"), testHubLogin(), true)
+	_, _, err := hubSettingsConverged([]byte("version: 1\n"), testHubLogin(), true)
 	if err == nil {
 		t.Fatal("added a `server:` key beside a legacy server.yaml")
 	}
@@ -157,7 +158,7 @@ func TestHubLoginSettingsRefusesToStealFromLegacyServerYAML(t *testing.T) {
 	}
 	// With the key already present, scion is ALREADY ignoring server.yaml, so
 	// there is nothing left to lose and lever proceeds.
-	if _, changed, err := hubLoginSettings([]byte("server:\n  user_access_mode: open\n"), testHubLogin(), true); err != nil || !changed {
+	if _, changed, err := hubSettingsConverged([]byte("server:\n  user_access_mode: open\n"), testHubLogin(), true); err != nil || !changed {
 		t.Fatalf("changed=%v err=%v, want the edit to proceed", changed, err)
 	}
 }
@@ -169,7 +170,7 @@ func TestHubLoginSettingsRefusesAFileItCannotEdit(t *testing.T) {
 		"server a scalar": "server: nope\n",
 		"broken yaml":     "server:\n\tbad: tab\n",
 	} {
-		if _, _, err := hubLoginSettings([]byte(content), testHubLogin(), false); err == nil {
+		if _, _, err := hubSettingsConverged([]byte(content), testHubLogin(), false); err == nil {
 			t.Fatalf("%s: no error, want a refusal rather than an overwrite", name)
 		}
 	}
@@ -232,12 +233,27 @@ func TestLoginForwardScriptUsesAbsolutePathsAndTheRightArgv(t *testing.T) {
 	}
 }
 
-func TestWriteScionSettingsScriptIsAtomicAndUserOwned(t *testing.T) {
-	script := writeScionSettingsScript([]string{"orb", "-m", "lever-x"}, "/tmp/staged.yaml")
+func TestWriteScionSettingsIsAtomicAndUserOwned(t *testing.T) {
+	f := exec.NewFakeRunner()
+	f.Script("orb -m lever-x bash -c", exec.Result{})
+	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-x"}}
+	if err := g.writeScionSettings(context.Background(), []byte("server: {}\n")); err != nil {
+		t.Fatalf("writeScionSettings: %v", err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("want one call, got %+v", f.Calls)
+	}
+	c := f.Calls[0]
+	// The content travels on stdin of `<userPrefix> bash -c <script>`: argv
+	// only, as the run user (the file is theirs, not root's).
+	if c.Name != "orb" || !reflect.DeepEqual(c.Args[:4], []string{"-m", "lever-x", "bash", "-c"}) {
+		t.Fatalf("argv = %s %v", c.Name, c.Args)
+	}
+	if c.Stdin != "server: {}\n" {
+		t.Fatalf("stdin = %q", c.Stdin)
+	}
+	script := c.Args[len(c.Args)-1]
 	for _, want := range []string{
-		"set -o pipefail",
-		"cat '/tmp/staged.yaml'",
-		"'orb' '-m' 'lever-x'",
 		".scion/settings.yaml.lever-tmp",
 		`mv "$HOME/.scion/settings.yaml.lever-tmp" "$HOME/.scion/settings.yaml"`,
 	} {
@@ -280,11 +296,11 @@ func TestDisableLoginForwardScriptStopsTheBridgeBeforeRemovingIt(t *testing.T) {
 }
 
 func TestHubLoginSettingsWithoutRemovesOnlyTheBlock(t *testing.T) {
-	with, _, err := hubLoginSettings([]byte("# top\nversion: 1\nserver:\n  user_access_mode: open\n"), testHubLogin(), false)
+	with, _, err := hubSettingsConverged([]byte("# top\nversion: 1\nserver:\n  user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
-	out, changed, err := hubLoginSettingsWithout(with)
+	out, changed, err := hubSettingsWithoutLogin(with)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -302,7 +318,7 @@ func TestHubLoginSettingsWithoutRemovesOnlyTheBlock(t *testing.T) {
 
 	// Idempotent, and every "nothing to do" shape is a quiet no-op: removal is
 	// convergence, not an assertion about what was there.
-	if _, changed, err := hubLoginSettingsWithout(out); err != nil || changed {
+	if _, changed, err := hubSettingsWithoutLogin(out); err != nil || changed {
 		t.Fatalf("second removal: changed=%v err=%v", changed, err)
 	}
 	for name, content := range map[string]string{
@@ -312,7 +328,7 @@ func TestHubLoginSettingsWithoutRemovesOnlyTheBlock(t *testing.T) {
 		"not a mapping": "- one\n",
 		"no oidc_login": "server:\n  user_access_mode: open\n",
 	} {
-		got, changed, err := hubLoginSettingsWithout([]byte(content))
+		got, changed, err := hubSettingsWithoutLogin([]byte(content))
 		if err != nil || changed || string(got) != content {
 			t.Fatalf("%s: got %q changed=%v err=%v, want an untouched no-op", name, got, changed, err)
 		}
@@ -330,9 +346,9 @@ func TestHubLoginSettingsWithoutRemovesOnlyTheBlock(t *testing.T) {
 // theoretical cost — it is a hub bounce, and every agent reconnecting, on an
 // apply that changed nothing the hub can see.
 func TestDisableHubLoginReportsOnlyWhatTheHubWasServing(t *testing.T) {
-	withBlock, _, err := hubLoginSettings([]byte("version: 1\nserver:\n  user_access_mode: open\n"), testHubLogin(), false)
+	withBlock, _, err := hubSettingsConverged([]byte("version: 1\nserver:\n  user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
 	const clean = "version: 1\nserver:\n  user_access_mode: open\n"
 
@@ -354,7 +370,7 @@ func TestDisableHubLoginReportsOnlyWhatTheHubWasServing(t *testing.T) {
 			f := exec.NewFakeRunner()
 			f.Script("orb -u root -m m bash -c", exec.Result{Stdout: tc.forwards})
 			f.Script("orb -m m /bin/bash -c", exec.Result{Stdout: "LEGACY 0\n" + tc.settings})
-			f.Script("bash -c", exec.Result{})
+			f.Script("orb -m m bash -c", exec.Result{})
 			g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
 
 			changed, err := g.DisableHubLogin(context.Background())
@@ -481,9 +497,9 @@ func authBlock(t *testing.T, b []byte) map[string]any {
 // system status never reports complete and the SPA bounces every fresh load to
 // /onboarding — a setup wizard for a machine lever has already set up.
 func TestHubLoginSettingsNamesAnOperator(t *testing.T) {
-	out, changed, err := hubLoginSettings(nil, testHubLogin(), false)
+	out, changed, err := hubSettingsConverged(nil, testHubLogin(), false)
 	if err != nil || !changed {
-		t.Fatalf("hubLoginSettings: changed=%v err=%v", changed, err)
+		t.Fatalf("hubSettingsConverged: changed=%v err=%v", changed, err)
 	}
 	if got := authBlock(t, out)["display_name"]; got != operatorDisplayName {
 		t.Fatalf("server.auth.display_name = %v, want %q:\n%s", got, operatorDisplayName, out)
@@ -504,7 +520,7 @@ func TestHubLoginSettingsKeepsAnOperatorsOwnIdentity(t *testing.T) {
 		"server:\n  auth:\n    email: me@example.com\n",
 		"server:\n  auth:\n    username: stephen\n",
 	} {
-		out, _, err := hubLoginSettings([]byte(existing), testHubLogin(), false)
+		out, _, err := hubSettingsConverged([]byte(existing), testHubLogin(), false)
 		if err != nil {
 			t.Fatalf("%s: %v", existing, err)
 		}
@@ -514,9 +530,9 @@ func TestHubLoginSettingsKeepsAnOperatorsOwnIdentity(t *testing.T) {
 	}
 	// An `auth` block carrying only unrelated keys still gets named, and keeps
 	// them: the block is merged into, never replaced.
-	out, _, err := hubLoginSettings([]byte("server:\n  auth:\n    user_access_mode: open\n"), testHubLogin(), false)
+	out, _, err := hubSettingsConverged([]byte("server:\n  auth:\n    user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
 	auth := authBlock(t, out)
 	if auth["display_name"] != operatorDisplayName || auth["user_access_mode"] != "open" {
@@ -528,16 +544,16 @@ func TestHubLoginSettingsKeepsAnOperatorsOwnIdentity(t *testing.T) {
 // "changed" because scion reads the whole file once at startup, so a settings
 // file with a correct oidc_login but no operator must still restart the hub.
 func TestHubLoginSettingsIdentityAloneIsAChange(t *testing.T) {
-	full, _, err := hubLoginSettings(nil, testHubLogin(), false)
+	full, _, err := hubSettingsConverged(nil, testHubLogin(), false)
 	if err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
-	stripped, changed, err := hubLoginSettingsWithout(full)
+	stripped, changed, err := hubSettingsWithoutLogin(full)
 	if err != nil || !changed {
 		t.Fatalf("strip: changed=%v err=%v", changed, err)
 	}
 	// Put oidc_login back but leave the operator unnamed.
-	withOIDCOnly, _, err := hubLoginSettings(stripped, testHubLogin(), false)
+	withOIDCOnly, _, err := hubSettingsConverged(stripped, testHubLogin(), false)
 	if err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
@@ -549,11 +565,11 @@ func TestHubLoginSettingsIdentityAloneIsAChange(t *testing.T) {
 // TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote: turning remote access
 // off removes lever's own value, and nothing that looks like a person's.
 func TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote(t *testing.T) {
-	with, _, err := hubLoginSettings([]byte("server:\n  user_access_mode: open\n"), testHubLogin(), false)
+	with, _, err := hubSettingsConverged([]byte("server:\n  user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
-	out, changed, err := hubLoginSettingsWithout(with)
+	out, changed, err := hubSettingsWithoutLogin(with)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -563,25 +579,25 @@ func TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote(t *testing.T) {
 
 	// An operator's own identity survives the removal, and so does an unrelated
 	// key sitting beside lever's.
-	mine, _, err := hubLoginSettings([]byte("server:\n  auth:\n    display_name: Stephen\n"), testHubLogin(), false)
+	mine, _, err := hubSettingsConverged([]byte("server:\n  auth:\n    display_name: Stephen\n"), testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
-	out, _, err = hubLoginSettingsWithout(mine)
+	out, _, err = hubSettingsWithoutLogin(mine)
 	if err != nil {
-		t.Fatalf("hubLoginSettingsWithout: %v", err)
+		t.Fatalf("hubSettingsWithoutLogin: %v", err)
 	}
 	if authBlock(t, out)["display_name"] != "Stephen" {
 		t.Fatalf("removal took an operator's identity with it:\n%s", out)
 	}
 
-	keep, _, err := hubLoginSettings([]byte("server:\n  auth:\n    user_access_mode: open\n"), testHubLogin(), false)
+	keep, _, err := hubSettingsConverged([]byte("server:\n  auth:\n    user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil {
-		t.Fatalf("hubLoginSettings: %v", err)
+		t.Fatalf("hubSettingsConverged: %v", err)
 	}
-	out, _, err = hubLoginSettingsWithout(keep)
+	out, _, err = hubSettingsWithoutLogin(keep)
 	if err != nil {
-		t.Fatalf("hubLoginSettingsWithout: %v", err)
+		t.Fatalf("hubSettingsWithoutLogin: %v", err)
 	}
 	auth := authBlock(t, out)
 	if _, named := auth["display_name"]; named || auth["user_access_mode"] != "open" {

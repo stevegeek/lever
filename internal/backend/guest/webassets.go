@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -37,9 +38,8 @@ const webAssetsSentinel = "assets/main.js"
 
 // webAssetsExclude drops vite's sourcemaps from the staged payload. They are
 // 71% of the build output (8.2MB of 11.5MB at pin e82a2a08, 79 files) and they
-// ship to every guest on every pin, to debug a SPA lever does not develop. The
-// pattern is shell-quoted at both ends of the pipeline: unquoted it would be
-// globbed by the host shell before tar ever saw it.
+// ship to every guest on every pin, to debug a SPA lever does not develop. A
+// filepath.Match pattern against each file's base name (see writeWebAssetsTar).
 //
 // Deliberately not configurable. Nobody has asked to debug scion's minified
 // bundle from inside a lever guest; a knob can be added the day someone does.
@@ -441,15 +441,77 @@ func copyFile(src, dst string) error {
 }
 
 // stageWebAssets streams the built dist/client into the guest, unless the guest
-// already holds this digest.
+// already holds this digest. The tree travels as a tar archive written by
+// lever itself (writeWebAssetsTar) on the stdin of a guest-side extract script
+// — argv only, through the Runner's stdin seam, like InstallRootBinary.
 func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 	if g.stagedWebDigest(ctx) == digest {
 		return nil
 	}
-	if _, err := g.Host.Run(ctx, nil, "bash", "-c", stageWebAssetsScript(g.RootPrefix, dist, digest)); err != nil {
+	pr, pw := io.Pipe()
+	go func() { _ = pw.CloseWithError(writeWebAssetsTar(pw, dist)) }()
+	err := g.pipeInto(ctx, g.RootPrefix, pr, stageWebAssetsScript(digest))
+	_ = pr.Close()
+	if err != nil {
 		return fmt.Errorf("stage scion web assets into guest at %s: %w", ScionWebAssetsDir, err)
 	}
 	return nil
+}
+
+// writeWebAssetsTar writes dist as a tar archive to w: regular files and
+// symlinks, paths relative to dist, sourcemaps (webAssetsExclude) dropped.
+// Written by lever rather than the host's tar so the archive is the same from
+// every host: no AppleDouble `._name` members from macOS bsdtar turning
+// xattrs into files, no host uid/gid to restore (the entries carry none — the
+// extract side runs as guest root and --no-same-owner makes it root's anyway).
+func writeWebAssetsTar(w io.Writer, dist string) error {
+	tw := tar.NewWriter(w)
+	err := filepath.WalkDir(dist, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dist, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		name := filepath.ToSlash(rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: name + "/", Mode: 0o755})
+		case info.Mode()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: name, Linkname: target, Mode: 0o777})
+		case !info.Mode().IsRegular():
+			return fmt.Errorf("%s: not a regular file", path)
+		}
+		if skip, _ := filepath.Match(webAssetsExclude, d.Name()); skip {
+			return nil
+		}
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: name, Mode: int64(info.Mode().Perm()), Size: info.Size()}); err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		_, err = io.Copy(tw, f)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("archive %s: %w", dist, err)
+	}
+	return tw.Close()
 }
 
 // stagedWebDigest reads the digest the guest currently holds, or "" when there
@@ -461,57 +523,40 @@ func (g Guest) stagedWebDigest(ctx context.Context) string {
 	script := fmt.Sprintf("test -f %s && cat %s",
 		shellSingleQuote(filepath.Join(ScionWebAssetsDir, filepath.FromSlash(webAssetsSentinel))),
 		shellSingleQuote(filepath.Join(ScionWebAssetsDir, webDigestFile)))
-	// Absolute path, not a bare name: userRun passes no env, so a bare name
+	// Absolute path, not a bare name: UserRun passes no env, so a bare name
 	// resolves on the guest run-user's PATH, which precedes /usr/bin with
 	// run-user-writable directories (the same reasoning as
 	// InstallRootBinaryIfChanged's /usr/bin/sha256sum). A shim planted there
 	// could echo the current digest for a tree it had replaced and pin the
 	// staged UI stale forever, with no guest root needed.
-	res, err := g.userRun(ctx, "/bin/bash", "-c", script)
+	res, err := g.UserRun(ctx, "/bin/bash", "-c", script)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(res.Stdout)
 }
 
-// stageWebAssetsScript builds the host shell pipeline that streams the asset
-// tree into the guest. Split out from stageWebAssets so a test can assert the
-// argv without a guest — the same shape internal/backend's InstallGuestBinary
-// argv tests use.
+// stageWebAssetsScript is the guest-side half of stageWebAssets: extract the
+// archive on stdin into a temp directory, record the digest inside it, then
+// swap it in. Split out so a test can assert it without a guest.
 //
-// It mirrors InstallRootBinary's transport (the Runner has no stdin channel, so
-// the host `tar -cf -` is piped into a guest-side `bash -c`) and its atomicity:
-// extract into a temp directory, then swap. A directory swap cannot be a single
-// atomic mv the way a file replace can, so the rm+mv pair leaves a brief window
-// with no assets; a failure inside it leaves the destination absent rather than
-// half-written, which the next apply re-stages because stagedWebDigest reads "".
+// A directory swap cannot be a single atomic mv the way a file replace can, so
+// the rm+mv pair leaves a brief window with no assets; a failure inside it
+// leaves the destination absent rather than half-written, which the next apply
+// re-stages because stagedWebDigest reads "".
 //
-// Three tar details are load-bearing:
-//   - COPYFILE_DISABLE=1 stops macOS bsdtar turning extended attributes into
-//     AppleDouble `._name` members. vite's output carries xattrs, so without
-//     this the guest gets a junk `._file` beside every real asset.
-//   - --no-same-owner: extraction runs as guest root, and GNU tar as root
-//     restores the ARCHIVE's ownership by default — the host's uid, which
-//     need not exist in the guest.
-//   - `set -o pipefail` so a host-side tar failure is not masked by a
-//     successful guest-side one. bash, not sh, because dash lacks pipefail.
+// --no-same-owner: extraction runs as guest root, and GNU tar as root restores
+// the ARCHIVE's ownership by default; lever's archive carries none, and the
+// flag makes that explicit.
 //
-// The guest-side `bash` and `tar` stay bare names, unlike the run-user probe in
+// `bash` and `tar` stay bare names, unlike the run-user probe in
 // stagedWebDigest: they resolve on guest ROOT's PATH, which no run-user can
 // write to, so planting a shim there already requires the root this command
-// runs as. That also matches InstallRootBinary's existing convention.
-//
-// Paths are shell-quoted for the same reason InstallRootBinary quotes its
-// destPath: the guest script is embedded as an argument inside the host script,
-// so an unquoted path containing a single quote would break out of the inner
-// quoting and run as a host command.
-func stageWebAssetsScript(rootPrefix []string, dist, digest string) string {
-	rootWords := make([]string, 0, len(rootPrefix))
-	for _, w := range rootPrefix {
-		rootWords = append(rootWords, shellSingleQuote(w))
-	}
+// runs as. Paths and the digest are shell-quoted because they are interpolated
+// into the script.
+func stageWebAssetsScript(digest string) string {
 	tmp := ScionWebAssetsDir + ".tmp"
-	inner := fmt.Sprintf("rm -rf %s && mkdir -p %s && tar -xf - --no-same-owner -C %s && printf %%s %s > %s && rm -rf %s && mv %s %s",
+	return fmt.Sprintf("rm -rf %s && mkdir -p %s && tar -xf - --no-same-owner -C %s && printf %%s %s > %s && rm -rf %s && mv %s %s",
 		shellSingleQuote(tmp),
 		shellSingleQuote(tmp),
 		shellSingleQuote(tmp),
@@ -520,6 +565,4 @@ func stageWebAssetsScript(rootPrefix []string, dist, digest string) string {
 		shellSingleQuote(ScionWebAssetsDir),
 		shellSingleQuote(tmp),
 		shellSingleQuote(ScionWebAssetsDir))
-	return fmt.Sprintf("set -o pipefail; COPYFILE_DISABLE=1 tar -cf - --exclude=%s -C %s . | %s bash -c %s",
-		shellSingleQuote(webAssetsExclude), shellSingleQuote(dist), strings.Join(rootWords, " "), shellSingleQuote(inner))
 }

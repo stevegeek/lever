@@ -1,8 +1,11 @@
 package guest
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -296,7 +299,7 @@ func TestEnsureScionWebAssetsReusesCachedBuild(t *testing.T) {
 			f := exec.NewFakeRunner()
 			// The guest holds nothing yet, so staging must run.
 			f.Script(strings.Join(shape.userPrefix, " ")+" /bin/bash -c", exec.Result{})
-			f.Script("bash -c", exec.Result{})
+			f.Script(strings.Join(shape.rootPrefix, " ")+" bash -c", exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "m"}
 
 			if err := g.EnsureScionWebAssets(context.Background(), ScionSpec{Source: src, WebUI: true}); err != nil {
@@ -308,10 +311,19 @@ func TestEnsureScionWebAssetsReusesCachedBuild(t *testing.T) {
 				if c.Name == "npm" {
 					t.Fatalf("npm ran despite a complete cached build: %v", c.Args)
 				}
-				if c.Name == "bash" && len(c.Args) == 2 && strings.Contains(c.Args[1], "tar -cf -") {
+				// The archive travels on stdin of `<rootPrefix> bash -c <script>`.
+				if c.Stdin != "" {
 					staged = true
-					if !strings.Contains(c.Args[1], digest) {
-						t.Fatal("the staging script does not record the digest it installed")
+					script := c.Args[len(c.Args)-1]
+					if !strings.Contains(script, "tar -xf -") || !strings.Contains(script, digest) {
+						t.Fatalf("the staging script does not extract stdin and record the digest it installed: %s", script)
+					}
+					if c.Name != shape.rootPrefix[0] {
+						t.Fatalf("staging must run through the root prefix, got %s %v", c.Name, c.Args)
+					}
+					names := tarNames(t, c.Stdin)
+					if !slices.Contains(names, "assets/main.js") {
+						t.Fatalf("archive does not carry the sentinel asset: %v", names)
 					}
 				}
 			}
@@ -340,7 +352,7 @@ func TestEnsureScionWebAssetsSkipsStagingWhenGuestMatches(t *testing.T) {
 		t.Fatalf("EnsureScionWebAssets: %v", err)
 	}
 	for _, c := range f.Calls {
-		if c.Name == "bash" {
+		if c.Stdin != "" {
 			t.Fatalf("re-staged 12MB of assets the guest already holds: %v", c.Args)
 		}
 	}
@@ -375,68 +387,96 @@ func TestStagedWebDigestRequiresTheAssetItAttests(t *testing.T) {
 	}
 }
 
-func TestStageWebAssetsScript(t *testing.T) {
-	for _, shape := range prefixShapes("m") {
-		t.Run(shape.name, func(t *testing.T) {
-			got := stageWebAssetsScript(shape.rootPrefix, "/host/dist/client", "deadbeef")
-
-			// macOS bsdtar turns xattrs into AppleDouble members without this,
-			// littering the guest with ._name files beside every asset.
-			if !strings.Contains(got, "COPYFILE_DISABLE=1") {
-				t.Errorf("missing COPYFILE_DISABLE=1: %s", got)
-			}
-			// Extraction runs as guest root; GNU tar would otherwise restore
-			// the host's uid, which need not exist in the guest.
-			if !strings.Contains(got, "--no-same-owner") {
-				t.Errorf("missing --no-same-owner: %s", got)
-			}
-			// Without pipefail a host-side tar failure is masked by the
-			// successful guest side.
-			if !strings.HasPrefix(got, "set -o pipefail; ") {
-				t.Errorf("missing pipefail: %s", got)
-			}
-			// Sourcemaps are 68% of the payload and ship to every guest on
-			// every pin. The pattern must be QUOTED, or the host shell globs
-			// it away before tar sees it.
-			if !strings.Contains(got, "--exclude='*.map'") {
-				t.Errorf("sourcemaps not excluded (or the pattern is unquoted): %s", got)
-			}
-			// Extract-then-swap, so a failure leaves the destination absent
-			// rather than half-written. The guest half of the pipeline is
-			// single-quoted INSIDE the host script, so its own quotes appear
-			// in the doubly-escaped '\'' form — that nesting is the thing
-			// InstallRootBinary's quoting comment warns about, so assert it
-			// literally rather than assuming one level.
-			nested := func(v string) string { return `'\''` + v + `'\''` }
-			tmp := ScionWebAssetsDir + ".tmp"
-			for _, want := range []string{
-				"-C " + nested(tmp),
-				"mv " + nested(tmp) + " " + nested(ScionWebAssetsDir),
-				"printf %s " + nested("deadbeef") + " > " + nested(filepath.Join(tmp, webDigestFile)),
-			} {
-				if !strings.Contains(got, want) {
-					t.Errorf("missing %q in: %s", want, got)
-				}
-			}
-			for _, w := range shape.rootPrefix {
-				if !strings.Contains(got, "'"+w+"'") {
-					t.Errorf("root prefix word %q not quoted into the script: %s", w, got)
-				}
-			}
-		})
+// tarNames lists the entry names of a tar archive held in memory.
+func tarNames(t *testing.T, archive string) []string {
+	t.Helper()
+	var names []string
+	tr := tar.NewReader(strings.NewReader(archive))
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return names
+		}
+		if err != nil {
+			t.Fatalf("read archive: %v", err)
+		}
+		names = append(names, h.Name)
 	}
 }
 
-// The guest script is embedded as an argument inside the HOST script, so an
-// unquoted path with a single quote would break out of the inner quoting and
-// run as an extra host command.
-func TestStageWebAssetsScriptQuotesTheHostPath(t *testing.T) {
-	got := stageWebAssetsScript([]string{"orb"}, "/host/'; touch /tmp/pwned; '", "d")
-	if strings.Contains(got, "; touch /tmp/pwned; ") && !strings.Contains(got, `'\''`) {
-		t.Fatalf("dist path was not shell-quoted: %s", got)
+func TestStageWebAssetsScript(t *testing.T) {
+	got := stageWebAssetsScript("deadbeef")
+	// The archive arrives on stdin; extraction runs as guest root and GNU tar
+	// would otherwise restore the archive's ownership.
+	if !strings.Contains(got, "tar -xf - --no-same-owner") {
+		t.Errorf("missing stdin extract with --no-same-owner: %s", got)
 	}
+	// Extract-then-swap, so a failure leaves the destination absent rather
+	// than half-written.
+	tmp := ScionWebAssetsDir + ".tmp"
+	for _, want := range []string{
+		"-C '" + tmp + "'",
+		"mv '" + tmp + "' '" + ScionWebAssetsDir + "'",
+		"printf %s 'deadbeef' > '" + filepath.Join(tmp, webDigestFile) + "'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in: %s", want, got)
+		}
+	}
+}
+
+// The digest is interpolated into the guest script, so it is quoted: a value
+// with a single quote must not break out of the quoting.
+func TestStageWebAssetsScriptQuotesTheDigest(t *testing.T) {
+	got := stageWebAssetsScript("'; touch /tmp/pwned; '")
 	if !strings.Contains(got, `'\''`) {
-		t.Fatalf("expected escaped single quotes in: %s", got)
+		t.Fatalf("digest was not shell-quoted: %s", got)
+	}
+}
+
+// writeWebAssetsTar produces the archive lever streams into the guest: every
+// file under dist with its relative path, sourcemaps dropped, and no host
+// artefacts (AppleDouble members, host uids).
+func TestWriteWebAssetsTar(t *testing.T) {
+	dist := t.TempDir()
+	write(t, filepath.Join(dist, "index.html"), "<html>")
+	write(t, filepath.Join(dist, "assets", "main.js"), "console.log(1)")
+	write(t, filepath.Join(dist, "assets", "main.js.map"), "{}")
+	write(t, filepath.Join(dist, "assets", "deep", "x.css"), "a{}")
+
+	var buf bytes.Buffer
+	if err := writeWebAssetsTar(&buf, dist); err != nil {
+		t.Fatalf("writeWebAssetsTar: %v", err)
+	}
+	var got []string
+	contents := map[string]string{}
+	tr := tar.NewReader(&buf)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read archive: %v", err)
+		}
+		got = append(got, h.Name)
+		if h.Uid != 0 || h.Gid != 0 || h.Uname != "" || h.Gname != "" {
+			t.Errorf("%s carries host ownership: uid=%d gid=%d %q/%q", h.Name, h.Uid, h.Gid, h.Uname, h.Gname)
+		}
+		if h.Typeflag == tar.TypeReg {
+			b, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents[h.Name] = string(b)
+		}
+	}
+	want := []string{"assets/", "assets/deep/", "assets/deep/x.css", "assets/main.js", "index.html"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("archive entries = %v, want %v (sourcemaps excluded, paths relative)", got, want)
+	}
+	if contents["assets/main.js"] != "console.log(1)" {
+		t.Fatalf("main.js content = %q", contents["assets/main.js"])
 	}
 }
 

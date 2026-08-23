@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -164,7 +165,6 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 			f := exec.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "arm64\n"})
 			f.Script("go build", exec.Result{})
-			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Code: 1})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			src := t.TempDir() // must exist for the stat check
@@ -176,11 +176,6 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 			}
 
 			var sawBuild, sawInstall bool
-			wantRootWords := make([]string, 0, len(shape.rootPrefix))
-			for _, w := range shape.rootPrefix {
-				wantRootWords = append(wantRootWords, "'"+w+"'")
-			}
-			wantRootJoined := strings.Join(wantRootWords, " ")
 			for _, c := range f.Calls {
 				if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
 					if c.Dir != src {
@@ -207,13 +202,17 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 					}
 					sawBuild = true
 				}
-				if c.Name == "bash" && len(c.Args) >= 2 && c.Args[0] == "-c" {
-					script := c.Args[1]
-					if strings.Contains(script, "set -o pipefail") &&
-						strings.Contains(script, "scion.tmp") &&
+				// The install is `<rootPrefix> bash -c <script>` with the binary
+				// on stdin: argv only, no host shell, no quoted prefix words.
+				if c.Stdin == "fake-scion-lever-jail" {
+					want := append(append([]string{}, shape.rootPrefix[1:]...), "bash", "-c")
+					if c.Name != shape.rootPrefix[0] || len(c.Args) != len(want)+1 || !reflect.DeepEqual(c.Args[:len(want)], want) {
+						t.Fatalf("install argv: want %s %v <script>, got %s %v", shape.rootPrefix[0], want, c.Name, c.Args)
+					}
+					script := c.Args[len(c.Args)-1]
+					if strings.Contains(script, "scion.tmp") &&
 						strings.Contains(script, "mv") &&
-						strings.Contains(script, "/usr/local/bin/scion") &&
-						strings.Contains(script, wantRootJoined) {
+						strings.Contains(script, "/usr/local/bin/scion") {
 						sawInstall = true
 					}
 				}
@@ -222,7 +221,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 				t.Fatalf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
 			}
 			if !sawInstall {
-				t.Fatalf("expected bash -c atomic scion install via RootPrefix %v; calls=%+v", shape.rootPrefix, f.Calls)
+				t.Fatalf("expected atomic scion install via RootPrefix %v with the binary on stdin; calls=%+v", shape.rootPrefix, f.Calls)
 			}
 		})
 	}
@@ -260,7 +259,6 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
 	f.Script("orb -m lever-vtest cat", exec.Result{Code: 1})
 	f.Script("orb -u root -m lever-vtest", exec.Result{})
-	f.Script("bash -c", exec.Result{})
 
 	stageFakeBuildOutput(t, "lever-vtest")
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-vtest"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-vtest"}, Machine: "lever-vtest"}
@@ -301,16 +299,13 @@ func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 
 // TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath proves destPath
 // (and its derived .tmp) are safe to interpolate even if a future caller
-// passes a metacharacter-laden value: InstallRootBinary's install script
-// embeds destPath inside a single-quoted argument nested inside an outer
-// `bash -c` script. An embedded `'` in destPath, substituted raw, closes that
-// quote early FROM THE OUTER BASH'S PERSPECTIVE (the inner single-quoted
-// segment is itself just text inside the outer script), letting anything
-// after it run as an extra, injected command on the HOST. This test uses the
-// REAL runner (not FakeRunner) with a harmless `env` RootPrefix stand-in (env
-// just execs its argv, mirroring "the guest prefix runs bash -c '<script>'"
-// exactly) so the actual composed shell script is genuinely parsed by bash,
-// not just string-matched.
+// passes a metacharacter-laden value: the guest-side install script embeds
+// destPath inside single quotes, so an embedded `'` substituted raw would
+// close that quote early and let anything after it run as an extra command
+// in the guest. This test uses the REAL runner (not FakeRunner) with a
+// harmless `env` RootPrefix stand-in (env just execs its argv, mirroring "the
+// guest prefix runs bash -c <script>" exactly) so the actual script is
+// genuinely parsed by bash, not just string-matched.
 func TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath(t *testing.T) {
 	dir := t.TempDir()
 	local := filepath.Join(dir, "src-bin")
@@ -377,12 +372,13 @@ func stageBinary(t *testing.T, content string) (string, string) {
 	return p, hex.EncodeToString(sum[:])
 }
 
-// installCalls counts the streaming install (the host-side `bash -c` pipe),
-// which is the 158MB cost the digest check exists to avoid.
+// installCalls counts the streaming install (a `bash -c 'cat > …'` script
+// with the binary on stdin), which is the 158MB cost the digest check exists
+// to avoid.
 func installCalls(f *exec.FakeRunner) int {
 	n := 0
 	for _, c := range f.Calls {
-		if c.Name == "bash" && len(c.Args) > 1 && strings.Contains(c.Args[1], "cat ") {
+		if len(c.Args) > 1 && c.Args[len(c.Args)-2] == "-c" && strings.Contains(c.Args[len(c.Args)-1], "cat > ") {
 			n++
 		}
 	}
@@ -398,8 +394,12 @@ func TestInstallIfChangedSkipsWhenGuestBinaryMatches(t *testing.T) {
 				exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
-			if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+			installed, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion")
+			if err != nil {
 				t.Fatalf("InstallRootBinaryIfChanged: %v", err)
+			}
+			if installed {
+				t.Fatal("a matching guest binary must report installed=false")
 			}
 			if n := installCalls(f); n != 0 {
 				t.Fatalf("a matching guest binary must not be re-streamed; got %d install call(s)", n)
@@ -422,12 +422,15 @@ func TestInstallIfChangedInstallsWhenGuestBinaryDiffersOrAbsent(t *testing.T) {
 			shape := prefixShapes("lever-jail")[0]
 			f := exec.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", tc.guestDigest)
-			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
-			if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+			installed, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion")
+			if err != nil {
 				t.Fatalf("InstallRootBinaryIfChanged: %v", err)
+			}
+			if !installed {
+				t.Fatal("an install must report installed=true")
 			}
 			if n := installCalls(f); n != 1 {
 				t.Fatalf("want exactly 1 install call, got %d", n)
@@ -438,7 +441,7 @@ func TestInstallIfChangedInstallsWhenGuestBinaryDiffersOrAbsent(t *testing.T) {
 func TestInstallIfChangedFailsOnUnreadableLocalFile(t *testing.T) {
 	f := exec.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb"}, RootPrefix: []string{"orb"}, Machine: "lever-jail"}
-	err := g.InstallRootBinaryIfChanged(context.Background(), filepath.Join(t.TempDir(), "absent"), "/usr/local/bin/scion")
+	_, err := g.InstallRootBinaryIfChanged(context.Background(), filepath.Join(t.TempDir(), "absent"), "/usr/local/bin/scion")
 	if err == nil {
 		t.Fatal("expected an error hashing a missing file")
 	}
@@ -457,7 +460,6 @@ func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 			f := exec.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "aarch64\n"})
 			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Code: 1})
-			f.Script("bash -c", exec.Result{})
 			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
@@ -524,7 +526,7 @@ func TestInstallIfChangedHashesTheGuestBinaryNotAMarker(t *testing.T) {
 	f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
-	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+	if _, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
 		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
 	}
 	if len(f.Calls) != 1 {

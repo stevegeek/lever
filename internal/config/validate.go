@@ -97,7 +97,7 @@ func (t Tool) validateExternalBackend() error {
 }
 
 // validateBackend rejects a config's backend unless lever can run it
-// (KnownBackends, held in lockstep with backend.Candidates), so nothing is
+// (KnownBackends, held in lockstep with registry.Candidates), so nothing is
 // ever silently swapped for the default.
 func validateBackend(name string) error {
 	if name == "" {

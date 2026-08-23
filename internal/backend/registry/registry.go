@@ -1,12 +1,16 @@
 // Package registry constructs the selected containment backend and its jail
 // transport. It is the ONE place that names a concrete backend: the backends
-// table below maps a name to its constructor and jail-prefix function, and
-// the lockstep test keeps it equal to backend.Candidates (the guarantee
-// matrix, which lives in the leaf package and cannot import implementations).
+// table below maps a name to its declared guarantees, constructor and
+// jail-prefix function, and Candidates/ProfileFor/Names are views of that
+// table. Roadmap and rejected backends are documentation, not code — see
+// docs-site/_reference/backends.md, which also states the contract's
+// guarantee 0: a hypervisor boundary between the agent workload and the host
+// kernel is mandatory; no backend without it may be added here.
 package registry
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
@@ -22,6 +26,8 @@ const Default = "orbstack"
 
 // entry is what the registry knows about one backend.
 type entry struct {
+	// Profile is the guarantees the backend declares; its Name is the key.
+	Profile backend.Profile
 	// New builds the backend for a jail machine.
 	New func(r proc.Runner, machine string) backend.Backend
 	// JailPrefix is the argv prefix that runs a command INSIDE the jail for an
@@ -29,14 +35,16 @@ type entry struct {
 	JailPrefix func(machine, user string) []string
 }
 
-// backends is the single table; adding a backend means one entry here and one
-// in backend.Candidates.
-var backends = map[string]entry{
-	"orbstack": {
+// backends is the single table, in the order `lever backends` lists them;
+// adding a backend means one entry here.
+var backends = []entry{
+	{
+		Profile:    orbstack.Profile,
 		New:        func(r proc.Runner, machine string) backend.Backend { return orbstack.New(r, machine) },
 		JailPrefix: orbstack.JailPrefix,
 	},
-	"lima": {
+	{
+		Profile:    lima.Profile,
 		New:        func(r proc.Runner, machine string) backend.Backend { return lima.New(r, machine) },
 		JailPrefix: func(machine, _ string) []string { return lima.JailPrefix(machine) },
 	},
@@ -49,11 +57,46 @@ func lookup(name string) (entry, error) {
 	if name == "" {
 		name = Default
 	}
-	e, ok := backends[name]
+	e, ok := find(name)
 	if !ok {
-		return entry{}, fmt.Errorf("unknown backend %q (valid: %s)", name, strings.Join(backend.Names(), ", "))
+		return entry{}, fmt.Errorf("unknown backend %q (valid: %s)", name, strings.Join(Names(), ", "))
 	}
 	return e, nil
+}
+
+func find(name string) (entry, bool) {
+	i := slices.IndexFunc(backends, func(e entry) bool { return e.Profile.Name == name })
+	if i < 0 {
+		return entry{}, false
+	}
+	return backends[i], true
+}
+
+// Names lists the selectable backend names, sorted.
+func Names() []string {
+	out := make([]string, 0, len(backends))
+	for _, e := range backends {
+		out = append(out, e.Profile.Name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Candidates lists every backend Lever can run with the guarantees it
+// declares, in table order: the substrate guarantee matrix `lever backends`
+// prints and config validation pins.
+func Candidates() []backend.Profile {
+	out := make([]backend.Profile, 0, len(backends))
+	for _, e := range backends {
+		out = append(out, e.Profile)
+	}
+	return out
+}
+
+// ProfileFor returns the declared guarantee profile for a backend name.
+func ProfileFor(name string) (backend.Profile, bool) {
+	e, ok := find(name)
+	return e.Profile, ok
 }
 
 // Select builds the named backend for a jail machine. An empty name uses

@@ -5,11 +5,11 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/registry"
 )
 
 // newBackendsCmd lists every containment backend Lever can run and the
-// guarantees it declares, straight from backend.Candidates (the same source the
+// guarantees it declares, straight from registry.Candidates (the same source the
 // docs and config validation use). Roadmap and rejected backends are
 // documentation: docs-site/_reference/backends.md. Read-only; no jail required.
 func newBackendsCmd() *cobra.Command {
@@ -23,10 +23,10 @@ func newBackendsCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, _ []string) {
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tKERNEL\tFS BOUND BY\tEGRESS AT\tFRAGILE")
-			for _, c := range backend.Candidates {
+			for _, p := range registry.Candidates() {
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\n",
-					c.Name, kernelWord(c.Profile.SeparateKernel),
-					c.Profile.FSBoundedBy, c.Profile.EgressEnforcedAt, c.Profile.VersionFragile)
+					p.Name, kernelWord(p.SeparateKernel),
+					p.FSBoundedBy, p.EgressEnforcedAt, p.VersionFragile)
 			}
 			w.Flush()
 		},

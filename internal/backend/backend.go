@@ -1,7 +1,7 @@
 // Package backend defines the substrate contract every containment backend
-// satisfies. The declared backends and their guarantees live in candidates.go
-// (the single source of the guarantee matrix); construction is in
-// internal/backend/registry.
+// satisfies. Each implementation declares its own guarantees as a Profile;
+// internal/backend/registry is the single table that names the implemented
+// backends and exposes the guarantee matrix derived from it.
 //
 // # Dependency direction
 //

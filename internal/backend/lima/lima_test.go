@@ -17,12 +17,9 @@ import (
 )
 
 // TestProfileIsSingleSourced guards against re-hardcoding the profile: Lima's
-// runtime Profile() must be the same value the guarantee matrix declares.
+// runtime Profile() must be the exported Profile value the registry publishes.
 func TestProfileIsSingleSourced(t *testing.T) {
-	want, ok := backend.ProfileFor("lima")
-	if !ok {
-		t.Fatal("backend.Candidates is missing lima")
-	}
+	want := Profile
 	if got := New(proc.NewFakeRunner(), "lever-x").Profile(); got != want {
 		t.Errorf("Profile() = %+v, want declared %+v", got, want)
 	}

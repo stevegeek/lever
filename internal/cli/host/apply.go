@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
+	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
@@ -416,7 +417,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			}
 			// State the containment posture every bring-up runs under, so the
 			// selected backend's guarantees are visible, not assumed.
-			if p, ok := backend.ProfileFor(app.Backend); ok {
+			if p, ok := registry.ProfileFor(app.Backend); ok {
 				cmd.Printf("backend: %s\n", p.Summary())
 			}
 			if dryRun {

@@ -59,13 +59,18 @@ func New(r proc.Runner, vm string) *Lima {
 // Exported for registry.JailRunner (broker-side re-derivation).
 func JailPrefix(vm string) []string { return []string{"limactl", "shell", vm} }
 
-// Profile returns lima's declared guarantees. The value lives once in
-// backend.Candidates (the single source of the guarantee matrix); returning it
-// here keeps the runtime profile and the documented one identical.
-func (l *Lima) Profile() backend.Profile {
-	p, _ := backend.ProfileFor("lima")
-	return p
+// Profile is lima's declared guarantees — the one value the runtime Profile()
+// method, the registry's guarantee matrix and `lever backends` all report, so
+// they cannot disagree.
+var Profile = backend.Profile{
+	Name:             "lima",
+	SeparateKernel:   true, // own Lima VM kernel, not shared with the host or other jails
+	FSBoundedBy:      "VM: no host files + project tree mounted at /lever",
+	EgressEnforcedAt: "jail netns iptables/ip6tables",
+	VersionFragile:   true, // depends on Lima's portForwards/mount behaviours
 }
+
+func (l *Lima) Profile() backend.Profile { return Profile }
 
 func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {

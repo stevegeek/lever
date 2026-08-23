@@ -74,13 +74,18 @@ func New(r proc.Runner, machine string) *OrbStack {
 	return o
 }
 
-// Profile returns orbstack's declared guarantees. The value lives once in
-// backend.Candidates (the single source of the guarantee matrix); returning it
-// here keeps the runtime profile and the documented one identical.
-func (o *OrbStack) Profile() backend.Profile {
-	p, _ := backend.ProfileFor("orbstack")
-	return p
+// Profile is orbstack's declared guarantees — the one value the runtime
+// Profile() method, the registry's guarantee matrix and `lever backends` all
+// report, so they cannot disagree.
+var Profile = backend.Profile{
+	Name:             "orbstack",
+	SeparateKernel:   false, // shares the one OrbStack VM kernel across manager+workers
+	FSBoundedBy:      "isolated machine: no host files + project tree mounted at /lever",
+	EgressEnforcedAt: "jail netns iptables/ip6tables",
+	VersionFragile:   true, // depends on OrbStack --isolated behaviours
 }
+
+func (o *OrbStack) Profile() backend.Profile { return Profile }
 
 func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {

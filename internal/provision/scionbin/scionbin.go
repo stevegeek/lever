@@ -69,14 +69,31 @@ func (s Spec) Validate() error {
 	if s.Source != "" {
 		fi, err := os.Stat(s.Source)
 		if err != nil {
-			return fmt.Errorf("scion source %q: %w", s.Source, err)
+			return &SourceError{Path: s.Source, Err: err}
 		}
 		if !fi.IsDir() {
-			return fmt.Errorf("scion source %q is not a directory", s.Source)
+			return &SourceError{Path: s.Source}
 		}
 	}
 	return nil
 }
+
+// SourceError reports that Spec.Source cannot be built from: Path is the
+// configured scion.source; Err is the stat failure, or nil when the path
+// exists but is not a directory. Callers match it with errors.As.
+type SourceError struct {
+	Path string
+	Err  error
+}
+
+func (e *SourceError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("scion source %q is not a directory", e.Path)
+	}
+	return fmt.Sprintf("scion source %q: %v", e.Path, e.Err)
+}
+
+func (e *SourceError) Unwrap() error { return e.Err }
 
 // Resolve produces a host-local scion binary for goarch ("arm64"/"amd64").
 // machine names the output file in os.TempDir so two jails on one host never

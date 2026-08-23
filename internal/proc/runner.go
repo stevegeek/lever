@@ -6,6 +6,7 @@ package proc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -81,6 +82,35 @@ type Call struct {
 	Stdin string // everything RunStdin read from its reader ("" for Run/RunIn)
 }
 
+// Argv renders the call as "name arg0 arg1 ..." — the same key shape Script
+// matches on, so a test can compare what ran against what it scripted.
+func (c Call) Argv() string {
+	return strings.TrimSpace(c.Name + " " + strings.Join(c.Args, " "))
+}
+
+// Subcommand reports whether the call is `name sub ...` (first argument sub).
+func (c Call) Subcommand(name, sub string) bool {
+	return c.Name == name && len(c.Args) > 0 && c.Args[0] == sub
+}
+
+// HasPrefix reports whether the call is name followed by exactly args as its
+// leading arguments; further arguments may follow.
+func (c Call) HasPrefix(name string, args ...string) bool {
+	if c.Name != name || len(c.Args) < len(args) {
+		return false
+	}
+	for i, a := range args {
+		if c.Args[i] != a {
+			return false
+		}
+	}
+	return true
+}
+
+// ErrUnscripted is returned (wrapped) by FakeRunner for a command no Script
+// key matches.
+var ErrUnscripted = errors.New("unscripted command")
+
 type FakeRunner struct {
 	Calls   []Call
 	scripts map[string]Result
@@ -98,7 +128,45 @@ func (f *FakeRunner) scriptedResult(name string, args []string) (Result, error) 
 			return res, nil
 		}
 	}
-	return Result{Code: 1}, fmt.Errorf("fakerunner: unscripted command %q", full)
+	return Result{Code: 1}, fmt.Errorf("fakerunner: %w %q", ErrUnscripted, full)
+}
+
+// CallIndex returns the index of the first recorded call pred accepts, or -1.
+func (f *FakeRunner) CallIndex(pred func(Call) bool) int {
+	for i, c := range f.Calls {
+		if pred(c) {
+			return i
+		}
+	}
+	return -1
+}
+
+// Called reports whether any recorded call satisfies pred.
+func (f *FakeRunner) Called(pred func(Call) bool) bool { return f.CallIndex(pred) >= 0 }
+
+// Subcommand is a Called/CallIndex predicate for `name sub ...`.
+func Subcommand(name, sub string) func(Call) bool {
+	return func(c Call) bool { return c.Subcommand(name, sub) }
+}
+
+// ArgvPrefix is a Called/CallIndex predicate for name with exactly args as the
+// leading arguments.
+func ArgvPrefix(name string, args ...string) func(Call) bool {
+	return func(c Call) bool { return c.HasPrefix(name, args...) }
+}
+
+// ArgvContains is a Called/CallIndex predicate: every substring appears in the
+// call's rendered Argv.
+func ArgvContains(subs ...string) func(Call) bool {
+	return func(c Call) bool {
+		argv := c.Argv()
+		for _, s := range subs {
+			if !strings.Contains(argv, s) {
+				return false
+			}
+		}
+		return true
+	}
 }
 
 func (f *FakeRunner) RunIn(_ context.Context, dir string, env map[string]string, name string, args ...string) (Result, error) {

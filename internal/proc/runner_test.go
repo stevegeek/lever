@@ -2,6 +2,7 @@ package proc
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -24,8 +25,41 @@ func TestFakeRunnerRecordsAndScripts(t *testing.T) {
 
 func TestFakeRunnerUnscriptedErrors(t *testing.T) {
 	f := NewFakeRunner()
-	if _, err := f.Run(context.Background(), nil, "orb", "boom"); err == nil {
-		t.Fatal("expected error for unscripted command")
+	if _, err := f.Run(context.Background(), nil, "orb", "boom"); !errors.Is(err, ErrUnscripted) {
+		t.Fatalf("expected ErrUnscripted for unscripted command, got %v", err)
+	}
+}
+
+func TestFakeRunnerCallPredicates(t *testing.T) {
+	f := NewFakeRunner()
+	f.Script("orb", Result{})
+	_, _ = f.Run(context.Background(), nil, "orb", "list")
+	_, _ = f.Run(context.Background(), nil, "orb", "-m", "m", "getent", "ahosts", "host.orb.internal")
+	_, _ = f.Run(context.Background(), nil, "orb", "create", "--isolated", "m")
+
+	if got := f.Calls[1].Argv(); got != "orb -m m getent ahosts host.orb.internal" {
+		t.Fatalf("Argv = %q", got)
+	}
+	if i := f.CallIndex(Subcommand("orb", "create")); i != 2 {
+		t.Fatalf("CallIndex(create) = %d", i)
+	}
+	if f.Called(Subcommand("orb", "delete")) {
+		t.Fatal("delete was never called")
+	}
+	if f.Called(Subcommand("limactl", "list")) {
+		t.Fatal("Subcommand must match the host binary too")
+	}
+	if !f.Called(ArgvPrefix("orb", "-m", "m", "getent")) {
+		t.Fatal("ArgvPrefix should match leading args")
+	}
+	if f.Called(ArgvPrefix("orb", "-m", "m", "getent", "ahosts", "host.orb.internal", "extra")) {
+		t.Fatal("ArgvPrefix must not match beyond the recorded args")
+	}
+	if !f.Called(ArgvContains("getent", "host.orb.internal")) || f.Called(ArgvContains("getent", "missing")) {
+		t.Fatal("ArgvContains must require every substring")
+	}
+	if f.CallIndex(func(Call) bool { return false }) != -1 {
+		t.Fatal("CallIndex should be -1 when nothing matches")
 	}
 }
 

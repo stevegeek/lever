@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -29,6 +30,11 @@ func matchingRealizedConfigJSON(vm, projectTree string) string {
 func scriptRealizedConfig(f *proc.FakeRunner, vm, json string) {
 	f.Script("limactl list --json "+vm, proc.Result{Stdout: json + "\n"})
 }
+
+// configDriftMsg is the fragment of the drift error the operator reads; the
+// full wording (naming the VM and the `lever down`/`lever up` repair) is the
+// contract these tests pin.
+const configDriftMsg = "mismatched containment config"
 
 // --- verifyRealizedConfig: direct unit tests (fake runner, no full EnsureUp). ---
 
@@ -138,8 +144,8 @@ func TestVerifyRealizedConfigDetectsDrift(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected a drift error, got nil")
 			}
-			if !strings.Contains(err.Error(), "mismatched containment config") || !strings.Contains(err.Error(), "lever-x") {
-				t.Fatalf("error should name the VM and say 'mismatched containment config'; got: %v", err)
+			if !strings.Contains(err.Error(), configDriftMsg) || !strings.Contains(err.Error(), vm) {
+				t.Fatalf("error should name the VM and say %q; got: %v", configDriftMsg, err)
 			}
 			if !strings.Contains(err.Error(), "lever down") || !strings.Contains(err.Error(), "lever up") {
 				t.Fatalf("error should tell the operator to 'lever down' then 'lever up'; got: %v", err)
@@ -158,27 +164,25 @@ func TestVerifyRealizedConfigDetectsDrift(t *testing.T) {
 func TestEnsureUpFailsClosedOnDriftedRunningVM(t *testing.T) {
 	f := proc.NewFakeRunner()
 	limaVersionScript(f)
-	f.Script("limactl list --format", proc.Result{Stdout: "lever-x Running\n"})
+	scriptList(f, listRunning)
 	// Drift: a second mount an operator's global override could have added.
-	f.Script("limactl list --json lever-x", proc.Result{Stdout: `{"name":"lever-x","status":"Running","config":{` +
-		`"mounts":[{"location":"/Users/x/tree","mountPoint":"/lever","writable":true},{"location":"/","mountPoint":"/host","writable":true}],` +
-		`"portForwards":[` +
-		`{"guestIP":"0.0.0.0","guestIPMustBeZero":true,"guestPortRange":[1,65535],"proto":"any","ignore":true},` +
-		`{"guestIP":"127.0.0.1","guestPortRange":[1,65535],"proto":"any","ignore":true}` +
-		`],"containerd":{"system":false,"user":false}}}` + "\n"})
-	l := New(f, "lever-x", common.Options{})
+	scriptRealizedConfig(f, vm, `{"name":"lever-x","status":"Running","config":{`+
+		`"mounts":[{"location":"/Users/x/tree","mountPoint":"/lever","writable":true},{"location":"/","mountPoint":"/host","writable":true}],`+
+		`"portForwards":[`+
+		`{"guestIP":"0.0.0.0","guestIPMustBeZero":true,"guestPortRange":[1,65535],"proto":"any","ignore":true},`+
+		`{"guestIP":"127.0.0.1","guestPortRange":[1,65535],"proto":"any","ignore":true}`+
+		`],"containerd":{"system":false,"user":false}}}`)
+	l := New(f, vm, common.Options{})
 
-	err := l.EnsureUp(context.Background(), backend.Config{MachineName: "lever-x", ProjectTree: "/Users/x/tree"})
+	err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree})
 	if err == nil {
 		t.Fatal("expected EnsureUp to fail closed on a drifted realized config")
 	}
-	if !strings.Contains(err.Error(), "mismatched containment config") {
-		t.Fatalf("error should say 'mismatched containment config'; got: %v", err)
+	if !strings.Contains(err.Error(), configDriftMsg) {
+		t.Fatalf("error should say %q; got: %v", configDriftMsg, err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "limactl" && len(c.Args) >= 2 && c.Args[0] == "shell" {
-			t.Fatalf("EnsureUp must not provision (no `limactl shell` calls) a VM that failed the drift check: %+v", f.Calls)
-		}
+	if f.Called(proc.Subcommand("limactl", "shell")) {
+		t.Fatalf("EnsureUp must not provision (no `limactl shell` calls) a VM that failed the drift check: %+v", f.Calls)
 	}
 }
 
@@ -187,26 +191,18 @@ func TestEnsureUpFailsClosedOnDriftedRunningVM(t *testing.T) {
 func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
 	f := proc.NewFakeRunner()
 	limaVersionScript(f)
-	f.Script("limactl list --format", proc.Result{Stdout: ""}) // no VM yet
-	f.Script("limactl create --name=lever-x --tty=false", proc.Result{Stdout: "created\n"})
-	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
-	f.Script("limactl start --tty=false lever-x", proc.Result{Stdout: "started\n"})
-	f.Script("limactl shell lever-x whoami", proc.Result{Stdout: "leveruser\n"})
-	f.Script("limactl shell lever-x id -u", proc.Result{Stdout: "501\n"})
-	f.Script("limactl shell lever-x bash", proc.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x sudo bash", proc.Result{Stdout: "ok\n"})
-	f.Script("limactl shell lever-x getent ahosts host.lima.internal", proc.Result{Stdout: "0.250.250.254 STREAM \n"})
-	f.Script("limactl shell lever-x sudo iptables", proc.Result{})
-	f.Script("limactl shell lever-x sudo ip6tables", proc.Result{})
-	l := New(f, "lever-x", common.Options{})
+	scriptList(f, listAbsent)
+	scriptLifecycle(f)
+	limaGuest.ScriptProvision(f, "501", backendtest.AhostsV4)
+	l := New(f, vm, common.Options{})
 
-	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: "lever-x", ProjectTree: "/Users/x/tree"}); err != nil {
+	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree}); err != nil {
 		t.Fatalf("EnsureUp with a matching freshly-created config: %v", err)
 	}
 
-	createIdx := callIndex(f.Calls, []string{"create", "--name=lever-x", "--tty=false"})
-	verifyIdx := callIndex(f.Calls, []string{"list", "--json", "lever-x"})
-	startIdx := callIndex(f.Calls, []string{"start", "--tty=false", "lever-x"})
+	createIdx := callIndex(f, "create", "--name="+vm, "--tty=false")
+	verifyIdx := callIndex(f, "list", "--json", vm)
+	startIdx := callIndex(f, "start", "--tty=false", vm)
 	if createIdx < 0 || verifyIdx < 0 || startIdx < 0 {
 		t.Fatalf("expected create, verify (list --json), and start calls; got %+v", f.Calls)
 	}
@@ -221,22 +217,12 @@ func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
 func TestEnsureUpIsIdempotentWhenRunningAndMatching(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptedVM(f) // scripts a matching realized config for "/Users/x/tree" too
-	l := New(f, "lever-x", common.Options{})
+	l := New(f, vm, common.Options{})
 
 	if err := l.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-x", ProjectTree: "/Users/x/tree",
+		MachineName: vm, ProjectTree: tree,
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name != "limactl" || len(c.Args) == 0 {
-			continue
-		}
-		if c.Args[0] == "create" {
-			t.Fatalf("create called though VM is Running: %+v", c)
-		}
-		if c.Args[0] == "start" {
-			t.Fatalf("start called though VM is already Running: %+v", c)
-		}
-	}
+	backendtest.AssertNoSubcommand(t, f, "limactl", "create", "start")
 }

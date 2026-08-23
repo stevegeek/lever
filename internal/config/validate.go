@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/broker/registry"
 )
 
@@ -105,16 +104,15 @@ func (t Tool) validateExternalBackend() error {
 	return nil
 }
 
-// validateBackend rejects a config's backend unless lever can run it. The set
-// of valid backends lives in package backend (the single source; implemented
-// only — roadmap/rejected backends are documentation), not a list duplicated
-// here, so nothing is ever silently swapped for the default.
+// validateBackend rejects a config's backend unless lever can run it
+// (KnownBackends, held in lockstep with backend.Candidates), so nothing is
+// ever silently swapped for the default.
 func validateBackend(name string) error {
 	if name == "" {
-		return fmt.Errorf("config: backend is required (valid: %s)", strings.Join(backend.Names(), ", "))
+		return fmt.Errorf("config: backend is required (valid: %s)", strings.Join(BackendNames(), ", "))
 	}
-	if _, ok := backend.Lookup(name); !ok {
-		return fmt.Errorf("config: unknown backend %q (valid: %s)", name, strings.Join(backend.Names(), ", "))
+	if !KnownBackend(name) {
+		return fmt.Errorf("config: unknown backend %q (valid: %s)", name, strings.Join(BackendNames(), ", "))
 	}
 	return nil
 }
@@ -368,7 +366,7 @@ func (a *App) validateRemote() error {
 	if !a.Remote.Enabled {
 		return nil
 	}
-	if a.Backend != "orbstack" {
+	if a.Backend != BackendOrbstack {
 		// NOT a reachability limit. The proxy dials the hub THROUGH the jail
 		// (remoteproxy.JailDial), which every backend supports and which needs
 		// no guest→host forwarding at all — that was the old rationale, and it
@@ -387,7 +385,7 @@ func (a *App) validateRemote() error {
 	if rp == a.EffectiveJailPort() || rp == a.EffectiveAdminPort() {
 		return fmt.Errorf("config: remote: port %d collides with a broker listener", rp)
 	}
-	if rp == backend.GuestLoginIssuerPort {
+	if rp == GuestLoginIssuerPort {
 		// Same reason as login_port below: the container runtime mirrors the
 		// jail's login forwarder onto this host port, so whichever of lever's
 		// two host listeners names it cannot bind. The proxy's failure is loud
@@ -430,7 +428,7 @@ func (a *App) validateRemote() error {
 		// back channel from inside the jail. One port cannot be both.
 		return fmt.Errorf("config: remote: login_port %d collides with the proxy port", lp)
 	}
-	if lp == backend.GuestLoginIssuerPort {
+	if lp == GuestLoginIssuerPort {
 		// Not a host listener lever owns, but one it causes: OrbStack mirrors
 		// the guest forwarder onto the host at this number, so the provider
 		// could not bind here even though nothing in lever's own config says

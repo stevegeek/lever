@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/stevegeek/lever/internal/backend"
 )
 
 func writeTmp(t *testing.T, body string) string {
@@ -1386,7 +1384,7 @@ func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
 		"jail port":                  8443,
 		"admin port":                 8444,
 		"proxy port":                 8445,
-		"mirrored guest issuer port": backend.GuestLoginIssuerPort,
+		"mirrored guest issuer port": GuestLoginIssuerPort,
 	} {
 		body := base + fmt.Sprintf("  login_port: %d\n", port)
 		_, err := Load(writeTmp(t, body))
@@ -1397,7 +1395,7 @@ func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
 	// The SAME guard belongs on the proxy's own port: naming the mirrored
 	// guest port there is the identical live failure, just for the other of
 	// lever's two host listeners.
-	if _, err := Load(writeTmp(t, base+fmt.Sprintf("  port: %d\n", backend.GuestLoginIssuerPort))); err == nil ||
+	if _, err := Load(writeTmp(t, base+fmt.Sprintf("  port: %d\n", GuestLoginIssuerPort))); err == nil ||
 		!strings.Contains(err.Error(), "mirrored") {
 		t.Fatalf("remote.port naming the guest forwarder's host mirror: want a collision error, got %v", err)
 	}

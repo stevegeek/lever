@@ -286,7 +286,7 @@ type Remote struct {
 	// LoginPort is the HOST loopback port the local OIDC provider binds.
 	//
 	// It is deliberately NOT the port the hub dials. The hub dials a guest
-	// loopback port (backend.GuestLoginIssuerPort), which a forwarder carries
+	// loopback port (GuestLoginIssuerPort, mirrored from backend.GuestLoginIssuerPort), which a forwarder carries
 	// to this one — two numbers, because OrbStack mirrors a guest listener
 	// onto the host at the same number and one number for both halves left
 	// the provider unable to bind its own port. The guest half has no config

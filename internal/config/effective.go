@@ -149,7 +149,7 @@ func (a *App) EffectiveAllowedPorts() []int {
 // binds: the configured value, or 8447.
 //
 // 8447, not 8446: 8446 is the guest-side issuer port
-// (backend.GuestLoginIssuerPort), which the container runtime mirrors onto the
+// (GuestLoginIssuerPort, mirrored from backend.GuestLoginIssuerPort), which the container runtime mirrors onto the
 // host at the same number. The block reads 8443 jail, 8444 admin, 8445 proxy,
 // 8446 the jail's mirrored forwarder, 8447 the provider.
 func (a *App) EffectiveRemoteLoginPort() int {

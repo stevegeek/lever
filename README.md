@@ -87,16 +87,6 @@ dependency. See [core vs instance](docs-site/_guides/core-vs-instance.md).
 
 ## Build & run
 
-Four binaries share one `internal/`:
-
-- **`lever`**, the host control plane (provisioning + lifecycle).
-- **`lever-manager`**, the in-jail orchestrator (`agent`/`msg`/`watch`) the manager runs.
-- **`lever-agent`**, the in-jail capability helper run by the image's pre-start hook.
-- **`lever-tool-db`**, the reference first-party capability tool (optional).
-
-The three in-jail binaries are cross-compiled by `make lever-image-bins` / `make lever-image` and
-baked into the agent image at `/usr/local/bin`.
-
 ```bash
 go install github.com/stevegeek/lever/cmd/lever@latest   # host `lever` onto your GOBIN/PATH
 # — or from a clone (requires Go 1.26+):
@@ -113,6 +103,7 @@ Runnable examples: [hello-worker](examples/hello-worker), [assistant-demo](examp
 
 Build prerequisites for the agent image (scion's base image, arch tags, extending the image for an
 instance) are in [install & build the image](docs-site/_guides/getting-started-install.md).
+Repository layout, binaries, and test targets are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 An **instance** is one `lever.yaml` at the instance **root** describing the manager and its workers.
 The root is not mounted; only the `tree:` subdirectory is bind-mounted into the jail. Commands with

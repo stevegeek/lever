@@ -101,10 +101,10 @@ func (t Tool) validateExternalBackend() error {
 // ever silently swapped for the default.
 func validateBackend(name string) error {
 	if name == "" {
-		return fmt.Errorf("config: backend is required (valid: %s)", strings.Join(BackendNames(), ", "))
+		return fmt.Errorf("config: backend is required (valid: %s)", strings.Join(backendNames(), ", "))
 	}
-	if !KnownBackend(name) {
-		return fmt.Errorf("config: unknown backend %q (valid: %s)", name, strings.Join(BackendNames(), ", "))
+	if !knownBackend(name) {
+		return fmt.Errorf("config: unknown backend %q (valid: %s)", name, strings.Join(backendNames(), ", "))
 	}
 	return nil
 }

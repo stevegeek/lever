@@ -14,15 +14,15 @@ const (
 // Implemented backends only — roadmap/rejected backends are documentation.
 var KnownBackends = []string{BackendOrbstack, BackendLima}
 
-// BackendNames lists the selectable backend names, sorted.
-func BackendNames() []string {
+// backendNames lists the selectable backend names, sorted.
+func backendNames() []string {
 	out := slices.Clone(KnownBackends)
 	slices.Sort(out)
 	return out
 }
 
-// KnownBackend reports whether name is a backend lever can run.
-func KnownBackend(name string) bool {
+// knownBackend reports whether name is a backend lever can run.
+func knownBackend(name string) bool {
 	return slices.Contains(KnownBackends, name)
 }
 

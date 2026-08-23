@@ -18,7 +18,4 @@ func TestKnownBackendsMatchCandidates(t *testing.T) {
 	if !slices.Equal(config.KnownBackends, want) {
 		t.Fatalf("config.KnownBackends = %v, backend.Candidates = %v", config.KnownBackends, want)
 	}
-	if got := config.BackendNames(); !slices.Equal(got, backend.Names()) {
-		t.Fatalf("config.BackendNames() = %v, backend.Names() = %v", got, backend.Names())
-	}
 }

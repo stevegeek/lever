@@ -1,12 +1,10 @@
 package host
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -59,18 +57,6 @@ func loadInstance(t *testing.T, extra string) *config.App {
 		t.Fatal(err)
 	}
 	return app
-}
-
-// execCmd runs cmd with argv, capturing stdout and stderr into one buffer,
-// and returns the combined output with Execute's error.
-func execCmd(t *testing.T, cmd *cobra.Command, argv ...string) (string, error) {
-	t.Helper()
-	cmd.SetArgs(argv)
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	err := cmd.Execute()
-	return out.String(), err
 }
 
 // inertApplyOpts is what tests build apply deps with. Never let a test spawn a

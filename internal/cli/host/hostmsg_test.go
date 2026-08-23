@@ -2,6 +2,7 @@ package host
 
 import (
 	"fmt"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestHostMsgSendToManager(t *testing.T) {
 	fr.Script("scion", proc.Result{})
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	_, err := execCmd(t, root, "msg", "send", "hello", "there", "--to", "assistant")
+	_, err := clitest.Exec(t, root, "msg", "send", "hello", "there", "--to", "assistant")
 	if err != nil {
 		t.Fatalf("msg send: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestHostMsgSendToWorkerWithInterrupt(t *testing.T) {
 	fr.Script("scion", proc.Result{})
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	_, err := execCmd(t, root, "msg", "send", "check", "in", "--to", "scratch", "--interrupt")
+	_, err := clitest.Exec(t, root, "msg", "send", "check", "in", "--to", "scratch", "--interrupt")
 	if err != nil {
 		t.Fatalf("msg send: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 	fr := proc.NewFakeRunner()
 	sb := &stubBackend{runner: fr}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	_, err := execCmd(t, root, "msg", "send", "hi", "--to", "nope")
+	_, err := clitest.Exec(t, root, "msg", "send", "hi", "--to", "nope")
 	if err == nil {
 		t.Fatal("want error for unknown --to")
 	}
@@ -105,7 +106,7 @@ func TestHostMsgSendJailDownFailsFast(t *testing.T) {
 	fr := proc.NewFakeRunner()
 	sb := &stubBackend{runner: fr, resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-assistant")}
 	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
-	_, err := execCmd(t, root, "msg", "send", "hi", "--to", "assistant")
+	_, err := clitest.Exec(t, root, "msg", "send", "hi", "--to", "assistant")
 	if err == nil {
 		t.Fatal("want error when jail is down")
 	}

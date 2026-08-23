@@ -2,6 +2,7 @@ package manager
 
 import (
 	"encoding/json"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,7 +16,7 @@ func TestMsgSend_postsBrokerRequestAndPrintsConfirmation(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	}))
 
-	out, err := execCmd(t, root, "msg", "send", "hello", "--to", "scratch", "--interrupt")
+	out, err := clitest.Exec(t, root, "msg", "send", "hello", "--to", "scratch", "--interrupt")
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -40,7 +41,7 @@ func TestMsgSend_bodyIsJoinedArgs(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	}))
 
-	if _, err := execCmd(t, root, "msg", "send", "--to", "scratch", "hello", "there"); err != nil {
+	if _, err := clitest.Exec(t, root, "msg", "send", "--to", "scratch", "hello", "there"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if gotBody["body"] != "hello there" {
@@ -63,7 +64,7 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 		})
 	}))
 
-	out, err := execCmd(t, root, "msg", "list", "--worker", "scratch", "--all")
+	out, err := clitest.Exec(t, root, "msg", "list", "--worker", "scratch", "--all")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
 	}))
 
-	if _, err := execCmd(t, root, "msg", "list"); err != nil {
+	if _, err := clitest.Exec(t, root, "msg", "list"); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	want := map[string]any{"all": false, "worker": ""}
@@ -107,7 +108,7 @@ func TestMsgList_malformedResponseIsAnError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"events": "not-an-array"}`))
 	}))
 
-	out, err := execCmd(t, root, "msg", "list")
+	out, err := clitest.Exec(t, root, "msg", "list")
 	if err == nil {
 		t.Fatalf("expected decode error, got nil (out=%q)", out)
 	}
@@ -124,7 +125,7 @@ func TestMsgList_emptyInboxPrintsFallback(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{}})
 	}))
 
-	out, err := execCmd(t, root, "msg", "list")
+	out, err := clitest.Exec(t, root, "msg", "list")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

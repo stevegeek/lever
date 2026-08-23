@@ -137,3 +137,22 @@ func wantJailNotUp(t testing.TB, err error) {
 	clitest.WantErrIs(t, err, errJailNotUp)
 	clitest.WantErrContaining(t, err, "lever up")
 }
+
+// wantSubcommands fails unless the host root wires a command named name
+// carrying every sub.
+func wantSubcommands(t *testing.T, name string, subs ...string) {
+	t.Helper()
+	for _, c := range newRootWith(defaultFactory).Commands() {
+		if c.Name() != name {
+			continue
+		}
+		got := clitest.Names(c)
+		for _, s := range subs {
+			if !got[s] {
+				t.Fatalf("%s subcommands = %v, want %v", name, got, subs)
+			}
+		}
+		return
+	}
+	t.Fatalf("`lever %s` not wired into the host root", name)
+}

@@ -24,23 +24,7 @@ import (
 )
 
 func TestRemoteCommandWired(t *testing.T) {
-	root := newRootWith(defaultFactory)
-	var found bool
-	for _, c := range root.Commands() {
-		if c.Name() == "remote" {
-			found = true
-			subs := map[string]bool{}
-			for _, s := range c.Commands() {
-				subs[s.Name()] = true
-			}
-			if !subs["serve"] || !subs["status"] {
-				t.Fatalf("remote subcommands = %v, want serve+status", subs)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("`lever remote` not wired into the host root")
-	}
+	wantSubcommands(t, "remote", "serve", "status")
 }
 
 func TestRemoteServeDisabledErrors(t *testing.T) {

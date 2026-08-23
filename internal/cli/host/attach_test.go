@@ -18,37 +18,26 @@ func attachApp() *config.App {
 	}
 }
 
-func TestAttachTargetDefaultsToManager(t *testing.T) {
-	slug, project, err := attachTarget(attachApp(), "/lever", "")
+// wantAttachTarget resolves `to` against attachApp and requires slug in the
+// instance project /lever.
+func wantAttachTarget(t *testing.T, to, wantSlug string) {
+	t.Helper()
+	slug, project, err := attachTarget(attachApp(), "/lever", to)
 	if err != nil {
 		t.Fatalf("attachTarget: %v", err)
 	}
-	if slug != "assistant" || project != "/lever" {
-		t.Fatalf("got (%q, %q), want (assistant, /lever)", slug, project)
+	if slug != wantSlug || project != "/lever" {
+		t.Fatalf("got (%q, %q), want (%s, /lever)", slug, project, wantSlug)
 	}
 }
 
-func TestAttachTargetManagerByName(t *testing.T) {
-	slug, project, err := attachTarget(attachApp(), "/lever", "assistant")
-	if err != nil {
-		t.Fatalf("attachTarget: %v", err)
-	}
-	if slug != "assistant" || project != "/lever" {
-		t.Fatalf("got (%q, %q), want (assistant, /lever)", slug, project)
-	}
-}
+func TestAttachTargetDefaultsToManager(t *testing.T) { wantAttachTarget(t, "", "assistant") }
 
-func TestAttachTargetWorker(t *testing.T) {
-	slug, project, err := attachTarget(attachApp(), "/lever", "scratch")
-	if err != nil {
-		t.Fatalf("attachTarget: %v", err)
-	}
-	// Single-project model: the worker's agent record lives in the instance
-	// project (the jail mount root), NOT a per-worker /lever/workers/<name>.
-	if slug != "scratch" || project != "/lever" {
-		t.Fatalf("got (%q, %q), want (scratch, /lever)", slug, project)
-	}
-}
+func TestAttachTargetManagerByName(t *testing.T) { wantAttachTarget(t, "assistant", "assistant") }
+
+// Single-project model: the worker's agent record lives in the instance
+// project (the jail mount root), NOT a per-worker /lever/workers/<name>.
+func TestAttachTargetWorker(t *testing.T) { wantAttachTarget(t, "scratch", "scratch") }
 
 func TestAttachTargetUnknownListsValidNames(t *testing.T) {
 	_, _, err := attachTarget(attachApp(), "/lever", "nope")

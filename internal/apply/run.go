@@ -55,7 +55,7 @@ type BootstrapMaterial = wire.Bootstrap
 // run is one apply execution: the config it converges, the collaborators it
 // acts through, and the one piece of cross-step state the plan carries.
 // Every step executor is a method on it so the per-step signatures stop
-// repeating (ctx, app, d, boot, name, jp, ...).
+// repeating (ctx, app, d, name, jp, ...).
 type run struct {
 	app *config.App
 	d   Deps
@@ -148,7 +148,7 @@ type Deps struct {
 	// lever's host-side OIDC provider look local to the hub, and the
 	// `oidc_login` block in the guest's ~/.scion/settings.yaml. It reports
 	// whether that configuration changed, which is the signal to restart a
-	// hub that is already running — see runScionServer. It is the CLI's job
+	// hub that is already running — see scionServer. It is the CLI's job
 	// to make this a no-op when remote access is off.
 	EnsureHubLogin func(ctx context.Context) (bool, error)
 	// DisableHubLogin converges the GUEST half of the login path off: stop and
@@ -378,7 +378,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 // disableHubLogin converges the guest half of the login path off, and restarts
 // the hub when that removed something the running hub was started FROM.
 //
-// The restart is the OFF path's half of runScionServer's. Two pieces of the
+// The restart is the OFF path's half of scionServer's. Two pieces of the
 // hub's remote-access state are fixed at startup and nowhere else: it reads
 // `oidc_login` once, from the settings file (pkg/config/hub_config.go), and it
 // takes --web-assets-dir from the argv it was started with. So a hub left
@@ -490,7 +490,7 @@ func (r *run) step(ctx context.Context, s Step) error {
 	}
 }
 
-// runScionServer runs the scion-server step: bring the guest's login path up
+// scionServer runs the scion-server step: bring the guest's login path up
 // to date, restart the hub if that changed its configuration, then start (or
 // confirm) the hub.
 //
@@ -564,7 +564,7 @@ func runBrokerUp(ctx context.Context, d Deps) error {
 	return d.BrokerHealthy(ctx)
 }
 
-// runAgentTemplate runs the agent-template step. Logs on change only: it is a
+// agentTemplate runs the agent-template step. Logs on change only: it is a
 // provisioning-time change the operator cannot otherwise see, and silence on a
 // no-op keeps a re-apply quiet.
 func (r *run) agentTemplate(ctx context.Context, s Step) error {
@@ -616,7 +616,7 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
 
-// runRegisterProject runs the register-project step: observe before doing
+// registerProject runs the register-project step: observe before doing
 // anything destructive, then (only when the registration is unsound) clear the
 // stale marker + project-config registration(s) and re-init + hub-link.
 func (r *run) registerProject(ctx context.Context, s Step) error {
@@ -683,7 +683,7 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	return r.d.StripProjectSharedDirs(ctx, path.Base(jp))
 }
 
-// runMintManagerBootstrap runs the mint-manager-bootstrap step: mint the
+// mintManagerBootstrap runs the mint-manager-bootstrap step: mint the
 // manager's one-time enrol ticket and stage it (0600) for lever-agent to read.
 // Idempotent against the LIVE broker latch (not a stale file): a spent latch is
 // tolerated only when a ticket is already staged.
@@ -693,7 +693,7 @@ func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 	// it — the manager has its bootstrap.json from then. After a broker restart
 	// the latch reopens, mint succeeds, and a fresh ticket is deposited, so a
 	// partially-failed first apply (bootstrap written but manager never enrolled)
-	// recovers on re-apply. (*boot is not read after this step.)
+	// recovers on re-apply. (r.minted is not read after this step.)
 	m, err := r.d.MintManagerBootstrap(ctx)
 	if err != nil {
 		if errors.Is(err, ErrBootstrapLatched) {
@@ -721,6 +721,12 @@ func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 // tails share recoverDeleteAndCreate.
 func (r *run) startManager(ctx context.Context, s Step) error {
 	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
+	// Read the prompt before any waiting: a missing or unreadable prompt file
+	// is a config error and should fail fast, not after the broker-ready poll.
+	task, err := r.managerTask()
+	if err != nil {
+		return err
+	}
 	// Gate on runtime-broker readiness before any create/resume: the workstation
 	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
 	// up (waitHubReady only proved the latter), so acting now would race it. This
@@ -730,7 +736,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err := r.d.WaitBrokerReady(ctx, jp); err != nil {
 		return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
 	}
-	opts, err := r.managerStartOpts(ctx, jp)
+	opts, err := r.managerStartOpts(ctx, jp, task)
 	if err != nil {
 		return err
 	}
@@ -744,9 +750,22 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	return r.waitManagerLive(ctx, jp)
 }
 
+// managerTask reads the manager's task prompt (when configured).
+func (r *run) managerTask() (string, error) {
+	p := r.app.ManagerPromptPath()
+	if p == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", fmt.Errorf("reading manager prompt %s: %w", p, err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
 // managerStartOpts builds the `scion start` options for the manager: the task
-// prompt (when configured) and, in api-key mode, the project env + placeholder
-// secret the container needs before it boots.
+// prompt (already read by managerTask) and, in api-key mode, the project env +
+// placeholder secret the container needs before it boots.
 //
 // LEVER_BOOTSTRAP reconciliation: we do NOT set LEVER_BOOTSTRAP here.
 // lever-agent boot's canonical-path default (./.lever/bootstrap.json relative
@@ -755,15 +774,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 // to jp/.lever/bootstrap.json — exactly where mint-manager-bootstrap wrote the
 // manager's bootstrap.json. Injecting an env var would be redundant and add a
 // scion StartOpts.Env dependency that the file convention avoids.
-func (r *run) managerStartOpts(ctx context.Context, jp string) (scion.StartOpts, error) {
-	task := ""
-	if p := r.app.ManagerPromptPath(); p != "" {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return scion.StartOpts{}, fmt.Errorf("reading manager prompt %s: %w", p, err)
-		}
-		task = strings.TrimSpace(string(b))
-	}
+func (r *run) managerStartOpts(ctx context.Context, jp, task string) (scion.StartOpts, error) {
 	apiKey := r.app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey
 	if apiKey {
 		if err := r.prepareAPIKeyMode(ctx, jp); err != nil {
@@ -1108,7 +1119,7 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 // before a manager Start OR Resume. If this apply run already minted fresh
 // material (r.minted), it's a no-op. Otherwise, when r.d.RearmBootstrap is
 // set, it re-arms the broker's spent latch and mints+stages fresh material
-// (recording it into *boot so a SECOND create in the same Run — e.g. a
+// (recording it in r.minted so a SECOND create in the same Run — e.g. a
 // failed-resume recovery that immediately re-creates — does not re-arm
 // twice). A RearmBootstrap that fails is a hard error — a create without
 // enrolable bootstrap is guaranteed to 403, so failing loudly now is strictly

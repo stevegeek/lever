@@ -111,16 +111,11 @@ func TestRemoveScionProjectConfigsErrorsOnGuestFailure(t *testing.T) {
 func writeProjectConfig(t *testing.T, home, name, workspacePath string) string {
 	t.Helper()
 	dir := filepath.Join(home, ".scion", "project-configs", name, ".scion")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	body := "project_id: " + name + "\n"
 	if workspacePath != "" {
 		body += "workspace_path: " + workspacePath + "\n"
 	}
-	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	write(t, filepath.Join(dir, "settings.yaml"), body)
 	return filepath.Join(home, ".scion", "project-configs", name)
 }
 
@@ -299,9 +294,6 @@ func TestScionProjectRegisteredErrorsOnGuestFailure(t *testing.T) {
 func writeHubProjectConfig(t *testing.T, home, name, workspacePath, endpoint string) string {
 	t.Helper()
 	dir := filepath.Join(home, ".scion", "project-configs", name, ".scion")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	body := "schema_version: \"1\"\nhub:\n    enabled: true\n    linked: true\n"
 	if endpoint != "" {
 		body += "    endpoint: " + endpoint + "\n"
@@ -311,9 +303,7 @@ func writeHubProjectConfig(t *testing.T, home, name, workspacePath, endpoint str
 		body += "workspace_path: " + workspacePath + "\n"
 	}
 	p := filepath.Join(dir, "settings.yaml")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	write(t, p, body)
 	return p
 }
 

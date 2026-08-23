@@ -32,12 +32,13 @@ type Lima struct {
 	common.Base
 }
 
-func New(r proc.Runner, vm string) *Lima {
+func New(r proc.Runner, vm string, opts common.Options) *Lima {
 	l := &Lima{}
 	l.Base = common.NewBase(common.Config{
 		Runner:    r,
 		Machine:   vm,
 		HostAlias: hostAlias,
+		Options:   opts,
 		Hooks: common.Hooks{
 			// Lima's jail prefix is static — it does not depend on the run user.
 			JailPrefix: func(machine, _ string) []string { return JailPrefix(machine) },

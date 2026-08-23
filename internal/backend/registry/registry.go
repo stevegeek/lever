@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/lima"
 	"github.com/stevegeek/lever/internal/backend/orbstack"
 	"github.com/stevegeek/lever/internal/jail"
@@ -29,7 +30,7 @@ type entry struct {
 	// Profile is the guarantees the backend declares; its Name is the key.
 	Profile backend.Profile
 	// New builds the backend for a jail machine.
-	New func(r proc.Runner, machine string) backend.Backend
+	New func(r proc.Runner, machine string, opts common.Options) backend.Backend
 	// JailPrefix is the argv prefix that runs a command INSIDE the jail for an
 	// already-resolved identity — no EnsureUp state, no I/O.
 	JailPrefix func(machine, user string) []string
@@ -39,13 +40,15 @@ type entry struct {
 // adding a backend means one entry here.
 var backends = []entry{
 	{
-		Profile:    orbstack.Profile,
-		New:        func(r proc.Runner, machine string) backend.Backend { return orbstack.New(r, machine) },
+		Profile: orbstack.Profile,
+		New: func(r proc.Runner, machine string, o common.Options) backend.Backend {
+			return orbstack.New(r, machine, o)
+		},
 		JailPrefix: orbstack.JailPrefix,
 	},
 	{
 		Profile:    lima.Profile,
-		New:        func(r proc.Runner, machine string) backend.Backend { return lima.New(r, machine) },
+		New:        func(r proc.Runner, machine string, o common.Options) backend.Backend { return lima.New(r, machine, o) },
 		JailPrefix: func(machine, _ string) []string { return lima.JailPrefix(machine) },
 	},
 }
@@ -100,13 +103,15 @@ func ProfileFor(name string) (backend.Profile, bool) {
 }
 
 // Select builds the named backend for a jail machine. An empty name uses
-// Default.
+// Default. The host-network escape hatch is read from the environment here
+// (and in JailRunner) — the only two construction sites — so backends and
+// transports stay pure.
 func Select(name string, r proc.Runner, machine string) (backend.Backend, error) {
 	e, err := lookup(name)
 	if err != nil {
 		return nil, err
 	}
-	return e.New(r, machine), nil
+	return e.New(r, machine, common.Options{ForceHostNetwork: jail.ForceHostNetworkFromEnv()}), nil
 }
 
 // JailArgv returns the argv prefix that runs a command INSIDE the jail for the

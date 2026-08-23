@@ -50,12 +50,13 @@ type OrbStack struct {
 	probeInterval time.Duration
 }
 
-func New(r proc.Runner, machine string) *OrbStack {
+func New(r proc.Runner, machine string, opts common.Options) *OrbStack {
 	o := &OrbStack{probeAttempts: startProbeAttempts, probeInterval: startProbeInterval}
 	o.Base = common.NewBase(common.Config{
 		Runner:    r,
 		Machine:   machine,
 		HostAlias: "host.orb.internal",
+		Options:   opts,
 		Hooks: common.Hooks{
 			JailPrefix: JailPrefix,
 			Guest: func(r proc.Runner, machine string) guest.Guest {

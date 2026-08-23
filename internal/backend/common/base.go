@@ -49,12 +49,23 @@ type Hooks struct {
 	ResolveHostAlias func(ctx context.Context) (v4, v6 string, err error)
 }
 
+// Options is the caller-supplied part of a backend's construction — what the
+// registry decides once and every embedder passes through to NewBase.
+type Options struct {
+	// ForceHostNetwork is the host-side debugging escape hatch
+	// (jail.ForceHostNetworkEnv) that makes every in-jail scion command fall
+	// back to a shared netns. The registry reads it from the environment;
+	// Base never consults the environment itself.
+	ForceHostNetwork bool
+}
+
 // Config is what a Base needs from its embedder, set once at construction.
 type Config struct {
 	Runner    proc.Runner // host runner (the prefix binary runs on the host)
 	Machine   string      // jail identifier
 	HostAlias string      // DNS name an agent uses to reach allowlisted host tools
 	Hooks     Hooks
+	Options   Options
 }
 
 // Base carries the shared jail state and implements the prefix/guest-delegating
@@ -66,6 +77,7 @@ type Base struct {
 	machine   string
 	hostAlias string
 	hooks     Hooks
+	opts      Options
 
 	user    string // resolved in-jail run user
 	uid     string // resolved in-jail run-user uid
@@ -75,7 +87,7 @@ type Base struct {
 
 // NewBase builds the shared half of a prefix-reached backend.
 func NewBase(cfg Config) Base {
-	return Base{r: cfg.Runner, machine: cfg.Machine, hostAlias: cfg.HostAlias, hooks: cfg.Hooks}
+	return Base{r: cfg.Runner, machine: cfg.Machine, hostAlias: cfg.HostAlias, hooks: cfg.Hooks, opts: cfg.Options}
 }
 
 // Runner returns the host runner the backend was built with.
@@ -165,14 +177,13 @@ func (b *Base) JailRunner() proc.Runner {
 	return b.jail()
 }
 
-// jail builds the transport for the current run user; the host-network escape
-// hatch is read here, at construction, so the transport itself stays pure.
+// jail builds the transport for the current run user.
 func (b *Base) jail() *jail.Runner {
 	return jail.New(jail.Config{
 		Host:             b.r,
 		Prefix:           b.jailPrefix(),
 		UID:              b.RunUID(),
-		ForceHostNetwork: jail.ForceHostNetworkFromEnv(),
+		ForceHostNetwork: b.opts.ForceHostNetwork,
 	})
 }
 

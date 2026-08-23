@@ -33,15 +33,22 @@ func TestSelectUnknownIsRejected(t *testing.T) {
 	}
 }
 
-// TestConstructorsMatchCandidates keeps the registry and the guarantee matrix
-// in lockstep: exactly the declared candidates have a constructor.
-func TestConstructorsMatchCandidates(t *testing.T) {
-	if len(constructors) != len(backend.Candidates) {
-		t.Fatalf("constructors has %d entries, Candidates has %d", len(constructors), len(backend.Candidates))
+// TestBackendsMatchCandidates keeps the registry and the guarantee matrix in
+// lockstep: exactly the declared candidates have an entry, and every entry is
+// complete. The two tables are separate only because backend (a leaf the
+// config layer imports) cannot import the implementations.
+func TestBackendsMatchCandidates(t *testing.T) {
+	if len(backends) != len(backend.Candidates) {
+		t.Fatalf("backends has %d entries, Candidates has %d", len(backends), len(backend.Candidates))
 	}
 	for _, c := range backend.Candidates {
-		if _, ok := constructors[c.Name]; !ok {
-			t.Errorf("candidate %q has no constructor", c.Name)
+		e, ok := backends[c.Name]
+		if !ok {
+			t.Errorf("candidate %q has no registry entry", c.Name)
+			continue
+		}
+		if e.New == nil || e.JailPrefix == nil {
+			t.Errorf("candidate %q has an incomplete registry entry", c.Name)
 		}
 	}
 }

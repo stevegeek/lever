@@ -2,7 +2,6 @@ package broker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -69,9 +68,12 @@ func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 	return true
 }
 
-// requireManagerWorker authenticates the caller as the manager and authorizes the
-// requested worker against config. Returns the resolved spec, or writes 403/502.
-func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, worker string) (WorkerSpec, bool) {
+// requireManagerWorker is the shared preamble of the worker dispatch routes:
+// authenticate the caller as the manager, THEN decode the body into req (so
+// an unauthenticated caller gets 403, never 400 — matching /msg and
+// /provision), then authorize the named worker against config and check the
+// runtime is wired. Returns the resolved spec, or writes 403/400/502.
+func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, req any, worker func() string) (WorkerSpec, bool) {
 	// A revoked manager cannot dispatch or tear down workers. Dispatching a worker
 	// is a stronger steering primitive than messaging (it spawns a fresh,
 	// fully-capable agent), so revocation must cut it too — otherwise revoke
@@ -80,9 +82,14 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, wo
 	if !ok {
 		return WorkerSpec{}, false
 	}
-	spec, ok := b.workerSpec(worker)
+	if err := decodeBody(w, r, jailBodyLimit, req); err != nil {
+		b.audit("worker", caller, "deny", "bad body")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return WorkerSpec{}, false
+	}
+	spec, ok := b.workerSpec(worker())
 	if !ok {
-		b.audit("worker", caller, "deny", "unknown worker: "+worker)
+		b.audit("worker", caller, "deny", "unknown worker: "+worker())
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
@@ -107,14 +114,6 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	return "", nil
 }
 
-// stage-step sentinels discriminate stageFreshTicket failures by which step
-// failed, so callers can map each to its own HTTP status/body. The wrap
-// prefixes ("ticket:"/"stage:") also match the healer's existing audit text.
-var (
-	errStepTicket = errors.New("ticket")
-	errStepStage  = errors.New("stage")
-)
-
 // stageFreshTicket mints a one-use enrolment ticket for cn and stages a fresh
 // bootstrap.json under dir (the same host authority `lever up` uses), via the
 // shared wire.Stage — the single construction+deposit path for the enrolment
@@ -124,15 +123,15 @@ var (
 func (b *Broker) stageFreshTicket(cn, dir string) error {
 	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errStepTicket, err)
+		return fmt.Errorf("ticket: %w", err)
 	}
 	bs := wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
 	root, rel, err := b.stagingPath(dir)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errStepStage, err)
+		return fmt.Errorf("stage: %w", err)
 	}
 	if err := wire.Stage(root, rel, bs); err != nil {
-		return fmt.Errorf("%w: %w", errStepStage, err)
+		return fmt.Errorf("stage: %w", err)
 	}
 	return nil
 }
@@ -161,21 +160,9 @@ func (b *Broker) stagingPath(dir string) (root, rel string, err error) {
 	return b.tree, rel, nil
 }
 
-// stageErrorBody maps a stageFreshTicket step error to its 500 response body.
-func stageErrorBody(err error) string {
-	if errors.Is(err, errStepStage) {
-		return "stage error"
-	}
-	return "ticket error"
-}
-
 func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	var req wire.WorkerStartRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	spec, ok := b.requireManagerWorker(w, r, req.Worker)
+	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
 	if !ok {
 		return
 	}
@@ -227,7 +214,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 	// skips enrol and the ticket ages out unspent.
 	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
 		b.audit("worker", b.manager, "error", "resume "+err.Error())
-		http.Error(w, stageErrorBody(err), http.StatusInternalServerError)
+		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
 	}
 	resume := b.runtime.Resume
@@ -236,6 +223,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		resume = b.runtime.ResumeForce
 	}
 	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
+		b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
@@ -253,11 +241,13 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
 	ctx := r.Context()
 	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
-		http.Error(w, stageErrorBody(err), http.StatusInternalServerError)
+		b.audit("worker", b.manager, "error", "start "+err.Error())
+		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
 	}
 	if spec.APIKey {
 		if err := b.runtime.EnvSet(ctx, b.instanceProject, "LEVER_LLM_AUTH", "api-key"); err != nil {
+			b.audit("worker", b.manager, "error", "env set: "+err.Error())
 			http.Error(w, "runtime error", http.StatusBadGateway)
 			return
 		}
@@ -272,6 +262,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
 		Image: spec.Image, APIKey: spec.APIKey,
 	}); err != nil {
+		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
@@ -284,11 +275,11 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
-// workerLiveAttempts/workerLiveInterval bound waitWorkerLive's post-start poll.
-// Package vars (not consts) so tests can shrink them.
-var (
-	workerLiveAttempts = 20
-	workerLiveInterval = 500 * time.Millisecond
+// defaultLiveAttempts/defaultLiveInterval bound waitWorkerLive's post-start
+// poll (Broker.liveAttempts/liveInterval; tests shrink them per instance).
+const (
+	defaultLiveAttempts = 20
+	defaultLiveInterval = 500 * time.Millisecond
 )
 
 // waitWorkerLive polls the worker's scion record until it shows Phase=="running"
@@ -300,7 +291,7 @@ var (
 func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
 		return b.runtime.List(c, b.instanceProject)
-	}, spec.Name, workerLiveAttempts, workerLiveInterval)
+	}, spec.Name, b.liveAttempts, b.liveInterval)
 	if err == nil {
 		return nil
 	}
@@ -314,15 +305,12 @@ func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 
 func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {
 	var req wire.WorkerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	spec, ok := b.requireManagerWorker(w, r, req.Worker)
+	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
 	if !ok {
 		return
 	}
 	if err := do(r.Context(), spec); err != nil {
+		b.audit("worker", b.manager, "error", r.URL.Path+" "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
@@ -372,6 +360,7 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 	}
 	agents, err := b.runtime.List(r.Context(), b.instanceProject)
 	if err != nil {
+		b.audit("worker", b.manager, "error", "list: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}

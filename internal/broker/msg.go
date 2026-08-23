@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -132,7 +131,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.MsgSendRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -166,7 +165,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.MsgListRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

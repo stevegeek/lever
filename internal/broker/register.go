@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"encoding/json"
 	"maps"
 	"net/http"
 
@@ -17,12 +16,8 @@ import (
 // A tool can never widen its own envelope, and an unconfigured tool is rejected
 // before any registry write. Served only on the host-loopback admin listener.
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	var req wire.RegisterRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+	if err := decodeBody(w, r, adminBodyLimit, &req); err != nil {
 		b.audit("register", "", "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

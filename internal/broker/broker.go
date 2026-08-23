@@ -185,6 +185,10 @@ type Broker struct {
 	workers        map[string]WorkerSpec
 	brokerCAPEM    string
 	brokerURL      string
+	// liveAttempts/liveInterval bound waitWorkerLive's post-start poll; tests
+	// shrink them per instance (like reenrolNow).
+	liveAttempts int
+	liveInterval time.Duration
 
 	instanceProject string
 	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
@@ -266,6 +270,7 @@ func New(c Config) *Broker {
 		persist:  c.PersistRevocation,
 		apiKey:   c.APIKey, llmUpstream: up,
 		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, resolveAgentID: c.ResolveAgentID, tree: c.Tree, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
+		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval,
 		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
 		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
 		reenrolEvents:     make(chan string, reenrolQueueDepth),

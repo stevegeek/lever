@@ -357,15 +357,12 @@ func TestWorkerStartRefusesTaskMismatch(t *testing.T) {
 // After a successful Start, an un-live container (crash-loop) must surface as a
 // loud error, NOT a false {Phase:"running"}.
 func TestWorkerStartLivenessTimeout(t *testing.T) {
-	origAtt, origInt := workerLiveAttempts, workerLiveInterval
-	workerLiveAttempts, workerLiveInterval = 3, time.Millisecond
-	defer func() { workerLiveAttempts, workerLiveInterval = origAtt, origInt }()
-
 	dir := t.TempDir()
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
 		BootstrapDir: filepath.Join(dir, ".lever")}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, exitedAfterStart: true} // absent, then Exited after Start
 	b := newTestBroker(t, rt, spec)
+	b.liveAttempts, b.liveInterval = 3, time.Millisecond
 
 	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
 
@@ -411,10 +408,6 @@ func (r *midPollListFailRuntime) List(ctx context.Context, project string) ([]sc
 // reports the worker running/live. This behavior must survive the WaitAgentLive
 // extraction (plan B3).
 func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
-	origAtt, origInt := workerLiveAttempts, workerLiveInterval
-	workerLiveAttempts, workerLiveInterval = 5, time.Millisecond
-	defer func() { workerLiveAttempts, workerLiveInterval = origAtt, origInt }()
-
 	dir := t.TempDir()
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
 		BootstrapDir: filepath.Join(dir, ".lever")}
@@ -423,6 +416,7 @@ func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
 		failAfterAct: 2,                                                // two blips inside the liveness poll before a live record
 	}
 	b := newTestBroker(t, rt, spec)
+	b.liveAttempts, b.liveInterval = 5, time.Millisecond
 
 	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
 
@@ -494,6 +488,26 @@ func TestWorkerStart_authz(t *testing.T) {
 	}
 }
 
+// Authentication runs BEFORE the body is decoded on every worker route: an
+// intruder posting garbage gets 403, not 400 (no body-shape oracle), and the
+// manager posting garbage gets 400 with a "bad body" audit line.
+func TestWorkerRoutes_authBeforeDecode(t *testing.T) {
+	for _, path := range []string{"/worker/start", "/worker/stop", "/worker/suspend", "/worker/resume"} {
+		t.Run(path, func(t *testing.T) {
+			b, _, audit := newMsgTestBroker(true)
+			if rec := callWorker(t, b, path, `{`, "intruder"); rec.Code != http.StatusForbidden {
+				t.Fatalf("intruder bad body: status = %d, want 403", rec.Code)
+			}
+			if rec := callWorker(t, b, path, `{`, "manager"); rec.Code != http.StatusBadRequest {
+				t.Fatalf("manager bad body: status = %d, want 400", rec.Code)
+			}
+			if !strings.Contains(audit.String(), `detail="bad body"`) {
+				t.Fatalf("audit missing bad body line: %s", audit.String())
+			}
+		})
+	}
+}
+
 // TestWorkerList proves the list fan-out is collapsed to a SINGLE
 // List(instanceProject) call that returns the whole fleet (multiple workers),
 // not one call per declared worker.
@@ -517,7 +531,7 @@ func TestWorkerList(t *testing.T) {
 		ManagerIdentity: "test-manager",
 		InstanceProject: testInstanceProject,
 	})
-	req := httptest.NewRequest("GET", "/worker/list", nil)
+	req := httptest.NewRequest("POST", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec, req)
@@ -538,7 +552,7 @@ func TestWorkerList(t *testing.T) {
 		t.Fatalf("bad list: %+v", out.Agents)
 	}
 	// non-manager rejected
-	req2 := httptest.NewRequest("GET", "/worker/list", nil)
+	req2 := httptest.NewRequest("POST", "/worker/list", nil)
 	req2.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req2)
@@ -569,7 +583,7 @@ func TestWorkerNilRuntime_returns502(t *testing.T) {
 	}
 
 	// /worker/list with manager CN must also return 502, not panic.
-	req := httptest.NewRequest("GET", "/worker/list", nil)
+	req := httptest.NewRequest("POST", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req)
@@ -599,7 +613,7 @@ func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 	}
 
 	// Non-manager CN on /worker/list must get 403, not 502.
-	req := httptest.NewRequest("GET", "/worker/list", nil)
+	req := httptest.NewRequest("POST", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req)

@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
@@ -55,7 +54,7 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req wire.DirectiveIDRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil || req.ID == "" {
+	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.ID == "" {
 		b.audit("directive", caller, "deny", "consume: bad body")
 		opaque404(w)
 		return
@@ -110,7 +109,7 @@ func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.DirectiveIDRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil || req.ID == "" || b.directiveVerifier == nil {
+	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.ID == "" || b.directiveVerifier == nil {
 		opaque404(w)
 		return
 	}

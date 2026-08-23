@@ -539,6 +539,10 @@ func TestDirectiveRoutesDisabledWithoutVerifier(t *testing.T) {
 		{http.MethodPost, "/directive/list"},
 		{http.MethodPost, "/directive/revoke"},
 		{http.MethodPost, "/directive/selftest"},
+		// Wrong method on a disabled channel is still 404, never 405: the
+		// channel must stay invisible.
+		{http.MethodGet, "/directive/send"},
+		{http.MethodPost, "/directive/resolve?agent=manager"},
 	}
 	for _, c := range checks {
 		req, err := http.NewRequest(c.method, "http://unix"+c.path, bytes.NewReader([]byte(`{}`)))

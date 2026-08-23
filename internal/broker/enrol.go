@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -29,7 +28,7 @@ func csrCommonName(csrPEM []byte) (string, error) {
 // NOT burn the ticket.
 func (b *Broker) handleEnrol(w http.ResponseWriter, r *http.Request) {
 	var req wire.EnrolRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("enrol", "", "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

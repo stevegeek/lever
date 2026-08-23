@@ -123,8 +123,8 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	}
 
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
-	// helper's step-discriminated wrap ("ticket:"/"stage:") reproduces the two
-	// audit lines this path emitted before the shared extraction.
+	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
+	// audit line.
 	if err := b.stageFreshTicket(cn, dir); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return

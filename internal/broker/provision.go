@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/stevegeek/lever/internal/wire"
@@ -23,7 +22,7 @@ func (b *Broker) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.ProvisionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("provision", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

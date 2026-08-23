@@ -132,13 +132,13 @@ func (g Guest) ScriptArch(f *proc.FakeRunner, arch string) {
 // calls.
 func (g Guest) ScriptEgress(f *proc.FakeRunner, ahosts string) {
 	f.Script(g.User+" getent ahosts "+g.Alias, proc.Result{Stdout: ahosts})
-	g.ScriptFirewall(f)
+	g.scriptFirewall(f)
 }
 
-// ScriptFirewall scripts only the root iptables/ip6tables calls, for a runner
+// scriptFirewall scripts only the root iptables/ip6tables calls, for a runner
 // that answers the resolve itself (ClosedChainRunner) or a test that scripts
 // a specific ahosts answer.
-func (g Guest) ScriptFirewall(f *proc.FakeRunner) {
+func (g Guest) scriptFirewall(f *proc.FakeRunner) {
 	f.Script(g.Root+" iptables", proc.Result{})
 	f.Script(g.Root+" ip6tables", proc.Result{})
 }

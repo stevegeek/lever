@@ -63,34 +63,82 @@ func (b *Broker) runHealer(ctx context.Context) {
 }
 
 // healLapse is one auto-re-enrol attempt for cn. Synchronous; called only
-// from the healer goroutine (and directly by tests).
+// from the healer goroutine (and directly by tests). The steps, in order:
+// policy gate, throttle, revocation, ticket re-stage, bounce.
 func (b *Broker) healLapse(ctx context.Context, cn string) {
-	// Mode gate.
+	dir, slug, ok := b.healTarget(cn)
+	if !ok {
+		return
+	}
+	if !b.admitReenrol(cn) {
+		return
+	}
+	// Revocation makes expiry a real kill-switch — `lever revoke` wins over
+	// the healer. Checked right before ticket mint to keep the window between
+	// check and use minimal.
+	if b.isRevoked(cn) {
+		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
+		return
+	}
+	if dir == "" {
+		b.audit("reenrol", cn, "error", "no bootstrap dir configured for this identity")
+		return
+	}
+	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
+	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
+	// audit line.
+	if err := b.stageFreshTicket(cn, dir); err != nil {
+		b.audit("reenrol", cn, "error", err.Error())
+		return
+	}
+	verb, ok := b.bounceForReenrol(ctx, cn, slug)
+	if !ok {
+		return
+	}
+	// Success resets the cap so the NEXT independent lapse (weeks later) can
+	// heal again; the cap only bounds consecutive failures.
+	b.reenrolMu.Lock()
+	b.reenrolTries[cn] = 0
+	b.reenrolMu.Unlock()
+	b.audit("reenrol", cn, "allow", "natural lapse: ticket re-staged, healed via "+verb)
+}
+
+// healTarget applies the policy gates (mode, configured identity) and
+// resolves where the heal acts: the bootstrap dir to re-stage into and the
+// scion slug to bounce, which differ between manager and worker. ok is false
+// when cn is not healable at all; dir may be "" for a configured identity
+// with no bootstrap dir, which the caller audits.
+func (b *Broker) healTarget(cn string) (dir, slug string, ok bool) {
 	switch b.autoReenrol {
 	case autoReenrolOff:
-		return
+		return "", "", false
 	case autoReenrolManager:
 		if cn != b.manager {
-			return
+			return "", "", false
 		}
 	}
-
-	// Identity gate: only configured identities are healable.
 	spec, isWorker := b.workerSpec(cn)
 	if cn != b.manager && !isWorker {
-		return
+		return "", "", false
 	}
+	if isWorker {
+		return spec.BootstrapDir, spec.Name, true
+	}
+	return b.managerBootstrapDir, b.managerSlug, true
+}
 
-	// Cooldown + cap. Deliberately BEFORE the revoked check so the revoked
-	// deny-audit below is throttled to the same cadence as every other
-	// outcome — a revoked cert hammering handshakes must not write one audit
-	// line per attempt.
+// admitReenrol is the per-CN cooldown + attempt cap, and records the attempt
+// it admits. Deliberately BEFORE the revoked check in healLapse so the
+// revoked deny-audit is throttled to the same cadence as every other outcome
+// — a revoked cert hammering handshakes must not write one audit line per
+// attempt.
+func (b *Broker) admitReenrol(cn string) bool {
 	now := b.reenrolNow()
 	b.reenrolMu.Lock()
+	defer b.reenrolMu.Unlock()
 	if last, ok := b.reenrolLast[cn]; ok {
 		if now.Sub(last) < reenrolCooldown {
-			b.reenrolMu.Unlock()
-			return
+			return false
 		}
 		// A long-quiet CN starts a fresh burst: without this, 3 failed attempts
 		// would disable healing for that CN until the broker restarts.
@@ -99,44 +147,22 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		}
 	}
 	if b.reenrolTries[cn] >= reenrolMaxAttempts {
-		b.reenrolMu.Unlock()
-		return
+		return false
 	}
 	b.reenrolLast[cn] = now
 	b.reenrolTries[cn]++
-	b.reenrolMu.Unlock()
+	return true
+}
 
-	// Revocation makes expiry a real kill-switch — `lever revoke` wins over
-	// the healer. Checked right before ticket mint to keep the window between
-	// check and use minimal.
-	if b.isRevoked(cn) {
-		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
-		return
-	}
-
-	// Target: bootstrap dir + scion slug differ between manager and worker.
-	dir, slug := b.managerBootstrapDir, b.managerSlug
-	if isWorker {
-		dir, slug = spec.BootstrapDir, spec.Name
-	}
-	if dir == "" {
-		b.audit("reenrol", cn, "error", "no bootstrap dir configured for this identity")
-		return
-	}
-
-	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
-	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
-	// audit line.
-	if err := b.stageFreshTicket(cn, dir); err != nil {
-		b.audit("reenrol", cn, "error", err.Error())
-		return
-	}
-
-	// Bounce by observed phase so boot re-enrols with the staged ticket.
+// bounceForReenrol restarts agent slug by its observed phase so boot
+// re-enrols with the staged ticket. It audits every failure itself and
+// returns the verb it used for the caller's success line; ok is false when
+// the heal must stop here.
+func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb string, ok bool) {
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
 		b.audit("reenrol", cn, "error", "list: "+err.Error())
-		return
+		return "", false
 	}
 	phase := ""
 	for _, a := range agents {
@@ -152,9 +178,8 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	// instance its containment.
 	if err = b.checkAgentRole(ctx, slug); err != nil {
 		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
-		return
+		return "", false
 	}
-	var verb string
 	switch phase {
 	case scion.PhaseRunning:
 		verb = "suspend+resume"
@@ -169,16 +194,11 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		err = b.runtime.ResumeForce(ctx, slug, b.instanceProject)
 	default:
 		b.audit("reenrol", cn, "error", "natural lapse detected but agent "+slug+" is in phase "+phase+" — not bounceable, run `lever up`")
-		return
+		return "", false
 	}
 	if err != nil {
 		b.audit("reenrol", cn, "error", "natural lapse: "+verb+" failed: "+err.Error())
-		return
+		return "", false
 	}
-	// Success resets the cap so the NEXT independent lapse (weeks later) can
-	// heal again; the cap only bounds consecutive failures.
-	b.reenrolMu.Lock()
-	b.reenrolTries[cn] = 0
-	b.reenrolMu.Unlock()
-	b.audit("reenrol", cn, "allow", "natural lapse: ticket re-staged, healed via "+verb)
+	return verb, true
 }

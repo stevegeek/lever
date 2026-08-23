@@ -118,7 +118,7 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Verify over the EXACT received bytes first; only then parse those bytes.
-	if err := b.directiveVerifier.VerifyContext(r.Context(), opsig.NamespaceDirective, raw, sig); err != nil {
+	if err := b.directiveVerifier.Verify(r.Context(), opsig.NamespaceDirective, raw, sig); err != nil {
 		b.audit("directive", "operator", "deny", "send: bad signature")
 		b.dirAudit.append("send_denied", map[string]any{"reason": "signature"})
 		http.Error(w, "signature verification failed", http.StatusBadRequest)
@@ -234,7 +234,7 @@ func (b *Broker) verifyAdminEnvelope(w http.ResponseWriter, r *http.Request, op,
 	if !ok {
 		return opsig.Envelope{}, false
 	}
-	if err := b.directiveVerifier.VerifyContext(r.Context(), opsig.NamespaceAdmin, raw, sig); err != nil {
+	if err := b.directiveVerifier.Verify(r.Context(), opsig.NamespaceAdmin, raw, sig); err != nil {
 		b.audit("directive", "operator", "deny", op+": bad signature")
 		b.dirAudit.append(op+"_denied", map[string]any{"reason": "signature"})
 		http.Error(w, "signature verification failed", http.StatusBadRequest)
@@ -287,7 +287,7 @@ func (b *Broker) handleDirectiveSelftest(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if err := b.directiveVerifier.VerifyContext(r.Context(), opsig.NamespaceDirective, raw, sig); err != nil {
+	if err := b.directiveVerifier.Verify(r.Context(), opsig.NamespaceDirective, raw, sig); err != nil {
 		b.dirAudit.append("selftest", map[string]any{"ok": false, "reason": "signature: " + err.Error()})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

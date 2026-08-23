@@ -49,7 +49,7 @@ func validStatement(now time.Time) Statement {
 func TestSignVerifyRoundTrip(t *testing.T) {
 	priv, as := genKey(t, t.TempDir())
 	msg, _ := json.Marshal(validStatement(time.Now()))
-	sig, err := SignContext(context.Background(), priv, NamespaceDirective, msg)
+	sig, err := Sign(context.Background(), priv, NamespaceDirective, msg)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 		t.Fatalf("not an armored signature: %.60s", sig)
 	}
 	v := Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	if err := v.VerifyContext(context.Background(), NamespaceDirective, msg, sig); err != nil {
+	if err := v.Verify(context.Background(), NamespaceDirective, msg, sig); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
 }
@@ -65,18 +65,18 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 func TestVerifyRejectsTamperAndWrongNamespaceAndPrincipal(t *testing.T) {
 	priv, as := genKey(t, t.TempDir())
 	msg, _ := json.Marshal(validStatement(time.Now()))
-	sig, err := SignContext(context.Background(), priv, NamespaceDirective, msg)
+	sig, err := Sign(context.Background(), priv, NamespaceDirective, msg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	v := Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	if err := v.VerifyContext(context.Background(), NamespaceDirective, append(msg, ' '), sig); err == nil {
+	if err := v.Verify(context.Background(), NamespaceDirective, append(msg, ' '), sig); err == nil {
 		t.Fatal("tampered message verified")
 	}
-	if err := v.VerifyContext(context.Background(), NamespaceAdmin, msg, sig); err == nil {
+	if err := v.Verify(context.Background(), NamespaceAdmin, msg, sig); err == nil {
 		t.Fatal("wrong namespace verified")
 	}
-	if err := (Verifier{AllowedSigners: as, Principal: "other@x"}).VerifyContext(context.Background(), NamespaceDirective, msg, sig); err == nil {
+	if err := (Verifier{AllowedSigners: as, Principal: "other@x"}).Verify(context.Background(), NamespaceDirective, msg, sig); err == nil {
 		t.Fatal("wrong principal verified")
 	}
 }
@@ -310,20 +310,20 @@ func TestParseEnvelopeNamesTheFailingField(t *testing.T) {
 func TestSignVerifyContextCancelled(t *testing.T) {
 	priv, as := genKey(t, t.TempDir())
 	msg, _ := json.Marshal(validStatement(time.Now()))
-	sig, err := SignContext(context.Background(), priv, NamespaceDirective, msg)
+	sig, err := Sign(context.Background(), priv, NamespaceDirective, msg)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := SignContext(ctx, priv, NamespaceDirective, msg); err == nil {
-		t.Fatal("SignContext with a cancelled ctx must fail")
+	if _, err := Sign(ctx, priv, NamespaceDirective, msg); err == nil {
+		t.Fatal("Sign with a cancelled ctx must fail")
 	}
 	v := Verifier{AllowedSigners: as, Principal: "operator@testinst"}
-	if err := v.VerifyContext(context.Background(), NamespaceDirective, msg, sig); err != nil {
+	if err := v.Verify(context.Background(), NamespaceDirective, msg, sig); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if err := v.VerifyContext(ctx, NamespaceDirective, msg, sig); err == nil {
-		t.Fatal("VerifyContext with a cancelled ctx must fail")
+	if err := v.Verify(ctx, NamespaceDirective, msg, sig); err == nil {
+		t.Fatal("Verify with a cancelled ctx must fail")
 	}
 }

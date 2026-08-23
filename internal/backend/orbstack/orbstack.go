@@ -213,17 +213,7 @@ func parseMachineStatus(stdout, name string) (status string, found bool) {
 // Teardown deletes the jail machine. Idempotent: a no-op if the machine is
 // already absent.
 func (o *OrbStack) Teardown(ctx context.Context) error {
-	_, found, err := o.machineStatus(ctx)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return nil // already gone
-	}
-	if _, err := o.Runner().Run(ctx, nil, "orb", "delete", o.Machine()); err != nil {
-		return fmt.Errorf("orb delete: %w", err)
-	}
-	return nil
+	return o.orbIfPresent(ctx, "delete")
 }
 
 // Stop powers the machine off but keeps its disk intact — a strictly less
@@ -231,15 +221,21 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 // a no-op if the machine is already absent; orb tolerates stopping an
 // already-stopped machine, so no separate guard is needed for that case.
 func (o *OrbStack) Stop(ctx context.Context) error {
+	return o.orbIfPresent(ctx, "stop")
+}
+
+// orbIfPresent runs `orb <verb> <machine>` when the machine exists and is a
+// no-op when it is already gone. Shared by Stop and Teardown.
+func (o *OrbStack) orbIfPresent(ctx context.Context, verb string) error {
 	_, found, err := o.machineStatus(ctx)
 	if err != nil {
 		return err
 	}
 	if !found {
-		return nil // already gone; nothing to stop
+		return nil // already gone
 	}
-	if _, err := o.Runner().Run(ctx, nil, "orb", "stop", o.Machine()); err != nil {
-		return fmt.Errorf("orb stop: %w", err)
+	if _, err := o.Runner().Run(ctx, nil, "orb", verb, o.Machine()); err != nil {
+		return fmt.Errorf("orb %s: %w", verb, err)
 	}
 	return nil
 }

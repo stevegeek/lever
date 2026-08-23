@@ -254,8 +254,8 @@ type Deps struct {
 	// failed … starting FRESH, previous session lost"), which MUST reach the
 	// user rather than vanish into a swallowed return value. buildApplyDeps
 	// wires this to the invoking cobra command's PrintErrf, mirroring how
-	// other user-facing warnings already surface (see cli/stop.go,
-	// cli/down.go).
+	// other user-facing warnings already surface (see internal/cli/host/stop.go,
+	// internal/cli/host/down.go).
 	Log func(format string, args ...any)
 }
 
@@ -954,7 +954,7 @@ func resumeOrRecover(ctx context.Context, d Deps, boot *bootTracker, name, jp st
 	}
 	// LOUD recovery: the conversation could not be restored. This MUST reach
 	// the user — resume failing means the durable session (the whole point of
-	// suspending, not stopping, at power-off; see cli/stop.go) is about to be
+	// suspending, not stopping, at power-off; see internal/cli/host/stop.go) is about to be
 	// discarded.
 	return recoverDeleteAndCreate(ctx, d, boot, name, jp, opts,
 		fmt.Sprintf(v.lostFmt, rerr), fmt.Sprintf(v.lostWhy, rerr))

@@ -642,3 +642,27 @@ func TestAptPrereqsDeclareLeverToolDependencies(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallRootBinaryRefusesShortStream pins the doc claim that a stream
+// ending early cannot install a truncated binary: `cat` treats the early end
+// as a plain EOF, so only the byte-count check stops the swap. Like the
+// injection test above, this runs the real script through `env` so bash
+// evaluates it.
+func TestInstallRootBinaryRefusesShortStream(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "dst")
+	script := installRootBinaryScript(dest, 11) // claims 11 bytes; stream 5
+	g := Guest{Host: exec.RealRunner{}, RootPrefix: []string{"env"}, Machine: "test"}
+	if err := g.pipeInto(context.Background(), g.RootPrefix, strings.NewReader("short"), script); err == nil {
+		t.Fatal("expected the short stream to fail the install")
+	}
+	if _, err := os.Stat(dest); err == nil {
+		t.Fatalf("truncated binary was installed at %s", dest)
+	}
+	if err := g.pipeInto(context.Background(), g.RootPrefix, strings.NewReader("bin-content"), script); err != nil {
+		t.Fatalf("full stream: %v", err)
+	}
+	if data, err := os.ReadFile(dest); err != nil || string(data) != "bin-content" {
+		t.Fatalf("installed = %q, %v", data, err)
+	}
+}

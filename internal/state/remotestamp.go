@@ -53,7 +53,7 @@ func remoteStampContent(version, hash string, pid int) string {
 
 // remoteProxyPID reads the pid recorded in remote.pid — the file the proxy
 // process writes for itself once its listeners are bound
-// (remoteproxy.writePIDFile). Both stamp operations key off THIS number rather
+// (daemon.WritePIDFile). Both stamp operations key off THIS number rather
 // than os.Getpid(), so the stamp is only ever a statement about the process
 // that currently owns the pid file, whoever wrote it.
 func (s State) remoteProxyPID() (int, error) {

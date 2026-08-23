@@ -158,9 +158,9 @@ func (b runtimeBroker) ready() bool {
 //
 // FAIL-SOFT: on budget exhaustion it returns nil (not an error), so the caller
 // proceeds to start regardless — the start path's own bounded broker-unavailable
-// retry (internal/apply's isBrokerUnavailable) is the backstop, and hard-failing
-// the whole bring-up on a readiness probe that can't confirm would be worse than
-// letting start try. Only ctx cancellation returns an error. `hub brokers` lists
+// retry (internal/apply's retryOnBrokerUnavailable, gated on
+// IsBrokerUnavailable) is the backstop, and hard-failing the whole bring-up on
+// a readiness probe that can't confirm would be worse than letting start try. Only ctx cancellation returns an error. `hub brokers` lists
 // brokers hub-wide; project scopes only the hub-client/settings resolution, so
 // it is passed to dodge the "no project" resolution failure a bare call hits.
 func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {

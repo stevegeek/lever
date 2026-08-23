@@ -62,7 +62,7 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// the wildcard op BEFORE the policy check. A tool exposes WildcardOp in
 	// the registry only when it is coarse-gated (an existing reviewed
 	// invariant enforced at registration), so this branch never fires for a
-	// fine tool. Crucially this does NOT widen the grant: MayObtain below
+	// fine tool. Crucially this does NOT widen the grant: MayObtainRule below
 	// still requires the caller to hold the exact {tool, "*"} grant, and the
 	// original op is preserved (requestedOp) purely for the audit trail.
 	requestedOp := req.Op

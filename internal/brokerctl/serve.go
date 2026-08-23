@@ -145,7 +145,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	// certs live certTTL (24h), and a broker that outlives its serving cert
 	// fails every gateway handshake, including the agents' own /renew calls,
 	// so the whole fleet's certs decay behind it. SANs: always the selected
-	// backend's host alias (cfg.ServerName, e.g. host.orb.internal) as DNS;
+	// backend's host alias (be.HostToolAlias(), e.g. host.orb.internal) as DNS;
 	// additionally the jail's resolved host-alias IP (passed by `lever apply`
 	// via $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can dial
 	// the broker by IP — DNS/53 is dropped in that posture, so they cannot

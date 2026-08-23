@@ -208,29 +208,39 @@ func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 // caller.
 //
 // The install is atomic: the host file is the stdin of a guest-side script
-// that writes a temp path, makes it executable, then mv's it over destPath (mv
-// is atomic on the same filesystem), so a mid-stream failure can't leave a
-// truncated, executable binary at destPath. A short read fails `cat` and the
-// `&&` chain stops before the mv. destPath is a fixed literal at every call
-// site today (not attacker input), but it — and its derived .tmp — are still
-// shell-quoted, because they are interpolated into the guest script.
+// that writes a temp path, checks its byte count against the host file's,
+// makes it executable, then mv's it over destPath (mv is atomic on the same
+// filesystem), so a mid-stream failure can't leave a truncated, executable
+// binary at destPath. The count check is what makes that true: a stream that
+// ends early is a plain EOF to `cat`, which exits 0, so without it the `&&`
+// chain would install the truncated file. destPath is a fixed literal at
+// every call site today (not attacker input), but it — and its derived .tmp
+// — are still shell-quoted, because they are interpolated into the guest
+// script.
 func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := g.pipeInto(ctx, g.RootPrefix, f, installRootBinaryScript(destPath)); err != nil {
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("install %s into guest: %w", destPath, err)
+	}
+	if err := g.pipeInto(ctx, g.RootPrefix, f, installRootBinaryScript(destPath, fi.Size())); err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}
 	return nil
 }
 
 // installRootBinaryScript is the guest-side half of InstallRootBinary: read
-// stdin into destPath.tmp, then swap it in. Split out so a test can pin it.
-func installRootBinaryScript(destPath string) string {
+// stdin into destPath.tmp, refuse it unless exactly size bytes arrived, then
+// swap it in. `wc -c <` rather than `stat` because the two stats disagree
+// across GNU and BSD and the injection test runs this script on the host.
+// Split out so a test can pin it.
+func installRootBinaryScript(destPath string, size int64) string {
 	tmp := shellSingleQuote(destPath + ".tmp")
-	return fmt.Sprintf("cat > %s && chmod +x %s && mv %s %s", tmp, tmp, tmp, shellSingleQuote(destPath))
+	return fmt.Sprintf("cat > %s && [ \"$(wc -c < %s)\" -eq %d ] && chmod +x %s && mv %s %s", tmp, tmp, size, tmp, tmp, shellSingleQuote(destPath))
 }
 
 // guestFileDigest returns the hex sha256 the guest reports for path, or ""

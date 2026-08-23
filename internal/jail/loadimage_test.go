@@ -3,6 +3,7 @@ package jail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -217,5 +218,34 @@ func TestLoadImageReportsLoadFailure(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "podman load") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// unreadRunner fails the load without ever reading stdin, the way a podman
+// that rejects the command up front does. The producer then sees a closed
+// pipe; that write error must not mask the load's own stderr.
+type unreadRunner struct{ exec.Runner }
+
+func (unreadRunner) RunStdin(context.Context, io.Reader, map[string]string, string, ...string) (exec.Result, error) {
+	return exec.Result{Code: 125, Stderr: "Error: cannot connect to podman\n"}, errors.New("exit status 125")
+}
+
+func TestLoadImageLoadFailureBeforeDrainKeepsLoadStderr(t *testing.T) {
+	err := loadImage(context.Background(), unreadRunner{}, orbPrefix("m", "u"), "501", func(w io.Writer) error {
+		if _, err := io.WriteString(w, "tarball-bytes"); err != nil {
+			return fmt.Errorf("docker save: %w", err)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"podman load", "exit status 125", "cannot connect to podman", "docker save"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err %q lacks %q", err, want)
+		}
+	}
+	if !strings.HasPrefix(err.Error(), "loadimage: podman load:") {
+		t.Errorf("load failure must be primary, got %q", err)
 	}
 }

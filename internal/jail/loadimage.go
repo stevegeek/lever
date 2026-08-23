@@ -141,8 +141,12 @@ func LoadImage(ctx context.Context, r exec.Runner, prefix []string, uid, imageRe
 // loadImage pipes whatever save writes into the jail's `podman load`. save
 // runs in its own goroutine so the two ends stream concurrently; its error
 // closes the pipe, which the load side observes as a short read. Both errors
-// are collected and the producer's reported first, since a load that fails
-// because the save died is a symptom.
+// are collected. A load failure is reported first, with podman's stderr: a
+// load that dies before draining stdin makes the producer's write fail too,
+// and that write error ("closed pipe") is the symptom, not the cause. The
+// producer's error is primary only when the load itself succeeded, or when
+// the load's own failure is the short read the dead producer caused — in
+// which case both are named.
 func loadImage(ctx context.Context, r exec.Runner, prefix []string, uid string, save func(io.Writer) error) error {
 	pr, pw := io.Pipe()
 	saveErr := make(chan error, 1)
@@ -155,11 +159,14 @@ func loadImage(ctx context.Context, r exec.Runner, prefix []string, uid string, 
 	res, loadErr := r.RunStdin(ctx, pr, nil, args[0], args[1:]...)
 	// Unblock a producer still writing after the consumer has gone away.
 	_ = pr.CloseWithError(loadErr)
-	if err := <-saveErr; err != nil {
-		return fmt.Errorf("loadimage: %w", err)
-	}
-	if loadErr != nil {
+	sErr := <-saveErr
+	switch {
+	case loadErr != nil && sErr != nil:
+		return fmt.Errorf("loadimage: podman load: %w: %s (%v)", loadErr, strings.TrimSpace(res.Stderr), sErr)
+	case loadErr != nil:
 		return fmt.Errorf("loadimage: podman load: %w: %s", loadErr, strings.TrimSpace(res.Stderr))
+	case sErr != nil:
+		return fmt.Errorf("loadimage: %w", sErr)
 	}
 	return nil
 }

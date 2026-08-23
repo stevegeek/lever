@@ -2,7 +2,6 @@ package guest
 
 import (
 	"context"
-	"gopkg.in/yaml.v3"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +10,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"gopkg.in/yaml.v3"
 )
 
 func testHubLogin() types.HubLogin {

@@ -3,7 +3,6 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/wire"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	registry "github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func TestRegisterAddsTool(t *testing.T) {

@@ -9,12 +9,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/wire"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 const e2eServerName = "broker.test"

@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"path/filepath"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"gopkg.in/yaml.v3"
 )
 
 // Convergence of the hub's ~/.scion/settings.yaml for the remote-access login

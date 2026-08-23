@@ -11,11 +11,12 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/wire"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func TestE2ELLMProxyOverRealMTLS(t *testing.T) {

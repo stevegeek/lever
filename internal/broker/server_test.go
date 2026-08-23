@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/wire"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	registry "github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // TestJailHandlerGatewayDeniesNoCert verifies that a tools/call request to the

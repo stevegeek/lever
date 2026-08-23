@@ -5,10 +5,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"github.com/stevegeek/lever/internal/wire"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func TestRenewUsesAuthenticatedCNNotCSRCN(t *testing.T) {

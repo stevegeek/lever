@@ -3,10 +3,11 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/stevegeek/lever/internal/wire"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func enrolReq(ticket string, csrPEM []byte) *http.Request {

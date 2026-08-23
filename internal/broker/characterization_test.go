@@ -14,12 +14,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/pem"
-	"github.com/stevegeek/lever/internal/wire"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // --- A1: exact deny audit lines on the copy-pasted authn+revocation preambles ---

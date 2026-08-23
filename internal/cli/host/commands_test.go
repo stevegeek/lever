@@ -87,7 +87,7 @@ func (s *stubBackend) ScionProjectRegistered(_ context.Context, workspacePath st
 
 func TestUpCommandCallsEnsureUp(t *testing.T) {
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"provision", "--machine", "lever-jail", "--tree", "/tmp/tree", "--allow-port", "3305"})

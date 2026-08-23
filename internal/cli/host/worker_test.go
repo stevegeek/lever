@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -53,10 +52,8 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := proc.NewFakeRunner()
-	f.Script("scion", proc.Result{Stdout: "ok"})
-	sb := &stubBackend{runner: f}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	f := scionOKRunner()
+	root := stubRoot(&stubBackend{runner: f})
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -111,8 +108,7 @@ func TestWorkerPurgeRequiresForce(t *testing.T) {
 	}
 
 	f := proc.NewFakeRunner() // no scripts: any scion call errors loudly
-	sb := &stubBackend{runner: f}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(&stubBackend{runner: f})
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -135,8 +131,7 @@ func TestWorkerPurgeUnknownWorker(t *testing.T) {
 	t.Chdir(dir)
 
 	f := proc.NewFakeRunner()
-	sb := &stubBackend{runner: f}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(&stubBackend{runner: f})
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -142,7 +141,7 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	}
 
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -176,7 +175,7 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 // still tears the jail down.
 func TestDestroyCallsTeardown(t *testing.T) {
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"destroy", "--machine", "lever-x"})
@@ -192,7 +191,7 @@ func TestDestroyCallsTeardown(t *testing.T) {
 // down` must keep working, unchanged, as a hidden alias of `destroy`.
 func TestDownAliasCallsTeardown(t *testing.T) {
 	sb := &stubBackend{}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs([]string{"down", "--machine", "lever-x"})

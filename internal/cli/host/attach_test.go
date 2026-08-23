@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -74,7 +73,7 @@ func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "attach", "scratch")
 	if err == nil {
 		t.Fatal("expected attach to fail when the jail is not up")
@@ -94,7 +93,7 @@ func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
 	t.Chdir(dir)
 
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
-	root := newRootWith(func(string, string) (backend.Backend, error) { return sb, nil })
+	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "attach")
 	if err == nil {
 		t.Fatal("expected attach to fail when the jail is not up")

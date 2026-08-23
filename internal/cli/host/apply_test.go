@@ -253,15 +253,7 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := proc.NewFakeRunner()
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{})
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-wired-abc\n"})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
+	f := patMintRunner("pat-wired-abc")
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -606,15 +598,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 
-	f := proc.NewFakeRunner()
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{}) // waitHubReady's poll, run inside ServerStart
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-mint-xyz\n"})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
+	f := patMintRunner("pat-mint-xyz")
 
 	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
@@ -700,29 +684,6 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("second call made %d new runner call(s), want 0 (must be a no-op): %+v",
 			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
 	}
-}
-
-// scriptPATMintChain registers the throwaway-window call chain shared by every
-// ensureControllerPAT test below (server start → list poll → init → hub link →
-// server stop → dev-token resolve/rm), everything except the "hub token
-// create" calls themselves — those differ per test by --name/token, so each
-// test scripts them individually via scriptTokenCreate.
-func scriptPATMintChain(f *proc.FakeRunner) {
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{}) // waitHubReady's poll, run inside ServerStart
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
-}
-
-// scriptTokenCreate registers a distinct "hub token create --project lever
-// --name <name>" response so the fake runner can tell the controller and
-// remote mints apart (they differ only by --name, which lands right after
-// --project in the argv scion.Client.HubTokenCreate builds).
-func scriptTokenCreate(f *proc.FakeRunner, name, token string) {
-	f.Script("scion hub token create --project lever --name "+name, proc.Result{Stdout: "Token: " + token + "\n"})
 }
 
 // countCalls returns how many recorded calls satisfy pred.
@@ -990,15 +951,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f := proc.NewFakeRunner()
-	f.Script("scion server start", proc.Result{})
-	f.Script("scion list", proc.Result{}) // waitHubReady's poll (throwaway AND real hub)
-	f.Script("scion init", proc.Result{})
-	f.Script("scion hub link", proc.Result{})
-	f.Script("scion hub token create", proc.Result{Stdout: "Token: pat-e2e-round-trip\n"})
-	f.Script("scion server stop", proc.Result{})
-	f.Script("sh -c printf", proc.Result{Stdout: "/home/tester"}) // $HOME resolution for the dev-token path
-	f.Script("sh -c if", proc.Result{})                           // the guarded removeJailFile rm
+	f := patMintRunner("pat-e2e-round-trip")
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 

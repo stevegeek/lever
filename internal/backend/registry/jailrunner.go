@@ -44,5 +44,10 @@ func JailRunner(name string, host exec.Runner, machine, user, uid string) (exec.
 	if err != nil {
 		return nil, err
 	}
-	return jail.New(host, argv, uid), nil
+	return jail.New(jail.Config{
+		Host:             host,
+		Prefix:           argv,
+		UID:              uid,
+		ForceHostNetwork: jail.ForceHostNetworkFromEnv(),
+	}), nil
 }

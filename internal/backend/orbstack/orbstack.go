@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -53,8 +52,8 @@ type OrbStack struct {
 
 func New(r exec.Runner, machine string) *OrbStack {
 	o := &OrbStack{probeAttempts: startProbeAttempts, probeInterval: startProbeInterval}
-	o.Base = common.Base{
-		R:         r,
+	o.Base = common.NewBase(common.Config{
+		Runner:    r,
 		Machine:   machine,
 		HostAlias: "host.orb.internal",
 		Hooks: common.Hooks{
@@ -71,7 +70,7 @@ func New(r exec.Runner, machine string) *OrbStack {
 				return resolveHostAlias(ctx, r, machine)
 			},
 		},
-	}
+	})
 	return o
 }
 
@@ -88,7 +87,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 		return fmt.Errorf("EnsureUp: ProjectTree is required")
 	}
 	// Preflight: require OrbStack >= 2.1.1 for --mount support on isolated machines.
-	ok, got, err := orbVersionAtLeast(ctx, o.R, 2, 1, 1)
+	ok, got, err := common.VersionAtLeast(ctx, o.Runner(), []string{"orb", "version"}, orbVersionRe, 2, 1, 1)
 	if err != nil {
 		return fmt.Errorf("EnsureUp: orb version check: %w", err)
 	}
@@ -101,7 +100,7 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := o.ReadRunUser(ctx); err != nil {
 		return err
 	}
-	if err := o.Guest().EnsureRuntimes(ctx, o.User); err != nil {
+	if err := o.Guest().EnsureRuntimes(ctx, o.RunUser()); err != nil {
 		return err
 	}
 	if cfg.HasScion() {
@@ -117,56 +116,21 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	return o.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
 }
 
-// orbVersionAtLeast runs `orb version`, parses the semver, and returns whether
-// it is >= (major, minor, patch). got is the raw version string on success or
-// the raw output on parse failure.
-func orbVersionAtLeast(ctx context.Context, r exec.Runner, major, minor, patch int) (ok bool, got string, err error) {
-	res, err := r.Run(ctx, nil, "orb", "version")
-	if err != nil {
-		return false, "", fmt.Errorf("orb version: %w", err)
-	}
-	m := orbVersionRe.FindStringSubmatch(res.Stdout)
-	if m == nil {
-		return false, strings.TrimSpace(res.Stdout), fmt.Errorf("orb version: could not parse version from %q", strings.TrimSpace(res.Stdout))
-	}
-	// m[1],m[2],m[3] are guaranteed digits by the regex.
-	vMaj, _ := strconv.Atoi(m[1])
-	vMin, _ := strconv.Atoi(m[2])
-	vPat, _ := strconv.Atoi(m[3])
-	got = fmt.Sprintf("%s.%s.%s", m[1], m[2], m[3])
-
-	switch {
-	case vMaj > major:
-		return true, got, nil
-	case vMaj < major:
-		return false, got, nil
-	// vMaj == major
-	case vMin > minor:
-		return true, got, nil
-	case vMin < minor:
-		return false, got, nil
-	// vMin == minor
-	default:
-		return vPat >= patch, got, nil
-	}
-}
-
 // ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning: it
 // probes the machine's existence/state via the same read-only `orb list` check
 // ensureMachine uses, and errors if the machine is absent or not running,
 // rather than creating, starting, or configuring it. For passive verbs
 // (attach) that need the jail transport but must never bring the machine up.
 func (o *OrbStack) ResolveRunUser(ctx context.Context) error {
-	res, err := o.R.Run(ctx, nil, "orb", "list")
+	status, found, err := o.machineStatus(ctx)
 	if err != nil {
-		return fmt.Errorf("orb list: %w", err)
+		return err
 	}
-	status, found := machineStatus(res.Stdout, o.Machine)
 	if !found {
-		return fmt.Errorf("machine %q does not exist", o.Machine)
+		return fmt.Errorf("machine %q does not exist", o.Machine())
 	}
 	if !strings.EqualFold(status, "running") {
-		return fmt.Errorf("machine %q is not running (status %q)", o.Machine, status)
+		return fmt.Errorf("machine %q is not running (status %q)", o.Machine(), status)
 	}
 	return o.ReadRunUser(ctx)
 }
@@ -177,11 +141,11 @@ func (o *OrbStack) ResolveRunUser(ctx context.Context) error {
 // teardown+recreate — mounts cannot be modified on a running machine (acceptable
 // limitation; document it in operator notes).
 func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error {
-	res, err := o.R.Run(ctx, nil, "orb", "list")
+	status, found, err := o.machineStatus(ctx)
 	if err != nil {
-		return fmt.Errorf("orb list: %w", err)
+		return err
 	}
-	if status, found := machineStatus(res.Stdout, o.Machine); found {
+	if found {
 		if strings.EqualFold(status, "running") {
 			// Idempotent: already up (and we cannot alter the mount after
 			// creation, so no action is taken here). To change the project
@@ -191,13 +155,13 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 		// Machine exists but is powered off (e.g. after `lever stop`) — power
 		// it back on so `up` resumes a halted machine rather than silently
 		// no-op'ing into an unreachable jail.
-		if _, err := o.R.Run(ctx, nil, "orb", "start", o.Machine); err != nil {
+		if _, err := o.Runner().Run(ctx, nil, "orb", "start", o.Machine()); err != nil {
 			return fmt.Errorf("orb start: %w", err)
 		}
 		return o.waitMachineReachable(ctx)
 	}
 	mountArg := projectTree + ":" + common.MountDest
-	if _, err := o.R.Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.Machine); err != nil {
+	if _, err := o.Runner().Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.Machine()); err != nil {
 		return fmt.Errorf("orb create: %w", err)
 	}
 	return nil
@@ -209,24 +173,30 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error 
 func (o *OrbStack) waitMachineReachable(ctx context.Context) error {
 	var lastErr error
 	err := retry.Until(ctx, o.probeAttempts, o.probeInterval, func() (bool, error) {
-		_, lastErr = o.R.Run(ctx, nil, "orb", "-m", o.Machine, "true")
+		_, lastErr = o.Runner().Run(ctx, nil, "orb", "-m", o.Machine(), "true")
 		return lastErr == nil, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
-		return fmt.Errorf("machine %q not reachable after orb start: %w", o.Machine, lastErr)
+		return fmt.Errorf("machine %q not reachable after orb start: %w", o.Machine(), lastErr)
 	}
 	return err
 }
 
-func machineListed(stdout, name string) bool {
-	_, found := machineStatus(stdout, name)
-	return found
+// machineStatus probes `orb list` (read-only) and returns this machine's
+// status field and whether it was listed at all. The one place every verb
+// that needs to know "does it exist / is it running" asks.
+func (o *OrbStack) machineStatus(ctx context.Context) (status string, found bool, err error) {
+	res, err := o.Runner().Run(ctx, nil, "orb", "list")
+	if err != nil {
+		return "", false, fmt.Errorf("orb list: %w", err)
+	}
+	status, found = parseMachineStatus(res.Stdout, o.Machine())
+	return status, found, nil
 }
 
-// machineStatus returns the status field (second column) of `orb list` output
-// for name, and whether the machine was listed at all. Read-only: callers
-// parse output from a probe (`orb list`) they already issued.
-func machineStatus(stdout, name string) (status string, found bool) {
+// parseMachineStatus returns the status field (second column) of `orb list`
+// output for name, and whether the machine was listed at all.
+func parseMachineStatus(stdout, name string) (status string, found bool) {
 	for _, line := range strings.Split(stdout, "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 || f[0] != name {
@@ -243,14 +213,14 @@ func machineStatus(stdout, name string) (status string, found bool) {
 // Teardown deletes the jail machine. Idempotent: a no-op if the machine is
 // already absent.
 func (o *OrbStack) Teardown(ctx context.Context) error {
-	res, err := o.R.Run(ctx, nil, "orb", "list")
+	_, found, err := o.machineStatus(ctx)
 	if err != nil {
-		return fmt.Errorf("orb list: %w", err)
+		return err
 	}
-	if !machineListed(res.Stdout, o.Machine) {
+	if !found {
 		return nil // already gone
 	}
-	if _, err := o.R.Run(ctx, nil, "orb", "delete", o.Machine); err != nil {
+	if _, err := o.Runner().Run(ctx, nil, "orb", "delete", o.Machine()); err != nil {
 		return fmt.Errorf("orb delete: %w", err)
 	}
 	return nil
@@ -261,14 +231,14 @@ func (o *OrbStack) Teardown(ctx context.Context) error {
 // a no-op if the machine is already absent; orb tolerates stopping an
 // already-stopped machine, so no separate guard is needed for that case.
 func (o *OrbStack) Stop(ctx context.Context) error {
-	res, err := o.R.Run(ctx, nil, "orb", "list")
+	_, found, err := o.machineStatus(ctx)
 	if err != nil {
-		return fmt.Errorf("orb list: %w", err)
+		return err
 	}
-	if !machineListed(res.Stdout, o.Machine) {
+	if !found {
 		return nil // already gone; nothing to stop
 	}
-	if _, err := o.R.Run(ctx, nil, "orb", "stop", o.Machine); err != nil {
+	if _, err := o.Runner().Run(ctx, nil, "orb", "stop", o.Machine()); err != nil {
 		return fmt.Errorf("orb stop: %w", err)
 	}
 	return nil

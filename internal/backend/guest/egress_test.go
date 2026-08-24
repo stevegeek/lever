@@ -5,37 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
-// closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for `iptables -S`
-// and records whether the chain was flushed or the alias re-resolved.
-type closedChainRunner struct {
-	*exec.FakeRunner
-	flushed, resolved bool
-}
-
-func (r *closedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
-	argv := strings.Join(args, " ")
-	if name == "orb" {
-		switch {
-		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
-			return exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"}, nil
-		case strings.Contains(argv, "-F LEVER_EGRESS"):
-			r.flushed = true
-		case strings.Contains(argv, "getent ahosts"):
-			r.resolved = true
-		}
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
-
-func (r *closedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
-	return r.RunIn(ctx, "", env, name, args...)
-}
-
 // orbGuest returns a Guest shaped like orbstack's, for argv-identical assertions.
-func orbGuest(host exec.Runner, machine string) Guest {
+func orbGuest(host proc.Runner, machine string) Guest {
 	return Guest{
 		Host:       host,
 		UserPrefix: []string{"orb", "-m", machine},
@@ -54,9 +29,9 @@ func noopResolve(t *testing.T) func(context.Context) (string, string, error) {
 }
 
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &closedChainRunner{FakeRunner: exec.NewFakeRunner()}
-	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	r := &backendtest.ClosedChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "orb"}
+	r.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	r.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	g := orbGuest(r, "lever-jail")
 
 	v4, _, rebuilt, err := g.ApplyEgress(context.Background(), noopResolve(t), []int{8443}, true)
@@ -65,10 +40,10 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 	// I2: an already-closed chain must NOT be flushed or re-resolved — that would
 	// briefly open egress for a running agent.
-	if r.flushed {
+	if r.Flushed {
 		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
 	}
-	if r.resolved {
+	if r.Resolved {
 		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
 	}
 	if v4 != "0.250.250.254" {
@@ -83,9 +58,9 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 }
 
 func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) {
@@ -118,9 +93,9 @@ func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
 }
 
 func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }

@@ -3,6 +3,7 @@ package agent
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,11 +16,17 @@ import (
 	"time"
 )
 
-// LocalGatewayURL is the loopback address Claude's MCP/LLM config points at. The
-// gateway sidecar reverse-proxies that plaintext traffic to the real broker over
-// mTLS, presenting the always-current agent leaf — so Claude never holds the
-// rotating cert (which it would otherwise cache for its whole lifetime).
-const LocalGatewayURL = "http://127.0.0.1:8462"
+// LocalGatewayAddr is the loopback address the gateway sidecar listens on and
+// LocalGatewayURL is the same address as the base URL Claude's MCP/LLM config
+// points at. The gateway reverse-proxies that plaintext traffic to the real
+// broker over mTLS, presenting the always-current agent leaf — so Claude never
+// holds the rotating cert (which it would otherwise cache for its whole
+// lifetime). Both the sidecar's --listen argument and the gateway flag default
+// derive from LocalGatewayAddr; there is no second copy of the port.
+const (
+	LocalGatewayAddr = "127.0.0.1:8462"
+	LocalGatewayURL  = "http://" + LocalGatewayAddr
+)
 
 // idleConnTimeout caps how long a pooled broker connection lingers before the
 // proxy must re-handshake. GetClientCertificate runs per-HANDSHAKE, not
@@ -71,7 +78,7 @@ func (s *clientCertSource) GetClientCertificate(_ *tls.CertificateRequestInfo) (
 			if s.cert == nil || now().After(s.cert.Leaf.NotAfter) {
 				return nil, rerr
 			}
-			log.Printf("agent: re-read agent leaf failed, serving cached: %v", rerr)
+			log.Printf("gateway: re-read agent leaf failed, serving cached: %v", rerr)
 		}
 	}
 	return s.cert, nil
@@ -104,13 +111,17 @@ func (s *clientCertSource) reloadLocked() error {
 	return nil
 }
 
-// caPool builds a RootCAs pool from a PEM bundle. prefix tags the returned error
-// ("agent"/"gateway") so each caller keeps its existing error string; nothing
-// matches on those strings, so the prefix is purely for operator-facing clarity.
-func caPool(caPEM []byte, prefix string) (*x509.CertPool, error) {
+// errBadCAPEM means the CA bundle held no parsable certificate.
+var errBadCAPEM = errors.New("agent: bad CA PEM")
+
+// errNotLoopback means the gateway was asked to listen off-host.
+var errNotLoopback = errors.New("gateway: listen addr must be loopback")
+
+// caPool builds a RootCAs pool from a PEM bundle.
+func caPool(caPEM []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("%s: bad CA PEM", prefix)
+		return nil, errBadCAPEM
 	}
 	return pool, nil
 }
@@ -120,14 +131,13 @@ func caPool(caPEM []byte, prefix string) (*x509.CertPool, error) {
 // caPEM and presents the rotating agent leaf from idDir via a per-handshake
 // clientCertSource, with IdleConnTimeout capping pooled-connection reuse so a
 // rotated leaf reaches the broker well within its TTL. Mints eagerly so a broken
-// id-dir fails now, not on the first live handshake. prefix tags the bad-CA-PEM
-// error for the calling site.
-func reloadingTransport(idDir string, caPEM []byte, prefix string) (*http.Transport, error) {
+// id-dir fails now, not on the first live handshake.
+func reloadingTransport(idDir string, caPEM []byte) (*http.Transport, error) {
 	src, err := newClientCertSource(idDir)
 	if err != nil {
 		return nil, err
 	}
-	pool, err := caPool(caPEM, prefix)
+	pool, err := caPool(caPEM)
 	if err != nil {
 		return nil, err
 	}
@@ -153,28 +163,36 @@ func reloadingTransport(idDir string, caPEM []byte, prefix string) (*http.Transp
 // often (same reasoning as the gateway).
 // Mints eagerly so a broken id-dir fails now, not on the first live handshake.
 func NewReloadingClient(idDir string, caPEM []byte) (*http.Client, error) {
-	tr, err := reloadingTransport(idDir, caPEM, "agent")
+	tr, err := reloadingTransport(idDir, caPEM)
 	if err != nil {
 		return nil, err
 	}
 	return &http.Client{Transport: tr}, nil
 }
 
+// GatewayConfig drives Gateway.
+type GatewayConfig struct {
+	Listen    string // loopback address to serve plaintext on (LocalGatewayAddr in production)
+	BrokerURL string // real broker origin the proxy forwards to over mTLS
+	CAPEM     []byte // CA that signed the broker's serving cert
+	IDDir     string // directory holding the rotating agent.{crt,key}
+}
+
 // Gateway runs the loopback reverse-proxy: it accepts plaintext HTTP from
-// in-container Claude on listenAddr and forwards to the real broker at brokerURL
-// over mTLS, presenting the rotating agent leaf from idDir. Blocks until the
+// in-container Claude on c.Listen and forwards to the real broker at c.BrokerURL
+// over mTLS, presenting the rotating agent leaf from c.IDDir. Blocks until the
 // listener closes (process signal).
-func Gateway(listenAddr, brokerURL string, caPEM []byte, idDir string) error {
-	if err := requireLoopback(listenAddr); err != nil {
+func Gateway(c GatewayConfig) error {
+	if err := requireLoopback(c.Listen); err != nil {
 		return err
 	}
-	proxy, err := newGatewayProxy(brokerURL, caPEM, idDir)
+	proxy, err := newGatewayProxy(c.BrokerURL, c.CAPEM, c.IDDir)
 	if err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", listenAddr)
+	ln, err := net.Listen("tcp", c.Listen)
 	if err != nil {
-		return fmt.Errorf("gateway: listen %s: %w", listenAddr, err)
+		return fmt.Errorf("gateway: listen %s: %w", c.Listen, err)
 	}
 	srv := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(ln)
@@ -189,7 +207,7 @@ func requireLoopback(listenAddr string) error {
 		return fmt.Errorf("gateway: parse listen addr %q: %w", listenAddr, err)
 	}
 	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("gateway: listen addr must be loopback, got %q", listenAddr)
+		return fmt.Errorf("%w, got %q", errNotLoopback, listenAddr)
 	}
 	return nil
 }
@@ -201,7 +219,7 @@ func newGatewayProxy(brokerURL string, caPEM []byte, idDir string) (*httputil.Re
 	if err != nil {
 		return nil, fmt.Errorf("gateway: parse broker URL %q: %w", brokerURL, err)
 	}
-	tr, err := reloadingTransport(idDir, caPEM, "gateway")
+	tr, err := reloadingTransport(idDir, caPEM)
 	if err != nil {
 		return nil, err
 	}

@@ -1,14 +1,15 @@
 // Package brokerctl is the host-side controller for the lever capability broker:
 // it translates a lever config into a broker.Config, ensures the CA + capability
-// signing root key, supervises first-party tool subprocesses, and runs the broker.
+// signing root key, supervises first-party tool subprocesses, runs the broker,
+// and stops the host-side daemons. The state directory it reads and writes is
+// package state's.
 package brokerctl
 
 import (
+	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"slices"
-	"strings"
 
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/broker/registry"
@@ -16,22 +17,24 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
-
-// serverName is the DEFAULT (orbstack) server name; Serve overrides it from the
-// selected backend's HostToolAlias.
-const serverName = "host.orb.internal"
 
 // llmSentinelBackend is the Backend value of the reserved llm pseudo-tool. It
 // satisfies registry.Register's non-empty-Backend invariant but is NEVER dialed:
 // the llm capability is exercised by the broker /llm proxy, not an /mcp/<name>/ tool route.
 const llmSentinelBackend = "lever:llm-proxy"
 
-// BuildBroker assembles a broker.Config from the parsed app config: the
-// request/delegation policy (from manager+worker grants), the pre-loaded tool
-// registry (config-authoritative envelopes; caveat_param is the config-declared
-// guard, the tool re-supplies it at /register), the agent list, and TTLs. The
-// caller supplies the keys/CA/tickets (EnsureKeys, Task 3).
+// errEmptyAPIKeyFile means api_key_file exists but holds only whitespace. An
+// absent file is a different error (fs.ErrNotExist from package state).
+var errEmptyAPIKeyFile = errors.New("is empty")
+
+// BuildBroker assembles the config-derived groups of a broker.Config from the
+// parsed app config — Identity (the request/delegation policy from
+// manager+worker grants, the pre-loaded tool registry whose config-authoritative
+// envelopes the tool re-supplies at /register, the manager identity and TTLs)
+// and LLM (the api_key_file contents and upstream). The caller supplies the
+// keys/CA/tickets (EnsureKeys); decorateConfig fills the host-side groups.
 func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca.TicketStore) (broker.Config, error) {
 	pol := rules.NewPolicy()
 	addGrants := func(cn string, obtain []config.Grant, delegate []config.DelegateGrant) {
@@ -43,10 +46,8 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		}
 	}
 	addGrants(app.ManagerCN(), app.Manager.Obtain, app.Manager.Delegate)
-	agents := make([]string, 0, len(app.Workers))
 	for _, g := range app.Workers {
 		addGrants(g.Name, g.Obtain, g.Delegate)
-		agents = append(agents, g.Name)
 	}
 
 	reg := registry.New()
@@ -92,40 +93,38 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 	}
 
 	cfg := broker.Config{
-		Keys:            keys,
-		CA:              caInst,
-		Tickets:         tickets,
-		Rules:           pol,
-		Registry:        reg,
-		ManagerIdentity: app.ManagerCN(),
-		Agents:          agents,
-		GrantTTL:        app.Broker.GrantTTL,
-		TicketTTL:       app.Broker.TicketTTL,
-		ServerName:      serverName,
-		LLMUpstream:     app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com
+		Identity: broker.IdentityConfig{
+			Keys:            keys,
+			CA:              caInst,
+			Tickets:         tickets,
+			Rules:           pol,
+			Registry:        reg,
+			ManagerIdentity: app.ManagerCN(),
+			// The manager's scion agent slug is the APP NAME (apply's start-manager
+			// dispatches the manager as Worker: app.Name), not the manager cert CN.
+			ManagerSlug: app.Name,
+			GrantTTL:    app.Broker.GrantTTL,
+			TicketTTL:   app.Broker.TicketTTL,
+		},
+		LLM: broker.LLMConfig{
+			Upstream: app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com
+		},
 	}
 
 	// Load the api_key_file into the broker config so the /llm proxy has the
 	// key. This is host-side only; the key never enters a container.
-	// Defense-in-depth: re-check 0600 here even though config.Validate also
-	// checks it — brokerctl may be invoked outside the apply/validate path.
+	// Defense-in-depth: ReadRequiredSecret re-checks 0600 here even though
+	// config.Validate also checks it — brokerctl may be invoked outside the
+	// apply/validate path. An absent file is its own error (not "is empty").
 	if app.AnyAPIKeyAgent() {
-		fi, err := os.Stat(app.Broker.APIKeyFile)
+		key, err := state.ReadRequiredSecret(app.Broker.APIKeyFile, "api_key_file")
 		if err != nil {
-			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file: %w", err)
+			return broker.Config{}, fmt.Errorf("brokerctl: %w", err)
 		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file must be 0600, got %#o", perm)
+		if key == "" {
+			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q %w", app.Broker.APIKeyFile, errEmptyAPIKeyFile)
 		}
-		key, err := os.ReadFile(app.Broker.APIKeyFile)
-		if err != nil {
-			return broker.Config{}, fmt.Errorf("brokerctl: read api_key_file: %w", err)
-		}
-		trimmed := strings.TrimSpace(string(key))
-		if trimmed == "" {
-			return broker.Config{}, fmt.Errorf("brokerctl: api_key_file %q is empty", app.Broker.APIKeyFile)
-		}
-		cfg.APIKey = []byte(trimmed)
+		cfg.LLM.APIKey = []byte(key)
 	}
 
 	return cfg, nil

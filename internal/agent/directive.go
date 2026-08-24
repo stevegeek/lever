@@ -1,46 +1,33 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // directivePost posts {"id":id} to a directive route over the agent's own
-// mTLS channel and returns the raw JSON body on 200. Non-200 bodies are
-// deliberately terse (the broker's opaque contract) — surface them as-is.
+// mTLS channel and returns the raw JSON body on 200. A non-200 surfaces as
+// httpjson's *StatusError (the broker's terse body is carried verbatim in
+// its text), the same shape the `request` tool already reports.
 func directivePost(ctx context.Context, brokerURL string, client *http.Client, route, id string) (json.RawMessage, error) {
-	body, _ := json.Marshal(map[string]string{"id": id})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brokerURL+route, bytes.NewReader(body))
-	if err != nil {
+	var raw json.RawMessage
+	if err := httpjson.Post(ctx, client, brokerURL+route, wire.DirectiveIDRequest{ID: id}, &raw); err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s", bytes.TrimSpace(b))
-	}
-	return json.RawMessage(b), nil
+	return raw, nil
 }
 
 // DirectiveConsume atomically consumes an operator directive over the
 // agent's mTLS channel. The returned JSON is the ONLY authoritative body.
 func DirectiveConsume(ctx context.Context, brokerURL string, client *http.Client, id string) (json.RawMessage, error) {
-	return directivePost(ctx, brokerURL, client, "/directive/consume", id)
+	return directivePost(ctx, brokerURL, client, wire.PathDirectiveConsume, id)
 }
 
 // DirectiveCheck reads a directive's status (target-gated, read-only).
 func DirectiveCheck(ctx context.Context, brokerURL string, client *http.Client, id string) (json.RawMessage, error) {
-	return directivePost(ctx, brokerURL, client, "/directive/check", id)
+	return directivePost(ctx, brokerURL, client, wire.PathDirectiveCheck, id)
 }

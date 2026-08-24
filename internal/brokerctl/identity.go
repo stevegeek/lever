@@ -1,11 +1,8 @@
 package brokerctl
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // ConfigHash digests the broker-relevant configuration: the broker block
@@ -23,17 +20,28 @@ import (
 // scion.Client.roleFlagSupported) instead of trusting a restart to invalidate
 // it — a stale "no --role" would hand every agent scion#1090's FULL default.
 func ConfigHash(app *config.App) string {
-	j, err := json.Marshal(struct {
+	// Marshal of plain config structs cannot fail in practice; an empty hash
+	// (HashJSON's failure value) makes the comparison a guaranteed mismatch
+	// (restart), which fails toward the safe side.
+	return state.HashJSON(struct {
 		Broker  config.Broker
 		Workers []config.Worker
 		Scion   config.ScionConfig
 	}{app.Broker, app.Workers, app.Scion})
-	if err != nil {
-		// Marshal of plain config structs cannot fail in practice; an empty
-		// hash makes the comparison a guaranteed mismatch (restart), which
-		// fails toward the safe side.
-		return ""
-	}
-	sum := sha256.Sum256(j)
-	return hex.EncodeToString(sum[:])
+}
+
+// RemoteConfigHash digests the config a `lever remote serve` process captures
+// at startup — see state.RemoteConfigHash for why. This is the only place
+// that maps config.App onto state.RemoteIdentity, so state stays free of
+// config types.
+func RemoteConfigHash(app *config.App) string {
+	return state.RemoteConfigHash(state.RemoteIdentity{
+		Enabled:      app.Remote.Enabled,
+		Port:         app.Remote.Port,
+		BaseURL:      app.Remote.BaseURL,
+		AllowedUsers: app.Remote.AllowedUsers,
+		LoginPort:    app.Remote.LoginPort,
+		Name:         app.Name,
+		Backend:      app.Backend,
+	})
 }

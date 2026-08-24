@@ -2,11 +2,10 @@ package broker
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -119,46 +116,15 @@ func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event,
 const testInstanceProject = "/lever"
 
 func TestWorkerSpecLookup(t *testing.T) {
-	b := New(Config{
+	b := New(Config{Dispatch: DispatchConfig{
 		Workers: []WorkerSpec{{Name: "worker", WorkspaceSubdir: "workers/worker"}},
-	})
+	}})
 	if _, ok := b.workerSpec("worker"); !ok {
 		t.Fatal("expected worker spec present")
 	}
 	if _, ok := b.workerSpec("nope"); ok {
 		t.Fatal("expected absent spec to be missing")
 	}
-}
-
-// fakeTLSWithCN returns a synthetic TLS connection state whose verified client
-// cert CN is cn. Sufficient for RequireAgent in tests that don't need a real CA.
-func fakeTLSWithCN(cn string) *tls.ConnectionState {
-	return &tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{
-			{Subject: pkix.Name{CommonName: cn}},
-		},
-	}
-}
-
-// caTicketStore returns a fresh, empty TicketStore for tests.
-func caTicketStore(_ *testing.T) *ca.TicketStore {
-	return ca.NewTicketStore()
-}
-
-// newTestBroker builds a Broker with a fake runtime, a real ticket store, and a
-// temp bootstrap dir for the given single worker.
-func newTestBroker(t *testing.T, rt WorkerRuntime, spec WorkerSpec) *Broker {
-	t.Helper()
-	return New(Config{
-		Tickets:         caTicketStore(t),
-		Registry:        registry.New(),
-		Runtime:         rt,
-		Workers:         []WorkerSpec{spec},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-		InstanceProject: testInstanceProject,
-	})
 }
 
 // callWorker drives a handler with a synthetic verified client cert CN.
@@ -355,15 +321,12 @@ func TestWorkerStartRefusesTaskMismatch(t *testing.T) {
 // After a successful Start, an un-live container (crash-loop) must surface as a
 // loud error, NOT a false {Phase:"running"}.
 func TestWorkerStartLivenessTimeout(t *testing.T) {
-	origAtt, origInt := workerLiveAttempts, workerLiveInterval
-	workerLiveAttempts, workerLiveInterval = 3, time.Millisecond
-	defer func() { workerLiveAttempts, workerLiveInterval = origAtt, origInt }()
-
 	dir := t.TempDir()
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
 		BootstrapDir: filepath.Join(dir, ".lever")}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, exitedAfterStart: true} // absent, then Exited after Start
 	b := newTestBroker(t, rt, spec)
+	b.liveAttempts, b.liveInterval = 3, time.Millisecond
 
 	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
 
@@ -409,10 +372,6 @@ func (r *midPollListFailRuntime) List(ctx context.Context, project string) ([]sc
 // reports the worker running/live. This behavior must survive the WaitAgentLive
 // extraction (plan B3).
 func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
-	origAtt, origInt := workerLiveAttempts, workerLiveInterval
-	workerLiveAttempts, workerLiveInterval = 5, time.Millisecond
-	defer func() { workerLiveAttempts, workerLiveInterval = origAtt, origInt }()
-
 	dir := t.TempDir()
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
 		BootstrapDir: filepath.Join(dir, ".lever")}
@@ -421,6 +380,7 @@ func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
 		failAfterAct: 2,                                                // two blips inside the liveness poll before a live record
 	}
 	b := newTestBroker(t, rt, spec)
+	b.liveAttempts, b.liveInterval = 5, time.Millisecond
 
 	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
 
@@ -492,6 +452,26 @@ func TestWorkerStart_authz(t *testing.T) {
 	}
 }
 
+// Authentication runs BEFORE the body is decoded on every worker route: an
+// intruder posting garbage gets 403, not 400 (no body-shape oracle), and the
+// manager posting garbage gets 400 with a "bad body" audit line.
+func TestWorkerRoutes_authBeforeDecode(t *testing.T) {
+	for _, path := range []string{"/worker/start", "/worker/stop", "/worker/suspend", "/worker/resume"} {
+		t.Run(path, func(t *testing.T) {
+			b, _, audit := newMsgTestBroker(t, true)
+			if rec := callWorker(t, b, path, `{`, "intruder"); rec.Code != http.StatusForbidden {
+				t.Fatalf("intruder bad body: status = %d, want 403", rec.Code)
+			}
+			if rec := callWorker(t, b, path, `{`, "manager"); rec.Code != http.StatusBadRequest {
+				t.Fatalf("manager bad body: status = %d, want 400", rec.Code)
+			}
+			if !strings.Contains(audit.String(), `detail="bad body"`) {
+				t.Fatalf("audit missing bad body line: %s", audit.String())
+			}
+		})
+	}
+}
+
 // TestWorkerList proves the list fan-out is collapsed to a SINGLE
 // List(instanceProject) call that returns the whole fleet (multiple workers),
 // not one call per declared worker.
@@ -502,20 +482,11 @@ func TestWorkerList(t *testing.T) {
 			{Slug: "helper", Phase: "suspended"},
 		},
 	}}
-	b := New(Config{
-		Tickets:  caTicketStore(t),
-		Registry: registry.New(),
-		Runtime:  rt,
-		Workers: []WorkerSpec{
-			{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()},
-			{Name: "helper", WorkspaceSubdir: "workers/helper", BootstrapDir: t.TempDir()},
-		},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-		InstanceProject: testInstanceProject,
-	})
-	req := httptest.NewRequest("GET", "/worker/list", nil)
+	b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt,
+		WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()},
+		WorkerSpec{Name: "helper", WorkspaceSubdir: "workers/helper", BootstrapDir: t.TempDir()},
+	)))
+	req := httptest.NewRequest("POST", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
 	rec := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec, req)
@@ -536,7 +507,7 @@ func TestWorkerList(t *testing.T) {
 		t.Fatalf("bad list: %+v", out.Agents)
 	}
 	// non-manager rejected
-	req2 := httptest.NewRequest("GET", "/worker/list", nil)
+	req2 := httptest.NewRequest("POST", "/worker/list", nil)
 	req2.TLS = fakeTLSWithCN("intruder")
 	rec2 := httptest.NewRecorder()
 	b.JailHandler().ServeHTTP(rec2, req2)
@@ -548,61 +519,29 @@ func TestWorkerList(t *testing.T) {
 // TestWorkerNilRuntime_returns502 proves that when the scion runtime is unwired
 // (nil) the worker handlers return 502, not a panic from a nil-interface call.
 func TestWorkerNilRuntime_returns502(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
 	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
-	b := New(Config{
-		Tickets:         caTicketStore(t),
-		Registry:        registry.New(),
-		Runtime:         nil, // unwired: simulates manual `lever broker serve`
-		Workers:         []WorkerSpec{spec},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-	})
-
-	// /worker/start with manager CN must return 502, not panic.
-	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"go"}`, "test-manager")
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("/worker/start nil-runtime: status = %d, want 502", rec.Code)
-	}
-
-	// /worker/list with manager CN must also return 502, not panic.
-	req := httptest.NewRequest("GET", "/worker/list", nil)
-	req.TLS = fakeTLSWithCN("test-manager")
-	rec2 := httptest.NewRecorder()
-	b.JailHandler().ServeHTTP(rec2, req)
-	if rec2.Code != http.StatusBadGateway {
-		t.Fatalf("/worker/list nil-runtime: status = %d, want 502", rec2.Code)
-	}
+	// Runtime nil: unwired, simulates a manual `lever broker serve`.
+	// Both verbs with the manager CN must return 502, not panic.
+	assertNilRuntimeVerbs(t, "test-manager", http.StatusBadGateway)
 }
 
 // TestWorkerNilRuntime_authzPrecedence proves that even with nil runtime, an
 // unauthenticated or non-manager caller gets 403 (authz runs before the nil check).
 func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
+	assertNilRuntimeVerbs(t, "intruder", http.StatusForbidden)
+}
+
+// assertNilRuntimeVerbs calls /worker/start and /worker/list as cn on a broker
+// whose scion runtime is nil and pins the status both must answer.
+func assertNilRuntimeVerbs(t *testing.T, cn string, want int) {
+	t.Helper()
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
-	b := New(Config{
-		Tickets:         caTicketStore(t),
-		Registry:        registry.New(),
-		Runtime:         nil,
-		Workers:         []WorkerSpec{spec},
-		BrokerCAPEM:     "CA-PEM",
-		BrokerURL:       "https://10.0.0.2:8080",
-		ManagerIdentity: "test-manager",
-	})
-
-	// Non-manager CN on /worker/start must get 403, not 502.
-	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder")
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("/worker/start intruder nil-runtime: status = %d, want 403", rec.Code)
-	}
-
-	// Non-manager CN on /worker/list must get 403, not 502.
-	req := httptest.NewRequest("GET", "/worker/list", nil)
-	req.TLS = fakeTLSWithCN("intruder")
-	rec2 := httptest.NewRecorder()
-	b.JailHandler().ServeHTTP(rec2, req)
-	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("/worker/list intruder nil-runtime: status = %d, want 403", rec2.Code)
+	b := newTestBroker(t, nil, spec)
+	for _, path := range []string{"/worker/start", "/worker/list"} {
+		rec := callWorker(t, b, path, `{"worker":"worker","task":"go"}`, cn)
+		if rec.Code != want {
+			t.Fatalf("%s %s nil-runtime: status = %d, want %d", path, cn, rec.Code, want)
+		}
 	}
 }
 
@@ -646,7 +585,7 @@ func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 		t.Fatalf("revoked manager dispatch: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
 	// No bootstrap staged, no start attempted.
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("revoked dispatch must not stage bootstrap")
 	}
 }

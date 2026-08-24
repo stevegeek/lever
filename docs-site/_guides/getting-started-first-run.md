@@ -66,7 +66,6 @@ lever apply --dry-run
 You'll see a `backend: <profile summary>` line, then the ordered plan:
 
 ```
-  jail-up                 /…/hello-worker/workspace
   broker-up
   load-image              scionlocal/lever-claude:arm64
   init-machine

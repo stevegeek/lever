@@ -10,14 +10,15 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend/common"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // Run with: go test -tags integration -run TestRealOrbStack ./internal/backend/orbstack/ -v
 // Requires OrbStack running. Creates and DELETES a throwaway jail.
 func TestRealOrbStack(t *testing.T) {
 	machine := "lever-it-" + os.Getenv("USER")
-	b := New(exec.RealRunner{}, machine)
+	b := New(proc.RealRunner{}, machine, common.Options{})
 	ctx := context.Background()
 	t.Cleanup(func() { _ = b.Teardown(ctx) })
 
@@ -37,7 +38,7 @@ func TestRealOrbStack(t *testing.T) {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 
-	r := exec.RealRunner{}
+	r := proc.RealRunner{}
 
 	// 1. Sentinel must be readable at /lever/<sentinelName> inside the jail.
 	res, err := r.Run(ctx, nil, "orb", "-m", machine, "bash", "-lc",

@@ -46,39 +46,6 @@ func (s *stubSession) state() (handedOut int, invalidated []string, logins []str
 	return s.handedOut, append([]string(nil), s.invalidated...), append([]string(nil), s.logins...)
 }
 
-// recordingHub captures what each forwarded request carried and answers with
-// whatever the test queued.
-type recordingHub struct {
-	*httptest.Server
-	mu     sync.Mutex
-	seen   []*http.Request
-	answer func(w http.ResponseWriter, r *http.Request)
-}
-
-func newRecordingHub(t *testing.T) *recordingHub {
-	t.Helper()
-	h := &recordingHub{}
-	h.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.mu.Lock()
-		h.seen = append(h.seen, r.Clone(r.Context()))
-		answer := h.answer
-		h.mu.Unlock()
-		if answer != nil {
-			answer(w, r)
-			return
-		}
-		_, _ = w.Write([]byte("ok"))
-	}))
-	t.Cleanup(h.Server.Close)
-	return h
-}
-
-func (h *recordingHub) requests() []*http.Request {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]*http.Request(nil), h.seen...)
-}
-
 // TestSessionNeverRidesAnAPIRequest is the least-privilege property: /api/v1
 // keeps riding the narrow remote PAT, and only the UI shell gets the hub
 // session. scion's sessionToBearerMiddleware passes a request through when it
@@ -88,7 +55,7 @@ func (h *recordingHub) requests() []*http.Request {
 func TestSessionNeverRidesAnAPIRequest(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 
 	for _, path := range []string{"/api/v1", "/api/v1/agents", "/api/v1/agents/x/messages"} {
@@ -117,7 +84,7 @@ func TestSessionNeverRidesAnAPIRequest(t *testing.T) {
 func TestShellRequestCarriesTheSessionAndThePAT(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess, AllowedUsers: []string{"op@example.test"}})
 
 	for _, path := range []string{"/", "/auth/me", "/assets/main.js"} {
@@ -150,7 +117,7 @@ func TestShellRequestCarriesTheSessionAndThePAT(t *testing.T) {
 func TestClientSuppliedCookieIsReplacedNotMerged(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 	req := proxyRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Cookie", "scion_sess=attacker; other=1")
@@ -200,7 +167,7 @@ func TestStaleSessionIsRenewedAndTheRequestRetried(t *testing.T) {
 			hub.answer = answer
 			sess := &stubSession{cookie: "stale-session"}
 			var audited []AuditLine
-			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 				ServeHost: "mac.ts.net", Session: sess,
 				Audit: func(l AuditLine) { audited = append(audited, l) }})
 
@@ -240,7 +207,7 @@ func TestRetryHappensOnlyOnce(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
@@ -262,7 +229,7 @@ func TestOnlyBodilessMethodsAreRetried(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, proxyRequest(http.MethodPost, "/upload", strings.NewReader("body")))
@@ -284,7 +251,7 @@ func TestNonSessionFailuresArePassedThrough(t *testing.T) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
@@ -307,7 +274,7 @@ func TestRedirectsThatAreNotLoginPagesPassThrough(t *testing.T) {
 		http.Redirect(w, r, "/agents/manager", http.StatusFound)
 	}
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
@@ -323,7 +290,7 @@ func TestLoginFailureIs502NotAPage(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{err: errors.New("hub refused the callback (state_mismatch)")}
 	var audited []AuditLine
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess, Audit: func(l AuditLine) { audited = append(audited, l) }})
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
@@ -342,7 +309,7 @@ func TestLoginFailureIs502NotAPage(t *testing.T) {
 // pre-existing caller) working unchanged when no provider is configured.
 func TestNoSessionSourceMeansNoCookie(t *testing.T) {
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net"})
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/", nil))
@@ -381,7 +348,7 @@ func TestSessionAndProxyEndToEnd(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
 	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p})
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", AllowedUsers: []string{"op@example.test"}, Session: d})
 
 	get := func(path string) *httptest.ResponseRecorder {
@@ -421,7 +388,7 @@ func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
 	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p})
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: d})
 
 	rw := httptest.NewRecorder()
@@ -455,7 +422,7 @@ func TestSignInNavigationIsDrivenNotForwarded(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
 	var audited []AuditLine
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess, Audit: func(l AuditLine) { audited = append(audited, l) }})
 
 	rw := httptest.NewRecorder()
@@ -490,7 +457,7 @@ func TestSignInNavigationIsDrivenNotForwarded(t *testing.T) {
 func TestSignInNavigationPreservesReturnTarget(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 
 	cases := []struct{ returnTo, want string }{
@@ -522,7 +489,7 @@ func TestSignInNavigationPreservesReturnTarget(t *testing.T) {
 func TestCallbackIsForwardedNotIntercepted(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 
 	rw := httptest.NewRecorder()
@@ -541,7 +508,7 @@ func TestCallbackIsForwardedNotIntercepted(t *testing.T) {
 func TestSignInNavigationLoginFailureIs502(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{err: errors.New("hub refused the callback (state_mismatch)")}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: sess})
 
 	rw := httptest.NewRecorder()
@@ -566,7 +533,7 @@ func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
 	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p})
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "scion_pat_x" },
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
 		ServeHost: "mac.ts.net", Session: d})
 
 	rw := httptest.NewRecorder()
@@ -589,5 +556,28 @@ func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 	}
 	if logins, _ := hub.counts(); logins != 1 {
 		t.Fatalf("shell request logged in again (%d handshakes) — the session was not reused", logins)
+	}
+}
+
+// TestLoginFailureNamesTheConfiguredLog pins the denial text the operator
+// reads when the hub login fails: it points at the proxy's log, taken from
+// Config.LogPath, with DefaultLogPath when the caller set none.
+func TestLoginFailureNamesTheConfiguredLog(t *testing.T) {
+	hub := newRecordingHub(t)
+	for _, tc := range []struct{ logPath, want string }{
+		{"", "hub login failed — see .lever-state/remote.log"},
+		{"/srv/x/.lever-state/remote.log", "hub login failed — see /srv/x/.lever-state/remote.log"},
+	} {
+		sess := &stubSession{err: errors.New("hub refused")}
+		h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+			ServeHost: "mac.ts.net", Session: sess, LogPath: tc.logPath})
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, proxyRequest("GET", "/", nil))
+		if rw.Code != http.StatusBadGateway {
+			t.Fatalf("LogPath %q: status = %d, want 502", tc.logPath, rw.Code)
+		}
+		if got := strings.TrimSpace(rw.Body.String()); got != tc.want {
+			t.Fatalf("LogPath %q: body = %q, want %q", tc.logPath, got, tc.want)
+		}
 	}
 }

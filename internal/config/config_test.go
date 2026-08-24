@@ -9,21 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
-func writeTmp(t *testing.T, body string) string {
+// writeConfig writes body as a lever.yaml in a fresh temp dir and returns its
+// path. The default llm_auth is api-key, which requires a broker.api_key_file
+// these minimal fixtures don't provide, so a body that says nothing about
+// broker:/llm_auth defaults to subscription; tests that care set it explicitly.
+func writeConfig(t *testing.T, body string) string {
 	t.Helper()
-	// The default llm_auth is api-key, which requires a broker.api_key_file these
-	// minimal fixtures don't provide. Tests that don't exercise llm_auth default to
-	// subscription; tests that care set broker:/llm_auth: explicitly.
 	if !strings.Contains(body, "llm_auth") && !strings.Contains(body, "broker:") {
 		body += "broker:\n  llm_auth: subscription\n"
 	}
-	dir := t.TempDir()
-	tree := filepath.Join(dir, "tree")
-	_ = os.MkdirAll(filepath.Join(tree, "workers", "appa"), 0o755)
-	p := filepath.Join(dir, "app.yaml")
+	p := filepath.Join(t.TempDir(), "lever.yaml")
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +29,7 @@ func writeTmp(t *testing.T, body string) string {
 }
 
 func TestLoadValid(t *testing.T) {
-	p := writeTmp(t, `name: demo
+	p := writeConfig(t, `name: demo
 backend: orbstack
 tree: ./tree
 manager:
@@ -41,7 +39,7 @@ workers:
   - name: appa
     dir: workers/appa
 `)
-	app, err := Load(p)
+	app, err := LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -61,8 +59,8 @@ workers:
 
 func TestScionSourceResolved(t *testing.T) {
 	// relative path → resolved under the config dir and absolute
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: relative/scion\n")
-	app, err := Load(p)
+	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: relative/scion\n")
+	app, err := LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -75,8 +73,8 @@ func TestScionSourceResolved(t *testing.T) {
 	}
 
 	// absolute path → stays as-is
-	p = writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: /abs/scion-src\n")
-	app, err = Load(p)
+	p = writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: /abs/scion-src\n")
+	app, err = LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -85,8 +83,8 @@ func TestScionSourceResolved(t *testing.T) {
 	}
 
 	// empty → stays empty
-	p = writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
-	app, err = Load(p)
+	p = writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
+	app, err = LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -133,39 +131,41 @@ func TestCredentialFileResolved(t *testing.T) {
 	}
 }
 
+// TestAPIKeyFileResolvedAgainstConfigDir: a relative broker.api_key_file is
+// resolved against the config's directory like credential_file, so a config
+// loaded from another cwd (`lever broker serve`) still finds the key.
+func TestAPIKeyFileResolvedAgainstConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "secrets", "api-key")
+	if err := os.WriteFile(key, []byte("sk-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "lever.yaml")
+	mustWriteFile(t, cfg, "name: a\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: api-key\n  api_key_file: secrets/api-key\nmanager: {}\n")
+	app, err := Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Broker.APIKeyFile != key {
+		t.Fatalf("APIKeyFile = %q, want %q", app.Broker.APIKeyFile, key)
+	}
+}
+
 func TestValidateRejectsUnknownBackend(t *testing.T) {
-	p := writeTmp(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n")
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected error for unknown backend")
-	}
-	if !strings.Contains(err.Error(), "unknown backend") {
-		t.Errorf("error %q should say 'unknown backend'", err)
-	}
+	rejectNoHost(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n", msgUnknownBackend)
 }
 
 // A backend lever cannot run — including ex-roadmap names like linux-docker —
 // must be rejected at config load, naming the valid set.
 func TestConfigRejectsUnknownBackend(t *testing.T) {
-	p := writeTmp(t, "name: x\nbackend: linux-docker\ntree: ./tree\nmanager: {}\n")
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected error for an unknown backend")
-	}
-	if !strings.Contains(err.Error(), "unknown backend") || !strings.Contains(err.Error(), "orbstack") {
-		t.Errorf("error %q should say 'unknown backend' and name the valid set", err)
-	}
+	rejectNoHost(t, "name: x\nbackend: linux-docker\ntree: ./tree\nmanager: {}\n", msgUnknownBackend, "orbstack")
 }
 
 func TestValidateRequiresBackend(t *testing.T) {
-	p := writeTmp(t, "name: x\ntree: ./tree\nmanager: {}\n")
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected error when backend is omitted")
-	}
-	if !strings.Contains(err.Error(), "backend is required") {
-		t.Errorf("error %q should say 'backend is required'", err)
-	}
+	rejectNoHost(t, "name: x\ntree: ./tree\nmanager: {}\n", "backend is required")
 }
 
 func TestValidateRejectsWorkerMissingNameOrDir(t *testing.T) {
@@ -174,20 +174,15 @@ func TestValidateRejectsWorkerMissingNameOrDir(t *testing.T) {
 		"missing dir":  "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: a\n",
 	}
 	for label, yaml := range cases {
-		p := writeTmp(t, yaml)
-		_, err := Load(p)
-		if err == nil {
-			t.Fatalf("%s: expected error for worker with empty name/dir", label)
-		}
-		if !strings.Contains(err.Error(), "worker needs name + dir") {
-			t.Errorf("%s: error %q should say 'worker needs name + dir'", label, err)
-		}
+		t.Run(label, func(t *testing.T) {
+			rejectNoHost(t, yaml, "worker needs name + dir")
+		})
 	}
 }
 
 func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: bad\n    dir: ../escape\n")
-	if _, err := Load(p); err == nil {
+	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nworkers:\n  - name: bad\n    dir: ../escape\n")
+	if _, err := LoadNoHostChecks(p); err == nil {
 		t.Fatal("expected error for worker dir outside tree")
 	}
 }
@@ -199,18 +194,14 @@ func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
 // `tree`.
 func TestValidateRejectsWorkerDirDot(t *testing.T) {
 	for _, dir := range []string{".", "./"} {
-		p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: bad\n    dir: "+dir+"\n")
-		_, err := Load(p)
-		if err == nil {
-			t.Fatalf("dir %q: expected error for worker dir collapsing to the tree root", dir)
-		}
-		if !strings.Contains(err.Error(), "collides with the manager's mount root") {
-			t.Errorf("dir %q: error %q should explain the mount-root collision", dir, err)
-		}
+		t.Run(dir, func(t *testing.T) {
+			rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: bad\n    dir: "+dir+"\n",
+				"collides with the manager's mount root")
+		})
 	}
 	// A normal subdir must still pass.
-	ok := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: good\n    dir: workers/good\n")
-	if _, err := Load(ok); err != nil {
+	ok := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: good\n    dir: workers/good\n")
+	if _, err := LoadNoHostChecks(ok); err != nil {
 		t.Fatalf("a normal worker dir (workers/good) must pass, got %v", err)
 	}
 }
@@ -222,14 +213,14 @@ func TestValidateRejectsGitTree(t *testing.T) {
 	}
 	a := &App{Name: "demo", Backend: "orbstack", Tree: tree}
 	a.Broker.LLMAuth = "subscription"
-	if err := a.validateNonGitTree(); err == nil {
+	if err := a.checkNonGitTree(); err == nil {
 		t.Fatalf("expected rejection: tree is itself a git repo")
 	}
 }
 
 func TestValidateRejectsScionSourceAndVersionTogether(t *testing.T) {
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: ./scion-src\n  version: abc123\n")
-	if _, err := Load(p); err == nil {
+	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: ./scion-src\n  version: abc123\n")
+	if _, err := LoadNoHostChecks(p); err == nil {
 		t.Fatal("expected error: scion.source and scion.version are mutually exclusive")
 	}
 }
@@ -237,13 +228,13 @@ func TestValidateRejectsScionSourceAndVersionTogether(t *testing.T) {
 func TestScionAgentRoleValidation(t *testing.T) {
 	// A typo must fail at load, not as an opaque `scion start` error at
 	// bring-up, where an unknown --role value surfaces from deep in the hub.
-	bad := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n  agent_role: baselien\n")
-	if _, err := Load(bad); err == nil {
+	bad := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n  agent_role: baselien\n")
+	if _, err := LoadNoHostChecks(bad); err == nil {
 		t.Fatal("expected error: unknown scion.agent_role")
 	}
 	for _, role := range []string{"baseline", "none", "readonly", "full"} {
-		p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n  agent_role: "+role+"\n")
-		if _, err := Load(p); err != nil {
+		p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n  agent_role: "+role+"\n")
+		if _, err := LoadNoHostChecks(p); err != nil {
 			t.Errorf("agent_role %q must load: %v", role, err)
 		}
 	}
@@ -252,8 +243,8 @@ func TestScionAgentRoleValidation(t *testing.T) {
 func TestScionAgentRoleDefaultsToUnset(t *testing.T) {
 	// Unset is the default ON PURPOSE: --role exists on no pin lever can
 	// currently fetch, so a non-empty default would break every instance.
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n")
-	a, err := Load(p)
+	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n")
+	a, err := LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +396,7 @@ func TestManagerAndWorkerImageResolveArch(t *testing.T) {
 }
 
 func TestLoadParsesWorkerImage(t *testing.T) {
-	p := writeTmp(t, `name: demo
+	p := writeConfig(t, `name: demo
 backend: orbstack
 tree: ./tree
 manager:
@@ -415,7 +406,7 @@ workers:
     dir: workers/appa
     image: scionlocal/lever-rust:latest
 `)
-	app, err := Load(p)
+	app, err := LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -465,8 +456,8 @@ func TestValidateRejectsBadNameImagePrompt(t *testing.T) {
 		"bad worker name":  "name: demo\nbackend: orbstack\ntree: ws\nworkers:\n  - name: Bad\n    dir: workers/x\n",
 	}
 	for label, body := range cases {
-		p := writeTmp(t, body)
-		if _, err := Load(p); err == nil {
+		p := writeConfig(t, body)
+		if _, err := LoadNoHostChecks(p); err == nil {
 			t.Fatalf("%s should be rejected", label)
 		}
 	}
@@ -491,14 +482,7 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
-			p := writeTmp(t, tc.config)
-			_, err := Load(p)
-			if err == nil {
-				t.Fatal("worker name colliding with manager identity must be rejected")
-			}
-			if !strings.Contains(err.Error(), "collides with the manager identity") {
-				t.Errorf("error %q should mention 'collides with the manager identity'", err)
-			}
+			rejectNoHost(t, tc.config, "collides with the manager identity")
 		})
 	}
 }
@@ -508,14 +492,7 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 // broker's resolveMsgTarget, messages addressed to that worker would silently
 // route to the manager instead. Config validation must reject the collision.
 func TestValidateRejectsWorkerNameCollidingWithAppName(t *testing.T) {
-	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: demo\n    dir: workers/demo\n")
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("worker name colliding with the app name must be rejected")
-	}
-	if !strings.Contains(err.Error(), "collides with the manager agent") {
-		t.Errorf("error %q should mention 'collides with the manager agent'", err)
-	}
+	rejectNoHost(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: demo\n    dir: workers/demo\n", "collides with the manager agent")
 }
 
 // manager.allow_ports opens host-loopback ports to the jailed agent — the
@@ -523,29 +500,22 @@ func TestValidateRejectsWorkerNameCollidingWithAppName(t *testing.T) {
 // (bootstrap/revoke/bump-epoch) from the guest, so listing the admin port
 // there must be rejected at config load, not left as an operator footgun.
 func TestManagerAllowPortsRejectsExplicitAdminPort(t *testing.T) {
-	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  admin_port: 9444\nmanager:\n  allow_ports: [9444]\n")
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("manager.allow_ports containing the (explicit) broker admin port must be rejected")
-	}
-	if !strings.Contains(err.Error(), "allow_ports") || !strings.Contains(err.Error(), "admin") {
-		t.Errorf("error %q should mention allow_ports and the admin port", err)
-	}
+	rejectNoHost(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  admin_port: 9444\nmanager:\n  allow_ports: [9444]\n", "allow_ports", "admin")
 }
 
 func TestManagerAllowPortsRejectsDefaultAdminPortWhenUnset(t *testing.T) {
 	// broker.admin_port is left unset, so the effective admin port is the
 	// package default (DefaultBrokerAdminPort) — the rejection must use the
 	// EFFECTIVE port, not just a configured one.
-	p := writeTmp(t, fmt.Sprintf("name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  allow_ports: [%d]\n", DefaultBrokerAdminPort))
-	if _, err := Load(p); err == nil {
+	p := writeConfig(t, fmt.Sprintf("name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  allow_ports: [%d]\n", DefaultBrokerAdminPort))
+	if _, err := LoadNoHostChecks(p); err == nil {
 		t.Fatal("manager.allow_ports containing the DEFAULT broker admin port must be rejected")
 	}
 }
 
 func TestManagerAllowPortsAcceptsOrdinaryPorts(t *testing.T) {
-	p := writeTmp(t, "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  allow_ports: [3305]\n")
-	if _, err := Load(p); err != nil {
+	p := writeConfig(t, "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  allow_ports: [3305]\n")
+	if _, err := LoadNoHostChecks(p); err != nil {
 		t.Fatalf("an ordinary allow_ports entry should load fine: %v", err)
 	}
 }
@@ -616,8 +586,8 @@ func TestSecurityImagePolicy(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := writeTmp(t, tc.body)
-			_, err := Load(p)
+			p := writeConfig(t, tc.body)
+			_, err := LoadNoHostChecks(p)
 			if tc.wantOK && err != nil {
 				t.Fatalf("expected OK, got %v", err)
 			}
@@ -633,22 +603,7 @@ func TestSecurityImagePolicyAppliesToWorkers(t *testing.T) {
 		"security:\n  allowed_image_registries: [scionlocal]\n" +
 		"manager:\n  image: scionlocal/mgr:latest\n" +
 		"workers:\n  - name: g\n    dir: workers/g\n    image: ghcr.io/who/x:latest\n"
-	if _, err := Load(writeTmp(t, body)); err == nil {
-		t.Fatal("worker image outside the allowlist should be rejected")
-	}
-}
-
-func writeConfig(t *testing.T, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "work"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	p := filepath.Join(dir, "lever.yaml")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return p
+	rejectNoHost(t, body) // worker image outside the allowlist should be rejected
 }
 
 const baseCfg = `
@@ -675,7 +630,7 @@ broker:
 `
 
 func TestLoadParsesBrokerAndGrants(t *testing.T) {
-	app, err := Load(writeConfig(t, baseCfg))
+	app, err := LoadNoHostChecks(writeConfig(t, baseCfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,41 +653,19 @@ func TestLoadParsesBrokerAndGrants(t *testing.T) {
 
 func TestLoadRejectsGrantWithUnknownTool(t *testing.T) {
 	bad := baseCfg + "\n# trailing\n"
-	bad = replaceFirst(bad, "tool: db, op: read, to: [worker]", "tool: nope, op: read, to: [worker]")
-	if _, err := Load(writeConfig(t, bad)); err == nil {
-		t.Fatal("a delegate grant referencing an undeclared tool must be rejected")
-	}
+	bad = strings.Replace(bad, "tool: db, op: read, to: [worker]", "tool: nope, op: read, to: [worker]", 1)
+	rejectNoHost(t, bad) // a delegate grant referencing an undeclared tool must be rejected
 }
 
 func TestLoadRejectsDelegateToUnknownAgent(t *testing.T) {
-	bad := replaceFirst(baseCfg, "to: [worker]", "to: [ghost]")
-	if _, err := Load(writeConfig(t, bad)); err == nil {
-		t.Fatal("a delegate.to naming an undeclared agent must be rejected")
-	}
+	bad := strings.Replace(baseCfg, "to: [worker]", "to: [ghost]", 1)
+	rejectNoHost(t, bad) // a delegate.to naming an undeclared agent must be rejected
 }
 
 func TestLoadRejectsGrantWithUnknownOp(t *testing.T) {
 	// db exists but has only op "read"; granting "write" must be rejected.
-	bad := replaceFirst(baseCfg, "op: read, to:", "op: write, to:")
-	if _, err := Load(writeConfig(t, bad)); err == nil {
-		t.Fatal("a delegate grant referencing an undeclared op must be rejected")
-	}
-}
-
-func replaceFirst(s, old, new string) string {
-	i := indexOf(s, old)
-	if i < 0 {
-		return s
-	}
-	return s[:i] + new + s[i+len(old):]
-}
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
+	bad := strings.Replace(baseCfg, "op: read, to:", "op: write, to:", 1)
+	rejectNoHost(t, bad) // a delegate grant referencing an undeclared op must be rejected
 }
 
 // TestRejectsMixedLLMAuthInstance: an instance that mixes api-key and
@@ -749,9 +682,7 @@ func TestRejectsMixedLLMAuthInstance(t *testing.T) {
 		Workers: []Worker{{Name: "worker", Dir: "w", LLMAuth: LLMAuthSubscription}},
 	}
 	err := a.Validate()
-	if err == nil || !strings.Contains(err.Error(), "mixed") {
-		t.Fatalf("mixed instance must be rejected with a 'mixed' error, got: %v", err)
-	}
+	testutil.WantErrContaining(t, err, "mixed")
 }
 
 // TestUniformInstancesValidate: the two pure cases are accepted (uniform
@@ -778,6 +709,32 @@ func TestUniformInstancesValidate(t *testing.T) {
 	if err := apikey.Validate(); err != nil {
 		t.Fatalf("uniform api-key should validate: %v", err)
 	}
+	if err := apikey.CheckHost(); err != nil {
+		t.Fatalf("0600 api_key_file should pass the host check: %v", err)
+	}
+}
+
+// TestLoadNoHostChecksSkipsProbes: Validate is pure, so a config whose only
+// faults are on the host (a missing tool binary, a missing api-key file)
+// loads through LoadNoHostChecks and is rejected by Load / CheckHost.
+func TestLoadNoHostChecksSkipsProbes(t *testing.T) {
+	cfg := strings.Replace(baseCfg, "command: [true, -dsn, \"file:ref.db\"]", "command: ["+missingBinary+"]", 1)
+	p := writeConfig(t, cfg)
+	app, err := LoadNoHostChecks(p)
+	if err != nil {
+		t.Fatalf("LoadNoHostChecks must not probe the tool binary: %v", err)
+	}
+	testutil.WantErrContaining(t, app.CheckHost(), missingBinary)
+	if _, err := Load(p); err == nil {
+		t.Fatal("Load must run CheckHost")
+	}
+
+	keyCfg := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n  api_key_file: missing-key\n"
+	if _, err := LoadNoHostChecks(writeConfig(t, keyCfg)); err != nil {
+		t.Fatalf("LoadNoHostChecks must not stat api_key_file: %v", err)
+	}
+	_, err = Load(writeConfig(t, keyCfg))
+	testutil.WantErrContaining(t, err, "api_key_file")
 }
 
 // TestInjectsLLMGrantPerAgentMode unit-tests the grant-injection discrimination
@@ -839,23 +796,13 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 	t.Run("invalid manager llm_auth rejects", func(t *testing.T) {
 		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager:\n  llm_auth: bogus\n"
 		_, err := Load(writeConfig(t, body))
-		if err == nil {
-			t.Fatal("expected error for invalid manager llm_auth value, got nil")
-		}
-		if !strings.Contains(err.Error(), "manager.llm_auth") {
-			t.Errorf("error must name manager.llm_auth, got: %v", err)
-		}
+		testutil.WantErrContaining(t, err, "manager.llm_auth")
 	})
 
 	t.Run("invalid worker llm_auth rejects", func(t *testing.T) {
 		body := "name: demo\nbackend: orbstack\ntree: work\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: w1\n    dir: workers/w1\n    llm_auth: bogus\n"
 		_, err := Load(writeConfig(t, body))
-		if err == nil {
-			t.Fatal("expected error for invalid worker llm_auth value, got nil")
-		}
-		if !strings.Contains(err.Error(), "worker w1") {
-			t.Errorf("error must name the worker, got: %v", err)
-		}
+		testutil.WantErrContaining(t, err, "worker w1")
 	})
 
 	t.Run("api-key without api_key_file rejects", func(t *testing.T) {
@@ -876,12 +823,7 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 		}
 		body := "name: demo\nbackend: orbstack\ntree: work\nmanager: {}\nbroker:\n  llm_auth: api-key\n  api_key_file: " + keyPath + "\n"
 		_, err := Load(writeConfig(t, body))
-		if err == nil {
-			t.Fatal("expected error for 0644 api_key_file, got nil")
-		}
-		if !strings.Contains(err.Error(), "0600") {
-			t.Errorf("error must mention 0600, got: %v", err)
-		}
+		testutil.WantErrContaining(t, err, "0600")
 	})
 }
 
@@ -916,7 +858,7 @@ var extCfg = baseCfg + `    - name: devonthink
 `
 
 func TestLoadAcceptsExternalTools(t *testing.T) {
-	app, err := Load(writeConfig(t, extCfg))
+	app, err := LoadNoHostChecks(writeConfig(t, extCfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -938,19 +880,17 @@ func TestLoadAcceptsExternalTools(t *testing.T) {
 }
 
 func TestLoadAcceptsWildcardGrantOnCoarseTool(t *testing.T) {
-	cfg := replaceFirst(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
-		"workers:\n  - {name: worker, dir: work, obtain: [{tool: things3, op: \"*\"}]}")
-	if _, err := Load(writeConfig(t, cfg)); err != nil {
+	cfg := strings.Replace(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
+		"workers:\n  - {name: worker, dir: work, obtain: [{tool: things3, op: \"*\"}]}", 1)
+	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("a wildcard grant on a coarse tool must load: %v", err)
 	}
 }
 
 func TestLoadRejectsWildcardGrantOnFineTool(t *testing.T) {
-	cfg := replaceFirst(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
-		"workers:\n  - {name: worker, dir: work, obtain: [{tool: devonthink, op: \"*\"}]}")
-	if _, err := Load(writeConfig(t, cfg)); err == nil {
-		t.Fatal("a wildcard grant on a fine tool must be rejected at load")
-	}
+	cfg := strings.Replace(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
+		"workers:\n  - {name: worker, dir: work, obtain: [{tool: devonthink, op: \"*\"}]}", 1)
+	rejectNoHost(t, cfg) // a wildcard grant on a fine tool must be rejected at load
 }
 
 func TestLoadRejectsExternalToolShapeErrors(t *testing.T) {
@@ -970,7 +910,7 @@ func TestLoadRejectsExternalToolShapeErrors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := Load(writeConfig(t, replaceFirst(extCfg, c.find, c.repl))); err == nil {
+			if _, err := Load(writeConfig(t, strings.Replace(extCfg, c.find, c.repl, 1))); err == nil {
 				t.Fatalf("%s: must be rejected", c.name)
 			}
 		})
@@ -978,37 +918,35 @@ func TestLoadRejectsExternalToolShapeErrors(t *testing.T) {
 }
 
 func TestLoadRejectsFineExternalWithoutOperations(t *testing.T) {
-	cfg := replaceFirst(extCfg, "      operations:\n        - {name: search}\n      allowed_values: {database: [work, personal]}\n", "")
-	if _, err := Load(writeConfig(t, cfg)); err == nil {
-		t.Fatal("a fine external tool with no operations must be rejected")
-	}
+	cfg := strings.Replace(extCfg, "      operations:\n        - {name: search}\n      allowed_values: {database: [work, personal]}\n", "", 1)
+	rejectNoHost(t, cfg) // a fine external tool with no operations must be rejected
 }
 
 func TestLoadRejectsSupervisedToolWithoutCommand(t *testing.T) {
-	cfg := replaceFirst(extCfg, "command: [true, -dsn, \"file:ref.db\"]\n      ", "")
+	cfg := strings.Replace(extCfg, "command: [true, -dsn, \"file:ref.db\"]\n      ", "", 1)
 	if _, err := Load(writeConfig(t, cfg)); err == nil {
 		t.Fatal("a non-external tool with no command must be rejected")
 	}
 }
 
 func TestLoadAllowsNonLoopbackBackendWithOptIn(t *testing.T) {
-	cfg := replaceFirst(extCfg, "external: true\n      backend: 127.0.0.1:3300",
-		"external: true\n      allow_non_loopback: true\n      backend: 192.168.1.9:3300")
-	if _, err := Load(writeConfig(t, cfg)); err != nil {
+	cfg := strings.Replace(extCfg, "external: true\n      backend: 127.0.0.1:3300",
+		"external: true\n      allow_non_loopback: true\n      backend: 192.168.1.9:3300", 1)
+	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("allow_non_loopback must permit a LAN backend: %v", err)
 	}
 }
 
 func TestLoadAcceptsIPv6LoopbackBackend(t *testing.T) {
-	cfg := replaceFirst(extCfg, "backend: 127.0.0.1:3300", "backend: \"[::1]:3300\"")
-	if _, err := Load(writeConfig(t, cfg)); err != nil {
+	cfg := strings.Replace(extCfg, "backend: 127.0.0.1:3300", "backend: \"[::1]:3300\"", 1)
+	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("[::1] is loopback and must be accepted: %v", err)
 	}
 }
 
 func TestLoadAcceptsBackendWithPath(t *testing.T) {
-	cfg := replaceFirst(extCfg, "backend: 127.0.0.1:3300", "backend: 127.0.0.1:3101/mcp")
-	if _, err := Load(writeConfig(t, cfg)); err != nil {
+	cfg := strings.Replace(extCfg, "backend: 127.0.0.1:3300", "backend: 127.0.0.1:3101/mcp", 1)
+	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("a loopback backend with a path (qmd-style) must be accepted: %v", err)
 	}
 }
@@ -1018,15 +956,10 @@ func TestLoadAcceptsBackendWithPath(t *testing.T) {
 // supervised tool setting it is a config mistake that should fail closed, not
 // be silently ignored.
 func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
-	cfg := replaceFirst(baseCfg, "command: [true, -dsn, \"file:ref.db\"]",
-		"command: [true, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true")
+	cfg := strings.Replace(baseCfg, "command: [true, -dsn, \"file:ref.db\"]",
+		"command: [true, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true", 1)
 	_, err := Load(writeConfig(t, cfg))
-	if err == nil {
-		t.Fatal("a non-external tool setting allow_non_loopback must be rejected")
-	}
-	if !strings.Contains(err.Error(), "allow_non_loopback") || !strings.Contains(err.Error(), "external") {
-		t.Errorf("error %q should mention allow_non_loopback and external", err)
-	}
+	testutil.WantErrContaining(t, err, "allow_non_loopback", "external")
 }
 
 // TestLoadRejectsIllegalToolNames: tool names flow into the broker's
@@ -1039,8 +972,8 @@ func TestLoadRejectsIllegalToolNames(t *testing.T) {
 	bad := []string{"bad/name", "Bad", "has space", "star*"}
 	for _, name := range bad {
 		t.Run(name, func(t *testing.T) {
-			cfg := replaceFirst(baseCfg, "name: db", "name: "+name)
-			cfg = replaceFirst(cfg, "tool: db, op: read", "tool: "+name+", op: read")
+			cfg := strings.Replace(baseCfg, "name: db", "name: "+name, 1)
+			cfg = strings.Replace(cfg, "tool: db, op: read", "tool: "+name+", op: read", 1)
 			if _, err := Load(writeConfig(t, cfg)); err == nil {
 				t.Fatalf("tool name %q should be rejected", name)
 			}
@@ -1065,9 +998,9 @@ func TestLoadAcceptsExistingValidToolNames(t *testing.T) {
 // legitimately use underscores, and they are safe in the /mcp/<name>/ URL path.
 // This is the case the initial nameRE reuse wrongly rejected.
 func TestLoadAcceptsUnderscoreToolName(t *testing.T) {
-	cfg := replaceFirst(baseCfg, "name: db", "name: apple_notes")
-	cfg = replaceFirst(cfg, "tool: db, op: read", "tool: apple_notes, op: read")
-	if _, err := Load(writeConfig(t, cfg)); err != nil {
+	cfg := strings.Replace(baseCfg, "name: db", "name: apple_notes", 1)
+	cfg = strings.Replace(cfg, "tool: db, op: read", "tool: apple_notes, op: read", 1)
+	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("underscore tool name apple_notes must be accepted: %v", err)
 	}
 }
@@ -1076,11 +1009,9 @@ func TestLoadAcceptsUnderscoreToolName(t *testing.T) {
 // config mistake — it can never be granted (checkCap compares op strings) and
 // would silently sink into the tool's op set undetected.
 func TestLoadRejectsEmptyOperationName(t *testing.T) {
-	cfg := replaceFirst(baseCfg, "{name: read, caveat_param: {table: table, filter: filter}}",
-		"{name: read, caveat_param: {table: table, filter: filter}}\n        - {name: \"\"}")
-	if _, err := Load(writeConfig(t, cfg)); err == nil {
-		t.Fatal("an operation with an empty name must be rejected")
-	}
+	cfg := strings.Replace(baseCfg, "{name: read, caveat_param: {table: table, filter: filter}}",
+		"{name: read, caveat_param: {table: table, filter: filter}}\n        - {name: \"\"}", 1)
+	rejectNoHost(t, cfg) // an operation with an empty name must be rejected
 }
 
 func TestWorkerToWorkerMessagingDefaultsTrue(t *testing.T) {
@@ -1129,31 +1060,25 @@ func TestOperatorUnsetDisablesDirectives(t *testing.T) {
 // a validation error, not silently clamped.
 func TestOperatorRejectsExpiryMaxOver24h(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: 25h\n"
-	if _, err := Load(writeTmp(t, body)); err == nil {
-		t.Fatal("directive_expiry_max > 24h should be rejected")
-	}
+	rejectNoHost(t, body) // directive_expiry_max > 24h should be rejected
 }
 
 // directive_expiry must not exceed directive_expiry_max.
 func TestOperatorRejectsExpiryOverMax(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: 2h\n  directive_expiry_max: 1h\n"
-	if _, err := Load(writeTmp(t, body)); err == nil {
-		t.Fatal("directive_expiry > directive_expiry_max should be rejected")
-	}
+	rejectNoHost(t, body) // directive_expiry > directive_expiry_max should be rejected
 }
 
 // allowed_signers must stay confined to the instance dir, like prompt_file.
 func TestOperatorRejectsAllowedSignersEscapingInstanceDir(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  allowed_signers: ../../etc/passwd\n"
-	if _, err := Load(writeTmp(t, body)); err == nil {
-		t.Fatal("allowed_signers escaping the instance dir should be rejected")
-	}
+	rejectNoHost(t, body) // allowed_signers escaping the instance dir should be rejected
 }
 
 // A confined allowed_signers loads cleanly and flips DirectivesEnabled on.
 func TestOperatorAllowedSignersConfinedLoads(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  allowed_signers: operator/allowed_signers\n"
-	app, err := Load(writeTmp(t, body))
+	app, err := LoadNoHostChecks(writeConfig(t, body))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1164,32 +1089,18 @@ func TestOperatorAllowedSignersConfinedLoads(t *testing.T) {
 
 // Negative directive_expiry must be rejected; zero defaults to 10m.
 func TestOperatorRejectsNegativeDirectiveExpiry(t *testing.T) {
-	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: -10m\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil {
-		t.Fatal("directive_expiry < 0 should be rejected")
-	}
-	if !strings.Contains(err.Error(), "config: operator:") {
-		t.Errorf("error %q should contain 'config: operator:'", err)
-	}
+	rejectNoHost(t, "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: -10m\n", msgOperatorPrefix)
 }
 
 // Negative directive_expiry_max must be rejected; zero defaults to 24h.
 func TestOperatorRejectsNegativeDirectiveExpiryMax(t *testing.T) {
-	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: -1h\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil {
-		t.Fatal("directive_expiry_max < 0 should be rejected")
-	}
-	if !strings.Contains(err.Error(), "config: operator:") {
-		t.Errorf("error %q should contain 'config: operator:'", err)
-	}
+	rejectNoHost(t, "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: -1h\n", msgOperatorPrefix)
 }
 
 // Exact boundary: directive_expiry_max: 24h is accepted (hard ceiling, not exceeded).
 func TestOperatorAcceptsExactly24hExpiryMax(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry_max: 24h\n"
-	app, err := Load(writeTmp(t, body))
+	app, err := LoadNoHostChecks(writeConfig(t, body))
 	if err != nil {
 		t.Fatalf("directive_expiry_max: 24h should be accepted, got error: %v", err)
 	}
@@ -1201,7 +1112,7 @@ func TestOperatorAcceptsExactly24hExpiryMax(t *testing.T) {
 // Boundary: directive_expiry equal to directive_expiry_max is accepted.
 func TestOperatorAcceptsExpiryEqualToMax(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\noperator:\n  directive_expiry: 2h\n  directive_expiry_max: 2h\n"
-	app, err := Load(writeTmp(t, body))
+	app, err := LoadNoHostChecks(writeConfig(t, body))
 	if err != nil {
 		t.Fatalf("directive_expiry == directive_expiry_max should be accepted, got error: %v", err)
 	}
@@ -1222,38 +1133,33 @@ func TestValidateDiskFormat(t *testing.T) {
 	}
 }
 
-func TestToolValidateResolvesCommand(t *testing.T) {
+func TestToolCheckHostResolvesCommand(t *testing.T) {
 	// A binary guaranteed on the minimal PATH.
 	ok := Tool{Name: "t", Command: []string{"true"}}
-	if err := ok.validate(); err != nil {
+	if err := ok.checkHost(); err != nil {
 		t.Fatalf("`true` is on the minimal PATH, should validate: %v", err)
 	}
 	// A binary that is not on the minimal PATH.
-	bad := Tool{Name: "t", Command: []string{"definitely-not-on-path-xyz"}}
-	err := bad.validate()
-	if err == nil {
-		t.Fatalf("missing binary should be rejected")
-	}
-	if !strings.Contains(err.Error(), "definitely-not-on-path-xyz") || !strings.Contains(err.Error(), "PATH") {
-		t.Fatalf("error must name the command and PATH, got: %v", err)
-	}
+	bad := Tool{Name: "t", Command: []string{missingBinary}}
+	err := bad.checkHost()
+	testutil.WantErrContaining(t, err, missingBinary, "PATH")
 }
 
-// TestToolValidateRejectsNonExecutableAbsolutePath: the slash-containing
-// (absolute path) branch of Tool.validate() must apply the same
+// TestToolCheckHostRejectsNonExecutableAbsolutePath: the slash-containing
+// (absolute path) branch of Tool.checkHost() must apply the same
 // executable-file check as the PATH-scoped branch — a directory or a
 // non-executable file is exactly the #9 failure mode (opaque spawn failure),
 // just via an absolute path instead of a bare PATH-resolved name.
-func TestToolValidateRejectsNonExecutableAbsolutePath(t *testing.T) {
+func TestToolCheckHostRejectsNonExecutableAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
-	if err := (Tool{Name: "t", Command: []string{dir}}).validate(); err == nil {
+	if err := (Tool{Name: "t", Command: []string{dir}}).checkHost(); err == nil {
 		t.Fatalf("a directory command path should be rejected")
 	}
 	notExec := filepath.Join(dir, "not-exec")
 	if err := os.WriteFile(notExec, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := (Tool{Name: "t", Command: []string{notExec}}).validate(); err == nil {
+	if err := (Tool{Name: "t", Command: []string{notExec}}).checkHost(); err == nil {
 		t.Fatalf("a non-executable file command path should be rejected")
 	}
 }
@@ -1261,8 +1167,8 @@ func TestToolValidateRejectsNonExecutableAbsolutePath(t *testing.T) {
 func TestAutoReenrolKnob(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"
 	// Default (absent) = all.
-	p := writeTmp(t, base)
-	app, err := Load(p)
+	p := writeConfig(t, base)
+	app, err := LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1271,8 +1177,8 @@ func TestAutoReenrolKnob(t *testing.T) {
 	}
 	// Explicit values round-trip.
 	for _, v := range []AutoReenrolMode{AutoReenrolAll, AutoReenrolManager, AutoReenrolOff} {
-		p := writeTmp(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: "+string(v)+"\n")
-		app, err := Load(p)
+		p := writeConfig(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: "+string(v)+"\n")
+		app, err := LoadNoHostChecks(p)
 		if err != nil {
 			t.Fatalf("%s: %v", v, err)
 		}
@@ -1281,8 +1187,8 @@ func TestAutoReenrolKnob(t *testing.T) {
 		}
 	}
 	// Invalid value rejected at load.
-	p = writeTmp(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: sometimes\n")
-	if _, err := Load(p); err == nil {
+	p = writeConfig(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: sometimes\n")
+	if _, err := LoadNoHostChecks(p); err == nil {
 		t.Fatal("expected load error for invalid auto_reenrol")
 	}
 }
@@ -1294,7 +1200,7 @@ func TestScionBinaryIsMutuallyExclusive(t *testing.T) {
 		{"source+version", "scion:\n  source: ./scion-src\n  version: abc123\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"+tc.body)
+			p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"+tc.body)
 			if _, err := Load(p); err == nil {
 				t.Fatal("expected a mutual-exclusion error")
 			}
@@ -1303,7 +1209,7 @@ func TestScionBinaryIsMutuallyExclusive(t *testing.T) {
 }
 
 func TestScionBinaryResolvesRelativeToInstanceDir(t *testing.T) {
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: dist/scion-linux-amd64\n")
+	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: dist/scion-linux-amd64\n")
 	a, err := Load(p)
 	if err != nil {
 		t.Fatal(err)
@@ -1321,8 +1227,8 @@ func TestConfigWithoutScionBlockStillLoads(t *testing.T) {
 	// for commands that never bring anything up (doctor, msg, attach).
 	// Requiring a mode here would break all of them; the missing mode is
 	// reported at bring-up instead.
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
-	if _, err := Load(p); err != nil {
+	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
+	if _, err := LoadNoHostChecks(p); err != nil {
 		t.Fatalf("a config with no scion block must still load: %v", err)
 	}
 }
@@ -1337,21 +1243,16 @@ func TestScionBinaryAndSourceRejectedInsideTree(t *testing.T) {
 		{"binary deeper in tree", "scion:\n  binary: tree/workers/appa/scion\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"+tc.body)
+			p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"+tc.body)
 			_, err := Load(p)
-			if err == nil {
-				t.Fatal("expected rejection: path is inside the mounted tree")
-			}
-			if !strings.Contains(err.Error(), "inside the mounted tree") {
-				t.Errorf("error %q should explain why", err)
-			}
+			testutil.WantErrContaining(t, err, "inside the mounted tree")
 		})
 	}
 }
 
 func TestScionBinaryOutsideTreeIsAccepted(t *testing.T) {
 	// The normal shape: built elsewhere, kept beside the config, outside the mount.
-	p := writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: dist/scion-linux-amd64\n")
+	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: dist/scion-linux-amd64\n")
 	if _, err := Load(p); err != nil {
 		t.Fatalf("a binary outside the tree must load: %v", err)
 	}
@@ -1360,7 +1261,7 @@ func TestScionBinaryOutsideTreeIsAccepted(t *testing.T) {
 // remote is unset by default: disabled, with the proxy port defaulting to
 // 8445 (adjacent to the broker's 8443/8444 block).
 func TestRemoteDefaults(t *testing.T) {
-	app, err := Load(writeTmp(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"))
+	app, err := LoadNoHostChecks(writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1386,24 +1287,19 @@ func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
 		"jail port":                  8443,
 		"admin port":                 8444,
 		"proxy port":                 8445,
-		"mirrored guest issuer port": backend.GuestLoginIssuerPort,
+		"mirrored guest issuer port": GuestLoginIssuerPort,
 	} {
-		body := base + fmt.Sprintf("  login_port: %d\n", port)
-		_, err := Load(writeTmp(t, body))
-		if err == nil || !strings.Contains(err.Error(), "login_port") {
-			t.Fatalf("login_port on the %s: want a collision error, got %v", name, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			rejectNoHost(t, base+fmt.Sprintf("  login_port: %d\n", port), "login_port")
+		})
 	}
 	// The SAME guard belongs on the proxy's own port: naming the mirrored
 	// guest port there is the identical live failure, just for the other of
 	// lever's two host listeners.
-	if _, err := Load(writeTmp(t, base+fmt.Sprintf("  port: %d\n", backend.GuestLoginIssuerPort))); err == nil ||
-		!strings.Contains(err.Error(), "mirrored") {
-		t.Fatalf("remote.port naming the guest forwarder's host mirror: want a collision error, got %v", err)
-	}
+	rejectNoHost(t, base+fmt.Sprintf("  port: %d\n", GuestLoginIssuerPort), "mirrored")
 
 	body := base + "  login_port: 9500\n"
-	app, err := Load(writeTmp(t, body))
+	app, err := LoadNoHostChecks(writeConfig(t, body))
 	if err != nil {
 		t.Fatalf("a free login_port must load: %v", err)
 	}
@@ -1415,20 +1311,12 @@ func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
 // remote.port colliding with the broker's jail port (8443 default) must fail
 // validation — the proxy and the broker's mTLS listener can't share a port.
 func TestRemotePortCollisionRejected(t *testing.T) {
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8443\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil || !strings.Contains(err.Error(), "remote") {
-		t.Fatalf("want remote port collision error, got %v", err)
-	}
+	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8443\n", "remote")
 }
 
 // remote.port colliding with the broker's admin port must also fail.
 func TestRemotePortCollisionWithAdminPortRejected(t *testing.T) {
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8444\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil || !strings.Contains(err.Error(), "remote") {
-		t.Fatalf("want remote port collision error, got %v", err)
-	}
+	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8444\n", "remote")
 }
 
 // TestRemoteProxyPortInManagerAllowPortsRejected: manager.allow_ports opens a
@@ -1445,16 +1333,9 @@ func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 		"default proxy port":  base + "manager:\n  allow_ports: [3101, 8445]\n",
 		"explicit proxy port": base + "  port: 9445\nmanager:\n  allow_ports: [9445]\n",
 	} {
-		_, err := Load(writeTmp(t, body))
-		if err == nil {
-			t.Fatalf("%s in manager.allow_ports must not load", name)
-		}
-		if !strings.Contains(err.Error(), "allow_ports") {
-			t.Errorf("%s: error must name manager.allow_ports, got %v", name, err)
-		}
-		if !strings.Contains(err.Error(), "remote.port") {
-			t.Errorf("%s: error must say what to do about it, got %v", name, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			rejectNoHost(t, body, "allow_ports", "remote.port")
+		})
 	}
 
 	// The login port is the opposite case: the guest forwarder exists to reach
@@ -1462,7 +1343,7 @@ func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 	// it by hand (the only way to reach it before that grant existed) must not
 	// be locked out of loading.
 	ok := base + "  login_port: 8447\nmanager:\n  allow_ports: [8447]\n"
-	app, err := Load(writeTmp(t, ok))
+	app, err := LoadNoHostChecks(writeConfig(t, ok))
 	if err != nil {
 		t.Fatalf("the login port in manager.allow_ports must still load: %v", err)
 	}
@@ -1476,7 +1357,7 @@ func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 	// With remote off there is no proxy to reach, and a stale allow_ports
 	// entry must not block loading — same rule as every other remote check.
 	off := "name: x\nbackend: orbstack\ntree: ./tree\nmanager:\n  allow_ports: [8445]\n"
-	if _, err := Load(writeTmp(t, off)); err != nil {
+	if _, err := LoadNoHostChecks(writeConfig(t, off)); err != nil {
 		t.Fatalf("with remote disabled, port 8445 in allow_ports must load: %v", err)
 	}
 }
@@ -1484,17 +1365,13 @@ func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 // base_url, when set, must be an absolute https URL (the tailnet serve
 // hostname) — a bare word or non-https scheme is rejected.
 func TestRemoteBaseURLValidated(t *testing.T) {
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"notaurl\"\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil || !strings.Contains(err.Error(), "base_url") {
-		t.Fatalf("want base_url error, got %v", err)
-	}
+	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"notaurl\"\n", "base_url")
 }
 
 // A well-formed https base_url is accepted.
 func TestRemoteBaseURLAcceptsHTTPS(t *testing.T) {
 	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-	app, err := Load(writeTmp(t, body))
+	app, err := LoadNoHostChecks(writeConfig(t, body))
 	if err != nil {
 		t.Fatalf("a well-formed https base_url should be accepted: %v", err)
 	}
@@ -1511,28 +1388,20 @@ func TestRemoteBaseURLAcceptsHTTPS(t *testing.T) {
 // letting it "succeed" into a proxy that refuses 100% of traffic, which
 // previously surfaced only much later as a confusing doctor healthz 403.
 func TestRemoteBaseURLRequiredWhenEnabled(t *testing.T) {
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil || !strings.Contains(err.Error(), "base_url") {
-		t.Fatalf("want a base_url-required error, got %v", err)
-	}
+	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n", "base_url")
 }
 
 // allowed_users entries must be non-empty strings: a blank entry would pin
 // to nothing while acting as "allow this header value" with an empty string.
 func TestRemoteAllowedUsersRejectsEmpty(t *testing.T) {
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"ok@example.com\", \"\"]\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil || !strings.Contains(err.Error(), "allowed_users") {
-		t.Fatalf("want allowed_users error, got %v", err)
-	}
+	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"ok@example.com\", \"\"]\n", "allowed_users")
 }
 
 // A disabled remote block is not validated at all — a bad port/base_url
 // left over from a previous config doesn't block loading until re-enabled.
 func TestRemoteDisabledSkipsValidation(t *testing.T) {
 	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: false\n  port: 8443\n  base_url: \"notaurl\"\n"
-	if _, err := Load(writeTmp(t, body)); err != nil {
+	if _, err := LoadNoHostChecks(writeConfig(t, body)); err != nil {
 		t.Fatalf("a disabled remote block should not be validated: %v", err)
 	}
 }
@@ -1540,7 +1409,7 @@ func TestRemoteDisabledSkipsValidation(t *testing.T) {
 // An explicit port that doesn't collide is honoured by EffectiveRemotePort.
 func TestRemoteExplicitPortHonoured(t *testing.T) {
 	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 9445\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-	app, err := Load(writeTmp(t, body))
+	app, err := LoadNoHostChecks(writeConfig(t, body))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1559,11 +1428,8 @@ func TestRemoteExplicitPortHonoured(t *testing.T) {
 // the jail now, so a reader chasing that reason would be chasing a problem
 // that cannot exist.
 func TestRemoteRequiresOrbstackBackend(t *testing.T) {
-	body := "name: x\nbackend: lima\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n"
-	_, err := Load(writeTmp(t, body))
-	if err == nil || !strings.Contains(err.Error(), "orbstack") {
-		t.Fatalf("want an orbstack-required error, got %v", err)
-	}
+	_, err := LoadNoHostChecks(writeConfig(t, "name: x\nbackend: lima\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n"))
+	testutil.WantErrContaining(t, err, "orbstack")
 	if strings.Contains(err.Error(), "forwarding") {
 		t.Fatalf("error must not cite guest→host forwarding as the reason, got %v", err)
 	}
@@ -1573,7 +1439,7 @@ func TestRemoteRequiresOrbstackBackend(t *testing.T) {
 // backend check must not reject the backend remote access actually supports.
 func TestRemoteOrbstackBackendAccepted(t *testing.T) {
 	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-	if _, err := Load(writeTmp(t, body)); err != nil {
+	if _, err := LoadNoHostChecks(writeConfig(t, body)); err != nil {
 		t.Fatalf("orbstack + remote.enabled should load cleanly: %v", err)
 	}
 }
@@ -1626,14 +1492,12 @@ func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
 		"\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 
 	t.Setenv("PATH", "")
-	_, err := Load(writeTmp(t, body))
-	if err == nil || !strings.Contains(err.Error(), "Go toolchain") {
-		t.Fatalf("want a load-time refusal naming the toolchain, got %v", err)
-	}
+	_, err := Load(writeConfig(t, body))
+	testutil.WantErrContaining(t, err, "Go toolchain")
 
 	// With remote off, the same config is fine: nothing cross-compiles.
 	off := strings.Replace(body, "enabled: true", "enabled: false", 1)
-	if _, err := Load(writeTmp(t, off)); err != nil {
+	if _, err := Load(writeConfig(t, off)); err != nil {
 		t.Fatalf("remote off must not need a toolchain: %v", err)
 	}
 }
@@ -1644,7 +1508,7 @@ func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
 // it exists for.
 func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager:\n  allow_ports: [3305]\n"
-	off, err := Load(writeTmp(t, base))
+	off, err := LoadNoHostChecks(writeConfig(t, base))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1652,7 +1516,7 @@ func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T
 		t.Fatalf("remote off: EffectiveAllowedPorts() = %v, want %v", got, want)
 	}
 
-	on, err := Load(writeTmp(t, base+"remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"))
+	on, err := LoadNoHostChecks(writeConfig(t, base+"remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

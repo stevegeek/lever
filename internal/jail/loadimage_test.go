@@ -2,15 +2,18 @@ package jail
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestLoadImageArgs(t *testing.T) {
-	got := LoadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")
+	got := loadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -18,12 +21,12 @@ func TestLoadImageArgs(t *testing.T) {
 		"podman", "load",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("LoadImageArgs:\n got  %v\n want %v", got, want)
+		t.Errorf("loadImageArgs:\n got  %v\n want %v", got, want)
 	}
 }
 
 func TestImageInspectArgs(t *testing.T) {
-	got := ImageInspectArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:latest")
+	got := imageInspectArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:latest")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -31,7 +34,7 @@ func TestImageInspectArgs(t *testing.T) {
 		"podman", "image", "inspect", "--format", "{{.Id}}", "scionlocal/lever-claude:latest",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("ImageInspectArgs:\n got  %v\n want %v", got, want)
+		t.Errorf("imageInspectArgs:\n got  %v\n want %v", got, want)
 	}
 }
 
@@ -65,20 +68,20 @@ const (
 // and jailImageID (an `orb …` prefix call) resolve independently. A missing
 // script for either binary makes that side error — the real-world "image not
 // present / inspect exits non-zero" case — which the readers map to "".
-func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *exec.FakeRunner {
+func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *proc.FakeRunner {
 	t.Helper()
-	r := exec.NewFakeRunner()
+	r := proc.NewFakeRunner()
 	if hostOut != "" {
-		r.Script("docker", exec.Result{Stdout: hostOut})
+		r.Script("docker", proc.Result{Stdout: hostOut})
 	}
 	if jailOut != "" {
-		r.Script("orb", exec.Result{Stdout: jailOut})
+		r.Script("orb", proc.Result{Stdout: jailOut})
 	}
 	return r
 }
 
 // TestImageLoaded exercises the fail-open host-vs-jail comparison offline
-// through the exec.Runner seam — previously unreachable because the readers
+// through the proc.Runner seam — previously unreachable because the readers
 // shelled out to os/exec directly.
 func TestImageLoaded(t *testing.T) {
 	prefix := orbPrefix("lever-demo", "leveruser")
@@ -130,10 +133,10 @@ func TestImageLoadedUsesHostSeam(t *testing.T) {
 // TestPruneImagesErrorPropagates: a failing prune surfaces a wrapped error (the
 // only call site logs it non-fatally), rather than being swallowed.
 func TestPruneImagesErrorPropagates(t *testing.T) {
-	r := exec.NewFakeRunner() // no script for the prefix binary -> Run errors
+	r := proc.NewFakeRunner() // no script for the prefix binary -> Run errors
 	err := PruneImages(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501")
-	if err == nil {
-		t.Fatal("PruneImages must propagate the runner error")
+	if !errors.Is(err, proc.ErrUnscripted) {
+		t.Fatalf("PruneImages must propagate the runner error, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "prune images") {
 		t.Errorf("error missing context prefix: %v", err)
@@ -143,8 +146,8 @@ func TestPruneImagesErrorPropagates(t *testing.T) {
 // TestPruneImagesSuccess: a clean prune returns nil and drives the prune argv
 // through the host runner.
 func TestPruneImagesSuccess(t *testing.T) {
-	r := exec.NewFakeRunner()
-	r.Script("orb", exec.Result{})
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
 	if err := PruneImages(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501"); err != nil {
 		t.Fatalf("PruneImages: %v", err)
 	}
@@ -157,7 +160,7 @@ func TestPruneImagesSuccess(t *testing.T) {
 }
 
 func TestPruneImagesArgs(t *testing.T) {
-	got := PruneImagesArgs(orbPrefix("lever-demo", "leveruser"), "501")
+	got := pruneImagesArgs(orbPrefix("lever-demo", "leveruser"), "501")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
@@ -165,6 +168,85 @@ func TestPruneImagesArgs(t *testing.T) {
 		"podman", "image", "prune", "-f",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("PruneImagesArgs:\n got  %v\n want %v", got, want)
+		t.Errorf("pruneImagesArgs:\n got  %v\n want %v", got, want)
+	}
+}
+
+// TestLoadImageStreamsSaveIntoPodmanLoad: the producer's bytes reach the jail's
+// `podman load` as stdin, through the prefix argv — no host shell, no pipeline
+// string.
+func TestLoadImageStreamsSaveIntoPodmanLoad(t *testing.T) {
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
+	err := loadImage(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", func(w io.Writer) error {
+		_, err := io.WriteString(w, "tarball-bytes")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("loadImage: %v", err)
+	}
+	if len(r.Calls) != 1 {
+		t.Fatalf("want one host call, got %+v", r.Calls)
+	}
+	got := append([]string{r.Calls[0].Name}, r.Calls[0].Args...)
+	if !reflect.DeepEqual(got, loadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")) {
+		t.Fatalf("argv = %v", got)
+	}
+	if r.Calls[0].Stdin != "tarball-bytes" {
+		t.Fatalf("stdin = %q", r.Calls[0].Stdin)
+	}
+}
+
+// A failing producer is reported as the cause, not masked by the consumer's
+// short read.
+func TestLoadImageReportsSaveFailure(t *testing.T) {
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
+	saveErr := errors.New("docker save: no such image")
+	err := loadImage(context.Background(), r, orbPrefix("m", "u"), "501", func(io.Writer) error {
+		return saveErr
+	})
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("err = %v, want the producer's error as the cause", err)
+	}
+}
+
+func TestLoadImageReportsLoadFailure(t *testing.T) {
+	r := proc.NewFakeRunner() // unscripted orb -> load fails
+	err := loadImage(context.Background(), r, orbPrefix("m", "u"), "501", func(w io.Writer) error {
+		_, err := io.WriteString(w, "x")
+		return err
+	})
+	if !errors.Is(err, proc.ErrUnscripted) || !strings.Contains(err.Error(), "podman load") {
+		t.Fatalf("err = %v, want the load failure wrapped under podman load", err)
+	}
+}
+
+// unreadRunner fails the load without ever reading stdin, the way a podman
+// that rejects the command up front does. The producer then sees a closed
+// pipe; that write error must not mask the load's own stderr.
+type unreadRunner struct{ proc.Runner }
+
+func (unreadRunner) RunStdin(context.Context, io.Reader, map[string]string, string, ...string) (proc.Result, error) {
+	return proc.Result{Code: 125, Stderr: "Error: cannot connect to podman\n"}, errors.New("exit status 125")
+}
+
+func TestLoadImageLoadFailureBeforeDrainKeepsLoadStderr(t *testing.T) {
+	err := loadImage(context.Background(), unreadRunner{}, orbPrefix("m", "u"), "501", func(w io.Writer) error {
+		if _, err := io.WriteString(w, "tarball-bytes"); err != nil {
+			return fmt.Errorf("docker save: %w", err)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"podman load", "exit status 125", "cannot connect to podman", "docker save"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err %q lacks %q", err, want)
+		}
+	}
+	if !strings.HasPrefix(err.Error(), "loadimage: podman load:") {
+		t.Errorf("load failure must be primary, got %q", err)
 	}
 }

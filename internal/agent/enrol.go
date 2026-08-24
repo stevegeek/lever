@@ -13,11 +13,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // Identity is the agent's enrolled mTLS material (PEM).
@@ -51,7 +55,7 @@ func GenerateCSR(cn string) (csrPEM, keyPEM []byte, err error) {
 // caClient builds an HTTPS client that trusts caPEM (server-authenticated; the
 // agent has no client cert yet at enrol — /enrol uses VerifyClientCertIfGiven).
 func caClient(caPEM []byte) (*http.Client, error) {
-	pool, err := caPool(caPEM, "agent")
+	pool, err := caPool(caPEM)
 	if err != nil {
 		return nil, err
 	}
@@ -69,13 +73,9 @@ func Enrol(ctx context.Context, brokerURL string, caPEM []byte, ticket, cn strin
 	if err != nil {
 		return Identity{}, err
 	}
-	er, err := postJSON[struct {
-		Cert string `json:"cert"`
-	}](ctx, client, brokerURL+"/enrol",
-		map[string]string{"ticket": ticket, "csr": string(csrPEM)},
-		0, "agent: enrol", false)
-	if err != nil {
-		return Identity{}, err
+	var er wire.EnrolResponse
+	if err := httpjson.Post(ctx, client, brokerURL+wire.PathEnrol, wire.EnrolRequest{Ticket: ticket, CSR: string(csrPEM)}, &er); err != nil {
+		return Identity{}, fmt.Errorf("agent: enrol: %w", err)
 	}
 	return Identity{CertPEM: []byte(er.Cert), KeyPEM: keyPEM, CAPEM: caPEM}, nil
 }
@@ -115,13 +115,32 @@ func LoadIdentity(dir string) (Identity, bool) {
 	return Identity{CertPEM: cert, KeyPEM: key, CAPEM: caPEM}, true
 }
 
-// ValidCert reports whether certPEM's leaf is currently within its validity.
-func ValidCert(certPEM []byte, now time.Time) bool {
+// parseLeafPEM parses the first certificate in certPEM.
+func parseLeafPEM(certPEM []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return false
+		return nil, errors.New("agent: invalid cert PEM")
 	}
 	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("agent: parse cert: %w", err)
+	}
+	return leaf, nil
+}
+
+// CN returns the common name of the identity's leaf certificate — the name the
+// broker authenticated this agent under, and so the bound_to of a self-obtain.
+func (id Identity) CN() (string, error) {
+	leaf, err := parseLeafPEM(id.CertPEM)
+	if err != nil {
+		return "", err
+	}
+	return leaf.Subject.CommonName, nil
+}
+
+// ValidCert reports whether certPEM's leaf is currently within its validity.
+func ValidCert(certPEM []byte, now time.Time) bool {
+	leaf, err := parseLeafPEM(certPEM)
 	if err != nil {
 		return false
 	}

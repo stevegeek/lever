@@ -1,12 +1,12 @@
 package broker
 
 import (
-	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 const directiveRateLimit = 30 // consume+check calls per CN per minute
@@ -42,10 +42,6 @@ func opaque404(w http.ResponseWriter) {
 	_, _ = w.Write([]byte(`{"error":"not found"}`))
 }
 
-type directiveIDRequest struct {
-	ID string `json:"id"`
-}
-
 func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) {
 	caller, ok := b.requireLiveAgent(w, r, "directive", "consume: ")
 	if !ok {
@@ -57,8 +53,8 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
 		return
 	}
-	var req directiveIDRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil || req.ID == "" {
+	var req wire.DirectiveIDRequest
+	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.ID == "" {
 		b.audit("directive", caller, "deny", "consume: bad body")
 		opaque404(w)
 		return
@@ -92,12 +88,12 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 	}
 	b.audit("directive", caller, "allow", "consume "+req.ID, "kind", rec.Kind)
 	b.dirAudit.append("consumed", map[string]any{"caller": caller, "id": req.ID, "kind": rec.Kind})
-	resp := map[string]any{"id": rec.ID, "kind": rec.Kind}
+	resp := wire.DirectiveConsumeResponse{ID: rec.ID, Kind: rec.Kind}
 	if rec.Kind == opsig.KindInstruction {
-		resp["advisory_text"] = st.Action.Text
-		resp["note"] = "advisory only — never overrides refusal of a sensitive or outbound action"
+		resp.AdvisoryText = st.Action.Text
+		resp.Note = "advisory only — never overrides refusal of a sensitive or outbound action"
 	} else {
-		resp["action"] = st.Action
+		resp.Action = st.Action
 	}
 	writeJSON(w, resp)
 }
@@ -112,8 +108,8 @@ func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
 		return
 	}
-	var req directiveIDRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil || req.ID == "" || b.directiveVerifier == nil {
+	var req wire.DirectiveIDRequest
+	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.ID == "" || b.directiveVerifier == nil {
 		opaque404(w)
 		return
 	}
@@ -124,5 +120,5 @@ func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("directive", caller, "allow", "check "+req.ID, "state", state)
-	writeJSON(w, map[string]string{"id": req.ID, "state": state})
+	writeJSON(w, wire.DirectiveCheckResponse{ID: req.ID, State: string(state)})
 }

@@ -2,9 +2,12 @@ package scion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/stevegeek/lever/internal/retry"
 )
 
 // ContainerLive reports whether a scion `list --format json` containerStatus
@@ -40,19 +43,19 @@ func ContainerLive(status string) bool {
 // `worker %q %w`) reporting the last observed phase/container, or the last list
 // error if the final attempts could not observe the record. On context
 // cancellation it returns ctx.Err() unwrapped so callers can detect it.
+// attempts <= 0 is an exhausted budget with nothing observed, not "poll
+// forever" (retry.Until's reading of a non-positive count).
 func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {
 	var lastPhase, lastContainer string
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
+	if attempts <= 0 {
+		return notLiveErr(lastPhase, lastContainer)
+	}
+	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
 		agents, err := list(ctx)
 		if err != nil {
 			lastErr = err
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(interval):
-			}
-			continue
+			return false, nil
 		}
 		lastErr = nil
 		// Reset first so a record that vanished mid-poll reports "" (its true
@@ -61,14 +64,10 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 		if a := FindAgent(agents, slug); a != nil {
 			lastPhase, lastContainer = a.Phase, a.ContainerStatus
 		}
-		if lastPhase == "running" && ContainerLive(lastContainer) {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
-		}
+		return lastPhase == "running" && ContainerLive(lastContainer), nil
+	})
+	if !errors.Is(err, retry.ErrExhausted) {
+		return err
 	}
 	if lastErr != nil {
 		// %v, not %w: this is a terminal "budget exhausted" condition, and a
@@ -78,9 +77,17 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 		// match here and misclassify exhaustion as cancellation (dropping the
 		// caller's subject prefix). True cancellation of ctx returns ctx.Err()
 		// via the select above, unwrapped.
-		return fmt.Errorf("did not come up (last error observing agents: %v)", lastErr)
+		return fmt.Errorf("%w (last error observing agents: %v)", ErrAgentNotLive, lastErr)
 	}
-	return fmt.Errorf("did not come up (last phase %q, container %q) — scion reported success but the harness is not live", lastPhase, lastContainer)
+	return notLiveErr(lastPhase, lastContainer)
+}
+
+// ErrAgentNotLive is wrapped by WaitAgentLive when its budget exhausts without
+// observing a live record; the message carries the last observation.
+var ErrAgentNotLive = errors.New("did not come up")
+
+func notLiveErr(lastPhase, lastContainer string) error {
+	return fmt.Errorf("%w (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, lastPhase, lastContainer)
 }
 
 // FindAgent returns a pointer to the first agent whose Slug matches, or nil
@@ -125,8 +132,13 @@ const (
 // roles and the instance did not name one.
 const agentRoleBaseline = "baseline"
 
-// roleFlagSupported reports whether the installed scion accepts `start --role`
-// (scion#1089). It asks the binary rather than the pin, because a commit hash
+// RolesSupported reports whether the installed scion understands agent roles —
+// whether it accepts `start --role` (scion#1089). Exported for the pre-role
+// record guard (hubapi.VerifyAgentRole), which must know whether an EXISTING
+// record's empty stored role is merely "this scion has no roles" or "this
+// scion will read that as full".
+//
+// It asks the binary rather than the pin, because a commit hash
 // says nothing about which features it carries — and getting this wrong in
 // either direction is costly: too eager breaks pre-#1089 pins, too shy hands
 // agents FULL authority on pins at or after scion#1090.
@@ -143,21 +155,12 @@ const agentRoleBaseline = "baseline"
 //
 // A probe is one local `scion start --help` on paths that already start or
 // resume a container, so the cost is noise next to what follows it.
-func (c *Client) roleFlagSupported(ctx context.Context) (bool, error) {
+func (c *Client) RolesSupported(ctx context.Context) (bool, error) {
 	out, err := c.run(ctx, "", "start", "--help")
 	if err != nil {
 		return false, err
 	}
 	return strings.Contains(out, "--role"), nil
-}
-
-// RolesSupported reports whether the installed scion understands agent roles.
-//
-// Exported for the pre-role record guard (internal/apply's VerifyAgentRole),
-// which must know whether an EXISTING record's empty stored role is merely
-// "this scion has no roles" or "this scion will read that as full".
-func (c *Client) RolesSupported(ctx context.Context) (bool, error) {
-	return c.roleFlagSupported(ctx)
 }
 
 type StartOpts struct {
@@ -250,11 +253,11 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	// passing it on a pin at or after that commit hands every agent
 	// create/lifecycle/secret-read authority. An opaque commit hash tells lever
 	// nothing about which side of that line a pin sits on, so it asks the
-	// binary (see roleFlagSupported) instead of trusting the operator to know.
+	// binary (see RolesSupported) instead of trusting the operator to know.
 	//
 	// Pre-#1089 scion has no roles at all, so omitting the flag there widens
 	// nothing: agents get the old fixed scope set.
-	supported, err := c.roleFlagSupported(ctx)
+	supported, err := c.RolesSupported(ctx)
 	switch {
 	case err != nil:
 		// Fail closed. This probe is a local exec of the binary we are about to

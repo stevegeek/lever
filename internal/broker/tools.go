@@ -1,6 +1,10 @@
 package broker
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
+)
 
 // handleTools returns the broker's registered tool names to an authenticated
 // agent (mTLS). It is the FULL catalog, not policy-filtered: an agent may call a
@@ -8,10 +12,6 @@ import "net/http"
 // the MayObtainRule policy would wrongly hide such tools. The token + mTLS are
 // the real gate.
 func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	// A revoked agent cannot enumerate the tool catalog (the last read-only
 	// path — completes "revocation denies every acting/observing path").
 	if _, ok := b.requireLiveAgent(w, r, "tools", ""); !ok {
@@ -25,5 +25,5 @@ func (b *Broker) handleTools(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, n)
 	}
-	writeJSON(w, map[string][]string{"tools": out})
+	writeJSON(w, wire.ToolsResponse{Tools: out})
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -61,10 +62,8 @@ func verifies(pub []byte, tokB64, caller string, params map[string]string) bool 
 
 func rpc(t *testing.T, s *MCPServer, body string) map[string]any {
 	t.Helper()
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/", strings.NewReader(body)))
 	var resp map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	_ = json.Unmarshal(s.Handle(context.Background(), []byte(body)), &resp)
 	return resp
 }
 
@@ -192,7 +191,7 @@ func TestMCPDirectiveConsume404SurfacesAsToolCallError(t *testing.T) {
 	// The broker's opaque-404 contract (unknown id / wrong target / already
 	// consumed / expired / stale generation — all byte-identical) must reach
 	// the model as "not found" and nothing more, matching how the existing
-	// `request` case surfaces a broker error (mcpserver.go's writeRPCError),
+	// `request` case surfaces a broker error (mcp.Error),
 	// never a transport panic.
 	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) {
 		w.Header().Set("Content-Type", "application/json")
@@ -362,6 +361,31 @@ func fakeCapBroker(t *testing.T, called *bool) *httptest.Server {
 	return srv
 }
 
+// rejectedLocally sends one tools/call for tool with args to an MCP server
+// backed by a fake broker and pins the caller-side rejection shape: a -32602
+// (invalid params) JSON-RPC error and the broker never reached. It returns the
+// error message so the caller can pin what it names. label prefixes failures.
+func rejectedLocally(t *testing.T, label, tool, args string) string {
+	t.Helper()
+	called := false
+	srv := fakeCapBroker(t, &called)
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tool+`","arguments":`+args+`}}`)
+	e, isErr := resp["error"].(map[string]any)
+	if !isErr {
+		t.Fatalf("%s: must error, got %v", label, resp)
+	}
+	if code, _ := e["code"].(float64); int(code) != -32602 {
+		t.Fatalf("%s: error code = %v, want -32602 (invalid params)", label, e["code"])
+	}
+	if called {
+		t.Fatalf("%s: must not reach the broker", label)
+	}
+	msg, _ := e["message"].(string)
+	return msg
+}
+
 func TestMCPDelegateWithoutRecipientIsALocalArgumentError(t *testing.T) {
 	// delegate's entire purpose is binding to ANOTHER agent. An absent, blank or
 	// misspelt `to` used to reach the broker as an empty bind target, which the
@@ -382,23 +406,11 @@ func TestMCPDelegateWithoutRecipientIsALocalArgumentError(t *testing.T) {
 		// constraint while the bind target fell back to self.
 		{"sibling spelling only", `{"tool":"db","op":"read","bound_to":"worker"}`},
 	} {
-		called := false
-		srv := fakeCapBroker(t, &called)
-		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
-
-		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":`+tc.args+`}}`)
-		e, isErr := resp["error"].(map[string]any)
-		if !isErr {
-			t.Fatalf("%s: delegate without a recipient must error, got %v", tc.name, resp)
-		}
-		if code, _ := e["code"].(float64); int(code) != -32602 {
-			t.Fatalf("%s: error code = %v, want -32602 (invalid params)", tc.name, e["code"])
-		}
-		if msg, _ := e["message"].(string); !strings.Contains(msg, `"to"`) {
+		// An empty bind target self-obtains at the broker, so the rejection
+		// must happen before the request leaves.
+		msg := rejectedLocally(t, "delegate without a recipient ("+tc.name+")", "delegate", tc.args)
+		if !strings.Contains(msg, `"to"`) {
 			t.Fatalf("%s: error = %q, want it to name the missing argument", tc.name, msg)
-		}
-		if called {
-			t.Fatalf("%s: must not reach the broker (an empty bind target self-obtains there)", tc.name)
 		}
 	}
 }
@@ -415,23 +427,9 @@ func TestMCPCapabilityToolsRequireToolAndOp(t *testing.T) {
 		{"delegate", `{"op":"read","to":"worker"}`, `"tool"`},
 		{"delegate", `{"tool":"db","to":"worker"}`, `"op"`},
 	} {
-		called := false
-		srv := fakeCapBroker(t, &called)
-		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
-
-		resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tc.tool+`","arguments":`+tc.args+`}}`)
-		e, isErr := resp["error"].(map[string]any)
-		if !isErr {
-			t.Fatalf("%s %s: must error, got %v", tc.tool, tc.args, resp)
-		}
-		if code, _ := e["code"].(float64); int(code) != -32602 {
-			t.Fatalf("%s %s: error code = %v, want -32602", tc.tool, tc.args, e["code"])
-		}
-		if msg, _ := e["message"].(string); !strings.Contains(msg, tc.want) {
+		msg := rejectedLocally(t, tc.tool+" "+tc.args, tc.tool, tc.args)
+		if !strings.Contains(msg, tc.want) {
 			t.Fatalf("%s %s: error = %q, want it to name %s", tc.tool, tc.args, msg, tc.want)
-		}
-		if called {
-			t.Fatalf("%s %s: must not reach the broker", tc.tool, tc.args)
 		}
 	}
 }
@@ -441,23 +439,10 @@ func TestMCPDelegateRejectsConflictingBindTarget(t *testing.T) {
 	// DISAGREES with it is an unresolvable contradiction: acting on either
 	// spelling binds the token somewhere the caller did not unambiguously ask
 	// for. Reject rather than pick, mirroring directiveID's id/directive_id rule.
-	called := false
-	srv := fakeCapBroker(t, &called)
-	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
-
-	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":{"tool":"db","op":"read","to":"worker","bound_to":"other"}}}`)
-	e, isErr := resp["error"].(map[string]any)
-	if !isErr {
-		t.Fatalf("conflicting bind target must error, got %v", resp)
-	}
-	if code, _ := e["code"].(float64); int(code) != -32602 {
-		t.Fatalf("error code = %v, want -32602", e["code"])
-	}
-	if msg, _ := e["message"].(string); !strings.Contains(msg, `"to"`) {
+	msg := rejectedLocally(t, "conflicting bind target", "delegate",
+		`{"tool":"db","op":"read","to":"worker","bound_to":"other"}`)
+	if !strings.Contains(msg, `"to"`) {
 		t.Fatalf("error = %q, want it to point at the canonical argument", msg)
-	}
-	if called {
-		t.Fatalf("must not reach the broker")
 	}
 }
 
@@ -490,23 +475,9 @@ func TestMCPDelegateRejectsSelfAsRecipient(t *testing.T) {
 	// (rules.go) branches on requester == boundTo and consults the OBTAIN set, so
 	// an agent with no delegate grants at all gets a success and an audit line
 	// that reads like a self-obtain. Same silent no-op class as the empty `to`.
-	called := false
-	srv := fakeCapBroker(t, &called)
-	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
-
-	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate","arguments":{"tool":"db","op":"read","to":"manager"}}}`)
-	e, isErr := resp["error"].(map[string]any)
-	if !isErr {
-		t.Fatalf("self-delegation must error, got %v", resp)
-	}
-	if code, _ := e["code"].(float64); int(code) != -32602 {
-		t.Fatalf("error code = %v, want -32602", e["code"])
-	}
-	if msg, _ := e["message"].(string); !strings.Contains(msg, "request") {
+	msg := rejectedLocally(t, "self-delegation", "delegate", `{"tool":"db","op":"read","to":"manager"}`)
+	if !strings.Contains(msg, "request") {
 		t.Fatalf("error = %q, want it to point at the tool that does mint for self", msg)
-	}
-	if called {
-		t.Fatalf("must not reach the broker")
 	}
 }
 
@@ -522,19 +493,8 @@ func TestMCPRequestRejectsSiblingBindArgumentWithoutMisinforming(t *testing.T) {
 	// names (registry.MapParams identity-maps them), and `to` is an ordinary one
 	// for a mail/message/transfer tool. So reject — silence is the worse failure —
 	// while refusing to assert it is "unknown", and name the ways out.
-	called := false
-	srv := fakeCapBroker(t, &called)
-	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
-
-	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request","arguments":{"tool":"db","op":"read","to":"worker"}}}`)
-	e, isErr := resp["error"].(map[string]any)
-	if !isErr {
-		t.Fatalf("request with a stray `to` must error rather than self-bind, got %v", resp)
-	}
-	if code, _ := e["code"].(float64); int(code) != -32602 {
-		t.Fatalf("error code = %v, want -32602", e["code"])
-	}
-	msg, _ := e["message"].(string)
+	msg := rejectedLocally(t, "request with a stray `to` (must not self-bind)", "request",
+		`{"tool":"db","op":"read","to":"worker"}`)
 	// Calling it "unknown" is false for a tool whose argument really is named
 	// `to`, and the repair it invites — dropping the argument — mints a WIDER
 	// token. The message must instead offer both real readings.
@@ -543,9 +503,6 @@ func TestMCPRequestRejectsSiblingBindArgumentWithoutMisinforming(t *testing.T) {
 	}
 	if !strings.Contains(msg, `"bound_to"`) || !strings.Contains(msg, "delegate") {
 		t.Fatalf("error = %q, want it to name both readings (bound_to, or the delegate tool)", msg)
-	}
-	if called {
-		t.Fatalf("must not reach the broker")
 	}
 }
 

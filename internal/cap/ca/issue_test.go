@@ -125,7 +125,7 @@ func TestIssueServerCertHasServerAuthAndDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := c.IssueServerCert("host.orb.internal")
+	certPEM, _, err := c.IssueServerCertSANs("host.orb.internal", []string{"host.orb.internal"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestIssueServerCertIPSAN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := c.IssueServerCert("127.0.0.1")
+	certPEM, _, err := c.IssueServerCertSANs("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}

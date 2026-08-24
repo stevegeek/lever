@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestInitProjectRunsInDir(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion init", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("scion init", proc.Result{})
 	c := New(f, Options{})
 	if err := c.InitProject(context.Background(), "/g/a"); err != nil {
 		t.Fatalf("InitProject: %v", err)
@@ -21,8 +21,8 @@ func TestInitProjectRunsInDir(t *testing.T) {
 }
 
 func TestHubLinkArgvAndDir(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion hub link", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("scion hub link", proc.Result{})
 	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
 	if err := c.HubLink(context.Background(), "/g/a"); err != nil {
 		t.Fatalf("HubLink: %v", err)

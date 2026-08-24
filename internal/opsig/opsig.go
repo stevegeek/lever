@@ -6,6 +6,7 @@ package opsig
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -245,8 +246,14 @@ func ParseEnvelope(raw []byte, instance string, now time.Time, maxSkew time.Dura
 	if err := decodeStrict(raw, "envelope", &e); err != nil {
 		return Envelope{}, err
 	}
-	if e.V != 1 || e.Instance != instance || e.Op == "" {
-		return Envelope{}, fmt.Errorf("%w: envelope fields", ErrInvalid)
+	if e.V != 1 {
+		return Envelope{}, fmt.Errorf("%w: version %d", ErrInvalid, e.V)
+	}
+	if e.Instance != instance {
+		return Envelope{}, fmt.Errorf("%w: instance mismatch", ErrInvalid)
+	}
+	if e.Op == "" {
+		return Envelope{}, fmt.Errorf("%w: op", ErrInvalid)
 	}
 	ts, err := parseTime("issued_at", e.IssuedAt)
 	if err != nil {
@@ -258,11 +265,12 @@ func ParseEnvelope(raw []byte, instance string, now time.Time, maxSkew time.Dura
 	return e, nil
 }
 
-// Sign signs msg with the SSH private key at keyPath under namespace using
-// the system ssh-keygen. msg goes to stdin; the armored signature comes
-// back on stdout. Fixed argv — no caller-controlled flags.
-func Sign(keyPath, namespace string, msg []byte) ([]byte, error) {
-	cmd := exec.Command("ssh-keygen", "-Y", "sign", "-f", keyPath, "-n", namespace, "-q", "-")
+// Sign signs msg with the SSH private key at keyPath under namespace
+// using the system ssh-keygen. msg goes to stdin; the armored signature
+// comes back on stdout. Fixed argv — no caller-controlled flags. ctx bounds
+// the subprocess.
+func Sign(ctx context.Context, keyPath, namespace string, msg []byte) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-Y", "sign", "-f", keyPath, "-n", namespace, "-q", "-")
 	cmd.Stdin = bytes.NewReader(msg)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -279,9 +287,11 @@ type Verifier struct {
 	Principal      string
 }
 
-// Verify checks sig over msg under namespace. The signature is written to a
-// private temp file (ssh-keygen requires -s to be a file); msg goes to stdin.
-func (v Verifier) Verify(namespace string, msg, sig []byte) error {
+// Verify checks sig over msg under namespace. The signature is
+// written to a private temp file (ssh-keygen requires -s to be a file); msg
+// goes to stdin. ctx bounds the subprocess — this runs on the broker's
+// request path.
+func (v Verifier) Verify(ctx context.Context, namespace string, msg, sig []byte) error {
 	dir, err := os.MkdirTemp("", "lever-opsig-*")
 	if err != nil {
 		return fmt.Errorf("opsig: %v", err)
@@ -291,7 +301,7 @@ func (v Verifier) Verify(namespace string, msg, sig []byte) error {
 	if err := os.WriteFile(sigFile, sig, 0o600); err != nil {
 		return fmt.Errorf("opsig: %v", err)
 	}
-	cmd := exec.Command("ssh-keygen", "-Y", "verify",
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-Y", "verify",
 		"-f", v.AllowedSigners, "-I", v.Principal, "-n", namespace, "-s", sigFile)
 	cmd.Stdin = bytes.NewReader(msg)
 	var errb bytes.Buffer

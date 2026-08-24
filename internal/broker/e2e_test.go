@@ -1,7 +1,7 @@
 package broker
 
 // e2e_test.go exercises the full provision→enrol→request→exercise path over
-// real mTLS: a live httptest.Server with the broker CA's ServerTLSConfig, real
+// real mTLS: a live httptest.Server with the broker CA's ServerTLSConfigSource, real
 // TLS clients that pin the broker CA, and a fake upstream MCP backend.
 
 import (
@@ -14,23 +14,22 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 const e2eServerName = "broker.test"
 
 // jailServer starts an httptest server using the broker's JailHandler() over
-// real mTLS (broker CA ServerTLSConfig). Tools must be registered before this
+// real mTLS (broker CA ServerTLSConfigSource). Tools must be registered before this
 // call because JailHandler() binds gateway routes at call time.
 func jailServer(t *testing.T, b *Broker) *httptest.Server {
 	t.Helper()
-	certPEM, keyPEM, err := b.ca.IssueServerCert(e2eServerName)
+	src, err := b.ca.NewServerCertSource(e2eServerName, []string{e2eServerName}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsCfg, err := b.ca.ServerTLSConfig(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tlsCfg := b.ca.ServerTLSConfigSource(src, nil)
 	srv := httptest.NewUnstartedServer(b.JailHandler())
 	srv.TLS = tlsCfg
 	srv.StartTLS()
@@ -52,23 +51,6 @@ func agentClient(t *testing.T, b *Broker, cert tls.Certificate) *http.Client {
 		cfg.Certificates = []tls.Certificate{cert}
 	}
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
-}
-
-// signedCert builds a real tls.Certificate for cn signed by the broker CA.
-// It generates its own ephemeral key so callers that need the key alongside the
-// cert should use csrWithKey + b.ca.SignCSR directly (as the enrol step does).
-func signedCert(t *testing.T, b *Broker, cn string) tls.Certificate {
-	t.Helper()
-	csrPEM, keyPEM := csrWithKey(t, cn)
-	certPEM, err := b.ca.SignCSR(csrPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pair, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pair
 }
 
 // TestE2EProvisionEnrolRequestExercise exercises the full four-step flow over
@@ -100,7 +82,7 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 	// ─────────────────────────────────────────────────────────────────────────
 	// Step 1: provision — manager POSTs /provision {worker:"worker"} → ticket.
 	// ─────────────────────────────────────────────────────────────────────────
-	provBody, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
+	provBody, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
 	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -110,7 +92,7 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 		body, _ := io.ReadAll(provResp.Body)
 		t.Fatalf("provision: status=%d body=%s", provResp.StatusCode, body)
 	}
-	var provResult ProvisionResponse
+	var provResult wire.ProvisionResponse
 	if err := json.NewDecoder(provResp.Body).Decode(&provResult); err != nil {
 		t.Fatalf("provision: decode: %v", err)
 	}
@@ -124,7 +106,7 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 	// with NO client cert → gets a signed cert.
 	// ─────────────────────────────────────────────────────────────────────────
 	workerCSRPEM, workerKeyPEM := csrWithKey(t, "worker")
-	enrolReqBody, _ := json.Marshal(EnrolRequest{
+	enrolReqBody, _ := json.Marshal(wire.EnrolRequest{
 		Ticket: ticket,
 		CSR:    string(workerCSRPEM),
 	})
@@ -139,7 +121,7 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 		body, _ := io.ReadAll(enrolResp.Body)
 		t.Fatalf("enrol: status=%d body=%s", enrolResp.StatusCode, body)
 	}
-	var enrolResult EnrolResponse
+	var enrolResult wire.EnrolResponse
 	if err := json.NewDecoder(enrolResp.Body).Decode(&enrolResult); err != nil {
 		t.Fatalf("enrol: decode: %v", err)
 	}
@@ -158,7 +140,7 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 	// Step 3: request (delegation) — manager POSTs /request {tool:"db",
 	// op:"read", bound_to:"worker"} → capability token bound to worker.
 	// ─────────────────────────────────────────────────────────────────────────
-	capReqBody, _ := json.Marshal(CapRequest{Tool: "db", Op: "read", BoundTo: "worker"})
+	capReqBody, _ := json.Marshal(wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"})
 	capResp, err := managerClient.Post(srv.URL+"/request", "application/json", bytes.NewReader(capReqBody))
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -168,7 +150,7 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 		body, _ := io.ReadAll(capResp.Body)
 		t.Fatalf("request: status=%d body=%s", capResp.StatusCode, body)
 	}
-	var capResult CapResponse
+	var capResult wire.CapResponse
 	if err := json.NewDecoder(capResp.Body).Decode(&capResult); err != nil {
 		t.Fatalf("request: decode: %v", err)
 	}

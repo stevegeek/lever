@@ -10,9 +10,6 @@ import (
 	"os"
 )
 
-// osStat is a package indirection so tests can assert file permissions.
-var osStat = os.Stat
-
 // KeyPair is the broker's capability-signing root keypair (Ed25519). The
 // private key is the forge; the public key is published for verification.
 type KeyPair struct {
@@ -73,22 +70,6 @@ func EncodePublicKey(pub ed25519.PublicKey) string {
 // DecodePublicKey parses a hex-encoded Ed25519 public key.
 func DecodePublicKey(s string) (ed25519.PublicKey, error) {
 	b, err := hex.DecodeString(s)
-	if err != nil {
-		return nil, fmt.Errorf("token: decode public: %w", err)
-	}
-	if len(b) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("token: public key is %d bytes, want %d", len(b), ed25519.PublicKeySize)
-	}
-	return ed25519.PublicKey(b), nil
-}
-
-// LoadPublicKey reads a hex public key.
-func LoadPublicKey(path string) (ed25519.PublicKey, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("token: read public: %w", err)
-	}
-	b, err := hex.DecodeString(string(raw))
 	if err != nil {
 		return nil, fmt.Errorf("token: decode public: %w", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
@@ -18,20 +19,22 @@ import (
 // call time — tools must be registered before JailHandler() is called.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/provision", b.handleProvision)
-	mux.HandleFunc("/worker/start", b.handleWorkerStart)
-	mux.HandleFunc("/worker/stop", b.handleWorkerStop)
-	mux.HandleFunc("/worker/suspend", b.handleWorkerSuspend)
-	mux.HandleFunc("/worker/resume", b.handleWorkerResume)
-	mux.HandleFunc("/worker/list", b.handleWorkerList)
-	mux.HandleFunc("/msg/send", b.handleMsgSend)
-	mux.HandleFunc("/msg/list", b.handleMsgList)
-	mux.HandleFunc("/directive/consume", b.handleDirectiveConsume)
-	mux.HandleFunc("/directive/check", b.handleDirectiveCheck)
-	mux.HandleFunc("/enrol", b.handleEnrol)
-	mux.HandleFunc("/renew", b.handleRenew)
-	mux.HandleFunc("/request", b.handleRequest)
-	mux.HandleFunc("/tools", b.handleTools)
+	// Method patterns: every JSON route is POST-only; /tools is the lone GET.
+	// A wrong method 405s at the mux, before any handler runs.
+	mux.HandleFunc("POST "+wire.PathProvision, b.handleProvision)
+	mux.HandleFunc("POST "+wire.PathWorkerStart, b.handleWorkerStart)
+	mux.HandleFunc("POST "+wire.PathWorkerStop, b.handleWorkerStop)
+	mux.HandleFunc("POST "+wire.PathWorkerSuspend, b.handleWorkerSuspend)
+	mux.HandleFunc("POST "+wire.PathWorkerResume, b.handleWorkerResume)
+	mux.HandleFunc("POST "+wire.PathWorkerList, b.handleWorkerList)
+	mux.HandleFunc("POST "+wire.PathMsgSend, b.handleMsgSend)
+	mux.HandleFunc("POST "+wire.PathMsgList, b.handleMsgList)
+	mux.HandleFunc("POST "+wire.PathDirectiveConsume, b.handleDirectiveConsume)
+	mux.HandleFunc("POST "+wire.PathDirectiveCheck, b.handleDirectiveCheck)
+	mux.HandleFunc("POST "+wire.PathEnrol, b.handleEnrol)
+	mux.HandleFunc("POST "+wire.PathRenew, b.handleRenew)
+	mux.HandleFunc("POST "+wire.PathRequest, b.handleRequest)
+	mux.HandleFunc("GET "+wire.PathTools, b.handleTools)
 
 	for _, name := range b.reg.Names() {
 		if name == ReservedLLMTool {
@@ -52,32 +55,20 @@ func (b *Broker) JailHandler() http.Handler {
 	return mux
 }
 
-// EpochResponse reports the broker's current minimum acceptable token epoch,
-// plus the serving process's identity: the binary version it runs and a
-// digest of the broker-relevant configuration it was started with. apply's
-// broker-reuse shortcut compares these against its own expectation and
-// restarts the broker on mismatch (#19) — a broker predating these fields
-// reports them empty, which callers treat as a mismatch.
-type EpochResponse struct {
-	Epoch      int    `json:"epoch"`
-	Version    string `json:"version,omitempty"`
-	ConfigHash string `json:"config_hash,omitempty"`
-}
-
 // handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
 func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
+	writeJSON(w, wire.EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.
 // Routes /register, /epoch, /bump-epoch, /revoke, /bootstrap — no capability-gated or agent-facing endpoints.
 func (b *Broker) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/register", b.handleRegister)
-	mux.HandleFunc("/epoch", b.handleEpoch)
-	mux.HandleFunc("/bump-epoch", b.handleBumpEpoch)
-	mux.HandleFunc("/revoke", b.handleRevoke)
-	mux.HandleFunc("/bootstrap", b.handleBootstrap)
+	mux.HandleFunc("POST "+wire.PathRegister, b.handleRegister)
+	mux.HandleFunc("GET "+wire.PathEpoch, b.handleEpoch)
+	mux.HandleFunc("POST "+wire.PathBumpEpoch, b.handleBumpEpoch)
+	mux.HandleFunc("POST "+wire.PathRevoke, b.handleRevoke)
+	mux.HandleFunc("POST "+wire.PathBootstrap, b.handleBootstrap)
 	return mux
 }
 

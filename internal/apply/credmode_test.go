@@ -3,8 +3,9 @@ package apply
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // The manager's OAuth token is the longest-lived, highest-value secret lever
@@ -24,9 +25,7 @@ func TestDefaultReadCredRejectsGroupAndWorldAccess(t *testing.T) {
 		if err == nil {
 			t.Fatalf("mode %#o must be rejected", mode)
 		}
-		if !strings.Contains(err.Error(), "0600") {
-			t.Errorf("mode %#o: error should name the required mode, got %v", mode, err)
-		}
+		testutil.WantErrContaining(t, err, "0600")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -11,13 +12,106 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/testutil"
 )
+
+// runApply runs the full plan over deps completed by fillDeps.
+func runApply(app *config.App, deps Deps) error {
+	return Run(context.Background(), app, fillDeps(deps), PlanOpts{})
+}
+
+// fillDeps completes d with an inert implementation of every required
+// collaborator the test left nil, so a test names only what it asserts on.
+// The inert mint returns fresh material (boot.minted = true) and stages it
+// into the app tree exactly as the real mint step would; a test that models a
+// spent latch wires spentLatchMint instead.
+func fillDeps(d Deps) Deps {
+	if d.LoadImage == nil {
+		d.LoadImage = func(context.Context, string) error { return nil }
+	}
+	if d.ImageLoaded == nil {
+		d.ImageLoaded = func(context.Context, string) bool { return false }
+	}
+	if d.PruneImages == nil {
+		d.PruneImages = func(context.Context) error { return nil }
+	}
+	if d.StartBroker == nil {
+		d.StartBroker = func(context.Context) error { return nil }
+	}
+	if d.BrokerHealthy == nil {
+		d.BrokerHealthy = func(context.Context) error { return nil }
+	}
+	if d.EnsureControllerPAT == nil {
+		d.EnsureControllerPAT = func(context.Context) error { return nil }
+	}
+	if d.WaitBrokerReady == nil {
+		d.WaitBrokerReady = func(context.Context, string) error { return nil }
+	}
+	if d.MintManagerBootstrap == nil {
+		d.MintManagerBootstrap = func(context.Context) (BootstrapMaterial, error) {
+			return BootstrapMaterial{Ticket: "minted-this-run"}, nil
+		}
+	}
+	if d.RearmBootstrap == nil {
+		d.RearmBootstrap = func(context.Context) error { return nil }
+	}
+	if d.EnsureHubLogin == nil {
+		d.EnsureHubLogin = func(context.Context) (bool, error) { return false, nil }
+	}
+	if d.DisableHubLogin == nil {
+		d.DisableHubLogin = func(context.Context) (bool, error) { return false, nil }
+	}
+	if d.EnsureAgentTemplate == nil {
+		d.EnsureAgentTemplate = func(context.Context, string) (bool, error) { return false, nil }
+	}
+	if d.StartRemoteProxy == nil {
+		d.StartRemoteProxy = func(context.Context) error { return nil }
+	}
+	if d.StopRemoteProxy == nil {
+		d.StopRemoteProxy = func(context.Context) error { return nil }
+	}
+	if d.RemoveJailFile == nil {
+		d.RemoveJailFile = func(context.Context, string) error { return nil }
+	}
+	if d.RemoveScionProjectConfigs == nil {
+		d.RemoveScionProjectConfigs = func(context.Context, string) error { return nil }
+	}
+	if d.ScionProjectRegistered == nil {
+		d.ScionProjectRegistered = func(context.Context, string) (bool, error) { return false, nil }
+	}
+	if d.StripProjectSharedDirs == nil {
+		d.StripProjectSharedDirs = func(context.Context, string) error { return nil }
+	}
+	if d.RepairScionHubEndpoint == nil {
+		d.RepairScionHubEndpoint = func(context.Context, string) error { return nil }
+	}
+	if d.VerifyAgentRole == nil {
+		d.VerifyAgentRole = func(context.Context, string, string) error { return nil }
+	}
+	if d.Log == nil {
+		d.Log = func(string, ...any) {}
+	}
+	return d
+}
+
+// spentLatchMint models a re-apply against a broker whose single-use
+// /bootstrap latch is already consumed: a ticket from the earlier apply is
+// staged in tree, and the mint reports ErrBootstrapLatched, so the step
+// tolerates it and boot.minted stays false.
+func spentLatchMint(t *testing.T, tree string) func(context.Context) (BootstrapMaterial, error) {
+	t.Helper()
+	if err := StageBootstrapMaterial(tree, BootstrapMaterial{Ticket: "from-an-earlier-apply"}); err != nil {
+		t.Fatal(err)
+	}
+	return func(context.Context) (BootstrapMaterial, error) {
+		return BootstrapMaterial{}, ErrBootstrapLatched
+	}
+}
 
 // isObserveList reports whether args is scion.Client.List's shape (`list
 // --format json ... --non-interactive`), as opposed to waitHubReady's
@@ -43,28 +137,23 @@ func isObserveList(args []string) bool {
 // flakyStartRunner fails the first startFails `scion start` calls with the
 // runtime-broker-unavailable error (the registration race), then defers to the
 // wrapped FakeRunner. Used to prove start-manager retries. It also answers
-// `scion list --format json` itself (Task 4's observe-first start-manager
+// `scion list --format json` itself (the observe-first start-manager
 // calls List before AND after Start): the very first (observe-first) list call
 // reports slug ABSENT (so the create path — and thus Start — is actually
 // taken), and every call after that reports it running/running (so the
 // post-start liveness verify converges as soon as Start finally succeeds).
 type flakyStartRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	slug       string
 	startFails int
 	startCalls int
 	listCalls  int
 }
 
-func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		if isObserveList(args) {
-			r.listCalls++
-			r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
-			if r.listCalls == 1 {
-				return exec.Result{Stdout: "[]"}, nil
-			}
-			return exec.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
+			return absentThenRunningList(r.FakeRunner, &r.listCalls, r.slug, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 		}
 		hasStart, hasServer, isProbe := false, false, false
 		for _, a := range args {
@@ -82,47 +171,42 @@ func (r *flakyStartRunner) RunIn(ctx context.Context, dir string, env map[string
 		}
 		if isProbe {
 			// Answer as a scion WITHOUT --role, matching the pins lever can fetch.
-			return exec.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
+			return proc.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
 		}
 		if hasStart && !hasServer { // agent start, not `scion server start`
 			r.startCalls++
 			if r.startCalls <= r.startFails {
 				// Client.run builds its error from Stdout+Stderr, so the marker must
 				// live there, not just in the Go error.
-				return exec.Result{Code: 1, Stderr: "no_runtime_broker: No runtime brokers available for this project"}, fmt.Errorf("exit status 1")
+				return proc.Result{Code: 1, Stderr: "no_runtime_broker: No runtime brokers available for this project"}, fmt.Errorf("exit status 1")
 			}
 		}
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
 // alreadyUpRunner simulates a fully-up instance on re-apply: `scion server
 // start` and agent `start` return "already running"; everything else
-// succeeds. It also answers `scion list --format json` itself (Task 4's
+// succeeds. It also answers `scion list --format json` itself (the
 // observe-first start-manager calls List before AND after Start): the first
 // list call reports slug ABSENT (so start-manager still takes the create path
 // and calls Start, exercising the AlreadyRunning tolerance below), and every
 // call after that reports it running/running (so the post-start liveness
 // verify converges once AlreadyRunning is tolerated as success).
 type alreadyUpRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	slug      string
 	listCalls int
 }
 
-func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		if isObserveList(args) {
-			r.listCalls++
-			r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
-			if r.listCalls == 1 {
-				return exec.Result{Stdout: "[]"}, nil
-			}
-			return exec.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, r.slug)}, nil
+			return absentThenRunningList(r.FakeRunner, &r.listCalls, r.slug, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 		}
 		hasServer, hasStart := false, false
 		for _, a := range args {
@@ -134,21 +218,21 @@ func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]
 			}
 		}
 		if hasServer && hasStart {
-			return exec.Result{Code: 1, Stderr: "Error: server is already running (PID: 123)"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "Error: server is already running (PID: 123)"}, fmt.Errorf("exit status 1")
 		}
 		if hasStart && !hasServer {
-			return exec.Result{Code: 1, Stderr: "Error: agent already running"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "Error: agent already running"}, fmt.Errorf("exit status 1")
 		}
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
 // agentLifecycleRunner fakes `scion list/start/resume/delete` around a SINGLE
-// manager-agent record, for Task 4's observe-first start-manager tests. list
+// manager-agent record, for the observe-first start-manager tests. list
 // reports whatever the record's current phase/containerStatus is (a ""
 // initPhase reports no agents at all, i.e. absent); a successful start/resume
 // advances the record to liveWhenPhase/liveWhenContainer (both default to
@@ -167,7 +251,7 @@ func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name s
 // argv is still exercised and recorded), and the post-create liveness poll
 // converges on the very next list call.
 type agentLifecycleRunner struct {
-	*exec.FakeRunner
+	*proc.FakeRunner
 	slug string
 
 	initPhase, initContainerStatus   string
@@ -218,7 +302,7 @@ func (r *agentLifecycleRunner) goLive() {
 }
 
 func (r *agentLifecycleRunner) record(dir string, env map[string]string, name string, args []string) {
-	r.FakeRunner.Calls = append(r.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
+	r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 }
 
 // verb extracts the scion subcommand from args, skipping the leading `-g
@@ -248,7 +332,7 @@ func (r *agentLifecycleRunner) verb(args []string) string {
 	return args[0]
 }
 
-func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name != "scion" {
 		return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 	}
@@ -256,25 +340,25 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	switch r.verb(args) {
 	case "role-probe":
 		// Answer as a scion WITHOUT --role, matching the pins lever can fetch.
-		return exec.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
+		return proc.Result{Stdout: "Flags:\n      --harness-auth string   Override auth method\n"}, nil
 	case "list":
 		r.listCalls++
 		r.record(dir, env, name, args)
 		if r.listErr != nil && (r.listFailsThenSucceed == 0 || r.listCalls <= r.listFailsThenSucceed) {
-			return exec.Result{Code: 1, Stderr: r.listErr.Error()}, r.listErr
+			return proc.Result{Code: 1, Stderr: r.listErr.Error()}, r.listErr
 		}
 		if r.phase == "" {
-			return exec.Result{Stdout: "[]"}, nil
+			return proc.Result{Stdout: "[]"}, nil
 		}
-		return exec.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
+		return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
 	case "start":
 		r.startCalls++
 		r.record(dir, env, name, args)
 		if r.startErr != nil {
-			return exec.Result{Code: 1, Stderr: r.startErr.Error()}, r.startErr
+			return proc.Result{Code: 1, Stderr: r.startErr.Error()}, r.startErr
 		}
 		r.goLive()
-		return exec.Result{Stdout: "ok"}, nil
+		return proc.Result{Stdout: "ok"}, nil
 	case "resume":
 		r.resumeCalls++
 		for _, a := range args {
@@ -287,37 +371,33 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 			if r.healerRecoversOnResumeFail {
 				r.goLive()
 			}
-			return exec.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
+			return proc.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
 		}
 		r.goLive()
-		return exec.Result{Stdout: "ok"}, nil
+		return proc.Result{Stdout: "ok"}, nil
 	case "delete":
 		r.deleteCalls++
 		r.record(dir, env, name, args)
 		if r.deleteErr != nil {
-			return exec.Result{Code: 1, Stderr: r.deleteErr.Error()}, r.deleteErr
+			return proc.Result{Code: 1, Stderr: r.deleteErr.Error()}, r.deleteErr
 		}
 		r.phase, r.containerStatus = "", ""
-		return exec.Result{Stdout: "ok"}, nil
+		return proc.Result{Stdout: "ok"}, nil
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *agentLifecycleRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *agentLifecycleRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// newObserveFirstApp returns a minimal app + fresh FakeRunner for Task 4's
+// newObserveFirstApp returns a minimal app + fresh FakeRunner for the
 // start-manager observe-first tests, sharing one shape across the matrix
 // (name "hello", matching agentLifecycleRunner's slug in each test below).
-func newObserveFirstApp(t *testing.T) (*config.App, *exec.FakeRunner) {
+func newObserveFirstApp(t *testing.T) (*config.App, *proc.FakeRunner) {
 	t.Helper()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
 	return app, f
 }
 
@@ -329,11 +409,9 @@ func TestStartManagerObserveFirstCreatesWhenAbsent(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // initPhase "" == absent
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if r.startCalls != 1 {
@@ -351,11 +429,9 @@ func TestStartManagerObserveFirstResumesSuspended(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if r.resumeCalls != 1 {
@@ -367,17 +443,15 @@ func TestStartManagerObserveFirstResumesSuspended(t *testing.T) {
 }
 
 // TestStartManagerObserveFirstResumesStopped: `scion resume` covers stopped
-// records too (per the plan's Evidence base: "scion resume help: 'Resume a
+// records too ("scion resume help: 'Resume a
 // stopped scion agent' — covers stopped as well as suspended").
 func TestStartManagerObserveFirstResumesStopped(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "stopped", initContainerStatus: "stopped"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if r.resumeCalls != 1 {
@@ -398,11 +472,9 @@ func TestStartManagerObserveFirstNoOpWhenRunning(t *testing.T) {
 	// this fixture pins that the liveness gate accepts it.
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 6 seconds"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if r.startCalls != 0 || r.resumeCalls != 0 {
@@ -415,24 +487,14 @@ func TestStartManagerObserveFirstNoOpWhenRunning(t *testing.T) {
 // whose ContainerStatus never comes up (the harness died) must fail loudly,
 // not silently pass just because the switch took the no-op path.
 func TestStartManagerRunningRecordButDeadContainerFailsLoud(t *testing.T) {
-	origAtt, origInt := managerLiveAttempts, managerLiveInterval
-	managerLiveAttempts, managerLiveInterval = 3, time.Millisecond
-	defer func() { managerLiveAttempts, managerLiveInterval = origAtt, origInt }()
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "stopped"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		ManagerLiveRetry: fastRetry(3),
+		Scion:            scion.New(r, scion.Options{}),
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a running record whose container never comes up must fail, not silently pass")
-	}
-	if !strings.Contains(err.Error(), `phase "running"`) || !strings.Contains(err.Error(), `container "stopped"`) {
-		t.Fatalf("error should report the last observed phase/container, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, `phase "running"`, `container "stopped"`)
 	if r.startCalls != 0 || r.resumeCalls != 0 {
 		t.Errorf("startCalls=%d resumeCalls=%d, want 0/0 (the no-op branch must not start/resume)", r.startCalls, r.resumeCalls)
 	}
@@ -453,16 +515,12 @@ func TestStartManagerResumeFailsRecoversFresh(t *testing.T) {
 		initPhase: "suspended", initContainerStatus: "stopped",
 		resumeErr: fmt.Errorf("cannot resume agent 'hello': agent does not exist"),
 	}
-	var logged []string
+	var logged logSink
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		Log: func(format string, args ...any) {
-			logged = append(logged, fmt.Sprintf(format, args...))
-		},
+		Scion: scion.New(r, scion.Options{}),
+		Log:   logged.logf,
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run should recover from a failed resume by starting fresh: %v", err)
 	}
 	if r.resumeCalls != 1 {
@@ -474,11 +532,11 @@ func TestStartManagerResumeFailsRecoversFresh(t *testing.T) {
 	if r.startCalls != 1 {
 		t.Errorf("startCalls = %d, want 1 (fresh create after the failed resume)", r.startCalls)
 	}
-	if len(logged) != 1 {
-		t.Fatalf("expected exactly one loud log line, got %+v", logged)
+	if len(logged.lines) != 1 {
+		t.Fatalf("expected exactly one loud log line, got %+v", logged.lines)
 	}
-	if !strings.Contains(logged[0], "resume failed") || !strings.Contains(logged[0], "FRESH") || !strings.Contains(logged[0], "previous session lost") {
-		t.Fatalf("recovery log line missing expected wording, got %q", logged[0])
+	if !strings.Contains(logged.lines[0], "resume failed") || !strings.Contains(logged.lines[0], "FRESH") || !strings.Contains(logged.lines[0], "previous session lost") {
+		t.Fatalf("recovery log line missing expected wording, got %q", logged.lines[0])
 	}
 }
 
@@ -495,27 +553,20 @@ func TestStartManagerResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
 		deleteErr: fmt.Errorf("delete: agent locked"),
 	}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a failed resume AND a failed delete must be a hard error")
-	}
-	if !strings.Contains(err.Error(), "cannot resume") || !strings.Contains(err.Error(), "delete: agent locked") {
-		t.Fatalf("error should mention BOTH the resume and delete failures, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "cannot resume", "delete: agent locked")
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (must not attempt a fresh create over an undeleted record)", r.startCalls)
 	}
 }
 
 // TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds proves the
-// CRITICAL fix (resume-branch-review.md C1): `scion resume` shares Start's
+// CRITICAL fix: `scion resume` shares Start's
 // runtime-broker-registration race, so a resume that fails with the
-// broker-unavailable wording must be RETRIED (same brokerStartAttempts/
-// brokerStartInterval budget as Start) before any loud recovery — a transient
+// broker-unavailable wording must be RETRIED (same BrokerStartRetry
+// budget as Start) before any loud recovery — a transient
 // blip must never destroy a resumable conversation.
 // TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError pins
 // the ERROR branch's distinct delete-fail error wrap ("forced resume failed
@@ -533,20 +584,11 @@ func TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError(t *te
 		deleteErr: fmt.Errorf("delete: agent locked"),
 	}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a failed forced resume AND a failed delete must be a hard error")
-	}
-	if !strings.Contains(err.Error(), "forced resume failed") {
-		t.Fatalf("error should carry the error-branch's distinct 'forced resume failed' prefix, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "container state corrupt") || !strings.Contains(err.Error(), "delete: agent locked") {
-		t.Fatalf("error should mention BOTH the forced-resume and delete failures, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "forced resume failed")
+	testutil.WantErrContaining(t, err, "container state corrupt", "delete: agent locked")
 	if r.resumeForceCalls != 1 {
 		t.Errorf("resumeForceCalls = %d, want 1 (error phase must TRY resume --force first)", r.resumeForceCalls)
 	}
@@ -556,29 +598,22 @@ func TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError(t *te
 }
 
 func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) {
-	origAtt, origInt := brokerStartAttempts, brokerStartInterval
-	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
-	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
 		initPhase: "suspended", initContainerStatus: "stopped",
 		// scion resume's own transient wording (singular "broker" — see
-		// isBrokerUnavailable's doc), failing the first 2 calls then resolving.
+		// scion.IsBrokerUnavailable's doc), failing the first 2 calls then resolving.
 		resumeErr:              fmt.Errorf("cannot resume agent: no runtime broker available"),
 		resumeFailsThenSucceed: 2,
 	}
-	var logged []string
+	var logged logSink
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		Log: func(format string, args ...any) {
-			logged = append(logged, fmt.Sprintf(format, args...))
-		},
+		BrokerStartRetry: fastRetry(5),
+		Scion:            scion.New(r, scion.Options{}),
+		Log:              logged.logf,
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run should succeed once the broker race resolves within the retry budget: %v", err)
 	}
 	if r.resumeCalls != 3 {
@@ -587,8 +622,8 @@ func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) 
 	if r.deleteCalls != 0 || r.startCalls != 0 {
 		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 — a resume that eventually succeeds must NOT delete/recreate (conversation preserved)", r.deleteCalls, r.startCalls)
 	}
-	if len(logged) != 0 {
-		t.Errorf("no loud recovery log expected when resume eventually succeeds, got %+v", logged)
+	if len(logged.lines) != 0 {
+		t.Errorf("no loud recovery log expected when resume eventually succeeds, got %+v", logged.lines)
 	}
 }
 
@@ -598,10 +633,6 @@ func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) 
 // recovery — the retry absorbs a transient blip, it does not turn a
 // permanently-unavailable broker into an infinite hang.
 func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testing.T) {
-	origAtt, origInt := brokerStartAttempts, brokerStartInterval
-	brokerStartAttempts, brokerStartInterval = 3, time.Millisecond
-	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -610,16 +641,13 @@ func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testi
 		// resumeFailsThenSucceed left 0: resume fails on EVERY call, exercising
 		// full budget exhaustion.
 	}
-	var logged []string
+	var logged logSink
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		Log: func(format string, args ...any) {
-			logged = append(logged, fmt.Sprintf(format, args...))
-		},
+		BrokerStartRetry: fastRetry(3),
+		Scion:            scion.New(r, scion.Options{}),
+		Log:              logged.logf,
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("an exhausted-but-transient resume must still recover fresh, not fail the apply: %v", err)
 	}
 	if r.resumeCalls != 3 {
@@ -628,8 +656,8 @@ func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testi
 	if r.deleteCalls != 1 || r.startCalls != 1 {
 		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (loud recovery only AFTER the retry budget exhausts)", r.deleteCalls, r.startCalls)
 	}
-	if len(logged) != 1 || !strings.Contains(logged[0], "resume failed") || !strings.Contains(logged[0], "FRESH") {
-		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged)
+	if len(logged.lines) != 1 || !strings.Contains(logged.lines[0], "resume failed") || !strings.Contains(logged.lines[0], "FRESH") {
+		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged.lines)
 	}
 }
 
@@ -645,20 +673,20 @@ func TestIsBrokerUnavailable(t *testing.T) {
 		"Post \"http://hub\": context deadline exceeded",
 	}
 	for _, s := range transient {
-		if !isBrokerUnavailable(fmt.Errorf("%s", s)) {
-			t.Errorf("isBrokerUnavailable(%q) = false, want true (transient)", s)
+		if !scion.IsBrokerUnavailable(fmt.Errorf("%s", s)) {
+			t.Errorf("scion.IsBrokerUnavailable(%q) = false, want true (transient)", s)
 		}
 	}
 	for _, s := range []string{
 		"authentication failed", "project not found", "permission denied",
 		"invalid deadline configured", // "deadline" without "exceeded" must NOT match
 	} {
-		if isBrokerUnavailable(fmt.Errorf("%s", s)) {
-			t.Errorf("isBrokerUnavailable(%q) = true, want false (real failure)", s)
+		if scion.IsBrokerUnavailable(fmt.Errorf("%s", s)) {
+			t.Errorf("scion.IsBrokerUnavailable(%q) = true, want false (real failure)", s)
 		}
 	}
-	if isBrokerUnavailable(nil) {
-		t.Error("isBrokerUnavailable(nil) = true, want false")
+	if scion.IsBrokerUnavailable(nil) {
+		t.Error("scion.IsBrokerUnavailable(nil) = true, want false")
 	}
 }
 
@@ -670,10 +698,6 @@ func TestIsBrokerUnavailable(t *testing.T) {
 // succeed onto an already-running record (pure no-op path) so the test isolates
 // the observe retry.
 func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
-	origAtt, origInt := brokerStartAttempts, brokerStartInterval
-	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
-	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -682,11 +706,10 @@ func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
 		listFailsThenSucceed: 2,
 	}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		BrokerStartRetry: fastRetry(5),
+		Scion:            scion.New(r, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("a transient observe-List blip must be retried, not fail the apply: %v", err)
 	}
 	if r.startCalls != 0 || r.resumeCalls != 0 {
@@ -706,16 +729,14 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent record → create
 	var waitCalls, startCallsAtGate int
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 		WaitBrokerReady: func(ctx context.Context, project string) error {
 			waitCalls++
 			startCallsAtGate = r.startCalls
 			return nil
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if waitCalls != 1 {
@@ -736,56 +757,42 @@ func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 		WaitBrokerReady: func(ctx context.Context, project string) error {
 			return context.Canceled
 		},
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil || !strings.Contains(err.Error(), "runtime broker") {
-		t.Fatalf("a gate error must abort start-manager, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "runtime broker")
 	if r.startCalls != 0 || r.resumeCalls != 0 {
 		t.Errorf("startCalls=%d resumeCalls=%d, want 0/0 (no action when the gate errors)", r.startCalls, r.resumeCalls)
 	}
 }
 
 // TestStartManagerLivenessNeverGreenAfterCreate: `scion start` reports success
-// but the container never actually comes up (scion's own false-success — see
-// the plan's Evidence base). The liveness verify must exhaust its attempts and
+// but the container never actually comes up (scion's own false-success).
+// The liveness verify must exhaust its attempts and
 // fail loudly with the last observed phase/container, rather than trusting
 // the CLI's exit code.
 func TestStartManagerLivenessNeverGreenAfterCreate(t *testing.T) {
-	origAtt, origInt := managerLiveAttempts, managerLiveInterval
-	managerLiveAttempts, managerLiveInterval = 3, time.Millisecond
-	defer func() { managerLiveAttempts, managerLiveInterval = origAtt, origInt }()
-
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
 		liveWhenContainer: "stopped", // Start "succeeds" but the container never lives
 	}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		ManagerLiveRetry: fastRetry(3),
+		Scion:            scion.New(r, scion.Options{}),
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a manager whose container never comes up must fail the apply, not report success")
-	}
-	if !strings.Contains(err.Error(), "did not come up") || !strings.Contains(err.Error(), `container "stopped"`) {
-		t.Fatalf("error should say the manager did not come up and report the last container status, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "did not come up", `container "stopped"`)
 	if r.startCalls != 1 {
 		t.Errorf("startCalls = %d, want 1 (Start itself must still have been attempted)", r.startCalls)
 	}
 }
 
-// TestStartManagerUnexpectedPhaseRecoversFresh proves the IMPORTANT fix
-// (resume-branch-review.md I1): an unhandled-but-real scion phase (here
+// TestStartManagerUnexpectedPhaseRecoversFresh proves the IMPORTANT fix:
+// an unhandled-but-real scion phase (here
 // "error" — a crashed manager, e.g. an OOM/harness crash) must NOT hard-fail
 // (brick) `lever up` with no path forward but `lever destroy`. It takes the
 // SAME loud delete+fresh recovery as a failed resume, so `up` converges.
@@ -793,16 +800,12 @@ func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "error", initContainerStatus: "stopped",
 		resumeErr: fmt.Errorf("container state corrupt")}
-	var logged []string
+	var logged logSink
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		Log: func(format string, args ...any) {
-			logged = append(logged, fmt.Sprintf(format, args...))
-		},
+		Scion: scion.New(r, scion.Options{}),
+		Log:   logged.logf,
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("an unrecoverable error phase must recover fresh, not hard-fail the apply: %v", err)
 	}
 	if r.resumeForceCalls != 1 {
@@ -811,11 +814,11 @@ func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
 	if r.deleteCalls != 1 || r.startCalls != 1 {
 		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (delete the unrecoverable record, then fresh create)", r.deleteCalls, r.startCalls)
 	}
-	if len(logged) != 1 {
-		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged)
+	if len(logged.lines) != 1 {
+		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged.lines)
 	}
-	if !strings.Contains(logged[0], `phase "error"`) || !strings.Contains(logged[0], "FRESH") || !strings.Contains(logged[0], "previous session lost") {
-		t.Fatalf("recovery log line missing expected wording, got %q", logged[0])
+	if !strings.Contains(logged.lines[0], `phase "error"`) || !strings.Contains(logged.lines[0], "FRESH") || !strings.Contains(logged.lines[0], "previous session lost") {
+		t.Fatalf("recovery log line missing expected wording, got %q", logged.lines[0])
 	}
 }
 
@@ -825,16 +828,12 @@ func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
 func TestStartManagerErrorPhaseForcedResumeRecovers(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "error", initContainerStatus: "stopped"}
-	var logged []string
+	var logged logSink
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		Log: func(format string, args ...any) {
-			logged = append(logged, fmt.Sprintf(format, args...))
-		},
+		Scion: scion.New(r, scion.Options{}),
+		Log:   logged.logf,
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if r.resumeForceCalls != 1 {
@@ -843,7 +842,7 @@ func TestStartManagerErrorPhaseForcedResumeRecovers(t *testing.T) {
 	if r.deleteCalls != 0 || r.startCalls != 0 {
 		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 (forced resume succeeded — the conversation must survive)", r.deleteCalls, r.startCalls)
 	}
-	for _, l := range logged {
+	for _, l := range logged.lines {
 		if strings.Contains(l, "previous session lost") {
 			t.Fatalf("no loss notice expected on successful forced resume, got %q", l)
 		}
@@ -863,25 +862,21 @@ func TestStartManagerResumeFailButHealerRecovered(t *testing.T) {
 			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: "stopped",
 				resumeErr:                  fmt.Errorf("verb conflict: agent transition in flight"),
 				healerRecoversOnResumeFail: true}
-			var logged []string
+			var logged logSink
 			deps := Deps{
-				JailUp:    func(context.Context, *config.App) error { return nil },
-				LoadImage: func(context.Context, string) error { return nil },
-				Scion:     scion.New(r, scion.Options{}),
-				Log: func(format string, args ...any) {
-					logged = append(logged, fmt.Sprintf(format, args...))
-				},
+				Scion: scion.New(r, scion.Options{}),
+				Log:   logged.logf,
 			}
-			if err := Run(context.Background(), app, deps); err != nil {
+			if err := runApply(app, deps); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 			if r.deleteCalls != 0 || r.startCalls != 0 {
 				t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 (record is running — the healer recovered it, apply must keep the session)", r.deleteCalls, r.startCalls)
 			}
-			if len(logged) != 1 || !strings.Contains(logged[0], "recovered concurrently") {
-				t.Fatalf("expected one 'recovered concurrently' log line, got %+v", logged)
+			if len(logged.lines) != 1 || !strings.Contains(logged.lines[0], "recovered concurrently") {
+				t.Fatalf("expected one 'recovered concurrently' log line, got %+v", logged.lines)
 			}
-			for _, l := range logged {
+			for _, l := range logged.lines {
 				if strings.Contains(l, "previous session lost") {
 					t.Fatalf("no loss notice when the record survived, got %q", l)
 				}
@@ -904,11 +899,9 @@ func TestStartManagerStartingPhaseRecoversFresh(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: ""}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("a half-started (\"starting\") record must recover fresh, not hard-fail: %v", err)
 	}
 	if r.deleteCalls != 1 || r.startCalls != 1 {
@@ -934,23 +927,18 @@ func TestStartManagerStartingPhaseRecoversFresh(t *testing.T) {
 // the branch taken is resume/no-op, which never creates at all).
 
 // TestStartManagerCreateRearmsSpentLatchWhenNoFreshMintThisRun: the plain
-// absent-record create path, with no MintManagerBootstrap wired (so boot is
-// untouched/"empty" exactly as it would be after a tolerated spent latch),
-// must call RearmBootstrap exactly once and then proceed with Start.
+// absent-record create path after a tolerated spent latch (spentLatchMint, so
+// boot.minted stays false) must call RearmBootstrap exactly once and then proceed with Start.
 func TestStartManagerCreateRearmsSpentLatchWhenNoFreshMintThisRun(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // initPhase "" == absent -> create path
 	rearmCalls := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			rearmCalls++
-			return BootstrapMaterial{Ticket: "fresh-ticket"}, nil
-		},
+		MintManagerBootstrap: spentLatchMint(t, app.Tree),
+		Scion:                scion.New(r, scion.Options{}),
+		RearmBootstrap:       countRearm(&rearmCalls),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 1 {
@@ -970,18 +958,13 @@ func TestStartManagerCreateSkipsRearmWhenFreshMintAlreadyHappened(t *testing.T) 
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent -> create path
 	rearmCalls := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, no latch
 		},
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			rearmCalls++
-			return BootstrapMaterial{}, nil
-		},
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 0 {
@@ -1005,16 +988,12 @@ func TestStartManagerRecoveryRearmsBeforeFreshCreate(t *testing.T) {
 	}
 	rearmCalls := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		Log:       func(string, ...any) {},
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			rearmCalls++
-			return BootstrapMaterial{Ticket: "fresh-after-recovery"}, nil
-		},
+		MintManagerBootstrap: spentLatchMint(t, app.Tree),
+		Scion:                scion.New(r, scion.Options{}),
+		Log:                  func(string, ...any) {},
+		RearmBootstrap:       countRearm(&rearmCalls),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 1 {
@@ -1037,18 +1016,14 @@ func TestStartManagerResumeRearmsWhenNoFreshMaterial(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
 	rearmCalls := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		// No MintManagerBootstrap -> no fresh material minted this run
-		// (boot.minted stays false), modelling the persisted-broker/spent-latch
-		// state in which an expired leaf would otherwise stay dead.
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			rearmCalls++
-			return BootstrapMaterial{Ticket: "fresh-for-resume"}, nil
-		},
+		MintManagerBootstrap: spentLatchMint(t, app.Tree),
+		Scion:                scion.New(r, scion.Options{}),
+		// A spent latch -> no fresh material minted this run (boot.minted
+		// stays false), modelling the persisted-broker state in which an
+		// expired leaf would otherwise stay dead.
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 1 {
@@ -1068,18 +1043,13 @@ func TestStartManagerResumeSkipsRearmWhenAlreadyMinted(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
 	rearmCalls := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{Ticket: "minted-this-run"}, nil // fresh mint, latch was open
 		},
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			rearmCalls++
-			return BootstrapMaterial{}, nil
-		},
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 0 {
@@ -1098,15 +1068,10 @@ func TestStartManagerNoOpRunningNeverRearms(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "running"}
 	rearmCalls := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			rearmCalls++
-			return BootstrapMaterial{}, nil
-		},
+		Scion:          scion.New(r, scion.Options{}),
+		RearmBootstrap: countRearm(&rearmCalls),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 0 {
@@ -1122,20 +1087,14 @@ func TestStartManagerCreateFailsLoudlyWhenRearmFails(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent -> create path
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
-		RearmBootstrap: func(context.Context) (BootstrapMaterial, error) {
-			return BootstrapMaterial{}, fmt.Errorf("broker restart failed: connection refused")
+		MintManagerBootstrap: spentLatchMint(t, app.Tree),
+		Scion:                scion.New(r, scion.Options{}),
+		RearmBootstrap: func(context.Context) error {
+			return fmt.Errorf("broker restart failed: connection refused")
 		},
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a failed re-arm must fail the apply — a create over a spent latch is guaranteed to 403")
-	}
-	if !strings.Contains(err.Error(), "bootstrap") || !strings.Contains(err.Error(), "latch") {
-		t.Fatalf("error should mention bootstrap/latch, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "bootstrap", "latch")
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (Start must never be attempted without enrolable bootstrap material)", r.startCalls)
 	}
@@ -1149,12 +1108,10 @@ func TestStartManagerCreateProceedsWithoutRearmWhenNilBackCompat(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent -> create path
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 		// RearmBootstrap intentionally left nil.
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if r.startCalls != 1 {
@@ -1174,17 +1131,10 @@ func TestStartManagerObserveListErrorIsHardFailure(t *testing.T) {
 	// and otherwise defers to r.
 	fe := &firstListErrRunner{inner: r}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(fe, scion.Options{}),
+		Scion: scion.New(fe, scion.Options{}),
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a List error observing agents must fail start-manager")
-	}
-	if !strings.Contains(err.Error(), "observing agents") {
-		t.Fatalf("error should mention observing agents, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "observing agents")
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (must not guess an action past an observe failure)", r.startCalls)
 	}
@@ -1201,17 +1151,21 @@ type firstListErrRunner struct {
 	listSeen int
 }
 
-func (r *firstListErrRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *firstListErrRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.inner.RunStdin(ctx, stdin, env, name, args...)
+}
+
+func (r *firstListErrRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" && isObserveList(args) {
 		r.listSeen++
 		if r.listSeen == 1 {
-			return exec.Result{Code: 1, Stderr: "hub: internal server error"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "hub: internal server error"}, fmt.Errorf("exit status 1")
 		}
 	}
 	return r.inner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *firstListErrRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *firstListErrRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -1228,30 +1182,30 @@ type failNListsRunner struct {
 	listSeen  int
 }
 
-func (r *failNListsRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *failNListsRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.inner.RunStdin(ctx, stdin, env, name, args...)
+}
+
+func (r *failNListsRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" && isObserveList(args) {
 		r.listSeen++
 		if r.listSeen > 1 && r.listSeen <= 1+r.failCount {
-			return exec.Result{Code: 1, Stderr: "hub: transient blip"}, fmt.Errorf("exit status 1")
+			return proc.Result{Code: 1, Stderr: "hub: transient blip"}, fmt.Errorf("exit status 1")
 		}
 	}
 	return r.inner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *failNListsRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *failNListsRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// TestWaitManagerLiveToleratesMidPollListErrors proves the MINOR fix
-// (resume-branch-review.md M1): two transient List errors during the
+// TestWaitManagerLiveToleratesMidPollListErrors proves the MINOR fix:
+// two transient List errors during the
 // post-action liveness poll must not abort the apply — they are consumed
 // within the existing retry budget, and the poll succeeds as soon as a List
 // call reports the manager running/running.
 func TestWaitManagerLiveToleratesMidPollListErrors(t *testing.T) {
-	origAtt, origInt := managerLiveAttempts, managerLiveInterval
-	managerLiveAttempts, managerLiveInterval = 5, time.Millisecond
-	defer func() { managerLiveAttempts, managerLiveInterval = origAtt, origInt }()
-
 	app, f := newObserveFirstApp(t)
 	// Already running/live — the no-op branch — so start-manager's OWN observe
 	// (list call 1) must succeed; failNListsRunner then fails exactly the next
@@ -1260,11 +1214,10 @@ func TestWaitManagerLiveToleratesMidPollListErrors(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "running"}
 	fe := &failNListsRunner{inner: r, failCount: 2}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(fe, scion.Options{}),
+		ManagerLiveRetry: fastRetry(5),
+		Scion:            scion.New(fe, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("two transient List blips within the liveness poll's budget must not fail apply: %v", err)
 	}
 	if r.startCalls != 0 || r.resumeCalls != 0 {
@@ -1286,12 +1239,9 @@ func TestRunIdempotentReapply(t *testing.T) {
 		Name: "demo", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
 	}
-	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner(), slug: "demo"}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &alreadyUpRunner{FakeRunner: scionOKRunner(), slug: "demo"}
 	mintCalled := false
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
 		JailMount: "/lever",
 		// Same broker process as a prior apply ⇒ latch spent ⇒ ErrBootstrapLatched.
@@ -1301,7 +1251,7 @@ func TestRunIdempotentReapply(t *testing.T) {
 			return BootstrapMaterial{}, ErrBootstrapLatched
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("re-apply of a fully-up instance must be a clean no-op: %v", err)
 	}
 	if !mintCalled {
@@ -1314,18 +1264,15 @@ func TestRunIdempotentReapply(t *testing.T) {
 func TestRunMintBootstrapPropagatesRealError(t *testing.T) {
 	tree := t.TempDir()
 	app := &config.App{Name: "demo", Backend: "orbstack", Tree: tree, Manager: config.Manager{Image: "img"}}
-	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner(), slug: "demo"}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &alreadyUpRunner{FakeRunner: scionOKRunner(), slug: "demo"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
 		JailMount: "/lever",
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{}, fmt.Errorf("broker /bootstrap: connection refused")
 		},
 	}
-	if err := Run(context.Background(), app, deps); err == nil {
+	if err := runApply(app, deps); err == nil {
 		t.Fatal("a real mint error (not the latch) must propagate, not be tolerated")
 	}
 }
@@ -1338,31 +1285,20 @@ func TestRunMintBootstrapPropagatesRealError(t *testing.T) {
 func TestRunLatchedWithoutStagedBootstrapFails(t *testing.T) {
 	tree := t.TempDir() // nothing staged
 	app := &config.App{Name: "demo", Backend: "orbstack", Tree: tree, Manager: config.Manager{Image: "img"}}
-	r := &alreadyUpRunner{FakeRunner: exec.NewFakeRunner(), slug: "demo"}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &alreadyUpRunner{FakeRunner: scionOKRunner(), slug: "demo"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		Scion:     scion.New(r, scion.Options{}),
 		JailMount: "/lever",
 		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{}, ErrBootstrapLatched
 		},
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a spent latch with no staged bootstrap must fail loudly (stale broker)")
-	}
-	if !strings.Contains(err.Error(), "lever down") {
-		t.Fatalf("error should guide the user to `lever down`, got: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "lever down")
 }
 
 func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	// Make the retry fast for the test.
-	origAtt, origInt := brokerStartAttempts, brokerStartInterval
-	brokerStartAttempts, brokerStartInterval = 5, time.Millisecond
-	defer func() { brokerStartAttempts, brokerStartInterval = origAtt, origInt }()
 
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
@@ -1374,14 +1310,12 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &flakyStartRunner{FakeRunner: exec.NewFakeRunner(), slug: "hello", startFails: 2}
-	r.Script("scion", exec.Result{Stdout: "ok"})
+	r := &flakyStartRunner{FakeRunner: scionOKRunner(), slug: "hello", startFails: 2}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		BrokerStartRetry: fastRetry(5),
+		Scion:            scion.New(r, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run should succeed after the broker race resolves: %v", err)
 	}
 	if r.startCalls != 3 {
@@ -1389,32 +1323,27 @@ func TestStartManagerRetriesOnBrokerUnavailable(t *testing.T) {
 	}
 }
 func TestRunDispatchesStepsInOrder(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
 		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
-	var jailUp, loadImg bool
+	var loadImg bool
 	deps := Deps{
-		JailUp: func(context.Context, *config.App) error { jailUp = true; return nil },
 		LoadImage: func(_ context.Context, ref string) error {
 			loadImg = (ref == "scionlocal/lever-claude:latest")
 			return nil
 		},
-		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion: hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !jailUp || !loadImg {
-		t.Fatalf("host steps not called: jailUp=%v loadImg=%v", jailUp, loadImg)
+	if !loadImg {
+		t.Fatal("host step load-image not called")
 	}
-	j := ""
-	for _, c := range f.Calls {
-		j += strings.Join(c.Args, " ") + "|"
-	}
+	j := joinedCalls(f)
 	for _, want := range []string{"init --machine", "config set --global image_registry scionlocal", "server start", "init --non-interactive", "hub link", "start hello"} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing scion call %q in: %q", want, j)
@@ -1434,7 +1363,7 @@ type serverStartOrderRunner struct {
 	order *[]string
 }
 
-func (r *serverStartOrderRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *serverStartOrderRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" {
 		hasServer, hasStart := false, false
 		for _, a := range args {
@@ -1452,36 +1381,30 @@ func (r *serverStartOrderRunner) RunIn(ctx context.Context, dir string, env map[
 	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *serverStartOrderRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *serverStartOrderRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
 // TestRunBootstrapTokenRunsOnceBeforeScionServer pins the bootstrap-token
-// step's executor wiring (Task 4): a fake EnsureControllerPAT must be invoked
+// step's executor wiring: a fake EnsureControllerPAT must be invoked
 // exactly once, and strictly before the `scion server start` call — the
 // controller PAT must exist before the real, dev-auth-off hub locks down.
 func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
 	var order []string
 	alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
 	sr := &serverStartOrderRunner{agentLifecycleRunner: alr, order: &order}
 	ensureCalls := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(sr, scion.Options{}),
+		Scion: scion.New(sr, scion.Options{}),
 		EnsureControllerPAT: func(context.Context) error {
 			ensureCalls++
 			order = append(order, "bootstrap-token")
 			return nil
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if ensureCalls != 1 {
@@ -1509,19 +1432,13 @@ func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
 // caller that doesn't wire the mint window) must not error and must not
 // block the rest of Run — the scion-server step still runs unguarded.
 func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
 		// EnsureControllerPAT intentionally left nil.
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var sawServerStart bool
@@ -1547,25 +1464,19 @@ func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
 }
 
 func TestRunCredentialStep(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img", CredentialFile: "/x/token"},
 	}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		ReadCred:  func(string) (string, error) { return "sk-ant-raw", nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		ReadCred: func(string) (string, error) { return "sk-ant-raw", nil },
+		Scion:    hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	j := ""
-	for _, c := range f.Calls {
-		j += strings.Join(c.Args, " ") + "|"
-	}
+	j := joinedCalls(f)
 	// plaintext: scion stores the argument verbatim since ce96122c.
 	if want := "hub env set --secret --always CLAUDE_CODE_OAUTH_TOKEN sk-ant-raw"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
@@ -1573,30 +1484,21 @@ func TestRunCredentialStep(t *testing.T) {
 }
 
 // TestRunScionServerEmitsWebFlagsWhenRemoteEnabled pins the scion-server
-// step's threading of App.RemoteEnabled() (Task 5) into scion.ServerOpts:
+// step's threading of App.RemoteEnabled() into scion.ServerOpts:
 // with remote access configured on, the real hub's `server start` call must
 // carry --enable-web. It must NOT carry the tailnet base_url; the
 // consequence of that is asserted by the agent-endpoint test below.
 func TestRunScionServerEmitsWebFlagsWhenRemoteEnabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion: hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	j := ""
-	for _, c := range f.Calls {
-		j += strings.Join(c.Args, " ") + "|"
-	}
+	j := joinedCalls(f)
 	if want := "server start --web-port 8080 --dev-auth=false --enable-web|"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
 	}
@@ -1607,57 +1509,39 @@ func TestRunScionServerEmitsWebFlagsWhenRemoteEnabled(t *testing.T) {
 // the exact value, so the hub signs session cookies with the host-persisted
 // key instead of a per-boot random one.
 func TestRunScionServerEmitsSessionSecret(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
 	deps := Deps{
-		JailUp:           func(context.Context, *config.App) error { return nil },
-		LoadImage:        func(context.Context, string) error { return nil },
-		Scion:            scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:            hubScion(f, app),
 		HubSessionSecret: "sessionsecrethex",
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	j := ""
-	for _, c := range f.Calls {
-		j += strings.Join(c.Args, " ") + "|"
-	}
+	j := joinedCalls(f)
 	if want := "server start --web-port 8080 --dev-auth=false --session-secret=sessionsecrethex|"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
 	}
 }
 
-// TestRunScionServerPointsTheHubAtStagedAssets is the end of the Task 13 wire:
+// TestRunScionServerPointsTheHubAtStagedAssets is the end of the staged-assets wire:
 // a remote-enabled instance on a `version:` pin has no embedded SPA, so the
 // scion-server step must point the hub at the directory the backend staged.
-// The path is guest.ScionWebAssetsDir at both ends by construction — this pins
+// The path is layout.WebAssetsDir at both ends by construction — this pins
 // that the step actually emits it.
 func TestRunScionServerPointsTheHubAtStagedAssets(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		Scion:   config.ScionConfig{Version: "e82a2a08"},
-		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Scion = config.ScionConfig{Version: "e82a2a08"}
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion: hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	j := ""
-	for _, c := range f.Calls {
-		j += strings.Join(c.Args, " ") + "|"
-	}
-	if want := "--enable-web --web-assets-dir=" + guest.ScionWebAssetsDir + "|"; !strings.Contains(j, want) {
+	j := joinedCalls(f)
+	if want := "--enable-web --web-assets-dir=" + layout.WebAssetsDir + "|"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
 	}
 }
@@ -1666,20 +1550,14 @@ func TestRunScionServerPointsTheHubAtStagedAssets(t *testing.T) {
 // flag must stay off: a non-empty value would make scion serve an empty
 // directory INSTEAD of whatever the operator embedded in their own binary.
 func TestRunScionServerOmitsAssetsDirForBinaryMode(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		Scion:   config.ScionConfig{Binary: "/host/scion-linux-arm64"},
-		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Scion = config.ScionConfig{Binary: "/host/scion-linux-arm64"}
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion: hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	for _, c := range f.Calls {
@@ -1770,14 +1648,11 @@ func agentHubEndpoint(t *testing.T, serverStart []string) string {
 func TestRunScionServerKeepsAgentHubEndpointJailReachable(t *testing.T) {
 	serverStartArgs := func(t *testing.T, app *config.App) []string {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := scionOKRunner()
 		deps := Deps{
-			JailUp:    func(context.Context, *config.App) error { return nil },
-			LoadImage: func(context.Context, string) error { return nil },
-			Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+			Scion: hubScion(f, app),
 		}
-		if err := Run(context.Background(), app, deps); err != nil {
+		if err := runApply(app, deps); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 		for _, c := range f.Calls {
@@ -1816,18 +1691,12 @@ func TestRunScionServerKeepsAgentHubEndpointJailReachable(t *testing.T) {
 // `server start` call must NOT gain --enable-web or --base-url — a headless
 // hub must not serve the SPA.
 func TestRunScionServerOmitsWebFlagsWhenRemoteDisabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion: hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	for _, c := range f.Calls {
@@ -1843,25 +1712,19 @@ func TestRunScionServerOmitsWebFlagsWhenRemoteDisabled(t *testing.T) {
 
 // TestRunRemoteProxyStepInvokesStartWhenEnabled proves the remote-proxy
 // step's executor wiring: Plan only includes the step when
-// app.RemoteEnabled() (see plan_test.go), and runStep must invoke the
+// app.RemoteEnabled() (see plan_test.go), and run.step must invoke the
 // injected Deps.StartRemoteProxy for it — exactly once, exactly like every
 // other step's Deps func.
 func TestRunRemoteProxyStepInvokesStartWhenEnabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
 	var starts int
 	deps := Deps{
-		JailUp:           func(context.Context, *config.App) error { return nil },
-		LoadImage:        func(context.Context, string) error { return nil },
-		Scion:            scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:            hubScion(f, app),
 		StartRemoteProxy: func(context.Context) error { starts++; return nil },
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if starts != 1 {
@@ -1874,26 +1737,20 @@ func TestRunRemoteProxyStepInvokesStartWhenEnabled(t *testing.T) {
 // level): the proxy needs the hub up, so its start must be observed
 // strictly after `scion server start` actually runs.
 func TestRunRemoteProxyStepOrderedAfterScionServer(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
 	var order []string
 	alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
 	sr := &serverStartOrderRunner{agentLifecycleRunner: alr, order: &order}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(sr, scion.Options{}),
+		Scion: scion.New(sr, scion.Options{}),
 		StartRemoteProxy: func(context.Context) error {
 			order = append(order, "remote-proxy")
 			return nil
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	ssIdx, rpIdx := -1, -1
@@ -1918,45 +1775,33 @@ func TestRunRemoteProxyStepOrderedAfterScionServer(t *testing.T) {
 // caller that hasn't wired the proxy controller) must not error even though
 // the step is present in the plan.
 func TestRunRemoteProxyStepSkipsCleanlyWhenNil(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion: hubScion(f, app),
 		// StartRemoteProxy intentionally left nil.
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run must not fail when StartRemoteProxy is nil: %v", err)
 	}
 }
 
 // TestRunConvergesRemoteProxyOffWhenDisabled is the config-off idempotence
-// case (see the plan's Task 8 contract): Plan omits the remote-proxy step
+// case: Plan omits the remote-proxy step
 // entirely when remote is disabled, so Run itself — not a step — must call
 // Deps.StopRemoteProxy to converge a stale proxy (left running from a prior
 // apply with remote enabled) to stopped.
 func TestRunConvergesRemoteProxyOffWhenDisabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		// Remote left disabled (the zero value).
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	// Remote left disabled (the zero value).
 	var stops int
 	deps := Deps{
-		JailUp:          func(context.Context, *config.App) error { return nil },
-		LoadImage:       func(context.Context, string) error { return nil },
-		Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:           hubScion(f, app),
 		StopRemoteProxy: func(context.Context) error { stops++; return nil },
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if stops != 1 {
@@ -1968,22 +1813,16 @@ func TestRunConvergesRemoteProxyOffWhenDisabled(t *testing.T) {
 // when remote IS enabled, Run must never call StopRemoteProxy — only the
 // remote-proxy step's StartRemoteProxy runs.
 func TestRunDoesNotStopRemoteProxyWhenEnabled(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
 	var stops int
 	deps := Deps{
-		JailUp:           func(context.Context, *config.App) error { return nil },
-		LoadImage:        func(context.Context, string) error { return nil },
-		Scion:            scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:            hubScion(f, app),
 		StartRemoteProxy: func(context.Context) error { return nil },
 		StopRemoteProxy:  func(context.Context) error { stops++; return nil },
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if stops != 0 {
@@ -1996,19 +1835,13 @@ func TestRunDoesNotStopRemoteProxyWhenEnabled(t *testing.T) {
 // pre-remote-access test, and any caller that doesn't need the proxy), must
 // not error.
 func TestRunConvergeOffSkipsCleanlyWhenNil(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion: hubScion(f, app),
 		// StopRemoteProxy intentionally left nil.
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run must not fail when StopRemoteProxy is nil: %v", err)
 	}
 }
@@ -2028,14 +1861,11 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var sawPrompt bool
@@ -2066,14 +1896,11 @@ func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var sawEnvSet, sawPlaceholder bool
@@ -2116,14 +1943,11 @@ func TestStartManagerNoLLMAuthEnvForSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var startArgv string
@@ -2152,42 +1976,9 @@ func TestJailPathTranslation(t *testing.T) {
 		{"/elsewhere", "/tmp/foo", "/lever", "/elsewhere"},
 	}
 	for _, c := range cases {
-		if got := jailPath(c.host, c.tree, c.mount); got != c.want {
-			t.Errorf("jailPath(%q, %q, %q) = %q, want %q", c.host, c.tree, c.mount, got, c.want)
+		if got := JailPath(c.host, c.tree, c.mount); got != c.want {
+			t.Errorf("JailPath(%q, %q, %q) = %q, want %q", c.host, c.tree, c.mount, got, c.want)
 		}
-	}
-}
-
-func TestRemoveStaleMarker(t *testing.T) {
-	// marker FILE is removed
-	d1 := t.TempDir()
-	mf := filepath.Join(d1, ".scion")
-	if err := os.WriteFile(mf, []byte("project-id: x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeStaleMarker(d1); err != nil {
-		t.Fatalf("removeStaleMarker(file): %v", err)
-	}
-	if _, err := os.Stat(mf); !os.IsNotExist(err) {
-		t.Errorf("marker file should be gone, stat err=%v", err)
-	}
-
-	// .scion DIRECTORY is left untouched (in-repo git-mode project)
-	d2 := t.TempDir()
-	md := filepath.Join(d2, ".scion")
-	if err := os.Mkdir(md, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeStaleMarker(d2); err != nil {
-		t.Fatalf("removeStaleMarker(dir): %v", err)
-	}
-	if info, err := os.Stat(md); err != nil || !info.IsDir() {
-		t.Errorf("marker DIR should be preserved, err=%v", err)
-	}
-
-	// absent .scion is a no-op
-	if err := removeStaleMarker(t.TempDir()); err != nil {
-		t.Errorf("removeStaleMarker(absent): %v", err)
 	}
 }
 
@@ -2195,28 +1986,33 @@ func TestRegisterRemovesStaleMarkerBeforeInit(t *testing.T) {
 	// A stale marker in the tree must be gone by the time `scion init` runs,
 	// so init creates a fresh project (writing workspace_path) rather than
 	// resolving the stale marker and skipping it.
-	tree := t.TempDir()
-	marker := filepath.Join(tree, ".scion")
-	if err := os.WriteFile(marker, []byte("project-id: stale\n"), 0o644); err != nil {
-		t.Fatal(err)
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	initSeen := func() bool { // the project init, not the earlier `init --machine`
+		for _, c := range f.Calls {
+			if c.Name == "scion" && len(c.Args) > 0 && c.Args[0] == "init" && !slices.Contains(c.Args, "--machine") {
+				return true
+			}
+		}
+		return false
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	removed := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
+		RemoveJailFile: func(_ context.Context, p string) error {
+			removed++
+			if initSeen() {
+				t.Errorf("RemoveJailFile(%s) ran AFTER scion init", p)
+			}
+			return nil
+		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Errorf("stale marker should have been removed before init, stat err=%v", err)
+	if removed != 1 || !initSeen() {
+		t.Errorf("removed=%d initSeen=%v, want 1/true", removed, initSeen())
 	}
 }
 
@@ -2233,24 +2029,18 @@ func TestRegisterRemovesMarkerThroughJailWhenProvided(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("project-id: stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	var calls []string
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		RemoveJailFile: func(_ context.Context, jailPath string) error {
 			calls = append(calls, jailPath)
 			return nil // deliberately does NOT touch the host file
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(calls) != 1 || calls[0] != "/lever/.scion" {
@@ -2260,38 +2050,6 @@ func TestRegisterRemovesMarkerThroughJailWhenProvided(t *testing.T) {
 	// removeStaleMarker fallback was NOT exercised alongside RemoveJailFile.
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("host marker should be untouched when RemoveJailFile handles removal, stat err=%v", err)
-	}
-}
-
-// TestRegisterHostFallbackWhenRemoveJailFileNil pins the pre-existing
-// host-side behavior (RemoveJailFile nil, e.g. tests / the broker-only VM
-// gate): removeStaleMarker(s.Target) still runs and the marker is gone by the
-// time `scion init` runs. This is a regression guard alongside the existing
-// TestRegisterRemovesStaleMarkerBeforeInit test.
-func TestRegisterHostFallbackWhenRemoveJailFileNil(t *testing.T) {
-	tree := t.TempDir()
-	marker := filepath.Join(tree, ".scion")
-	if err := os.WriteFile(marker, []byte("project-id: stale\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
-	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
-		// RemoveJailFile intentionally left nil.
-	}
-	if err := Run(context.Background(), app, deps); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Errorf("host-side fallback should have removed the marker, stat err=%v", err)
 	}
 }
 
@@ -2305,13 +2063,9 @@ func TestRegisterHostFallbackWhenRemoveJailFileNil(t *testing.T) {
 // exactly ONE register-project step, for the instance tree.
 func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
+	app.Workers = []config.Worker{{Name: "worker", Dir: "workers/worker"}}
 	var removeCalls []string
 	var initCalls []string
 	// Ordering proof: at the moment the RemoveScionProjectConfigs call fires,
@@ -2320,10 +2074,8 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 	// in call order, a count of 0 proves the removal ran before init.
 	var initCountAtRemove []int
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		RemoveScionProjectConfigs: func(_ context.Context, jailWorkspacePath string) error {
 			removeCalls = append(removeCalls, jailWorkspacePath)
 			n := 0
@@ -2337,7 +2089,7 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 		},
 	}
 
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -2371,29 +2123,17 @@ func TestRegisterRemovesStaleScionProjectConfigsBeforeInit(t *testing.T) {
 // does) must not crash Run, and `scion init` still runs.
 func TestRegisterToleratesNilRemoveScionProjectConfigs(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		// RemoveScionProjectConfigs intentionally left nil.
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var sawInit bool
-	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
-			sawInit = true
-		}
-	}
-	if !sawInit {
+	if !sawScionCall(f, "init --non-interactive") {
 		t.Fatal("scion init should still run when RemoveScionProjectConfigs is nil")
 	}
 }
@@ -2411,19 +2151,13 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("project-id: real\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
+	app.Workers = []config.Worker{{Name: "worker", Dir: "workers/worker"}}
 	var removeJailCalls, removeConfigCalls, registeredCalls []string
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		RemoveJailFile: func(_ context.Context, jailPath string) error {
 			removeJailCalls = append(removeJailCalls, jailPath)
 			return nil
@@ -2437,7 +2171,7 @@ func TestRegisterSkipsDestructivePathWhenAlreadyRegistered(t *testing.T) {
 			return true, nil
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(registeredCalls) != 1 || registeredCalls[0] != "/lever" {
@@ -2476,18 +2210,12 @@ func TestRegisterStripsSharedDirsOnBothPaths(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := t.TempDir()
-			f := exec.NewFakeRunner()
-			f.Script("scion", exec.Result{Stdout: "ok"})
-			app := &config.App{
-				Name: "hello", Backend: "orbstack", Tree: tree,
-				Manager: config.Manager{Image: "img"},
-			}
+			f := scionOKRunner()
+			app := helloApp(tree)
 			var stripCalls []string
 			deps := Deps{
-				JailUp:    func(context.Context, *config.App) error { return nil },
-				LoadImage: func(context.Context, string) error { return nil },
 				JailMount: "/lever",
-				Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+				Scion:     hubScion(f, app),
 				ScionProjectRegistered: func(context.Context, string) (bool, error) {
 					return tc.registered, nil
 				},
@@ -2496,7 +2224,7 @@ func TestRegisterStripsSharedDirsOnBothPaths(t *testing.T) {
 					return nil
 				},
 			}
-			if err := Run(context.Background(), app, deps); err != nil {
+			if err := runApply(app, deps); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 			// The hub knows the project by the workspace basename — the same
@@ -2514,28 +2242,16 @@ func TestRegisterStripsSharedDirsOnBothPaths(t *testing.T) {
 // directory while the operator believes they do not.
 func TestRegisterFailsWhenSharedDirStripFails(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		StripProjectSharedDirs: func(context.Context, string) error {
-			return errors.New("403 Forbidden")
+			return errForbidden
 		},
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("apply must fail when the shared-dir strip fails")
-	}
-	if !strings.Contains(err.Error(), "403") {
-		t.Errorf("error should carry the strip failure, got %v", err)
-	}
+	testutil.WantErrIs(t, runApply(app, deps), errForbidden)
 }
 
 // TestRegisterRunsDestructivePathWhenNotRegistered pins the complement: when
@@ -2544,18 +2260,12 @@ func TestRegisterFailsWhenSharedDirStripFails(t *testing.T) {
 // exactly as it does today.
 func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	var removeJailCalls, removeConfigCalls []string
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		RemoveJailFile: func(_ context.Context, jailPath string) error {
 			removeJailCalls = append(removeJailCalls, jailPath)
 			return nil
@@ -2568,7 +2278,7 @@ func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
 			return false, nil
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(removeJailCalls) != 1 || removeJailCalls[0] != "/lever/.scion" {
@@ -2577,16 +2287,7 @@ func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
 	if len(removeConfigCalls) != 1 || removeConfigCalls[0] != "/lever" {
 		t.Fatalf("RemoveScionProjectConfigs calls = %+v, want exactly one call with \"/lever\"", removeConfigCalls)
 	}
-	var sawInit, sawHubLink bool
-	for _, c := range f.Calls {
-		j := strings.Join(c.Args, " ")
-		if strings.Contains(j, "init --non-interactive") {
-			sawInit = true
-		}
-		if strings.Contains(j, "hub link") {
-			sawHubLink = true
-		}
-	}
+	sawInit, sawHubLink := sawScionCall(f, "init --non-interactive"), sawScionCall(f, "hub link")
 	if !sawInit || !sawHubLink {
 		t.Fatalf("scion init and hub link must both run when not registered; init=%v hublink=%v", sawInit, sawHubLink)
 	}
@@ -2598,18 +2299,12 @@ func TestRegisterRunsDestructivePathWhenNotRegistered(t *testing.T) {
 // like a `false` result would.
 func TestRegisterFallsThroughToDestructivePathOnObserveError(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	var removeConfigCalls []string
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		RemoveScionProjectConfigs: func(_ context.Context, wp string) error {
 			removeConfigCalls = append(removeConfigCalls, wp)
 			return nil
@@ -2620,19 +2315,13 @@ func TestRegisterFallsThroughToDestructivePathOnObserveError(t *testing.T) {
 			return true, fmt.Errorf("boom: guest unreachable")
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v (an observe error must fail OPEN to the destructive path, not fail the apply)", err)
 	}
 	if len(removeConfigCalls) != 1 {
 		t.Fatalf("observe error must fall through to the destructive path; RemoveScionProjectConfigs calls = %+v", removeConfigCalls)
 	}
-	var sawInit bool
-	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
-			sawInit = true
-		}
-	}
-	if !sawInit {
+	if !sawScionCall(f, "init --non-interactive") {
 		t.Fatal("scion init should still run when the observe read errors")
 	}
 }
@@ -2642,29 +2331,17 @@ func TestRegisterFallsThroughToDestructivePathOnObserveError(t *testing.T) {
 // does, before this task) must not crash Run, and `scion init` still runs.
 func TestRegisterToleratesNilScionProjectRegistered(t *testing.T) {
 	tree := t.TempDir()
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		// ScionProjectRegistered intentionally left nil.
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	var sawInit bool
-	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "init --non-interactive") {
-			sawInit = true
-		}
-	}
-	if !sawInit {
+	if !sawScionCall(f, "init --non-interactive") {
 		t.Fatal("scion init should still run when ScionProjectRegistered is nil")
 	}
 }
@@ -2675,20 +2352,14 @@ func TestRegisterToleratesNilScionProjectRegistered(t *testing.T) {
 // dropped; see register-project's single-step doc).
 func TestRegisterUsesJailPaths(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
+	app.Workers = []config.Worker{{Name: "worker", Dir: "workers/worker"}}
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var managerInit bool
@@ -2714,8 +2385,8 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 	}
 }
 
-// TestSingleProjectRegisterRunsOnceAcrossTwoWorkers is Task 6's apply-side
-// single-project integration proof (P2). Every register-project test above
+// TestSingleProjectRegisterRunsOnceAcrossTwoWorkers is the apply-side
+// single-project integration proof. Every register-project test above
 // configures at most ONE worker, which cannot distinguish "registration
 // collapsed to one per instance" from "one per worker that happens to equal
 // one because there's only one worker". With TWO workers configured
@@ -2727,8 +2398,7 @@ func TestRegisterUsesJailPaths(t *testing.T) {
 // truly gone, not coincidentally absent.
 func TestSingleProjectRegisterRunsOnceAcrossTwoWorkers(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: tree,
 		Manager: config.Manager{Image: "img"},
@@ -2758,16 +2428,14 @@ func TestSingleProjectRegisterRunsOnceAcrossTwoWorkers(t *testing.T) {
 	// single instance jail path "/lever" (never workers/a or workers/b).
 	var registeredCalls []string
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 		ScionProjectRegistered: func(_ context.Context, wp string) (bool, error) {
 			registeredCalls = append(registeredCalls, wp)
 			return false, nil // force the destructive path so init/hub-link actually run
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -2795,19 +2463,13 @@ func TestSingleProjectRegisterRunsOnceAcrossTwoWorkers(t *testing.T) {
 
 func TestStartUsesJailPath(t *testing.T) {
 	tree := t.TempDir() // real dir so file-writing steps can write into it
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
 		JailMount: "/lever",
-		Scion:     scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:     hubScion(f, app),
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var sawJailG, sawWorkspace bool
@@ -2853,23 +2515,18 @@ func TestDefaultReadCredRejectsWorldReadable(t *testing.T) {
 	}
 }
 
-// loadImageStep drives just the load-image case of runStep with the given deps.
+// loadImageStep drives just the load-image case of run.step with the given deps.
 func loadImageStep(d Deps) error {
-	return runStep(context.Background(), &config.App{}, Step{Kind: "load-image", Target: "img"}, d, &bootTracker{})
+	return (&run{app: &config.App{}, d: fillDeps(d)}).step(context.Background(), Step{Kind: "load-image", Target: "img"})
 }
 
 // TestRunStepUnknownKind pins the switch's default arm: a Step whose Kind is
 // not a known StepKind is a hard error (never a silent no-op), and the message
 // echoes the offending kind. This guards the dispatch table against a Plan that
-// emits a kind runStep has no case for.
+// emits a kind run.step has no case for.
 func TestRunStepUnknownKind(t *testing.T) {
-	err := runStep(context.Background(), &config.App{}, Step{Kind: "no-such-kind"}, Deps{}, &bootTracker{})
-	if err == nil {
-		t.Fatal("runStep with an unknown kind must error")
-	}
-	if !strings.Contains(err.Error(), "no-such-kind") {
-		t.Fatalf("error %q must name the unknown kind", err)
-	}
+	err := (&run{app: &config.App{}}).step(context.Background(), Step{Kind: "no-such-kind"})
+	testutil.WantErrContaining(t, err, "no-such-kind")
 }
 
 // TestLoadImageStepSkipsWhenAlreadyLoaded: the whole point of the guard — when
@@ -2912,8 +2569,8 @@ func TestLoadImageStepLoadsAndPrunesWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestLoadImageStepNilGuardLoads: no guard wired (nil ImageLoaded/PruneImages)
-// preserves pre-guard behavior — always load, never prune.
+// TestLoadImageStepNilGuardLoads: a guard that never reports the image present
+// (fillDeps's inert ImageLoaded) always loads.
 func TestLoadImageStepNilGuardLoads(t *testing.T) {
 	var loads int
 	d := Deps{LoadImage: func(context.Context, string) error { loads++; return nil }}
@@ -2930,24 +2587,20 @@ func TestLoadImageStepNilGuardLoads(t *testing.T) {
 func TestLoadImageStepLoadErrorIsFatal(t *testing.T) {
 	var prunes int
 	d := Deps{
-		LoadImage:   func(context.Context, string) error { return fmt.Errorf("boom") },
+		LoadImage:   func(context.Context, string) error { return errBoom },
 		ImageLoaded: func(context.Context, string) bool { return false },
 		PruneImages: func(context.Context) error { prunes++; return nil },
 	}
-	err := loadImageStep(d)
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("runStep err = %v, want the load failure", err)
-	}
+	testutil.WantErrIs(t, loadImageStep(d), errBoom)
 	if prunes != 0 {
 		t.Errorf("PruneImages calls = %d, want 0 (no prune after a failed load)", prunes)
 	}
 }
 
 // TestLoadImageStepPruneErrorIsNonFatal: the image loaded, so a prune failure
-// is logged, not returned.
+// is logged.lines, not returned.
 func TestLoadImageStepPruneErrorIsNonFatal(t *testing.T) {
 	d := Deps{
-		LoadImage:   func(context.Context, string) error { return nil },
 		ImageLoaded: func(context.Context, string) bool { return false },
 		PruneImages: func(context.Context) error { return fmt.Errorf("prune boom") },
 	}
@@ -2956,9 +2609,16 @@ func TestLoadImageStepPruneErrorIsNonFatal(t *testing.T) {
 	}
 }
 
-// preRoleRefusal is what VerifyAgentRole returns for a record created before
+// errPreRoleRefusal is what VerifyAgentRole returns for a record created before
 // scion#1089: it stores no role, and a roles-aware scion reads that as `full`.
-var preRoleRefusal = fmt.Errorf("agent %q has no stored role", "hello")
+var errPreRoleRefusal = fmt.Errorf("agent %q has no stored role", "hello")
+
+// Errors the tests inject into a Deps func and expect back from the step,
+// asserted with errors.Is rather than by wording.
+var (
+	errForbidden = errors.New("403 Forbidden")
+	errBoom      = errors.New("boom")
+)
 
 // TestStartManagerRefusesPreRoleRecordOnResume: the guard must stop the apply
 // BEFORE the resume, and must not fall into the delete+create recovery — that
@@ -2968,18 +2628,11 @@ func TestStartManagerRefusesPreRoleRecordOnResume(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
 	deps := Deps{
-		JailUp:          func(context.Context, *config.App) error { return nil },
-		LoadImage:       func(context.Context, string) error { return nil },
 		Scion:           scion.New(r, scion.Options{}),
-		VerifyAgentRole: func(context.Context, string, string) error { return preRoleRefusal },
+		VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
 	}
-	err := Run(context.Background(), app, deps)
-	if err == nil {
-		t.Fatal("a record with no stored role must fail the bring-up on a roles-aware scion")
-	}
-	if !strings.Contains(err.Error(), "no stored role") {
-		t.Errorf("error should carry the guard's reason, got %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrIs(t, err, errPreRoleRefusal)
 	if r.resumeCalls != 0 {
 		t.Errorf("resumeCalls = %d, want 0 (the guard runs BEFORE the resume)", r.resumeCalls)
 	}
@@ -2996,12 +2649,10 @@ func TestStartManagerRefusesPreRoleRecordWhenRunning(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 6 seconds"}
 	deps := Deps{
-		JailUp:          func(context.Context, *config.App) error { return nil },
-		LoadImage:       func(context.Context, string) error { return nil },
 		Scion:           scion.New(r, scion.Options{}),
-		VerifyAgentRole: func(context.Context, string, string) error { return preRoleRefusal },
+		VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
 	}
-	if err := Run(context.Background(), app, deps); err == nil {
+	if err := runApply(app, deps); err == nil {
 		t.Fatal("a running record with no stored role must fail the bring-up too")
 	}
 }
@@ -3014,15 +2665,13 @@ func TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
 	called := 0
 	deps := Deps{
-		JailUp:    func(context.Context, *config.App) error { return nil },
-		LoadImage: func(context.Context, string) error { return nil },
-		Scion:     scion.New(r, scion.Options{}),
+		Scion: scion.New(r, scion.Options{}),
 		VerifyAgentRole: func(context.Context, string, string) error {
 			called++
-			return preRoleRefusal
+			return errPreRoleRefusal
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if called != 0 {
@@ -3039,12 +2688,10 @@ func TestStartManagerVerifyAgentRolePassesThrough(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
 	deps := Deps{
-		JailUp:          func(context.Context, *config.App) error { return nil },
-		LoadImage:       func(context.Context, string) error { return nil },
 		Scion:           scion.New(r, scion.Options{}),
 		VerifyAgentRole: func(context.Context, string, string) error { return nil },
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if r.resumeCalls != 1 {
@@ -3063,25 +2710,19 @@ func TestRegisterRepairsHubEndpointOnTheSkipPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	var repaired []string
 	deps := Deps{
-		JailUp:                 func(context.Context, *config.App) error { return nil },
-		LoadImage:              func(context.Context, string) error { return nil },
 		JailMount:              "/lever",
-		Scion:                  scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:                  hubScion(f, app),
 		ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
 		RepairScionHubEndpoint: func(_ context.Context, wp string) error {
 			repaired = append(repaired, wp)
 			return nil
 		},
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(repaired) != 1 || repaired[0] != "/lever" {
@@ -3096,23 +2737,17 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
-	app := &config.App{
-		Name: "hello", Backend: "orbstack", Tree: tree,
-		Manager: config.Manager{Image: "img"},
-	}
+	f := scionOKRunner()
+	app := helloApp(tree)
 	deps := Deps{
-		JailUp:                 func(context.Context, *config.App) error { return nil },
-		LoadImage:              func(context.Context, string) error { return nil },
 		JailMount:              "/lever",
-		Scion:                  scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:                  hubScion(f, app),
 		ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
 		RepairScionHubEndpoint: func(context.Context, string) error {
 			return fmt.Errorf("guest unreachable")
 		},
 	}
-	if err := Run(context.Background(), app, deps); err == nil {
+	if err := runApply(app, deps); err == nil {
 		t.Fatal("a failed endpoint repair must fail the bring-up")
 	}
 }
@@ -3123,22 +2758,19 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 // on serving a configuration with no login in it — and an unconditional
 // restart would drop every agent's hub connection on every apply.
 func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
-	run := func(t *testing.T, changed bool, ensureErr error) ([]exec.Call, error) {
+	run := func(t *testing.T, changed bool, ensureErr error) ([]proc.Call, error) {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := scionOKRunner()
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"},
 			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
 		deps := Deps{
-			JailUp:         func(context.Context, *config.App) error { return nil },
-			LoadImage:      func(context.Context, string) error { return nil },
-			Scion:          scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+			Scion:          hubScion(f, app),
 			EnsureHubLogin: func(context.Context) (bool, error) { return changed, ensureErr },
 		}
-		return f.Calls, Run(context.Background(), app, deps)
+		return f.Calls, runApply(app, deps)
 	}
-	stopped := func(calls []exec.Call) bool {
+	stopped := func(calls []proc.Call) bool {
 		for _, c := range calls {
 			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" && c.Args[1] == "stop" {
 				return true
@@ -3178,18 +2810,15 @@ func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
 func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
 	run := func(t *testing.T, remote config.Remote) (disabled, ensured int) {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := scionOKRunner()
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"}, Remote: remote}
 		deps := Deps{
-			JailUp:          func(context.Context, *config.App) error { return nil },
-			LoadImage:       func(context.Context, string) error { return nil },
-			Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+			Scion:           hubScion(f, app),
 			EnsureHubLogin:  func(context.Context) (bool, error) { ensured++; return false, nil },
 			DisableHubLogin: func(context.Context) (bool, error) { disabled++; return false, nil },
 		}
-		if err := Run(context.Background(), app, deps); err != nil {
+		if err := runApply(app, deps); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 		return disabled, ensured
@@ -3224,19 +2853,16 @@ func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
 func TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState(t *testing.T) {
 	run := func(t *testing.T, changed bool) (server, logs []string) {
 		t.Helper()
-		f := exec.NewFakeRunner()
-		f.Script("scion", exec.Result{Stdout: "ok"})
+		f := scionOKRunner()
 		// Remote access off — the config this whole path is about.
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"}}
 		deps := Deps{
-			JailUp:          func(context.Context, *config.App) error { return nil },
-			LoadImage:       func(context.Context, string) error { return nil },
-			Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+			Scion:           hubScion(f, app),
 			DisableHubLogin: func(context.Context) (bool, error) { return changed, nil },
 			Log:             func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
 		}
-		if err := Run(context.Background(), app, deps); err != nil {
+		if err := runApply(app, deps); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 		for _, c := range f.Calls {
@@ -3280,19 +2906,15 @@ func TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState(t *testing.T)
 // down on every apply — but ordering a hub restart would fail an apply that
 // was never driving scion in the first place.
 func TestRemoteOffSkipsTheHubRestartWhenThePlanDoesNotManageTheHub(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"}}
 	disabled := 0
 	deps := Deps{
-		BrokerOnly:      true,
-		JailUp:          func(context.Context, *config.App) error { return nil },
-		LoadImage:       func(context.Context, string) error { return nil },
-		Scion:           scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:           hubScion(f, app),
 		DisableHubLogin: func(context.Context) (bool, error) { disabled++; return true, nil },
 	}
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := Run(context.Background(), app, fillDeps(deps), PlanOpts{BrokerOnly: true}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if disabled != 1 {
@@ -3312,15 +2934,19 @@ type stoppedHubRunner struct {
 	inner *agentLifecycleRunner
 }
 
-func (r *stoppedHubRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *stoppedHubRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.inner.RunStdin(ctx, stdin, env, name, args...)
+}
+
+func (r *stoppedHubRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "stop" {
-		r.inner.FakeRunner.Calls = append(r.inner.FakeRunner.Calls, exec.Call{Name: name, Args: args, Env: env, Dir: dir})
-		return exec.Result{Code: 1, Stderr: "Error: server daemon is not running"}, fmt.Errorf("exit status 1")
+		r.inner.FakeRunner.Calls = append(r.inner.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Code: 1, Stderr: "Error: server daemon is not running"}, fmt.Errorf("exit status 1")
 	}
 	return r.inner.RunIn(ctx, dir, env, name, args...)
 }
 
-func (r *stoppedHubRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
+func (r *stoppedHubRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
@@ -3335,20 +2961,17 @@ func (r *stoppedHubRunner) Run(ctx context.Context, env map[string]string, name 
 // Restarting something that is already stopped must be a no-op followed by a
 // start.
 func TestScionServerRestartsAHubThatIsAlreadyStopped(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{Stdout: "ok"})
+	f := scionOKRunner()
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"},
 		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
 	runner := &stoppedHubRunner{inner: &agentLifecycleRunner{FakeRunner: f, slug: app.Name}}
 	deps := Deps{
-		JailUp:         func(context.Context, *config.App) error { return nil },
-		LoadImage:      func(context.Context, string) error { return nil },
-		Scion:          scion.New(runner, scion.Options{HubEndpoint: "http://127.0.0.1:8080"}),
+		Scion:          scion.New(runner, scion.Options{HubEndpoint: testHubEndpoint}),
 		EnsureHubLogin: func(context.Context) (bool, error) { return true, nil },
 	}
 
-	if err := Run(context.Background(), app, deps); err != nil {
+	if err := runApply(app, deps); err != nil {
 		t.Fatalf("apply failed on a hub that was already stopped: %v", err)
 	}
 	var stopped, started bool
@@ -3382,19 +3005,39 @@ func TestAgentTemplateGetsTheJailPath(t *testing.T) {
 		Manager: config.Manager{Image: "img"},
 	}
 	var got string
-	if err := runAgentTemplate(context.Background(),
-		app,
-		Step{Kind: KindAgentTemplate, Target: app.Tree},
-		Deps{
-			JailMount: "/lever",
-			EnsureAgentTemplate: func(_ context.Context, projectDir string) (bool, error) {
-				got = projectDir
-				return false, nil
-			},
-		}); err != nil {
-		t.Fatalf("runAgentTemplate: %v", err)
+	r := &run{app: app, d: Deps{
+		JailMount: "/lever",
+		EnsureAgentTemplate: func(_ context.Context, projectDir string) (bool, error) {
+			got = projectDir
+			return false, nil
+		},
+	}}
+	if err := r.agentTemplate(context.Background(), Step{Kind: KindAgentTemplate, Target: app.Tree}); err != nil {
+		t.Fatalf("agentTemplate: %v", err)
 	}
 	if got != "/lever" {
 		t.Fatalf("projectDir = %q, want the jail path %q — the host path does not exist inside the jail", got, "/lever")
+	}
+}
+
+// TestRunRefusesIncompleteDeps pins Deps.check: a nil required collaborator
+// fails Run by name before any step runs, and a Deps with every field set
+// passes the check.
+func TestRunRefusesIncompleteDeps(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	deps := fillDeps(Deps{Scion: scion.New(f, scion.Options{})})
+	deps.VerifyAgentRole = nil
+	err := Run(context.Background(), app, deps, PlanOpts{})
+	if err == nil || err.Error() != "apply: Deps.VerifyAgentRole is not set" {
+		t.Fatalf("err = %v, want the missing field named", err)
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("no step may run before the check: %d calls", len(f.Calls))
+	}
+	if err := fillDeps(Deps{Scion: scion.New(f, scion.Options{})}).check(); err != nil {
+		t.Fatalf("a complete Deps must pass: %v", err)
+	}
+	if err := (Deps{}).check(); err == nil {
+		t.Fatal("an empty Deps must fail")
 	}
 }

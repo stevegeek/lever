@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"fmt"
-	"net/http"
+
+	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // Renew rotates the agent's keypair and re-issues its cert under the broker's
@@ -19,47 +21,43 @@ func Renew(ctx context.Context, brokerURL string, id Identity) (Identity, error)
 	if err != nil {
 		return Identity{}, err
 	}
-	rr, err := postJSON[struct {
-		Cert string `json:"cert"`
-	}](ctx, client, brokerURL+"/renew",
-		map[string]string{"csr": string(csrPEM)},
-		0, "agent: renew", false)
-	if err != nil {
-		return Identity{}, err
+	var rr wire.RenewResponse
+	if err := httpjson.Post(ctx, client, brokerURL+wire.PathRenew, wire.RenewRequest{CSR: string(csrPEM)}, &rr); err != nil {
+		return Identity{}, fmt.Errorf("agent: renew: %w", err)
 	}
 	return Identity{CertPEM: []byte(rr.Cert), KeyPEM: keyPEM, CAPEM: id.CAPEM}, nil
 }
 
-// RefreshLLMToken obtains a fresh capability(llm) token from the broker using
-// the enrolled mTLS identity and merges ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL
-// into the provided overlay map. The token is returned verbatim from the broker
-// (already base64url-encoded) — do NOT re-encode it. Called by the renewal sidecar
-// on each cert renewal cycle when LLM auth mode is "api-key".
-//
-// ANTHROPIC_BASE_URL points at the in-container loopback gateway (same host Boot
-// writes), NOT the broker: the gateway presents the rotating agent leaf on
-// Claude's behalf, so a direct-broker URL would resurrect the 24h cached-leaf
-// outage fixed in aa63f9f. brokerURL is only the token-acquisition endpoint.
-//
-// Fail closed: the overlay map is only mutated after a successful token acquisition.
-func RefreshLLMToken(
-	ctx context.Context,
-	brokerURL string,
-	id Identity,
-	cn string,
-	requestFn func(ctx context.Context, brokerURL string, client *http.Client, cn string) (string, error),
-	overlay map[string]string,
-) error {
-	client, err := id.Client()
+// RenewConfig drives RenewOnce.
+type RenewConfig struct {
+	Identity  Identity // current identity (the caller loaded it from IDDir)
+	IDDir     string   // where the rotated identity is written back
+	BrokerURL string   // already resolved (flag or bootstrap)
+	// LLMAuth "api-key" with a non-empty SettingsPath also refreshes
+	// ANTHROPIC_AUTH_TOKEN after the cert is renewed and rewrites the claude
+	// settings.json env block at SettingsPath.
+	LLMAuth      string
+	SettingsPath string
+}
+
+// RenewOnce performs a single renewal cycle: Renew c.Identity, write the
+// renewed identity back to c.IDDir, then (api-key mode) refresh the LLM
+// capability token and rewrite the settings.json env block so the next claude
+// launch picks up the fresh token.
+func RenewOnce(ctx context.Context, c RenewConfig) error {
+	renewed, err := Renew(ctx, c.BrokerURL, c.Identity)
 	if err != nil {
-		return fmt.Errorf("agent: refresh llm token: build mTLS client: %w", err)
+		return err
 	}
-	tok, err := requestFn(ctx, brokerURL, client, cn)
-	if err != nil {
-		return fmt.Errorf("agent: refresh llm token: obtain: %w", err)
+	if err := renewed.Write(c.IDDir); err != nil {
+		return err
 	}
-	overlay["ANTHROPIC_AUTH_TOKEN"] = tok
-	// Claude posts to the loopback gateway, which proxies /llm to the broker.
-	overlay["ANTHROPIC_BASE_URL"] = llmBaseURL(LocalGatewayURL)
-	return nil
+	if c.LLMAuth != LLMAuthAPIKey || c.SettingsPath == "" {
+		return nil
+	}
+	overlay := HarnessEnvOverlay()
+	if err := RefreshLLMToken(ctx, c.BrokerURL, renewed, overlay); err != nil {
+		return err
+	}
+	return WriteSettingsEnv(c.SettingsPath, overlay)
 }

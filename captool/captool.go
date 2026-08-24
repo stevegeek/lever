@@ -49,6 +49,7 @@ type Operation struct {
 // Config assembles a Server.
 type Config struct {
 	Name       string // tool/registry name; the capability tool this verifies (e.g. "db")
+	Version    string // reported as the MCP serverInfo version (default "dev")
 	Backend    string // listen address (host loopback)
 	AdminURL   string // broker admin base URL (loopback) for /register and /epoch
 	Operations []Operation
@@ -59,6 +60,7 @@ type Config struct {
 // Server is a running captool MCP server.
 type Server struct {
 	name     string
+	version  string
 	backend  string
 	adminURL string
 	ops      map[string]Operation
@@ -93,7 +95,7 @@ func New(c Config) (*Server, error) {
 		ops[o.Name] = o
 	}
 	return &Server{
-		name: c.Name, backend: c.Backend, adminURL: c.AdminURL,
+		name: c.Name, version: c.Version, backend: c.Backend, adminURL: c.AdminURL,
 		ops: ops, log: c.Log, epochTTL: c.EpochTTL,
 	}, nil
 }

@@ -1,13 +1,18 @@
 package broker
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
+
+// errUnknownRecipient is the deny for a `to` that names no identity the broker
+// knows. It is wrapped as "unknown recipient %q".
+var errUnknownRecipient = errors.New("unknown recipient")
 
 // msgTarget is a resolved, policy-approved message destination: the scion
 // recipient string and the project (-g) it must be sent under. Every
@@ -22,9 +27,9 @@ type msgTarget struct {
 // Identity-derived, config-authoritative, default-deny. The returned error
 // text is the deny reason (audited alongside the recipient by the handler).
 func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
-	isManager := caller == b.manager
-	_, isWorker := b.workers[caller]
-	if !isManager && !isWorker {
+	// The caller is a cert CN: a slug alias is not an identity.
+	callerCN, _, isManager, ok := b.identity(caller)
+	if !ok || callerCN != caller {
 		return msgTarget{}, fmt.Errorf("caller %q is not the manager or a declared worker", caller)
 	}
 	// The manager target ALWAYS routes to agent:<slug> — scion knows the
@@ -42,7 +47,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	// who != "" preserves the bare-"user:" fallthrough to the
 	// unknown-recipient deny below.
 	if who, ok := strings.CutPrefix(to, "user:"); ok && who != "" {
-		if who == "manager" || who == b.manager || who == b.managerSlug {
+		if _, _, toManager, known := b.identity(who); who == "manager" || (known && toManager) {
 			return managerTarget, nil
 		}
 		return msgTarget{}, fmt.Errorf("user-addressed recipient %q is not broker-routable (scion supports user messaging only inside agent containers); message the manager agent instead", to)
@@ -51,17 +56,16 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if rest, ok := strings.CutPrefix(to, "agent:"); ok && rest != "" {
 		name = rest
 	}
-	if name == b.manager || name == b.managerSlug {
+	_, slug, toManager, known := b.identity(name)
+	switch {
+	case !known:
+		return msgTarget{}, fmt.Errorf("%w %q", errUnknownRecipient, to)
+	case toManager:
 		return managerTarget, nil
-	}
-	spec, ok := b.workers[name]
-	if !ok {
-		return msgTarget{}, fmt.Errorf("unknown recipient %q", to)
-	}
-	if !isManager && caller != name && !b.workerToWorker {
+	case !isManager && caller != name && !b.workerToWorker:
 		return msgTarget{}, fmt.Errorf("worker→worker messaging is disabled")
 	}
-	return msgTarget{scionTo: "agent:" + spec.Name, project: b.instanceProject}, nil
+	return msgTarget{scionTo: "agent:" + slug, project: b.instanceProject}, nil
 }
 
 // resolveListSubject resolves WHOSE inbox caller may read, as an agent slug.
@@ -77,15 +81,15 @@ func (b *Broker) resolveListSubject(caller, worker string) (string, error) {
 	if caller == b.manager {
 		if worker == "" {
 			// The manager's agent slug, NOT its cert CN: the hub knows it only
-			// by the slug (see Config.ManagerSlug).
+			// by the slug (see IdentityConfig.ManagerSlug).
 			return b.managerSlug, nil
 		}
-		if _, ok := b.workers[worker]; !ok {
+		if _, ok := b.workerSpec(worker); !ok {
 			return "", fmt.Errorf("unknown worker %q", worker)
 		}
 		return worker, nil
 	}
-	if _, ok := b.workers[caller]; !ok {
+	if _, ok := b.workerSpec(caller); !ok {
 		return "", fmt.Errorf("caller %q is not the manager or a declared worker", caller)
 	}
 	if worker != "" {
@@ -116,24 +120,6 @@ func eventsForAgent(events []scion.Event, agentID string) []scion.Event {
 	return kept
 }
 
-// MsgSendRequest, MsgListRequest and MsgListResponse are the /msg/* wire types.
-// Exported so the lever CLI marshals/decodes against these one declarations
-// instead of ad-hoc maps and anonymous structs.
-type MsgSendRequest struct {
-	To        string `json:"to"`
-	Body      string `json:"body"`
-	Interrupt bool   `json:"interrupt"`
-}
-
-type MsgListRequest struct {
-	All    bool   `json:"all"`
-	Worker string `json:"worker"`
-}
-
-type MsgListResponse struct {
-	Events []scion.Event `json:"events"`
-}
-
 func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	// A revoked agent loses its messaging channel too — otherwise a
 	// compromised-then-revoked agent could keep steering other agents via
@@ -142,8 +128,8 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req MsgSendRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var req wire.MsgSendRequest
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -168,7 +154,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "send->"+tgt.scionTo)
-	writeJSON(w, map[string]bool{"ok": true})
+	writeJSON(w, wire.MsgSendResponse{OK: true})
 }
 
 func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
@@ -176,8 +162,8 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req MsgListRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var req wire.MsgListRequest
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -193,7 +179,7 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolve BEFORE reading: without an id to attribute events to there is no
 	// safe answer, and returning the raw feed is the leak (see
-	// Config.ResolveAgentID).
+	// DispatchConfig.ResolveAgentID).
 	if b.resolveAgentID == nil {
 		b.audit("msg", caller, "error", "list: agent id resolver not wired")
 		http.Error(w, "inbox unavailable", http.StatusBadGateway)
@@ -212,5 +198,5 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "list "+subject)
-	writeJSON(w, MsgListResponse{Events: eventsForAgent(events, subjectID)})
+	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: eventsForAgent(events, subjectID)})
 }

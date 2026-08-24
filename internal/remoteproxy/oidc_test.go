@@ -18,7 +18,11 @@ var testIdentity = Identity{Subject: "lever-remote:op@example.test", Email: "op@
 func newTestProvider(t *testing.T, now func() time.Time) (*Provider, *auditSink) {
 	t.Helper()
 	sink := &auditSink{}
-	return NewProvider(ProviderConfig{Port: 8446, Audit: sink.add, Now: now}), sink
+	p := NewProvider(ProviderConfig{Port: 8446, Audit: sink.add})
+	if now != nil {
+		p.now = now // the in-package clock seam; nil keeps the real clock
+	}
+	return p, sink
 }
 
 // auditSink collects audit lines for the assertions that nothing secret ever
@@ -79,6 +83,11 @@ func mintTestCode(t *testing.T, p *Provider) string {
 // agent could mint a code, have the hub exchange it, and receive a hub web
 // session as any identity it asserts. Do not "finish" this route. The login is
 // driven server-side and mints codes by calling Provider.Mint directly.
+// authorizeIsPermanently404 names the decision handleAuthorize enforces, so
+// the grep that finds "/authorize" in this package also finds the reason it
+// 404s.
+const authorizeIsPermanently404 = "/authorize must never be implemented: it would be an HTTP code-minting endpoint reachable from inside the jail"
+
 func TestAuthorizeIsPermanently404(t *testing.T) {
 	p, sink := newTestProvider(t, nil)
 	for _, target := range []string{

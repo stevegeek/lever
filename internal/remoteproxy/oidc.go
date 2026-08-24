@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,7 +29,7 @@ import (
 // come from OIDC. It comes from ONE property: an authorization code can only
 // be created by an in-process call to Provider.Mint, inside the host-side
 // proxy, at the same trust level as the remote PAT file sitting beside it.
-// There is no HTTP route that mints one — see authorizeIsPermanently404.
+// There is no HTTP route that mints one — see handleAuthorize.
 //
 // Everything the hub reaches (discovery, /token, /userinfo) is also reachable
 // from inside the jail, because the guest-side forwarder that gives the hub a
@@ -70,7 +71,7 @@ const (
 	// /auth/login/oidc then 500s) but nothing ever dials it: the proxy drives
 	// the whole login server-side. It names a host that cannot resolve, so it
 	// can never be mistaken for a live endpoint, and it deliberately does NOT
-	// point at this provider's own /authorize — see authorizeIsPermanently404.
+	// point at this provider's own /authorize — see handleAuthorize.
 	// Exported so `lever doctor` can assert that the hub redirects HERE and
 	// nowhere else, which is what proves the hub is configured against
 	// lever's provider rather than someone's real IdP.
@@ -96,7 +97,7 @@ type ProviderConfig struct {
 	// accepts (a non-loopback http issuer makes it refuse to start). It is a
 	// DIFFERENT number from Port: OrbStack mirrors a guest listener onto the
 	// host at the same port, so one number for both halves left the provider
-	// unable to bind its own (see backend.GuestLoginIssuerPort).
+	// unable to bind its own (see config.GuestLoginIssuerPort).
 	//
 	// Zero means "the same as Port", which is what a test wants when nothing
 	// sits between the hub and the provider.
@@ -104,8 +105,6 @@ type ProviderConfig struct {
 	// Audit receives one line per request the provider answers; nil disables
 	// (tests). Values never carry a code, token or cookie.
 	Audit func(line AuditLine)
-	// Now is the clock, injectable for expiry tests. nil ⇒ time.Now.
-	Now func() time.Time
 }
 
 // Provider is the host-side OIDC provider: three endpoints the hub consumes,
@@ -143,12 +142,9 @@ func NewProvider(cfg ProviderConfig) *Provider {
 		port:   cfg.Port,
 		issuer: fmt.Sprintf("http://127.0.0.1:%d", issuerPort),
 		audit:  cfg.Audit,
-		now:    cfg.Now,
+		now:    time.Now, // tests swap the clock in-package to drive expiry
 		codes:  map[string]*grant{},
 		tokens: map[string]*grant{},
-	}
-	if p.now == nil {
-		p.now = time.Now
 	}
 	p.handler = p.buildHandler()
 	return p
@@ -260,17 +256,12 @@ func (p *Provider) buildHandler() http.Handler {
 // A hit is therefore either a misconfiguration or an in-jail probe, which is
 // why it is audited.
 func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	p.record(r, "deny-authorize", http.StatusNotFound, "the local OIDC provider has no authorization endpoint by design")
+	p.record(r, DecisionDenyAuthorize, http.StatusNotFound, "the local OIDC provider has no authorization endpoint by design")
 	http.NotFound(w, r)
 }
 
-// authorizeIsPermanently404 is a named anchor for the decision above, so the
-// grep that finds "/authorize" in this package also finds the reason it 404s.
-// Referenced by TestAuthorizeIsPermanently404.
-const authorizeIsPermanently404 = "/authorize must never be implemented: it would be an HTTP code-minting endpoint reachable from inside the jail"
-
 func (p *Provider) handleNotFound(w http.ResponseWriter, r *http.Request) {
-	p.record(r, "oidc-not-found", http.StatusNotFound, "")
+	p.record(r, DecisionOIDCNotFound, http.StatusNotFound, "")
 	http.NotFound(w, r)
 }
 
@@ -279,7 +270,7 @@ func (p *Provider) handleNotFound(w http.ResponseWriter, r *http.Request) {
 // the hub never fetches it (no id_token is ever issued or parsed), and
 // advertising a URI nothing serves would be a lie.
 func (p *Provider) handleDiscovery(w http.ResponseWriter, r *http.Request) {
-	p.record(r, "oidc-discovery", http.StatusOK, "")
+	p.record(r, DecisionOIDCDiscovery, http.StatusOK, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                p.issuer,
 		"authorization_endpoint":                DeadAuthorizationEndpoint,
@@ -301,12 +292,12 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 // variations of the other parameters.
 func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		p.record(r, "oidc-token-refused", http.StatusMethodNotAllowed, "token endpoint takes POST")
+		p.record(r, DecisionOIDCTokenRefused, http.StatusMethodNotAllowed, "token endpoint takes POST")
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		p.record(r, "oidc-token-refused", http.StatusBadRequest, "malformed form body")
+		p.record(r, DecisionOIDCTokenRefused, http.StatusBadRequest, "malformed form body")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
@@ -315,11 +306,11 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	if why != "" {
 		// why is one of a fixed set of reasons; it never quotes the code, the
 		// redirect_uri or anything else the caller sent.
-		p.record(r, "oidc-token-refused", http.StatusBadRequest, why)
+		p.record(r, DecisionOIDCTokenRefused, http.StatusBadRequest, why)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
-	p.record(r, "oidc-token", http.StatusOK, "")
+	p.record(r, DecisionOIDCToken, http.StatusOK, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token": g.accessToken,
 		"token_type":   "Bearer",
@@ -363,7 +354,7 @@ func (p *Provider) redeem(code, grantType, redirectURI, clientID string) (*grant
 func (p *Provider) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	tok, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
-		p.record(r, "oidc-userinfo-refused", http.StatusUnauthorized, "no bearer token")
+		p.record(r, DecisionOIDCUserinfoRefused, http.StatusUnauthorized, "no bearer token")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 		return
 	}
@@ -376,11 +367,11 @@ func (p *Provider) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Unlock()
 	if !found {
-		p.record(r, "oidc-userinfo-refused", http.StatusUnauthorized, "unknown or expired access token")
+		p.record(r, DecisionOIDCUserinfoRefused, http.StatusUnauthorized, "unknown or expired access token")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 		return
 	}
-	p.record(r, "oidc-userinfo", http.StatusOK, "")
+	p.record(r, DecisionOIDCUserinfo, http.StatusOK, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sub":            g.identity.Subject,
 		"email":          g.identity.Email,
@@ -409,7 +400,7 @@ func (p *Provider) sweepLocked(now time.Time) {
 // record emits one audit line per provider request. TSLogin is left empty: the
 // caller is the hub's back channel (or an in-jail prober), never a browser
 // whose tailnet identity the proxy verified.
-func (p *Provider) record(r *http.Request, decision string, status int, reason string) {
+func (p *Provider) record(r *http.Request, decision Decision, status int, reason string) {
 	if p.audit == nil {
 		return
 	}
@@ -427,30 +418,10 @@ func (p *Provider) record(r *http.Request, decision string, status int, reason s
 // scheme match is case-insensitive per RFC 7235; the token is returned as-is.
 func bearerToken(header string) (string, bool) {
 	const prefix = "bearer "
-	if len(header) <= len(prefix) || !equalFoldASCII(header[:len(prefix)], prefix) {
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return "", false
 	}
 	return header[len(prefix):], true
-}
-
-// equalFoldASCII compares two equal-length ASCII strings case-insensitively.
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range len(a) {
-		x, y := a[i], b[i]
-		if 'A' <= x && x <= 'Z' {
-			x += 'a' - 'A'
-		}
-		if 'A' <= y && y <= 'Z' {
-			y += 'a' - 'A'
-		}
-		if x != y {
-			return false
-		}
-	}
-	return true
 }
 
 // randomSecret returns secretBytes of crypto/rand entropy, hex-encoded.

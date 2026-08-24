@@ -3,12 +3,12 @@ package guest
 import (
 	"context"
 	"os"
-	osexec "os/exec"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // TestEnsureLeverTemplateWritesAnEmptyPrompt pins the two things the overlay
@@ -18,8 +18,8 @@ import (
 // (that name would suppress scion's automatic base-layer prepend and strip
 // agents.md/home/skills from the chain).
 func TestEnsureLeverTemplateWritesAnEmptyPrompt(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb", exec.Result{Stdout: "wrote"})
+	f := proc.NewFakeRunner()
+	f.Script("orb", proc.Result{Stdout: "wrote"})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}}
 
 	changed, err := g.EnsureLeverTemplate(context.Background())
@@ -69,7 +69,7 @@ func TestEnsureLeverTemplateWritesAnEmptyPrompt(t *testing.T) {
 //     repair path — content here is what puts the placeholder prompt back on
 //     every new agent's command line.
 func TestEnsureLeverTemplateConvergesAgainstARealFile(t *testing.T) {
-	if _, err := osexec.LookPath("bash"); err != nil {
+	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash on PATH: this test runs the guest script rather than mocking it")
 	}
 	home := t.TempDir()
@@ -77,7 +77,7 @@ func TestEnsureLeverTemplateConvergesAgainstARealFile(t *testing.T) {
 	// "shell",m]) with a local stand-in: `env HOME=<tmp>` runs the script here,
 	// against a throwaway home, exactly as the guest would run it against the
 	// run user's.
-	g := Guest{Host: exec.RealRunner{}, UserPrefix: []string{"env", "HOME=" + home}}
+	g := Guest{Host: proc.RealRunner{}, UserPrefix: []string{"env", "HOME=" + home}}
 	prompt := filepath.Join(home, ".scion", "templates", LeverTemplateName, "system-prompt.md")
 
 	changed, err := g.EnsureLeverTemplate(context.Background())

@@ -2,7 +2,6 @@ package broker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -44,28 +43,25 @@ type WorkerSpec struct {
 	APIKey          bool   // true ⇒ api-key LLM mode for this worker
 }
 
+// workerSpec looks up a declared worker by name (its cert CN, which is also
+// its scion slug).
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
 	s, ok := b.workers[name]
 	return s, ok
 }
 
-type workerStartRequest struct {
-	Worker string `json:"worker"`
-	Task   string `json:"task"`
-}
-
-// WorkerResponse is the wire envelope for the single-worker endpoints
-// (/worker/start|stop|suspend|resume). Exported so the lever CLI decodes the
-// broker's reply against this one declaration instead of its own copy.
-type WorkerResponse struct {
-	Worker string `json:"worker"`
-	Phase  string `json:"phase"`
-}
-
-// WorkerListResponse is the wire envelope for /worker/list. Exported for the
-// same single-source reason as WorkerResponse.
-type WorkerListResponse struct {
-	Agents []scion.Agent `json:"agents"`
+// identity resolves an agent name to its (cert CN, scion slug) pair. The
+// manager answers to its cert CN or its scion slug (the app name — distinct,
+// see IdentityConfig.ManagerSlug); a declared worker's CN IS its slug. A caller that
+// needs a strict CN (not an alias) compares the returned cn with its input.
+func (b *Broker) identity(name string) (cn, slug string, isManager, ok bool) {
+	if name == b.manager || name == b.managerSlug {
+		return b.manager, b.managerSlug, true, true
+	}
+	if spec, ok := b.workerSpec(name); ok {
+		return spec.Name, spec.Name, false, true
+	}
+	return "", "", false, false
 }
 
 // runtimeReady returns true when the scion runtime is wired. When the runtime
@@ -82,9 +78,12 @@ func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 	return true
 }
 
-// requireManagerWorker authenticates the caller as the manager and authorizes the
-// requested worker against config. Returns the resolved spec, or writes 403/502.
-func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, worker string) (WorkerSpec, bool) {
+// requireManagerWorker is the shared preamble of the worker dispatch routes:
+// authenticate the caller as the manager, THEN decode the body into req (so
+// an unauthenticated caller gets 403, never 400 — matching /msg and
+// /provision), then authorize the named worker against config and check the
+// runtime is wired. Returns the resolved spec, or writes 403/400/502.
+func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, req any, worker func() string) (WorkerSpec, bool) {
 	// A revoked manager cannot dispatch or tear down workers. Dispatching a worker
 	// is a stronger steering primitive than messaging (it spawns a fresh,
 	// fully-capable agent), so revocation must cut it too — otherwise revoke
@@ -93,9 +92,14 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, wo
 	if !ok {
 		return WorkerSpec{}, false
 	}
-	spec, ok := b.workerSpec(worker)
+	if err := decodeBody(w, r, jailBodyLimit, req); err != nil {
+		b.audit("worker", caller, "deny", "bad body")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return WorkerSpec{}, false
+	}
+	spec, ok := b.workerSpec(worker())
 	if !ok {
-		b.audit("worker", caller, "deny", "unknown worker: "+worker)
+		b.audit("worker", caller, "deny", "unknown worker: "+worker())
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
@@ -120,14 +124,6 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	return "", nil
 }
 
-// stage-step sentinels discriminate stageFreshTicket failures by which step
-// failed, so callers can map each to its own HTTP status/body. The wrap
-// prefixes ("ticket:"/"stage:") also match the healer's existing audit text.
-var (
-	errStepTicket = errors.New("ticket")
-	errStepStage  = errors.New("stage")
-)
-
 // stageFreshTicket mints a one-use enrolment ticket for cn and stages a fresh
 // bootstrap.json under dir (the same host authority `lever up` uses), via the
 // shared wire.Stage — the single construction+deposit path for the enrolment
@@ -137,15 +133,15 @@ var (
 func (b *Broker) stageFreshTicket(cn, dir string) error {
 	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errStepTicket, err)
+		return fmt.Errorf("ticket: %w", err)
 	}
 	bs := wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
 	root, rel, err := b.stagingPath(dir)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errStepStage, err)
+		return fmt.Errorf("stage: %w", err)
 	}
 	if err := wire.Stage(root, rel, bs); err != nil {
-		return fmt.Errorf("%w: %w", errStepStage, err)
+		return fmt.Errorf("stage: %w", err)
 	}
 	return nil
 }
@@ -174,21 +170,9 @@ func (b *Broker) stagingPath(dir string) (root, rel string, err error) {
 	return b.tree, rel, nil
 }
 
-// stageErrorBody maps a stageFreshTicket step error to its 500 response body.
-func stageErrorBody(err error) string {
-	if errors.Is(err, errStepStage) {
-		return "stage error"
-	}
-	return "ticket error"
-}
-
 func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
-	var req workerStartRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	spec, ok := b.requireManagerWorker(w, r, req.Worker)
+	var req wire.WorkerStartRequest
+	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
 	if !ok {
 		return
 	}
@@ -204,7 +188,7 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		// ignored here — the task-mismatch 409 guard on the resume path covers
 		// only the non-running branch (a running worker's task is likewise fixed,
 		// and there is nothing to resume). To run a new task, purge then re-dispatch.
-		writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 	case phase != "":
 		b.resumeExistingWorker(w, r, spec, phase, req.Task)
 	default:
@@ -226,7 +210,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		return
 	}
 	// Refuse a record whose stored role this scion would read as full, BEFORE
-	// staging anything (see Config.VerifyAgentRole).
+	// staging anything (see DispatchConfig.VerifyAgentRole).
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
 		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -240,7 +224,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 	// skips enrol and the ticket ages out unspent.
 	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
 		b.audit("worker", b.manager, "error", "resume "+err.Error())
-		http.Error(w, stageErrorBody(err), http.StatusInternalServerError)
+		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
 	}
 	resume := b.runtime.Resume
@@ -249,6 +233,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		resume = b.runtime.ResumeForce
 	}
 	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
+		b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
@@ -258,7 +243,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		return
 	}
 	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
-	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
 // startFreshWorker provisions an absent worker: mint a one-use ticket, stage the
@@ -266,11 +251,13 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
 	ctx := r.Context()
 	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
-		http.Error(w, stageErrorBody(err), http.StatusInternalServerError)
+		b.audit("worker", b.manager, "error", "start "+err.Error())
+		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
 	}
 	if spec.APIKey {
 		if err := b.runtime.EnvSet(ctx, b.instanceProject, "LEVER_LLM_AUTH", "api-key"); err != nil {
+			b.audit("worker", b.manager, "error", "env set: "+err.Error())
 			http.Error(w, "runtime error", http.StatusBadGateway)
 			return
 		}
@@ -285,6 +272,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
 		Image: spec.Image, APIKey: spec.APIKey,
 	}); err != nil {
+		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
@@ -294,14 +282,14 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		return
 	}
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
-	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
-// workerLiveAttempts/workerLiveInterval bound waitWorkerLive's post-start poll.
-// Package vars (not consts) so tests can shrink them.
-var (
-	workerLiveAttempts = 20
-	workerLiveInterval = 500 * time.Millisecond
+// defaultLiveAttempts/defaultLiveInterval bound waitWorkerLive's post-start
+// poll (Broker.liveAttempts/liveInterval; tests shrink them per instance).
+const (
+	defaultLiveAttempts = 20
+	defaultLiveInterval = 500 * time.Millisecond
 )
 
 // waitWorkerLive polls the worker's scion record until it shows Phase=="running"
@@ -313,7 +301,7 @@ var (
 func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
 		return b.runtime.List(c, b.instanceProject)
-	}, spec.Name, workerLiveAttempts, workerLiveInterval)
+	}, spec.Name, b.liveAttempts, b.liveInterval)
 	if err == nil {
 		return nil
 	}
@@ -326,18 +314,13 @@ func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 }
 
 func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, spec WorkerSpec) error) {
-	var req struct {
-		Worker string `json:"worker"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	spec, ok := b.requireManagerWorker(w, r, req.Worker)
+	var req wire.WorkerRequest
+	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
 	if !ok {
 		return
 	}
 	if err := do(r.Context(), spec); err != nil {
+		b.audit("worker", b.manager, "error", r.URL.Path+" "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
@@ -346,7 +329,7 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 		phase = "unknown"
 	}
 	b.audit("worker", b.manager, "allow", r.URL.Path+" "+spec.Name)
-	writeJSON(w, WorkerResponse{Worker: spec.Name, Phase: phase})
+	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: phase})
 }
 
 func (b *Broker) handleWorkerStop(w http.ResponseWriter, r *http.Request) {
@@ -387,8 +370,9 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 	}
 	agents, err := b.runtime.List(r.Context(), b.instanceProject)
 	if err != nil {
+		b.audit("worker", b.manager, "error", "list: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, WorkerListResponse{Agents: agents})
+	writeJSON(w, wire.WorkerListResponse[scion.Agent]{Agents: agents})
 }

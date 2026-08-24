@@ -15,22 +15,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-)
 
-// auditConfig returns testConfig with the audit log captured in a buffer, so
-// tests can pin exact broker.decision lines.
-func auditConfig(t *testing.T) (Config, *bytes.Buffer) {
-	t.Helper()
-	cfg := testConfig(t)
-	var buf bytes.Buffer
-	cfg.Log = slog.New(slog.NewTextHandler(&buf, nil))
-	return cfg, &buf
-}
+	"github.com/stevegeek/lever/internal/wire"
+)
 
 // --- A1: exact deny audit lines on the copy-pasted authn+revocation preambles ---
 
@@ -156,7 +147,7 @@ func TestDirectiveCertlessDenyAuditsEmptyCallerAndError(t *testing.T) {
 func TestRequestPolicyDenyDetailFullStringWithCoercionAndDelegation(t *testing.T) {
 	cfg, audit := coarseConfig(t, false) // nobody holds the {utilities,*} grant
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
 		Tool: "utilities", Op: "get_weather", BoundTo: "analyst", // manager delegating
 	}))
 	r.TLS = leafFor(t, b, "manager")
@@ -178,9 +169,9 @@ func TestRequestPolicyDenyDetailFullStringWithCoercionAndDelegation(t *testing.T
 // with the bound_to suffix present (delegation grant exists, op unregistered).
 func TestRequestUnregisteredOpDenyDetailFullString(t *testing.T) {
 	cfg, audit := auditConfig(t)
-	cfg.Rules.AllowDelegate("manager", "db", "drop", "worker") // grant for an op the registry lacks
+	cfg.Identity.Rules.AllowDelegate("manager", "db", "drop", "worker") // grant for an op the registry lacks
 	b := New(cfg)
-	r := httptest.NewRequest("POST", "/request", reqBody(t, CapRequest{
+	r := httptest.NewRequest("POST", "/request", reqBody(t, wire.CapRequest{
 		Tool: "db", Op: "drop", BoundTo: "worker",
 	}))
 	r.TLS = leafFor(t, b, "manager")
@@ -223,7 +214,7 @@ func TestRenewRejectsTamperedCSRSignature(t *testing.T) {
 	cfg, audit := auditConfig(t)
 	b := New(cfg)
 	csr := tamperCSRSignature(t, makeCSRForCN(t, "worker"))
-	body, _ := json.Marshal(RenewRequest{CSR: string(csr)})
+	body, _ := json.Marshal(wire.RenewRequest{CSR: string(csr)})
 	r := httptest.NewRequest("POST", "/renew", bytes.NewReader(body))
 	r.TLS = leafFor(t, b, "worker")
 	w := httptest.NewRecorder()
@@ -242,7 +233,7 @@ func TestRenewAndEnrolRejectGarbageCSRPEM(t *testing.T) {
 	t.Run("renew", func(t *testing.T) {
 		cfg, audit := auditConfig(t)
 		b := New(cfg)
-		body, _ := json.Marshal(RenewRequest{CSR: "not a pem"})
+		body, _ := json.Marshal(wire.RenewRequest{CSR: "not a pem"})
 		r := httptest.NewRequest("POST", "/renew", bytes.NewReader(body))
 		r.TLS = leafFor(t, b, "worker")
 		w := httptest.NewRecorder()
@@ -308,7 +299,7 @@ func TestDirectiveAdminRoutesReject405OnWrongMethod(t *testing.T) {
 // the lone GET route — enrolled agent resolves to (cn, slug, generation).
 func TestDirectiveResolveHappyPath(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	b.Directives().BumpGeneration("manager") // generation 0 -> 1 (as enrol would)
+	b.directives.BumpGeneration("manager") // generation 0 -> 1 (as enrol would)
 	sock := serveDirectiveAdmin(t, b)
 	client := directiveClient(sock)
 	resp, err := client.Get("http://unix/directive/resolve?agent=manager")
@@ -320,7 +311,7 @@ func TestDirectiveResolveHappyPath(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("resolve status = %d, want 200 (%s)", resp.StatusCode, body)
 	}
-	var got DirectiveResolveResponse
+	var got wire.DirectiveResolveResponse
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode resolve response: %v (%s)", err, body)
 	}
@@ -354,7 +345,7 @@ func TestDirectiveSendAndSelftestRejectMalformedBodies(t *testing.T) {
 	}
 }
 
-// --- A7: forwarding-header scrub in the two reverse-proxy Directors ---
+// --- A7: forwarding-header scrub in the two reverse-proxy Rewrites ---
 
 // spoofedHeaders is what a jail agent could set to smuggle identity/session
 // context upstream through the broker's reverse proxies.
@@ -382,9 +373,9 @@ func headerRecordingUpstream(t *testing.T, got *forwardedHeaders, respBody strin
 
 // assertForwardingHeadersScrubbed pins the scrub property: Cookie,
 // X-Forwarded-Host, and X-Forwarded-Proto never reach the upstream, and the
-// inbound X-Forwarded-For chain is dropped. Note ReverseProxy re-adds the
-// immediate client IP as X-Forwarded-For AFTER the Director runs, so the
-// pinned property for XFF is "spoofed chain absent", not "header absent".
+// inbound X-Forwarded-For chain is dropped. Note rewriteUpstream re-sets the
+// immediate client IP as X-Forwarded-For, so the pinned property for XFF is
+// "spoofed chain absent", not "header absent".
 func assertForwardingHeadersScrubbed(t *testing.T, got forwardedHeaders) {
 	t.Helper()
 	if got.cookie != "" {

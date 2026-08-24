@@ -16,16 +16,20 @@ import (
 	"time"
 )
 
+// serverTLSConfig builds a serving config for "example.test" over the
+// production path (rotating cert source + ServerTLSConfigSource).
+func serverTLSConfig(t *testing.T, c *CA, onLapse LapseFunc) *tls.Config {
+	t.Helper()
+	src, err := c.NewServerCertSource("example.test", []string{"example.test"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.ServerTLSConfigSource(src, onLapse)
+}
+
 func serverFor(t *testing.T, c *CA, h http.Handler) *httptest.Server {
 	t.Helper()
-	certPEM, keyPEM, err := c.IssueServerCert("example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := c.ServerTLSConfig(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := serverTLSConfig(t, c, nil)
 	srv := httptest.NewUnstartedServer(h)
 	srv.TLS = cfg
 	srv.StartTLS()
@@ -168,14 +172,7 @@ func caSignedCert(t *testing.T, c *CA, cn string, notBefore, notAfter time.Time,
 // lapseServerFor is serverFor with a lapse hook wired.
 func lapseServerFor(t *testing.T, c *CA, onLapse LapseFunc) *httptest.Server {
 	t.Helper()
-	certPEM, keyPEM, err := c.IssueServerCert("example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := c.ServerTLSConfigLapse(certPEM, keyPEM, onLapse)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := serverTLSConfig(t, c, onLapse)
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.TLS = cfg
 	srv.StartTLS()

@@ -27,6 +27,7 @@ import (
 
 	"github.com/stevegeek/lever/captool"
 	registry "github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // dbRow is one row in the in-memory store the captool handler reads from.
@@ -180,7 +181,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	managerClient := agentClient(t, b, managerCert)
 
 	// ── Step 1: provision — manager → ticket ──────────────────────────────────
-	provBody, _ := json.Marshal(ProvisionRequest{Worker: "worker"})
+	provBody, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
 	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -190,7 +191,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 		body, _ := io.ReadAll(provResp.Body)
 		t.Fatalf("provision: status=%d body=%s", provResp.StatusCode, body)
 	}
-	var provResult ProvisionResponse
+	var provResult wire.ProvisionResponse
 	if err := json.NewDecoder(provResp.Body).Decode(&provResult); err != nil {
 		t.Fatalf("provision: decode: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 
 	// ── Step 1b: enrol — worker self-generates a key, POSTs /enrol → cert ──────
 	workerCSRPEM, workerKeyPEM := csrWithKey(t, "worker")
-	enrolReqBody, _ := json.Marshal(EnrolRequest{Ticket: provResult.Ticket, CSR: string(workerCSRPEM)})
+	enrolReqBody, _ := json.Marshal(wire.EnrolRequest{Ticket: provResult.Ticket, CSR: string(workerCSRPEM)})
 	certlessClient := agentClient(t, b, tls.Certificate{})
 	enrolResp, err := certlessClient.Post(srv.URL+"/enrol", "application/json", bytes.NewReader(enrolReqBody))
 	if err != nil {
@@ -211,7 +212,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 		body, _ := io.ReadAll(enrolResp.Body)
 		t.Fatalf("enrol: status=%d body=%s", enrolResp.StatusCode, body)
 	}
-	var enrolResult EnrolResponse
+	var enrolResult wire.EnrolResponse
 	if err := json.NewDecoder(enrolResp.Body).Decode(&enrolResult); err != nil {
 		t.Fatalf("enrol: decode: %v", err)
 	}
@@ -226,7 +227,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 
 	// ── Step 2: request (delegation) — manager delegates a db.read bound to the
 	// worker, constrained to table=A, filter=alice → capability token ─────────
-	capReqBody, _ := json.Marshal(CapRequest{
+	capReqBody, _ := json.Marshal(wire.CapRequest{
 		Tool: "db", Op: "read", BoundTo: "worker",
 		Constraints: map[string]string{"table": "A", "filter": "alice"},
 	})
@@ -239,7 +240,7 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 		body, _ := io.ReadAll(capResp.Body)
 		t.Fatalf("request: status=%d body=%s", capResp.StatusCode, body)
 	}
-	var capResult CapResponse
+	var capResult wire.CapResponse
 	if err := json.NewDecoder(capResp.Body).Decode(&capResult); err != nil {
 		t.Fatalf("request: decode: %v", err)
 	}

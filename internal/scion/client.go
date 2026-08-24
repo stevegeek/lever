@@ -1,7 +1,27 @@
 // Package scion is the single seam to the `scion` CLI. It builds argv + env and
-// delegates execution to an injected exec.Runner, mirroring the Ruby ScionClient
-// so every method is unit-testable with a fake runner. Anything that names a
-// scion subcommand or endpoint lives HERE and nowhere else.
+// delegates execution to an injected proc.Runner, mirroring the Ruby ScionClient
+// so every method is unit-testable with a fake runner.
+//
+// # What lives where
+//
+// Scion knowledge is split by KIND, across three places:
+//
+//   - This package owns everything about RUNNING scion: subcommand names,
+//     flags, env vars (SCION_HUB_ENDPOINT, SCION_HUB_TOKEN), the hub's default
+//     port, and every predicate over scion's OUTPUT wording (AlreadyRunning,
+//     IsBrokerUnavailable, IsAgentAbsent, the unexported notRunning and
+//     secretSetErr). No other package may match scion's error text; a caller
+//     that needs a new classification adds a predicate here.
+//   - internal/scion/layout owns scion's ON-DISK shape: the ~/.scion paths,
+//     the settings.yaml key names, the oidc_login block and the YAML edit
+//     helpers. It is pure data, with no runner, so provisioning code can use
+//     it without this package.
+//   - internal/hubapi owns the hub's REST surface, for what the CLI does not
+//     expose.
+//
+// internal/backend/guest writes scion's files inside a jail and
+// internal/provision/scionbin builds the scion binary; both take their paths
+// and keys from layout and know nothing of scion's verbs.
 package scion
 
 import (
@@ -12,8 +32,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // DefaultHubEndpoint is the hub endpoint on the loopback of whatever runs the
@@ -28,12 +49,15 @@ import (
 // entirely, deferring to the scion binary's own default.
 const DefaultHubEndpoint = "http://127.0.0.1:8080"
 
+// DefaultHubPort is the port scion's hub listens on inside the jail (scion's
+// own --web-port default). DefaultHubEndpoint spells the same port; a test
+// pins the two together so they cannot drift.
+const DefaultHubPort = 8080
+
 type Options struct {
 	Bin            string        // default "scion"
 	HubEndpoint    string        // SCION_HUB_ENDPOINT
-	DevToken       string        // SCION_DEV_TOKEN
-	HubToken       string        // SCION_HUB_TOKEN (static; the controller PAT, P3)
-	HubTokenSource func() string // SCION_HUB_TOKEN (lazy; wins over HubToken — the mint-mid-apply case)
+	HubTokenSource func() string // SCION_HUB_TOKEN (lazy: the controller PAT is minted mid-apply)
 	// AgentRole is passed as `scion start --role <role>` (scion#1089). Empty ⇒
 	// the flag is omitted, which is the default: it does not exist on earlier
 	// pins. See config.ScionConfig.AgentRole.
@@ -43,14 +67,19 @@ type Options struct {
 type Client struct {
 	bin            string
 	hubEndpoint    string
-	devToken       string
-	hubToken       string
 	hubTokenSource func() string
 	agentRole      string
-	r              exec.Runner
+	r              proc.Runner
+
+	// Poll budgets for waitHubReady / WaitRuntimeBrokerReady. New sets the
+	// defaults; tests shrink them on the instance.
+	hubReadyAttempts    int
+	hubReadyInterval    time.Duration
+	brokerReadyAttempts int
+	brokerReadyInterval time.Duration
 }
 
-func New(r exec.Runner, o Options) *Client {
+func New(r proc.Runner, o Options) *Client {
 	bin := o.Bin
 	if bin == "" {
 		bin = "scion"
@@ -58,35 +87,30 @@ func New(r exec.Runner, o Options) *Client {
 	return &Client{
 		bin:            bin,
 		hubEndpoint:    o.HubEndpoint,
-		devToken:       o.DevToken,
-		hubToken:       o.HubToken,
 		hubTokenSource: o.HubTokenSource,
 		agentRole:      o.AgentRole,
 		r:              r,
+
+		hubReadyAttempts:    hubReadyAttempts,
+		hubReadyInterval:    hubReadyInterval,
+		brokerReadyAttempts: brokerReadyAttempts,
+		brokerReadyInterval: brokerReadyInterval,
 	}
 }
 
-// currentHubToken resolves the controller PAT: the lazy source (read at call
-// time, for the mint-mid-apply case where the token isn't known at New())
-// wins over the static value.
+// currentHubToken resolves the controller PAT from the lazy source (read at
+// call time: the token isn't known at New() — it is minted mid-apply).
 func (c *Client) currentHubToken() string {
 	if c.hubTokenSource != nil {
 		return c.hubTokenSource()
 	}
-	return c.hubToken
+	return ""
 }
-
-// HubToken exposes the resolved controller PAT so callers outside this
-// package (e.g. the attach exec path) can embed it themselves.
-func (c *Client) HubToken() string { return c.currentHubToken() }
 
 func (c *Client) env() map[string]string {
 	m := map[string]string{"SCION_HUB_ENABLED": "true"}
 	if c.hubEndpoint != "" {
 		m["SCION_HUB_ENDPOINT"] = c.hubEndpoint
-	}
-	if c.devToken != "" {
-		m["SCION_DEV_TOKEN"] = c.devToken
 	}
 	if tok := c.currentHubToken(); tok != "" {
 		m["SCION_HUB_TOKEN"] = tok

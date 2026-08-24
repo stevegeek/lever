@@ -74,8 +74,11 @@ esac
 # lever-agent is copied INTO the guest by the acceptance setup (linux/<guestarch>).
 say "build lever-tool-db (host) + lever-agent (linux/$GUESTARCH)"
 mkdir -p "$BIN"
-( cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$BIN/lever-tool-db" ./cmd/lever-tool-db ) || { echo "build lever-tool-db failed"; exit 1; }
-( cd "$REPO_ROOT" && GOOS=linux GOARCH="$GUESTARCH" CGO_ENABLED=0 go build -o "$BIN/lever-agent" ./cmd/lever-agent ) || { echo "build lever-agent failed"; exit 1; }
+# Stamp the versions the Makefile stamps (LEVER_AGENT_LDFLAGS /
+# LEVER_TOOL_DB_LDFLAGS) so the MCP serverInfo matches a `make` build.
+LEVER_VERSION="$(sed -n 's/^const Version = "\(.*\)"/\1/p' "$REPO_ROOT/internal/cli/root.go")"
+( cd "$REPO_ROOT" && CGO_ENABLED=0 go build -ldflags "-X main.Version=$LEVER_VERSION" -o "$BIN/lever-tool-db" ./cmd/lever-tool-db ) || { echo "build lever-tool-db failed"; exit 1; }
+( cd "$REPO_ROOT" && GOOS=linux GOARCH="$GUESTARCH" CGO_ENABLED=0 go build -ldflags "-X github.com/stevegeek/lever/internal/agent.Version=$LEVER_VERSION" -o "$BIN/lever-agent" ./cmd/lever-agent ) || { echo "build lever-agent failed"; exit 1; }
 export LEVER_AGENT_BIN="$BIN/lever-agent"
 
 # --- instance fixtures -----------------------------------------------------------

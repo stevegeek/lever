@@ -4,13 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
 // orbShaped and limaShaped are two argv-prefix shapes exercised by every test
@@ -32,9 +36,9 @@ func prefixShapes(machine string) []prefixShape {
 func TestEnsureRuntimesArgv(t *testing.T) {
 	for _, shape := range prefixShapes("lever-x") {
 		t.Run(shape.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
-			f.Script(strings.Join(shape.userPrefix, " "), exec.Result{})
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
+			f.Script(strings.Join(shape.userPrefix, " "), proc.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-x"}
 
 			if err := g.EnsureRuntimes(context.Background(), "stephen"); err != nil {
@@ -124,8 +128,8 @@ func TestGOARCHMapsUname(t *testing.T) {
 	cases := map[string]string{"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}
 	for uname, want := range cases {
 		t.Run(uname, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script("limactl shell v uname -m", exec.Result{Stdout: uname + "\n"})
+			f := proc.NewFakeRunner()
+			f.Script("limactl shell v uname -m", proc.Result{Stdout: uname + "\n"})
 			g := Guest{Host: f, UserPrefix: []string{"limactl", "shell", "v"}}
 			got, err := g.GOARCH(context.Background())
 			if err != nil || got != want {
@@ -136,8 +140,8 @@ func TestGOARCHMapsUname(t *testing.T) {
 }
 
 func TestGOARCHUnrecognizedErrors(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -m m uname -m", exec.Result{Stdout: "riscv64\n"})
+	f := proc.NewFakeRunner()
+	f.Script("orb -m m uname -m", proc.Result{Stdout: "riscv64\n"})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}}
 	if _, err := g.GOARCH(context.Background()); err == nil {
 		t.Fatal("expected error for unrecognized guest architecture")
@@ -146,103 +150,61 @@ func TestGOARCHUnrecognizedErrors(t *testing.T) {
 	}
 }
 
-// stageFakeBuildOutput creates the file a faked `go build` would have written,
-// at the exact path resolveScionBinary passes to `-o`. InstallRootBinaryIfChanged
-// hashes that file for real, so it has to exist even when the build is a stub.
-func stageFakeBuildOutput(t *testing.T, machine string) {
-	t.Helper()
-	p := filepath.Join(os.TempDir(), "lever-scion-"+machine)
-	if err := os.WriteFile(p, []byte("fake-scion-"+machine), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(p) })
-}
-
 func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	for _, shape := range prefixShapes("lever-jail") {
 		t.Run(shape.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "arm64\n"})
-			f.Script("go build", exec.Result{})
-			f.Script("bash -c", exec.Result{})
-			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Code: 1})
-			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", proc.Result{Stdout: "arm64\n"})
+			f.Script("go build", proc.Result{})
+			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", proc.Result{Code: 1})
+			f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
 			src := t.TempDir() // must exist for the stat check
-			stageFakeBuildOutput(t, "lever-jail")
+			backendtest.StageFakeBuildOutput(t, "lever-jail")
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
 			if err := g.EnsureScion(context.Background(), ScionSpec{Source: src}); err != nil {
 				t.Fatalf("EnsureScion: %v", err)
 			}
 
-			var sawBuild, sawInstall bool
-			wantRootWords := make([]string, 0, len(shape.rootPrefix))
-			for _, w := range shape.rootPrefix {
-				wantRootWords = append(wantRootWords, "'"+w+"'")
-			}
-			wantRootJoined := strings.Join(wantRootWords, " ")
+			backendtest.AssertScionBuild(t, f, src, "lever-jail")
+			var sawInstall bool
 			for _, c := range f.Calls {
-				if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-					if c.Dir != src {
-						t.Errorf("build Dir: want %q got %q", src, c.Dir)
+				// The install is `<rootPrefix> bash -c <script>` with the binary
+				// on stdin: argv only, no host shell, no quoted prefix words.
+				if c.Stdin == "fake-scion-lever-jail" {
+					want := append(append([]string{}, shape.rootPrefix[1:]...), "bash", "-c")
+					if c.Name != shape.rootPrefix[0] || len(c.Args) != len(want)+1 || !reflect.DeepEqual(c.Args[:len(want)], want) {
+						t.Fatalf("install argv: want %s %v <script>, got %s %v", shape.rootPrefix[0], want, c.Name, c.Args)
 					}
-					if c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
-						t.Errorf("build env: want linux/arm64 got %+v", c.Env)
-					}
-					var sawCmd bool
-					var binArg string
-					for i, a := range c.Args {
-						if a == "./cmd/scion" {
-							sawCmd = true
-						}
-						if a == "-o" && i+1 < len(c.Args) {
-							binArg = c.Args[i+1]
-						}
-					}
-					if !sawCmd {
-						t.Errorf("build args should contain ./cmd/scion; got %+v", c.Args)
-					}
-					if !strings.Contains(binArg, "lever-scion-lever-jail") {
-						t.Errorf("build output path should include per-machine name lever-scion-lever-jail; got %q", binArg)
-					}
-					sawBuild = true
-				}
-				if c.Name == "bash" && len(c.Args) >= 2 && c.Args[0] == "-c" {
-					script := c.Args[1]
-					if strings.Contains(script, "set -o pipefail") &&
-						strings.Contains(script, "scion.tmp") &&
+					script := c.Args[len(c.Args)-1]
+					if strings.Contains(script, "scion.tmp") &&
 						strings.Contains(script, "mv") &&
-						strings.Contains(script, "/usr/local/bin/scion") &&
-						strings.Contains(script, wantRootJoined) {
+						strings.Contains(script, "/usr/local/bin/scion") {
 						sawInstall = true
 					}
 				}
 			}
-			if !sawBuild {
-				t.Fatalf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
-			}
 			if !sawInstall {
-				t.Fatalf("expected bash -c atomic scion install via RootPrefix %v; calls=%+v", shape.rootPrefix, f.Calls)
+				t.Fatalf("expected atomic scion install via RootPrefix %v with the binary on stdin; calls=%+v", shape.rootPrefix, f.Calls)
 			}
 		})
 	}
 }
 
 func TestEnsureScionSourceMissing(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-jail"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-jail"}, Machine: "lever-jail"}
 
 	err := g.EnsureScion(context.Background(), ScionSpec{Source: "/does/not/exist"})
 	if err == nil {
 		t.Fatal("expected error for missing scion source, got nil")
 	}
-	if !strings.Contains(err.Error(), "scion source") {
-		t.Fatalf("error should mention scion source; got: %v", err)
+	var srcErr *scionbin.SourceError
+	if !errors.As(err, &srcErr) {
+		t.Fatalf("error should be a scion source error; got: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			t.Fatalf("go build must NOT be called when source missing (stat short-circuits): %+v", c)
-		}
+	if i := f.CallIndex(proc.Subcommand("go", "build")); i >= 0 {
+		t.Fatalf("go build must NOT be called when source missing (stat short-circuits): %+v", f.Calls[i])
 	}
 }
 
@@ -252,31 +214,26 @@ func TestEnsureScionSourceMissing(t *testing.T) {
 func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	const pin = "666333f9"
 	const moduleDir = "/mod/github.com/!google!cloud!platform/scion@v0.0.0-x"
-	f := exec.NewFakeRunner()
-	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
+	f := proc.NewFakeRunner()
+	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	f.Script("/opt/go/bin/go mod download -json github.com/GoogleCloudPlatform/scion@"+pin,
-		exec.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
-	f.Script("/opt/go/bin/go build -o", exec.Result{})
-	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
-	f.Script("orb -m lever-vtest cat", exec.Result{Code: 1})
-	f.Script("orb -u root -m lever-vtest", exec.Result{})
-	f.Script("bash -c", exec.Result{})
+		proc.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
+	f.Script("/opt/go/bin/go build -o", proc.Result{})
+	f.Script("orb -m lever-vtest uname -m", proc.Result{Stdout: "arm64\n"})
+	f.Script("orb -m lever-vtest cat", proc.Result{Code: 1})
+	f.Script("orb -u root -m lever-vtest", proc.Result{})
 
-	stageFakeBuildOutput(t, "lever-vtest")
+	backendtest.StageFakeBuildOutput(t, "lever-vtest")
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-vtest"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-vtest"}, Machine: "lever-vtest"}
 	if err := g.EnsureScion(context.Background(), ScionSpec{Version: pin}); err != nil {
 		t.Fatalf("EnsureScion(version): %v", err)
 	}
 
-	var build *exec.Call
-	for i := range f.Calls {
-		if c := f.Calls[i]; c.Name == "/opt/go/bin/go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			build = &f.Calls[i]
-		}
-	}
-	if build == nil {
+	bi := f.CallIndex(proc.Subcommand("/opt/go/bin/go", "build"))
+	if bi < 0 {
 		t.Fatal("expected a cross-compile build with the resolved absolute go binary")
 	}
+	build := f.Calls[bi]
 	if build.Dir != moduleDir {
 		t.Fatalf("build ran in %q, want the pinned module dir %q", build.Dir, moduleDir)
 	}
@@ -287,10 +244,10 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 
 // A failed `go mod download` (bad commit) must surface, not silently fall through.
 func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("go env GOROOT", exec.Result{Stdout: "/opt/go\n"})
-	f.Script("orb -m lever-vtest uname -m", exec.Result{Stdout: "arm64\n"})
-	f.Script("/opt/go/bin/go mod download -json", exec.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
+	f := proc.NewFakeRunner()
+	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
+	f.Script("orb -m lever-vtest uname -m", proc.Result{Stdout: "arm64\n"})
+	f.Script("/opt/go/bin/go mod download -json", proc.Result{Stdout: `{"Error":"unknown revision deadbeef"}`})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-vtest"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-vtest"}, Machine: "lever-vtest"}
 	if err := g.EnsureScion(context.Background(), ScionSpec{Version: "deadbeef"}); err == nil {
 		t.Fatal("expected error when go mod download reports a bad revision")
@@ -301,16 +258,13 @@ func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 
 // TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath proves destPath
 // (and its derived .tmp) are safe to interpolate even if a future caller
-// passes a metacharacter-laden value: InstallRootBinary's install script
-// embeds destPath inside a single-quoted argument nested inside an outer
-// `bash -c` script. An embedded `'` in destPath, substituted raw, closes that
-// quote early FROM THE OUTER BASH'S PERSPECTIVE (the inner single-quoted
-// segment is itself just text inside the outer script), letting anything
-// after it run as an extra, injected command on the HOST. This test uses the
-// REAL runner (not FakeRunner) with a harmless `env` RootPrefix stand-in (env
-// just execs its argv, mirroring "the guest prefix runs bash -c '<script>'"
-// exactly) so the actual composed shell script is genuinely parsed by bash,
-// not just string-matched.
+// passes a metacharacter-laden value: the guest-side install script embeds
+// destPath inside single quotes, so an embedded `'` substituted raw would
+// close that quote early and let anything after it run as an extra command
+// in the guest. This test uses the REAL runner (not FakeRunner) with a
+// harmless `env` RootPrefix stand-in (env just execs its argv, mirroring "the
+// guest prefix runs bash -c <script>" exactly) so the actual script is
+// genuinely parsed by bash, not just string-matched.
 func TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath(t *testing.T) {
 	dir := t.TempDir()
 	local := filepath.Join(dir, "src-bin")
@@ -335,7 +289,7 @@ func TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath(t *testing.T) {
 	// that runs as a separate command if the quote isn't neutralized.
 	dest := filepath.Join(dir, "dst") + "'; touch " + marker + " #"
 
-	g := Guest{Host: exec.RealRunner{}, RootPrefix: []string{"env"}, Machine: "test"}
+	g := Guest{Host: proc.RealRunner{}, RootPrefix: []string{"env"}, Machine: "test"}
 	if err := g.InstallRootBinary(context.Background(), local, dest); err != nil {
 		t.Fatalf("InstallRootBinary: %v", err)
 	}
@@ -377,12 +331,13 @@ func stageBinary(t *testing.T, content string) (string, string) {
 	return p, hex.EncodeToString(sum[:])
 }
 
-// installCalls counts the streaming install (the host-side `bash -c` pipe),
-// which is the 158MB cost the digest check exists to avoid.
-func installCalls(f *exec.FakeRunner) int {
+// installCalls counts the streaming install (a `bash -c 'cat > …'` script
+// with the binary on stdin), which is the 158MB cost the digest check exists
+// to avoid.
+func installCalls(f *proc.FakeRunner) int {
 	n := 0
 	for _, c := range f.Calls {
-		if c.Name == "bash" && len(c.Args) > 1 && strings.Contains(c.Args[1], "cat ") {
+		if len(c.Args) > 1 && c.Args[len(c.Args)-2] == "-c" && strings.Contains(c.Args[len(c.Args)-1], "cat > ") {
 			n++
 		}
 	}
@@ -393,13 +348,17 @@ func TestInstallIfChangedSkipsWhenGuestBinaryMatches(t *testing.T) {
 	for _, shape := range prefixShapes("lever-jail") {
 		t.Run(shape.name, func(t *testing.T) {
 			local, sum := stageBinary(t, "scion-bytes")
-			f := exec.NewFakeRunner()
+			f := proc.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum",
-				exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
+				proc.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
-			if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+			installed, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion")
+			if err != nil {
 				t.Fatalf("InstallRootBinaryIfChanged: %v", err)
+			}
+			if installed {
+				t.Fatal("a matching guest binary must report installed=false")
 			}
 			if n := installCalls(f); n != 0 {
 				t.Fatalf("a matching guest binary must not be re-streamed; got %d install call(s)", n)
@@ -411,23 +370,26 @@ func TestInstallIfChangedSkipsWhenGuestBinaryMatches(t *testing.T) {
 func TestInstallIfChangedInstallsWhenGuestBinaryDiffersOrAbsent(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		guestDigest exec.Result
+		guestDigest proc.Result
 	}{
-		{"guest binary differs", exec.Result{Stdout: "0000  /usr/local/bin/scion\n"}},
-		{"guest binary absent", exec.Result{Code: 1, Stderr: "No such file"}},
-		{"sha256sum unavailable", exec.Result{Code: 127, Stderr: "command not found"}},
+		{"guest binary differs", proc.Result{Stdout: "0000  /usr/local/bin/scion\n"}},
+		{"guest binary absent", proc.Result{Code: 1, Stderr: "No such file"}},
+		{"sha256sum unavailable", proc.Result{Code: 127, Stderr: "command not found"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			local, _ := stageBinary(t, "scion-bytes")
 			shape := prefixShapes("lever-jail")[0]
-			f := exec.NewFakeRunner()
+			f := proc.NewFakeRunner()
 			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", tc.guestDigest)
-			f.Script("bash -c", exec.Result{})
-			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
+			f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
-			if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+			installed, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion")
+			if err != nil {
 				t.Fatalf("InstallRootBinaryIfChanged: %v", err)
+			}
+			if !installed {
+				t.Fatal("an install must report installed=true")
 			}
 			if n := installCalls(f); n != 1 {
 				t.Fatalf("want exactly 1 install call, got %d", n)
@@ -436,9 +398,9 @@ func TestInstallIfChangedInstallsWhenGuestBinaryDiffersOrAbsent(t *testing.T) {
 	}
 }
 func TestInstallIfChangedFailsOnUnreadableLocalFile(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb"}, RootPrefix: []string{"orb"}, Machine: "lever-jail"}
-	err := g.InstallRootBinaryIfChanged(context.Background(), filepath.Join(t.TempDir(), "absent"), "/usr/local/bin/scion")
+	_, err := g.InstallRootBinaryIfChanged(context.Background(), filepath.Join(t.TempDir(), "absent"), "/usr/local/bin/scion")
 	if err == nil {
 		t.Fatal("expected an error hashing a missing file")
 	}
@@ -453,12 +415,11 @@ func TestInstallIfChangedFailsOnUnreadableLocalFile(t *testing.T) {
 func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 	for _, shape := range prefixShapes("lever-jail") {
 		t.Run(shape.name, func(t *testing.T) {
-			bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
-			f := exec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "aarch64\n"})
-			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Code: 1})
-			f.Script("bash -c", exec.Result{})
-			f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
+			bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", proc.Result{Stdout: "aarch64\n"})
+			f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", proc.Result{Code: 1})
+			f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
 			if err := g.EnsureScion(context.Background(), ScionSpec{Binary: bin}); err != nil {
@@ -478,10 +439,10 @@ func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 
 func TestEnsureScionBinaryModeRejectsWrongArch(t *testing.T) {
 	// The guest is amd64, the supplied binary is arm64. Nothing may be written.
-	bin := writeELF64(t, t.TempDir(), emAArch64, etExec)
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	shape := prefixShapes("lever-jail")[0]
-	f := exec.NewFakeRunner()
-	f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", exec.Result{Stdout: "x86_64\n"})
+	f := proc.NewFakeRunner()
+	f.Script(strings.Join(shape.userPrefix, " ")+" uname -m", proc.Result{Stdout: "x86_64\n"})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
 	err := g.EnsureScion(context.Background(), ScionSpec{Binary: bin})
@@ -496,7 +457,7 @@ func TestEnsureScionBinaryModeRejectsWrongArch(t *testing.T) {
 func TestEnsureScionRejectsNoModeNamingAllThreeKeys(t *testing.T) {
 	// Fails on the config alone: no guest round-trip, so it also works when the
 	// machine is not up.
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-jail"}, RootPrefix: []string{"orb"}, Machine: "lever-jail"}
 
 	err := g.EnsureScion(context.Background(), ScionSpec{})
@@ -520,11 +481,11 @@ func TestInstallIfChangedHashesTheGuestBinaryNotAMarker(t *testing.T) {
 	// guest with no working scion and no way for `lever up` to repair it.
 	local, sum := stageBinary(t, "scion-bytes")
 	shape := prefixShapes("lever-jail")[0]
-	f := exec.NewFakeRunner()
-	f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", exec.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
+	f := proc.NewFakeRunner()
+	f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", proc.Result{Stdout: sum + "  /usr/local/bin/scion\n"})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
 
-	if err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
+	if _, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion"); err != nil {
 		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
 	}
 	if len(f.Calls) != 1 {
@@ -546,9 +507,9 @@ func TestInstallIfChangedHashesTheGuestBinaryNotAMarker(t *testing.T) {
 func aptPrereqScript(t *testing.T) string {
 	t.Helper()
 	shape := prefixShapes("lever-x")[0]
-	f := exec.NewFakeRunner()
-	f.Script(strings.Join(shape.rootPrefix, " "), exec.Result{})
-	f.Script(strings.Join(shape.userPrefix, " "), exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
+	f.Script(strings.Join(shape.userPrefix, " "), proc.Result{})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-x"}
 	if err := g.EnsureRuntimes(context.Background(), "stephen"); err != nil {
 		t.Fatalf("EnsureRuntimes: %v", err)
@@ -609,5 +570,29 @@ func TestAptPrereqsDeclareLeverToolDependencies(t *testing.T) {
 		if !slices.Contains(guard, pkg) {
 			t.Errorf("%q is not declared in the guest prereqs (%v) — lever runs it in the jail", pkg, guard)
 		}
+	}
+}
+
+// TestInstallRootBinaryRefusesShortStream pins the doc claim that a stream
+// ending early cannot install a truncated binary: `cat` treats the early end
+// as a plain EOF, so only the byte-count check stops the swap. Like the
+// injection test above, this runs the real script through `env` so bash
+// evaluates it.
+func TestInstallRootBinaryRefusesShortStream(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "dst")
+	script := installRootBinaryScript(dest, 11) // claims 11 bytes; stream 5
+	g := Guest{Host: proc.RealRunner{}, RootPrefix: []string{"env"}, Machine: "test"}
+	if err := g.pipeInto(context.Background(), g.RootPrefix, strings.NewReader("short"), script); err == nil {
+		t.Fatal("expected the short stream to fail the install")
+	}
+	if _, err := os.Stat(dest); err == nil {
+		t.Fatalf("truncated binary was installed at %s", dest)
+	}
+	if err := g.pipeInto(context.Background(), g.RootPrefix, strings.NewReader("bin-content"), script); err != nil {
+		t.Fatalf("full stream: %v", err)
+	}
+	if data, err := os.ReadFile(dest); err != nil || string(data) != "bin-content" {
+		t.Fatalf("installed = %q, %v", data, err)
 	}
 }

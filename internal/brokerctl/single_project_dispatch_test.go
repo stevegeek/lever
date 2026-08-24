@@ -1,7 +1,7 @@
 package brokerctl
 
-// single_project_dispatch_test.go is Task 6's broker-side single-project
-// integration proof (P2 plan). It drives the REAL config → WorkerSpecs →
+// single_project_dispatch_test.go is the broker-side single-project
+// integration proof. It drives the REAL config → WorkerSpecs →
 // broker.Config → broker.New chain (BuildBroker + WorkerSpecs, exactly as
 // Serve assembles them, minus the real backend/jail wiring) for a config with
 // TWO workers (dir: workers/a, dir: workers/b), with only the scion runtime
@@ -31,8 +31,9 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // fakeWorkerRuntime is a minimal broker.WorkerRuntime fake local to this
@@ -123,7 +124,7 @@ func fakeTLSWithCN(cn string) *tls.ConnectionState {
 
 // TestSingleProjectWorkerDispatchAndList drives the collapsed single-project
 // broker dispatch end to end (fake scion runtime only) for a two-worker
-// config, per the P2 plan's Task 6.
+// config.
 func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	tree := t.TempDir() // real dir: HostWorkspace MkdirAll is genuine, assertable
 	kp, err := token.Generate()
@@ -146,7 +147,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	}
 
 	// Config-derived, path-authoritative worker specs — the SAME production
-	// function Serve calls (see serve.go: cfg.Workers = WorkerSpecs(app, jailMount)).
+	// function Serve calls (see serve.go dispatchConfig: Workers: WorkerSpecs(app, jailMount)).
 	const jailMount = "/lever"
 	specs := WorkerSpecs(app, jailMount)
 	if len(specs) != 2 {
@@ -164,21 +165,21 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	// env is set, so decorateConfig takes the no-Runtime path and we inject the
 	// fake afterward. Workers/InstanceProject (jailMount) come from the selected
 	// backend's MountDest, which is "/lever" for orbstack (== the jailMount const).
-	be, err := registry.Select(app.Backend, leverexec.RealRunner{}, "lever-"+app.Name)
+	be, err := registry.Select(app.Backend, proc.RealRunner{}, "lever-"+app.Name)
 	if err != nil {
 		t.Fatalf("registry.Select: %v", err)
 	}
-	state := StateDir(t.TempDir())
-	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
+	st := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
-	if err := decorateConfig(&cfg, app, state, be, "test"); err != nil {
+	if err := decorateConfig(&cfg, app, st, be, "test", ServeEnv{}); err != nil {
 		t.Fatalf("decorateConfig: %v", err)
 	}
-	if cfg.InstanceProject != jailMount {
-		t.Fatalf("decorateConfig InstanceProject = %q, want backend MountDest %q", cfg.InstanceProject, jailMount)
+	if cfg.Dispatch.InstanceProject != jailMount {
+		t.Fatalf("decorateConfig InstanceProject = %q, want backend MountDest %q", cfg.Dispatch.InstanceProject, jailMount)
 	}
-	cfg.Runtime = rt
+	cfg.Dispatch.Runtime = rt
 	b := broker.New(cfg)
 
 	call := func(method, path, body string) *httptest.ResponseRecorder {
@@ -189,7 +190,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		} else {
 			r = httptest.NewRequest(method, path, nil)
 		}
-		r.TLS = fakeTLSWithCN(cfg.ManagerIdentity)
+		r.TLS = fakeTLSWithCN(cfg.Identity.ManagerIdentity)
 		rec := httptest.NewRecorder()
 		b.JailHandler().ServeHTTP(rec, r)
 		return rec
@@ -242,7 +243,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		{Slug: "b", Phase: "running"},
 	}
 	listCallsBefore := rt.listCalls // the two /worker/start calls above each phase-check via List
-	rec := call("GET", "/worker/list", "")
+	rec := call("POST", "/worker/list", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list status = %d (%s)", rec.Code, rec.Body.String())
 	}

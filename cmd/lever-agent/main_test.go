@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,191 +17,9 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/agent"
-	"github.com/stevegeek/lever/internal/broker"
-	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/broker/rules"
 	"github.com/stevegeek/lever/internal/cap/ca"
-	"github.com/stevegeek/lever/internal/cap/token"
-	"gopkg.in/yaml.v3"
+	"github.com/stevegeek/lever/internal/httpjson"
 )
-
-// svcSpec mirrors the subset of scion's api.ServiceSpec that the renew sidecar
-// uses, for parsing the emitted scion-services.yaml back in tests.
-type svcSpec struct {
-	Name    string   `yaml:"name"`
-	Command []string `yaml:"command"`
-	Restart string   `yaml:"restart"`
-}
-
-func TestWriteRenewServicesAPIKey(t *testing.T) {
-	home := t.TempDir()
-	bsDir := filepath.Join(home, "ws", ".lever")
-	if err := os.MkdirAll(bsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	bootstrap := filepath.Join(bsDir, "bootstrap.json")
-	const brokerURL = "https://host.orb.internal:8443"
-	if err := os.WriteFile(bootstrap, []byte(`{"broker_url":"`+brokerURL+`"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	idDir := filepath.Join(home, ".lever-id")
-	settings := filepath.Join(home, ".claude", "settings.json")
-
-	if err := writeRenewServices(home, idDir, bootstrap, settings, "api-key"); err != nil {
-		t.Fatalf("writeRenewServices: %v", err)
-	}
-
-	out := filepath.Join(home, ".scion", "scion-services.yaml")
-	b, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatalf("read services file: %v", err)
-	}
-	var specs []svcSpec
-	if err := yaml.Unmarshal(b, &specs); err != nil {
-		t.Fatalf("parse services yaml: %v", err)
-	}
-	// Two sidecars: lever-gateway (the loopback mTLS proxy) then lever-renew.
-	if len(specs) != 2 {
-		t.Fatalf("want 2 services, got %d: %s", len(specs), b)
-	}
-
-	// Gateway MUST be emitted first (up before renew) and carry baked absolute
-	// flags — sidecars get no CWD, so it must never fall back to a bootstrap path.
-	gw := specs[0]
-	if gw.Name != "lever-gateway" {
-		t.Errorf("specs[0].name = %q, want lever-gateway (emitted first)", gw.Name)
-	}
-	if gw.Restart != "on-failure" {
-		t.Errorf("gateway restart = %q, want on-failure", gw.Restart)
-	}
-	gwCmd := strings.Join(gw.Command, " ")
-	for _, want := range []string{
-		"lever-agent gateway",
-		"--id-dir " + idDir,
-		"--broker-url " + brokerURL, // baked; no sidecar bootstrap file-read
-		"--listen 127.0.0.1:8462",
-	} {
-		if !strings.Contains(gwCmd, want) {
-			t.Errorf("gateway command %q missing %q", gwCmd, want)
-		}
-	}
-
-	s := specs[1]
-	if s.Name != "lever-renew" {
-		t.Errorf("specs[1].name = %q, want lever-renew", s.Name)
-	}
-	if s.Restart != "on-failure" {
-		t.Errorf("restart = %q, want on-failure", s.Restart)
-	}
-	cmd := strings.Join(s.Command, " ")
-	for _, want := range []string{
-		"lever-agent renew --loop",
-		"--id-dir " + idDir,
-		"--broker-url " + brokerURL, // resolved at boot; no sidecar file-read
-		"--llm-auth api-key",
-		"--settings " + settings,
-	} {
-		if !strings.Contains(cmd, want) {
-			t.Errorf("command %q missing %q", cmd, want)
-		}
-	}
-}
-
-// TestWriteRenewServicesNoBootstrapIsNoop: a non-brokered agent (no bootstrap
-// file) gets no sidecar — there is nothing to renew against.
-func TestWriteRenewServicesNoBootstrapIsNoop(t *testing.T) {
-	home := t.TempDir()
-	missing := filepath.Join(home, "ws", ".lever", "bootstrap.json")
-	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), missing, "", "subscription"); err != nil {
-		t.Fatalf("writeRenewServices: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
-		t.Fatalf("services file should not exist for a non-brokered agent; stat err = %v", err)
-	}
-}
-
-// TestWriteRenewServicesEmptyBrokerURLIsNoop: a bootstrap that exists but carries
-// no broker URL (brokerless) is a distinct path from a missing bootstrap — it too
-// gets no sidecar, since there is nothing to renew against.
-func TestWriteRenewServicesEmptyBrokerURLIsNoop(t *testing.T) {
-	home := t.TempDir()
-	bsDir := filepath.Join(home, "ws", ".lever")
-	if err := os.MkdirAll(bsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	bootstrap := filepath.Join(bsDir, "bootstrap.json")
-	if err := os.WriteFile(bootstrap, []byte(`{"ticket":"tk","broker_url":""}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeRenewServices(home, filepath.Join(home, ".lever-id"), bootstrap, "", "api-key"); err != nil {
-		t.Fatalf("writeRenewServices: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".scion", "scion-services.yaml")); !os.IsNotExist(err) {
-		t.Fatalf("services file should not exist for a brokerless bootstrap; stat err = %v", err)
-	}
-}
-
-func TestWriteClaudeSettingsEnvMergesNotClobbers(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	// Pre-existing settings: an unrelated top-level key + an existing env var.
-	if err := os.WriteFile(path, []byte(`{"model":"sonnet","env":{"EXISTING":"keep"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	w := writeClaudeSettingsEnv(path)
-	if err := w(map[string]string{"ANTHROPIC_AUTH_TOKEN": "tok", "ANTHROPIC_BASE_URL": "http://x/llm"}); err != nil {
-		t.Fatal(err)
-	}
-	var got map[string]any
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("result is not valid JSON: %v", err)
-	}
-	if got["model"] != "sonnet" {
-		t.Errorf("clobbered unrelated top-level key: model=%v", got["model"])
-	}
-	env, ok := got["env"].(map[string]any)
-	if !ok {
-		t.Fatalf("env is not an object: %v", got["env"])
-	}
-	if env["EXISTING"] != "keep" {
-		t.Errorf("clobbered pre-existing env var: EXISTING=%v", env["EXISTING"])
-	}
-	if env["ANTHROPIC_AUTH_TOKEN"] != "tok" || env["ANTHROPIC_BASE_URL"] != "http://x/llm" {
-		t.Errorf("dynamic vars not merged into env: %v", env)
-	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
-		t.Errorf("settings perm = %o, want 600", fi.Mode().Perm())
-	}
-}
-
-func TestWriteClaudeSettingsEnvCreatesWhenAbsent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ".claude", "settings.json")
-	if err := writeClaudeSettingsEnv(path)(map[string]string{"ANTHROPIC_AUTH_TOKEN": "tok"}); err != nil {
-		t.Fatal(err)
-	}
-	var got map[string]any
-	b, _ := os.ReadFile(path)
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatal(err)
-	}
-	env, _ := got["env"].(map[string]any)
-	if env["ANTHROPIC_AUTH_TOKEN"] != "tok" {
-		t.Fatalf("absent-file case did not create env block: %v", got)
-	}
-}
-
-func TestWriteClaudeSettingsEnvEmptyPathNoop(t *testing.T) {
-	if err := writeClaudeSettingsEnv("")(map[string]string{"X": "y"}); err != nil {
-		t.Fatalf("empty path should be a no-op, got %v", err)
-	}
-}
 
 func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
 	// lever-agent sits on $PATH inside every agent jail, so `delegate` here is
@@ -226,17 +42,25 @@ func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
 		{"request without -tool", "request", `"-tool"`, []string{"-op", "read"}},
 		{"request without -op", "request", `"-op"`, []string{"-tool", "db"}},
 	} {
-		err := cmdCLI(tc.verb, append([]string{"-id-dir", missingID}, tc.args...))
+		err := cmdCLI(context.Background(), tc.verb, append([]string{"-id-dir", missingID}, tc.args...))
 		if err == nil {
 			t.Fatalf("%s: must error", tc.name)
 		}
 		if !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: error = %q, want it to name %s", tc.name, err, tc.want)
 		}
-		if strings.Contains(err.Error(), "no identity") {
+		if errors.Is(err, errNoIdentity) {
 			t.Fatalf("%s: argument checks must run before the identity load, got %q", tc.name, err)
 		}
 	}
+}
+
+// isFlagParseError reports whether err is the flag package's own rejection of
+// an argv: an undefined flag, or -h. Those have no sentinel in package flag
+// except flag.ErrHelp, so the undefined-flag case is matched on its wording.
+func isFlagParseError(err error) bool {
+	return err != nil && (errors.Is(err, flag.ErrHelp) ||
+		strings.Contains(err.Error(), "flag provided but not defined"))
 }
 
 func TestUnknownSubcommandErrors(t *testing.T) {
@@ -251,194 +75,17 @@ func TestRunRequiresSubcommand(t *testing.T) {
 	}
 }
 
-// TestRenewFlagAcceptance verifies that the renew flagset accepts --loop and
-// --interval without a parse error (reconciles manifest.json sidecar declaration).
-func TestRenewFlagAcceptance(t *testing.T) {
-	fs := flag.NewFlagSet("renew", flag.ContinueOnError)
-	defaultIDDir := filepath.Join(os.Getenv("HOME"), ".lever-id")
-	fs.String("id-dir", defaultIDDir, "")
-	fs.String("broker-url", "", "")
-	fs.String("bootstrap", "", "")
-	loop := fs.Bool("loop", false, "")
-	interval := fs.Duration("interval", 12*time.Hour, "")
-
-	if err := fs.Parse([]string{"--loop", "--interval", "6h"}); err != nil {
-		t.Fatalf("flag parse error (manifest sidecar would crash): %v", err)
-	}
-	if !*loop {
-		t.Error("--loop should be true after parse")
-	}
-	if *interval != 6*time.Hour {
-		t.Errorf("--interval: got %v, want 6h", *interval)
-	}
-}
-
 // TestRenewOnceNoIdentityErrors verifies that renewOnce returns an error (not a
 // panic or hang) when no identity exists in the directory.
 func TestRenewOnceNoIdentityErrors(t *testing.T) {
 	tmp := t.TempDir()
-	err := renewOnce(renewOpts{idDir: tmp})
+	err := renewOnce(context.Background(), renewOpts{idDir: tmp})
 	if err == nil {
 		t.Fatal("renewOnce with empty dir must return an error")
 	}
-	if !strings.Contains(err.Error(), "no identity") {
+	if !errors.Is(err, errNoIdentity) {
 		t.Errorf("unexpected error: %v", err)
 	}
-}
-
-// TestRenewOnceAPIKeyRefreshesOverlayAndSettings exercises the api-key branch of
-// renewOnce (the overlay build + llm-token refresh + settings rewrite) against a
-// real mTLS broker. It pins the five env keys the rewritten settings.json must
-// carry: the three identity paths, a fresh ANTHROPIC_AUTH_TOKEN, and a
-// gateway-hosted ANTHROPIC_BASE_URL — NOT the broker (the aa63f9f contract). The
-// branch had no coverage before (only the no-identity error path was tested).
-func TestRenewOnceAPIKeyRefreshesOverlayAndSettings(t *testing.T) {
-	srv, caInst := newRenewTestBroker(t)
-	ticket := provisionWorkerTicket(t, caInst, srv.URL, "worker")
-
-	idDir := t.TempDir()
-	id, err := agent.Enrol(context.Background(), srv.URL, caInst.CertPEM(), ticket, "worker")
-	if err != nil {
-		t.Fatalf("enrol worker: %v", err)
-	}
-	if err := id.Write(idDir); err != nil {
-		t.Fatalf("write identity: %v", err)
-	}
-
-	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	if err := renewOnce(renewOpts{
-		idDir:        idDir,
-		brokerURL:    srv.URL,
-		llmAuth:      "api-key",
-		settingsPath: settingsPath,
-	}); err != nil {
-		t.Fatalf("renewOnce: %v", err)
-	}
-
-	env := readSettingsEnv(t, settingsPath)
-	for _, tc := range []struct{ key, want string }{
-		{"CLAUDE_CODE_CLIENT_CERT", filepath.Join(idDir, "agent.crt")},
-		{"CLAUDE_CODE_CLIENT_KEY", filepath.Join(idDir, "agent.key")},
-		{"NODE_EXTRA_CA_CERTS", filepath.Join(idDir, "ca.crt")},
-	} {
-		if env[tc.key] != tc.want {
-			t.Errorf("env[%s] = %q, want %q", tc.key, env[tc.key], tc.want)
-		}
-	}
-	if env["ANTHROPIC_AUTH_TOKEN"] == "" {
-		t.Error("api-key renew must write a fresh ANTHROPIC_AUTH_TOKEN")
-	}
-	if want := "http://127.0.0.1:8462/llm"; env["ANTHROPIC_BASE_URL"] != want {
-		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q (loopback gateway, not the broker)", env["ANTHROPIC_BASE_URL"], want)
-	}
-	if strings.HasPrefix(env["ANTHROPIC_BASE_URL"], srv.URL) {
-		t.Errorf("ANTHROPIC_BASE_URL = %q points at the broker (%s) — renew must write the gateway URL", env["ANTHROPIC_BASE_URL"], srv.URL)
-	}
-}
-
-// newRenewTestBroker starts a real mTLS broker permitting the worker to
-// self-mint an llm capability token, returning the TLS server and its CA.
-func newRenewTestBroker(t *testing.T) (*httptest.Server, *ca.CA) {
-	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	caInst, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rl := rules.NewPolicy()
-	rl.AllowObtain("worker", broker.ReservedLLMTool, broker.ReservedLLMOp)
-	reg := registry.New()
-	if err := reg.Register(registry.Tool{
-		Name:       broker.ReservedLLMTool,
-		Backend:    "lever:llm-proxy",
-		Operations: map[string]registry.Operation{broker.ReservedLLMOp: {Name: broker.ReservedLLMOp}},
-		FirstParty: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	b := broker.New(broker.Config{
-		Keys:            kp,
-		CA:              caInst,
-		Tickets:         ca.NewTicketStore(),
-		Rules:           rl,
-		Registry:        reg,
-		ManagerIdentity: "manager",
-		Agents:          []string{"manager", "worker"},
-		GrantTTL:        time.Hour,
-		ServerName:      "127.0.0.1",
-	})
-	certPEM, keyPEM, err := caInst.IssueServerCert("127.0.0.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tlsCfg, err := caInst.ServerTLSConfig(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(b.JailHandler())
-	srv.TLS = tlsCfg
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	return srv, caInst
-}
-
-// provisionWorkerTicket mints a one-use enrol ticket for worker by POSTing
-// /provision as a manager cert signed by the broker CA.
-func provisionWorkerTicket(t *testing.T, caInst *ca.CA, brokerURL, worker string) string {
-	t.Helper()
-	csrPEM, keyPEM, err := agent.GenerateCSR("manager")
-	if err != nil {
-		t.Fatal(err)
-	}
-	certPEM, err := caInst.SignCSR(csrPEM)
-	if err != nil {
-		t.Fatalf("sign manager CSR: %v", err)
-	}
-	managerCert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(caInst.Cert)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		RootCAs:      pool,
-		Certificates: []tls.Certificate{managerCert},
-	}}}
-	body, _ := json.Marshal(map[string]string{"worker": worker})
-	resp, err := client.Post(brokerURL+"/provision", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("provision status %d", resp.StatusCode)
-	}
-	var pr struct {
-		Ticket string `json:"ticket"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil || pr.Ticket == "" {
-		t.Fatalf("provision decode=%v ticket=%q", err, pr.Ticket)
-	}
-	return pr.Ticket
-}
-
-// readSettingsEnv reads the env block from a claude settings.json.
-func readSettingsEnv(t *testing.T, path string) map[string]string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var s struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := json.Unmarshal(b, &s); err != nil {
-		t.Fatalf("settings.json not valid JSON: %v", err)
-	}
-	return s.Env
 }
 
 // TestRenewNonLoopReturnsErrorImmediately verifies that run with renew (no
@@ -449,7 +96,7 @@ func TestRenewNonLoopReturnsErrorImmediately(t *testing.T) {
 	if err == nil {
 		t.Fatal("renew with no identity must error")
 	}
-	if !strings.Contains(err.Error(), "no identity") {
+	if !errors.Is(err, errNoIdentity) {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -472,8 +119,7 @@ func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 	err := run([]string{"lever-agent", "renew", "--id-dir", tmp, "--loop", "--interval", "24h"})
 	// Loop mode exits cleanly (nil) on signal. Either way, the error must NOT be
 	// a flag-parse error — that would mean cmdRenew doesn't define --loop/--interval.
-	if err != nil && (strings.Contains(err.Error(), "flag provided but not defined") ||
-		strings.Contains(err.Error(), "flag: help requested")) {
+	if isFlagParseError(err) {
 		t.Fatalf("real cmdRenew rejected --loop/--interval (manifest sidecar would break): %v", err)
 	}
 }
@@ -487,7 +133,7 @@ func TestProvisionVerbAcceptedByRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error (no identity), got nil")
 	}
-	if strings.Contains(err.Error(), "flag provided but not defined") {
+	if isFlagParseError(err) {
 		t.Fatalf("provision flags must parse: %v", err)
 	}
 }
@@ -512,19 +158,25 @@ func captureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-// callVerbWorkerID enrols a worker identity against a real mTLS broker and writes
-// it to a temp dir, returning the dir. The `call` verb needs a loadable identity
-// (id.Client builds the mTLS client), but the broker it dials for the actual tool
-// call is a separate stub, so any valid identity suffices.
+// callVerbWorkerID writes a loadable worker identity (a CA-signed leaf) to a
+// temp dir and returns it. The `call` verb only needs id.Client() to build its
+// mTLS client; the server it dials is a plain-HTTP stub.
 func callVerbWorkerID(t *testing.T) string {
 	t.Helper()
-	srv, caInst := newRenewTestBroker(t)
-	ticket := provisionWorkerTicket(t, caInst, srv.URL, "worker")
-	id, err := agent.Enrol(context.Background(), srv.URL, caInst.CertPEM(), ticket, "worker")
+	caInst, err := ca.Generate()
 	if err != nil {
-		t.Fatalf("enrol worker: %v", err)
+		t.Fatal(err)
+	}
+	csrPEM, keyPEM, err := agent.GenerateCSR("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, err := caInst.SignCSR(csrPEM)
+	if err != nil {
+		t.Fatal(err)
 	}
 	idDir := t.TempDir()
+	id := agent.Identity{CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caInst.CertPEM()}
 	if err := id.Write(idDir); err != nil {
 		t.Fatalf("write identity: %v", err)
 	}
@@ -535,18 +187,18 @@ func callVerbWorkerID(t *testing.T) string {
 // only prior coverage was the live acceptance harness (not run by `go test`):
 // it POSTs a JSON-RPC tools/call to /mcp/<tool>/ with Content-Type
 // application/json, the token in arguments._capability, prints the raw response
-// body to stdout EVEN on a non-200, and maps a non-200 to `call: status %d`.
+// body to stdout EVEN on a non-200, and surfaces a non-200 as an error carrying
+// the status.
 func TestCallVerbSemantics(t *testing.T) {
 	idDir := callVerbWorkerID(t)
 
 	for _, tc := range []struct {
-		name    string
-		status  int
-		body    string
-		wantErr string
+		name   string
+		status int
+		body   string
 	}{
-		{"success", http.StatusOK, `{"result":"ok"}`, ""},
-		{"denied", http.StatusForbidden, `{"error":"denied"}`, "call: status 403"},
+		{"success", http.StatusOK, `{"result":"ok"}`},
+		{"denied", http.StatusForbidden, `{"error":"denied"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotPath, gotCT, gotBody string
@@ -565,7 +217,7 @@ func TestCallVerbSemantics(t *testing.T) {
 
 			var err error
 			out := captureStdout(t, func() {
-				err = cmdCLI("call", []string{
+				err = cmdCLI(context.Background(), "call", []string{
 					"-id-dir", idDir,
 					"-broker-url", stub.URL,
 					"-tool", "db",
@@ -591,14 +243,12 @@ func TestCallVerbSemantics(t *testing.T) {
 			if !strings.Contains(out, tc.body) {
 				t.Errorf("stdout = %q, want it to contain response body %q", out, tc.body)
 			}
-			if tc.wantErr == "" {
+			if tc.status == http.StatusOK {
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
 				}
-			} else {
-				if err == nil || err.Error() != tc.wantErr {
-					t.Errorf("error = %v, want %q", err, tc.wantErr)
-				}
+			} else if httpjson.Status(err) != tc.status {
+				t.Errorf("error = %v, want one carrying status %d", err, tc.status)
 			}
 		})
 	}
@@ -635,22 +285,20 @@ func TestMCPRemoveArgsUserScope(t *testing.T) {
 	}
 }
 
-// TestClaudeMCPAddIsIdempotent verifies claudeMCPAdd removes before adding and
+// TestClaudeMCPAddIsIdempotent verifies claudeMCP.Add removes before adding and
 // ignores a failing remove (absent server), so a re-boot (scion resume) can't
 // fail the pre-start hook on "already exists".
 func TestClaudeMCPAddIsIdempotent(t *testing.T) {
 	var calls [][]string
-	orig := runCommand
-	defer func() { runCommand = orig }()
-	runCommand = func(name string, args ...string) ([]byte, error) {
+	c := claudeMCP{run: func(name string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string{name}, args...))
 		if len(args) > 1 && args[1] == "remove" {
 			return []byte("No MCP server named \"db\""), errors.New("exit status 1") // absent → non-zero
 		}
 		return nil, nil
-	}
-	if err := claudeMCPAdd("db", "--transport", "http", "https://broker/mcp/db/"); err != nil {
-		t.Fatalf("a failing remove must be ignored; claudeMCPAdd returned %v", err)
+	}}
+	if err := c.Add("db", "--transport", "http", "https://broker/mcp/db/"); err != nil {
+		t.Fatalf("a failing remove must be ignored; claudeMCP.Add returned %v", err)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("want remove then add (2 calls), got %d: %v", len(calls), calls)
@@ -666,16 +314,40 @@ func TestClaudeMCPAddIsIdempotent(t *testing.T) {
 
 // TestClaudeMCPAddSurfacesAddError: a failing ADD (not remove) must surface.
 func TestClaudeMCPAddSurfacesAddError(t *testing.T) {
-	orig := runCommand
-	defer func() { runCommand = orig }()
-	runCommand = func(name string, args ...string) ([]byte, error) {
+	c := claudeMCP{run: func(name string, args ...string) ([]byte, error) {
 		if len(args) > 1 && args[1] == "add" {
 			return []byte("boom"), errors.New("exit status 1")
 		}
 		return nil, nil
-	}
-	if err := claudeMCPAdd("db", "--transport", "http", "u"); err == nil {
+	}}
+	if err := c.Add("db", "--transport", "http", "u"); err == nil {
 		t.Fatal("a failing add must return an error")
+	}
+}
+
+// TestToolsFlagDistinguishesOmittedFromEmpty pins the -tools contract: omitted
+// means auto-discover (set=false); "-tools ”" is an explicit empty list
+// (set=true, no tools); a CSV is trimmed and blanks dropped.
+func TestToolsFlagDistinguishesOmittedFromEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantSet bool
+		want    []string
+	}{
+		{"omitted", nil, false, nil},
+		{"explicit empty", []string{"-tools", ""}, true, nil},
+		{"csv", []string{"-tools", " db, ,mail "}, true, []string{"db", "mail"}},
+	} {
+		fs := flag.NewFlagSet("boot", flag.ContinueOnError)
+		var tools toolsFlag
+		fs.Var(&tools, "tools", "")
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if tools.set != tc.wantSet || !slices.Equal(tools.tools, tc.want) {
+			t.Errorf("%s: set=%v tools=%v, want set=%v tools=%v", tc.name, tools.set, tools.tools, tc.wantSet, tc.want)
+		}
 	}
 }
 

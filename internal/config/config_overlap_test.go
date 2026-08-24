@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // testApp builds a minimal valid two-worker App whose dirs the caller chooses.
@@ -37,9 +39,7 @@ func TestValidateRejectsOverlappingWorkerDirs(t *testing.T) {
 			if !strings.Contains(err.Error(), "one") && !strings.Contains(err.Error(), "overlap") {
 				t.Fatalf("error should explain the overlap, got %v", err)
 			}
-			if !strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "beta") {
-				t.Fatalf("error should name BOTH workers, got %v", err)
-			}
+			testutil.WantErrContaining(t, err, "alpha", "beta")
 		})
 	}
 }
@@ -67,10 +67,5 @@ func TestValidateRejectsAWorkerNamedManager(t *testing.T) {
 	app.Broker.ManagerIdentity = "mgr"
 	app.Workers[1].Name = "manager"
 	err := app.Validate()
-	if err == nil {
-		t.Fatal(`a worker named "manager" must be rejected: it shadows the directive-channel alias`)
-	}
-	if !strings.Contains(err.Error(), "manager") {
-		t.Fatalf("error should name the reserved word, got %v", err)
-	}
+	testutil.WantErrContaining(t, err, "manager")
 }

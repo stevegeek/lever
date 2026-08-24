@@ -5,14 +5,14 @@ import (
 	"strings"
 	"testing"
 
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // msgArgv runs one Message and returns the argv the runner saw.
 func msgArgv(t *testing.T, o MsgOpts) []string {
 	t.Helper()
-	f := leverexec.NewFakeRunner()
-	f.Script("scion message", leverexec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("scion message", proc.Result{})
 	if err := New(f, Options{}).Message(context.Background(), o); err != nil {
 		t.Fatalf("Message: %v", err)
 	}

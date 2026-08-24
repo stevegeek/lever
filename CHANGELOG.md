@@ -5,6 +5,134 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+A code-quality refactor across the module. No new features; the user-visible
+differences below are side effects of tightening seams. Contributors should
+read the Changed/Internal entries before rebasing open branches.
+
+### Changed
+
+- **Broker jail and admin routes are method-restricted and body-capped.**
+  Every route is registered with a method pattern, so a request with the
+  wrong method gets 405 instead of being decoded. Request bodies are read
+  through `http.MaxBytesReader`: 64 KiB for jail and admin JSON, 4 KiB for
+  the small verbs, 256 KiB for signed envelopes, 4 MiB for the tool gateway.
+- **captool and the agent's MCP server cap a message at 1 MiB**
+  (`mcp.MaxBodyBytes`): the HTTP transport reads bodies through
+  `http.MaxBytesReader`, and `lever-agent serve-capability`'s stdio
+  transport now sizes its line scanner to the same cap (it was
+  `bufio.Scanner`'s 64 KiB default, so a line between 64 KiB and 1 MiB that
+  used to end the session is now answered; a longer line still ends it with
+  `bufio.ErrTooLong`). The MCP `initialize` reply reports
+  `captool.Config.Version`; `lever-tool-db` now sets it from a build-time
+  `main.Version` (the Makefile and `tools/test/lima-e2e.sh` stamp it with
+  `-ldflags`), so a `make`-built tool reports the lever version and a plain
+  `go build` reports `dev`.
+- **`lever apply --dry-run` no longer lists a jail-up step.** The step was a
+  no-op on every production path: apply brings the machine up eagerly, before
+  planning, to resolve the run user. The machine still comes up; only the
+  phantom step is gone.
+- **`broker.api_key_file` is resolved against the config file's directory**
+  when relative, like every other path in `lever.yaml`. An absolute path is
+  unchanged.
+- **The bridge events file is created owner-only** (0600, directory 0700).
+  An existing file keeps its mode; delete it to adopt the new one.
+- **The per-agent `settings.json` env block no longer carries
+  `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY` or `NODE_EXTRA_CA_CERTS`.**
+  Claude reaches the broker through the loopback gateway and never presented
+  the leaf itself. The image still exports the same paths as container env for
+  other in-container tooling.
+- **Web assets are tarred by lever itself** (`archive/tar`) instead of
+  shelling out to the host `tar`, so the archive is identical on every host.
+- **`LEVER_FORCE_HOST_NETWORK` is read once, when the jail transport is
+  constructed**, not on every call. Set it before `lever apply`, not during.
+- **`lever apply` talks to the broker admin socket with a 5 s client
+  timeout** instead of an unbounded one.
+- **Some CLI error strings changed.** Broker calls from `lever` and
+  `lever-agent` go through one JSON-over-HTTP helper (`internal/httpjson`),
+  so a failed call now reports the single `POST <url>: <status>: <body>`
+  shape rather than per-call wording. Scripts that matched the old text need
+  updating.
+- **`lever-agent` binaries report a version.** The Makefile passes
+  `-ldflags` (`LEVER_AGENT_LDFLAGS`) into every `lever-agent` build.
+- **Broker `/worker/*` routes authenticate before they decode.** A request
+  from a caller that is not the manager gets 403 whatever its body; only an
+  authenticated caller with a malformed body gets 400 (it used to be 400
+  for both).
+- **Broker worker start/resume report a ticket-staging failure as
+  `stage error`** (500) for every step; the old `ticket error` body for the
+  mint step is gone.
+- **Signed admin-op envelope rejections are audited with a specific
+  reason.** `opsig.ParseEnvelope` names the failing field (`version N`,
+  `instance mismatch`, `op`) where the audit line used to say `envelope
+  fields`. The HTTP response is unchanged (`invalid envelope`, 400).
+- **`lever apply`'s bootstrap-token step removes scion's residual dev-token
+  on failure too.** The throwaway dev-auth hub's `~/.scion/dev-token` is now
+  deleted from the deferred cleanup, so an aborted mint no longer leaves the
+  open admin credential behind; before, only a successful mint removed it.
+- **`lever-agent` verbs stop on SIGINT/SIGTERM.** `boot`, `serve-capability`,
+  `renew`, `provision`, `request`, `delegate` and `call` now run under one
+  signal-bound context, so a signal cancels the broker call in flight
+  instead of leaving the process in a dial or read. Before, only the
+  `renew -loop` ticker was signal-bound.
+- **Remote-proxy login refusals are sentinel-wrapped and reworded.** The
+  three refusals the login driver decides itself (the hub redirected to a
+  different OIDC provider, the hub asked for another `client_id`, the hub
+  answered without replacing the login-state cookie with a session) now wrap
+  a fixed message and append the detail in parentheses. For example, the
+  no-session case was `the hub answered <status> without turning the
+  login-state <cookie> cookie into a session` and is now `the hub answered
+  without turning the login-state cookie into a session (it answered
+  <status> and left the <cookie> cookie as it was)`. Only the log and audit
+  text changes; the proxy's HTTP responses are the same.
+
+### Internal
+
+- `internal/exec` is renamed to `internal/proc` so it no longer shadows `os/exec` (the `leverexec` alias is gone).
+
+- **Integration tests are behind `-tags integration`.** The live VM, hubapi
+  and `lever-tool-db` host tests no longer run under `go test ./...`; run
+  `make test-integration` (or `go test -tags integration ./...`).
+- **New packages:** `internal/retry` (one bounded poll loop, `retry.Until`),
+  `internal/httpjson` (JSON-over-HTTP client), `internal/mcp` (JSON-RPC
+  framing and `tools/call` projection shared by the agent server and
+  captool), `internal/state` (host state dir), `internal/daemon` (host daemon
+  bookkeeping), `internal/fsutil` and `internal/testutil` (stdlib-only
+  leaves), `internal/backend/types` (the data types the `Backend` contract
+  carries), `internal/provision/*` (host build pipelines moved out of
+  `internal/guest`), `internal/scion/layout` (scion's on-disk paths and
+  settings keys), `internal/agent` (lever-agent domain logic moved out of
+  `cmd/lever-agent`), and `internal/cli/host` + `internal/cli/manager` (the
+  host and in-jail halves of `internal/cli`).
+- **Wire contract in `internal/wire`.** Broker request/response types and
+  route paths are declared once and used by the broker, the CLI, the agent
+  and captool. `wire` is a leaf package; list replies are generic
+  (`wire.WorkerListResponse[T]`, `wire.MsgListResponse[T]`) so
+  `lever-manager` no longer links `internal/broker`.
+- **`internal/config` split by concern; `Validate` is pure.** Host probes
+  (binary presence, file modes, toolchain access) moved to `CheckHost`;
+  `LoadNoHostChecks` exists for tests. `config` no longer imports
+  `internal/backend`.
+- **`broker.Config` is grouped into sub-structs** (`Identity`, `Persistence`,
+  `LLM`, `Dispatch`, `Directives`). `Config.Agents` is gone; the declared
+  `Workers` are the source of truth.
+- **Smaller seams:** `proc.Runner` gained `RunStdin`; `internal/jail` is a
+  pure transport; `backend.NewBase` holds private state with a shared
+  version gate and machine status; `opsig.Sign`/`Verify` are ctx-bounded
+  (the old un-bounded wrappers are deleted); `apply.Run` requires every
+  `Deps` collaborator; `remoteproxy` has one hub URL in `LoginDriver` and a
+  typed audit `Decision`; doctor checks are table-driven.
+- The broker and proxy pid files and the remote stamp are written atomically
+  (temp file + rename), so a crash mid-write leaves no torn file.
+- **The remote stamp hash shape changed.** `lever remote serve` now records
+  a `state.RemoteIdentity` digest instead of a digest of `config.Remote`; the
+  covered fields are the same. The first `lever apply` after upgrading sees
+  a mismatch and restarts the proxy once.
+- Dead code reachable only from tests is deleted (including
+  `agent.MCPServer.Handler`); staticcheck and gofmt are clean;
+  `CONTRIBUTING.md` lists every `internal/` package.
+
 ## [0.19.0] - 2026-08-23
 
 ### Added

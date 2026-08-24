@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {
@@ -65,8 +65,8 @@ func TestParseScionStateIgnoresJunk(t *testing.T) {
 func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 	for _, shape := range prefixShapes("lever-x") {
 		t.Run(shape.name, func(t *testing.T) {
-			f := leverexec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " "), leverexec.Result{})
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " "), proc.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix}
 
 			if err := g.RemoveScionProjectConfigs(context.Background(), "/lever/workers/scratch"); err != nil {
@@ -98,7 +98,7 @@ func TestRemoveScionProjectConfigsIssuesThroughUserPrefix(t *testing.T) {
 // swallows) a failure of the guest command itself, mirroring
 // ReadScionProjectState's error handling.
 func TestRemoveScionProjectConfigsErrorsOnGuestFailure(t *testing.T) {
-	f := leverexec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
+	f := proc.NewFakeRunner() // no Script registered ⇒ unscripted-command error
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
 
 	if err := g.RemoveScionProjectConfigs(context.Background(), "/lever"); err == nil {
@@ -111,16 +111,11 @@ func TestRemoveScionProjectConfigsErrorsOnGuestFailure(t *testing.T) {
 func writeProjectConfig(t *testing.T, home, name, workspacePath string) string {
 	t.Helper()
 	dir := filepath.Join(home, ".scion", "project-configs", name, ".scion")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	body := "project_id: " + name + "\n"
 	if workspacePath != "" {
 		body += "workspace_path: " + workspacePath + "\n"
 	}
-	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	write(t, filepath.Join(dir, "settings.yaml"), body)
 	return filepath.Join(home, ".scion", "project-configs", name)
 }
 
@@ -180,15 +175,15 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 
 // The four scenarios below pin scionProjectRegistered's exactly-one-valid-
 // registration predicate: registered requires BOTH exactly one matching entry
-// AND the in-tree marker. Pure-Go over backend.ScionProjectState (mirroring
+// AND the in-tree marker. Pure-Go over types.ScionProjectState (mirroring
 // how internal/cli's checkScionProject is tested), since the underlying
 // marker+entries read is already covered by TestParseScionState* above and by
 // ReadScionProjectState's real production use — nothing new is parsed here.
 
 func TestScionProjectRegisteredOneMatchingEntryPlusMarker(t *testing.T) {
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: true,
-		Entries:       []backend.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
+		Entries:       []types.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
 	}
 	if !scionProjectRegistered(st, "/lever") {
 		t.Fatal("exactly one matching entry + marker present must be registered")
@@ -196,16 +191,16 @@ func TestScionProjectRegisteredOneMatchingEntryPlusMarker(t *testing.T) {
 }
 
 func TestScionProjectRegisteredZeroEntries(t *testing.T) {
-	st := backend.ScionProjectState{MarkerPresent: true}
+	st := types.ScionProjectState{MarkerPresent: true}
 	if scionProjectRegistered(st, "/lever") {
 		t.Fatal("zero entries must not be registered")
 	}
 }
 
 func TestScionProjectRegisteredDuplicateEntries(t *testing.T) {
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: true,
-		Entries: []backend.ScionProjectEntry{
+		Entries: []types.ScionProjectEntry{
 			{Name: "lever__aaaa1111", WorkspacePath: "/lever"},
 			{Name: "lever__bbbb2222", WorkspacePath: "/lever"},
 		},
@@ -218,9 +213,9 @@ func TestScionProjectRegisteredDuplicateEntries(t *testing.T) {
 func TestScionProjectRegisteredEntryWithoutMarker(t *testing.T) {
 	// The bad-teardown signature: one entry claims the workspace, but the
 	// in-tree marker is gone.
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: false,
-		Entries:       []backend.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
+		Entries:       []types.ScionProjectEntry{{Name: "lever__aaaa1111", WorkspacePath: "/lever"}},
 	}
 	if scionProjectRegistered(st, "/lever") {
 		t.Fatal("an entry without the in-tree marker must not be registered")
@@ -231,9 +226,9 @@ func TestScionProjectRegisteredEntryWithoutMarker(t *testing.T) {
 // DIFFERENT workspace (e.g. a worker's registration) doesn't count toward this
 // workspace's check.
 func TestScionProjectRegisteredIgnoresOtherWorkspacePaths(t *testing.T) {
-	st := backend.ScionProjectState{
+	st := types.ScionProjectState{
 		MarkerPresent: true, // this workspace's own marker
-		Entries:       []backend.ScionProjectEntry{{Name: "worker__cccc3333", WorkspacePath: "/lever/workers/worker"}},
+		Entries:       []types.ScionProjectEntry{{Name: "worker__cccc3333", WorkspacePath: "/lever/workers/worker"}},
 	}
 	if scionProjectRegistered(st, "/lever") {
 		t.Fatal("an entry for a different workspace path must not count as this one's registration")
@@ -247,8 +242,8 @@ func TestScionProjectRegisteredIgnoresOtherWorkspacePaths(t *testing.T) {
 func TestScionProjectRegisteredIssuesThroughUserPrefix(t *testing.T) {
 	for _, shape := range prefixShapes("lever-x") {
 		t.Run(shape.name, func(t *testing.T) {
-			f := leverexec.NewFakeRunner()
-			f.Script(strings.Join(shape.userPrefix, " "), leverexec.Result{Stdout: "MARKER 1\nENTRY lever__aaaa1111 /lever\n"})
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(shape.userPrefix, " "), proc.Result{Stdout: "MARKER 1\nENTRY lever__aaaa1111 /lever\n"})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix}
 
 			ok, err := g.ScionProjectRegistered(context.Background(), "/lever")
@@ -268,9 +263,9 @@ func TestScionProjectRegisteredIssuesThroughUserPrefix(t *testing.T) {
 // TestScionProjectRegisteredNotRegisteredOverTransport is the same transport
 // proof for the negative case (no entries at all).
 func TestScionProjectRegisteredNotRegisteredOverTransport(t *testing.T) {
-	f := leverexec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
-	f.Script(strings.Join(g.UserPrefix, " "), leverexec.Result{Stdout: "MARKER 1\n"})
+	f.Script(strings.Join(g.UserPrefix, " "), proc.Result{Stdout: "MARKER 1\n"})
 
 	ok, err := g.ScionProjectRegistered(context.Background(), "/lever")
 	if err != nil {
@@ -286,7 +281,7 @@ func TestScionProjectRegisteredNotRegisteredOverTransport(t *testing.T) {
 // ReadScionProjectState's error handling — the register apply step relies on
 // seeing a non-nil error to fail OPEN to the destructive path.
 func TestScionProjectRegisteredErrorsOnGuestFailure(t *testing.T) {
-	f := leverexec.NewFakeRunner() // no Script registered ⇒ unscripted-command error
+	f := proc.NewFakeRunner() // no Script registered ⇒ unscripted-command error
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}}
 
 	if _, err := g.ScionProjectRegistered(context.Background(), "/lever"); err == nil {
@@ -299,9 +294,6 @@ func TestScionProjectRegisteredErrorsOnGuestFailure(t *testing.T) {
 func writeHubProjectConfig(t *testing.T, home, name, workspacePath, endpoint string) string {
 	t.Helper()
 	dir := filepath.Join(home, ".scion", "project-configs", name, ".scion")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	body := "schema_version: \"1\"\nhub:\n    enabled: true\n    linked: true\n"
 	if endpoint != "" {
 		body += "    endpoint: " + endpoint + "\n"
@@ -311,9 +303,7 @@ func writeHubProjectConfig(t *testing.T, home, name, workspacePath, endpoint str
 		body += "workspace_path: " + workspacePath + "\n"
 	}
 	p := filepath.Join(dir, "settings.yaml")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	write(t, p, body)
 	return p
 }
 

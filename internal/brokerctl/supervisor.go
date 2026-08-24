@@ -12,10 +12,31 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
+// ToolSpec is what the Supervisor needs to know about one configured tool:
+// the name (for logs and errors), the command to spawn, the loopback backend
+// it serves on, and whether it is external (fronted by the broker, never
+// spawned). ToolSpecs builds them from config so the Supervisor itself holds
+// no config types.
+type ToolSpec struct {
+	Name     string
+	Command  []string
+	Backend  string
+	External bool
+}
+
+// ToolSpecs maps the configured broker tools onto the Supervisor's ToolSpec.
+func ToolSpecs(tools []config.Tool) []ToolSpec {
+	specs := make([]ToolSpec, 0, len(tools))
+	for _, t := range tools {
+		specs = append(specs, ToolSpec{Name: t.Name, Command: t.Command, Backend: t.Backend, External: t.External})
+	}
+	return specs
+}
+
 // Supervisor launches + tears down the configured first-party tool subprocesses; external tools (broker-fronted, not spawned) are skipped.
 // Tools are host-side, bind loopback, and self-register over the broker admin URL.
 type Supervisor struct {
-	tools      []config.Tool
+	tools      []ToolSpec
 	adminURL   string
 	toolLogDir string
 
@@ -28,7 +49,7 @@ type Supervisor struct {
 // tool's -admin flag. Each supervised tool's combined stdout/stderr is written
 // to its own <toolLogDir>/<name>.log so per-tool forensics aren't muddled in a
 // shared file.
-func NewSupervisor(tools []config.Tool, adminURL, toolLogDir string) *Supervisor {
+func NewSupervisor(tools []ToolSpec, adminURL, toolLogDir string) *Supervisor {
 	return &Supervisor{tools: tools, adminURL: adminURL, toolLogDir: toolLogDir}
 }
 
@@ -109,11 +130,4 @@ func toolLogName(name string) string {
 		}
 	}, name)
 	return safe + ".log"
-}
-
-// trackedCount returns the number of currently-tracked child processes (test aid).
-func (s *Supervisor) trackedCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.cmds)
 }

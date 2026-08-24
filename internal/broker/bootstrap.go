@@ -2,15 +2,13 @@ package broker
 
 import (
 	"net/http"
+
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // handleBootstrap mints the manager's single-use enrolment ticket. Loopback-only
 // (admin mux); not gated by a client cert. Refuses all calls after the first.
 func (b *Broker) handleBootstrap(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	b.mu.Lock()
 	if b.bootstrapped {
 		b.mu.Unlock()
@@ -28,5 +26,5 @@ func (b *Broker) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("bootstrap", b.manager, "allow", "")
-	writeJSON(w, map[string]string{"ticket": ticket})
+	writeJSON(w, wire.BootstrapResponse{Ticket: ticket})
 }

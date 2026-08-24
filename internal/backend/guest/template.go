@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 // The guest half of lever's agent-template overlay.
@@ -78,7 +80,7 @@ const (
 	LeverTemplateName = "lever"
 
 	// leverTemplateRel is the overlay directory, relative to the run user's home.
-	leverTemplateRel = ".scion/templates/" + LeverTemplateName
+	leverTemplateRel = layout.TemplatesRel + "/" + LeverTemplateName
 )
 
 // EnsureLeverTemplate creates the overlay template in the guest and reports
@@ -100,7 +102,7 @@ func (g Guest) EnsureLeverTemplate(ctx context.Context) (bool, error) {
 		`set -e; d="$HOME/%s"; f="$d/system-prompt.md"; `+
 			`if [ -s "$f" ] || [ ! -f "$f" ]; then mkdir -p "$d" && : > "$f" && echo wrote; fi`,
 		leverTemplateRel)
-	res, err := g.userRun(ctx, "bash", "-c", script)
+	res, err := g.UserRun(ctx, "bash", "-c", script)
 	if err != nil {
 		return false, fmt.Errorf("guest: create the %s agent template: %w", LeverTemplateName, err)
 	}

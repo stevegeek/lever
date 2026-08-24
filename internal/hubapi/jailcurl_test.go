@@ -3,36 +3,41 @@ package hubapi
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
-	leverexec "github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // scriptedRunner returns a fixed Result and error for every call, and records
-// the call. exec.FakeRunner cannot model a non-zero exit (its scriptedResult
+// the call. proc.FakeRunner cannot model a non-zero exit (its scriptedResult
 // returns a nil error on a match), which is exactly the curl-failure case here.
 type scriptedRunner struct {
-	res  leverexec.Result
+	res  proc.Result
 	err  error
-	call leverexec.Call
+	call proc.Call
 }
 
-func (s *scriptedRunner) RunIn(_ context.Context, dir string, env map[string]string, name string, args ...string) (leverexec.Result, error) {
-	s.call = leverexec.Call{Name: name, Args: args, Env: env, Dir: dir}
+func (s *scriptedRunner) RunIn(_ context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	s.call = proc.Call{Name: name, Args: args, Env: env, Dir: dir}
 	return s.res, s.err
 }
 
-func (s *scriptedRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (leverexec.Result, error) {
+func (s *scriptedRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return s.RunIn(ctx, "", env, name, args...)
 }
 
-func jailCurl(r leverexec.Runner, token string) *JailCurl {
+func (s *scriptedRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return s.RunIn(ctx, "", env, name, args...)
+}
+
+func jailCurl(r proc.Runner, token string) *JailCurl {
 	return &JailCurl{Runner: r, BaseURL: "http://127.0.0.1:8080", Token: func() string { return token }}
 }
 
 func TestJailCurlRunsInTheJailAndPassesTheTokenAsEnv(t *testing.T) {
-	r := &scriptedRunner{res: leverexec.Result{Stdout: "{\"projects\":[]}\n200"}}
+	r := &scriptedRunner{res: proc.Result{Stdout: "{\"projects\":[]}\n200"}}
 	status, body, err := jailCurl(r, "pat-secret").Do(context.Background(), "GET", "/api/v1/projects")
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -67,7 +72,7 @@ func TestJailCurlRunsInTheJailAndPassesTheTokenAsEnv(t *testing.T) {
 }
 
 func TestJailCurlReportsStatusWithoutBody(t *testing.T) {
-	r := &scriptedRunner{res: leverexec.Result{Stdout: "\n204"}}
+	r := &scriptedRunner{res: proc.Result{Stdout: "\n204"}}
 	status, body, err := jailCurl(r, "t").Do(context.Background(), "DELETE", "/x")
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -78,7 +83,7 @@ func TestJailCurlReportsStatusWithoutBody(t *testing.T) {
 }
 
 func TestJailCurlRequiresAToken(t *testing.T) {
-	r := &scriptedRunner{res: leverexec.Result{Stdout: "\n200"}}
+	r := &scriptedRunner{res: proc.Result{Stdout: "\n200"}}
 	if _, _, err := jailCurl(r, "").Do(context.Background(), "GET", "/x"); err == nil {
 		t.Fatal("an unminted PAT must fail rather than send an empty bearer header")
 	}
@@ -88,23 +93,24 @@ func TestJailCurlNamesMissingCurl(t *testing.T) {
 	// lever's guest provisioning installs curl, so exit 127 means the jail is
 	// not provisioned — a different problem from an unreachable hub.
 	r := &scriptedRunner{
-		res: leverexec.Result{Code: curlNotFound, Stderr: "sh: curl: not found"},
+		res: proc.Result{Code: curlNotFound, Stderr: "sh: curl: not found"},
 		err: errors.New("exit status 127"),
 	}
 	_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
-	if err == nil || !strings.Contains(err.Error(), "curl is missing") {
-		t.Fatalf("want a provisioning-specific error, got %v", err)
+	if !errors.Is(err, errCurlMissing) {
+		t.Fatalf("want errCurlMissing, got %v", err)
 	}
 }
 
 func TestJailCurlSurfacesConnectionFailure(t *testing.T) {
+	exitErr := errors.New("exit status 7")
 	r := &scriptedRunner{
-		res: leverexec.Result{Code: 7, Stderr: "curl: (7) Failed to connect"},
-		err: errors.New("exit status 7"),
+		res: proc.Result{Code: 7, Stderr: "curl: (7) Failed to connect"},
+		err: exitErr,
 	}
 	status, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
-	if err == nil {
-		t.Fatal("a connection failure must be an error")
+	if !errors.Is(err, exitErr) {
+		t.Fatalf("a connection failure must wrap the runner's error, got %v", err)
 	}
 	if status != 0 {
 		t.Errorf("status = %d, want 0 so it can never be read as an HTTP status", status)
@@ -117,7 +123,7 @@ func TestJailCurlSurfacesConnectionFailure(t *testing.T) {
 func TestJailCurlRejectsOutputWithoutAStatusLine(t *testing.T) {
 	// A truncated or hijacked response must not read as a successful request.
 	for _, out := range []string{"", "just a body with no newline", "body\nnot-a-code"} {
-		r := &scriptedRunner{res: leverexec.Result{Stdout: out}}
+		r := &scriptedRunner{res: proc.Result{Stdout: out}}
 		if _, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x"); err == nil {
 			t.Errorf("output %q must fail, not report a status", out)
 		}
@@ -127,7 +133,7 @@ func TestJailCurlRejectsOutputWithoutAStatusLine(t *testing.T) {
 func TestJailCurlRejectsAnOversizedBody(t *testing.T) {
 	// Truncating would surface as "unexpected end of JSON input", which blames
 	// the hub's answer instead of the size. Say what actually happened.
-	r := &scriptedRunner{res: leverexec.Result{Stdout: strings.Repeat("x", maxBody+1) + "\n200"}}
+	r := &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", maxBody+1) + "\n200"}}
 	_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("want an explicit too-large error, got %v", err)
@@ -139,7 +145,7 @@ func TestJailCurlClassifiesUnparseableOutputAsAnswered(t *testing.T) {
 	// doctor print "hub not reachable" AND pass, hiding a wrong service on the
 	// hub port behind a green line.
 	for _, out := range []string{"body\nnot-a-code", strings.Repeat("x", maxBody+1) + "\n200"} {
-		r := &scriptedRunner{res: leverexec.Result{Stdout: out}}
+		r := &scriptedRunner{res: proc.Result{Stdout: out}}
 		_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
 		var apiErr *APIError
 		if !errors.As(err, &apiErr) {
@@ -153,8 +159,8 @@ func TestJailCurlClassifiesTransportFailureAsUnreachable(t *testing.T) {
 	// NOT answers, so they must stay plain errors or doctor would turn a stopped
 	// instance into a finding.
 	for _, r := range []*scriptedRunner{
-		{res: leverexec.Result{Code: 7, Stderr: "curl: (7) Failed to connect"}, err: errors.New("exit status 7")},
-		{res: leverexec.Result{Code: curlNotFound, Stderr: "sh: curl: not found"}, err: errors.New("exit status 127")},
+		{res: proc.Result{Code: 7, Stderr: "curl: (7) Failed to connect"}, err: errors.New("exit status 7")},
+		{res: proc.Result{Code: curlNotFound, Stderr: "sh: curl: not found"}, err: errors.New("exit status 127")},
 	} {
 		_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
 		var apiErr *APIError
@@ -162,7 +168,7 @@ func TestJailCurlClassifiesTransportFailureAsUnreachable(t *testing.T) {
 			t.Errorf("a transport failure must not be an APIError, got %v", err)
 		}
 	}
-	noPAT := &scriptedRunner{res: leverexec.Result{Stdout: "\n200"}}
+	noPAT := &scriptedRunner{res: proc.Result{Stdout: "\n200"}}
 	_, _, err := jailCurl(noPAT, "").Do(context.Background(), "GET", "/x")
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
@@ -171,7 +177,7 @@ func TestJailCurlClassifiesTransportFailureAsUnreachable(t *testing.T) {
 }
 
 func TestJailCurlTrimsTrailingSlashOnBaseURL(t *testing.T) {
-	r := &scriptedRunner{res: leverexec.Result{Stdout: "\n200"}}
+	r := &scriptedRunner{res: proc.Result{Stdout: "\n200"}}
 	j := &JailCurl{Runner: r, BaseURL: "http://127.0.0.1:8080/", Token: func() string { return "t" }}
 	if _, _, err := j.Do(context.Background(), "GET", "/api/v1/projects"); err != nil {
 		t.Fatalf("Do: %v", err)

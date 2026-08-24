@@ -11,20 +11,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/broker/brokertest"
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/httpjson"
 )
 
 // allowDelegate adds a delegation rule to the broker's policy: agent may delegate
 // (tool, op) to recipient.
-func allowDelegate(t *testing.T, env *brokerEnv, agent, tool, op, recipient string) {
+func allowDelegate(t *testing.T, env *brokertest.Env, agent, tool, op, recipient string) {
 	t.Helper()
 	env.Rules.AllowDelegate(agent, tool, op, recipient)
 }
 
 // regDB registers the "db" tool with a "read" operation in the broker's registry.
-func regDB(t *testing.T, env *brokerEnv) {
+func regDB(t *testing.T, env *brokertest.Env) {
 	t.Helper()
 	if err := env.Registry.Register(registry.Tool{
 		Name:    "db",
@@ -64,7 +66,7 @@ func decodeB64(t *testing.T, s string) []byte {
 }
 
 // TestBuildToolCallBody verifies that the JSON-RPC body produced for the gateway
-// satisfies the contract expected by internal/broker/mcp.go:toolsCallFields:
+// satisfies the contract expected by internal/mcp.ToolsCall:
 //   - jsonrpc == "2.0", method == "tools/call"
 //   - params.name == op
 //   - params.arguments._capability == token
@@ -133,16 +135,15 @@ func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
 // it POSTs to /mcp/<tool>/ with Content-Type application/json and the token in
 // arguments._capability, and — critically, unlike Request — returns the raw
 // response body EVEN on a non-200 (the caller prints it before surfacing the
-// error), with a non-200 mapped to `call: status %d`.
+// error), with a non-200 mapped to a call:-wrapped *httpjson.StatusError.
 func TestCallWireContract(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		status  int
-		body    string
-		wantErr string
+		name   string
+		status int
+		body   string
 	}{
-		{"success", http.StatusOK, `{"result":"ok"}`, ""},
-		{"denied", http.StatusForbidden, `{"error":"denied"}`, "call: status 403"},
+		{"success", http.StatusOK, `{"result":"ok"}`},
+		{"denied", http.StatusForbidden, `{"error":"denied"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotMethod, gotPath, gotCT string
@@ -157,7 +158,7 @@ func TestCallWireContract(t *testing.T) {
 			}))
 			defer stub.Close()
 
-			body, status, err := Call(context.Background(), stub.URL, stub.Client(),
+			body, err := Call(context.Background(), stub.URL, stub.Client(),
 				"db", "read", "tok_xyz", map[string]string{"table": "users"})
 
 			if gotMethod != http.MethodPost {
@@ -175,40 +176,42 @@ func TestCallWireContract(t *testing.T) {
 			if !strings.Contains(gotBody.String(), `"table":"users"`) {
 				t.Errorf("request body missing constraint: %s", gotBody.String())
 			}
-			// Body returned regardless of status; status echoed back.
+			// Body returned regardless of status; the status rides on the error.
 			if body != tc.body {
 				t.Errorf("body = %q, want %q", body, tc.body)
 			}
-			if status != tc.status {
-				t.Errorf("status = %d, want %d", status, tc.status)
-			}
-			if tc.wantErr == "" {
+			if tc.status == http.StatusOK {
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
 				}
-			} else if err == nil || err.Error() != tc.wantErr {
-				t.Errorf("error = %v, want %q", err, tc.wantErr)
+				return
+			}
+			if httpjson.Status(err) != tc.status {
+				t.Errorf("error = %v, want a *httpjson.StatusError with code %d", err, tc.status)
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), "call: ") {
+				t.Errorf("error = %v, want a call:-prefixed wrap", err)
 			}
 		})
 	}
 }
 
-// TestCallTransportError verifies a dial failure yields an empty body, zero
-// status and a `call:`-wrapped error (no body was ever received to print).
+// TestCallTransportError verifies a dial failure yields an empty body, no
+// status, and a `call:`-wrapped error (no body was ever received to print).
 func TestCallTransportError(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := stub.URL
 	stub.Close() // nothing is listening now → dial fails
 
-	body, status, err := Call(context.Background(), url, http.DefaultClient, "db", "read", "tok", nil)
+	body, err := Call(context.Background(), url, http.DefaultClient, "db", "read", "tok", nil)
 	if err == nil {
 		t.Fatal("dial failure must error")
 	}
 	if !strings.HasPrefix(err.Error(), "call: ") {
 		t.Errorf("error = %q, want a call:-prefixed wrap", err)
 	}
-	if body != "" || status != 0 {
-		t.Errorf("transport failure must yield empty body/zero status, got %q/%d", body, status)
+	if body != "" || httpjson.Status(err) != 0 {
+		t.Errorf("transport failure must yield empty body and no status, got %q/%d", body, httpjson.Status(err))
 	}
 }
 

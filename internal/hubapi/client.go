@@ -1,8 +1,10 @@
 // Package hubapi is a minimal client for the scion Hub REST API.
 //
 // lever drives scion through its CLI. This package covers only the hub
-// operations the CLI does not expose — today, removing a project's shared
-// directories (see StripSharedDir). Keep it that way: reach for the CLI first.
+// operations the CLI does not expose — today, listing a project's agents,
+// resolving one's hub id and verifying its stored role (see Agents, AgentID,
+// VerifyAgentRole) and removing a project's shared directories (see
+// StripSharedDir). Keep it that way: reach for the CLI first.
 //
 // Requests run INSIDE the jail (see JailCurl), never from the host. The hub
 // binds the jail's loopback, and lever's Lima template suppresses every
@@ -50,6 +52,10 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Msg }
 
+// errNoTransport is returned by every Client method when the Client was built
+// without a Doer. It is a programming error, not a hub or transport failure.
+var errNoTransport = errors.New("hubapi: client has no transport")
+
 // SharedDir mirrors the fields of scion's api.SharedDir that lever inspects.
 type SharedDir struct {
 	Name        string `json:"name"`
@@ -66,7 +72,7 @@ type project struct {
 // do issues one request, guarding against a Client built without a transport.
 func (c *Client) do(ctx context.Context, method, path string) (int, []byte, error) {
 	if c.T == nil {
-		return 0, nil, errors.New("hubapi: client has no transport")
+		return 0, nil, errNoTransport
 	}
 	return c.T.Do(ctx, method, path)
 }

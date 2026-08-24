@@ -12,17 +12,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// Inboxer is the slice of the scion client the bridge needs (so it's testable
-// with a fake). *scion.Client satisfies it.
+// Inboxer is the slice of an inbox source the bridge needs (so it's testable
+// with a fake).
 type Inboxer interface {
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
-
-// compile-time proof the real client satisfies Inboxer.
-var _ Inboxer = (*scion.Client)(nil)
 
 type Bridge struct {
 	in   Inboxer
@@ -50,10 +48,12 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 	if len(fresh) == 0 {
 		return nil, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(b.file), 0o755); err != nil {
+	// Owner-only, like every other state file: the events carry message
+	// content.
+	if err := os.MkdirAll(filepath.Dir(b.file), 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(b.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(b.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -73,14 +73,8 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 
 // Run polls forever at the given interval (thin loop, not unit-tested).
 func (b *Bridge) Run(ctx context.Context, interval time.Duration) error {
-	for {
-		if _, err := b.PollOnce(ctx); err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
-		}
-	}
+	return retry.Until(ctx, 0, interval, func() (bool, error) {
+		_, err := b.PollOnce(ctx)
+		return false, err
+	})
 }

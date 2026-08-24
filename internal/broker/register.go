@@ -1,35 +1,13 @@
 package broker
 
 import (
-	"encoding/json"
 	"maps"
 	"net/http"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// OperationSpec is one operation in a registration request.
-type OperationSpec struct {
-	Name        string            `json:"name"`
-	CaveatParam map[string]string `json:"caveat_param,omitempty"`
-}
-
-// RegisterRequest is the body of POST /register (admin listener only).
-type RegisterRequest struct {
-	Name          string              `json:"name"`
-	Backend       string              `json:"backend"`
-	Operations    []OperationSpec     `json:"operations"`
-	AllowedValues map[string][]string `json:"allowed_values,omitempty"`
-	FirstParty    bool                `json:"first_party,omitempty"`
-}
-
-// RegisterResponse gives the registering tool the broker's verification key and
-// current epoch, so captool can verify tokens independently + check freshness.
-type RegisterResponse struct {
-	PublicKey string `json:"public_key"`
-	Epoch     int    `json:"epoch"`
-}
 
 // handleRegister merges a first-party tool's registration against the
 // CONFIG-AUTHORITATIVE envelope pre-loaded at boot (D4): the host config owns
@@ -38,12 +16,8 @@ type RegisterResponse struct {
 // A tool can never widen its own envelope, and an unconfigured tool is rejected
 // before any registry write. Served only on the host-loopback admin listener.
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req RegisterRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+	var req wire.RegisterRequest
+	if err := decodeBody(w, r, adminBodyLimit, &req); err != nil {
 		b.audit("register", "", "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -96,7 +70,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("register", req.Name, "allow", cfg.Backend)
-	writeJSON(w, RegisterResponse{
+	writeJSON(w, wire.RegisterResponse{
 		PublicKey: token.EncodePublicKey(b.keys.Public),
 		Epoch:     b.MinEpoch(),
 	})

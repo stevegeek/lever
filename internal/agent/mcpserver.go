@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/mcp"
 )
 
 // MCPConfig assembles the capability MCP server.
@@ -27,41 +29,17 @@ func NewMCPServer(c MCPConfig) *MCPServer {
 	return &MCPServer{brokerURL: c.BrokerURL, agentCN: c.AgentCN, client: c.Client}
 }
 
-func (s *MCPServer) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
-
-// mcpMaxBodyBytes caps the JSON-RPC request body to 1 MiB. The MCP handler is
-// driven by a potentially-malicious in-jail LLM, so we bound reads to prevent
-// memory exhaustion. (The broker uses the same http.MaxBytesReader pattern with
-// per-endpoint caps; here we allow more headroom for MCP tool arguments.)
-const mcpMaxBodyBytes = 1 << 20 // 1 MiB
-
-func (s *MCPServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mcpMaxBodyBytes))
-	if err != nil {
-		writeRPCError(w, nil, -32700, "read error")
-		return
-	}
-	var msg map[string]any
-	if err := json.Unmarshal(body, &msg); err != nil {
-		writeRPCError(w, nil, -32700, "parse error")
-		return
-	}
-	id := msg["id"]
-	method, _ := msg["method"].(string)
-	switch method {
-	case "initialize":
-		writeRPCResult(w, id, map[string]any{
-			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "lever-capability", "version": "0.1.0"},
-		})
-	case "tools/list":
-		writeRPCResult(w, id, map[string]any{"tools": capabilityToolSchemas()})
-	case "tools/call":
-		s.handleToolsCall(w, r, id, msg)
-	default:
-		writeRPCError(w, id, -32601, "method not found")
-	}
+// Handle is the transport-free core: it takes one raw JSON-RPC message and
+// returns the framed reply (always non-empty). Stdio bridges (lever-agent
+// serve-capability) call this directly, one line in, one line out; ctx cancels
+// the outbound broker call.
+func (s *MCPServer) Handle(ctx context.Context, msg []byte) []byte {
+	return mcp.Dispatch(ctx, msg, mcp.Service{
+		Name:    "lever-capability",
+		Version: Version,
+		Tools:   capabilityToolSchemas,
+		Call:    s.handleToolsCall,
+	})
 }
 
 func capabilityToolSchemas() []any {
@@ -124,7 +102,49 @@ func directiveInputSchema(strProp func(string) map[string]any) map[string]any {
 		}}
 }
 
-func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id any, msg map[string]any) {
+// invalidParams marks a caller-side argument error (JSON-RPC -32602, invalid
+// params) as opposed to a failed broker call (-32000).
+type invalidParams struct{ err error }
+
+func (e invalidParams) Error() string { return e.err.Error() }
+func (e invalidParams) Unwrap() error { return e.err }
+
+// capabilityTools dispatches a tools/call by name. Every tool returns the text
+// of its result, or an error: invalidParams for an argument mistake, anything
+// else for a failed broker call.
+var capabilityTools = map[string]func(*MCPServer, context.Context, map[string]string) (string, error){
+	// request: mint a capability token.
+	// The bind target (bound_to, defaulted to the server's own AgentCN when absent)
+	// is authoritatively gated by the broker's MayObtain policy keyed on the mTLS
+	// caller identity. An LLM-supplied bound_to that is wider than policy allows is
+	// therefore not a client-side escalation — the broker refuses to mint it.
+	"request": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
+		return s.mint(ctx, args, requestArgs)
+	},
+	// delegate: mint a token bound to another agent, narrowed by the extra kv
+	// constraints. The broker's MayObtain policy authoritatively gates whether the
+	// mTLS caller may delegate this capability to `to`, and re-validates every
+	// constraint; minting bound-to-other is a single online call.
+	"delegate": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
+		return s.mint(ctx, args, delegateArgs)
+	},
+	// directive_consume: atomically consume a pending operator directive addressed
+	// to this agent, over its own mTLS channel. On success the broker's action JSON
+	// is surfaced verbatim as the tool result. On any failure — unknown id, wrong
+	// target, already consumed, expired, stale generation — the broker's opaque
+	// 404 body is surfaced via a JSON-RPC error, so the model sees "not found" and
+	// nothing more (no oracle for which failure occurred).
+	"directive_consume": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
+		return s.directive(ctx, args, DirectiveConsume)
+	},
+	// directive_check: read-only status check for an operator directive addressed
+	// to this agent. Same target-gated, opaque-failure surface as directive_consume.
+	"directive_check": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
+		return s.directive(ctx, args, DirectiveCheck)
+	},
+}
+
+func (s *MCPServer) handleToolsCall(ctx context.Context, id any, msg map[string]any) []byte {
 	params, _ := msg["params"].(map[string]any)
 	name, _ := params["name"].(string)
 	rawArgs, _ := params["arguments"].(map[string]any)
@@ -137,81 +157,43 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, id a
 			args[k] = str
 		}
 	}
-	// Thread the request context so a dropped HTTP connection cancels the outbound
-	// broker call.
-	ctx := r.Context()
-	result := func(tok string) {
-		writeRPCResult(w, id, map[string]any{"content": []any{map[string]any{"type": "text", "text": tok}}})
+	tool, ok := capabilityTools[name]
+	if !ok {
+		return mcp.Error(id, mcp.CodeMethodNotFound, "unknown tool")
 	}
-	switch name {
-	// request: mint a capability token.
-	// The bind target (bound_to, defaulted to the server's own AgentCN when absent)
-	// is authoritatively gated by the broker's MayObtain policy keyed on the mTLS
-	// caller identity. An LLM-supplied bound_to that is wider than policy allows is
-	// therefore not a client-side escalation — the broker refuses to mint it.
-	case "request":
-		m, argErr := requestArgs(args, s.agentCN)
-		if argErr != nil {
-			writeRPCError(w, id, -32602, argErr.Error())
-			return
-		}
-		tok, err := Request(ctx, s.brokerURL, s.client, m.tool, m.op, m.boundTo, constraintArgs(args, m.reserved...))
-		if err != nil {
-			writeRPCError(w, id, -32000, err.Error())
-			return
-		}
-		result(tok)
-	// delegate: mint a token bound to another agent, narrowed by the extra kv
-	// constraints. The broker's MayObtain policy authoritatively gates whether the
-	// mTLS caller may delegate this capability to `to`, and re-validates every
-	// constraint; minting bound-to-other is a single online call.
-	case "delegate":
-		m, argErr := delegateArgs(args, s.agentCN)
-		if argErr != nil {
-			writeRPCError(w, id, -32602, argErr.Error())
-			return
-		}
-		tok, err := Request(ctx, s.brokerURL, s.client, m.tool, m.op, m.boundTo, constraintArgs(args, m.reserved...))
-		if err != nil {
-			writeRPCError(w, id, -32000, err.Error())
-			return
-		}
-		result(tok)
-	// directive_consume: atomically consume a pending operator directive addressed
-	// to this agent, over its own mTLS channel. On success the broker's action JSON
-	// is surfaced verbatim as the tool result. On any failure — unknown id, wrong
-	// target, already consumed, expired, stale generation — the broker's opaque
-	// 404 body is surfaced via a JSON-RPC error, so the model sees "not found" and
-	// nothing more (no oracle for which failure occurred).
-	case "directive_consume":
-		did, argErr := directiveID(args)
-		if argErr != nil {
-			writeRPCError(w, id, -32602, argErr.Error())
-			return
-		}
-		raw, err := DirectiveConsume(ctx, s.brokerURL, s.client, did)
-		if err != nil {
-			writeRPCError(w, id, -32000, err.Error())
-			return
-		}
-		result(string(raw))
-	// directive_check: read-only status check for an operator directive addressed
-	// to this agent. Same target-gated, opaque-failure surface as directive_consume.
-	case "directive_check":
-		did, argErr := directiveID(args)
-		if argErr != nil {
-			writeRPCError(w, id, -32602, argErr.Error())
-			return
-		}
-		raw, err := DirectiveCheck(ctx, s.brokerURL, s.client, did)
-		if err != nil {
-			writeRPCError(w, id, -32000, err.Error())
-			return
-		}
-		result(string(raw))
-	default:
-		writeRPCError(w, id, -32601, "unknown tool")
+	text, err := tool(s, ctx, args)
+	var bad invalidParams
+	switch {
+	case errors.As(err, &bad):
+		return mcp.Error(id, mcp.CodeInvalidParams, err.Error())
+	case err != nil:
+		return mcp.Error(id, mcp.CodeServerError, err.Error())
 	}
+	return mcp.TextResult(id, text)
+}
+
+// mint validates a capability tool's arguments with parse (requestArgs or
+// delegateArgs) and asks the broker for the token.
+func (s *MCPServer) mint(ctx context.Context, args map[string]string, parse func(map[string]string, string) (capMint, error)) (string, error) {
+	m, err := parse(args, s.agentCN)
+	if err != nil {
+		return "", invalidParams{err}
+	}
+	return Request(ctx, s.brokerURL, s.client, m.tool, m.op, m.boundTo, constraintArgs(args, m.reserved...))
+}
+
+// directive resolves the directive id and runs call (DirectiveConsume or
+// DirectiveCheck) against the broker, surfacing its raw JSON verbatim.
+func (s *MCPServer) directive(ctx context.Context, args map[string]string, call func(context.Context, string, *http.Client, string) (json.RawMessage, error)) (string, error) {
+	did, err := directiveID(args)
+	if err != nil {
+		return "", invalidParams{err}
+	}
+	raw, err := call(ctx, s.brokerURL, s.client, did)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // directiveID resolves the directive id argument, accepting `directive_id` as
@@ -385,14 +367,4 @@ func constraintArgs(args map[string]string, reserved ...string) map[string]strin
 		}
 	}
 	return out
-}
-
-func writeRPCResult(w http.ResponseWriter, id any, result any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
-}
-
-func writeRPCError(w http.ResponseWriter, id any, code int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
 }

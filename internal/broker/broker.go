@@ -5,6 +5,7 @@
 package broker
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"net/url"
@@ -38,8 +39,8 @@ const (
 	// registered (api-key mode) so /request can mint capability(llm) tokens, but
 	// it gets NO /mcp/llm/ tool route and is hidden from /tools — it is served
 	// only by the /llm proxy route.
-	ReservedLLMTool = "llm"
-	ReservedLLMOp   = "generate"
+	ReservedLLMTool = registry.ReservedLLMTool
+	ReservedLLMOp   = registry.ReservedLLMOp
 )
 
 // RevocationState is the persisted revocation floor + per-agent revoke list.
@@ -48,47 +49,92 @@ type RevocationState struct {
 	Revoked  []string `json:"revoked"`
 }
 
-// Config assembles a Broker. Zero GrantTTL/TicketTTL are defaulted.
+// Config assembles a Broker. Its groups map onto who fills them: brokerctl's
+// BuildBroker fills Identity and LLM from the parsed app config, and its serve
+// path fills Persistence, Dispatch and Directives plus the top-level fields
+// from the state dir, the selected backend and the process environment.
 type Config struct {
-	Keys            token.KeyPair
-	CA              *ca.CA
-	Tickets         *ca.TicketStore
-	Rules           *rules.Policy
-	Registry        *registry.Registry
-	ManagerIdentity string   // the cert CN permitted to call /provision
-	Agents          []string // valid worker identities that may be provisioned
-	GrantTTL        time.Duration
-	TicketTTL       time.Duration
-	ServerName      string // the server cert hostname agents dial (host.orb.internal)
-	Log             *slog.Logger
-	// RevocationState seeds the epoch floor + revoke list at construction
-	// (loaded from the state dir) so a restart never silently un-revokes.
-	RevocationState RevocationState
+	Identity    IdentityConfig
+	Persistence PersistenceConfig
+	LLM         LLMConfig
+	Dispatch    DispatchConfig
+	Directives  DirectiveConfig
+
+	// Log receives the audit decisions; nil ⇒ a discard logger.
+	Log *slog.Logger
+	// Version and ConfigHash identify this broker process: the binary's
+	// version string and a digest of the broker-relevant configuration it was
+	// started with. Reported by /epoch so apply's broker-reuse shortcut can
+	// detect a stale broker (old binary or old tool set) and restart it
+	// instead of silently reusing it (#19). Both optional (empty = unreported).
+	Version    string
+	ConfigHash string
+}
+
+// IdentityConfig is the broker's keys, CA and policy: everything that decides
+// who may obtain which capability. Zero GrantTTL/TicketTTL are defaulted.
+type IdentityConfig struct {
+	Keys     token.KeyPair
+	CA       *ca.CA
+	Tickets  *ca.TicketStore
+	Rules    *rules.Policy
+	Registry *registry.Registry
+	// ManagerIdentity is the cert CN permitted to call /provision and the
+	// worker/msg routes.
+	ManagerIdentity string
+	// ManagerSlug is the manager's scion agent slug — the app name (apply's
+	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
+	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
+	// only by its slug, so a message routed to agent:<CN> fails with
+	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
+	// (embedders/tests that never message the manager).
+	ManagerSlug string
+	GrantTTL    time.Duration
+	TicketTTL   time.Duration
+}
+
+// PersistenceConfig seeds the broker's persisted state at construction and
+// writes it through on every change, so a restart never silently un-revokes
+// or drops a directive.
+type PersistenceConfig struct {
+	// Revocation seeds the epoch floor + revoke list (loaded from the state dir).
+	Revocation RevocationState
 	// PersistRevocation is called (under the broker lock) whenever revocation
 	// state changes, to write it through to the state dir. nil ⇒ no persistence.
 	PersistRevocation func(RevocationState) error
-
-	// DirectiveState seeds the persistent operator-directive store at
-	// construction (loaded from the state dir); PersistDirectives writes it
-	// through on every mutation. Modeled on RevocationState/PersistRevocation.
-	DirectiveState    DirectiveState
+	// Directives seeds the persistent operator-directive store; PersistDirectives
+	// writes it through on every mutation. Modeled on Revocation/PersistRevocation.
+	Directives        DirectiveState
 	PersistDirectives func(DirectiveState) error
+}
 
+// LLMConfig configures the /llm proxy.
+type LLMConfig struct {
 	// APIKey is the real Anthropic Console key bytes (loaded host-side from the
 	// 0600 api_key_file by brokerctl). nil ⇒ no /llm route is served.
 	APIKey []byte
-	// LLMUpstream is the proxy target; empty defaults to https://api.anthropic.com.
+	// Upstream is the proxy target; empty defaults to https://api.anthropic.com.
 	// Set by tests to a fake upstream. NEVER derived from a client request.
-	LLMUpstream string
+	Upstream string
+}
 
-	// Worker dispatch (host-side). Runtime is the scion client the broker drives;
-	// Workers are the config-derived, path-authoritative worker descriptions;
-	// BrokerCAPEM/BrokerURL are copied into each worker's staged bootstrap so it
-	// trusts the same CA and dials the same broker as the manager.
+// DispatchConfig is the host-side worker dispatch and messaging wiring.
+type DispatchConfig struct {
+	// Runtime is the scion client the broker drives; Workers are the
+	// config-derived, path-authoritative worker descriptions; BrokerCAPEM/
+	// BrokerURL are copied into each worker's staged bootstrap so it trusts
+	// the same CA and dials the same broker as the manager.
 	Runtime     WorkerRuntime
 	Workers     []WorkerSpec
 	BrokerCAPEM string
 	BrokerURL   string
+	// InstanceProject is the single Scion project (-g) that the manager and
+	// all workers are agents in; = the jail mount root. Used when a message
+	// is addressed to the manager's agent identity, and as the constant -g
+	// for every worker dispatch/lifecycle/list call.
+	InstanceProject string
+	// WorkerToWorker enables worker→worker messaging; default false (deny).
+	WorkerToWorker bool
 	// VerifyAgentRole refuses to RESUME a worker whose hub record stores no
 	// authorization role while the installed scion resolves that to full hub
 	// authority (see hubapi.VerifyAgentRole). A worker created by a scion older
@@ -122,44 +168,24 @@ type Config struct {
 	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
 	// Empty disables manager healing (audited as an error on lapse).
 	ManagerBootstrapDir string
+}
 
-	// InstanceProject is the single Scion project (-g) that the manager and
-	// all workers are agents in; = the jail mount root. Used when a message
-	// is addressed to the manager's agent identity, and as the constant -g
-	// for every worker dispatch/lifecycle/list call.
-	InstanceProject string
-	// ManagerSlug is the manager's scion agent slug — the app name (apply's
-	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
-	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
-	// only by its slug, so a message routed to agent:<CN> fails with
-	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
-	// (embedders/tests that never message the manager).
-	ManagerSlug string
-	// WorkerToWorker enables worker→worker messaging; default false (deny).
-	WorkerToWorker bool
-
-	// DirectiveVerifier gates the operator-directive UDS admin channel: nil
-	// means directives are disabled and every /directive/* route 404s.
-	DirectiveVerifier *opsig.Verifier
+// DirectiveConfig configures the operator-directive UDS admin channel.
+type DirectiveConfig struct {
+	// Verifier gates the channel: nil means directives are disabled and every
+	// /directive/* route 404s.
+	Verifier *opsig.Verifier
 	// InstanceID is this instance's name, checked against Statement.Instance /
 	// Envelope.Instance on every signed directive op (opsig.ParseStatement /
 	// ParseEnvelope's instance-mismatch fail-closed check).
 	InstanceID string
-	// DirectiveAuditPath is the bounded JSON-lines audit log for the
-	// directive channel. Empty ⇒ dirAudit.append is a no-op (still non-nil,
-	// so handlers never nil-check it).
-	DirectiveAuditPath string
-	// DirectiveExpiryMax clamps how far in the future a submitted directive's
+	// AuditPath is the bounded JSON-lines audit log for the directive channel.
+	// Empty ⇒ dirAudit.append is a no-op (still non-nil, so handlers never
+	// nil-check it).
+	AuditPath string
+	// ExpiryMax clamps how far in the future a submitted directive's
 	// expires_at may sit (on top of opsig's own 24h hard cap).
-	DirectiveExpiryMax time.Duration
-
-	// Version and ConfigHash identify this broker process: the binary's
-	// version string and a digest of the broker-relevant configuration it was
-	// started with. Reported by /epoch so apply's broker-reuse shortcut can
-	// detect a stale broker (old binary or old tool set) and restart it
-	// instead of silently reusing it (#19). Both optional (empty = unreported).
-	Version    string
-	ConfigHash string
+	ExpiryMax time.Duration
 }
 
 // Broker is the running capability authority + brokered-tool proxy.
@@ -170,10 +196,8 @@ type Broker struct {
 	rules     *rules.Policy
 	reg       *registry.Registry
 	manager   string
-	agents    map[string]struct{}
 	grantTTL  time.Duration
 	ticketTTL time.Duration
-	srvName   string
 	log       *slog.Logger
 
 	apiKey      []byte
@@ -186,6 +210,10 @@ type Broker struct {
 	workers        map[string]WorkerSpec
 	brokerCAPEM    string
 	brokerURL      string
+	// liveAttempts/liveInterval bound waitWorkerLive's post-start poll; tests
+	// shrink them per instance (like reenrolNow).
+	liveAttempts int
+	liveInterval time.Duration
 
 	instanceProject string
 	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
@@ -221,63 +249,57 @@ type Broker struct {
 
 // New builds a Broker from c.
 func New(c Config) *Broker {
-	if c.GrantTTL <= 0 {
-		c.GrantTTL = defaultGrantTTL
+	id, pe, llm, d, dir := c.Identity, c.Persistence, c.LLM, c.Dispatch, c.Directives
+	if id.GrantTTL <= 0 {
+		id.GrantTTL = defaultGrantTTL
 	}
-	if c.TicketTTL <= 0 {
-		c.TicketTTL = defaultTicketTTL
+	if id.TicketTTL <= 0 {
+		id.TicketTTL = defaultTicketTTL
+	}
+	if id.ManagerSlug == "" {
+		id.ManagerSlug = id.ManagerIdentity
 	}
 	if c.Log == nil {
 		// Default to a no-op logger so audit() never nil-panics when a caller
-		// (e.g. brokerctl.Serve, which leaves Log unset) builds a Config without
-		// one. Every decision path audits, so a nil log would otherwise crash
-		// the first request.
+		// builds a Config without one. Every decision path audits, so a nil
+		// log would otherwise crash the first request.
 		c.Log = slog.New(slog.DiscardHandler)
 	}
-	directives := newDirectiveStore(c.DirectiveState, c.PersistDirectives, c.Log)
-	agents := make(map[string]struct{}, len(c.Agents))
-	for _, a := range c.Agents {
-		agents[a] = struct{}{}
-	}
-	revoked := make(map[string]bool, len(c.RevocationState.Revoked))
-	for _, a := range c.RevocationState.Revoked {
+	revoked := make(map[string]bool, len(pe.Revocation.Revoked))
+	for _, a := range pe.Revocation.Revoked {
 		revoked[a] = true
 	}
-	upstream := c.LLMUpstream
-	if upstream == "" {
-		upstream = "https://api.anthropic.com"
-	}
-	up, _ := url.Parse(upstream) // operator/test-controlled, validated at serve time
-	workers := make(map[string]WorkerSpec, len(c.Workers))
-	for _, g := range c.Workers {
+	up, _ := url.Parse(cmp.Or(llm.Upstream, "https://api.anthropic.com")) // operator/test-controlled, validated at serve time
+	workers := make(map[string]WorkerSpec, len(d.Workers))
+	for _, g := range d.Workers {
 		workers[g.Name] = g
 	}
-	if c.ManagerSlug == "" {
-		c.ManagerSlug = c.ManagerIdentity
-	}
-	if c.AutoReenrol == "" {
-		c.AutoReenrol = autoReenrolAll
-	}
 	return &Broker{
-		keys: c.Keys, ca: c.CA, tickets: c.Tickets, rules: c.Rules, reg: c.Registry,
-		manager: c.ManagerIdentity, agents: agents,
-		grantTTL: c.GrantTTL, ticketTTL: c.TicketTTL, srvName: c.ServerName, log: c.Log,
-		minEpoch: c.RevocationState.MinEpoch,
-		revoked:  revoked,
-		persist:  c.PersistRevocation,
-		apiKey:   c.APIKey, llmUpstream: up,
-		runtime: c.Runtime, verifyRole: c.VerifyAgentRole, resolveAgentID: c.ResolveAgentID, tree: c.Tree, workers: workers, brokerCAPEM: c.BrokerCAPEM, brokerURL: c.BrokerURL,
-		instanceProject: c.InstanceProject, managerSlug: c.ManagerSlug, workerToWorker: c.WorkerToWorker,
-		autoReenrol: c.AutoReenrol, managerBootstrapDir: c.ManagerBootstrapDir,
-		reenrolEvents:     make(chan string, reenrolQueueDepth),
-		reenrolNow:        time.Now,
-		reenrolLast:       map[string]time.Time{},
-		reenrolTries:      map[string]int{},
-		directives:        directives,
-		directiveVerifier: c.DirectiveVerifier, instanceID: c.InstanceID,
-		dirAudit: newDirectiveAudit(c.DirectiveAuditPath), directiveExpiryMax: c.DirectiveExpiryMax,
+		// identity, keys and policy
+		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
+		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug,
+		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
+		log: c.Log, version: c.Version, configHash: c.ConfigHash,
+		// persisted state
+		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
+		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),
+		// llm proxy
+		apiKey: llm.APIKey, llmUpstream: up,
+		// worker dispatch and messaging
+		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
+		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
+		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, tree: d.Tree,
+		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval,
+		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
+		managerBootstrapDir: d.ManagerBootstrapDir,
+		reenrolEvents:       make(chan string, reenrolQueueDepth),
+		reenrolNow:          time.Now,
+		reenrolLast:         map[string]time.Time{},
+		reenrolTries:        map[string]int{},
+		// operator directives
+		directiveVerifier: dir.Verifier, instanceID: dir.InstanceID,
+		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
 		dirRate: newRateWindow(),
-		version: c.Version, configHash: c.ConfigHash,
 	}
 }
 
@@ -325,18 +347,9 @@ func (b *Broker) isRevoked(agent string) bool {
 	return b.revoked[agent]
 }
 
-func (b *Broker) isAgent(name string) bool {
-	_, ok := b.agents[name]
-	return ok
-}
-
 // audit logs a decision; detail is "" for plain allows. kvs are optional
 // extra slog key/value pairs (token id, matched rule, minted claims).
 func (b *Broker) audit(op, caller, decision, detail string, kvs ...any) {
 	args := append([]any{"op", op, "caller", caller, "decision", decision, "detail", detail}, kvs...)
 	b.log.Info("broker.decision", args...)
 }
-
-// Directives exposes the operator-directive store (enrol bumps generations;
-// admin/agent handlers submit/consume).
-func (b *Broker) Directives() *DirectiveStore { return b.directives }

@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/broker/registry"
-	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
@@ -44,40 +42,6 @@ func mintLLM(t *testing.T, priv ed25519.PrivateKey, agent string, epoch int) str
 		t.Fatal(err)
 	}
 	return encodeToken(raw) // base64.RawURLEncoding — matches the proxy's decode
-}
-
-// newTestBrokerForLLM builds a broker whose registry contains the reserved "llm"
-// pseudo-tool and whose APIKey + LLMUpstream are wired for proxy tests.
-// Returns the broker and the caller identity ("worker").
-func newTestBrokerForLLM(t *testing.T, apiKey []byte, upstreamURL string) (*Broker, string) {
-	t.Helper()
-	kp, err := token.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := ca.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	reg := registry.New()
-	if err := reg.Register(registry.Tool{
-		Name:       ReservedLLMTool,
-		Backend:    "lever:llm-proxy",
-		Operations: map[string]registry.Operation{ReservedLLMOp: {Name: ReservedLLMOp}},
-		FirstParty: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	b := New(Config{
-		Keys:        kp,
-		CA:          c,
-		Tickets:     ca.NewTicketStore(),
-		Registry:    reg,
-		Agents:      []string{"worker"},
-		APIKey:      apiKey,
-		LLMUpstream: upstreamURL,
-	})
-	return b, "worker"
 }
 
 // newMTLSRequest creates an *http.Request with a verified TLS client cert whose

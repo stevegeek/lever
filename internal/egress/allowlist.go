@@ -73,8 +73,8 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 	// both postures — see the BuildRules docstring.)
 	if closedInternet {
 		rules = append(rules,
-			Rule{Family: IPv4, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},
-			Rule{Family: IPv6, Args: []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}},
+			Rule{IPv4, out("-o", "lo", "-j", "ACCEPT")},
+			Rule{IPv6, out("-o", "lo", "-j", "ACCEPT")},
 		)
 	}
 
@@ -129,8 +129,8 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 		// traffic must flow broker→Anthropic. Order matters: this follows the
 		// per-port ACCEPTs.
 		rules = append(rules,
-			Rule{Family: IPv4, Args: []string{"-A", Chain, "-j", "DROP"}},
-			Rule{Family: IPv6, Args: []string{"-A", Chain, "-j", "DROP"}},
+			Rule{IPv4, out("-j", "DROP")},
+			Rule{IPv6, out("-j", "DROP")},
 		)
 	}
 	return rules

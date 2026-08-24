@@ -1,3 +1,5 @@
+//go:build integration
+
 package hubapi
 
 import (
@@ -6,8 +8,8 @@ import (
 	"os"
 	"testing"
 
-	leverexec "github.com/stevegeek/lever/internal/exec"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // TestJailCurlAgainstRealVM runs the REAL curl script through a REAL jail
@@ -20,11 +22,12 @@ import (
 // Unit tests cannot cover that — they stub the runner, so the script never
 // meets a real shell. This is exactly where a backend difference would hide.
 //
-// Skipped unless LEVER_VM_PREFIX is set. Run it as:
+// Gated behind the `integration` build tag and skipped unless LEVER_VM_PREFIX
+// is set. Run it as:
 //
 //	# Lima (start a VM, then serve JSON on :8080 inside it)
 //	LEVER_VM_PREFIX='limactl,shell,levercurltest' \
-//	  go test ./internal/hubapi/ -run TestJailCurlAgainstRealVM -v
+//	  go test -tags integration ./internal/hubapi/ -run TestJailCurlAgainstRealVM -v
 //
 //	# OrbStack
 //	LEVER_VM_PREFIX='orb,-m,lever-assistant' ...
@@ -40,7 +43,7 @@ func TestJailCurlAgainstRealVM(t *testing.T) {
 		url = "http://127.0.0.1:8080"
 	}
 
-	jr := jail.New(leverexec.RealRunner{}, splitCSV(prefix), "501")
+	jr := jail.New(jail.Config{Host: proc.RealRunner{}, Prefix: splitCSV(prefix), UID: "501"})
 	j := &JailCurl{Runner: jr, BaseURL: url, Token: func() string { return "probe-token" }}
 
 	status, body, err := j.Do(context.Background(), "GET", "/probe")

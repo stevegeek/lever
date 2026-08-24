@@ -19,9 +19,13 @@ import (
 	"github.com/stevegeek/lever/captool"
 )
 
+// Version is what the MCP serverInfo reports; stamp it with
+// -ldflags "-X main.Version=..." if you want more than "dev".
+var Version = "dev"
+
 func buildServer(store *Store, name, backend, adminURL string) (*captool.Server, error) {
 	return captool.New(captool.Config{
-		Name: name, Backend: backend, AdminURL: adminURL,
+		Name: name, Version: Version, Backend: backend, AdminURL: adminURL,
 		Log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		Operations: []captool.Operation{{
 			Name:        "list",

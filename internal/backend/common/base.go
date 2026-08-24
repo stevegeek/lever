@@ -14,8 +14,9 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 const (
@@ -43,34 +44,63 @@ type Hooks struct {
 	// Guest returns the guest provisioner scoped to (r, machine); its User/Root
 	// prefixes differ per backend (orb has a distinct `-u root` form; lima appends
 	// `sudo`).
-	Guest func(r exec.Runner, machine string) guest.Guest
+	Guest func(r proc.Runner, machine string) guest.Guest
 	// ResolveHostAlias resolves the host tool alias's (v4, v6) as seen from inside
 	// the jail. Kept per-backend because each has a dedicated exact-argv test.
 	ResolveHostAlias func(ctx context.Context) (v4, v6 string, err error)
 }
 
-// Base carries the shared jail state and implements the prefix/guest-delegating
-// Backend methods once. Embedders set R, Machine, HostAlias, and Hooks in their
-// constructor; EnsureUp fills User/UID (via ReadRunUser) and AliasV4/AliasV6
-// (via ApplyEgress).
-type Base struct {
-	R         exec.Runner // host runner (the prefix binary runs on the host)
-	Machine   string      // jail identifier
-	HostAlias string      // DNS name an agent uses to reach allowlisted host tools
-
-	User    string // resolved in-jail run user
-	UID     string // resolved in-jail run-user uid
-	AliasV4 string // resolved IPv4 of HostAlias as seen from the jail
-	AliasV6 string // resolved IPv6 of HostAlias as seen from the jail
-
-	Hooks Hooks
+// Options is the caller-supplied part of a backend's construction — what the
+// registry decides once and every embedder passes through to NewBase.
+type Options struct {
+	// ForceHostNetwork is the host-side debugging escape hatch
+	// (jail.ForceHostNetworkEnv) that makes every in-jail scion command fall
+	// back to a shared netns. The registry reads it from the environment;
+	// Base never consults the environment itself.
+	ForceHostNetwork bool
 }
 
+// Config is what a Base needs from its embedder, set once at construction.
+type Config struct {
+	Runner    proc.Runner // host runner (the prefix binary runs on the host)
+	Machine   string      // jail identifier
+	HostAlias string      // DNS name an agent uses to reach allowlisted host tools
+	Hooks     Hooks
+	Options   Options
+}
+
+// Base carries the shared jail state and implements the prefix/guest-delegating
+// Backend methods once. Embedders build it with NewBase; EnsureUp fills the run
+// user/uid (via ReadRunUser) and the resolved aliases (via ApplyEgress). The
+// resolved state is unexported so only those two paths can change it.
+type Base struct {
+	r         proc.Runner
+	machine   string
+	hostAlias string
+	hooks     Hooks
+	opts      Options
+
+	user    string // resolved in-jail run user
+	uid     string // resolved in-jail run-user uid
+	aliasV4 string // resolved IPv4 of hostAlias as seen from the jail
+}
+
+// NewBase builds the shared half of a prefix-reached backend.
+func NewBase(cfg Config) Base {
+	return Base{r: cfg.Runner, machine: cfg.Machine, hostAlias: cfg.HostAlias, hooks: cfg.Hooks, opts: cfg.Options}
+}
+
+// Runner returns the host runner the backend was built with.
+func (b *Base) Runner() proc.Runner { return b.r }
+
+// Machine returns the jail machine name this backend targets.
+func (b *Base) Machine() string { return b.machine }
+
 // Guest returns the shared guest provisioner scoped to this machine.
-func (b *Base) Guest() guest.Guest { return b.Hooks.Guest(b.R, b.Machine) }
+func (b *Base) Guest() guest.Guest { return b.hooks.Guest(b.r, b.machine) }
 
 // jailPrefix is the in-jail transport argv prefix for the current run user.
-func (b *Base) jailPrefix() []string { return b.Hooks.JailPrefix(b.Machine, b.User) }
+func (b *Base) jailPrefix() []string { return b.hooks.JailPrefix(b.machine, b.user) }
 
 // DockerHost is the rootless Docker socket endpoint the broker drives.
 func (b *Base) DockerHost() string {
@@ -78,28 +108,25 @@ func (b *Base) DockerHost() string {
 }
 
 // HostToolAlias is how an agent reaches allowlisted host tools.
-func (b *Base) HostToolAlias() string { return b.HostAlias }
+func (b *Base) HostToolAlias() string { return b.hostAlias }
 
 // HostAliasV4 returns the resolved IPv4 of HostToolAlias as seen from the jail,
 // valid after EnsureUp/ApplyEgress. Empty if not yet resolved.
-func (b *Base) HostAliasV4() string { return b.AliasV4 }
+func (b *Base) HostAliasV4() string { return b.aliasV4 }
 
 // MountDest returns the path inside the jail where the project tree is bind-mounted.
 func (b *Base) MountDest() string { return MountDest }
 
-// MachineName returns the jail machine name this backend targets.
-func (b *Base) MachineName() string { return b.Machine }
-
 // RunUser returns the in-jail run user resolved by EnsureUp (valid after EnsureUp).
-func (b *Base) RunUser() string { return b.User }
+func (b *Base) RunUser() string { return b.user }
 
 // RunUID returns the in-jail run-user uid resolved by EnsureUp, falling back to
 // DefaultRunUID if EnsureUp has not yet been called.
 func (b *Base) RunUID() string {
-	if b.UID == "" {
+	if b.uid == "" {
 		return DefaultRunUID
 	}
-	return b.UID
+	return b.uid
 }
 
 // ReadRunUser caches the in-jail run user and UID (via the guest UserPrefix +
@@ -107,64 +134,96 @@ func (b *Base) RunUID() string {
 // work for any guest user, not a hardcoded one. Called after the machine exists
 // and before guest provisioning.
 func (b *Base) ReadRunUser(ctx context.Context) error {
-	up := b.Guest().UserPrefix
-	whoami := append(append([]string{}, up[1:]...), "whoami")
-	res, err := b.R.Run(ctx, nil, up[0], whoami...)
+	g := b.Guest()
+	res, err := g.UserRun(ctx, "whoami")
 	if err != nil {
 		return fmt.Errorf("resolve run user: %w", err)
 	}
-	b.User = strings.TrimSpace(res.Stdout)
-	idu := append(append([]string{}, up[1:]...), "id", "-u")
-	res, err = b.R.Run(ctx, nil, up[0], idu...)
+	b.user = strings.TrimSpace(res.Stdout)
+	res, err = g.UserRun(ctx, "id", "-u")
 	if err != nil {
 		return fmt.Errorf("resolve run uid: %w", err)
 	}
-	b.UID = strings.TrimSpace(res.Stdout)
+	b.uid = strings.TrimSpace(res.Stdout)
 	return nil
 }
 
+// Provision is the shared tail of every embedder's EnsureUp, run once the
+// machine exists: resolve the run user, install the guest runtimes, install
+// scion when cfg asks for one, then apply egress. One copy rather than one
+// per backend: the ScionSpec literal drifted between the two once (ScionBinary
+// was added to both literals while the guard around them was updated in
+// neither — see backend.Config.HasScion).
+func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
+	if err := b.ReadRunUser(ctx); err != nil {
+		return err
+	}
+	if err := b.Guest().EnsureRuntimes(ctx, b.RunUser()); err != nil {
+		return err
+	}
+	if cfg.HasScion() {
+		if err := b.Guest().EnsureScion(ctx, guest.ScionSpec{
+			Binary:  cfg.ScionBinary,
+			Source:  cfg.ScionSource,
+			Version: cfg.ScionVersion,
+			WebUI:   cfg.ScionWebUI,
+		}); err != nil {
+			return err
+		}
+	}
+	return b.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+}
+
 // ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records the
-// resolved host alias, preserving the I2 no-reopen property.
+// resolved host alias, preserving the I2 no-reopen property. Called by each
+// embedder's EnsureUp as its last step; it is not part of the Backend
+// contract because nothing outside a backend drives it. Only the IPv4 alias
+// is kept: nothing reads the v6 one back, and the I2 skip path cannot supply
+// it (existingClosedAlias parses only v4 from the live chain).
 func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	v4, v6, rebuilt, err := b.Guest().ApplyEgress(ctx, b.Hooks.ResolveHostAlias, allowedPorts, closedInternet)
+	v4, _, _, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, allowedPorts, closedInternet)
 	if err != nil {
 		return err
 	}
-	if rebuilt {
-		b.AliasV4, b.AliasV6 = v4, v6
-	} else {
-		// I2 skip path: v6 is not authoritative here (existingClosedAlias only
-		// parses v4 from the live chain) — do not clobber a prior aliasV6.
-		b.AliasV4 = v4
-	}
+	b.aliasV4 = v4
 	return nil
 }
 
 // JailRunner returns the command transport into the jail (valid after EnsureUp,
 // which resolves the run user).
-func (b *Base) JailRunner() exec.Runner {
-	return jail.New(b.R, b.jailPrefix(), b.RunUID())
+func (b *Base) JailRunner() proc.Runner {
+	return b.jail()
+}
+
+// jail builds the transport for the current run user.
+func (b *Base) jail() *jail.Runner {
+	return jail.New(jail.Config{
+		Host:             b.r,
+		Prefix:           b.jailPrefix(),
+		UID:              b.RunUID(),
+		ForceHostNetwork: b.opts.ForceHostNetwork,
+	})
 }
 
 // AttachArgv builds the host argv for an interactive in-jail command.
 func (b *Base) AttachArgv(inner []string) []string {
-	return jail.AttachArgv(b.jailPrefix(), b.RunUID(), inner)
+	return b.jail().AttachArgv(inner)
 }
 
 // LoadImage streams a host docker image into the jail's rootless podman.
 func (b *Base) LoadImage(ctx context.Context, imageRef string) error {
-	return jail.LoadImage(ctx, b.jailPrefix(), b.RunUID(), imageRef)
+	return jail.LoadImage(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
 // ImageLoaded reports whether the jail already holds imageRef at the host's
 // image ID (so a re-import can be skipped). Fail-open — see the interface doc.
 func (b *Base) ImageLoaded(ctx context.Context, imageRef string) bool {
-	return jail.ImageLoaded(ctx, b.R, b.jailPrefix(), b.RunUID(), imageRef)
+	return jail.ImageLoaded(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
 // PruneJailImages reclaims dangling images from the jail's rootless podman.
 func (b *Base) PruneJailImages(ctx context.Context) error {
-	return jail.PruneImages(ctx, b.R, b.jailPrefix(), b.RunUID())
+	return jail.PruneImages(ctx, b.r, b.jailPrefix(), b.RunUID())
 }
 
 // InstallGuestBinary streams a host-local executable into the machine at
@@ -176,7 +235,7 @@ func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath strin
 // EnsureHubLogin provisions the guest half of the remote-access login path
 // (loopback forwarder + the hub's oidc_login block), reporting whether the
 // hub's configuration changed — see backend.Backend.
-func (b *Base) EnsureHubLogin(ctx context.Context, spec backend.HubLogin) (bool, error) {
+func (b *Base) EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error) {
 	return b.Guest().EnsureHubLogin(ctx, spec)
 }
 
@@ -195,7 +254,7 @@ func (b *Base) DisableHubLogin(ctx context.Context) (bool, error) {
 // ReadScionProjectState reads scion's registration state from the machine for
 // `lever doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
 // machine-only guest prefix, so it needs no EnsureUp.
-func (b *Base) ReadScionProjectState(ctx context.Context) (backend.ScionProjectState, error) {
+func (b *Base) ReadScionProjectState(ctx context.Context) (types.ScionProjectState, error) {
 	return b.Guest().ReadScionProjectState(ctx, MountDest)
 }
 

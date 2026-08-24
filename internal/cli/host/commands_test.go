@@ -1,0 +1,132 @@
+package host
+
+import (
+	"bytes"
+	"context"
+	"testing"
+
+	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/proc"
+)
+
+type stubBackend struct {
+	up, down, stopped bool
+	scionState        types.ScionProjectState
+	scionErr          error
+	resolveRunUserErr error       // when set, ResolveRunUser returns it instead of nil
+	runner            proc.Runner // JailRunner override; nil ⇒ proc.RealRunner{}
+	removeScionCalls  []string    // workspace paths passed to RemoveScionProjectConfigs
+	removeScionErr    error
+	registeredResult  bool // ScionProjectRegistered return value
+	registeredErr     error
+	registeredCalls   []string // workspace paths passed to ScionProjectRegistered
+	hubLoginChanged   bool     // EnsureHubLogin's "the hub config changed" answer
+	hubLoginErr       error
+	hubLoginCalls     []types.HubLogin
+	hubLoginDisabled  int            // DisableHubLogin call count
+	hubLoginRemoved   bool           // DisableHubLogin's "the hub config changed" answer
+	leverTemplates    int            // EnsureLeverTemplate call count
+	upCfg             backend.Config // the Config the last EnsureUp received
+}
+
+func (s *stubBackend) EnsureUp(_ context.Context, cfg backend.Config) error {
+	s.up, s.upCfg = true, cfg
+	return nil
+}
+func (s *stubBackend) DockerHost() string                             { return "unix:///x" }
+func (s *stubBackend) HostToolAlias() string                          { return "host.orb.internal" }
+func (s *stubBackend) MountDest() string                              { return "/lever" }
+func (s *stubBackend) ApplyEgress(context.Context, []int, bool) error { return nil }
+func (s *stubBackend) Teardown(context.Context) error                 { s.down = true; return nil }
+func (s *stubBackend) Stop(context.Context) error                     { s.stopped = true; return nil }
+func (s *stubBackend) Profile() backend.Profile                       { return backend.Profile{Name: "stub"} }
+func (s *stubBackend) HostAliasV4() string                            { return "" }
+func (s *stubBackend) RunUser() string                                { return "stub" }
+func (s *stubBackend) RunUID() string                                 { return "501" }
+func (s *stubBackend) ResolveRunUser(context.Context) error           { return s.resolveRunUserErr }
+func (s *stubBackend) JailRunner() proc.Runner {
+	if s.runner != nil {
+		return s.runner
+	}
+	return proc.RealRunner{}
+}
+func (s *stubBackend) AttachArgv(inner []string) []string {
+	return append([]string{"stub-attach"}, inner...)
+}
+func (s *stubBackend) LoadImage(context.Context, string) error                  { return nil }
+func (s *stubBackend) ImageLoaded(context.Context, string) bool                 { return false }
+func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
+func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
+func (s *stubBackend) EnsureHubLogin(_ context.Context, spec types.HubLogin) (bool, error) {
+	s.hubLoginCalls = append(s.hubLoginCalls, spec)
+	return s.hubLoginChanged, s.hubLoginErr
+}
+func (s *stubBackend) DisableHubLogin(context.Context) (bool, error) {
+	s.hubLoginDisabled++
+	return s.hubLoginRemoved, nil
+}
+func (s *stubBackend) EnsureLeverTemplate(context.Context) (bool, error) {
+	s.leverTemplates++
+	return true, nil
+}
+func (s *stubBackend) ReadScionProjectState(context.Context) (types.ScionProjectState, error) {
+	return s.scionState, s.scionErr
+}
+func (s *stubBackend) RemoveScionProjectConfigs(_ context.Context, workspacePath string) error {
+	s.removeScionCalls = append(s.removeScionCalls, workspacePath)
+	return s.removeScionErr
+}
+func (s *stubBackend) RepairScionHubEndpoint(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (s *stubBackend) ScionProjectRegistered(_ context.Context, workspacePath string) (bool, error) {
+	s.registeredCalls = append(s.registeredCalls, workspacePath)
+	return s.registeredResult, s.registeredErr
+}
+
+func TestUpCommandCallsEnsureUp(t *testing.T) {
+	sb := &stubBackend{}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"provision", "--machine", "lever-jail", "--tree", "/tmp/tree", "--allow-port", "3305"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !sb.up {
+		t.Fatal("EnsureUp not called")
+	}
+}
+
+func TestDoctorPrintsProfile(t *testing.T) {
+	root := newRootWith(func(string, string) (backend.Backend, error) { return &stubBackend{}, nil })
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"doctor", "--machine", "lever-jail"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if out.Len() == 0 {
+		t.Fatal("doctor printed nothing")
+	}
+}
+
+func TestFactoryReceivesConfiguredBackendName(t *testing.T) {
+	var gotName string
+	bf := func(name, machine string) (backend.Backend, error) {
+		gotName = name
+		return &stubBackend{}, nil
+	}
+	root := newRootWith(bf)
+	root.SetArgs([]string{"doctor", "--machine", "lever-x", "--backend", "orbstack"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	if err := root.Execute(); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if gotName != "orbstack" {
+		t.Fatalf("factory got name %q, want %q", gotName, "orbstack")
+	}
+}

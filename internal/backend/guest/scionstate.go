@@ -5,33 +5,44 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
+// projectSettingsGlob matches every project-configs registration's settings
+// file under the guest run user's home: ~/.scion/project-configs/<name>/.scion/
+// settings.yaml. Each script below loops over it; the registration directory
+// is two levels up from the match.
+const projectSettingsGlob = `"$HOME"/` + layout.ProjectConfigsRel + `/*/` + layout.SettingsRel
+
+// workspacePathOf is the shell fragment that prints a project settings file's
+// workspace_path value (the first one, leading whitespace stripped).
+const workspacePathOf = `grep -E '^` + layout.WorkspacePathKey + `:' "$s" 2>/dev/null | head -1 | sed 's/^` + layout.WorkspacePathKey + `:[[:space:]]*//'`
+
 // ReadScionProjectState reads scion's project-registration state from the guest
-// for `lever doctor`: the in-tree marker (<mountDest>/.scion) and each
+// for `lever doctor`: the in-tree marker (<workspacePath>/.scion) and each
 // ~/.scion/project-configs registration with the workspace path it claims. It
 // runs a read-only script through the machine-only UserPrefix, so it needs no
 // run user and works before EnsureUp (only the jail machine must be up).
-func (g Guest) ReadScionProjectState(ctx context.Context, mountDest string) (backend.ScionProjectState, error) {
+func (g Guest) ReadScionProjectState(ctx context.Context, workspacePath string) (types.ScionProjectState, error) {
 	// Emit a line-parseable report (test/ls/grep only — nothing is mutated):
 	//   MARKER 1|0
 	//   ENTRY <project-configs-dir> <workspace_path>
 	// The space-separated ENTRY format assumes no whitespace in a workspace
-	// path; safe because mountDest is the backend constant "/lever" and worker
-	// paths are "/lever/workers/<sanitized-name>".
+	// path; safe because workspacePath is the backend's mount constant "/lever"
+	// and worker paths are "/lever/workers/<sanitized-name>".
 	script := `
-if [ -e ` + shellSingleQuote(mountDest+"/.scion") + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
-for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+if [ -e ` + shellSingleQuote(workspacePath+"/"+layout.ProjectMarker) + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
+for s in ` + projectSettingsGlob + `; do
   [ -e "$s" ] || continue
   d=$(basename "$(dirname "$(dirname "$s")")")
-  wp=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  wp=$(` + workspacePathOf + `)
   echo "ENTRY $d $wp"
 done
 `
-	res, err := g.userRun(ctx, "bash", "-lc", script)
+	res, err := g.UserRun(ctx, "bash", "-lc", script)
 	if err != nil {
-		return backend.ScionProjectState{}, fmt.Errorf("guest: read scion project state: %w", err)
+		return types.ScionProjectState{}, fmt.Errorf("guest: read scion project state: %w", err)
 	}
 	return parseScionState(res.Stdout), nil
 }
@@ -43,7 +54,7 @@ done
 // no-op when nothing matches. wp is a lever constant (/lever or
 // /lever/workers/<sanitized-name>), never user input.
 func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
-	if _, err := g.userRun(ctx, "bash", "-lc", scionConfigRemoveScript(wp)); err != nil {
+	if _, err := g.UserRun(ctx, "bash", "-lc", scionConfigRemoveScript(wp)); err != nil {
 		return fmt.Errorf("guest: remove scion project configs for %s: %w", wp, err)
 	}
 	return nil
@@ -59,9 +70,9 @@ func (g Guest) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
 func scionConfigRemoveScript(wp string) string {
 	return `
 target=` + shellSingleQuote(wp) + `
-for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+for s in ` + projectSettingsGlob + `; do
   [ -e "$s" ] || continue
-  cur=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  cur=$(` + workspacePathOf + `)
   if [ "$cur" = "$target" ]; then rm -rf "$(dirname "$(dirname "$s")")"; fi
 done
 `
@@ -90,10 +101,10 @@ func (g Guest) ScionProjectRegistered(ctx context.Context, workspacePath string)
 // scionProjectRegistered is the pure exactly-one-valid-registration predicate,
 // factored out so it is unit-testable without a fake runner (mirrors how
 // internal/cli's checkScionProject is a pure function over the same
-// backend.ScionProjectState shape, just with the opposite polarity: that one
+// types.ScionProjectState shape, just with the opposite polarity: that one
 // flags corruption for `lever doctor`, this one gates a destructive apply
 // step).
-func scionProjectRegistered(st backend.ScionProjectState, workspacePath string) bool {
+func scionProjectRegistered(st types.ScionProjectState, workspacePath string) bool {
 	n := 0
 	for _, e := range st.Entries {
 		if e.WorkspacePath == workspacePath {
@@ -103,11 +114,11 @@ func scionProjectRegistered(st backend.ScionProjectState, workspacePath string) 
 	return n == 1 && st.MarkerPresent
 }
 
-// parseScionState turns the report lines into a ScionProjectState. Unknown or
+// parseScionState turns the report lines into a types.ScionProjectState. Unknown or
 // malformed lines are ignored (fail-safe: a check reading this treats "no
 // entries" as "nothing stale").
-func parseScionState(out string) backend.ScionProjectState {
-	var st backend.ScionProjectState
+func parseScionState(out string) types.ScionProjectState {
+	var st types.ScionProjectState
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 {
@@ -118,7 +129,7 @@ func parseScionState(out string) backend.ScionProjectState {
 			st.MarkerPresent = len(f) >= 2 && f[1] == "1"
 		case "ENTRY":
 			if len(f) >= 3 {
-				st.Entries = append(st.Entries, backend.ScionProjectEntry{Name: f[1], WorkspacePath: f[2]})
+				st.Entries = append(st.Entries, types.ScionProjectEntry{Name: f[1], WorkspacePath: f[2]})
 			}
 		}
 	}
@@ -146,7 +157,7 @@ func (g Guest) RepairScionHubEndpoint(ctx context.Context, wp, endpoint string) 
 	if endpoint == "" {
 		return nil
 	}
-	if _, err := g.userRun(ctx, "bash", "-lc", scionHubEndpointRepairScript(wp, endpoint)); err != nil {
+	if _, err := g.UserRun(ctx, "bash", "-lc", scionHubEndpointRepairScript(wp, endpoint)); err != nil {
 		return fmt.Errorf("guest: repair scion hub endpoint for %s: %w", wp, err)
 	}
 	return nil
@@ -161,9 +172,9 @@ func scionHubEndpointRepairScript(wp, endpoint string) string {
 	return `
 target=` + shellSingleQuote(wp) + `
 want=` + shellSingleQuote(endpoint) + `
-for s in "$HOME"/.scion/project-configs/*/.scion/settings.yaml; do
+for s in ` + projectSettingsGlob + `; do
   [ -e "$s" ] || continue
-  cur=$(grep -E '^workspace_path:' "$s" 2>/dev/null | head -1 | sed 's/^workspace_path:[[:space:]]*//')
+  cur=$(` + workspacePathOf + `)
   [ "$cur" = "$target" ] || continue
   have=$(grep -E '^[[:space:]]*endpoint:[[:space:]]*' "$s" 2>/dev/null | head -1 | sed 's/^[[:space:]]*endpoint:[[:space:]]*//')
   [ -n "$have" ] || continue

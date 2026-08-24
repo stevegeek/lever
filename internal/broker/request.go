@@ -9,21 +9,8 @@ import (
 
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// CapRequest is the body of POST /request: an agent asking to mint a capability
-// for itself (BoundTo == caller) or to delegate one (BoundTo == another agent).
-type CapRequest struct {
-	Tool        string            `json:"tool"`
-	Op          string            `json:"op"`
-	BoundTo     string            `json:"bound_to"`
-	Constraints map[string]string `json:"constraints,omitempty"`
-}
-
-// CapResponse carries the minted capability token (base64url signed token).
-type CapResponse struct {
-	Token string `json:"token"`
-}
 
 // denyDetail builds the deny reason shared by handleRequest's three deny
 // paths (used verbatim as both the audit detail and the 403 body):
@@ -32,7 +19,7 @@ type CapResponse struct {
 // only when the wildcard coercion rewrote it, bound_to only on delegation.
 // The allow-path coercion note ("(op coerced: X -> Y)") is intentionally a
 // different format and stays inline.
-func denyDetail(prefix string, req CapRequest, requestedOp, caller string) string {
+func denyDetail(prefix string, req wire.CapRequest, requestedOp, caller string) string {
 	detail := fmt.Sprintf("%s (tool=%s op=%s", prefix, req.Tool, requestedOp)
 	if requestedOp != req.Op {
 		detail += fmt.Sprintf(" coerced_to=%s", req.Op)
@@ -61,8 +48,8 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req CapRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var req wire.CapRequest
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("request", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -75,7 +62,7 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// the wildcard op BEFORE the policy check. A tool exposes WildcardOp in
 	// the registry only when it is coarse-gated (an existing reviewed
 	// invariant enforced at registration), so this branch never fires for a
-	// fine tool. Crucially this does NOT widen the grant: MayObtain below
+	// fine tool. Crucially this does NOT widen the grant: MayObtainRule below
 	// still requires the caller to hold the exact {tool, "*"} grant, and the
 	// original op is preserved (requestedOp) purely for the audit trail.
 	requestedOp := req.Op
@@ -145,5 +132,5 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		kvs = append(kvs, "constraints", string(cj))
 	}
 	b.audit("request", caller, "allow", detail, kvs...)
-	writeJSON(w, CapResponse{Token: base64.RawURLEncoding.EncodeToString(tok)})
+	writeJSON(w, wire.CapResponse{Token: base64.RawURLEncoding.EncodeToString(tok)})
 }

@@ -9,7 +9,7 @@ import (
 
 func rec(id, cn string, gen int, now time.Time) DirectiveRecord {
 	return DirectiveRecord{
-		ID: id, State: "active", Statement: []byte("{}"), TargetCN: cn, TargetGen: gen,
+		ID: id, State: DirectiveActive, Statement: []byte("{}"), TargetCN: cn, TargetGen: gen,
 		Kind: "instruction", NotBefore: now.Add(-time.Minute), ExpiresAt: now.Add(10 * time.Minute),
 	}
 }
@@ -170,7 +170,7 @@ func TestListReportsExpiredAndOmitsStatementBytes(t *testing.T) {
 	s.BumpGeneration("mgr")
 	_ = s.Submit(rec("d1", "mgr", 1, now), now)
 	l := s.List(now.Add(11 * time.Minute))
-	if len(l) != 1 || l[0].State != "expired" || l[0].Statement != nil {
+	if len(l) != 1 || l[0].State != DirectiveExpired || l[0].Statement != nil {
 		t.Fatalf("bad list: %+v", l)
 	}
 }

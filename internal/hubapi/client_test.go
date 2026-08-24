@@ -60,6 +60,19 @@ func stripScript() *fakeDoer {
 	}
 }
 
+// assertAPIStatus pins the answered-but-unusable contract: the error is an
+// *APIError (so callers can tell the hub answered) carrying the given status.
+func assertAPIStatus(t *testing.T, err error, status int) {
+	t.Helper()
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("want an *APIError with status %d, got %T: %v", status, err, err)
+	}
+	if ae.Status != status {
+		t.Fatalf("APIError status = %d, want %d: %v", ae.Status, status, err)
+	}
+}
+
 func TestProjectIDMatchesNameOrSlug(t *testing.T) {
 	for _, key := range []string{"lever", "lever-1"} {
 		c := &Client{T: stripScript()}
@@ -130,9 +143,9 @@ func TestStripSharedDirFailsWhen404ButDirStillThere(t *testing.T) {
 	if err == nil {
 		t.Fatal("a 404 that did not actually remove the dir must fail")
 	}
-	if !strings.Contains(err.Error(), "still on project") {
-		t.Errorf("error should say the dir survived, got %v", err)
-	}
+	// The verify read, not the DELETE, reports the failure: the DELETE's 404
+	// travels on the APIError so the operator can see what the hub claimed.
+	assertAPIStatus(t, err, http.StatusNotFound)
 }
 
 func TestStripSharedDirSurfacesForbidden(t *testing.T) {
@@ -145,18 +158,21 @@ func TestStripSharedDirSurfacesForbidden(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error on 403")
 	}
-	if !strings.Contains(err.Error(), "403") {
-		t.Errorf("error should name the status, got %v", err)
-	}
+	assertAPIStatus(t, err, http.StatusForbidden)
 }
 
 func TestStripSharedDirSurfacesTransportFailure(t *testing.T) {
 	// The jail is down. Status 0 must never be read as a status.
 	f := stripScript()
-	f.replies["GET /api/v1/projects"] = reply{err: errors.New("connection refused")}
+	refused := errors.New("connection refused")
+	f.replies["GET /api/v1/projects"] = reply{err: refused}
 	err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
-	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+	if !errors.Is(err, refused) {
 		t.Fatalf("transport failure must surface, got %v", err)
+	}
+	var ae *APIError
+	if errors.As(err, &ae) {
+		t.Fatalf("a transport failure must not be an APIError, got %v", err)
 	}
 }
 
@@ -166,9 +182,8 @@ func TestStripSharedDirFailsWhenVerifyReadFails(t *testing.T) {
 	f := stripScript()
 	f.replies["GET /api/v1/projects/"+leverUUID+"/shared-dirs"] = reply{status: 500, body: "boom"}
 	err := (&Client{T: f}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
-	if err == nil || !strings.Contains(err.Error(), "verifying") {
-		t.Fatalf("an unreadable verify must fail, got %v", err)
-	}
+	// The DELETE answered 204, so a 500 can only have come from the verify read.
+	assertAPIStatus(t, err, http.StatusInternalServerError)
 }
 
 func TestSharedDirsListsProjectMounts(t *testing.T) {
@@ -186,8 +201,8 @@ func TestSharedDirsListsProjectMounts(t *testing.T) {
 
 func TestClientWithoutTransportErrorsRatherThanPanics(t *testing.T) {
 	err := (&Client{}).StripSharedDir(context.Background(), "lever", "hub", "scratchpad")
-	if err == nil || !strings.Contains(err.Error(), "no transport") {
-		t.Fatalf("want a plain error, got %v", err)
+	if !errors.Is(err, errNoTransport) {
+		t.Fatalf("want errNoTransport, got %v", err)
 	}
 }
 
@@ -196,7 +211,6 @@ func TestGetSurfacesNonJSONBody(t *testing.T) {
 	f := stripScript()
 	f.replies["GET /api/v1/projects"] = reply{status: 200, body: "<html>not scion</html>"}
 	_, err := (&Client{T: f}).ProjectID(context.Background(), "lever", "hub")
-	if err == nil || !strings.Contains(err.Error(), "decoding") {
-		t.Fatalf("a non-JSON body must fail loud, got %v", err)
-	}
+	// Status 0: the hub answered 200, so the problem is the body, not the status.
+	assertAPIStatus(t, err, 0)
 }

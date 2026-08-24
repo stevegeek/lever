@@ -1,14 +1,24 @@
 // Package backend defines the substrate contract every containment backend
-// satisfies. The declared backends and their guarantees live in candidates.go
-// (the single source of the guarantee matrix); construction is in
-// internal/backend/registry.
+// satisfies. Each implementation declares its own guarantees as a Profile;
+// internal/backend/registry is the single table that names the implemented
+// backends and exposes the guarantee matrix derived from it.
+//
+// # Dependency direction
+//
+// This package is the CONTRACT. The plain data types its Backend interface
+// carries for the guest-side verbs (HubLogin, ScionProjectState) live in the
+// stdlib-only leaf internal/backend/types, which both this package and the
+// guest helper (internal/backend/guest) import. backend never imports guest:
+// the contract must not depend on one implementation's helper. common (the
+// shared implementation base) imports both, as an implementation should.
 package backend
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 // Profile DECLARES what a backend actually guarantees, so the security posture
@@ -87,14 +97,13 @@ type Backend interface {
 	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
 	HostAliasV4() string   // resolved IPv4 of HostToolAlias as seen from the jail ("" if unresolved)
 	MountDest() string     // path inside the jail where the project tree is bind-mounted
-	MachineName() string   // the jail identifier this backend targets
 	RunUser() string       // the in-jail run user
 	RunUID() string        // the in-jail run user's uid
 	// ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning:
 	// it errors if the machine is not already up. For passive verbs (attach) that
 	// need the jail transport but must never create or configure the machine.
 	ResolveRunUser(ctx context.Context) error
-	JailRunner() exec.Runner            // command transport into the jail
+	JailRunner() proc.Runner            // command transport into the jail
 	AttachArgv(inner []string) []string // interactive TTY argv (lever up)
 	LoadImage(ctx context.Context, imageRef string) error
 	// ImageLoaded reports whether the jail already holds imageRef at the same
@@ -120,7 +129,7 @@ type Backend interface {
 	// the old configuration and the caller must restart it — while an
 	// unchanged one restarts nothing, which is what stops a re-apply from
 	// bouncing the hub and every agent's connection to it.
-	EnsureHubLogin(ctx context.Context, spec HubLogin) (bool, error)
+	EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error)
 	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
 	// reporting whether it wrote anything. The overlay exists to suppress
 	// scion's stock placeholder system prompt, which would otherwise REPLACE
@@ -141,7 +150,6 @@ type Backend interface {
 	// part of the answer: no hub ever reads it, and a restart is too expensive
 	// to spend on a change the hub cannot see. See guest.DisableHubLogin.
 	DisableHubLogin(ctx context.Context) (bool, error)
-	ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error
 	Teardown(ctx context.Context) error
 	// Stop powers the machine off but keeps its disk intact — distinct from
 	// Teardown, which deletes the machine. Idempotent: a no-op if the machine
@@ -153,7 +161,7 @@ type Backend interface {
 	// jail (the in-tree marker + ~/.scion/project-configs entries) for `lever
 	// doctor`. Read-only; uses the machine-only guest transport, so it works
 	// without EnsureUp as long as the jail machine is up.
-	ReadScionProjectState(ctx context.Context) (ScionProjectState, error)
+	ReadScionProjectState(ctx context.Context) (types.ScionProjectState, error)
 	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
 	// registration(s) whose workspace_path == workspacePath, through the
 	// machine-only guest transport. A no-op when none match. Called before

@@ -1,13 +1,32 @@
 // Package registry holds the broker's view of registered MCP tools: their
 // backends, operations, the caveat→param mapping that lets the gateway turn a
 // request's real arguments into the constraint-keyed param set the token layer
-// verifies, and optional allowed-value rules. The registry is concurrency-safe; tools register at boot.
+// verifies, and optional allowed-value rules.
+//
+// The registry is concurrency-safe (Registry.mu) because, unlike
+// rules.Policy, it is mutated while the broker serves: the config-seeded
+// envelope is loaded at boot, but each first-party tool then merges its
+// registration through the admin /register route (Register) while the jail
+// listener is already answering /request, /tools and gateway lookups.
 package registry
 
 import (
 	"fmt"
 	"slices"
 	"sync"
+
+	"github.com/stevegeek/lever/internal/mcp"
+	"github.com/stevegeek/lever/internal/wire"
+)
+
+// Reserved names of the broker's built-in LLM pseudo-tool (the /llm proxy,
+// which has no backend subprocess and no /mcp/llm/ route) and of a coarse
+// tool's single operation. Declared in wire, the contract leaf, so config can
+// spell them without importing this package; aliased here for the broker side.
+const (
+	ReservedLLMTool = wire.ReservedLLMTool
+	ReservedLLMOp   = wire.ReservedLLMOp
+	WildcardOp      = wire.WildcardOp
 )
 
 // Operation describes one operation a tool exposes.
@@ -26,12 +45,6 @@ type Operation struct {
 	// mint-time error (#21). Empty = permissive (any key is a constraint).
 	Params []string
 }
-
-// WildcardOp is the operation name of a coarse tool's single capability. It is
-// a literal op value — minted, granted, and verified by exact match — so the
-// token layer needs no wildcard logic; the gateway simply REQUIRES this op for
-// a coarse tool (and never for a fine one, so "*" cannot widen a fine tool).
-const WildcardOp = "*"
 
 // Tool is a registered MCP tool.
 type Tool struct {
@@ -134,11 +147,14 @@ func (r *Registry) Names() []string {
 }
 
 // MapParams builds the constraint-keyed parameter set the token layer verifies
-// against, from the request's actual MCP arguments. Arguments are identity-
-// mapped (constraint key == arg name); the operation's CaveatParam entries add
-// renamed bindings (constraint key -> the value of a differently-named arg). A
-// renamed arg that is absent produces no binding, so a token constraint on that
-// key then fails closed at verification. Errors if tool/op is unregistered.
+// against, from the request's actual MCP arguments, using the operation's
+// CaveatParam renames. Errors if tool/op is unregistered.
+//
+// The mapping itself is mcp.MapConstraintParams — the registry's only use of
+// that package. It lives there, not here, because the broker (through this
+// method) and captool (verify.go) must compute byte-identical param sets or a
+// token minted against one would fail verification against the other; mcp is
+// a stdlib-only leaf, so the import costs the registry no transitive baggage.
 func (r *Registry) MapParams(tool, op string, args map[string]string) (map[string]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -150,16 +166,7 @@ func (r *Registry) MapParams(tool, op string, args map[string]string) (map[strin
 	if !ok {
 		return nil, fmt.Errorf("registry: tool %q has no operation %q", tool, op)
 	}
-	out := make(map[string]string, len(args)+len(o.CaveatParam))
-	for k, v := range args { // identity mapping (constraint key == arg name)
-		out[k] = v
-	}
-	for ck, argName := range o.CaveatParam { // renamed bindings
-		if v, ok := args[argName]; ok {
-			out[ck] = v
-		}
-	}
-	return out, nil
+	return mcp.MapConstraintParams(o.CaveatParam, args), nil
 }
 
 // ValidateConstraints returns an error if any (key,value) constraint requests a
@@ -198,14 +205,7 @@ func (r *Registry) ValidateConstraints(tool, op string, constraints map[string]s
 		if !restricted {
 			continue
 		}
-		found := false
-		for _, a := range allowed {
-			if a == v {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(allowed, v) {
 			return fmt.Errorf("registry: tool %q forbids %s=%q", tool, k, v)
 		}
 	}

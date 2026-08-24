@@ -1,31 +1,18 @@
 package broker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
-
-// msgBroker's fixture deliberately makes the manager cert CN ("manager") and
-// the manager scion agent SLUG ("assistant", the app name) DIFFER: a live bug
-// (scion: `Agent "manager" not found in project`) hid behind an earlier
-// fixture where CN == slug, so routing to agent:<CN> passed by coincidence.
-func msgBroker(g2g bool) *Broker {
-	b := New(Config{ManagerIdentity: "manager", ManagerSlug: "assistant", WorkerToWorker: g2g, InstanceProject: "/lever",
-		Workers: []WorkerSpec{{Name: "scratch", WorkspaceSubdir: "workers/scratch"},
-			{Name: "worker", WorkspaceSubdir: "workers/worker"}}})
-	return b
-}
 
 func TestResolveMsgTarget(t *testing.T) {
 	cases := []struct {
@@ -33,39 +20,39 @@ func TestResolveMsgTarget(t *testing.T) {
 		g2g              bool
 		wantTo, wantProj string
 		wantErr          bool
-		wantErrSub       string // optional: substring the deny reason must contain
+		wantErrIs        error // optional: the sentinel the deny must wrap
 	}{
-		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever", false, ""},
-		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever", false, ""},
-		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false, ""},
-		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false, ""},
-		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false, ""},
-		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false, ""},
-		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false, ""},
-		{"manager to user other", "manager", "user:stephen", true, "", "", true, ""},
-		{"manager to unknown worker", "manager", "nope", true, "", "", true, ""},
-		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false, ""},
-		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false, ""},
-		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false, ""},
-		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever", false, ""},
-		{"worker to worker disabled", "scratch", "worker", false, "", "", true, ""},
-		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false, ""},
-		{"unknown caller", "mallory", "assistant", true, "", "", true, ""},
-		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true, ""},
-		{"worker to unknown", "scratch", "nope", true, "", "", true, ""},
+		{"manager to worker bare", "manager", "scratch", true, "agent:scratch", "/lever", false, nil},
+		{"manager to worker prefixed", "manager", "agent:scratch", true, "agent:scratch", "/lever", false, nil},
+		{"manager to manager by slug", "manager", "assistant", true, "agent:assistant", "/lever", false, nil},
+		{"manager to manager slug prefixed", "manager", "agent:assistant", true, "agent:assistant", "/lever", false, nil},
+		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false, nil},
+		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false, nil},
+		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false, nil},
+		{"manager to user other", "manager", "user:stephen", true, "", "", true, nil},
+		{"manager to unknown worker", "manager", "nope", true, "", "", true, nil},
+		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false, nil},
+		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false, nil},
+		{"worker to user", "scratch", "user:manager", true, "agent:assistant", "/lever", false, nil},
+		{"worker to worker allowed", "scratch", "worker", true, "agent:worker", "/lever", false, nil},
+		{"worker to worker disabled", "scratch", "worker", false, "", "", true, nil},
+		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false, nil},
+		{"unknown caller", "mallory", "assistant", true, "", "", true, nil},
+		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true, nil},
+		{"worker to unknown", "scratch", "nope", true, "", "", true, nil},
 		// Bare prefixes are NOT the empty manager alias / empty agent name:
 		// they must fall through to the unknown-recipient deny.
-		{"bare user: prefix denied", "manager", "user:", true, "", "", true, "unknown recipient"},
-		{"bare agent: prefix denied", "manager", "agent:", true, "", "", true, ""},
+		{"bare user: prefix denied", "manager", "user:", true, "", "", true, errUnknownRecipient},
+		{"bare agent: prefix denied", "manager", "agent:", true, "", "", true, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			tgt, err := msgBroker(c.g2g).resolveMsgTarget(c.caller, c.to)
+			tgt, err := msgBroker(t, c.g2g).resolveMsgTarget(c.caller, c.to)
 			if c.wantErr != (err != nil) {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}
-			if c.wantErrSub != "" && !strings.Contains(err.Error(), c.wantErrSub) {
-				t.Fatalf("err = %v, want substring %q", err, c.wantErrSub)
+			if c.wantErrIs != nil && !errors.Is(err, c.wantErrIs) {
+				t.Fatalf("err = %v, want %v", err, c.wantErrIs)
 			}
 			if err == nil && (tgt.scionTo != c.wantTo || tgt.project != c.wantProj) {
 				t.Fatalf("got (%q,%q), want (%q,%q)", tgt.scionTo, tgt.project, c.wantTo, c.wantProj)
@@ -91,7 +78,7 @@ func TestResolveListSubject(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := msgBroker(true).resolveListSubject(c.caller, c.worker)
+			got, err := msgBroker(t, true).resolveListSubject(c.caller, c.worker)
 			if c.wantErr != (err != nil) {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}
@@ -123,31 +110,8 @@ func (f *fakeMsgRuntime) Inbox(_ context.Context, _ bool, project string) ([]sci
 	return f.events, f.inboxErr
 }
 
-// newMsgTestBroker builds a Broker wired with a fakeMsgRuntime for the
-// scratch/worker workers under manager cert CN "manager" and manager scion
-// slug "assistant" (deliberately distinct, see msgBroker), capturing audit
-// output to the returned buffer.
-func newMsgTestBroker(g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
-	var buf bytes.Buffer
-	rt := &fakeMsgRuntime{WorkerRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
-	b := New(Config{
-		ManagerIdentity: "manager",
-		ManagerSlug:     "assistant",
-		InstanceProject: "/lever",
-		WorkerToWorker:  g2g,
-		Workers: []WorkerSpec{
-			{Name: "scratch", WorkspaceSubdir: "workers/scratch"},
-			{Name: "worker", WorkspaceSubdir: "workers/worker"},
-		},
-		Runtime:  rt,
-		Registry: registry.New(),
-		Log:      slog.New(slog.NewTextHandler(&buf, nil)),
-	})
-	return b, rt, &buf
-}
-
 func TestMsgSend_managerToWorker(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go","interrupt":true}`, "manager")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
@@ -162,7 +126,7 @@ func TestMsgSend_managerToWorker(t *testing.T) {
 }
 
 func TestMsgSend_workerToUser(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/send", `{"to":"user:manager"}`, "scratch")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
@@ -177,7 +141,7 @@ func TestMsgSend_workerToUser(t *testing.T) {
 }
 
 func TestMsgSend_workerToWorkerDisabled(t *testing.T) {
-	b, rt, audit := newMsgTestBroker(false)
+	b, rt, audit := newMsgTestBroker(t, false)
 	rec := callWorker(t, b, "/msg/send", `{"to":"worker"}`, "scratch")
 	if rec.Code != 403 {
 		t.Fatalf("status = %d, want 403", rec.Code)
@@ -196,7 +160,7 @@ func TestMsgSend_workerToWorkerDisabled(t *testing.T) {
 // routable addresses by trial and error. Contrast with
 // TestMsgRuntimeError_genericBody, whose scion-runtime branch MUST stay opaque.
 func TestMsgSendDenyLeaksReason(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/send", `{"to":"user:stephen"}`, "manager")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
@@ -213,7 +177,7 @@ func TestMsgSendDenyLeaksReason(t *testing.T) {
 // TestMsgListDenyLeaksReason is the /msg/list analogue: resolveListProject's
 // reason must reach the HTTP body.
 func TestMsgListDenyLeaksReason(t *testing.T) {
-	b, _, _ := newMsgTestBroker(true)
+	b, _, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/list", `{"worker":"worker"}`, "scratch")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
@@ -225,7 +189,7 @@ func TestMsgListDenyLeaksReason(t *testing.T) {
 }
 
 func TestMsgSend_unknownCaller(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/send", `{"to":"scratch"}`, "mallory")
 	if rec.Code != 403 {
 		t.Fatalf("status = %d, want 403", rec.Code)
@@ -236,7 +200,7 @@ func TestMsgSend_unknownCaller(t *testing.T) {
 }
 
 func TestMsgList_managerReadsWorker(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	withAgentIDs(b)
 	// The event must be ATTRIBUTED to scratch: /msg/list now returns only the
 	// events the hub attributes to the subject agent.
@@ -248,7 +212,7 @@ func TestMsgList_managerReadsWorker(t *testing.T) {
 	if rt.inboxProject != "/lever" {
 		t.Fatalf("inboxProject = %q, want /lever (the instance project)", rt.inboxProject)
 	}
-	var out MsgListResponse
+	var out wire.MsgListResponse[scion.Event]
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("bad response JSON: %v", err)
 	}
@@ -258,7 +222,7 @@ func TestMsgList_managerReadsWorker(t *testing.T) {
 }
 
 func TestMsgList_workerForbiddenOtherWorker(t *testing.T) {
-	b, _, _ := newMsgTestBroker(true)
+	b, _, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/list", `{"worker":"worker"}`, "scratch")
 	if rec.Code != 403 {
 		t.Fatalf("status = %d, want 403", rec.Code)
@@ -268,16 +232,9 @@ func TestMsgList_workerForbiddenOtherWorker(t *testing.T) {
 // TestMsgNilRuntime_returns502 proves both handlers return 502 (not a panic)
 // when the scion runtime is unwired, and only after authn/authz has run.
 func TestMsgNilRuntime_returns502(t *testing.T) {
-	b := New(Config{
-		ManagerIdentity: "assistant",
-		InstanceProject: "/lever",
-		WorkerToWorker:  true,
-		Workers: []WorkerSpec{
-			{Name: "scratch", WorkspaceSubdir: "workers/scratch"},
-		},
-		Runtime:  nil,
-		Registry: registry.New(),
-	})
+	b := New(testConfig(t, withManager("assistant", ""),
+		withRuntime(nil, WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch"}),
+		func(c *Config) { c.Dispatch.WorkerToWorker = true }))
 
 	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "assistant")
 	if rec.Code != 502 {
@@ -298,7 +255,7 @@ func TestMsgNilRuntime_returns502(t *testing.T) {
 func TestMsgBadBody_returns400(t *testing.T) {
 	for _, path := range []string{"/msg/send", "/msg/list"} {
 		t.Run(path, func(t *testing.T) {
-			b, rt, audit := newMsgTestBroker(true)
+			b, rt, audit := newMsgTestBroker(t, true)
 			rec := callWorker(t, b, path, `{not json`, "manager")
 			if rec.Code != 400 {
 				t.Fatalf("%s status = %d, want 400", path, rec.Code)
@@ -319,7 +276,7 @@ func TestMsgBadBody_returns400(t *testing.T) {
 func TestMsgRuntimeError_genericBody(t *testing.T) {
 	secret := "scion: message secret-body failed"
 
-	b, rt, audit := newMsgTestBroker(true)
+	b, rt, audit := newMsgTestBroker(t, true)
 	rt.sendErr = errors.New(secret)
 	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "manager")
 	if rec.Code != 502 {
@@ -332,7 +289,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 		t.Fatalf("/msg/send audit missing error detail: %s", audit.String())
 	}
 
-	b2, rt2, audit2 := newMsgTestBroker(true)
+	b2, rt2, audit2 := newMsgTestBroker(t, true)
 	withAgentIDs(b2)
 	rt2.inboxErr = errors.New(secret)
 	rec2 := callWorker(t, b2, "/msg/list", `{"worker":"scratch"}`, "manager")
@@ -348,7 +305,7 @@ func TestMsgRuntimeError_genericBody(t *testing.T) {
 }
 
 func TestMsgSend_deniesRevokedCaller(t *testing.T) {
-	b, rt, audit := newMsgTestBroker(true)
+	b, rt, audit := newMsgTestBroker(t, true)
 	b.Revoke("scratch")
 	rec := callWorker(t, b, "/msg/send", `{"to":"user:manager","body":"steer"}`, "scratch")
 	if rec.Code != 403 {
@@ -362,22 +319,23 @@ func TestMsgSend_deniesRevokedCaller(t *testing.T) {
 	}
 }
 
-func TestMsgList_deniesRevokedCaller(t *testing.T) {
-	b, _, _ := newMsgTestBroker(true)
+// assertRevokedManagerDenied revokes the manager and pins that path answers 403.
+func assertRevokedManagerDenied(t *testing.T, path, body string) {
+	t.Helper()
+	b, _, _ := newMsgTestBroker(t, true)
 	b.Revoke("manager")
-	rec := callWorker(t, b, "/msg/list", `{"all":false}`, "manager")
+	rec := callWorker(t, b, path, body, "manager")
 	if rec.Code != 403 {
-		t.Fatalf("revoked msg list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+		t.Fatalf("revoked %s: status = %d, want 403 (%s)", path, rec.Code, rec.Body.String())
 	}
 }
 
+func TestMsgList_deniesRevokedCaller(t *testing.T) {
+	assertRevokedManagerDenied(t, "/msg/list", `{"all":false}`)
+}
+
 func TestWorkerList_deniesRevokedManager(t *testing.T) {
-	b, _, _ := newMsgTestBroker(true)
-	b.Revoke("manager")
-	rec := callWorker(t, b, "/worker/list", `{}`, "manager")
-	if rec.Code != 403 {
-		t.Fatalf("revoked worker list: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
-	}
+	assertRevokedManagerDenied(t, "/worker/list", `{}`)
 }
 
 // The hub scopes `scion notifications` to the authenticated USER, and lever
@@ -391,7 +349,7 @@ func msgListEvents(t *testing.T, b *Broker, rt *fakeMsgRuntime, body, cn string)
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
-	var resp MsgListResponse
+	var resp wire.MsgListResponse[scion.Event]
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -418,41 +376,36 @@ func withAgentIDs(b *Broker) {
 	}
 }
 
-func TestMsgList_workerSeesOnlyItsOwnEvents(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+// assertFleetCut lists the fleet feed as cn with body and pins that exactly
+// one event — wantID — survives the cut.
+func assertFleetCut(t *testing.T, body, cn, wantID, why string) {
+	t.Helper()
+	b, rt, _ := newMsgTestBroker(t, true)
 	withAgentIDs(b)
 	rt.events = fleetEvents()
-	got := msgListEvents(t, b, rt, `{"all":true}`, "scratch")
-	if len(got) != 1 || got[0]["id"] != "e2" {
-		t.Fatalf("a worker must see only its own events, got %+v", got)
+	got := msgListEvents(t, b, rt, body, cn)
+	if len(got) != 1 || got[0]["id"] != wantID {
+		t.Fatalf("%s, got %+v", why, got)
 	}
 }
 
+func TestMsgList_workerSeesOnlyItsOwnEvents(t *testing.T) {
+	assertFleetCut(t, `{"all":true}`, "scratch", "e2", "a worker must see only its own events")
+}
+
 func TestMsgList_managerSeesOnlyItsOwnEventsByDefault(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
-	withAgentIDs(b)
-	rt.events = fleetEvents()
-	got := msgListEvents(t, b, rt, `{"all":true}`, "manager")
-	if len(got) != 1 || got[0]["id"] != "e1" {
-		t.Fatalf("the manager's default inbox is its own, got %+v", got)
-	}
+	assertFleetCut(t, `{"all":true}`, "manager", "e1", "the manager's default inbox is its own")
 }
 
 // The documented manager-only selector must now actually select.
 func TestMsgList_managerWorkerSelectorSelects(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
-	withAgentIDs(b)
-	rt.events = fleetEvents()
-	got := msgListEvents(t, b, rt, `{"all":true,"worker":"worker"}`, "manager")
-	if len(got) != 1 || got[0]["id"] != "e3" {
-		t.Fatalf("--worker must select that worker's events, got %+v", got)
-	}
+	assertFleetCut(t, `{"all":true,"worker":"worker"}`, "manager", "e3", "--worker must select that worker's events")
 }
 
 // An event lever cannot attribute is dropped, not passed through: attribution is
 // the whole basis of the cut.
 func TestMsgList_dropsUnattributedEvents(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	withAgentIDs(b)
 	rt.events = []scion.Event{{"id": "e4", "message": "unattributed"}}
 	if got := msgListEvents(t, b, rt, `{"all":true}`, "scratch"); len(got) != 0 {
@@ -462,7 +415,7 @@ func TestMsgList_dropsUnattributedEvents(t *testing.T) {
 
 // Without a way to attribute events, returning the raw feed would be the leak.
 func TestMsgList_failsClosedWhenAgentIDUnresolvable(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	b.resolveAgentID = func(context.Context, string) (string, error) {
 		return "", fmt.Errorf("hub unreachable")
 	}
@@ -474,10 +427,32 @@ func TestMsgList_failsClosedWhenAgentIDUnresolvable(t *testing.T) {
 }
 
 func TestMsgList_failsClosedWhenResolverUnwired(t *testing.T) {
-	b, rt, _ := newMsgTestBroker(true)
+	b, rt, _ := newMsgTestBroker(t, true)
 	rt.events = fleetEvents()
 	rec := callWorker(t, b, "/msg/list", `{"all":true}`, "scratch")
 	if rec.Code == 200 {
 		t.Fatalf("an unwired resolver must not fall back to the fleet feed, got 200: %s", rec.Body.String())
+	}
+}
+
+func TestIdentity(t *testing.T) {
+	b := msgBroker(t, true) // manager CN "manager", slug "assistant", workers scratch/worker
+	cases := []struct {
+		name              string
+		wantCN, wantSlug  string
+		wantManager, want bool
+	}{
+		{"manager", "manager", "assistant", true, true},
+		{"assistant", "manager", "assistant", true, true},
+		{"scratch", "scratch", "scratch", false, true},
+		{"nope", "", "", false, false},
+		{"", "", "", false, false},
+	}
+	for _, tc := range cases {
+		cn, slug, isManager, ok := b.identity(tc.name)
+		if cn != tc.wantCN || slug != tc.wantSlug || isManager != tc.wantManager || ok != tc.want {
+			t.Fatalf("identity(%q) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
+				tc.name, cn, slug, isManager, ok, tc.wantCN, tc.wantSlug, tc.wantManager, tc.want)
+		}
 	}
 }

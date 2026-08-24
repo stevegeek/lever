@@ -3,12 +3,14 @@ package jail
 import (
 	"reflect"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestAttachArgv(t *testing.T) {
-	t.Setenv("LEVER_FORCE_HOST_NETWORK", "") // pin the default regardless of ambient env
 	inner := []string{"scion", "attach", "demo", "-g", "/lever"}
-	got := AttachArgv(orbPrefix("lever-demo", "leveruser"), "501", inner)
+	jr := New(Config{Host: proc.NewFakeRunner(), Prefix: orbPrefix("lever-demo", "leveruser"), UID: "501"})
+	got := jr.AttachArgv(inner)
 	// Default: own pasta netns, so SCION_FORCE_HOST_NETWORK is NOT emitted.
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser", "env",

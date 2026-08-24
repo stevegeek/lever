@@ -9,9 +9,9 @@ import (
 // parseCSR decodes a PEM CSR and verifies its self-signature (proof of
 // private-key possession). Shared by enrol and renew.
 //
-// SECURITY: on /renew this CheckSignature is the ONLY proof-of-possession
-// check — SignPublicKey does not re-verify the CSR (unlike enrol's SignCSR,
-// which does). Removing it would let a caller renew onto a public key whose
+// SECURITY: this CheckSignature is the ONLY proof-of-possession check on
+// both routes — each then calls SignPublicKey, which does not re-verify the
+// CSR. Removing it would let a caller enrol or renew onto a public key whose
 // private half it does not hold.
 //
 // The error strings feed audit deny lines verbatim

@@ -2,11 +2,12 @@ package scion
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/proc"
 )
 
 func TestContainerLive(t *testing.T) {
@@ -24,8 +25,8 @@ func TestContainerLive(t *testing.T) {
 }
 
 func TestListParsesAgents(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion list --format json -g /g/a --non-interactive", exec.Result{Stdout: `[{"slug":"a","phase":"running","activity":"building"}]`})
+	f := proc.NewFakeRunner()
+	f.Script("scion list --format json -g /g/a --non-interactive", proc.Result{Stdout: `[{"slug":"a","phase":"running","activity":"building"}]`})
 	c := New(f, Options{})
 	agents, err := c.List(context.Background(), "/g/a")
 	if err != nil {
@@ -40,20 +41,20 @@ func TestListParsesAgents(t *testing.T) {
 // `scion start --help` to learn whether this scion understands --role
 // (scion#1089), so the probe needs its own scripted answer. The two keys do not
 // overlap as prefixes, which keeps FakeRunner's prefix match deterministic.
-func fakeScion(roleSupported bool) *exec.FakeRunner {
-	f := exec.NewFakeRunner()
+func fakeScion(roleSupported bool) *proc.FakeRunner {
+	f := proc.NewFakeRunner()
 	help := "Flags:\n      --harness-auth string   Override auth method\n"
 	if roleSupported {
 		help += "      --role string   Agent authorization role\n"
 	}
-	f.Script("scion start --help", exec.Result{Stdout: help})
-	f.Script("scion -g", exec.Result{})
+	f.Script("scion start --help", proc.Result{Stdout: help})
+	f.Script("scion -g", proc.Result{})
 	return f
 }
 
 // startArgv is the argv of the actual start call — the LAST call, since the
 // capability probe runs first.
-func startArgv(f *exec.FakeRunner) string {
+func startArgv(f *proc.FakeRunner) string {
 	return strings.Join(f.Calls[len(f.Calls)-1].Args, " ")
 }
 
@@ -76,13 +77,20 @@ func TestStartArgv(t *testing.T) {
 // would make lever unable to start an agent at all on that pin. Nothing is
 // widened by omitting it, because the roles system does not exist there.
 func TestStartOmitsRoleFlagWhenUnsupported(t *testing.T) {
+	assertStartArgvLacks(t, "--role", "must not carry --role on a scion that has no such flag")
+}
+
+// assertStartArgvLacks starts a plain agent on a roles-less scion and fails
+// when the start argv carries flag.
+func assertStartArgvLacks(t *testing.T, flag, why string) {
+	t.Helper()
 	f := fakeScion(false)
 	c := New(f, Options{})
 	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if got := startArgv(f); strings.Contains(got, "--role") {
-		t.Fatalf("argv %q must not carry --role on a scion that has no such flag", got)
+	if got := startArgv(f); strings.Contains(got, flag) {
+		t.Fatalf("argv %q %s", got, why)
 	}
 }
 
@@ -134,7 +142,7 @@ func TestStartRejectsConfiguredRoleWhenUnsupported(t *testing.T) {
 // A probe that cannot answer must fail closed. Guessing "unsupported" would
 // silently omit the flag on a post-#1090 scion and grant FULL authority.
 func TestStartFailsClosedWhenProbeFails(t *testing.T) {
-	f := exec.NewFakeRunner() // nothing scripted: the probe errors
+	f := proc.NewFakeRunner() // nothing scripted: the probe errors
 	c := New(f, Options{})
 	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"})
 	if err == nil {
@@ -216,19 +224,12 @@ func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
 }
 
 func TestStartOmitsWorkspaceWhenEmpty(t *testing.T) {
-	f := fakeScion(false)
-	c := New(f, Options{})
-	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if got := startArgv(f); strings.Contains(got, "--workspace") {
-		t.Fatalf("argv %q should not contain --workspace when Workspace empty", got)
-	}
+	assertStartArgvLacks(t, "--workspace", "should not contain --workspace when Workspace empty")
 }
 
 func TestResumeStopSuspendArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{})
 	c := New(f, Options{})
 	_ = c.Resume(context.Background(), "a", "/g/a")
 	_ = c.Stop(context.Background(), "a", "/g/a")
@@ -247,8 +248,8 @@ func TestResumeStopSuspendArgv(t *testing.T) {
 }
 
 func TestListParsesContainerStatusAndIgnoresUnknownFields(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion list --format json -g /lever --non-interactive", exec.Result{Stdout: `[
+	f := proc.NewFakeRunner()
+	f.Script("scion list --format json -g /lever --non-interactive", proc.Result{Stdout: `[
 		{"slug":"assistant","phase":"running","containerStatus":"running","other":"ignored"},
 		{"slug":"scratch","phase":"suspended","containerStatus":"stopped"}
 	]`})
@@ -273,8 +274,8 @@ func TestListParsesContainerStatusAndIgnoresUnknownFields(t *testing.T) {
 }
 
 func TestListEmptyStdoutIsEmptySlice(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion list --format json -g /lever --non-interactive", exec.Result{Stdout: "   \n"})
+	f := proc.NewFakeRunner()
+	f.Script("scion list --format json -g /lever --non-interactive", proc.Result{Stdout: "   \n"})
 	c := New(f, Options{})
 	agents, err := c.List(context.Background(), "/lever")
 	if err != nil {
@@ -286,8 +287,8 @@ func TestListEmptyStdoutIsEmptySlice(t *testing.T) {
 }
 
 func TestListMalformedJSONErrors(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion list --format json -g /lever --non-interactive", exec.Result{Stdout: `[{"slug": "a", `})
+	f := proc.NewFakeRunner()
+	f.Script("scion list --format json -g /lever --non-interactive", proc.Result{Stdout: `[{"slug": "a", `})
 	c := New(f, Options{})
 	if _, err := c.List(context.Background(), "/lever"); err == nil {
 		t.Fatal("expected error parsing malformed JSON")
@@ -295,8 +296,8 @@ func TestListMalformedJSONErrors(t *testing.T) {
 }
 
 func TestDeleteArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("scion", exec.Result{})
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{})
 	c := New(f, Options{})
 	if err := c.Delete(context.Background(), "scratch", "/lever"); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -308,7 +309,7 @@ func TestDeleteArgv(t *testing.T) {
 }
 
 func TestAttachArgvNotRun(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	c := New(f, Options{Bin: "scion"})
 	argv := c.AttachArgv("a", "/g/a")
 	want := []string{"scion", "attach", "a", "-g", "/g/a"}
@@ -325,8 +326,8 @@ func TestAttachArgvNotRun(t *testing.T) {
 // controller PAT must be embedded into the returned argv itself — mirroring
 // how the jail env is embedded for attach (internal/jail/attach.go).
 func TestAttachArgvEmbedsHubTokenWhenPresent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	c := New(f, Options{Bin: "scion", HubToken: "pat123"})
+	f := proc.NewFakeRunner()
+	c := New(f, Options{Bin: "scion", HubTokenSource: func() string { return "pat123" }})
 	argv := c.AttachArgv("a", "/g/a")
 	want := []string{"env", "SCION_HUB_TOKEN=pat123", "scion", "attach", "a", "-g", "/g/a"}
 	if strings.Join(argv, " ") != strings.Join(want, " ") {
@@ -338,7 +339,7 @@ func TestAttachArgvEmbedsHubTokenWhenPresent(t *testing.T) {
 // exact argv shape preserved (see TestAttachArgvNotRun) so subscription-mode
 // attach is unaffected.
 func TestAttachArgvOmitsHubTokenWhenEmpty(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	c := New(f, Options{Bin: "scion"})
 	argv := c.AttachArgv("a", "/g/a")
 	for _, tok := range argv {
@@ -385,8 +386,8 @@ func TestWaitAgentLiveRecordVanishesMidPollResetsToEmpty(t *testing.T) {
 		return []Agent{{Slug: "other", Phase: "running", ContainerStatus: "running"}}, nil
 	}
 	err := WaitAgentLive(context.Background(), list, "mgr", 2, time.Millisecond)
-	if err == nil {
-		t.Fatal("WaitAgentLive should fail when the record never becomes live")
+	if !errors.Is(err, ErrAgentNotLive) {
+		t.Fatalf("WaitAgentLive should fail when the record never becomes live: %v", err)
 	}
 	if strings.Contains(err.Error(), "starting") || strings.Contains(err.Error(), "Up 1s") {
 		t.Fatalf("error must reflect the reset last observation, not the stale earlier phase: %v", err)
@@ -403,7 +404,7 @@ func TestWaitAgentLiveRecordVanishesMidPollResetsToEmpty(t *testing.T) {
 // throwaway hub (live failure 2026-08-11: attach dialled 127.0.0.1:48080 and got
 // connection refused while every other verb worked).
 func TestAttachArgvPinsTheHubEndpoint(t *testing.T) {
-	c := New(exec.NewFakeRunner(), Options{HubEndpoint: "http://127.0.0.1:8080"})
+	c := New(proc.NewFakeRunner(), Options{HubEndpoint: "http://127.0.0.1:8080"})
 	argv := strings.Join(c.AttachArgv("a", "/g/a"), " ")
 	if !strings.Contains(argv, "SCION_HUB_ENDPOINT=http://127.0.0.1:8080") {
 		t.Fatalf("attach argv must pin the hub endpoint, got %q", argv)
@@ -416,7 +417,7 @@ func TestAttachArgvPinsTheHubEndpoint(t *testing.T) {
 // Both env assignments ride the same `env` prefix, and the scion command still
 // follows them.
 func TestAttachArgvCarriesTokenAndEndpointTogether(t *testing.T) {
-	c := New(exec.NewFakeRunner(), Options{
+	c := New(proc.NewFakeRunner(), Options{
 		HubEndpoint:    "http://127.0.0.1:8080",
 		HubTokenSource: func() string { return "tok" },
 	})
@@ -442,9 +443,26 @@ func indexOf(argv []string, want string) int {
 // With neither a token nor an endpoint there is no env prefix at all — the bare
 // scion invocation, as before.
 func TestAttachArgvHasNoEnvPrefixWhenNothingToPin(t *testing.T) {
-	c := New(exec.NewFakeRunner(), Options{})
+	c := New(proc.NewFakeRunner(), Options{})
 	argv := c.AttachArgv("a", "/g/a")
 	if argv[0] == "env" {
 		t.Fatalf("no env assignments means no env prefix, got %q", strings.Join(argv, " "))
+	}
+}
+
+// TestWaitAgentLiveZeroAttemptsExhaustsImmediately pins that a non-positive
+// budget is exhaustion, not retry.Until's "unbounded" reading of <= 0.
+func TestWaitAgentLiveZeroAttemptsExhaustsImmediately(t *testing.T) {
+	calls := 0
+	list := func(context.Context) ([]Agent, error) {
+		calls++
+		return []Agent{{Slug: "mgr", Phase: "running", ContainerStatus: "running"}}, nil
+	}
+	err := WaitAgentLive(context.Background(), list, "mgr", 0, time.Millisecond)
+	if !errors.Is(err, ErrAgentNotLive) {
+		t.Fatalf("err = %v, want exhaustion", err)
+	}
+	if calls != 0 {
+		t.Fatalf("list called %d times with a zero budget", calls)
 	}
 }

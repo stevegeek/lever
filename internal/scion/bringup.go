@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stevegeek/lever/internal/retry"
 )
 
 // AlreadyRunning reports whether err is a scion "already running" error — used to
@@ -40,9 +43,71 @@ func notRunning(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "server daemon is not running")
 }
 
-// hubReadyAttempts/hubReadyInterval are package vars so tests can shrink them.
-var hubReadyAttempts = 30
-var hubReadyInterval = 1 * time.Second
+// IsBrokerUnavailable reports whether err is the "runtime broker not yet
+// registered" condition during bring-up (the registration race), as opposed
+// to a real failure. The scion workstation daemon starts its Hub API and its
+// runtime broker separately: the hub serves before the runtime broker has
+// registered ASYNCHRONOUSLY, so a call issued in that window fails. scion
+// words it three ways depending on the verb and how far the call got before
+// giving up:
+//   - `scion start`: plural "No runtime brokers available".
+//   - `scion resume`: singular "no runtime broker available" — the SAME race
+//     (confirmed in scion pkg/hub/handlers_agent_create_helpers.go:354,408).
+//   - either, on a cold VM: "deadline exceeded" — scion's own internal wait for
+//     the broker times out and surfaces the hub timeout instead of the clean
+//     message (observed live: "context deadline exceeded from the Hub during
+//     start-manager", which needed a second `up` to reconcile).
+//
+// All must be matched or a retry never sees its own transient error as
+// retryable. A caller that retries on it must check its OWN ctx between
+// attempts, since a deadline from that ctx (a genuine timeout, not scion's
+// internal one) matches too.
+func IsBrokerUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "no_runtime_broker") ||
+		strings.Contains(s, "No runtime brokers available") ||
+		strings.Contains(s, "no runtime broker available") ||
+		strings.Contains(s, "deadline exceeded")
+}
+
+// IsAgentAbsent reports whether err from a scion agent verb (`list`, `status`,
+// `resume`…) DEFINITIVELY means the named agent cannot be running — as opposed
+// to an unknown failure a caller must not paper over. It matches, case-
+// insensitively:
+//   - "is not responding" / "connection refused": no hub is reachable on the
+//     machine — the hub is only started by apply's scion-server step, so
+//     before the first apply nothing can be running;
+//   - "project not found": the hub is up but the project was never
+//     hub-registered (e.g. a partial prior bring-up where local `scion init`
+//     ran but `scion hub link` didn't) — no agent can be running under a
+//     project the hub doesn't know, and apply's register-project step (init +
+//     hub link) is exactly the repair;
+//   - "no git origin remote found": scion's documented fallback when the path
+//     isn't a locally registered project at all (no ~/.scion/project-configs
+//     entry — forced project resolution falls back to git; see the
+//     waitHubReady comment documenting this exact string). Lever projects are
+//     directory projects, never git-resolved, so for lever this can only mean
+//     "not registered" — again definitively absent, and register-project is
+//     the repair.
+func IsAgentAbsent(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "is not responding") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "project not found") ||
+		strings.Contains(msg, "no git origin remote found")
+}
+
+// hubReadyAttempts/hubReadyInterval are the default waitHubReady budget.
+const (
+	hubReadyAttempts = 30
+	hubReadyInterval = 1 * time.Second
+)
 
 // waitHubReady polls a lightweight, PROJECT-INDEPENDENT hub call until it
 // succeeds or attempts run out. `list --all` lists agents across all projects
@@ -51,25 +116,26 @@ var hubReadyInterval = 1 * time.Second
 // when run (as here) before any project is registered (verified live 2026-06-17).
 func (c *Client) waitHubReady(ctx context.Context) error {
 	var lastErr error
-	for i := 0; i < hubReadyAttempts; i++ {
-		if _, err := c.run(ctx, "", "list", "--all", "--format", "json"); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(hubReadyInterval):
-		}
+	err := retry.Until(ctx, c.hubReadyAttempts, c.hubReadyInterval, func() (bool, error) {
+		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json")
+		return lastErr == nil, nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return fmt.Errorf("%w after %d attempts: %w", ErrHubNotReady, c.hubReadyAttempts, lastErr)
 	}
-	return fmt.Errorf("hub not ready after %d attempts: %w", hubReadyAttempts, lastErr)
+	return err
 }
 
-// brokerReadyAttempts/brokerReadyInterval bound WaitRuntimeBrokerReady; package
-// vars so tests can shrink them.
-var brokerReadyAttempts = 30
-var brokerReadyInterval = 1 * time.Second
+// ErrHubNotReady is wrapped by waitHubReady when the hub never answers within
+// its budget; the last probe error is wrapped alongside it.
+var ErrHubNotReady = errors.New("hub not ready")
+
+// brokerReadyAttempts/brokerReadyInterval are the default WaitRuntimeBrokerReady
+// budget.
+const (
+	brokerReadyAttempts = 30
+	brokerReadyInterval = 1 * time.Second
+)
 
 // runtimeBroker is the subset of a `scion hub brokers --format json` row we read
 // to judge readiness. A broker registers with the hub before it finishes
@@ -96,35 +162,32 @@ func (b runtimeBroker) ready() bool {
 //
 // FAIL-SOFT: on budget exhaustion it returns nil (not an error), so the caller
 // proceeds to start regardless — the start path's own bounded broker-unavailable
-// retry (internal/apply's isBrokerUnavailable) is the backstop, and hard-failing
-// the whole bring-up on a readiness probe that can't confirm would be worse than
-// letting start try. Only ctx cancellation returns an error. `hub brokers` lists
+// retry (internal/apply's retryOnBrokerUnavailable, gated on
+// IsBrokerUnavailable) is the backstop, and hard-failing the whole bring-up on
+// a readiness probe that can't confirm would be worse than letting start try. Only ctx cancellation returns an error. `hub brokers` lists
 // brokers hub-wide; project scopes only the hub-client/settings resolution, so
 // it is passed to dodge the "no project" resolution failure a bare call hits.
 func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {
 	args := append([]string{"hub", "brokers", "--format", "json"}, projectFlag(project)...)
-	for i := 0; i < brokerReadyAttempts; i++ {
-		if out, err := c.run(ctx, "", args...); err == nil {
-			// parseJSON (not raw Unmarshal): scion prints the dev-auth WARNING
-			// banner into the same stream, and parseJSON strips it + ANSI before
-			// decoding — matching List/messaging. A parse miss leaves brokers empty
-			// (not ready), so it stays fail-soft.
-			var brokers []runtimeBroker
-			if parseJSON(out, &brokers) == nil {
-				for _, b := range brokers {
-					if b.ready() {
-						return nil
-					}
-				}
-			}
+	err := retry.Until(ctx, c.brokerReadyAttempts, c.brokerReadyInterval, func() (bool, error) {
+		out, err := c.run(ctx, "", args...)
+		if err != nil {
+			return false, nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(brokerReadyInterval):
+		// parseJSON (not raw Unmarshal): scion prints the dev-auth WARNING
+		// banner into the same stream, and parseJSON strips it + ANSI before
+		// decoding — matching List/messaging. A parse miss leaves brokers empty
+		// (not ready), so it stays fail-soft.
+		var brokers []runtimeBroker
+		if parseJSON(out, &brokers) != nil {
+			return false, nil
 		}
+		return slices.ContainsFunc(brokers, runtimeBroker.ready), nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return nil
 	}
-	return nil
+	return err
 }
 
 // InitMachine seeds the machine-level scion dir + default harness configs
@@ -225,7 +288,7 @@ type ServerOpts struct {
 	// built output, so a binary compiled from the fetched module serves scion's
 	// "Web UI Not Available" page. lever builds the assets host-side from that
 	// same module and stages them into the guest, and this flag points the hub
-	// at them (internal/backend/guest.ScionWebAssetsDir).
+	// at them (layout.WebAssetsDir).
 	//
 	// Only ever set together with EnableWeb, and only when lever actually staged
 	// the assets — config.App.ScionWebAssets decides both. Setting it otherwise
@@ -338,10 +401,17 @@ func secretSetErr(key string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "value must be base64-encoded") {
+	if isBase64Rejection(err) {
 		return fmt.Errorf("%w (setting %s): %v", errBase64Pin, key, err)
 	}
 	return err
+}
+
+// isBase64Rejection reports whether err is the hub refusing a plaintext secret
+// value. Wording from scion's hub env-set handler; like the other predicates
+// here it is the one place that text is known.
+func isBase64Rejection(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "value must be base64-encoded")
 }
 
 // errBase64Pin names the pin floor rather than the symptom: the hub rejects a

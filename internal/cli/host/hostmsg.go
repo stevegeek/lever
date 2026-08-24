@@ -1,0 +1,65 @@
+package host
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/scion"
+)
+
+// newHostMsgCmd is the operator's fire-and-forget note sender: `lever msg send
+// BODY --to NAME`. Operator authority, no broker hop (the host owns the CA,
+// jail, and config — the same trust model as `lever attach`). Strictly passive:
+// it resolves the jail transport but never provisions. NAME resolves like
+// attach (the app name → manager; a declared worker name → that worker).
+func newHostMsgCmd(bf BackendFactory) *cobra.Command {
+	cmd := &cobra.Command{Use: "msg", Short: "Send a note to an agent (host-side, fire-and-forget)"}
+	cmd.AddCommand(hostMsgSend(bf))
+	return cmd
+}
+
+func hostMsgSend(bf BackendFactory) *cobra.Command {
+	var to string
+	var interrupt bool
+	c := &cobra.Command{
+		Use:   "send BODY",
+		Args:  cobra.MinimumNArgs(1),
+		Short: "Send a message to the manager or a worker (--to NAME)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Config is always discovered from the CWD; the recipient NAME comes
+			// from --to, never a positional config path.
+			app, state, err := loadAppAndState(nil)
+			if err != nil {
+				return err
+			}
+			b, err := bf(app.Backend, machineName(app.Name))
+			if err != nil {
+				return err
+			}
+			slug, project, err := attachTarget(app, b.MountDest(), to)
+			if err != nil {
+				return err
+			}
+			if err := b.ResolveRunUser(cmd.Context()); err != nil {
+				return fmt.Errorf("msg: %w (%v) — run `lever up` first", errJailNotUp, err)
+			}
+			// state gives this client the controller PAT (minted by a prior
+			// `lever apply`'s bootstrap-token step) via HubTokenSource, so `msg
+			// send` authenticates against the real, dev-auth-off hub.
+			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
+			if err := sc.Message(cmd.Context(), scion.MsgOpts{
+				To: "agent:" + slug, Body: strings.Join(args, " "), Interrupt: interrupt, Project: project,
+			}); err != nil {
+				return err
+			}
+			cmd.Printf("Sent to %s.\n", to)
+			return nil
+		},
+	}
+	c.Flags().StringVar(&to, "to", "", "recipient: the manager (app name) or a declared worker name (required)")
+	c.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
+	_ = c.MarkFlagRequired("to")
+	return c
+}

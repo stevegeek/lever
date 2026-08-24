@@ -2,6 +2,7 @@ package agent
 
 import (
 	"crypto/tls"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -124,20 +125,19 @@ func TestNewClientCertSourceFailsOnMissingIDDir(t *testing.T) {
 	}
 }
 
-// TestCAPoolRejectsBadPEM covers the shared helper's bad-CA branch (untested at
-// every call site before D2) and pins the caller-supplied error prefix.
+// TestCAPoolRejectsBadPEM covers the shared helper's bad-CA branch.
 func TestCAPoolRejectsBadPEM(t *testing.T) {
-	if _, err := caPool(nil, "agent"); err == nil {
+	if _, err := caPool(nil); err == nil {
 		t.Fatal("caPool must reject an empty CA PEM")
 	}
-	_, err := caPool([]byte("-----BEGIN CERTIFICATE-----\nnotpem\n-----END CERTIFICATE-----"), "gateway")
-	if err == nil || !strings.Contains(err.Error(), "gateway: bad CA PEM") {
-		t.Fatalf("caPool must reject a malformed CA PEM with the site prefix, got %v", err)
+	_, err := caPool([]byte("-----BEGIN CERTIFICATE-----\nnotpem\n-----END CERTIFICATE-----"))
+	if !errors.Is(err, errBadCAPEM) {
+		t.Fatalf("caPool must reject a malformed CA PEM, got %v", err)
 	}
 }
 
 // TestReloadingTransportRejectsBadPEM proves the shared transport builder
-// propagates the bad-CA-PEM failure (with the caller's prefix) after a valid
+// propagates the bad-CA-PEM failure after a valid
 // id-dir mint.
 func TestReloadingTransportRejectsBadPEM(t *testing.T) {
 	caInst, err := ca.Generate()
@@ -146,8 +146,8 @@ func TestReloadingTransportRejectsBadPEM(t *testing.T) {
 	}
 	dir := t.TempDir()
 	writeLeaf(t, dir, caInst, time.Now())
-	_, err = reloadingTransport(dir, []byte("garbage"), "agent")
-	if err == nil || !strings.Contains(err.Error(), "agent: bad CA PEM") {
+	_, err = reloadingTransport(dir, []byte("garbage"))
+	if !errors.Is(err, errBadCAPEM) {
 		t.Fatalf("reloadingTransport must reject a malformed CA PEM, got %v", err)
 	}
 }
@@ -189,7 +189,7 @@ func TestNewReloadingClientPresentsRotatingCert(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &recordingBackend{}
-	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCertSANs("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestGatewayProxyPresentsRotatingCert(t *testing.T) {
 	// Fake mTLS broker: RequireAnyClientCert records the presented leaf without
 	// needing it to chain (we assert on the serial, not on verification).
 	backend := &recordingBackend{}
-	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCert("127.0.0.1")
+	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCertSANs("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,8 +323,8 @@ func TestGatewayProxyIdleConnTimeout(t *testing.T) {
 }
 
 func TestGatewayRejectsNonLoopbackListen(t *testing.T) {
-	err := Gateway("0.0.0.0:8462", "https://broker.example", []byte("ca"), t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "loopback") {
+	err := Gateway(GatewayConfig{Listen: "0.0.0.0:8462", BrokerURL: "https://broker.example", CAPEM: []byte("ca"), IDDir: t.TempDir()})
+	if !errors.Is(err, errNotLoopback) {
 		t.Fatalf("Gateway must reject a non-loopback listen addr, got err=%v", err)
 	}
 }

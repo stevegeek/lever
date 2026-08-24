@@ -2,6 +2,7 @@ package orbstack
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,181 +11,122 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
-	"github.com/stevegeek/lever/internal/exec"
+	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/backend/common"
+	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
+	"github.com/stevegeek/lever/internal/provision/webassets"
 )
 
 // TestProfileIsSingleSourced guards against re-hardcoding the profile: OrbStack's
-// runtime Profile() must be the same value the guarantee matrix declares.
+// runtime Profile() must be the exported Profile value the registry publishes.
 func TestProfileIsSingleSourced(t *testing.T) {
-	want, ok := backend.ProfileFor("orbstack")
-	if !ok {
-		t.Fatal("backend.Candidates is missing orbstack")
-	}
-	if got := New(exec.RealRunner{}, "m").Profile(); got != want {
+	want := Profile
+	if got := New(proc.RealRunner{}, "m", common.Options{}).Profile(); got != want {
 		t.Errorf("Profile() = %+v, want declared %+v", got, want)
 	}
 }
 
-// closedChainRunner returns an ACTIVE closed LEVER_EGRESS chain for `iptables -S`
-// and records whether the chain was flushed or the alias re-resolved.
-type closedChainRunner struct {
-	*exec.FakeRunner
-	flushed, resolved bool
+// The machine every test drives, and its guest transport prefixes.
+const machine = "lever-jail"
+
+var orbGuest = backendtest.Guest{
+	Machine: machine,
+	User:    "orb -m " + machine,
+	Root:    "orb -u root -m " + machine,
+	Alias:   "host.orb.internal",
 }
 
-func (r *closedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (exec.Result, error) {
-	argv := strings.Join(args, " ")
-	if name == "orb" {
-		switch {
-		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
-			return exec.Result{Stdout: "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"}, nil
-		case strings.Contains(argv, "-F LEVER_EGRESS"):
-			r.flushed = true
-		case strings.Contains(argv, "getent ahosts"):
-			r.resolved = true
-		}
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
+// `orb list` answers for the machine states.
+const (
+	listRunning = machine + " running ubuntu\n"
+	listStopped = machine + " stopped ubuntu\n"
+	listAbsent  = "\n"
+)
 
-func (r *closedChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (exec.Result, error) {
-	return r.RunIn(ctx, "", env, name, args...)
+// scriptList scripts the machine listing EnsureUp/Stop/Teardown consult first.
+func scriptList(f *proc.FakeRunner, out string) {
+	f.Script("orb list", proc.Result{Stdout: out})
 }
 
 func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
-	r := &closedChainRunner{FakeRunner: exec.NewFakeRunner()}
-	r.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	r.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
-	b := New(r, "lever-jail")
-	// A prior apply resolved a v6 alias; the skip path parses only v4 from the
-	// live chain (existingClosedAlias never reads v6), so a re-apply that hits
-	// the skip must leave the previously-resolved v6 alias untouched rather
-	// than zeroing it.
-	b.AliasV6 = "fd07::fe"
+	r := orbGuest.ClosedChain(backendtest.AhostsDual, true)
+	b := New(r, machine, common.Options{})
+	// A prior apply closed the chain; the re-apply below must hit the skip path.
+	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
+		t.Fatalf("first ApplyEgress: %v", err)
+	}
+	r.Open, r.Flushed, r.Resolved = false, false, false
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
 	// I2: an already-closed chain must NOT be flushed or re-resolved — that would
 	// briefly open egress for a running agent.
-	if r.flushed {
-		t.Fatal("must not flush LEVER_EGRESS when the closed posture is already active (would open egress)")
-	}
-	if r.resolved {
-		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
-	}
-	if b.HostAliasV4() != "0.250.250.254" {
-		t.Fatalf("alias should be read from the existing chain, got %q", b.HostAliasV4())
-	}
-	if b.AliasV6 != "fd07::fe" {
-		t.Fatalf("skip path must not clobber a prior aliasV6 (it cannot know v6 from the live chain); got %q", b.AliasV6)
-	}
+	backendtest.AssertClosedChainKept(t, r, b.HostAliasV4())
 }
 
 func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	orbGuest.ScriptEgress(f, backendtest.AhostsDual)
+	b := New(f, machine, common.Options{})
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
-	flushIdx, getentIdx := -1, -1
-	for i, c := range f.Calls {
-		argv := strings.Join(c.Args, " ")
-		if strings.Contains(argv, "iptables -F LEVER_EGRESS") {
-			flushIdx = i
-		}
-		if strings.Contains(argv, "getent ahosts host.orb.internal") {
-			getentIdx = i
-		}
-	}
-	if flushIdx < 0 {
-		t.Fatal("ApplyEgress must flush LEVER_EGRESS (idempotent re-apply, no rule accumulation)")
-	}
-	// Flush BEFORE resolve: under a prior closed posture the catch-all DROP blocks
-	// DNS/53; flushing the chain first restores it so the re-resolve succeeds.
-	if getentIdx < 0 || flushIdx > getentIdx {
-		t.Fatalf("flush (idx %d) must precede the host-alias resolve (idx %d)", flushIdx, getentIdx)
-	}
+	backendtest.AssertFlushPrecedesResolve(t, f, orbGuest.Alias)
 }
 
 // orbVersionScript scripts a successful `orb version` response for >= 2.1.1.
-func orbVersionScript(f *exec.FakeRunner) {
-	f.Script("orb version", exec.Result{Stdout: "Version: 2.2.1 (2020100)\n"})
+func orbVersionScript(f *proc.FakeRunner) {
+	f.Script("orb version", proc.Result{Stdout: "Version: 2.2.1 (2020100)\n"})
 }
 
-func scriptedMachine(f *exec.FakeRunner) {
+// scriptedMachine scripts a fully up (running) machine: version, list,
+// whoami/id -u, runtimes, arch probe (EnsureScion) and egress.
+func scriptedMachine(f *proc.FakeRunner) {
 	orbVersionScript(f)
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"}) // machine already exists
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
-	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	// EnsureScion (when a test sets ScionSource/ScionVersion): guest arch detection.
-	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "arm64\n"})
-	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
+	scriptList(f, listRunning) // machine already exists
+	orbGuest.ScriptProvision(f, "501", backendtest.AhostsDual)
 }
 
 func TestEnsureUpIsIdempotentWhenMachineExists(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	b := New(f, "lever-jail")
+	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/Users/x/tree", AllowedPorts: []int{3305},
+		MachineName: machine, ProjectTree: "/Users/x/tree", AllowedPorts: []int{3305},
 	})
 	if err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	// Must NOT call `orb create` when the machine already exists.
-	for _, c := range f.Calls {
-		if c.Name == "orb" && len(c.Args) > 0 && c.Args[0] == "create" {
-			t.Fatalf("create called though machine exists: %+v", c)
-		}
-	}
+	backendtest.AssertNoSubcommand(t, f, "orb", "create")
 }
 
 func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	orbVersionScript(f)
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
-	f.Script("orb create --isolated --mount", exec.Result{Stdout: "created\n"})
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
-	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	// ApplyEgress (called by EnsureUp): resolve alias + iptables rules
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
-	b := New(f, "lever-jail")
+	scriptList(f, listAbsent)
+	f.Script("orb create --isolated --mount", proc.Result{Stdout: "created\n"})
+	orbGuest.ScriptProvision(f, "501", backendtest.AhostsDual)
+	b := New(f, machine, common.Options{})
 
-	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/Users/x/tree"}); err != nil {
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/Users/x/tree"}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	var sawCreate bool
-	for _, c := range f.Calls {
-		if c.Name == "orb" && strings.Join(c.Args, " ") == "create --isolated --mount /Users/x/tree:/lever ubuntu lever-jail" {
-			sawCreate = true
-		}
-	}
-	if !sawCreate {
-		t.Fatalf("expected `orb create --isolated --mount /Users/x/tree:/lever ubuntu lever-jail`; calls=%+v", f.Calls)
+	want := "orb create --isolated --mount /Users/x/tree:/lever ubuntu " + machine
+	if !f.Called(func(c proc.Call) bool { return c.Argv() == want }) {
+		t.Fatalf("expected `%s`; calls=%+v", want, f.Calls)
 	}
 }
 
 // --- ResolveRunUser: passive attach must resolve without provisioning. ---
 
 func TestResolveRunUserResolvesWhenMachineRunning(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "501\n"})
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	scriptList(f, listRunning)
+	orbGuest.ScriptRunUser(f, "leveruser", "501")
+	b := New(f, machine, common.Options{})
 
 	if err := b.ResolveRunUser(context.Background()); err != nil {
 		t.Fatalf("ResolveRunUser: %v", err)
@@ -193,67 +135,55 @@ func TestResolveRunUserResolvesWhenMachineRunning(t *testing.T) {
 		t.Fatalf("run user/uid not resolved: user=%q uid=%q", b.RunUser(), b.RunUID())
 	}
 	// No provisioning calls: only the read-only list + whoami/id -u probes.
-	for _, c := range f.Calls {
-		argv := strings.Join(append([]string{c.Name}, c.Args...), " ")
-		if strings.Contains(argv, "create") || strings.Contains(argv, "iptables") || strings.Contains(argv, "apt-get") {
-			t.Fatalf("ResolveRunUser must not provision anything; saw call: %s", argv)
+	for _, sub := range []string{"create", "iptables", "apt-get"} {
+		if i := f.CallIndex(proc.ArgvContains(sub)); i >= 0 {
+			t.Fatalf("ResolveRunUser must not provision anything; saw call: %s", f.Calls[i].Argv())
 		}
 	}
 }
 
 func TestResolveRunUserErrorsWhenMachineAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	scriptList(f, listAbsent)
+	b := New(f, machine, common.Options{})
 
 	err := b.ResolveRunUser(context.Background())
 	if err == nil {
 		t.Fatal("expected error when the machine does not exist")
 	}
-	if !strings.Contains(err.Error(), "lever-jail") {
+	if !strings.Contains(err.Error(), machine) {
 		t.Fatalf("error should name the machine; got: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "orb" && len(c.Args) > 0 && c.Args[0] == "create" {
-			t.Fatalf("create must NOT be called by ResolveRunUser: %+v", c)
-		}
-	}
+	backendtest.AssertNoSubcommand(t, f, "orb", "create")
 }
 
 func TestResolveRunUserErrorsWhenMachineNotRunning(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	scriptList(f, listStopped)
+	b := New(f, machine, common.Options{})
 
 	err := b.ResolveRunUser(context.Background())
 	if err == nil {
 		t.Fatal("expected error when the machine is not running")
 	}
-	if !strings.Contains(err.Error(), "lever-jail") {
+	if !strings.Contains(err.Error(), machine) {
 		t.Fatalf("error should name the machine; got: %v", err)
 	}
-	for _, c := range f.Calls {
-		argv := strings.Join(append([]string{c.Name}, c.Args...), " ")
-		if strings.Contains(argv, "whoami") || strings.Contains(argv, "id -u") {
-			t.Fatalf("must not attempt to resolve run user on a non-running machine: %s", argv)
+	for _, probe := range []string{"whoami", "id -u"} {
+		if i := f.CallIndex(proc.ArgvContains(probe)); i >= 0 {
+			t.Fatalf("must not attempt to resolve run user on a non-running machine: %s", f.Calls[i].Argv())
 		}
 	}
 }
 
 func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	orbVersionScript(f)
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb -m lever-jail whoami", exec.Result{Stdout: "leveruser\n"})
-	f.Script("orb -m lever-jail id -u", exec.Result{Stdout: "1000\n"}) // non-default uid
-	f.Script("orb -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -u root -m lever-jail bash", exec.Result{Stdout: "ok\n"})
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
-	b := New(f, "lever-jail")
+	scriptList(f, listRunning)
+	orbGuest.ScriptProvision(f, "1000", backendtest.AhostsDual) // non-default uid
+	b := New(f, machine, common.Options{})
 
-	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/Users/x/tree"}); err != nil {
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/Users/x/tree"}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	if got := b.DockerHost(); !strings.Contains(got, "/run/user/1000/") {
@@ -262,14 +192,14 @@ func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 }
 
 func TestProfileDeclaresSharedKernelAndFragile(t *testing.T) {
-	p := New(exec.NewFakeRunner(), "lever-jail").Profile()
+	p := New(proc.NewFakeRunner(), machine, common.Options{}).Profile()
 	if p.SeparateKernel || !p.VersionFragile {
 		t.Fatalf("orbstack profile wrong: %+v", p)
 	}
 }
 
 func TestProfileFSBoundedByIsHonest(t *testing.T) {
-	p := New(exec.NewFakeRunner(), "lever-jail").Profile()
+	p := New(proc.NewFakeRunner(), machine, common.Options{}).Profile()
 	if !strings.Contains(p.FSBoundedBy, "/lever") {
 		t.Fatalf("Profile.FSBoundedBy should mention /lever mount; got %q", p.FSBoundedBy)
 	}
@@ -279,63 +209,42 @@ func TestProfileFSBoundedByIsHonest(t *testing.T) {
 }
 
 func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb -m lever-jail getent ahosts host.orb.internal", exec.Result{Stdout: "0.250.250.254 STREAM \nfd07::fe STREAM \n"})
-	f.Script("orb -u root -m lever-jail iptables", exec.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", exec.Result{})
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	orbGuest.ScriptEgress(f, backendtest.AhostsDual)
+	b := New(f, machine, common.Options{})
 
 	if err := b.ApplyEgress(context.Background(), []int{3305}, false); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
-	var sawAccept, sawDrop bool
-	for _, c := range f.Calls {
-		j := strings.Join(append([]string{c.Name}, c.Args...), " ")
-		if strings.Contains(j, "iptables") && strings.Contains(j, "--dport 3305") && strings.Contains(j, "ACCEPT") {
-			sawAccept = true
-		}
-		if strings.Contains(j, "iptables") && strings.Contains(j, "0.250.250.254 -j DROP") {
-			sawDrop = true
-		}
-	}
-	if !sawAccept || !sawDrop {
-		t.Fatalf("accept=%t drop=%t", sawAccept, sawDrop)
-	}
+	backendtest.AssertEgressRules(t, f, "3305")
 }
 
 // --- Stop: power off, keep disk (distinct from Teardown). ---
 
 func TestStopStopsMachineWhenListed(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb stop lever-jail", exec.Result{})
-	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
+	f := proc.NewFakeRunner()
+	scriptList(f, listRunning)
+	f.Script("orb stop "+machine, proc.Result{})
+	if err := New(f, machine, common.Options{}).Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	last := f.Calls[len(f.Calls)-1]
-	if last.Name != "orb" || len(last.Args) == 0 || last.Args[0] != "stop" {
-		t.Fatalf("expected last call orb stop lever-jail; got %+v", f.Calls)
-	}
+	backendtest.AssertLastSubcommand(t, f, "orb", "stop")
 }
 
 func TestStopIsNoopWhenAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
-	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
+	f := proc.NewFakeRunner()
+	scriptList(f, listAbsent)
+	if err := New(f, machine, common.Options{}).Stop(context.Background()); err != nil {
 		t.Fatalf("Stop should be a no-op, got: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "orb" && len(c.Args) > 0 && c.Args[0] == "stop" {
-			t.Fatalf("stop must NOT be called when machine absent: %+v", f.Calls)
-		}
-	}
+	backendtest.AssertNoSubcommand(t, f, "orb", "stop")
 }
 
 func TestStopOnAlreadyStoppedMachineIsHarmless(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
-	f.Script("orb stop lever-jail", exec.Result{})
-	if err := New(f, "lever-jail").Stop(context.Background()); err != nil {
+	f := proc.NewFakeRunner()
+	scriptList(f, listStopped)
+	f.Script("orb stop "+machine, proc.Result{})
+	if err := New(f, machine, common.Options{}).Stop(context.Background()); err != nil {
 		t.Fatalf("Stop on an already-stopped machine should be harmless, got: %v", err)
 	}
 }
@@ -344,184 +253,96 @@ func TestStopOnAlreadyStoppedMachineIsHarmless(t *testing.T) {
 // treated as a no-op. ---
 
 func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
-	f.Script("orb start lever-jail", exec.Result{})
-	f.Script("orb -m lever-jail true", exec.Result{})
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	scriptList(f, listStopped)
+	f.Script("orb start "+machine, proc.Result{})
+	f.Script(orbGuest.User+" true", proc.Result{})
+	b := New(f, machine, common.Options{})
 
 	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
 		t.Fatalf("ensureMachine: %v", err)
 	}
-	var sawStart, sawCreate bool
-	for _, c := range f.Calls {
-		if c.Name == "orb" && len(c.Args) > 0 {
-			if c.Args[0] == "start" {
-				sawStart = true
-			}
-			if c.Args[0] == "create" {
-				sawCreate = true
-			}
-		}
-	}
-	if !sawStart {
+	if !f.Called(proc.Subcommand("orb", "start")) {
 		t.Fatal("expected `orb start` for a stopped machine")
 	}
-	if sawCreate {
-		t.Fatal("create must NOT be called for an already-existing (stopped) machine")
-	}
+	// create must NOT be called for an already-existing (stopped) machine.
+	backendtest.AssertNoSubcommand(t, f, "orb", "create")
 }
 
 func TestEnsureMachineRunningIsNoop(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	scriptList(f, listRunning)
+	b := New(f, machine, common.Options{})
 
 	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
 		t.Fatalf("ensureMachine: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "orb" && len(c.Args) > 0 && (c.Args[0] == "start" || c.Args[0] == "create") {
-			t.Fatalf("neither start nor create should be called for an already-running machine: %+v", f.Calls)
-		}
-	}
+	// Neither start nor create for an already-running machine.
+	backendtest.AssertNoSubcommand(t, f, "orb", "start", "create")
 }
 
 func TestEnsureMachineStartTimesOutWhenUnreachable(t *testing.T) {
-	origAttempts, origInterval := orbStartProbeAttempts, orbStartProbeInterval
-	orbStartProbeAttempts, orbStartProbeInterval = 2, time.Millisecond
-	defer func() { orbStartProbeAttempts, orbStartProbeInterval = origAttempts, origInterval }()
-
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail stopped ubuntu\n"})
-	f.Script("orb start lever-jail", exec.Result{})
+	f := proc.NewFakeRunner()
+	scriptList(f, listStopped)
+	f.Script("orb start "+machine, proc.Result{})
 	// "orb -m lever-jail true" is deliberately unscripted: FakeRunner errors on
 	// every unscripted call, simulating a machine that never becomes reachable.
-	b := New(f, "lever-jail")
+	b := New(f, machine, common.Options{})
+	b.probeAttempts, b.probeInterval = 2, time.Millisecond
 
 	err := b.ensureMachine(context.Background(), "/Users/x/tree")
 	if err == nil {
 		t.Fatal("expected an error when the machine never becomes reachable after start")
 	}
-	if !strings.Contains(err.Error(), "lever-jail") {
+	if !strings.Contains(err.Error(), machine) {
 		t.Fatalf("error should name the machine; got: %v", err)
 	}
 }
 
 func TestTeardownDeletesMachineWhenPresent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "lever-jail running ubuntu\n"})
-	f.Script("orb delete lever-jail", exec.Result{})
-	if err := New(f, "lever-jail").Teardown(context.Background()); err != nil {
+	f := proc.NewFakeRunner()
+	scriptList(f, listRunning)
+	f.Script("orb delete "+machine, proc.Result{})
+	if err := New(f, machine, common.Options{}).Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if f.Calls[len(f.Calls)-1].Name != "orb" || f.Calls[len(f.Calls)-1].Args[0] != "delete" {
-		t.Fatalf("expected last call orb delete; got %+v", f.Calls)
-	}
+	backendtest.AssertLastSubcommand(t, f, "orb", "delete")
 }
 
 func TestTeardownIsNoopWhenAbsent(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb list", exec.Result{Stdout: "\n"}) // no machines
-	if err := New(f, "lever-jail").Teardown(context.Background()); err != nil {
+	f := proc.NewFakeRunner()
+	scriptList(f, listAbsent)
+	if err := New(f, machine, common.Options{}).Teardown(context.Background()); err != nil {
 		t.Fatalf("Teardown should be a no-op, got: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "orb" && len(c.Args) > 0 && c.Args[0] == "delete" {
-			t.Fatalf("delete must NOT be called when machine absent: %+v", f.Calls)
-		}
-	}
+	backendtest.AssertNoSubcommand(t, f, "orb", "delete")
 }
 
 // --- OrbStack version preflight tests ---
 
 func TestOrbVersionAtLeast(t *testing.T) {
-	cases := []struct {
-		name    string
-		stdout  string
-		wantOK  bool
-		wantErr bool
-		wantGot string
-	}{
-		{
-			name:    "2.2.1 >= 2.1.1 → ok",
-			stdout:  "Version: 2.2.1 (2020100)\n",
-			wantOK:  true,
-			wantGot: "2.2.1",
-		},
-		{
-			name:    "2.1.1 >= 2.1.1 → ok (exact match)",
-			stdout:  "Version: 2.1.1 (2000000)\n",
-			wantOK:  true,
-			wantGot: "2.1.1",
-		},
-		{
-			name:    "2.1.0 >= 2.1.1 → too old",
-			stdout:  "Version: 2.1.0 (1990000)\n",
-			wantOK:  false,
-			wantGot: "2.1.0",
-		},
-		{
-			name:    "2.0.9 >= 2.1.1 → too old (minor mismatch)",
-			stdout:  "Version: 2.0.9 (1900000)\n",
-			wantOK:  false,
-			wantGot: "2.0.9",
-		},
-		{
-			name:    "3.0.0 >= 2.1.1 → ok (major bump)",
-			stdout:  "Version: 3.0.0 (9999999)\n",
-			wantOK:  true,
-			wantGot: "3.0.0",
-		},
-		{
-			name:    "1.9.9 >= 2.1.1 → too old (major too low)",
-			stdout:  "Version: 1.9.9 (1000000)\n",
-			wantOK:  false,
-			wantGot: "1.9.9",
-		},
-		{
-			name:    "malformed output → error",
-			stdout:  "orb: command not found\n",
-			wantErr: true,
-		},
-		{
-			name:    "empty output → error",
-			stdout:  "",
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := exec.NewFakeRunner()
-			f.Script("orb version", exec.Result{Stdout: tc.stdout})
-			ok, got, err := orbVersionAtLeast(context.Background(), f, 2, 1, 1)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (ok=%t got=%q)", ok, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if ok != tc.wantOK {
-				t.Errorf("ok: want %t got %t", tc.wantOK, ok)
-			}
-			if got != tc.wantGot {
-				t.Errorf("got version string: want %q got %q", tc.wantGot, got)
-			}
-		})
-	}
+	backendtest.RunVersionCases(t, []backendtest.VersionCase{
+		{Name: "2.2.1 >= 2.1.1 → ok", Stdout: "Version: 2.2.1 (2020100)\n", WantOK: true, WantGot: "2.2.1"},
+		{Name: "2.1.1 >= 2.1.1 → ok (exact match)", Stdout: "Version: 2.1.1 (2000000)\n", WantOK: true, WantGot: "2.1.1"},
+		{Name: "2.1.0 >= 2.1.1 → too old", Stdout: "Version: 2.1.0 (1990000)\n", WantOK: false, WantGot: "2.1.0"},
+		{Name: "2.0.9 >= 2.1.1 → too old (minor mismatch)", Stdout: "Version: 2.0.9 (1900000)\n", WantOK: false, WantGot: "2.0.9"},
+		{Name: "3.0.0 >= 2.1.1 → ok (major bump)", Stdout: "Version: 3.0.0 (9999999)\n", WantOK: true, WantGot: "3.0.0"},
+		{Name: "1.9.9 >= 2.1.1 → too old (major too low)", Stdout: "Version: 1.9.9 (1000000)\n", WantOK: false, WantGot: "1.9.9"},
+		{Name: "malformed output → error", Stdout: "orb: command not found\n", WantErr: true},
+		{Name: "empty output → error", Stdout: "", WantErr: true},
+	}, func(f *proc.FakeRunner, stdout string) (bool, string, error) {
+		f.Script("orb version", proc.Result{Stdout: stdout})
+		return common.VersionAtLeast(context.Background(), f, []string{"orb", "version"}, orbVersionRe, 2, 1, 1)
+	})
 }
 
 func TestEnsureUpRejectsOldOrb(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb version", exec.Result{Stdout: "Version: 2.1.0 (1990000)\n"})
-	b := New(f, "lever-jail")
+	f := proc.NewFakeRunner()
+	f.Script("orb version", proc.Result{Stdout: "Version: 2.1.0 (1990000)\n"})
+	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail",
+		MachineName: machine,
 		ProjectTree: "/Users/x/tree",
 	})
 	if err == nil {
@@ -536,137 +357,95 @@ func TestEnsureUpRejectsOldOrb(t *testing.T) {
 }
 
 func TestEnsureUpInstallsPodman(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	b := New(f, "lever-jail")
-	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: "lever-jail", ProjectTree: "/t", AllowedPorts: nil}); err != nil {
+	b := New(f, machine, common.Options{})
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/t", AllowedPorts: nil}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	var sawPodman bool
-	for _, c := range f.Calls {
-		j := strings.Join(append([]string{c.Name}, c.Args...), " ")
-		if strings.Contains(j, "apt-get install") && strings.Contains(j, "podman") {
-			sawPodman = true
-		}
-	}
-	if !sawPodman {
+	if !f.Called(proc.ArgvContains("apt-get install", "podman")) {
 		t.Fatalf("expected podman install; calls=%+v", f.Calls)
 	}
 }
 
 func TestEnsureScionBuildsAndInstalls(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	f.Script("go build", exec.Result{})
-	f.Script("bash -c", exec.Result{})
+	f.Script("go build", proc.Result{})
+	f.Script("bash -c", proc.Result{})
 	// The install now reads a digest marker first and records one after.
-	f.Script("orb -m lever-jail sh -c", exec.Result{Code: 1})
-	f.Script("orb -u root -m lever-jail sh -c", exec.Result{})
+	f.Script(orbGuest.User+" sh -c", proc.Result{Code: 1})
+	f.Script(orbGuest.Root+" sh -c", proc.Result{})
 	src := t.TempDir() // must exist for the stat check
-	stageFakeBuildOutput(t, "lever-jail")
-	b := New(f, "lever-jail")
+	backendtest.StageFakeBuildOutput(t, machine)
+	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: src,
+		MachineName: machine, ProjectTree: "/t", ScionSource: src,
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 
-	var sawBuild, sawInstall bool
-	for _, c := range f.Calls {
-		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			if c.Dir != src {
-				t.Errorf("build Dir: want %q got %q", src, c.Dir)
-			}
-			if c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
-				t.Errorf("build env: want linux/arm64 got %+v", c.Env)
-			}
-			var sawCmd bool
-			var binArg string
-			for i, a := range c.Args {
-				if a == "./cmd/scion" {
-					sawCmd = true
-				}
-				if a == "-o" && i+1 < len(c.Args) {
-					binArg = c.Args[i+1]
-				}
-			}
-			if !sawCmd {
-				t.Errorf("build args should contain ./cmd/scion; got %+v", c.Args)
-			}
-			if !strings.Contains(binArg, "lever-scion-lever-jail") {
-				t.Errorf("build output path should include per-machine name lever-scion-lever-jail; got %q", binArg)
-			}
-			sawBuild = true
+	backendtest.AssertScionBuild(t, f, src, machine)
+	// The install: root prefix, guest-side atomic script, binary on stdin.
+	sawInstall := f.Called(func(c proc.Call) bool {
+		if !c.HasPrefix("orb", "-u", "root", "-m", machine, "bash", "-c") {
+			return false
 		}
-		if c.Name == "bash" && len(c.Args) >= 2 && c.Args[0] == "-c" {
-			script := c.Args[1]
-			if strings.Contains(script, "set -o pipefail") &&
-				strings.Contains(script, "scion.tmp") &&
-				strings.Contains(script, "mv") &&
-				strings.Contains(script, "'lever-jail'") &&
-				strings.Contains(script, "/usr/local/bin/scion") {
-				sawInstall = true
-			}
-		}
-	}
-	if !sawBuild {
-		t.Fatalf("expected go build for ./cmd/scion in %q; calls=%+v", src, f.Calls)
-	}
+		script := c.Args[len(c.Args)-1]
+		return strings.Contains(script, "scion.tmp") &&
+			strings.Contains(script, "mv") &&
+			strings.Contains(script, "/usr/local/bin/scion") &&
+			c.Stdin == "fake-scion-"+machine
+	})
 	if !sawInstall {
-		t.Fatalf("expected bash -c atomic scion install into jail; calls=%+v", f.Calls)
+		t.Fatalf("expected atomic scion install into jail via the root prefix; calls=%+v", f.Calls)
 	}
 }
 
 func TestEnsureScionSkippedWhenEmpty(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	b := New(f, "lever-jail")
+	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: "",
+		MachineName: machine, ProjectTree: "/t", ScionSource: "",
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			t.Fatalf("go build must NOT be called when ScionSource empty: %+v", c)
-		}
-		if c.Name == "bash" && len(c.Args) >= 2 && strings.Contains(c.Args[1], "/usr/local/bin/scion") {
-			t.Fatalf("scion install must NOT be called when ScionSource empty: %+v", c)
-		}
+	// go build must NOT be called when ScionSource is empty.
+	backendtest.AssertNoSubcommand(t, f, "go", "build")
+	if i := f.CallIndex(func(c proc.Call) bool {
+		return c.Name == "bash" && len(c.Args) >= 2 && strings.Contains(c.Args[1], "/usr/local/bin/scion")
+	}); i >= 0 {
+		t.Fatalf("scion install must NOT be called when ScionSource empty: %+v", f.Calls[i])
 	}
 }
 
 func TestEnsureScionSourceMissing(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	b := New(f, "lever-jail")
+	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/t", ScionSource: missing,
+		MachineName: machine, ProjectTree: "/t", ScionSource: missing,
 	})
-	if err == nil {
-		t.Fatal("expected error for missing scion source, got nil")
+	var srcErr *scionbin.SourceError
+	if !errors.As(err, &srcErr) || srcErr.Path != missing {
+		t.Fatalf("error should be a scion source error for %q; got: %v", missing, err)
 	}
-	if !strings.Contains(err.Error(), "scion source") {
-		t.Fatalf("error should mention scion source; got: %v", err)
-	}
-	for _, c := range f.Calls {
-		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "build" {
-			t.Fatalf("go build must NOT be called when source missing (stat short-circuits): %+v", c)
-		}
-	}
+	// go build must NOT be called when the source is missing (stat short-circuits).
+	backendtest.AssertNoSubcommand(t, f, "go", "build")
 }
 
 func TestEnsureUpRequiresProjectTree(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	// No `orb version` needed: ProjectTree guard fires before the preflight.
-	b := New(f, "lever-jail")
+	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail",
+		MachineName: machine,
 		ProjectTree: "", // empty
 	})
 	if err == nil {
@@ -677,10 +456,21 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	}
 }
 
+// resolvedOrb returns a backend whose run user is resolved (stephen/501)
+// through the same probes EnsureUp issues, without provisioning anything.
+func resolvedOrb(t *testing.T, f *proc.FakeRunner, machine string) *OrbStack {
+	t.Helper()
+	backendtest.Guest{User: "orb -m " + machine}.ScriptRunUser(f, "stephen", "501")
+	o := New(f, machine, common.Options{})
+	if err := o.ReadRunUser(context.Background()); err != nil {
+		t.Fatalf("ReadRunUser: %v", err)
+	}
+	f.Calls = nil
+	return o
+}
+
 func TestJailTransportMethods(t *testing.T) {
-	o := New(exec.NewFakeRunner(), "lever-x")
-	// Pre-EnsureUp the prefix uses the zero-value user; we only test post-resolve.
-	o.User, o.UID = "stephen", "501"
+	o := resolvedOrb(t, proc.NewFakeRunner(), "lever-x")
 
 	if got := JailPrefix("lever-x", "stephen"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
 		t.Fatalf("JailPrefix = %v", got)
@@ -704,30 +494,34 @@ func TestJailTransportMethods(t *testing.T) {
 // is pinned directly through the root transport. ---
 
 func TestInstallGuestBinaryArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("bash", exec.Result{})
-	o := New(f, "lever-x")
-	if err := o.InstallGuestBinary(context.Background(), "/host/lever-agent", "/usr/local/bin/lever-agent"); err != nil {
+	f := proc.NewFakeRunner()
+	f.Script("orb", proc.Result{})
+	local := filepath.Join(t.TempDir(), "lever-agent")
+	if err := os.WriteFile(local, []byte("agent-bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := New(f, "lever-x", common.Options{})
+	if err := o.InstallGuestBinary(context.Background(), local, "/usr/local/bin/lever-agent"); err != nil {
 		t.Fatalf("InstallGuestBinary: %v", err)
 	}
 	if len(f.Calls) != 1 {
 		t.Fatalf("want 1 host call, got %d", len(f.Calls))
 	}
 	c := f.Calls[0]
-	if c.Name != "bash" || len(c.Args) != 2 || c.Args[0] != "-c" {
-		t.Fatalf("want `bash -c <script>`, got %s %v", c.Name, c.Args)
+	// The root transport prefix must be wired through verbatim, with the
+	// binary on stdin of the guest-side script.
+	if c.Name != "orb" || !reflect.DeepEqual(c.Args[:6], []string{"-u", "root", "-m", "lever-x", "bash", "-c"}) {
+		t.Fatalf("root prefix mis-wired: %s %v", c.Name, c.Args)
 	}
-	// The root transport prefix must be wired through verbatim (shell-quoted).
-	if !strings.Contains(c.Args[1], `'orb' '-u' 'root' '-m' 'lever-x'`) {
-		t.Fatalf("root prefix mis-wired in install script: %q", c.Args[1])
+	if c.Stdin != "agent-bytes" {
+		t.Fatalf("binary not streamed on stdin: %q", c.Stdin)
 	}
 }
 
 func TestJailRunnerArgv(t *testing.T) {
-	f := exec.NewFakeRunner()
-	f.Script("orb", exec.Result{Stdout: "ok\n"})
-	o := New(f, "lever-x")
-	o.User, o.UID = "stephen", "501"
+	f := proc.NewFakeRunner()
+	o := resolvedOrb(t, f, "lever-x")
+	f.Script("orb", proc.Result{Stdout: "ok\n"})
 	if _, err := o.JailRunner().Run(context.Background(), nil, "true"); err != nil {
 		t.Fatalf("JailRunner run: %v", err)
 	}
@@ -746,8 +540,7 @@ func TestJailRunnerArgv(t *testing.T) {
 }
 
 func TestAttachArgvFullPrefix(t *testing.T) {
-	o := New(exec.NewFakeRunner(), "lever-x")
-	o.User, o.UID = "stephen", "501"
+	o := resolvedOrb(t, proc.NewFakeRunner(), "lever-x")
 	attach := o.AttachArgv([]string{"scion", "attach"})
 	if wantPrefix := []string{"orb", "-m", "lever-x", "-u", "stephen", "env"}; !reflect.DeepEqual(attach[:6], wantPrefix) {
 		t.Fatalf("attach prefix mis-wired: %v", attach[:6])
@@ -758,12 +551,12 @@ func TestAttachArgvFullPrefix(t *testing.T) {
 }
 
 func TestRunUserUIDAfterEnsureUp(t *testing.T) {
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f) // scripts whoami→leveruser, id -u→501
-	b := New(f, "lever-jail")
+	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/Users/x/tree",
+		MachineName: machine, ProjectTree: "/Users/x/tree",
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
@@ -781,92 +574,52 @@ func TestRunUserUIDAfterEnsureUp(t *testing.T) {
 // reported success. Every other binary-mode test calls EnsureScion directly and
 // so cannot see it — this one drives the real entry point.
 func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "scion")
-	h := make([]byte, 64)
-	copy(h, []byte{0x7f, 'E', 'L', 'F'})
-	h[4], h[5], h[6] = 2, 1, 1 // 64-bit, little-endian, v1
-	h[16] = 2                  // ET_EXEC
-	h[18] = 183                // EM_AARCH64
-	h[20] = 1                  // e_version
-	h[52] = 64                 // e_ehsize
-	if err := os.WriteFile(bin, h, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	f.Script("orb -m lever-jail uname -m", exec.Result{Stdout: "aarch64\n"})
-	f.Script("orb -m lever-jail /usr/bin/sha256sum", exec.Result{Code: 1}) // not installed yet
-	f.Script("bash -c", exec.Result{})
-	b := New(f, "lever-jail")
+	orbGuest.ScriptArch(f, "aarch64")
+	f.Script(orbGuest.User+" /usr/bin/sha256sum", proc.Result{Code: 1}) // not installed yet
+	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/t", ScionBinary: bin,
+		MachineName: machine, ProjectTree: "/t", ScionBinary: bin,
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 
-	var installed bool
-	for _, c := range f.Calls {
-		if c.Name == "go" {
-			t.Fatalf("binary mode must never invoke go through EnsureUp; got %+v", c)
-		}
-		if c.Name == "bash" && len(c.Args) > 1 && strings.Contains(c.Args[1], "cat ") {
-			installed = true
-		}
+	if i := f.CallIndex(func(c proc.Call) bool { return c.Name == "go" }); i >= 0 {
+		t.Fatalf("binary mode must never invoke go through EnsureUp; got %+v", f.Calls[i])
 	}
+	installed := f.Called(func(c proc.Call) bool {
+		return len(c.Args) > 1 && c.Args[len(c.Args)-2] == "-c" && strings.Contains(c.Args[len(c.Args)-1], "cat > ")
+	})
 	if !installed {
 		t.Fatal("EnsureUp with only ScionBinary set installed nothing")
 	}
 }
 
-// fakeScionCheckout writes the minimum of a scion checkout that the web-asset
-// path inspects: a web/ holding package.json.
-func fakeScionCheckout(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return root
-}
-
-// scriptScionInstall scripts the host build + guest install of the scion binary
-// so a test can reach whatever runs AFTER it.
-func scriptScionInstall(t *testing.T, f *exec.FakeRunner, machine string) {
-	t.Helper()
-	f.Script("go build", exec.Result{})
-	f.Script("bash -c", exec.Result{})
-	// A digest mismatch, so the install streams rather than skipping.
-	f.Script("orb -m "+machine+" /usr/bin/sha256sum", exec.Result{Code: 1})
-	stageFakeBuildOutput(t, machine)
-}
-
-// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. Each
-// backend keeps its OWN copy of that struct literal, and this pair has drifted
-// before — ScionBinary was added to both literals while the guard around them
-// was updated in neither (see backend.Config.HasScion) — so both backends pin
-// it, and both assert the negative too.
+// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. The
+// literal now lives once in common.Base.Provision, but each backend still pins
+// it end to end (and asserts the negative) so a backend that stops calling
+// Provision, or calls it with the wrong config, is caught here.
 func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	scriptScionInstall(t, f, "lever-jail")
-	b := New(f, "lever-jail")
+	orbGuest.ScriptScionInstall(t, f)
+	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/Users/x/tree",
-		ScionSource: fakeScionCheckout(t), ScionWebUI: true,
+		MachineName: machine, ProjectTree: "/Users/x/tree",
+		ScionSource: backendtest.FakeScionCheckout(t), ScionWebUI: true,
 	})
 	// node is deliberately not scripted: the web build stops at its toolchain
 	// probe, which is only reachable if ScionWebUI was threaded through.
-	if err == nil || !strings.Contains(err.Error(), "node/npm toolchain not usable") {
+	if !errors.Is(err, webassets.ErrNodeToolchain) {
 		t.Fatalf("want the web-asset build attempted; got %v", err)
 	}
 }
@@ -876,20 +629,16 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 
-	f := exec.NewFakeRunner()
+	f := proc.NewFakeRunner()
 	scriptedMachine(f)
-	scriptScionInstall(t, f, "lever-jail")
-	b := New(f, "lever-jail")
+	orbGuest.ScriptScionInstall(t, f)
+	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: "lever-jail", ProjectTree: "/Users/x/tree",
-		ScionSource: fakeScionCheckout(t),
+		MachineName: machine, ProjectTree: "/Users/x/tree",
+		ScionSource: backendtest.FakeScionCheckout(t),
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "npm" || c.Name == "node" {
-			t.Fatalf("an instance that serves no UI must not need node: %v %v", c.Name, c.Args)
-		}
-	}
+	backendtest.AssertNoNodeTooling(t, f)
 }

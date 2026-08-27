@@ -10,12 +10,12 @@ import (
 func TestWorkerSpecs(t *testing.T) {
 	app := &config.App{
 		Tree:    "/host/tree",
-		Manager: config.Manager{Image: "mgr:img"},
+		Manager: config.Manager{Image: "mgr:img", Model: "mgr-model"},
 		// Explicit subscription: api-key is the default post-7d86f73; this makes the helper worker assert APIKey:false.
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},
-			{Name: "helper", Dir: "workers/helper", Image: "helper:img"},
+			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model"},
 		},
 	}
 	specs := WorkerSpecs(app, "/lever")
@@ -26,10 +26,10 @@ func TestWorkerSpecs(t *testing.T) {
 	if w.Name != "worker" || w.WorkspaceSubdir != "workers/worker" ||
 		w.HostWorkspace != filepath.Join("/host/tree", "workers/worker") ||
 		w.BootstrapDir != filepath.Join("/host/tree", "workers/worker", ".lever") ||
-		w.Image != "mgr:img" /* inherits manager */ || !w.APIKey {
+		w.Image != "mgr:img" /* inherits manager */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
 		t.Fatalf("bad worker spec: %+v", w)
 	}
-	if specs[1].Image != "helper:img" || specs[1].APIKey {
+	if specs[1].Image != "helper:img" || specs[1].Model != "helper-model" || specs[1].APIKey {
 		t.Fatalf("bad helper spec: %+v", specs[1])
 	}
 }

@@ -175,7 +175,14 @@ func (m AutoReenrolMode) valid() bool {
 }
 
 type Manager struct {
-	Image          string          `yaml:"image"`
+	Image string `yaml:"image"`
+	// Model pins the LLM the agent runs on, passed through verbatim as
+	// `scion start --model` (a scion alias like `large`, or an explicit model
+	// ID). Empty ⇒ lever emits no flag and scion resolves the model itself,
+	// which since scion#908 means the alias "opus" — a default that belongs to
+	// the pin, not to this config, and can move under you when the pin moves.
+	// Set it to make the model a property of the instance you can review.
+	Model          string          `yaml:"model"`
 	PromptFile     string          `yaml:"prompt_file"`
 	AllowPorts     []int           `yaml:"allow_ports"`
 	CredentialFile string          `yaml:"credential_file"`
@@ -188,6 +195,7 @@ type Worker struct {
 	Name     string          `yaml:"name"`
 	Dir      string          `yaml:"dir"`
 	Image    string          `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
+	Model    string          `yaml:"model"` // optional; empty ⇒ inherit Manager.Model
 	LLMAuth  LLMAuthMode     `yaml:"llm_auth"`
 	Obtain   []Grant         `yaml:"obtain"`
 	Delegate []DelegateGrant `yaml:"delegate"`

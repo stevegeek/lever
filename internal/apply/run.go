@@ -810,6 +810,10 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task string) (scion.Star
 	}
 	return scion.StartOpts{
 		Worker: r.app.Name, Task: task, Project: jp, Image: r.app.ManagerImage(), Harness: "claude",
+		// Empty when the config names no model, which omits --model and leaves
+		// scion's default resolution alone. Only ever read on a fresh create:
+		// the resume paths below take no model (scion resume has no such flag).
+		Model: r.app.ManagerModel(),
 		// Workspace = the in-jail project tree, so the manager edits the real
 		// host files in place (verified 2026-06-16). Without it scion mounts a
 		// managed copy of the externalized config dir, not the live tree.

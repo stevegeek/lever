@@ -107,6 +107,7 @@ scion:
   version: e82a2a08                  # pin a scion commit; fetched + cross-compiled into the jail
 manager:
   image: scionlocal/lever-claude
+  model: claude-opus-5               # optional; alias or model ID for `scion start --model`
   prompt_file: prompt.md             # boot task; resolved at the ROOT (host-only, outside the mount)
   allow_ports: [3101, 3201]          # host tool ports the jail may reach
 broker:
@@ -124,6 +125,7 @@ workers:
   - name: scratch
     dir: workers/scratch              # relative to tree (i.e. workspace/workers/scratch)
     # image: <ref>                   # optional; defaults to manager.image
+    # model: <alias|id>             # optional; defaults to manager.model
     obtain:
       - { tool: db, op: read }       # this worker may obtain db/read capabilities
 security:                            # optional image policy (both default off)
@@ -180,6 +182,7 @@ failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-h
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `image` | string | **in practice** | - | Container image for the manager agent. Also the default image for workers that don't set their own (see `workers[].image`). `lever apply` loads this image into the jail's container runtime. Validated for safe ref characters. Without it, agents can't start. |
+| `model` | string | no | - | The LLM the manager runs on, passed to `scion start --model`: a scion alias (`small`, `medium`, `large`, `extra-large`/`xl`) or an explicit model ID (e.g. `claude-opus-5`). Also the default model for workers that don't set their own (see `workers[].model`). Omit to let the pinned scion resolve the model itself. **Create-time only:** `scion resume` has no `--model`, so changing this does not re-point an agent that already exists — only a freshly created one. Editing *only* this key also leaves a **running broker** untouched, so workers that inherit it keep the old model until the broker restarts (see *Worker model inheritance* below). |
 | `prompt_file` | path | no | - | A file whose contents become the manager's boot task. Resolved at the instance **root** (host-only, **outside** the mount, so an agent can't rewrite its own next boot prompt). Must be a confined relative path (no `..`, not absolute). Omit to start with scion's default task. |
 | `credential_file` | path | no | - | A file whose contents are set as the `CLAUDE_CODE_OAUTH_TOKEN` Hub secret and **projected into agent containers**. Relative paths resolve against the config file's directory; `~/` is expanded. Read at apply time with a **permission check (rejected unless the mode is `0600`-tight — no group or other bits) and size cap**. **Its contents reach every agent, point it only at a real, least-privilege, `0600` credential.** See [security-model.md](/security-model/). |
 | `allow_ports` | list of int | no | `[]` | Host tool ports the jail may reach over the host alias (`host.orb.internal`). **This opens a host-loopback port to the jailed agent** — the egress allowlist is the only thing standing between the guest and whatever is listening there, so list only ports you intend the agent to reach (host-side MCP servers, etc). The broker's admin port (`broker.admin_port`, default `8444`) is rejected at config load if listed here — it is unauthenticated and meant to be reachable only from the host loopback, never from the jail. |
@@ -194,6 +197,7 @@ failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-h
 | `name` | string | **yes** | - | Worker identity (its agent slug / hub project name). |
 | `dir` | path | **yes** | - | Worker directory, **relative to `tree`** and inside it. Mounted in place, so files the worker writes appear on the host. Must not be absolute or escape the tree (`..`). |
 | `image` | string | no | `manager.image` | Container image for this worker. Set it to give a worker a different toolchain; omit to inherit the manager image (the common single-image case). `lever apply` loads **each distinct** image into the jail. |
+| `model` | string | no | `manager.model` | The LLM this worker runs on. Set it to give a worker a different capability/cost point; omit to inherit the manager's model (and, if that is unset too, scion's own default). Resolved host-side from config, so the manager cannot choose it when it asks for a worker to be started. Create-time only, as for `manager.model`. |
 | `llm_auth` | enum | no | inherits `broker.llm_auth` | Same as `manager.llm_auth`, per worker, but the instance-uniform rule still applies. |
 | `obtain` / `delegate` | list | no | `[]` | Same shape and meaning as `manager.obtain` / `manager.delegate`. |
 
@@ -341,6 +345,14 @@ remote:
 - **Machine name:** `lever-<name>`. `up`/`apply`/`stop`/`destroy`/`doctor` all agree on this, derived
   from the config (override on `stop`/`destroy`/`doctor` with `--machine`). `lever down` is a
   deprecated alias of `destroy`.
+- **Worker model inheritance:** a worker with no `model:` runs on `manager.model`; with neither
+  set, lever passes no `--model` and the pinned scion resolves the model. The model is fixed when
+  an agent is created (`scion resume` takes no `--model`), so editing it only affects agents
+  created afterwards. The broker resolves the inheritance once, when it starts, and the hash that
+  decides whether `lever apply` restarts the broker covers `broker:`/`workers:`/`scion:` but
+  deliberately not `manager:` — so an edit to `manager.model` alone reaches a newly created worker
+  only after the broker restarts for another reason. Setting `workers[].model` explicitly is the
+  direct route. This is the same trade-off `image:` inheritance already makes.
 - **Worker image inheritance:** a worker with no `image:` runs on `manager.image`. The bring-up plan
   loads every distinct image once (deduped). At dispatch the capability broker reads the config
   directly and supplies each worker's resolved image, so `agent start NAME` takes no image argument.

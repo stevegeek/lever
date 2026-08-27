@@ -40,6 +40,7 @@ type WorkerSpec struct {
 	HostWorkspace   string // host path to the same subdir, e.g. <tree>/workers/worker; MkdirAll'd before start (scion's guard requires it to exist)
 	BootstrapDir    string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
 	Image           string // effective agent image
+	Model           string // effective LLM model; empty ⇒ no --model, scion decides
 	APIKey          bool   // true ⇒ api-key LLM mode for this worker
 }
 
@@ -270,7 +271,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 	if err := b.runtime.Start(ctx, scion.StartOpts{
 		Worker: spec.Name, Task: task, Harness: "claude",
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
-		Image: spec.Image, APIKey: spec.APIKey,
+		Image: spec.Image, Model: spec.Model, APIKey: spec.APIKey,
 	}); err != nil {
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)

@@ -141,7 +141,7 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	dir := t.TempDir()
 	hostWorkspace := filepath.Join(t.TempDir(), "workers", "worker") // does NOT exist yet
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: hostWorkspace,
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
+		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", Model: "claude-opus-5", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 
@@ -174,13 +174,16 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 		t.Fatalf("bootstrap perms = %v, want 0600", fi.Mode().Perm())
 	}
 	// scion start called with the constant instance project (-g) + per-worker
-	// --workspace subdir (no longer equal to each other) + api-key + image
+	// --workspace subdir (no longer equal to each other) + api-key + image +
+	// model. Image and Model are config-resolved host-side: the manager names a
+	// worker and never supplies either, so the spec's values must be what
+	// reaches scion.
 	if len(rt.started) != 1 {
 		t.Fatalf("start calls = %d, want 1", len(rt.started))
 	}
 	got := rt.started[0]
 	if got.Project != testInstanceProject || got.WorkspaceSubdir != "workers/worker" ||
-		got.Worker != "worker" || got.Image != "img:1" || !got.APIKey {
+		got.Worker != "worker" || got.Image != "img:1" || got.Model != "claude-opus-5" || !got.APIKey {
 		t.Fatalf("bad StartOpts: %+v", got)
 	}
 	if got.Task != "do it" {

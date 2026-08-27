@@ -169,6 +169,19 @@ type StartOpts struct {
 	Harness string // default "claude"
 	Project string
 	Image   string // optional
+	// Model is the LLM the agent runs on, emitted as `scion start --model`:
+	// either a scion alias (small, medium, large, extra-large/xl) or an explicit
+	// model ID. Empty emits NO flag, so scion resolves the model itself
+	// (scion#908 resolves an agent with no configured model to the alias
+	// "opus") — that is what keeps an existing config's argv unchanged.
+	//
+	// CREATE-time only. `scion resume` has no --model, so the model is fixed
+	// into the agent record when it is provisioned: changing `model:` in
+	// lever.yaml does NOT re-point an agent that already exists, because apply
+	// and the broker resume such an agent rather than re-creating it. The new
+	// value reaches an agent only on a fresh create (a newly declared worker, or
+	// a record that was deleted first).
+	Model string
 	// Workspace is the path mounted as /workspace in the agent container,
 	// passed as `--workspace`. For directory projects this MUST be set to the
 	// (in-jail) project tree to get a live in-place bind mount: scion's default
@@ -276,6 +289,12 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	}
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
+	}
+	if o.Model != "" {
+		// Unset means "say nothing": scion's own default model resolution is the
+		// documented fallback, and emitting an empty --model would replace it
+		// with an invalid value. See StartOpts.Model.
+		args = append(args, "--model", o.Model)
 	}
 	if o.WorkspaceSubdir != "" {
 		// Relative to the project's workspace_path; scion mounts exactly this

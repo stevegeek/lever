@@ -404,9 +404,13 @@ func newObserveFirstApp(t *testing.T) (*config.App, *proc.FakeRunner) {
 // TestStartManagerObserveFirstCreatesWhenAbsent: no existing record -> Start
 // is called (the create path), Resume/Delete are not, and the post-start
 // liveness verify (seeing the fake's default running/running once Start
-// succeeds) is what lets Run return nil.
+// succeeds) is what lets Run return nil. It also pins `manager.model` onto the
+// create argv: the create path is the ONLY one that can carry a model (scion
+// resume has no --model), so if managerStartOpts ever stops passing it, the
+// configured model reaches no agent at all.
 func TestStartManagerObserveFirstCreatesWhenAbsent(t *testing.T) {
 	app, f := newObserveFirstApp(t)
+	app.Manager.Model = "claude-opus-5"
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // initPhase "" == absent
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
@@ -419,6 +423,9 @@ func TestStartManagerObserveFirstCreatesWhenAbsent(t *testing.T) {
 	}
 	if r.resumeCalls != 0 || r.deleteCalls != 0 {
 		t.Errorf("resumeCalls=%d deleteCalls=%d, want 0/0 (absent record must CREATE, not resume/delete)", r.resumeCalls, r.deleteCalls)
+	}
+	if !sawScionCall(f, "start hello") || !sawScionCall(f, "--model claude-opus-5") {
+		t.Errorf("manager create must carry the configured model; argv=%q", joinedCalls(f))
 	}
 }
 

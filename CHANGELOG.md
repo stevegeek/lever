@@ -7,9 +7,37 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-A code-quality refactor across the module. No new features; the user-visible
-differences below are side effects of tightening seams. Contributors should
-read the Changed/Internal entries before rebasing open branches.
+A code-quality refactor across the module, plus one new config key. Apart from
+that key, the user-visible differences below are side effects of tightening
+seams. Contributors should read the Changed/Internal entries before rebasing
+open branches.
+
+### Added
+
+- **`model:` pins the LLM an agent runs on.** `manager.model` and
+  `workers[].model` are passed straight through as `scion start --model`,
+  taking either a scion alias (`small`, `medium`, `large`, `extra-large`/`xl`)
+  or an explicit model ID. A worker with no `model:` inherits the manager's,
+  the same way `image:` does, and the broker resolves it host-side at dispatch
+  so the manager cannot choose a worker's model. Omitting the key everywhere
+  keeps today's behavior exactly: lever emits no `--model` and the pinned scion
+  resolves the model itself (scion#908 resolves an agent with no configured
+  model to the alias `opus`).
+
+  **Create-time only.** `scion resume` has no `--model`, so the model is fixed
+  into an agent record when it is provisioned: editing `model:` does not
+  re-point an agent that already exists, because apply and the broker resume
+  those rather than re-creating them. The new value reaches a newly declared
+  worker, or an agent whose record was deleted first.
+
+  One further caveat on the inherited case, shared with `image:` and not new
+  here: a running broker bakes its worker dispatch table — inheritance already
+  resolved — at broker start, and `brokerctl.ConfigHash` deliberately excludes
+  the manager block so a manager-only edit does not bounce the broker. Editing
+  **only** `manager.model` therefore leaves an inheriting worker starting on the
+  previous model until the broker restarts for some other reason; setting
+  `workers[].model` explicitly (or any other `broker:`/`workers:`/`scion:`
+  change) does restart it.
 
 ### Changed
 

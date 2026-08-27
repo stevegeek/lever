@@ -204,6 +204,34 @@ func TestStartWorkspaceSubdirWinsOverWorkspace(t *testing.T) {
 	}
 }
 
+func TestStartModelEmitsFlag(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", Model: "claude-opus-5"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := startArgv(f); !strings.Contains(got, "--model claude-opus-5") {
+		t.Fatalf("argv %q must contain --model claude-opus-5", got)
+	}
+}
+
+// The absent case is the one that matters: an unset model must leave scion's
+// own resolution in place, so the flag has to be missing from argv entirely.
+// An empty `--model ""` would instead hand scion a value it cannot resolve,
+// and would change the argv of every config written before this option existed.
+func TestStartWithoutModelOmitsFlag(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, arg := range f.Calls[len(f.Calls)-1].Args {
+		if arg == "--model" {
+			t.Fatalf("argv %q must not mention --model when no model is configured", startArgv(f))
+		}
+	}
+}
+
 func TestStartAPIKeyUsesAPIKeyAuth(t *testing.T) {
 	f := fakeScion(false)
 	c := New(f, Options{})

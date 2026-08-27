@@ -347,6 +347,65 @@ func TestWorkerImageFallsBackToManagerImage(t *testing.T) {
 	}
 }
 
+// Model inheritance mirrors WorkerImage, minus the arch munging: the value is
+// scion's own vocabulary and is passed through verbatim. Unset anywhere must
+// stay "" all the way down, because "" is what makes Start omit --model and
+// leave scion's default resolution untouched.
+func TestWorkerModelFallsBackToManagerModel(t *testing.T) {
+	app := &App{
+		Manager: Manager{Model: "claude-opus-5"},
+		Workers: []Worker{
+			{Name: "plain", Dir: "workers/plain"},
+			{Name: "custom", Dir: "workers/custom", Model: "small"},
+		},
+	}
+	if got := app.ManagerModel(); got != "claude-opus-5" {
+		t.Fatalf("ManagerModel = %q, want claude-opus-5", got)
+	}
+	plain, _ := app.WorkerByName("plain")
+	if got := app.WorkerModel(plain); got != "claude-opus-5" {
+		t.Fatalf("plain worker model = %q, want the manager model", got)
+	}
+	custom, _ := app.WorkerByName("custom")
+	if got := app.WorkerModel(custom); got != "small" {
+		t.Fatalf("custom worker model = %q, want the override", got)
+	}
+}
+
+func TestModelUnsetResolvesEmpty(t *testing.T) {
+	app := &App{Workers: []Worker{{Name: "plain", Dir: "workers/plain"}}}
+	if got := app.ManagerModel(); got != "" {
+		t.Fatalf("ManagerModel with no model: = %q, want \"\" (no --model, scion decides)", got)
+	}
+	plain, _ := app.WorkerByName("plain")
+	if got := app.WorkerModel(plain); got != "" {
+		t.Fatalf("WorkerModel with no model: anywhere = %q, want \"\"", got)
+	}
+}
+
+func TestLoadParsesModel(t *testing.T) {
+	p := writeConfig(t, `name: demo
+backend: orbstack
+tree: ./tree
+manager:
+  model: claude-opus-5
+workers:
+  - name: appa
+    dir: workers/appa
+    model: xl
+`)
+	app, err := LoadNoHostChecks(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if app.Manager.Model != "claude-opus-5" {
+		t.Fatalf("manager model = %q", app.Manager.Model)
+	}
+	if app.Workers[0].Model != "xl" {
+		t.Fatalf("worker model = %q", app.Workers[0].Model)
+	}
+}
+
 func TestArchImage(t *testing.T) {
 	for _, c := range []struct{ ref, arch, want string }{
 		{"scionlocal/lever-claude", "arm64", "scionlocal/lever-claude:arm64"}, // tagless local name → arch tag

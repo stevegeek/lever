@@ -3187,3 +3187,37 @@ func TestStartManagerRefusesUnsendableInstructionsNamingTheFile(t *testing.T) {
 		}
 	}
 }
+
+// The behavioural half of "create-time only": a resume must carry NO
+// instructions — no --config on argv, nothing on stdin — even when the config
+// names a file. scion re-projects what it staged at the fresh create; lever
+// sending the text again on resume would be silently ignored today and a
+// surprise if scion ever started honouring it.
+func TestStartManagerResumeCarriesNoInstructions(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	if err := os.WriteFile(filepath.Join(dir, "manual.md"), []byte("# Manual\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  instructions_file: manual.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := scionOKRunner()
+	r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "suspended", initContainerStatus: "stopped"}
+	if err := runApply(app, Deps{Scion: scion.New(r, scion.Options{})}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.resumeCalls != 1 || r.startCalls != 0 {
+		t.Fatalf("resumeCalls=%d startCalls=%d, want 1/0", r.resumeCalls, r.startCalls)
+	}
+	for _, c := range f.Calls {
+		if slices.Contains(c.Args, "--config") || c.Stdin != "" {
+			t.Fatalf("a resume must carry no instructions; call %q had stdin %q", strings.Join(c.Args, " "), c.Stdin)
+		}
+	}
+}

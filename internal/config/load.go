@@ -26,22 +26,24 @@ const CanonicalName = "lever.yaml"
 const ManifestName = ".lever-manifest.yaml"
 
 // confinedRel reports whether p is a relative path that stays strictly inside
-// its base (not absolute, not ".", no ".." escape). Used for `tree` and
-// `prompt_file` so neither can point outside the instance root.
-// insideTree reports whether path (absolute) is tree itself or lies under it,
-// component-wise — a sibling that merely shares a prefix ("ws-notes" beside
-// "ws") is outside.
-func insideTree(tree, path string) bool {
-	rel, err := filepath.Rel(tree, path)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
+// its base (not absolute, not ".", no ".." escape). Used for `tree`,
+// `prompt_file` and `instructions_file` so none can point outside the instance
+// root. Root confinement alone does not keep a file out of the mounted tree —
+// that is insideTree's job at load time.
 func confinedRel(p string) bool {
 	if p == "" || filepath.IsAbs(p) {
 		return false
 	}
 	clean := filepath.Clean(p)
 	return clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
+}
+
+// insideTree reports whether path (absolute) is tree itself or lies under it,
+// component-wise — a sibling that merely shares a prefix ("ws-notes" beside
+// "ws") is outside.
+func insideTree(tree, path string) bool {
+	rel, err := filepath.Rel(tree, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolvePath expands a leading ~/ to the home dir, makes a relative path

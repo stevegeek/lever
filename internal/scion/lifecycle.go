@@ -171,11 +171,18 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 			if a := FindAgent(agents, slug); a != nil {
 				lastPhase, lastContainer = a.Phase, a.ContainerStatus
 			}
-			if lastPhase == "running" && ContainerLive(lastContainer) {
+			switch {
+			case lastPhase == "running" && ContainerLive(lastContainer):
 				strikes = 0
-			} else if strikes++; strikes >= 2 {
-				return fmt.Errorf("%w after %s (phase %q, container %q) — scion reported success and the record was live, then the harness died; its container log in the guest holds the last output",
-					ErrAgentDied, time.Since(start).Round(100*time.Millisecond), lastPhase, lastContainer)
+			case lastPhase == "running" && lastContainer == "":
+				// A blank container column is "cannot tell" — the same reading
+				// `lever up` and doctor make of it — so it neither confirms
+				// nor refutes: strikes stay as they are, like a list error.
+			default:
+				if strikes++; strikes >= 2 {
+					return fmt.Errorf("%w after %s (%s) — scion reported success and the record was live, then the harness died; its container log in the guest holds the last output",
+						ErrAgentDied, time.Since(start).Round(100*time.Millisecond), describeReading(lastPhase, lastContainer))
+				}
 			}
 		}
 		if time.Since(start) >= settle {
@@ -183,15 +190,24 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 				break
 			}
 			if graceLeft--; graceLeft <= 0 {
-				return fmt.Errorf("%w during the %s settle window (a non-live reading — phase %q, container %q — was never confirmed or refuted; last error observing agents: %v)",
-					ErrAgentUnverified, settle, lastPhase, lastContainer, lastErr)
+				return fmt.Errorf("%w during the %s settle window (a non-live reading — %s — was never confirmed or refuted; last error observing agents: %v); run `lever doctor` for the manager row",
+					ErrAgentUnverified, settle, describeReading(lastPhase, lastContainer), lastErr)
 			}
 		}
 	}
 	if !observed {
-		return fmt.Errorf("%w during the %s settle window (no observation succeeded; last error observing agents: %v)", ErrAgentUnverified, settle, lastErr)
+		return fmt.Errorf("%w during the %s settle window (no observation succeeded; last error observing agents: %v); run `lever doctor` for the manager row", ErrAgentUnverified, settle, lastErr)
 	}
 	return nil
+}
+
+// describeReading renders an observation for an error message: a record that
+// vanished from the listing says so, rather than printing two empty quotes.
+func describeReading(phase, container string) string {
+	if phase == "" && container == "" {
+		return "record gone from the listing"
+	}
+	return fmt.Sprintf("phase %q, container %q", phase, container)
 }
 
 // ErrAgentNotLive is wrapped by WaitAgentLive when its budget exhausts without

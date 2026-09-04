@@ -642,8 +642,8 @@ func TestWaitAgentLiveSettleFailsWhenTheRecordFlips(t *testing.T) {
 func TestWaitAgentLiveSettleFailsWhenTheRecordVanishes(t *testing.T) {
 	list, _ := scriptedList(liveMgr, []Agent{{Slug: "other", Phase: "running", ContainerStatus: "running"}})
 	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 200 * time.Millisecond})
-	if !errors.Is(err, ErrAgentDied) || !strings.Contains(err.Error(), `phase ""`) {
-		t.Fatalf("want ErrAgentDied with the vanished observation, got %v", err)
+	if !errors.Is(err, ErrAgentDied) || !strings.Contains(err.Error(), "record gone") {
+		t.Fatalf("want ErrAgentDied naming the vanished record, got %v", err)
 	}
 }
 
@@ -760,5 +760,22 @@ func TestWaitAgentLiveSettlePendingStrikeCannotWaitForever(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("still polling after 2s (%d list calls): a pending strike must not keep the window open forever", *calls)
+	}
+}
+
+// A blank container column inside the window is "cannot tell", the reading
+// `lever up` and doctor make of it: it neither confirms life nor counts as a
+// strike, so blanks alone never declare a death, while two non-live readings
+// with only blanks between them still do.
+func TestWaitAgentLiveSettleBlankColumnIsNotAStrike(t *testing.T) {
+	blank := []Agent{{Slug: "mgr", Phase: "running"}}
+	list, _ := scriptedList(liveMgr, blank)
+	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 30 * time.Millisecond}); err != nil {
+		t.Fatalf("blank readings alone must not fail the window: %v", err)
+	}
+	list, _ = scriptedList(liveMgr, deadMgr, blank, deadMgr)
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 200 * time.Millisecond})
+	if !errors.Is(err, ErrAgentDied) {
+		t.Fatalf("a blank between two dead readings does not break the chain, got %v", err)
 	}
 }

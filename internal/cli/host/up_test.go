@@ -5,8 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -180,5 +182,51 @@ func TestVerifyManagerRoleGuardsUpsFastPaths(t *testing.T) {
 	}
 	if gotProject != "lever" || gotAgent != "assistant" {
 		t.Errorf("guard called with (%q, %q), want (\"lever\", \"assistant\")", gotProject, gotAgent)
+	}
+}
+
+// gateAfterUp (lever#31): the paths that act on the manager without apply.Run
+// must observe it before "is up." — a resume with the full settle window, a
+// running manager with one fresh look — while the apply paths, gated inside
+// apply.Run already, add nothing.
+func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
+	newDeps := func() (apply.Deps, *proc.FakeRunner) {
+		f := proc.NewFakeRunner()
+		f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"running","containerStatus":"Up 1 second"}]`})
+		return apply.Deps{
+			Scion:            scion.New(f, scion.Options{}),
+			ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond, Settle: 5 * time.Millisecond},
+		}, f
+	}
+	for _, c := range []struct {
+		action   upAction
+		minLists int // list calls the gate must make
+		maxLists int
+	}{
+		{upApply, 0, 0},        // apply.Run gated it
+		{upRestart, 0, 0},      // ditto
+		{upNone, 1, 1},         // one fresh observation, no settle
+		{upResume, 2, 1 << 20}, // live, then held: at least one re-observation
+	} {
+		deps, f := newDeps()
+		if err := gateAfterUp(context.Background(), deps, c.action, "/lever", "assistant"); err != nil {
+			t.Fatalf("%s: a running manager must pass: %v", c.action, err)
+		}
+		lists := 0
+		for _, call := range f.Calls {
+			if len(call.Args) > 0 && call.Args[0] == "list" {
+				lists++
+			}
+		}
+		if lists < c.minLists || lists > c.maxLists {
+			t.Fatalf("%s: %d list call(s), want between %d and %d", c.action, lists, c.minLists, c.maxLists)
+		}
+	}
+	// And a dead manager on the resume path is a refusal, not "is up."
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"error","containerStatus":"Exited (1) 2 seconds ago"}]`})
+	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond}}
+	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant"); err == nil {
+		t.Fatal("a resume over a dead manager must not pass the gate")
 	}
 }

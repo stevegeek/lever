@@ -414,7 +414,7 @@ func TestWaitAgentLiveRecordVanishesMidPollResetsToEmpty(t *testing.T) {
 		// Record gone from the listing.
 		return []Agent{{Slug: "other", Phase: "running", ContainerStatus: "running"}}, nil
 	}
-	err := WaitAgentLive(context.Background(), list, "mgr", 2, time.Millisecond)
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 2, Interval: time.Millisecond})
 	if !errors.Is(err, ErrAgentNotLive) {
 		t.Fatalf("WaitAgentLive should fail when the record never becomes live: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestWaitAgentLiveZeroAttemptsExhaustsImmediately(t *testing.T) {
 		calls++
 		return []Agent{{Slug: "mgr", Phase: "running", ContainerStatus: "running"}}, nil
 	}
-	err := WaitAgentLive(context.Background(), list, "mgr", 0, time.Millisecond)
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 0, Interval: time.Millisecond})
 	if !errors.Is(err, ErrAgentNotLive) {
 		t.Fatalf("err = %v, want exhaustion", err)
 	}
@@ -579,5 +579,117 @@ func TestStartRefusesOversizedInstructionsBeforeAnyScionCall(t *testing.T) {
 	}
 	if len(f.Calls) != 0 {
 		t.Fatalf("no scion call may be made for instructions that cannot be sent; got %d", len(f.Calls))
+	}
+}
+
+// live returns a list func that answers each call from the script in order,
+// repeating the last entry; a nil entry is a list error.
+func scriptedList(script ...[]Agent) (func(context.Context) ([]Agent, error), *int) {
+	calls := 0
+	return func(context.Context) ([]Agent, error) {
+		i := calls
+		calls++
+		if i >= len(script) {
+			i = len(script) - 1
+		}
+		if script[i] == nil {
+			return nil, errors.New("hub hiccup")
+		}
+		return script[i], nil
+	}, &calls
+}
+
+var (
+	liveMgr = []Agent{{Slug: "mgr", Phase: "running", ContainerStatus: "Up 1 second"}}
+	deadMgr = []Agent{{Slug: "mgr", Phase: "error", ContainerStatus: "Exited (1) 2 seconds ago"}}
+)
+
+// A zero Settle is the pre-lever#31 gate exactly: return on the first live
+// observation, one list call. Every caller that shrinks the budget to zero
+// settle in tests relies on this.
+func TestWaitAgentLiveZeroSettleReturnsOnFirstLiveObservation(t *testing.T) {
+	list, calls := scriptedList(liveMgr)
+	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond}); err != nil {
+		t.Fatalf("WaitAgentLive: %v", err)
+	}
+	if *calls != 1 {
+		t.Fatalf("list called %d times, want exactly 1", *calls)
+	}
+}
+
+// The lever#31 case: the record is live on the first look (scion reports
+// running before the harness runs a line) and dead a moment later. The settle
+// window must see the flip and say so — ErrAgentDied, not "did not come up",
+// carrying the observation that failed.
+func TestWaitAgentLiveSettleFailsWhenTheRecordFlips(t *testing.T) {
+	list, _ := scriptedList(liveMgr, liveMgr, deadMgr)
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 50 * time.Millisecond})
+	if !errors.Is(err, ErrAgentDied) {
+		t.Fatalf("want ErrAgentDied, got %v", err)
+	}
+	if errors.Is(err, ErrAgentNotLive) {
+		t.Fatalf("a record that WAS live must not be reported as never having come up: %v", err)
+	}
+	for _, want := range []string{`phase "error"`, `Exited (1)`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q must carry the failing observation %q", err, want)
+		}
+	}
+}
+
+// A record that vanishes mid-settle is a death too (the phase/container it
+// reports are the empty ones, as in the first phase's reset-to-empty rule).
+func TestWaitAgentLiveSettleFailsWhenTheRecordVanishes(t *testing.T) {
+	list, _ := scriptedList(liveMgr, []Agent{{Slug: "other", Phase: "running", ContainerStatus: "running"}})
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 20 * time.Millisecond})
+	if !errors.Is(err, ErrAgentDied) || !strings.Contains(err.Error(), `phase ""`) {
+		t.Fatalf("want ErrAgentDied with the vanished observation, got %v", err)
+	}
+}
+
+// Holding live for the whole window passes, and the window really is
+// observed: more than one list call happens after the first live one.
+func TestWaitAgentLiveSettleHoldsThenPasses(t *testing.T) {
+	list, calls := scriptedList(liveMgr)
+	start := time.Now()
+	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 20 * time.Millisecond}); err != nil {
+		t.Fatalf("WaitAgentLive: %v", err)
+	}
+	if el := time.Since(start); el < 20*time.Millisecond {
+		t.Fatalf("returned after %s, before the 20ms settle window elapsed", el)
+	}
+	if *calls < 3 {
+		t.Fatalf("list called %d times; the settle window must re-observe, not sleep", *calls)
+	}
+}
+
+// A transient list error inside the window is skipped, like in the first
+// phase: a hub hiccup is not a dead harness.
+func TestWaitAgentLiveSettleToleratesAListError(t *testing.T) {
+	list, _ := scriptedList(liveMgr, nil, liveMgr)
+	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 10 * time.Millisecond}); err != nil {
+		t.Fatalf("one hiccup inside the window must not fail the gate: %v", err)
+	}
+}
+
+// But a window in which NOTHING could be observed proves nothing, and the gate
+// says so rather than passing on faith.
+func TestWaitAgentLiveSettleWithNoObservationIsNotAPass(t *testing.T) {
+	list, _ := scriptedList(liveMgr, nil)
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 10 * time.Millisecond})
+	if !errors.Is(err, ErrAgentNotLive) || !strings.Contains(err.Error(), "settle window") {
+		t.Fatalf("want an unobserved-window error, got %v", err)
+	}
+}
+
+// Cancellation inside the window surfaces as ctx.Err(), unwrapped, like the
+// first phase.
+func TestWaitAgentLiveSettleReturnsCtxErrOnCancel(t *testing.T) {
+	list, _ := scriptedList(liveMgr)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := WaitAgentLive(ctx, list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: time.Second})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrAgentNotLive) || errors.Is(err, ErrAgentDied) {
+		t.Fatalf("want bare context.Canceled, got %v", err)
 	}
 }

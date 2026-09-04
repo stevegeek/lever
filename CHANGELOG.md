@@ -79,8 +79,36 @@ Changed/Internal entries before rebasing open branches.
   (or `failed to send command`) in the container log, three layers below the
   prompt.
 
+### Fixed
+
+- **`lever up` no longer reports success over a dead harness** (#31). The
+  post-start liveness gate returned on the first poll that showed the record
+  running and the container up — both of which scion sets before the harness
+  has run a line — so a harness that died one to three seconds in (a task past
+  the tmux cap, `claude --continue` with no conversation) got `application
+  "…" is up.` and exit 0 while its container was already `Exited (1)`. The
+  gate now holds that pair for a **10 s settle window** and fails with a new
+  error, `came up, then died after Ns (phase …, container …)`, distinct from
+  `did not come up`. The manager gate in `apply` and the broker's worker
+  dispatch gate share it. It is still probabilistic — a harness that dies
+  after the window passes — and a sound harness-ready signal remains an
+  upstream scion request.
+- **`lever up`'s resume and no-op paths are gated too** (#31). Resuming a
+  suspended manager never observed anything before printing `is up.`; it now
+  runs the full gate. A manager that was already running gets one fresh
+  observation (no settle), so a healthy long-running manager is not held for
+  ten seconds on every `up`.
+- **`lever doctor` reports the manager's own liveness** (#31): a new
+  `manager agent` check, second in the list after the broker, fails when the
+  manager record is absent, its phase is not `running`, or its container is
+  not up. Before, all fourteen checks could pass with no manager container
+  present at all.
+
 ### Changed
 
+- **Fresh creates, resumes and worker dispatches take about ten seconds
+  longer** (#31): the settle window above is spent waiting, deliberately,
+  on every path that just started or resumed an agent.
 - **`manager.prompt_file` may no longer resolve inside the mounted tree**
   (#30), and neither may the new `instructions_file` keys. The docs always
   said these are host-only boot material an agent cannot rewrite, but only

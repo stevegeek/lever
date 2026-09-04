@@ -95,10 +95,17 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	}
 	// The role check needs the scion IN THE JAIL, which is the binary that
 	// will actually resolve the stored role — not the host's.
-	rolesSupported := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole).RolesSupported
+	jailScion := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole)
+	rolesSupported := jailScion.RolesSupported
+	// scion's own listing, not the hub's: it carries phase AND container
+	// status, and it names the project by its in-jail path.
+	listAgents := func(ctx context.Context, project string) ([]scionpkg.Agent, error) {
+		return jailScion.List(ctx, project)
+	}
 
 	checks := []func() checkResult{
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
+		func() checkResult { return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents) },
 		func() checkResult { return checkAgentCert(state, time.Now()) },
 		func() checkResult { return checkToolBackends(app.Broker.Tools, probes) },
 		func() checkResult { return checkClaudeVersion(app.ManagerImage(), probes) },

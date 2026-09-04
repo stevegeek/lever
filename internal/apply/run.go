@@ -30,6 +30,10 @@ var ErrBootstrapLatched = errors.New("broker /bootstrap latch already consumed")
 type RetryBudget struct {
 	Attempts int
 	Interval time.Duration
+	// Settle is how long a record must STAY live after it is first observed
+	// live before the manager counts as up (scion.LiveBudget.Settle). Only the
+	// manager liveness budget reads it.
+	Settle time.Duration
 }
 
 // or returns b, or def when b is the zero value.
@@ -50,7 +54,12 @@ func (b RetryBudget) or(def RetryBudget) RetryBudget {
 var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
 
 // defaultManagerLiveRetry bounds waitManagerLive's post-start poll.
-var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second}
+// The 10 s settle is lever#31: scion reports the record running before the
+// harness has run a line, and every harness death observed so far (a task past
+// the tmux cap, `claude --continue` with no conversation) landed within three
+// seconds of that. Ten seconds catches those with margin and is still
+// probabilistic for a later death.
+var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second, Settle: 10 * time.Second}
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
 // api-key instances. It is NOT a real credential: it exists only to satisfy
@@ -1215,18 +1224,43 @@ func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 // success meaningful. The live-container predicate is scion.ContainerLive,
 // shared with the broker's worker liveness gate.
 func (r *run) waitManagerLive(ctx context.Context, jp string) error {
+	return gateManagerLive(ctx, r.d.Scion, r.managerLive, r.app.Name, jp, "start-manager")
+}
+
+// gateManagerLive is the manager liveness gate every bring-up path shares: the
+// start-manager step here and `lever up`'s own resume/no-op paths (WaitManagerLive
+// / ObserveManagerLive), which act on the manager WITHOUT going through Run and
+// used to print "is up." with no observation at all (lever#31). subject
+// prefixes the exhaustion/death error; ctx errors pass through unwrapped.
+func gateManagerLive(ctx context.Context, sc *scion.Client, b RetryBudget, name, project, subject string) error {
 	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
-		return r.d.Scion.List(c, jp)
-	}, r.app.Name, r.managerLive.Attempts, r.managerLive.Interval)
+		return sc.List(c, project)
+	}, name, scion.LiveBudget{Attempts: b.Attempts, Interval: b.Interval, Settle: b.Settle})
 	if err == nil {
 		return nil
 	}
-	// WaitAgentLive returns ctx.Err() unwrapped on cancellation; pass it through
-	// as-is (no start-manager prefix) and prefix only the exhaustion error.
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return fmt.Errorf("start-manager: manager %q %w", r.app.Name, err)
+	return fmt.Errorf("%s: manager %q %w", subject, name, err)
+}
+
+// WaitManagerLive is the full gate — become live, then hold for the settle
+// window — for a path that just acted on the manager (`lever up` after its own
+// `scion resume`). Same List, same budget as the start-manager step.
+func WaitManagerLive(ctx context.Context, d Deps, name, project string) error {
+	return gateManagerLive(ctx, d.Scion, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up")
+}
+
+// ObserveManagerLive is one fresh observation with NO settle, for a manager
+// that was already running when `lever up` looked: it confirms the record and
+// container are live now, without holding a healthy long-running manager
+// hostage for ten seconds on every `up`. A harness that died earlier already
+// shows here as an error phase or an exited container.
+func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error {
+	b := d.ManagerLiveRetry.or(defaultManagerLiveRetry)
+	b.Settle = 0
+	return gateManagerLive(ctx, d.Scion, b, name, project, "up")
 }
 
 // JailPath maps a host path under tree to its location inside the jail (mount +

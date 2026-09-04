@@ -325,6 +325,9 @@ func readWorkerInstructions(spec WorkerSpec) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading instructions %s: %w", spec.InstructionsPath, err)
 	}
+	if err := scion.CheckInstructions(string(b)); err != nil {
+		return "", fmt.Errorf("instructions %s: %w", spec.InstructionsPath, err)
+	}
 	return string(b), nil
 }
 

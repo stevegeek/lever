@@ -566,3 +566,18 @@ func TestStartRefusesOversizedTaskBeforeAnyScionCall(t *testing.T) {
 		t.Fatalf("no scion call may be made for a task that cannot start; got %d call(s)", len(f.Calls))
 	}
 }
+
+// The instructions cap is a backstop on the same seam as the task check:
+// over-cap text never reaches scion, where it would fail as an opaque hub
+// transport error several layers below the config key.
+func TestStartRefusesOversizedInstructionsBeforeAnyScionCall(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", Instructions: strings.Repeat("m", MaxInstructionsBytes+1)})
+	if err == nil || !strings.Contains(err.Error(), "cap") {
+		t.Fatalf("want the named cap error, got %v", err)
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("no scion call may be made for instructions that cannot be sent; got %d", len(f.Calls))
+	}
+}

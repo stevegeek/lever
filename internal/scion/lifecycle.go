@@ -187,10 +187,12 @@ type StartOpts struct {
 	// Instructions is the agent's STANDING instructions text (who it is, how it
 	// must operate), sent as scion inline config `{"agent_instructions": …}` on
 	// STDIN via `--config -`, never on argv. scion stages it under the agent
-	// home and the harness projects it into the agent's own CLAUDE.md on every
-	// container start. Task stays the boot task — the first user turn — and is
-	// bound by TaskArgvBudget; this channel is not (lever#30). Empty sends no
-	// config at all, which keeps an existing config's argv byte-identical.
+	// home and the harness projects it into the agent's USER-level
+	// ~/.claude/CLAUDE.md (a managed block, beside any project CLAUDE.md in
+	// the tree) on every container start. Task stays the boot task — the
+	// first user turn — and is bound by TaskArgvBudget; this channel is bound
+	// only by MaxInstructionsBytes (lever#30). Empty sends no config at all,
+	// which keeps an existing config's argv byte-identical.
 	//
 	// CREATE-time only, like Model: scion stages the content when it provisions
 	// the agent directory and does not re-stage on resume (it merges the inline
@@ -265,6 +267,9 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	// agent, so refuse it here by name before any scion call (the earlier,
 	// friendlier checks at config load and request decode are the same test).
 	if err := CheckTask(o.Task); err != nil {
+		return err
+	}
+	if err := CheckInstructions(o.Instructions); err != nil {
 		return err
 	}
 	harness := o.Harness

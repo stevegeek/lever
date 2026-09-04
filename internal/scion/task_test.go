@@ -7,15 +7,25 @@ import (
 	"testing"
 )
 
-// scion single-quotes the task twice on its way into the tmux command line
-// (once as a harness argv word, once more inside the `sh -c` wrapper), so each
-// apostrophe expands to 13 bytes there — 12 more than the byte itself.
-func TestTaskArgvBytesCountsDoubleQuotedApostrophes(t *testing.T) {
-	if got := TaskArgvBytes("abc"); got != 3 {
-		t.Fatalf("TaskArgvBytes(abc) = %d, want 3", got)
+// shellQuote replicates scion's pkg/runtime/common.go shellQuote — the ONE
+// quoting pass that reaches tmux (scion's second pass is consumed by the
+// container's own `sh -c` before tmux parses the command). TaskArgvBytes must
+// equal that quoted word minus its two wrapping quotes, which the fixed part
+// of TaskArgvBudget already accounts for.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+
+func TestTaskArgvBytesMatchesScionsQuotingPass(t *testing.T) {
+	for _, task := range []string{"", "abc", "it's", "a'b'c", strings.Repeat("'", 10) + "x"} {
+		want := len(shellQuote(task)) - 2
+		if got := TaskArgvBytes(task); got != want {
+			t.Fatalf("TaskArgvBytes(%q) = %d, want %d (scion's quoted word minus its two quotes)", task, got, want)
+		}
 	}
-	if got := TaskArgvBytes("it's"); got != 4+12 {
-		t.Fatalf("TaskArgvBytes(it's) = %d, want %d", got, 4+12)
+	// Golden from a measured run of scion's construction through a real shell
+	// (review of lever#30): ten apostrophes add 40 bytes to the argv sum tmux
+	// receives, ten plain characters add 10.
+	if d := TaskArgvBytes(strings.Repeat("'", 10)) - TaskArgvBytes(strings.Repeat("a", 10)); d != 30 {
+		t.Fatalf("ten apostrophes must cost 30 bytes more than ten plain chars, got %d", d)
 	}
 }
 
@@ -40,12 +50,34 @@ func TestCheckTaskBoundary(t *testing.T) {
 	}
 }
 
-// Apostrophes count against the budget at their expanded size: a task well
-// under the budget in bytes can still be over it once scion quotes it.
+// Apostrophes count against the budget at their quoted size: a task under the
+// budget in bytes can still be over it once scion quotes it.
 func TestCheckTaskChargesApostrophes(t *testing.T) {
-	// 13 bytes per apostrophe after quoting; enough of them push a short task over.
-	n := TaskArgvBudget/13 + 1
+	n := TaskArgvBudget/4 + 1 // 4 bytes each once quoted
 	if err := CheckTask(strings.Repeat("'", n)); err == nil {
 		t.Fatalf("%d apostrophes (%d argv bytes) must exceed the %d budget", n, TaskArgvBytes(strings.Repeat("'", n)), TaskArgvBudget)
+	}
+}
+
+func TestCheckInstructions(t *testing.T) {
+	if err := CheckInstructions(""); err != nil {
+		t.Fatalf("empty means no config and must pass: %v", err)
+	}
+	if err := CheckInstructions(strings.Repeat("m", MaxInstructionsBytes)); err != nil {
+		t.Fatalf("exactly at the cap must pass: %v", err)
+	}
+	if err := CheckInstructions(strings.Repeat("m", MaxInstructionsBytes+1)); err == nil || !strings.Contains(err.Error(), strconv.Itoa(MaxInstructionsBytes)) {
+		t.Fatalf("one byte over the cap must fail naming the cap, got %v", err)
+	}
+	// scion resolves a leading file:// as a file reference before provisioning
+	// (pkg/api/content.go ResolveContent): refuse rather than stage some other
+	// file — or nothing — as the agent's standing instructions.
+	for _, bad := range []string{"file:///etc/passwd", "file://relative.md"} {
+		if err := CheckInstructions(bad); err == nil || !strings.Contains(err.Error(), "file://") {
+			t.Fatalf("%q must be refused by name, got %v", bad, err)
+		}
+	}
+	if err := CheckInstructions("# Manual\nsee file://x later\n"); err != nil {
+		t.Fatalf("file:// anywhere but the start is plain text: %v", err)
 	}
 }

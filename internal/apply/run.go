@@ -814,6 +814,11 @@ func (r *run) managerInstructions() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading manager instructions %s: %w", p, err)
 	}
+	// Same named errors Start would raise, but naming the file, and before
+	// the broker-ready wait.
+	if err := scion.CheckInstructions(string(b)); err != nil {
+		return "", fmt.Errorf("manager instructions %s: %w", p, err)
+	}
 	return string(b), nil
 }
 

@@ -3155,3 +3155,35 @@ func TestStartManagerFailsFastOnOversizedPrompt(t *testing.T) {
 		}
 	}
 }
+
+// A manual that scion would misread (a leading file://) or that cannot fit
+// its hub request fails at apply naming the FILE, with no start attempted —
+// the named error Start raises, one seam earlier and with the path attached.
+func TestStartManagerRefusesUnsendableInstructionsNamingTheFile(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	if err := os.WriteFile(filepath.Join(dir, "manual.md"), []byte("file:///etc/passwd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  instructions_file: manual.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := scionOKRunner()
+	deps := Deps{
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+	}
+	err = runApply(app, deps)
+	if err == nil || !strings.Contains(err.Error(), "manual.md") || !strings.Contains(err.Error(), "file://") {
+		t.Fatalf("want an error naming manual.md and the file:// rule, got %v", err)
+	}
+	for _, c := range f.Calls {
+		if j := strings.Join(c.Args, " "); strings.Contains(j, "start hello") {
+			t.Fatalf("no start may be attempted; got %q", j)
+		}
+	}
+}

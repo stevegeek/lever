@@ -664,3 +664,30 @@ func TestWorkerStart_oversizedTaskIs413WithoutStart(t *testing.T) {
 		t.Fatalf("no start may be attempted for an oversized task; got %d", len(rt.started))
 	}
 }
+
+// A worker manual over scion's hub-request cap is an operator error: 500 with
+// nothing staged, the same shape as an unreadable file. The manager sees the
+// generic body; the reason and the path stay in the host-side audit line.
+func TestWorkerStart_absent_oversizedInstructionsFailBeforeStaging(t *testing.T) {
+	dir := t.TempDir()
+	manual := filepath.Join(dir, "worker-manual.md")
+	if err := os.WriteFile(manual, []byte(strings.Repeat("m", scion.MaxInstructionsBytes+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
+		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", InstructionsPath: manual}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+	b := newTestBroker(t, rt, spec)
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.started) != 0 {
+		t.Fatalf("no start may happen; got %d", len(rt.started))
+	}
+	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
+		t.Fatalf("no ticket may be staged (stat err %v)", err)
+	}
+}

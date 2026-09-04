@@ -28,6 +28,14 @@ const ManifestName = ".lever-manifest.yaml"
 // confinedRel reports whether p is a relative path that stays strictly inside
 // its base (not absolute, not ".", no ".." escape). Used for `tree` and
 // `prompt_file` so neither can point outside the instance root.
+// insideTree reports whether path (absolute) is tree itself or lies under it,
+// component-wise — a sibling that merely shares a prefix ("ws-notes" beside
+// "ws") is outside.
+func insideTree(tree, path string) bool {
+	rel, err := filepath.Rel(tree, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func confinedRel(p string) bool {
 	if p == "" || filepath.IsAbs(p) {
 		return false
@@ -122,8 +130,39 @@ func LoadNoHostChecks(path string) (*App, error) {
 		if m.path == "" {
 			continue
 		}
-		if rel, err := filepath.Rel(app.Tree, m.path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if insideTree(app.Tree, m.path) {
 			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and it would be installed as the engine they run under",
+				m.key, m.path, app.Tree)
+		}
+	}
+	// Boot material the host must own: the manager's task and every standing
+	// instructions file. Confinement to the root (Validate) is not enough on
+	// its own, because the tree is INSIDE the root and is the one place agents
+	// can write — `prompt_file: workspace/boot.md` with `tree: workspace` would
+	// hand the manager authorship of its own next boot task, and an in-tree
+	// instructions_file its own standing CLAUDE.md. Same test as the engine
+	// above, for the same reason (lever#30 review).
+	bootFiles := []struct{ key, path string }{
+		{"manager.prompt_file", app.ManagerPromptPath()},
+		{"manager.instructions_file", app.ManagerInstructionsPath()},
+	}
+	for _, g := range app.Workers {
+		bootFiles = append(bootFiles, struct{ key, path string }{
+			fmt.Sprintf("workers[%s].instructions_file", g.Name), app.WorkerInstructionsPath(g)})
+	}
+	for _, m := range bootFiles {
+		if m.path == "" {
+			continue
+		}
+		// Abs: app.dir is the config's directory as given, so a relative
+		// config path yields a relative file path, and Rel against the
+		// absolute tree would then fail — passing the check by accident.
+		p, err := filepath.Abs(m.path)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s (%s): %w", m.key, m.path, err)
+		}
+		if insideTree(app.Tree, p) {
+			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and this file is boot material the host must own — move it up to the instance root",
 				m.key, m.path, app.Tree)
 		}
 	}

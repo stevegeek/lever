@@ -186,8 +186,9 @@ type Manager struct {
 	PromptFile string `yaml:"prompt_file"`
 	// InstructionsFile is the agent's STANDING instructions (who it is, how it
 	// must operate), delivered through scion's `agent_instructions` channel —
-	// a staged file the harness projects into the agent's own CLAUDE.md — and
-	// never through argv. PromptFile stays the boot TASK, the first user turn.
+	// a staged file the harness projects into the agent's user-level
+	// ~/.claude/CLAUDE.md — and never through argv. PromptFile stays the boot
+	// TASK, the first user turn. Both must resolve OUTSIDE the mounted tree.
 	// The split exists because the task rides scion's argv into a single tmux
 	// word capped at 16 KiB (lever#30); a manual belongs in a file. Host-only
 	// and root-confined like PromptFile. Create-time only, like Model.

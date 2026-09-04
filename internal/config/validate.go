@@ -211,6 +211,11 @@ func (a *App) Validate() error {
 	if a.Manager.PromptFile != "" && !confinedRel(a.Manager.PromptFile) {
 		return fmt.Errorf("config: manager.prompt_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.PromptFile)
 	}
+	// instructions_file is the same kind of boot material as prompt_file — it
+	// becomes the agent's standing CLAUDE.md — so it gets the same confinement.
+	if a.Manager.InstructionsFile != "" && !confinedRel(a.Manager.InstructionsFile) {
+		return fmt.Errorf("config: manager.instructions_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.InstructionsFile)
+	}
 	for _, g := range a.Workers {
 		if err := a.validateWorker(g); err != nil {
 			return err
@@ -316,6 +321,9 @@ func (a *App) validateWorker(g Worker) error {
 		if err := a.Security.validateImage(fmt.Sprintf("worker %q image", g.Name), g.Image); err != nil {
 			return err
 		}
+	}
+	if g.InstructionsFile != "" && !confinedRel(g.InstructionsFile) {
+		return fmt.Errorf("config: worker %q instructions_file %q must be a relative path inside the instance root (no \"..\", not absolute)", g.Name, g.InstructionsFile)
 	}
 	return nil
 }

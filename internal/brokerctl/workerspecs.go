@@ -21,7 +21,10 @@ func WorkerSpecs(app *config.App, jailMount string) []broker.WorkerSpec {
 			BootstrapDir:    filepath.Join(app.Tree, g.Dir, ".lever"),
 			Image:           app.WorkerImage(g),
 			Model:           app.WorkerModel(g), // own model:, else the manager's; empty ⇒ scion decides
-			APIKey:          app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
+			// Own instructions_file only — never the manager's (see
+			// config.WorkerInstructionsPath). Content is read at dispatch.
+			InstructionsPath: app.WorkerInstructionsPath(g),
+			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 		})
 	}
 	return specs

@@ -39,6 +39,39 @@ open branches.
   `workers[].model` explicitly (or any other `broker:`/`workers:`/`scion:`
   change) does restart it.
 
+- **`instructions_file:` delivers an agent's standing instructions as a
+  file, not on the command line** (#30). `manager.instructions_file` and
+  `workers[].instructions_file` name a host-only file — root-confined like
+  `prompt_file` — whose contents go to scion as inline agent config on stdin
+  (`scion start --config -`, JSON) and land in the agent's own `CLAUDE.md`
+  through scion's `agent_instructions` channel. `prompt_file` keeps its
+  meaning, the boot task that is the agent's first user turn, and should now
+  be short. A worker gets only its own file; the manager's manual is never
+  inherited, because it describes orchestration authority a worker must not
+  hold.
+
+  Why: the task rides scion's argv into a single tmux word, and tmux caps the
+  whole start command at 16 KiB. A prompt past roughly 15 KiB therefore never
+  started its agent — the container exited 1 with only `command too long` in
+  its log — and an operating manual for a long-lived manager passes that
+  without feeling large. Apostrophes cost 13 bytes each there, because scion
+  quotes the task twice.
+
+  **Create-time only**, like `model:`: scion stages the text when it
+  provisions the agent directory and re-projects that staged copy on every
+  later container start (an agent that edits its own managed block gets it
+  back), but an edited file reaches only a freshly created agent, not one
+  being resumed.
+
+- **An oversized task now fails by name before any start** (#30). lever
+  checks the task's command-line size — its bytes plus 12 per apostrophe —
+  against a 15 KiB budget at three seams: `lever apply` refuses the manager
+  prompt when it reads the file, naming it; the broker answers a worker
+  dispatch with 413 and the reason; and `scion.Client.Start` refuses as the
+  backstop for every path. Before, the only evidence was `command too long`
+  (or `failed to send command`) in the container log, three layers below the
+  prompt.
+
 ### Changed
 
 - **Broker jail and admin routes are method-restricted and body-capped.**

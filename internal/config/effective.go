@@ -211,6 +211,29 @@ func (a *App) ManagerPromptPath() string {
 	return filepath.Join(a.dir, a.Manager.PromptFile)
 }
 
+// ManagerInstructionsPath returns the absolute path to the manager's standing
+// instructions file, or "" when none is configured. Resolved at the instance
+// ROOT like ManagerPromptPath, and for the same reason: the file becomes the
+// agent's CLAUDE.md, so an agent in the mount must not be able to author it.
+func (a *App) ManagerInstructionsPath() string {
+	if a.Manager.InstructionsFile == "" {
+		return ""
+	}
+	return filepath.Join(a.dir, a.Manager.InstructionsFile)
+}
+
+// WorkerInstructionsPath returns the absolute path to a worker's own standing
+// instructions file, or "" when the worker names none. There is deliberately
+// no fallback to the manager's (contrast WorkerImage/WorkerModel): the
+// manager's manual describes orchestration authority a worker must not read,
+// so a worker gets lever instructions only when its config says so.
+func (a *App) WorkerInstructionsPath(g Worker) string {
+	if g.InstructionsFile == "" {
+		return ""
+	}
+	return filepath.Join(a.dir, g.InstructionsFile)
+}
+
 // OperatorAllowedSignersPath returns the absolute path to the operator's
 // allowed_signers file, or "" if directives are disabled (AllowedSigners
 // unset). Resolved at the instance ROOT (host side), like ManagerPromptPath —

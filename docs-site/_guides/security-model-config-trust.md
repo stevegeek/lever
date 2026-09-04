@@ -67,6 +67,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `name`, worker `name` | `^[a-z0-9][a-z0-9-]{0,62}$` (it becomes the jail machine name and a shell token). |
 | `tree` | confined relative subdir (not `.`/absolute/`..`); also rejected if it is itself a git repository (an ancestor `.git` is allowed), see [§4.1](/security-model/worker-isolation/). |
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute). |
+| `manager.instructions_file`, `workers[].instructions_file` | confined relative path under the root, like `prompt_file`. The contents become the agent's standing `CLAUDE.md`; scion re-projects its staged copy on every container start, so an agent that rewrites the managed block gets the host's text back. |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |

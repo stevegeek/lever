@@ -592,3 +592,75 @@ func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 		t.Fatal("revoked dispatch must not stage bootstrap")
 	}
 }
+
+// The worker's standing instructions come from the HOST file config resolved
+// for it, read at dispatch, and travel to scion in StartOpts.Instructions —
+// the manager names the worker and supplies the task, never the manual.
+func TestWorkerStart_absent_passesInstructionsFromHostFile(t *testing.T) {
+	dir := t.TempDir()
+	manual := filepath.Join(dir, "worker-manual.md")
+	if err := os.WriteFile(manual, []byte("# Worker manual\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
+		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", InstructionsPath: manual}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+	b := newTestBroker(t, rt, spec)
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.started) != 1 {
+		t.Fatalf("start calls = %d, want 1", len(rt.started))
+	}
+	if got := rt.started[0]; got.Instructions != "# Worker manual\n" || got.Task != "do it" {
+		t.Fatalf("StartOpts must carry the manual as Instructions and the task unchanged: %+v", got)
+	}
+}
+
+// A config that names a file the host cannot read is an operator error: fail
+// before ANY side effect — no ticket staged, no scion start.
+func TestWorkerStart_absent_missingInstructionsFileFailsBeforeStaging(t *testing.T) {
+	dir := t.TempDir()
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
+		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", InstructionsPath: filepath.Join(dir, "absent.md")}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+	b := newTestBroker(t, rt, spec)
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.started) != 0 {
+		t.Fatalf("no start may happen without the instructions; got %d", len(rt.started))
+	}
+	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
+		t.Fatalf("no ticket may be staged when the instructions file is unreadable (stat err %v)", err)
+	}
+}
+
+// A task past scion's argv cap is refused by name with 413 before the phase
+// lookup, so the manager learns WHY instead of getting a generic runtime
+// error for a container that exited "command too long" (lever#30).
+func TestWorkerStart_oversizedTaskIs413WithoutStart(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
+		BootstrapDir: filepath.Join(t.TempDir(), ".lever"), Image: "img:1"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+	b := newTestBroker(t, rt, spec)
+	body, _ := json.Marshal(map[string]string{"worker": "worker", "task": strings.Repeat("x", scion.TaskArgvBudget+1)})
+
+	rec := callWorker(t, b, "/worker/start", string(body), "test-manager")
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "instructions_file") {
+		t.Fatalf("the refusal must point at the fix; body=%q", rec.Body.String())
+	}
+	if len(rt.started) != 0 {
+		t.Fatalf("no start may be attempted for an oversized task; got %d", len(rt.started))
+	}
+}

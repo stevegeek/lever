@@ -41,7 +41,13 @@ type WorkerSpec struct {
 	BootstrapDir    string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
 	Image           string // effective agent image
 	Model           string // effective LLM model; empty ⇒ no --model, scion decides
-	APIKey          bool   // true ⇒ api-key LLM mode for this worker
+	// InstructionsPath is the HOST path of this worker's standing-instructions
+	// file, "" when it has none. Config-authoritative like the rest of the spec
+	// (the manager cannot choose it), but its CONTENT is read at dispatch, not
+	// baked here: the text is create-time material for the agent, so reading it
+	// late lets an edit reach the next fresh start without a broker restart.
+	InstructionsPath string
+	APIKey           bool // true ⇒ api-key LLM mode for this worker
 }
 
 // workerSpec looks up a declared worker by name (its cert CN, which is also
@@ -177,6 +183,17 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A task past scion's argv cap can never start a worker: scion inlines it
+	// into a tmux command capped at 16 KiB (lever#30), and the container
+	// would exit 1 with "command too long" behind a generic runtime error.
+	// Refuse it here by name, whatever the worker's phase — a running worker
+	// would ignore the task, but a manager sending one this size has a bug it
+	// needs to hear about, not a silent 200.
+	if err := scion.CheckTask(req.Task); err != nil {
+		b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
 	phase, err := b.phaseOf(r.Context(), spec)
 	if err != nil {
 		b.audit("worker", b.manager, "error", "phase: "+err.Error())
@@ -251,6 +268,15 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 // worker's OWN bootstrap, then scion start.
 func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
 	ctx := r.Context()
+	// Read the standing instructions BEFORE any side effect (ticket, env,
+	// workspace dir): a config that names a file the host cannot read is an
+	// operator error, and it must fail with nothing staged.
+	instructions, err := readWorkerInstructions(spec)
+	if err != nil {
+		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
+		http.Error(w, "instructions error", http.StatusInternalServerError)
+		return
+	}
 	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
 		b.audit("worker", b.manager, "error", "start "+err.Error())
 		http.Error(w, "stage error", http.StatusInternalServerError)
@@ -272,6 +298,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		Worker: spec.Name, Task: task, Harness: "claude",
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
 		Image: spec.Image, Model: spec.Model, APIKey: spec.APIKey,
+		Instructions: instructions,
 	}); err != nil {
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
@@ -284,6 +311,21 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 	}
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+}
+
+// readWorkerInstructions loads the worker's standing instructions from the
+// host path config resolved for it (WorkerSpec.InstructionsPath), or "" when
+// it has none. The content goes to scion on stdin as inline agent config, so
+// the file only has to be readable host-side.
+func readWorkerInstructions(spec WorkerSpec) (string, error) {
+	if spec.InstructionsPath == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(spec.InstructionsPath)
+	if err != nil {
+		return "", fmt.Errorf("reading instructions %s: %w", spec.InstructionsPath, err)
+	}
+	return string(b), nil
 }
 
 // defaultLiveAttempts/defaultLiveInterval bound waitWorkerLive's post-start

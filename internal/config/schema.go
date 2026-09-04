@@ -182,23 +182,36 @@ type Manager struct {
 	// which since scion#908 means the alias "opus" — a default that belongs to
 	// the pin, not to this config, and can move under you when the pin moves.
 	// Set it to make the model a property of the instance you can review.
-	Model          string          `yaml:"model"`
-	PromptFile     string          `yaml:"prompt_file"`
-	AllowPorts     []int           `yaml:"allow_ports"`
-	CredentialFile string          `yaml:"credential_file"`
-	LLMAuth        LLMAuthMode     `yaml:"llm_auth"`
-	Obtain         []Grant         `yaml:"obtain"`
-	Delegate       []DelegateGrant `yaml:"delegate"`
+	Model      string `yaml:"model"`
+	PromptFile string `yaml:"prompt_file"`
+	// InstructionsFile is the agent's STANDING instructions (who it is, how it
+	// must operate), delivered through scion's `agent_instructions` channel —
+	// a staged file the harness projects into the agent's own CLAUDE.md — and
+	// never through argv. PromptFile stays the boot TASK, the first user turn.
+	// The split exists because the task rides scion's argv into a single tmux
+	// word capped at 16 KiB (lever#30); a manual belongs in a file. Host-only
+	// and root-confined like PromptFile. Create-time only, like Model.
+	InstructionsFile string          `yaml:"instructions_file"`
+	AllowPorts       []int           `yaml:"allow_ports"`
+	CredentialFile   string          `yaml:"credential_file"`
+	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
+	Obtain           []Grant         `yaml:"obtain"`
+	Delegate         []DelegateGrant `yaml:"delegate"`
 }
 
 type Worker struct {
-	Name     string          `yaml:"name"`
-	Dir      string          `yaml:"dir"`
-	Image    string          `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
-	Model    string          `yaml:"model"` // optional; empty ⇒ inherit Manager.Model
-	LLMAuth  LLMAuthMode     `yaml:"llm_auth"`
-	Obtain   []Grant         `yaml:"obtain"`
-	Delegate []DelegateGrant `yaml:"delegate"`
+	Name  string `yaml:"name"`
+	Dir   string `yaml:"dir"`
+	Image string `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
+	Model string `yaml:"model"` // optional; empty ⇒ inherit Manager.Model
+	// InstructionsFile: this worker's standing instructions (see
+	// Manager.InstructionsFile). Deliberately NOT inherited from the manager —
+	// the manager's manual describes orchestration authority a worker must not
+	// hold — so an unset value means the worker gets no lever instructions.
+	InstructionsFile string          `yaml:"instructions_file"`
+	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
+	Obtain           []Grant         `yaml:"obtain"`
+	Delegate         []DelegateGrant `yaml:"delegate"`
 }
 
 type ScionConfig struct {

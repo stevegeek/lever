@@ -15,7 +15,7 @@ func TestWorkerSpecs(t *testing.T) {
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},
-			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model"},
+			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md"},
 		},
 	}
 	specs := WorkerSpecs(app, "/lever")
@@ -31,6 +31,14 @@ func TestWorkerSpecs(t *testing.T) {
 	}
 	if specs[1].Image != "helper:img" || specs[1].Model != "helper-model" || specs[1].APIKey {
 		t.Fatalf("bad helper spec: %+v", specs[1])
+	}
+	// instructions_file is the worker's OWN or nothing — never inherited from
+	// the manager — and the spec carries the config-resolved host path.
+	if specs[1].InstructionsPath != app.WorkerInstructionsPath(app.Workers[1]) || specs[1].InstructionsPath == "" {
+		t.Fatalf("helper InstructionsPath = %q, want the config-resolved path", specs[1].InstructionsPath)
+	}
+	if w.InstructionsPath != "" {
+		t.Fatalf("worker without instructions_file must get none, got %q", w.InstructionsPath)
 	}
 }
 

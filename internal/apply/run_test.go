@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -389,6 +390,22 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 
 func (r *agentLifecycleRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// RunStdin is Start's transport when the manager has standing instructions
+// (scion.Client.runStdin, `--config -`). The verb logic is RunIn's, so a
+// stdin start mutates the tracked record exactly like an argv-only one; the
+// stream is kept on the recorded call so a test can assert on it.
+func (r *agentLifecycleRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	var in []byte
+	if stdin != nil {
+		in, _ = io.ReadAll(stdin)
+	}
+	res, err := r.RunIn(ctx, "", env, name, args...)
+	if n := len(r.FakeRunner.Calls); n > 0 && len(in) > 0 {
+		r.FakeRunner.Calls[n-1].Stdin = string(in)
+	}
+	return res, err
 }
 
 // newObserveFirstApp returns a minimal app + fresh FakeRunner for the
@@ -3046,5 +3063,95 @@ func TestRunRefusesIncompleteDeps(t *testing.T) {
 	}
 	if err := (Deps{}).check(); err == nil {
 		t.Fatal("an empty Deps must fail")
+	}
+}
+
+// Standing instructions reach scion as inline config on STDIN, never argv:
+// the task rides argv into a tmux command capped at 16 KiB (lever#30), and a
+// manual passes that easily. The file is read at the instance ROOT like the
+// prompt, and the start must still be the SAME create (task positional, same
+// -g project) — only the transport of the manual differs.
+func TestStartManagerPassesInstructionsOnStdin(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	manual := "# Manual\n\nStanding orders: it's long.\n"
+	if err := os.WriteFile(filepath.Join(dir, "manual.md"), []byte(manual), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Read your manual, then begin."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  prompt_file: manager.md\n  instructions_file: manual.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := scionOKRunner()
+	deps := Deps{
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var start *proc.Call
+	for i := range f.Calls {
+		if j := strings.Join(f.Calls[i].Args, " "); strings.Contains(j, "start hello") {
+			start = &f.Calls[i]
+		}
+	}
+	if start == nil {
+		t.Fatalf("no manager start call; calls=%+v", f.Calls)
+	}
+	argv := strings.Join(start.Args, " ")
+	if !strings.Contains(argv, "start hello Read your manual, then begin.") || !strings.Contains(argv, "--config -") {
+		t.Fatalf("start argv %q must keep the task positional and add --config -", argv)
+	}
+	if strings.Contains(argv, "Standing orders") {
+		t.Fatalf("start argv %q must not carry the manual", argv)
+	}
+	var body struct {
+		AgentInstructions string `json:"agent_instructions"`
+	}
+	if err := json.Unmarshal([]byte(start.Stdin), &body); err != nil || body.AgentInstructions != manual {
+		t.Fatalf("stdin must be JSON carrying the manual verbatim; got %q (err %v)", start.Stdin, err)
+	}
+}
+
+// A prompt over the tmux budget fails at apply, naming the file, with NO start
+// attempted — the alternative is a container that exits "command too long"
+// after the broker-ready wait, which is exactly the diagnosis lever#30 paid for.
+func TestStartManagerFailsFastOnOversizedPrompt(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+	if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte(strings.Repeat("x", scion.TaskArgvBudget+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, config.CanonicalName)
+	if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  prompt_file: manager.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := scionOKRunner()
+	deps := Deps{
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+	}
+	err = runApply(app, deps)
+	var tl *scion.TaskTooLongError
+	if !errors.As(err, &tl) {
+		t.Fatalf("want *scion.TaskTooLongError from apply, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "manager.md") {
+		t.Fatalf("error %q must name the prompt file", err)
+	}
+	for _, c := range f.Calls {
+		if j := strings.Join(c.Args, " "); strings.Contains(j, "start hello") {
+			t.Fatalf("no start may be attempted for an oversized prompt; got %q", j)
+		}
 	}
 }

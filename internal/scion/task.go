@@ -37,7 +37,10 @@ import (
 const TaskArgvBudget = 15 * 1024
 
 // apostropheArgvCost is what one apostrophe adds beyond its own byte by the
-// time tmux sees it: scion's shellQuote rewrites `'` as `'\”`, four bytes.
+// time tmux sees it: scion's shellQuote rewrites each apostrophe as four
+// bytes — quote, backslash, quote, quote — spelled out in words here because
+// gofmt's doc-comment formatter turns an adjacent pair of single quotes into
+// a curly double quote, which is what a reader would otherwise see.
 // scion does quote the whole wrapper a second time when it builds the tmux
 // command STRING, but that string is run through the container's own `sh -c`
 // (pkg/runtime/common.go), which strips the outer pass before tmux parses a

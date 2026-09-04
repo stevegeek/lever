@@ -7,10 +7,11 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-A code-quality refactor across the module, plus one new config key. Apart from
-that key, the user-visible differences below are side effects of tightening
-seams. Contributors should read the Changed/Internal entries before rebasing
-open branches.
+A code-quality refactor across the module, plus two new config keys —
+`model:` and `instructions_file:` — and a named check for the one size limit
+scion never reported (#30). Apart from those, the user-visible differences
+below are side effects of tightening seams. Contributors should read the
+Changed/Internal entries before rebasing open branches.
 
 ### Added
 

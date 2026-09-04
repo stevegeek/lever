@@ -20,7 +20,11 @@ func WorkerSpecs(app *config.App, jailMount string) []broker.WorkerSpec {
 			HostWorkspace:   filepath.Join(app.Tree, g.Dir), // <tree>/<dir> — MkdirAll'd before start (scion's guard requires it to exist)
 			BootstrapDir:    filepath.Join(app.Tree, g.Dir, ".lever"),
 			Image:           app.WorkerImage(g),
-			APIKey:          app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
+			Model:           app.WorkerModel(g), // own model:, else the manager's; empty ⇒ scion decides
+			// Own instructions_file only — never the manager's (see
+			// config.WorkerInstructionsPath). Content is read at dispatch.
+			InstructionsPath: app.WorkerInstructionsPath(g),
+			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 		})
 	}
 	return specs

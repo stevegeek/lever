@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strings"
@@ -149,6 +150,22 @@ func (c *Client) runValue(ctx context.Context, dir string, args ...string) (stri
 
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
+	out := res.Stdout + res.Stderr
+	if err != nil {
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), clean(out))
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// runStdin is run with a byte stream on the command's stdin — the argv-only
+// way to hand scion a value too big for a command line (Start's inline agent
+// config). It folds stderr into the error like run does; the stream itself is
+// never echoed, because argv — all redactArgs ever sees — carries only the
+// `--config -` marker, and scion does not repeat its stdin in an error.
+// Runs in the process cwd: the Runner's stdin seam takes no directory, and
+// no caller that streams needs one.
+func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
+	res, err := c.r.RunStdin(ctx, stdin, c.env(), c.bin, args...)
 	out := res.Stdout + res.Stderr
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", redactArgs(args), clean(out))

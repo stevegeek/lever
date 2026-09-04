@@ -1,7 +1,9 @@
 package scion
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -169,6 +171,36 @@ type StartOpts struct {
 	Harness string // default "claude"
 	Project string
 	Image   string // optional
+	// Model is the LLM the agent runs on, emitted as `scion start --model`:
+	// either a scion alias (small, medium, large, extra-large/xl) or an explicit
+	// model ID. Empty emits NO flag, so scion resolves the model itself
+	// (scion#908 resolves an agent with no configured model to the alias
+	// "opus") — that is what keeps an existing config's argv unchanged.
+	//
+	// CREATE-time only. `scion resume` has no --model, so the model is fixed
+	// into the agent record when it is provisioned: changing `model:` in
+	// lever.yaml does NOT re-point an agent that already exists, because apply
+	// and the broker resume such an agent rather than re-creating it. The new
+	// value reaches an agent only on a fresh create (a newly declared worker, or
+	// a record that was deleted first).
+	Model string
+	// Instructions is the agent's STANDING instructions text (who it is, how it
+	// must operate), sent as scion inline config `{"agent_instructions": …}` on
+	// STDIN via `--config -`, never on argv. scion stages it under the agent
+	// home and the harness projects it into the agent's USER-level
+	// ~/.claude/CLAUDE.md (a managed block, beside any project CLAUDE.md in
+	// the tree) on every container start. Task stays the boot task — the
+	// first user turn — and is bound by TaskArgvBudget; this channel is bound
+	// only by MaxInstructionsBytes (lever#30). Empty sends no config at all,
+	// which keeps an existing config's argv byte-identical.
+	//
+	// CREATE-time only, like Model: scion stages the content when it provisions
+	// the agent directory and does not re-stage on resume (it merges the inline
+	// config into scion-agent.json, nothing more). An edited manual reaches a
+	// freshly created agent, not one being resumed. What resume DOES do is
+	// re-project the staged copy, so an agent that rewrites its own CLAUDE.md
+	// managed block gets the staged text back at its next start.
+	Instructions string
 	// Workspace is the path mounted as /workspace in the agent container,
 	// passed as `--workspace`. For directory projects this MUST be set to the
 	// (in-jail) project tree to get a live in-place bind mount: scion's default
@@ -231,6 +263,15 @@ func (c *Client) Delete(ctx context.Context, worker, project string) error {
 }
 
 func (c *Client) Start(ctx context.Context, o StartOpts) error {
+	// Backstop for every caller: a task past the tmux cap can never start an
+	// agent, so refuse it here by name before any scion call (the earlier,
+	// friendlier checks at config load and request decode are the same test).
+	if err := CheckTask(o.Task); err != nil {
+		return err
+	}
+	if err := CheckInstructions(o.Instructions); err != nil {
+		return err
+	}
 	harness := o.Harness
 	if harness == "" {
 		harness = "claude"
@@ -277,6 +318,12 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
 	}
+	if o.Model != "" {
+		// Unset means "say nothing": scion's own default model resolution is the
+		// documented fallback, and emitting an empty --model would replace it
+		// with an invalid value. See StartOpts.Model.
+		args = append(args, "--model", o.Model)
+	}
 	if o.WorkspaceSubdir != "" {
 		// Relative to the project's workspace_path; scion mounts exactly this
 		// subtree at /workspace (guarded). Same flag as Workspace — scion
@@ -285,8 +332,31 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	} else if o.Workspace != "" {
 		args = append(args, "--workspace", o.Workspace)
 	}
-	_, runErr := c.run(ctx, "", args...)
+	if o.Instructions == "" {
+		_, runErr := c.run(ctx, "", args...)
+		return runErr
+	}
+	// Standing instructions travel as inline agent config on scion's STDIN.
+	// JSON, not YAML: scion's loader picks the JSON parser on a leading brace,
+	// and json.Marshal escapes anything a manual can contain, so no quoting
+	// rule of a config language can alter the text. Inline content, not a
+	// file:// URI, so nothing depends on where the scion binary runs or what
+	// its working directory is. See StartOpts.Instructions.
+	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions})
+	if err != nil {
+		return fmt.Errorf("encoding agent instructions: %w", err)
+	}
+	args = append(args, "--config", "-")
+	_, runErr := c.runStdin(ctx, bytes.NewReader(body), args...)
 	return runErr
+}
+
+// inlineAgentConfig is the subset of scion's inline agent config (`scion
+// config-schema`) lever sends. Only the one field: everything else an agent
+// needs is already a flag, and an inline value would silently override the
+// template chain for that field.
+type inlineAgentConfig struct {
+	AgentInstructions string `json:"agent_instructions"`
 }
 
 func (c *Client) Resume(ctx context.Context, worker, project string) error {

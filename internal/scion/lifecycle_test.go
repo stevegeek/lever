@@ -2,6 +2,7 @@ package scion
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -201,6 +202,34 @@ func TestStartWorkspaceSubdirWinsOverWorkspace(t *testing.T) {
 	got := startArgv(f)
 	if !strings.Contains(got, "--workspace workers/a") || strings.Contains(got, "--workspace /lever") {
 		t.Fatalf("subdir must take precedence over absolute workspace; argv %q", got)
+	}
+}
+
+func TestStartModelEmitsFlag(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", Model: "claude-opus-5"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := startArgv(f); !strings.Contains(got, "--model claude-opus-5") {
+		t.Fatalf("argv %q must contain --model claude-opus-5", got)
+	}
+}
+
+// The absent case is the one that matters: an unset model must leave scion's
+// own resolution in place, so the flag has to be missing from argv entirely.
+// An empty `--model ""` would instead hand scion a value it cannot resolve,
+// and would change the argv of every config written before this option existed.
+func TestStartWithoutModelOmitsFlag(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, arg := range f.Calls[len(f.Calls)-1].Args {
+		if arg == "--model" {
+			t.Fatalf("argv %q must not mention --model when no model is configured", startArgv(f))
+		}
 	}
 }
 
@@ -464,5 +493,91 @@ func TestWaitAgentLiveZeroAttemptsExhaustsImmediately(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("list called %d times with a zero budget", calls)
+	}
+}
+
+// Standing instructions must never cross argv: scion inlines the task into one
+// tmux word capped at 16 KiB (lever#30), and a manual passes that without
+// feeling large. They go as scion inline config on STDIN (`--config -`), as
+// JSON so no YAML quoting rule can bite, while the task stays positional.
+func TestStartInstructionsGoOverStdinNotArgv(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	manual := "# Manual\n\nIt's \"quoted\", has a\ttab and a trailing newline.\n"
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "boot", Project: "/g/a", Instructions: manual}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	argv := strings.Join(last.Args, " ")
+	if !strings.Contains(argv, "--config -") {
+		t.Fatalf("argv %q must ask scion to read inline config from stdin", argv)
+	}
+	if !strings.Contains(argv, "start a boot") {
+		t.Fatalf("argv %q must keep the task positional", argv)
+	}
+	if strings.Contains(argv, "Manual") {
+		t.Fatalf("argv %q must not carry the instructions text", argv)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(last.Stdin), "{") {
+		t.Fatalf("stdin must be JSON (scion picks its JSON parser on a leading brace), got %q", last.Stdin)
+	}
+	var body struct {
+		AgentInstructions string `json:"agent_instructions"`
+	}
+	if err := json.Unmarshal([]byte(last.Stdin), &body); err != nil {
+		t.Fatalf("stdin is not valid JSON: %v (%q)", err, last.Stdin)
+	}
+	if body.AgentInstructions != manual {
+		t.Fatalf("agent_instructions = %q, want the manual verbatim %q", body.AgentInstructions, manual)
+	}
+}
+
+// The absent case must be byte-identical to today's argv: no --config, nothing
+// on stdin, so every existing instance keeps the start command it has now.
+func TestStartWithoutInstructionsOmitsConfigAndStdin(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	if err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	for _, arg := range last.Args {
+		if arg == "--config" {
+			t.Fatalf("argv %q must not mention --config when no instructions are configured", startArgv(f))
+		}
+	}
+	if last.Stdin != "" {
+		t.Fatalf("nothing may be written to scion's stdin without instructions, got %q", last.Stdin)
+	}
+}
+
+// An oversized task fails HERE, by name, before lever touches scion at all —
+// not as a container that exits 1 with "command too long" in a log nobody
+// reads. Not even the --role capability probe runs.
+func TestStartRefusesOversizedTaskBeforeAnyScionCall(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: strings.Repeat("x", TaskArgvBudget+1), Project: "/g/a"})
+	var tl *TaskTooLongError
+	if !errors.As(err, &tl) {
+		t.Fatalf("want *TaskTooLongError, got %v", err)
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("no scion call may be made for a task that cannot start; got %d call(s)", len(f.Calls))
+	}
+}
+
+// The instructions cap is a backstop on the same seam as the task check:
+// over-cap text never reaches scion, where it would fail as an opaque hub
+// transport error several layers below the config key.
+func TestStartRefusesOversizedInstructionsBeforeAnyScionCall(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", Instructions: strings.Repeat("m", MaxInstructionsBytes+1)})
+	if err == nil || !strings.Contains(err.Error(), "cap") {
+		t.Fatalf("want the named cap error, got %v", err)
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("no scion call may be made for instructions that cannot be sent; got %d", len(f.Calls))
 	}
 }

@@ -754,6 +754,10 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
+	instructions, err := r.managerInstructions()
+	if err != nil {
+		return err
+	}
 	// Gate on runtime-broker readiness before any create/resume: the workstation
 	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
 	// up (waitHubReady only proved the latter), so acting now would race it. This
@@ -763,7 +767,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err := r.d.WaitBrokerReady(ctx, jp); err != nil {
 		return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
 	}
-	opts, err := r.managerStartOpts(ctx, jp, task)
+	opts, err := r.managerStartOpts(ctx, jp, task, instructions)
 	if err != nil {
 		return err
 	}
@@ -787,7 +791,35 @@ func (r *run) managerTask() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading manager prompt %s: %w", p, err)
 	}
-	return strings.TrimSpace(string(b)), nil
+	task := strings.TrimSpace(string(b))
+	// The task rides scion's argv into a tmux command capped at 16 KiB
+	// (lever#30). Fail here, naming the file, rather than after the
+	// broker-ready wait with a container that exits "command too long".
+	if err := scion.CheckTask(task); err != nil {
+		return "", fmt.Errorf("manager prompt %s: %w", p, err)
+	}
+	return task, nil
+}
+
+// managerInstructions reads the manager's standing instructions (when
+// configured). Read up front like the prompt — a missing file is a config
+// error — and passed as CONTENT, so the file only has to be readable on the
+// host: the scion binary runs in the jail and never sees the path.
+func (r *run) managerInstructions() (string, error) {
+	p := r.app.ManagerInstructionsPath()
+	if p == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", fmt.Errorf("reading manager instructions %s: %w", p, err)
+	}
+	// Same named errors Start would raise, but naming the file, and before
+	// the broker-ready wait.
+	if err := scion.CheckInstructions(string(b)); err != nil {
+		return "", fmt.Errorf("manager instructions %s: %w", p, err)
+	}
+	return string(b), nil
 }
 
 // managerStartOpts builds the `scion start` options for the manager: the task
@@ -801,7 +833,7 @@ func (r *run) managerTask() (string, error) {
 // to jp/.lever/bootstrap.json — exactly where mint-manager-bootstrap wrote the
 // manager's bootstrap.json. Injecting an env var would be redundant and add a
 // scion StartOpts.Env dependency that the file convention avoids.
-func (r *run) managerStartOpts(ctx context.Context, jp, task string) (scion.StartOpts, error) {
+func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions string) (scion.StartOpts, error) {
 	apiKey := r.app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey
 	if apiKey {
 		if err := r.prepareAPIKeyMode(ctx, jp); err != nil {
@@ -810,6 +842,15 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task string) (scion.Star
 	}
 	return scion.StartOpts{
 		Worker: r.app.Name, Task: task, Project: jp, Image: r.app.ManagerImage(), Harness: "claude",
+		// Empty when the config names no model, which omits --model and leaves
+		// scion's default resolution alone. Only ever read on a fresh create:
+		// the resume paths below take no model (scion resume has no such flag).
+		Model: r.app.ManagerModel(),
+		// Standing instructions, delivered on scion's stdin as inline config —
+		// never argv (see scion.StartOpts.Instructions). Empty when the config
+		// names no file, which sends no config at all. Create-time only, like
+		// Model: a resume re-projects what scion staged at the fresh create.
+		Instructions: instructions,
 		// Workspace = the in-jail project tree, so the manager edits the real
 		// host files in place (verified 2026-06-16). Without it scion mounts a
 		// managed copy of the externalized config dir, not the live tree.

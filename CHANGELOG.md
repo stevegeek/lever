@@ -7,12 +7,88 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-A code-quality refactor across the module. No new features; the user-visible
-differences below are side effects of tightening seams. Contributors should
-read the Changed/Internal entries before rebasing open branches.
+A code-quality refactor across the module, plus two new config keys —
+`model:` and `instructions_file:` — and a named check for the one size limit
+scion never reported (#30). Apart from those, the user-visible differences
+below are side effects of tightening seams. Contributors should read the
+Changed/Internal entries before rebasing open branches.
+
+### Added
+
+- **`model:` pins the LLM an agent runs on.** `manager.model` and
+  `workers[].model` are passed straight through as `scion start --model`,
+  taking either a scion alias (`small`, `medium`, `large`, `extra-large`/`xl`)
+  or an explicit model ID. A worker with no `model:` inherits the manager's,
+  the same way `image:` does, and the broker resolves it host-side at dispatch
+  so the manager cannot choose a worker's model. Omitting the key everywhere
+  keeps today's behavior exactly: lever emits no `--model` and the pinned scion
+  resolves the model itself (scion#908 resolves an agent with no configured
+  model to the alias `opus`).
+
+  **Create-time only.** `scion resume` has no `--model`, so the model is fixed
+  into an agent record when it is provisioned: editing `model:` does not
+  re-point an agent that already exists, because apply and the broker resume
+  those rather than re-creating them. The new value reaches a newly declared
+  worker, or an agent whose record was deleted first.
+
+  One further caveat on the inherited case, shared with `image:` and not new
+  here: a running broker bakes its worker dispatch table — inheritance already
+  resolved — at broker start, and `brokerctl.ConfigHash` deliberately excludes
+  the manager block so a manager-only edit does not bounce the broker. Editing
+  **only** `manager.model` therefore leaves an inheriting worker starting on the
+  previous model until the broker restarts for some other reason; setting
+  `workers[].model` explicitly (or any other `broker:`/`workers:`/`scion:`
+  change) does restart it.
+
+- **`instructions_file:` delivers an agent's standing instructions as a
+  file, not on the command line** (#30). `manager.instructions_file` and
+  `workers[].instructions_file` name a host-only file — root-confined like
+  `prompt_file` — whose contents go to scion as inline agent config on stdin
+  (`scion start --config -`, JSON) and land in the agent's user-level
+  `~/.claude/CLAUDE.md` — a managed block, beside any project `CLAUDE.md` in
+  the tree — through scion's `agent_instructions` channel. Both keys must
+  resolve **outside** the mounted tree, and that is now enforced (see
+  Changed). The text is capped at 512 KiB and must not begin with `file://`,
+  which scion would read as a file reference. `prompt_file` keeps its
+  meaning, the boot task that is the agent's first user turn, and should now
+  be short. A worker gets only its own file; the manager's manual is never
+  inherited, because it describes orchestration authority a worker must not
+  hold.
+
+  Why: the task rides scion's argv into a single tmux word, and tmux caps the
+  whole start command at 16 KiB. A prompt past roughly 15 KiB therefore never
+  started its agent — the container exited 1 with only `command too long` in
+  its log — and an operating manual for a long-lived manager passes that
+  without feeling large. Apostrophes cost 4 bytes each there, because scion
+  single-quotes the task.
+
+  **Create-time only**, like `model:`: scion stages the text when it
+  provisions the agent directory and re-projects that staged copy on every
+  later container start (an agent that edits its own managed block gets it
+  back), but an edited file reaches only a freshly created agent, not one
+  being resumed.
+
+- **An oversized task now fails by name before any start** (#30). lever
+  checks the task's command-line size — its bytes plus 3 per apostrophe —
+  against a 15 KiB budget at three seams: `lever apply` refuses the manager
+  prompt when it reads the file, naming it; the broker answers a worker
+  dispatch with 413 and the reason, whatever the worker's phase (a resume
+  dispatch carrying an oversized task is refused too, where scion would have
+  ignored the task); and `scion.Client.Start` refuses as the backstop for
+  every path. Before, the only evidence was `command too long`
+  (or `failed to send command`) in the container log, three layers below the
+  prompt.
 
 ### Changed
 
+- **`manager.prompt_file` may no longer resolve inside the mounted tree**
+  (#30), and neither may the new `instructions_file` keys. The docs always
+  said these are host-only boot material an agent cannot rewrite, but only
+  `..` and absolute paths were rejected; `prompt_file: workspace/boot.md`
+  with `tree: workspace` passed, handing the manager authorship of its own
+  next boot task. Config load now rejects any of the three inside the tree,
+  the same check `scion.binary`/`scion.source` already had. A config that
+  relied on this must move the file up to the instance root.
 - **Broker jail and admin routes are method-restricted and body-capped.**
   Every route is registered with a method pattern, so a request with the
   wrong method gets 405 instead of being decoded. Request bodies are read

@@ -36,10 +36,19 @@ type RetryBudget struct {
 	Settle time.Duration
 }
 
-// or returns b, or def when b is the zero value.
+// or fills b's unset Attempts/Interval from def; the zero value is def
+// entirely. Settle is taken as given once anything is set — zero settle is a
+// legitimate explicit choice (every test relies on it), so only the all-zero
+// budget inherits def's.
 func (b RetryBudget) or(def RetryBudget) RetryBudget {
-	if b.Attempts == 0 && b.Interval == 0 {
+	if b == (RetryBudget{}) {
 		return def
+	}
+	if b.Attempts == 0 {
+		b.Attempts = def.Attempts
+	}
+	if b.Interval == 0 {
+		b.Interval = def.Interval
 	}
 	return b
 }
@@ -784,10 +793,11 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
-	if err := r.convergeManager(ctx, jp, rec, opts); err != nil {
+	acted, err := r.convergeManager(ctx, jp, rec, opts)
+	if err != nil {
 		return err
 	}
-	return r.waitManagerLive(ctx, jp)
+	return r.waitManagerLive(ctx, jp, acted)
 }
 
 // managerTask reads the manager's task prompt (when configured).
@@ -871,16 +881,18 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 }
 
 // convergeManager acts on the observed manager record (nil when absent): create,
-// keep, resume, forced resume, or the loud delete+fresh recovery.
-func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) error {
+// keep, resume, forced resume, or the loud delete+fresh recovery. acted reports
+// whether it started or resumed anything — what decides if the liveness gate
+// that follows must hold for the settle window (lever#31) or may take one look.
+func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) (acted bool, err error) {
 	switch {
 	case rec == nil:
-		return r.startManagerCreate(ctx, opts)
+		return true, r.startManagerCreate(ctx, opts)
 	case rec.Phase == scion.PhaseRunning:
 		// No-op — the liveness verify in startManager still confirms the
 		// container is actually up: a running RECORD with a dead container
 		// must fail loudly, not silently pass.
-		return nil
+		return false, nil
 	case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
 		// Resume rides the SAME runtime-broker-race retry as a create Start
 		// (see scion.IsBrokerUnavailable's doc): on a cold VM the runtime broker may
@@ -888,7 +900,7 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// identical transient window. Only once the retry budget is exhausted
 		// (or the error is not the transient one at all) is the session
 		// declared unrecoverable.
-		return r.resumeOrRecover(ctx, jp, opts, resumeVerbPlain(func() error {
+		return true, r.resumeOrRecover(ctx, jp, opts, resumeVerbPlain(func() error {
 			return r.d.Scion.Resume(ctx, r.app.Name, jp)
 		}))
 	case rec.Phase == scion.PhaseError:
@@ -900,7 +912,7 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
 		// container state, resume failed, and the then-unconditional
 		// delete+fresh destroyed the manager conversation (#3).
-		return r.resumeOrRecover(ctx, jp, opts, resumeVerbForce(func() error {
+		return true, r.resumeOrRecover(ctx, jp, opts, resumeVerbForce(func() error {
 			return r.d.Scion.ResumeForce(ctx, r.app.Name, jp)
 		}))
 	default:
@@ -917,7 +929,7 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// still let `up` converge, so this takes the SAME loud delete+fresh
 		// recovery as a failed resume, rather than hard-failing (bricking)
 		// the apply with no path forward but a hard `lever destroy`.
-		return r.recoverDeleteAndCreate(ctx, jp, opts,
+		return true, r.recoverDeleteAndCreate(ctx, jp, opts,
 			fmt.Sprintf("start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", r.app.Name, rec.Phase),
 			fmt.Sprintf("manager in phase %q", rec.Phase))
 	}
@@ -1223,8 +1235,16 @@ func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 // record — not CLI exit codes or error wording — is what makes start-manager's
 // success meaningful. The live-container predicate is scion.ContainerLive,
 // shared with the broker's worker liveness gate.
-func (r *run) waitManagerLive(ctx context.Context, jp string) error {
-	return gateManagerLive(ctx, r.d.Scion, r.managerLive, r.app.Name, jp, "start-manager")
+func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error {
+	b := r.managerLive
+	if !acted {
+		// Nothing was started or resumed: the manager was running before
+		// this apply looked, so holding it for the settle window would prove
+		// nothing and cost every `lever apply`/`lever reload` ten seconds.
+		// One look still refuses a running RECORD over a dead container.
+		b.Settle = 0
+	}
+	return gateManagerLive(ctx, r.d.Scion, b, r.app.Name, jp, "start-manager")
 }
 
 // gateManagerLive is the manager liveness gate every bring-up path shares: the
@@ -1252,15 +1272,42 @@ func WaitManagerLive(ctx context.Context, d Deps, name, project string) error {
 	return gateManagerLive(ctx, d.Scion, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up")
 }
 
-// ObserveManagerLive is one fresh observation with NO settle, for a manager
-// that was already running when `lever up` looked: it confirms the record and
-// container are live now, without holding a healthy long-running manager
-// hostage for ten seconds on every `up`. A harness that died earlier already
-// shows here as an error phase or an exited container.
+// observeAttempts bounds ObserveManagerLive's list retries: enough to ride
+// out a transient hub error, short enough that a refusal arrives in seconds
+// rather than after the fifteen the start gate allows.
+const observeAttempts = 3
+
+// ObserveManagerLive is `lever up`'s check for a manager that was already
+// running when `up` looked. It started nothing, so it holds nothing: one
+// observation (a failed list is retried observeAttempts times), no settle,
+// and a refusal ONLY on positive evidence of a death — a missing record, a
+// phase that is not running, or a container status that is present and not
+// live. An EMPTY container status is not evidence either way: that column is
+// refreshed by the runtime broker's heartbeat, not computed at read time, and
+// a momentary blank must not turn a healthy, attachable manager into a
+// refusal the morning after (lever#31 review). Every refusal names what was
+// seen and the ways out.
 func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error {
 	b := d.ManagerLiveRetry.or(defaultManagerLiveRetry)
-	b.Settle = 0
-	return gateManagerLive(ctx, d.Scion, b, name, project, "up")
+	a, err := scion.ObserveAgent(ctx, func(c context.Context) ([]scion.Agent, error) {
+		return d.Scion.List(c, project)
+	}, name, observeAttempts, b.Interval)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return fmt.Errorf("up: manager %q could not be observed: %w", name, err)
+	}
+	const remedy = "`lever attach` still tries the session; `lever doctor` shows the manager row; `lever stop` then `lever up` resumes it; `lever up --fresh` discards the conversation"
+	switch {
+	case a == nil:
+		return fmt.Errorf("up: manager %q was running when up looked, but has no record now — %s", name, remedy)
+	case a.Phase != scion.PhaseRunning:
+		return fmt.Errorf("up: manager %q was running when up looked, but is in phase %q now (container %q) — %s", name, a.Phase, a.ContainerStatus, remedy)
+	case a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus):
+		return fmt.Errorf("up: manager %q record says running, but its container is %q — the harness died; %s", name, a.ContainerStatus, remedy)
+	}
+	return nil
 }
 
 // JailPath maps a host path under tree to its location inside the jail (mount +

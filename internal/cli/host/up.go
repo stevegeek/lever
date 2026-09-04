@@ -76,10 +76,11 @@ func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name strin
 // already gated inside apply.Run's start-manager step, settle window included,
 // so they add nothing here. A resume acted on the manager moments ago and
 // gets the full gate: live, then held for the settle window. A manager that
-// was already running when `up` looked gets one fresh observation, no settle
-// — a harness that died earlier already reads as an error phase or an exited
-// container, and holding a healthy long-running manager for ten seconds on
-// every `up` would be a poor trade.
+// was already running when `up` looked gets one observation, no settle (a
+// failed list is retried a few times) and is refused only on positive
+// evidence of a death — a harness that died earlier reads as an error phase
+// or an exited container — because holding a healthy long-running manager
+// for ten seconds on every `up` would be a poor trade.
 func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string) error {
 	switch d {
 	case upResume:
@@ -124,7 +125,8 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// bring-up doesn't print a scary wall of text.
 				cmd.Printf("No running manager (%s) — bringing the application up.\n", firstLine(probeErr.Error()))
 			}
-			switch upDecision(phase, fresh) {
+			decision := upDecision(phase, fresh)
+			switch decision {
 			case upRestart:
 				// A failed delete must be VISIBLE: with the record still
 				// present, the following apply's observe-first start-manager
@@ -165,7 +167,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// the "is up." print with no observation at all, and the apply
 			// paths returned on the first live look — over a harness that dies
 			// a moment later (lever#31). Gate every path before claiming up.
-			if err := gateAfterUp(cmd.Context(), deps, upDecision(phase, fresh), project, app.Name); err != nil {
+			if err := gateAfterUp(cmd.Context(), deps, decision, project, app.Name); err != nil {
 				return err
 			}
 			if noAttach {

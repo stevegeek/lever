@@ -24,7 +24,6 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
-	"github.com/stevegeek/lever/internal/scion"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -604,7 +603,7 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 
 // agentLister reads scion's agent records for the in-jail project: phase and
 // container status, which the hub's own record lacks (hubapi.Agent).
-type agentLister func(ctx context.Context, project string) ([]scion.Agent, error)
+type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, error)
 
 // checkManagerLive reports whether the manager agent is actually up: a record
 // exists, its phase is running, and its container is live. Before lever#31
@@ -622,12 +621,12 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	if err != nil {
 		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
 	}
-	a := scion.FindAgent(agents, name)
+	a := scionpkg.FindAgent(agents, name)
 	if a == nil {
 		return checkResult{check, false, fmt.Sprintf("no record for manager %q — nothing is running this instance", name),
 			"run `lever up`"}
 	}
-	if a.Phase == "running" && scion.ContainerLive(a.ContainerStatus) {
+	if a.Phase == "running" && scionpkg.ContainerLive(a.ContainerStatus) {
 		return checkResult{check, true, fmt.Sprintf("%q is running (container %s)", name, a.ContainerStatus), ""}
 	}
 	fix := "run `lever up` to resume it"

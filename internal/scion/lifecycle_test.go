@@ -622,8 +622,8 @@ func TestWaitAgentLiveZeroSettleReturnsOnFirstLiveObservation(t *testing.T) {
 // window must see the flip and say so — ErrAgentDied, not "did not come up",
 // carrying the observation that failed.
 func TestWaitAgentLiveSettleFailsWhenTheRecordFlips(t *testing.T) {
-	list, _ := scriptedList(liveMgr, liveMgr, deadMgr)
-	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 50 * time.Millisecond})
+	list, _ := scriptedList(liveMgr, liveMgr, deadMgr) // dead repeats: two strikes
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 200 * time.Millisecond})
 	if !errors.Is(err, ErrAgentDied) {
 		t.Fatalf("want ErrAgentDied, got %v", err)
 	}
@@ -641,7 +641,7 @@ func TestWaitAgentLiveSettleFailsWhenTheRecordFlips(t *testing.T) {
 // reports are the empty ones, as in the first phase's reset-to-empty rule).
 func TestWaitAgentLiveSettleFailsWhenTheRecordVanishes(t *testing.T) {
 	list, _ := scriptedList(liveMgr, []Agent{{Slug: "other", Phase: "running", ContainerStatus: "running"}})
-	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 20 * time.Millisecond})
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 200 * time.Millisecond})
 	if !errors.Is(err, ErrAgentDied) || !strings.Contains(err.Error(), `phase ""`) {
 		t.Fatalf("want ErrAgentDied with the vanished observation, got %v", err)
 	}
@@ -652,11 +652,11 @@ func TestWaitAgentLiveSettleFailsWhenTheRecordVanishes(t *testing.T) {
 func TestWaitAgentLiveSettleHoldsThenPasses(t *testing.T) {
 	list, calls := scriptedList(liveMgr)
 	start := time.Now()
-	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 20 * time.Millisecond}); err != nil {
+	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond}); err != nil {
 		t.Fatalf("WaitAgentLive: %v", err)
 	}
-	if el := time.Since(start); el < 20*time.Millisecond {
-		t.Fatalf("returned after %s, before the 20ms settle window elapsed", el)
+	if el := time.Since(start); el < 60*time.Millisecond {
+		t.Fatalf("returned after %s, before the 60ms settle window elapsed", el)
 	}
 	if *calls < 3 {
 		t.Fatalf("list called %d times; the settle window must re-observe, not sleep", *calls)
@@ -667,7 +667,7 @@ func TestWaitAgentLiveSettleHoldsThenPasses(t *testing.T) {
 // phase: a hub hiccup is not a dead harness.
 func TestWaitAgentLiveSettleToleratesAListError(t *testing.T) {
 	list, _ := scriptedList(liveMgr, nil, liveMgr)
-	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 10 * time.Millisecond}); err != nil {
+	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 60 * time.Millisecond}); err != nil {
 		t.Fatalf("one hiccup inside the window must not fail the gate: %v", err)
 	}
 }
@@ -676,9 +676,9 @@ func TestWaitAgentLiveSettleToleratesAListError(t *testing.T) {
 // says so rather than passing on faith.
 func TestWaitAgentLiveSettleWithNoObservationIsNotAPass(t *testing.T) {
 	list, _ := scriptedList(liveMgr, nil)
-	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 10 * time.Millisecond})
-	if !errors.Is(err, ErrAgentNotLive) || !strings.Contains(err.Error(), "settle window") {
-		t.Fatalf("want an unobserved-window error, got %v", err)
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 30 * time.Millisecond})
+	if !errors.Is(err, ErrAgentUnverified) || errors.Is(err, ErrAgentNotLive) || errors.Is(err, ErrAgentDied) {
+		t.Fatalf("want ErrAgentUnverified and nothing stronger, got %v", err)
 	}
 }
 
@@ -691,5 +691,52 @@ func TestWaitAgentLiveSettleReturnsCtxErrOnCancel(t *testing.T) {
 	err := WaitAgentLive(ctx, list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: time.Second})
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrAgentNotLive) || errors.Is(err, ErrAgentDied) {
 		t.Fatalf("want bare context.Canceled, got %v", err)
+	}
+}
+
+// One bad reading is not a death: the hub's container column is
+// heartbeat-refreshed, and a single stale sample must not fail a healthy
+// agent. Two consecutive non-live observations are needed.
+func TestWaitAgentLiveSettleForgivesOneBadReading(t *testing.T) {
+	list, calls := scriptedList(liveMgr, deadMgr, liveMgr)
+	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 60 * time.Millisecond}); err != nil {
+		t.Fatalf("a single bad reading inside the window must be forgiven: %v", err)
+	}
+	if *calls < 3 {
+		t.Fatalf("list called %d times; the window must have re-observed past the bad reading", *calls)
+	}
+}
+
+// A pending strike at the end of the window is decided by one more
+// observation, never left hanging as a pass.
+func TestWaitAgentLiveSettleDecidesAPendingStrike(t *testing.T) {
+	// Polls land at ~5, ~10, ~15 ms against an 8 ms window: the second poll —
+	// the first past the deadline — is the first dead reading. A gate that
+	// ended the window on elapsed time alone would pass here with one strike
+	// pending; the rule is that the next observation decides it.
+	list, _ := scriptedList(liveMgr, liveMgr, deadMgr)
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: 5 * time.Millisecond, Settle: 8 * time.Millisecond})
+	if !errors.Is(err, ErrAgentDied) {
+		t.Fatalf("want ErrAgentDied once two dead readings are consecutive, got %v", err)
+	}
+}
+
+func TestObserveAgent(t *testing.T) {
+	list, calls := scriptedList(liveMgr)
+	a, err := ObserveAgent(context.Background(), list, "mgr", 3, time.Millisecond)
+	if err != nil || a == nil || a.ContainerStatus != "Up 1 second" || *calls != 1 {
+		t.Fatalf("found record must come back from one list call: %+v %v (calls %d)", a, err, *calls)
+	}
+	absent, _ := scriptedList([]Agent{{Slug: "other", Phase: "running"}})
+	if a, err := ObserveAgent(context.Background(), absent, "mgr", 3, time.Millisecond); err != nil || a != nil {
+		t.Fatalf("absent must be (nil, nil), got %+v %v", a, err)
+	}
+	flaky, _ := scriptedList(nil, liveMgr)
+	if a, err := ObserveAgent(context.Background(), flaky, "mgr", 3, time.Millisecond); err != nil || a == nil {
+		t.Fatalf("a transient list error must be retried within the budget: %+v %v", a, err)
+	}
+	down, _ := scriptedList(nil)
+	if _, err := ObserveAgent(context.Background(), down, "mgr", 2, time.Millisecond); err == nil || !strings.Contains(err.Error(), "hub hiccup") {
+		t.Fatalf("exhaustion must carry the last list error, got %v", err)
 	}
 }

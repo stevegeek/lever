@@ -89,15 +89,21 @@ Changed/Internal entries before rebasing open branches.
   "…" is up.` and exit 0 while its container was already `Exited (1)`. The
   gate now holds that pair for a **10 s settle window** and fails with a new
   error, `came up, then died after Ns (phase …, container …)`, distinct from
-  `did not come up`. The manager gate in `apply` and the broker's worker
-  dispatch gate share it. It is still probabilistic — a harness that dies
-  after the window passes — and a sound harness-ready signal remains an
-  upstream scion request.
+  `did not come up`. Two consecutive non-live readings are needed, because the
+  hub's container column is heartbeat-refreshed and one stale sample must not
+  fail a healthy agent; a window in which no observation succeeded is reported
+  as `could not be verified live`, not passed. The manager gate in `apply` and
+  the broker's worker dispatch gate share it. It is still probabilistic — a
+  harness that dies after the window passes — and a sound harness-ready
+  signal remains an upstream scion request.
 - **`lever up`'s resume and no-op paths are gated too** (#31). Resuming a
   suspended manager never observed anything before printing `is up.`; it now
-  runs the full gate. A manager that was already running gets one fresh
-  observation (no settle), so a healthy long-running manager is not held for
-  ten seconds on every `up`.
+  runs the full gate. A manager that was already running gets one
+  observation with no settle, refused only on positive evidence of a death (a
+  missing record, a non-running phase, a container status that is present
+  and not live — an empty column is not evidence), and every refusal names
+  the ways out: `lever attach`, `lever doctor`, `lever stop` then `lever up`,
+  `lever up --fresh`.
 - **`lever doctor` reports the manager's own liveness** (#31): a new
   `manager agent` check, second in the list after the broker, fails when the
   manager record is absent, its phase is not `running`, or its container is
@@ -108,7 +114,9 @@ Changed/Internal entries before rebasing open branches.
 
 - **Fresh creates, resumes and worker dispatches take about ten seconds
   longer** (#31): the settle window above is spent waiting, deliberately,
-  on every path that just started or resumed an agent.
+  on every path that just started or resumed an agent. `lever apply` and
+  `lever reload` over a manager that is already running act on nothing and
+  take one look, not the window.
 - **`manager.prompt_file` may no longer resolve inside the mounted tree**
   (#30), and neither may the new `instructions_file` keys. The docs always
   said these are host-only boot material an agent cannot rewrite, but only

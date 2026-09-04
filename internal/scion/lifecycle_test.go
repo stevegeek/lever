@@ -710,12 +710,13 @@ func TestWaitAgentLiveSettleForgivesOneBadReading(t *testing.T) {
 // A pending strike at the end of the window is decided by one more
 // observation, never left hanging as a pass.
 func TestWaitAgentLiveSettleDecidesAPendingStrike(t *testing.T) {
-	// Polls land at ~5, ~10, ~15 ms against an 8 ms window: the second poll —
+	// Polls land at ~20, ~40, ~60 ms against a 30 ms window: the second poll —
 	// the first past the deadline — is the first dead reading. A gate that
 	// ended the window on elapsed time alone would pass here with one strike
-	// pending; the rule is that the next observation decides it.
+	// pending; the rule is that the next observation decides it. Ten
+	// milliseconds of slack either side of the deadline.
 	list, _ := scriptedList(liveMgr, liveMgr, deadMgr)
-	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: 5 * time.Millisecond, Settle: 8 * time.Millisecond})
+	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: 20 * time.Millisecond, Settle: 30 * time.Millisecond})
 	if !errors.Is(err, ErrAgentDied) {
 		t.Fatalf("want ErrAgentDied once two dead readings are consecutive, got %v", err)
 	}
@@ -738,5 +739,26 @@ func TestObserveAgent(t *testing.T) {
 	down, _ := scriptedList(nil)
 	if _, err := ObserveAgent(context.Background(), down, "mgr", 2, time.Millisecond); err == nil || !strings.Contains(err.Error(), "hub hiccup") {
 		t.Fatalf("exhaustion must carry the last list error, got %v", err)
+	}
+}
+
+// A pending strike may not wait forever for its deciding observation: one
+// non-live reading followed by lists that keep failing — the container exits,
+// then the scion server dies — must end the window as unverified within a
+// few polls, not spawn `scion list` into a dead jail until someone kills the
+// command (lever#31 review R1).
+func TestWaitAgentLiveSettlePendingStrikeCannotWaitForever(t *testing.T) {
+	list, calls := scriptedList(liveMgr, deadMgr, nil) // one strike, then the hub is gone
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 20 * time.Millisecond})
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrAgentUnverified) || !strings.Contains(err.Error(), `phase "error"`) {
+			t.Fatalf("want ErrAgentUnverified naming the unconfirmed reading, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("still polling after 2s (%d list calls): a pending strike must not keep the window open forever", *calls)
 	}
 }

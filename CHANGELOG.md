@@ -89,10 +89,12 @@ Changed/Internal entries before rebasing open branches.
   "…" is up.` and exit 0 while its container was already `Exited (1)`. The
   gate now holds that pair for a **10 s settle window** and fails with a new
   error, `came up, then died after Ns (phase …, container …)`, distinct from
-  `did not come up`. Two consecutive non-live readings are needed, because the
-  hub's container column is heartbeat-refreshed and one stale sample must not
-  fail a healthy agent; a window in which no observation succeeded is reported
-  as `could not be verified live`, not passed. The manager gate in `apply` and
+  `did not come up`. Two non-live readings with no live reading between them
+  are needed, because the hub's container column is heartbeat-refreshed and
+  one stale sample must not fail a healthy agent; a window in which nothing
+  could be confirmed — no observation at all, or one non-live reading that no
+  later observation confirmed or refuted — is reported as `could not be
+  verified live`, not passed. The manager gate in `apply` and
   the broker's worker dispatch gate share it. It is still probabilistic — a
   harness that dies after the window passes — and a sound harness-ready
   signal remains an upstream scion request.
@@ -103,7 +105,10 @@ Changed/Internal entries before rebasing open branches.
   missing record, a non-running phase, a container status that is present
   and not live — an empty column is not evidence), and every refusal names
   the ways out: `lever attach`, `lever doctor`, `lever stop` then `lever up`,
-  `lever up --fresh`.
+  `lever up --fresh`. One gap is deliberate: a running record over a blank
+  column still passes this path, so `up --no-attach` can print `is up.` over
+  it; with attach (the default) a dead session surfaces as scion's own attach
+  error, as before.
 - **`lever doctor` reports the manager's own liveness** (#31): a new
   `manager agent` check, second in the list after the broker, fails when the
   manager record is absent, its phase is not `running`, or its container is

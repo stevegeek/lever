@@ -629,6 +629,13 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	if a.Phase == "running" && scionpkg.ContainerLive(a.ContainerStatus) {
 		return checkResult{check, true, fmt.Sprintf("%q is running (container %s)", name, a.ContainerStatus), ""}
 	}
+	if a.Phase == "running" && a.ContainerStatus == "" {
+		// The container column is refreshed by the runtime broker's heartbeat,
+		// not computed at read time; a blank is "cannot tell", which is what
+		// `lever up` reads it as too (apply.ObserveManagerLive), never a
+		// death and never a pass with a claim attached.
+		return checkResult{check, true, fmt.Sprintf("%q is running; not checked further (no container status reported yet)", name), ""}
+	}
 	fix := "run `lever up` to resume it"
 	if a.Phase == "error" {
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the conversation is lost and a fresh manager is created) — its container log in the guest holds the harness's last output"

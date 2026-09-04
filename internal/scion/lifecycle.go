@@ -133,8 +133,14 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 // codebase has already once failed a healthy manager on a single reading of
 // it. A non-live observation therefore only counts when the NEXT observation
 // agrees — one extra interval, and a real death (PhaseError on the hub, an
-// "Exited (1)" container) is stable across it. The window does not end on a
-// pending strike; the next observation decides it either way.
+// "Exited (1)" container) is stable across it. A pending strike keeps the
+// window open past its deadline for a bounded few polls, so the next
+// SUCCESSFUL observation can decide it; if none comes — a guest VM going down
+// mid-window, container first and scion server a moment later, leaves every
+// list failing — the window ends as unverified rather than polling a dead
+// jail forever (lever#31 review R1). A list error between two non-live
+// readings does not break the chain: it is neither confirmation nor
+// contradiction.
 func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration) error {
 	if interval <= 0 {
 		// Never spin: a zero interval would call list as fast as the CPU
@@ -142,10 +148,14 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 		// cadence.
 		interval = time.Second
 	}
+	// strikeGrace bounds how many polls past the deadline a pending strike may
+	// wait for a deciding observation.
+	const strikeGrace = 3
 	start := time.Now()
 	var lastErr error
+	var lastPhase, lastContainer string
 	observed := false
-	strikes := 0
+	strikes, graceLeft := 0, strikeGrace
 	for {
 		select {
 		case <-ctx.Done():
@@ -157,19 +167,25 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 			lastErr = err
 		} else {
 			lastErr, observed = nil, true
-			phase, container := "", ""
+			lastPhase, lastContainer = "", ""
 			if a := FindAgent(agents, slug); a != nil {
-				phase, container = a.Phase, a.ContainerStatus
+				lastPhase, lastContainer = a.Phase, a.ContainerStatus
 			}
-			if phase == "running" && ContainerLive(container) {
+			if lastPhase == "running" && ContainerLive(lastContainer) {
 				strikes = 0
 			} else if strikes++; strikes >= 2 {
 				return fmt.Errorf("%w after %s (phase %q, container %q) — scion reported success and the record was live, then the harness died; its container log in the guest holds the last output",
-					ErrAgentDied, time.Since(start).Round(100*time.Millisecond), phase, container)
+					ErrAgentDied, time.Since(start).Round(100*time.Millisecond), lastPhase, lastContainer)
 			}
 		}
-		if time.Since(start) >= settle && strikes == 0 {
-			break
+		if time.Since(start) >= settle {
+			if strikes == 0 {
+				break
+			}
+			if graceLeft--; graceLeft <= 0 {
+				return fmt.Errorf("%w during the %s settle window (a non-live reading — phase %q, container %q — was never confirmed or refuted; last error observing agents: %v)",
+					ErrAgentUnverified, settle, lastPhase, lastContainer, lastErr)
+			}
 		}
 	}
 	if !observed {
@@ -216,7 +232,8 @@ func notLiveErr(lastPhase, lastContainer string) error {
 // Absent is (nil, nil). It judges nothing: what an observation means depends
 // on the path — a caller that just started the agent wants WaitAgentLive's
 // gate, one that found it running already wants only positive evidence of a
-// death (apply.ObserveManagerLive). Exhaustion wraps the last list error; ctx
+// death (apply.ObserveManagerLive). Exhaustion reports the last list error
+// (%v, not %w — see waitLiveOnce on why a list error is never wrapped); ctx
 // errors pass through unwrapped.
 func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) (*Agent, error) {
 	if attempts <= 0 {

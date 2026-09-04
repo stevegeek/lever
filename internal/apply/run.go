@@ -1292,13 +1292,13 @@ func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error
 	a, err := scion.ObserveAgent(ctx, func(c context.Context) ([]scion.Agent, error) {
 		return d.Scion.List(c, project)
 	}, name, observeAttempts, b.Interval)
+	const remedy = "`lever attach` still tries the session; `lever doctor` shows the manager row; `lever stop` then `lever up` resumes it; `lever up --fresh` discards the conversation"
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		return fmt.Errorf("up: manager %q could not be observed: %w", name, err)
+		return fmt.Errorf("up: manager %q could not be observed: %w — %s", name, err, remedy)
 	}
-	const remedy = "`lever attach` still tries the session; `lever doctor` shows the manager row; `lever stop` then `lever up` resumes it; `lever up --fresh` discards the conversation"
 	switch {
 	case a == nil:
 		return fmt.Errorf("up: manager %q was running when up looked, but has no record now — %s", name, remedy)

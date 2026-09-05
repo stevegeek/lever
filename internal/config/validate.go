@@ -216,12 +216,18 @@ func (a *App) Validate() error {
 	if a.Manager.InstructionsFile != "" && !confinedRel(a.Manager.InstructionsFile) {
 		return fmt.Errorf("config: manager.instructions_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.InstructionsFile)
 	}
+	if err := validateImageTar("manager", a.Manager.Image, a.Manager.ImageTar); err != nil {
+		return err
+	}
 	for _, g := range a.Workers {
 		if err := a.validateWorker(g); err != nil {
 			return err
 		}
 	}
 	if err := a.validateWorkerDirsDisjoint(); err != nil {
+		return err
+	}
+	if err := a.validateImageTarsDistinct(); err != nil {
 		return err
 	}
 	if err := a.validateBroker(); err != nil {
@@ -283,6 +289,9 @@ func pathOverlaps(a, b string) bool {
 func (a *App) validateWorker(g Worker) error {
 	if g.Name == "" || g.Dir == "" {
 		return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
+	}
+	if err := validateImageTar(fmt.Sprintf("workers[%s]", g.Name), g.Image, g.ImageTar); err != nil {
+		return err
 	}
 	if !nameRE.MatchString(g.Name) {
 		return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
@@ -572,6 +581,56 @@ func (a *App) validateBrokerGrants() error {
 	}
 	for _, g := range a.Workers {
 		if err := checkAgentGrants("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateImageTar checks one `image_tar` against its `image`: the archive
+// is host-only boot material and stays root-confined like prompt_file; it
+// needs a tag-bearing ref to match against, so a missing `image:` (a worker
+// inheriting the manager's inherits the manager's tar with it) or a
+// digest-pinned ref (a tar carries tags, not manifest digests) is an error.
+func validateImageTar(who, image, tar string) error {
+	if tar == "" {
+		return nil
+	}
+	if !confinedRel(tar) {
+		return fmt.Errorf("config: %s.image_tar %q must be a relative path inside the instance root (no \"..\", not absolute)", who, tar)
+	}
+	if image == "" {
+		return fmt.Errorf("config: %s.image_tar %q needs %s.image — the archive is matched against the image's tag (a worker with no image inherits the manager's image and its tar)", who, tar, who)
+	}
+	if strings.Contains(image, "@") {
+		return fmt.Errorf("config: %s.image_tar %q cannot ship a digest-pinned image (%s): a docker archive is matched by tag, not by manifest digest", who, tar, image)
+	}
+	return nil
+}
+
+// validateImageTarsDistinct rejects one image ref shipped from two different
+// archives: the bring-up loads each distinct ref exactly once, so a second
+// source for the same ref would be silently ignored.
+func (a *App) validateImageTarsDistinct() error {
+	src := map[string]string{}
+	check := func(ref, tar string) error {
+		if ref == "" || tar == "" {
+			return nil
+		}
+		if prev, ok := src[ref]; ok && prev != tar {
+			return fmt.Errorf("config: image %q is shipped from two archives (%q and %q); one image ref must come from one image_tar", ref, prev, tar)
+		}
+		src[ref] = tar
+		return nil
+	}
+	if err := check(a.ManagerImage(), a.Manager.ImageTar); err != nil {
+		return err
+	}
+	for _, g := range a.Workers {
+		if g.Image == "" {
+			continue
+		}
+		if err := check(a.WorkerImage(g), g.ImageTar); err != nil {
 			return err
 		}
 	}

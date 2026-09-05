@@ -144,13 +144,17 @@ func LoadNoHostChecks(path string) (*App, error) {
 	// hand the manager authorship of its own next boot task, and an in-tree
 	// instructions_file its own standing CLAUDE.md. Same test as the engine
 	// above, for the same reason (lever#30 review).
+	// image_tar is the same kind of material — it is the code the agent
+	// runs — so it gets the same test (lever#32).
 	bootFiles := []struct{ key, path string }{
 		{"manager.prompt_file", app.ManagerPromptPath()},
 		{"manager.instructions_file", app.ManagerInstructionsPath()},
+		{"manager.image_tar", app.ManagerImageTarPath()},
 	}
 	for _, g := range app.Workers {
-		bootFiles = append(bootFiles, struct{ key, path string }{
-			fmt.Sprintf("workers[%s].instructions_file", g.Name), app.WorkerInstructionsPath(g)})
+		bootFiles = append(bootFiles,
+			struct{ key, path string }{fmt.Sprintf("workers[%s].instructions_file", g.Name), app.WorkerInstructionsPath(g)},
+			struct{ key, path string }{fmt.Sprintf("workers[%s].image_tar", g.Name), app.WorkerImageTarPath(g)})
 	}
 	for _, m := range bootFiles {
 		if m.path == "" {

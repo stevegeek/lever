@@ -77,13 +77,22 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	// manager, so their images must already be present — they can't be pulled
 	// under the egress allowlist. Dedup preserves first-seen order.
 	// Each ref carries its archive when the config ships one; Validate has
-	// already refused one ref from two different archives.
-	seen := map[string]bool{}
+	// already refused one ref from two different archives. A ref named both
+	// with and without an archive loads from the archive whatever the
+	// declaration order: a tar is an explicit source, host docker the fallback.
+	seen := map[string]int{}
 	addLoad := func(img, tar string) {
-		if img != "" && !seen[img] {
-			seen[img] = true
-			steps = append(steps, Step{Kind: KindLoadImage, Target: img, TarPath: tar})
+		if img == "" {
+			return
 		}
+		if i, ok := seen[img]; ok {
+			if steps[i].TarPath == "" {
+				steps[i].TarPath = tar
+			}
+			return
+		}
+		seen[img] = len(steps)
+		steps = append(steps, Step{Kind: KindLoadImage, Target: img, TarPath: tar})
 	}
 	addLoad(a.ManagerImage(), a.ManagerImageTarPath())
 	for _, g := range a.Workers {

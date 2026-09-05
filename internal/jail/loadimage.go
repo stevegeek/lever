@@ -176,9 +176,14 @@ func localhostAliasArgs(prefix []string, uid, ref string) []string {
 // Tagging the fresh docker.io/ name as localhost/ makes both names one
 // image; the superseded copy goes dangling for the prune that follows. A
 // ref that names its registry (a '.' or ':' in its first component, or
-// localhost/) is loaded under that exact name and is left alone. Failure
-// is fatal: silently running the stale image is the bug being fixed.
+// localhost/) is loaded under that exact name and is left alone, as is a
+// digest-pinned ref: docker save writes one with no RepoTag and a digest is
+// not a legal tag target, so the container resolves it by ID anyway.
+// Failure is fatal: silently running the stale image is the bug being fixed.
 func aliasLocalhost(ctx context.Context, r proc.Runner, prefix []string, uid, ref string) error {
+	if strings.Contains(ref, "@") {
+		return nil
+	}
 	if i := strings.Index(ref, "/"); i > 0 {
 		if first := ref[:i]; strings.ContainsAny(first, ".:") || first == "localhost" {
 			return nil

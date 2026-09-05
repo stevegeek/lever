@@ -274,7 +274,11 @@ func TestLocalhostAliasArgs(t *testing.T) {
 // registry (or one already under localhost/) is loaded under that exact name
 // and needs no alias.
 func TestLocalhostAliasSkipsQualifiedRefs(t *testing.T) {
-	for _, ref := range []string{"ghcr.io/org/img:1", "localhost/scionlocal/x:latest", "reg:5000/img:1", "docker.io/scionlocal/x:latest"} {
+	// A digest-pinned ref (security.require_image_digest) is self-naming
+	// too: docker save writes it with no RepoTag, and a digest is not a
+	// legal tag target, so an alias attempt could only fail the load.
+	for _, ref := range []string{"ghcr.io/org/img:1", "localhost/scionlocal/x:latest", "reg:5000/img:1", "docker.io/scionlocal/x:latest",
+		"scionlocal/x@sha256:" + strings.Repeat("a", 64), "alpine@sha256:" + strings.Repeat("a", 64)} {
 		r := proc.NewFakeRunner()
 		r.Script("orb", proc.Result{})
 		if err := aliasLocalhost(context.Background(), r, orbPrefix("m", "u"), "501", ref); err != nil {

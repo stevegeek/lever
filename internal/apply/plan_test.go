@@ -338,3 +338,25 @@ func TestPlanLoadImageCarriesTarPath(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanLoadImageTarWinsOverDockerSource: when one ref is named both with
+// an archive and without (a worker restating the manager image with its own
+// tar), the archive is the source whatever the declaration order — a tar
+// beside a config is an explicit choice, host docker is the fallback.
+func TestPlanLoadImageTarWinsOverDockerSource(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img:latest"},
+		Workers: []config.Worker{{Name: "w", Dir: "w/a", Image: "img:latest", ImageTar: "images/img.tar"}},
+	}
+	var got []Step
+	for _, s := range Plan(app, PlanOpts{}) {
+		if s.Kind == KindLoadImage {
+			got = append(got, s)
+		}
+	}
+	want := []Step{{Kind: KindLoadImage, Target: "img:latest", TarPath: app.WorkerImageTarPath(app.Workers[0])}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("load-image steps = %+v, want %+v", got, want)
+	}
+}

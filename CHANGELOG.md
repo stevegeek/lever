@@ -79,8 +79,49 @@ Changed/Internal entries before rebasing open branches.
   (or `failed to send command`) in the container log, three layers below the
   prompt.
 
+### Fixed
+
+- **`lever up` no longer reports success over a dead harness** (#31). The
+  post-start liveness gate returned on the first poll that showed the record
+  running and the container up — both of which scion sets before the harness
+  has run a line — so a harness that died one to three seconds in (a task past
+  the tmux cap, `claude --continue` with no conversation) got `application
+  "…" is up.` and exit 0 while its container was already `Exited (1)`. The
+  gate now holds that pair for a **10 s settle window** and fails with a new
+  error, `came up, then died after Ns (phase …, container …)`, distinct from
+  `did not come up`. Two non-live readings with no live reading between them
+  are needed, because the hub's container column is heartbeat-refreshed and
+  one stale sample must not fail a healthy agent; a window in which nothing
+  could be confirmed — no observation at all, or one non-live reading that no
+  later observation confirmed or refuted — is reported as `could not be
+  verified live`, not passed. The manager gate in `apply` and
+  the broker's worker dispatch gate share it. It is still probabilistic — a
+  harness that dies after the window passes — and a sound harness-ready
+  signal remains an upstream scion request.
+- **`lever up`'s resume and no-op paths are gated too** (#31). Resuming a
+  suspended manager never observed anything before printing `is up.`; it now
+  runs the full gate. A manager that was already running gets one
+  observation with no settle, refused only on positive evidence of a death (a
+  missing record, a non-running phase, a container status that is present
+  and not live — an empty column is not evidence), and every refusal names
+  the ways out: `lever attach`, `lever doctor`, `lever stop` then `lever up`,
+  `lever up --fresh`. One gap is deliberate: a running record over a blank
+  column still passes this path, so `up --no-attach` can print `is up.` over
+  it; with attach (the default) a dead session surfaces as scion's own attach
+  error, as before.
+- **`lever doctor` reports the manager's own liveness** (#31): a new
+  `manager agent` check, second in the list after the broker, fails when the
+  manager record is absent, its phase is not `running`, or its container is
+  not up. Before, all fourteen checks could pass with no manager container
+  present at all.
+
 ### Changed
 
+- **Fresh creates, resumes and worker dispatches take about ten seconds
+  longer** (#31): the settle window above is spent waiting, deliberately,
+  on every path that just started or resumed an agent. `lever apply` and
+  `lever reload` over a manager that is already running act on nothing and
+  take one look, not the window.
 - **`manager.prompt_file` may no longer resolve inside the mounted tree**
   (#30), and neither may the new `instructions_file` keys. The docs always
   said these are host-only boot material an agent cannot rewrite, but only

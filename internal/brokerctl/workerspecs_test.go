@@ -3,6 +3,7 @@ package brokerctl
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 )
@@ -45,5 +46,14 @@ func TestWorkerSpecs(t *testing.T) {
 func TestWorkerBrokerURL(t *testing.T) {
 	if got := workerBrokerURL("10.0.0.2", 8080); got != "https://10.0.0.2:8080" {
 		t.Fatalf("url = %q", got)
+	}
+}
+
+// The production worker gate holds for ten seconds (lever#31); dispatchConfig
+// itself needs a live backend to run, so the value is pinned here and the
+// wiring is checked live (a dispatch now takes about ten seconds longer).
+func TestWorkerLiveSettleIsTenSeconds(t *testing.T) {
+	if workerLiveSettle < 10*time.Second {
+		t.Fatalf("workerLiveSettle = %s, want >= 10s", workerLiveSettle)
 	}
 }

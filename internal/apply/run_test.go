@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
@@ -32,6 +33,12 @@ func runApply(app *config.App, deps Deps) error {
 // into the app tree exactly as the real mint step would; a test that models a
 // spent latch wires spentLatchMint instead.
 func fillDeps(d Deps) Deps {
+	// The production default holds the manager live for 10 s (lever#31); a
+	// test that does not model the settle window must not pay for it. Zero
+	// settle is the first-observation gate every earlier test was written for.
+	if d.ManagerLiveRetry == (RetryBudget{}) {
+		d.ManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Millisecond}
+	}
 	if d.LoadImage == nil {
 		d.LoadImage = func(context.Context, string) error { return nil }
 	}
@@ -265,6 +272,11 @@ type agentLifecycleRunner struct {
 	// default) preserves the original all-tests-so-far behavior: if resumeErr
 	// is set, resume fails EVERY call (no eventual success).
 	resumeFailsThenSucceed int
+	// dieAfterLiveLists, when > 0, models lever#31: once live, the record stays
+	// running/Up for this many list calls and then flips to error/Exited — the
+	// harness died after scion reported success.
+	dieAfterLiveLists int
+	liveLists         int
 	// listFailsThenSucceed, when > 0, makes the observe List fail (with listErr)
 	// for exactly this many calls, then succeed — models the runtime-broker race
 	// biting the FIRST hub call of start-manager. Only the observe-first List is
@@ -345,6 +357,12 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	case "list":
 		r.listCalls++
 		r.record(dir, env, name, args)
+		if r.dieAfterLiveLists > 0 && r.phase == "running" {
+			r.liveLists++
+			if r.liveLists > r.dieAfterLiveLists {
+				r.phase, r.containerStatus = "error", "Exited (1) 2 seconds ago"
+			}
+		}
 		if r.listErr != nil && (r.listFailsThenSucceed == 0 || r.listCalls <= r.listFailsThenSucceed) {
 			return proc.Result{Code: 1, Stderr: r.listErr.Error()}, r.listErr
 		}
@@ -3219,5 +3237,157 @@ func TestStartManagerResumeCarriesNoInstructions(t *testing.T) {
 		if slices.Contains(c.Args, "--config") || c.Stdin != "" {
 			t.Fatalf("a resume must carry no instructions; call %q had stdin %q", strings.Join(c.Args, " "), c.Stdin)
 		}
+	}
+}
+
+// lever#31: scion reports the record running before the harness runs, and the
+// harness dies a moment later. A gate that returns on the first live look
+// prints "is up." over a dead container; the settle window must catch the
+// flip and name it as a death, not a failure to come up.
+func TestStartManagerFailsWhenHarnessDiesDuringSettle(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", dieAfterLiveLists: 2}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
+	}
+	err := runApply(app, deps)
+	if !errors.Is(err, scion.ErrAgentDied) {
+		t.Fatalf("want ErrAgentDied from the start-manager gate, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "start-manager") || !strings.Contains(err.Error(), `Exited (1)`) {
+		t.Fatalf("error must carry the step and the failing observation: %v", err)
+	}
+}
+
+// The same death is invisible to a zero-settle gate — this is the pre-#31
+// behaviour, kept as a test so the settle default cannot be quietly dropped.
+func TestStartManagerZeroSettleMissesALaterDeath(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", dieAfterLiveLists: 1}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond},
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("zero settle returns on the first live look by design: %v", err)
+	}
+}
+
+// `lever up`'s resume path gates through WaitManagerLive with the full settle
+// window: a record that dies after the resume fails the up, named as a death.
+func TestWaitManagerLiveGatesUpsResumePath(t *testing.T) {
+	f := scionOKRunner()
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 1 second", dieAfterLiveLists: 1}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
+	}
+	err := WaitManagerLive(context.Background(), deps, "hello", "/lever")
+	if !errors.Is(err, scion.ErrAgentDied) || !strings.Contains(err.Error(), "up: manager") {
+		t.Fatalf("want an up-prefixed ErrAgentDied, got %v", err)
+	}
+}
+
+// ObserveManagerLive (lever#31): a manager `up` found running gets ONE look,
+// no settle — a running record over a live container passes in one list call;
+// only positive evidence of a death refuses, and the refusal names the ways
+// out. An empty container column is not evidence.
+func TestObserveManagerLiveRefusesOnlyOnEvidenceOfDeath(t *testing.T) {
+	observe := func(phase, container string) (error, int) {
+		r := &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "hello", initPhase: phase, initContainerStatus: container}
+		deps := Deps{Scion: scion.New(r, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: time.Hour}}
+		return ObserveManagerLive(context.Background(), deps, "hello", "/lever"), r.listCalls
+	}
+	if err, calls := observe("running", "Up 3 days"); err != nil || calls != 1 {
+		t.Fatalf("running + live: want pass in one look, got %v (%d calls)", err, calls)
+	}
+	if err, _ := observe("running", ""); err != nil {
+		t.Fatalf("running + empty container column is not evidence of death: %v", err)
+	}
+	if err, _ := observe("running", "Exited (1) 5 minutes ago"); err == nil || !strings.Contains(err.Error(), "container") || !strings.Contains(err.Error(), "lever up --fresh") {
+		t.Fatalf("running record over an exited container must refuse and name a way out, got %v", err)
+	}
+	if err, _ := observe("error", "Exited (1) 5 minutes ago"); err == nil || !strings.Contains(err.Error(), `phase "error"`) || !strings.Contains(err.Error(), "lever doctor") {
+		t.Fatalf("an error phase must refuse and point at doctor, got %v", err)
+	}
+	// Absent record: observed once as running (upNone), gone at the look.
+	r := &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "other", initPhase: "running", initContainerStatus: "Up"}
+	deps := Deps{Scion: scion.New(r, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond}}
+	if err := ObserveManagerLive(context.Background(), deps, "hello", "/lever"); err == nil || !strings.Contains(err.Error(), "no record") {
+		t.Fatalf("a vanished record must refuse, got %v", err)
+	}
+}
+
+// A refusal must arrive in seconds, not after the start gate's fifteen
+// attempts: the observation retries only a few times on a list error.
+func TestObserveManagerLiveGivesUpQuicklyWhenTheHubIsDown(t *testing.T) {
+	f := proc.NewFakeRunner() // nothing scripted: every scion call fails, like a down hub
+	deps := Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 15, Interval: time.Millisecond}}
+	err := ObserveManagerLive(context.Background(), deps, "hello", "/lever")
+	if err == nil || !strings.Contains(err.Error(), "could not be observed") {
+		t.Fatalf("want a could-not-observe error, got %v", err)
+	}
+	if len(f.Calls) > observeAttempts {
+		t.Fatalf("%d list calls, want at most %d", len(f.Calls), observeAttempts)
+	}
+}
+
+// An apply over a manager that is already running acts on nothing, so it
+// takes one look and does NOT hold for the settle window (lever#31 review
+// I1): `lever apply` and `lever reload` are the everyday reconfigure commands.
+func TestApplyOverRunningManagerTakesOneLookNotTheSettle(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 4 days"}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 500 * time.Millisecond},
+	}
+	start := time.Now()
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if el := time.Since(start); el >= 500*time.Millisecond {
+		t.Fatalf("apply over a running manager took %s: it must not hold for the settle window", el)
+	}
+	if r.startCalls != 0 || r.resumeCalls != 0 || r.listCalls > 2 {
+		t.Fatalf("start=%d resume=%d list=%d; want 0/0/<=2 (observe + one look)", r.startCalls, r.resumeCalls, r.listCalls)
+	}
+}
+
+// A resume DID act, so it is held for the settle window like a create.
+func TestStartManagerResumeIsHeldForTheSettleWindow(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped", dieAfterLiveLists: 1}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
+	}
+	err := runApply(app, deps)
+	if !errors.Is(err, scion.ErrAgentDied) || r.resumeCalls != 1 {
+		t.Fatalf("want ErrAgentDied after a resume (resumeCalls=%d), got %v", r.resumeCalls, err)
+	}
+}
+
+// RetryBudget.or fills Attempts/Interval per field, so a budget that sets
+// only Settle keeps it (review M5); the zero value is the default entirely.
+func TestRetryBudgetOrFillsPerField(t *testing.T) {
+	def := RetryBudget{Attempts: 15, Interval: time.Second, Settle: 10 * time.Second}
+	if got := (RetryBudget{}).or(def); got != def {
+		t.Fatalf("zero value must be the default, got %+v", got)
+	}
+	if got := (RetryBudget{Settle: 3 * time.Second}).or(def); got != (RetryBudget{Attempts: 15, Interval: time.Second, Settle: 3 * time.Second}) {
+		t.Fatalf("settle-only budget must keep its settle and inherit the rest, got %+v", got)
+	}
+	if got := (RetryBudget{Attempts: 3, Interval: time.Millisecond}).or(def); got.Settle != 0 {
+		t.Fatalf("an explicit zero settle beside a set budget must stay zero, got %+v", got)
+	}
+}
+
+// The production manager gate holds for ten seconds (lever#31). Pinned here
+// because the CHANGELOG promises it and every other test zeroes it.
+func TestDefaultManagerLiveRetryHoldsForTenSeconds(t *testing.T) {
+	if defaultManagerLiveRetry.Settle < 10*time.Second {
+		t.Fatalf("default settle = %s, want >= 10s", defaultManagerLiveRetry.Settle)
 	}
 }

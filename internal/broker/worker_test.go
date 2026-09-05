@@ -43,6 +43,11 @@ type fakeRuntime struct {
 	// crash-looped container (Phase "running", ContainerStatus "Exited (1)").
 	// Before Start it stays absent, so handleWorkerStart still takes the Start path.
 	exitedAfterStart bool
+	// dieAfterLists, when > 0, models lever#31: after a Start/Resume the record
+	// reads running/Up for this many List calls, then flips to error/Exited —
+	// the harness died after scion reported success.
+	dieAfterLists int
+	actedLists    int
 }
 
 func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
@@ -56,6 +61,12 @@ func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, er
 	if name, acted := f.lastActed(); acted && !f.staticPhases {
 		if f.exitedAfterStart {
 			return []scion.Agent{{Slug: name, Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}}, nil
+		}
+		if f.dieAfterLists > 0 {
+			f.actedLists++
+			if f.actedLists > f.dieAfterLists {
+				return []scion.Agent{{Slug: name, Phase: "error", ContainerStatus: "Exited (1) 2 seconds ago"}}, nil
+			}
 		}
 		return []scion.Agent{{Slug: name, Phase: "running", ContainerStatus: "Up 1 second"}}, nil
 	}
@@ -689,5 +700,43 @@ func TestWorkerStart_absent_oversizedInstructionsFailBeforeStaging(t *testing.T)
 	}
 	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
 		t.Fatalf("no ticket may be staged (stat err %v)", err)
+	}
+}
+
+// lever#31 on the worker path: the record is live when the broker first looks
+// and dead a moment later. With a settle window the dispatch fails and the
+// manager hears WHY — "came up, then died" with the observation — instead of a
+// 200 "running" over an exited container.
+func TestWorkerStartFailsWhenHarnessDiesDuringSettle(t *testing.T) {
+	dir := t.TempDir()
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
+		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, dieAfterLists: 2}
+	b := newTestBroker(t, rt, spec)
+	b.liveAttempts, b.liveInterval, b.liveSettle = 3, time.Millisecond, 30*time.Millisecond
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "then died") || !strings.Contains(rec.Body.String(), "Exited (1)") {
+		t.Fatalf("body must say the worker came up then died, with the observation: %q", rec.Body.String())
+	}
+}
+
+// Zero settle — what every broker built without brokerctl's production
+// config gets — is the first-observation gate: the same death goes unseen.
+// Pinned so the production default cannot be dropped without a test moving.
+func TestWorkerStartZeroSettleMissesALaterDeath(t *testing.T) {
+	dir := t.TempDir()
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
+		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, dieAfterLists: 1}
+	b := newTestBroker(t, rt, spec)
+	b.liveAttempts, b.liveInterval = 3, time.Millisecond
+
+	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager"); rec.Code != http.StatusOK {
+		t.Fatalf("zero settle returns on the first live look by design; got %d (%s)", rec.Code, rec.Body.String())
 	}
 }

@@ -601,6 +601,49 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 			"--role baseline (its conversation is LOST), or pin a scion older than scion#1089"}
 }
 
+// agentLister reads scion's agent records for the in-jail project: phase and
+// container status, which the hub's own record lacks (hubapi.Agent).
+type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, error)
+
+// checkManagerLive reports whether the manager agent is actually up: a record
+// exists, its phase is running, and its container is live. Before lever#31
+// none of doctor's checks read the manager at all, so fourteen green rows
+// could sit over an instance with no manager container — "doctor passes"
+// meant "the plumbing is fine", never "the agent works". This is the one row
+// that says the second thing. A list error is "not checked" (a down jail or
+// hub is another check's finding), never a pass.
+func checkManagerLive(ctx context.Context, project, name string, list agentLister) checkResult {
+	const check = "manager agent"
+	if list == nil {
+		return checkResult{check, true, "not checked", ""}
+	}
+	agents, err := list(ctx, project)
+	if err != nil {
+		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+	}
+	a := scionpkg.FindAgent(agents, name)
+	if a == nil {
+		return checkResult{check, false, fmt.Sprintf("no record for manager %q — nothing is running this instance", name),
+			"run `lever up`"}
+	}
+	if a.Phase == "running" && scionpkg.ContainerLive(a.ContainerStatus) {
+		return checkResult{check, true, fmt.Sprintf("%q is running (container %s)", name, a.ContainerStatus), ""}
+	}
+	if a.Phase == "running" && a.ContainerStatus == "" {
+		// The container column is refreshed by the runtime broker's heartbeat,
+		// not computed at read time; a blank is "cannot tell", which is what
+		// `lever up` reads it as too (apply.ObserveManagerLive), never a
+		// death and never a pass with a claim attached.
+		return checkResult{check, true, fmt.Sprintf("%q is running; not checked further (no container status reported yet)", name), ""}
+	}
+	fix := "run `lever up` to resume it"
+	if a.Phase == "error" {
+		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the conversation is lost and a fresh manager is created) — its container log in the guest holds the harness's last output"
+	}
+	return checkResult{check, false,
+		fmt.Sprintf("manager %q is not live: phase %q, container %q", name, a.Phase, a.ContainerStatus), fix}
+}
+
 // braceList renders names as a shell brace-expansion hint ({a,b}) for the fix
 // text, or the bare name for a single entry.
 func braceList(names []string) string {

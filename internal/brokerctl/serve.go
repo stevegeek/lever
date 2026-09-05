@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
@@ -60,6 +61,9 @@ func machineName(app *config.App) string { return "lever-" + app.Name }
 // agentRole is the instance's configured scion.agent_role; empty omits the
 // --role flag (see config.ScionConfig.AgentRole). It is threaded in rather than
 // read from config here so package scion stays a thin, config-free wrapper.
+// workerLiveSettle is DispatchConfig.LiveSettle in production (see there).
+const workerLiveSettle = 10 * time.Second
+
 func HostScionClient(jr proc.Runner, st state.State, agentRole string) *scion.Client {
 	return scion.New(jr, scion.Options{
 		HubEndpoint:    scion.DefaultHubEndpoint,
@@ -237,6 +241,11 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		// Confinement anchor for every bootstrap.json the broker stages (see
 		// broker.DispatchConfig.Tree): the mount point, which no agent can replace.
 		Tree: app.Tree,
+		// A dispatched worker must hold live for this long before the manager
+		// hears "running" (lever#31): scion reports the record running before
+		// the harness runs a line, and every observed harness death landed
+		// within three seconds of that. Same value as apply's manager gate.
+		LiveSettle: workerLiveSettle,
 		// Agents under closed-internet egress dial the host-alias IP; otherwise
 		// the backend's host alias hostname (the server cert's DNS SAN).
 		BrokerURL: workerBrokerURL(cmp.Or(env.HostAliasIP, be.HostToolAlias()), app.EffectiveJailPort()),

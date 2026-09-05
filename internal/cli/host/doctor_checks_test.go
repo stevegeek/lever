@@ -19,6 +19,7 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
+	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -1206,5 +1207,48 @@ func TestProductionProbesWiresEveryField(t *testing.T) {
 	if p.dial == nil || p.goVersion == nil || p.nodeToolchain == nil || p.claudeVersion == nil ||
 		p.remoteHealthz == nil || p.remoteLogin == nil || p.remoteJailLogin == nil {
 		t.Fatalf("productionProbes left a probe nil: %+v", p)
+	}
+}
+
+// checkManagerLive (lever#31): the one doctor row that says whether the agent
+// itself is up, not just the plumbing around it.
+func TestCheckManagerLive(t *testing.T) {
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	cases := []struct {
+		label      string
+		list       agentLister
+		ok         bool
+		wantDetail string
+		wantFix    string
+	}{
+		{"running", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days"}), true, "Up 4 days", ""},
+		{"absent", listing(scion.Agent{Slug: "scratch", Phase: "running", ContainerStatus: "Up 1 second"}), false, "no record", "lever up"},
+		{"crashed", listing(scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}), false, `phase "error"`, "--force"},
+		{"suspended", listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"}), false, `phase "suspended"`, "resume"},
+		{"running record, dead container", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}), false, "Exited (1)", "lever up"},
+		// A blank column is "cannot tell", read the same way `lever up` reads it.
+		{"running record, blank column", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "no container status", ""},
+	}
+	for _, c := range cases {
+		r := checkManagerLive(context.Background(), "/lever", "assistant", c.list)
+		if r.ok != c.ok {
+			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
+		}
+		if !strings.Contains(r.detail, c.wantDetail) {
+			t.Errorf("%s: detail %q should mention %q", c.label, r.detail, c.wantDetail)
+		}
+		if c.wantFix != "" && !strings.Contains(r.fix, c.wantFix) {
+			t.Errorf("%s: fix %q should mention %q", c.label, r.fix, c.wantFix)
+		}
+	}
+	// A listing failure is "not checked", never a pass with a claim attached
+	// and never a finding of its own — a down jail is another row's job.
+	r := checkManagerLive(context.Background(), "/lever", "assistant", func(context.Context, string) ([]scion.Agent, error) {
+		return nil, errors.New("connection refused\nusage: scion list ...")
+	})
+	if !r.ok || !strings.Contains(r.detail, "not checked") || strings.Contains(r.detail, "usage") {
+		t.Fatalf("list error must read as not-checked with only the first line: %+v", r)
 	}
 }

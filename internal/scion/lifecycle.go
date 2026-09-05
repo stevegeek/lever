@@ -23,31 +23,72 @@ func ContainerLive(status string) bool {
 	return status == "running" || strings.HasPrefix(status, "Up")
 }
 
+// LiveBudget bounds WaitAgentLive. Attempts × Interval is how long a record may
+// take to become live at all; Settle is how long it must then STAY live before
+// the caller may call it up (0 = return on the first live observation, the
+// pre-lever#31 behaviour).
+type LiveBudget struct {
+	Attempts int
+	Interval time.Duration
+	Settle   time.Duration
+}
+
 // WaitAgentLive polls list until the agent named slug shows BOTH Phase=="running"
-// AND a live container (ContainerLive), or attempts run out. It is the shared
-// post-action liveness backstop for scion's false-success classes: a blind
-// `scion start`'s 409 "already exists" (exit code is non-zero but its text can
-// match an idempotency predicate a layer up) and a `scion resume`/`scion start`
-// that reports success ("resumed") for a container whose harness dies moments
-// later (scion's own liveness check is a single immediate poll). Trusting the
-// observed record — not CLI exit codes or error wording — is what makes a
-// caller's success meaningful.
+// AND a live container (ContainerLive), or attempts run out; then, when the
+// budget has a Settle window, keeps polling and requires that pair to HOLD for
+// the whole window. It is the shared post-action liveness backstop for scion's
+// false-success classes: a blind `scion start`'s 409 "already exists" (exit
+// code is non-zero but its text can match an idempotency predicate a layer up)
+// and a `scion resume`/`scion start` that reports success ("resumed") for a
+// container whose harness dies moments later. Trusting the observed record —
+// not CLI exit codes or error wording — is what makes a caller's success
+// meaningful.
+//
+// Why a settle window (lever#31): both signals the first phase reads exist
+// BEFORE the harness has run a line. scion marks the record running right
+// after the container launches, and the in-container supervisor reports
+// PhaseRunning to the hub after waiting only 100 ms for its child; on the
+// legacy path the runtime broker even derives "running" from the same "Up …"
+// container text ContainerLive reads. So a harness that dies one to three
+// seconds in — a task past the tmux cap (lever#30), `claude --continue` with
+// no conversation — passes a first-observation gate and `lever up` prints
+// "is up." over a container that is already Exited (1). A crash sets
+// PhaseError on the hub and a dead container reads "Exited (1) …", so holding
+// the pair for Settle catches every observed case. It is still probabilistic:
+// a harness that dies at Settle + 1 s passes. A sound harness-ready signal is
+// an upstream scion request; this is the honest interim.
 //
 // A mid-poll list error does NOT mean the agent isn't live: by the time a caller
 // reaches this poll its observe-first List and the create/resume action have
 // already succeeded, so the hub is demonstrably up and a single error here is
 // far more likely a transient hiccup. The failed attempt is consumed within the
 // SAME budget and polling continues; the error is surfaced only if the whole
-// budget exhausts without ever observing a live record.
+// budget exhausts without ever observing a live record. During the settle
+// window an error is likewise skipped — but a window in which NO observation
+// succeeded is reported, not passed, because nothing was verified.
 //
 // On exhaustion it returns a "did not come up" error (no subject prefix — the
 // caller wraps it with its own, e.g. `start-manager: manager %q %w` or
 // `worker %q %w`) reporting the last observed phase/container, or the last list
-// error if the final attempts could not observe the record. On context
-// cancellation it returns ctx.Err() unwrapped so callers can detect it.
-// attempts <= 0 is an exhausted budget with nothing observed, not "poll
-// forever" (retry.Until's reading of a non-positive count).
-func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {
+// error if the final attempts could not observe the record. A record that
+// stops being live during the settle window returns ErrAgentDied with the
+// elapsed time and the observation that failed. On context cancellation it
+// returns ctx.Err() unwrapped so callers can detect it. Attempts <= 0 is an
+// exhausted budget with nothing observed, not "poll forever" (retry.Until's
+// reading of a non-positive count).
+func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, b LiveBudget) error {
+	if err := waitLiveOnce(ctx, list, slug, b.Attempts, b.Interval); err != nil {
+		return err
+	}
+	if b.Settle <= 0 {
+		return nil
+	}
+	return holdLive(ctx, list, slug, b.Interval, b.Settle)
+}
+
+// waitLiveOnce is the first phase: poll until the record is live or the
+// attempts run out.
+func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {
 	var lastPhase, lastContainer string
 	var lastErr error
 	if attempts <= 0 {
@@ -84,12 +125,157 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 	return notLiveErr(lastPhase, lastContainer)
 }
 
+// holdLive is the settle phase: observe every interval until settle has
+// elapsed since the record was first seen live, and fail when it is not.
+//
+// Two strikes, not one: the container column the hub serves is refreshed by
+// the runtime broker's heartbeat, not computed at read time, and this
+// codebase has already once failed a healthy manager on a single reading of
+// it. A non-live observation therefore only counts when the NEXT observation
+// agrees — one extra interval, and a real death (PhaseError on the hub, an
+// "Exited (1)" container) is stable across it. A pending strike keeps the
+// window open past its deadline for a bounded few polls, so the next
+// SUCCESSFUL observation can decide it; if none comes — a guest VM going down
+// mid-window, container first and scion server a moment later, leaves every
+// list failing — the window ends as unverified rather than polling a dead
+// jail forever (lever#31 review R1). A list error between two non-live
+// readings does not break the chain: it is neither confirmation nor
+// contradiction.
+func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration) error {
+	if interval <= 0 {
+		// Never spin: a zero interval would call list as fast as the CPU
+		// allows for the whole window. One second is the manager gate's own
+		// cadence.
+		interval = time.Second
+	}
+	// strikeGrace bounds how many polls past the deadline a pending strike may
+	// wait for a deciding observation.
+	const strikeGrace = 3
+	start := time.Now()
+	var lastErr error
+	var lastPhase, lastContainer string
+	observed := false
+	strikes, graceLeft := 0, strikeGrace
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+		agents, err := list(ctx)
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr, observed = nil, true
+			lastPhase, lastContainer = "", ""
+			if a := FindAgent(agents, slug); a != nil {
+				lastPhase, lastContainer = a.Phase, a.ContainerStatus
+			}
+			switch {
+			case lastPhase == "running" && ContainerLive(lastContainer):
+				strikes = 0
+			case lastPhase == "running" && lastContainer == "":
+				// A blank container column is "cannot tell" — the same reading
+				// `lever up` and doctor make of it — so it neither confirms
+				// nor refutes: strikes stay as they are, like a list error.
+			default:
+				if strikes++; strikes >= 2 {
+					return fmt.Errorf("%w after %s (%s) — scion reported success and the record was live, then the harness died; its container log in the guest holds the last output",
+						ErrAgentDied, time.Since(start).Round(100*time.Millisecond), describeReading(lastPhase, lastContainer))
+				}
+			}
+		}
+		if time.Since(start) >= settle {
+			if strikes == 0 {
+				break
+			}
+			if graceLeft--; graceLeft <= 0 {
+				return fmt.Errorf("%w during the %s settle window (a non-live reading — %s — was never confirmed or refuted; last error observing agents: %v); run `lever doctor` for the manager row",
+					ErrAgentUnverified, settle, describeReading(lastPhase, lastContainer), lastErr)
+			}
+		}
+	}
+	if !observed {
+		return fmt.Errorf("%w during the %s settle window (no observation succeeded; last error observing agents: %v); run `lever doctor` for the manager row", ErrAgentUnverified, settle, lastErr)
+	}
+	return nil
+}
+
+// describeReading renders an observation for an error message: a record that
+// vanished from the listing says so, rather than printing two empty quotes.
+func describeReading(phase, container string) string {
+	if phase == "" && container == "" {
+		return "record gone from the listing"
+	}
+	return fmt.Sprintf("phase %q, container %q", phase, container)
+}
+
 // ErrAgentNotLive is wrapped by WaitAgentLive when its budget exhausts without
 // observing a live record; the message carries the last observation.
 var ErrAgentNotLive = errors.New("did not come up")
 
+// ErrAgentDied is wrapped by WaitAgentLive when a record that WAS live stops
+// being so inside the settle window: the harness came up and died (lever#31).
+// Distinct from ErrAgentNotLive so a caller can tell "never started" from
+// "started, then crashed" — the second has a container log worth reading.
+var ErrAgentDied = errors.New("came up, then died")
+
+// ErrAgentUnverified is wrapped by WaitAgentLive when the record was seen
+// live once but no observation succeeded for the rest of the settle window:
+// nothing contradicted it, and nothing confirmed it either. Not a pass.
+var ErrAgentUnverified = errors.New("could not be verified live")
+
+// NotLiveError is WaitAgentLive's exhaustion error when the record was
+// observed but never live. It carries the last observation for a caller that
+// words its own message (apply.ObserveManagerLive); errors.Is(err,
+// ErrAgentNotLive) holds for it.
+type NotLiveError struct {
+	Phase, Container string
+}
+
+func (e *NotLiveError) Error() string {
+	return fmt.Sprintf("%v (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, e.Phase, e.Container)
+}
+
+func (e *NotLiveError) Is(target error) bool { return target == ErrAgentNotLive }
+
 func notLiveErr(lastPhase, lastContainer string) error {
-	return fmt.Errorf("%w (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, lastPhase, lastContainer)
+	return &NotLiveError{Phase: lastPhase, Container: lastContainer}
+}
+
+// ObserveAgent returns the record for slug as scion lists it NOW, retrying a
+// failed list up to attempts times (a transient hub error is not a verdict).
+// Absent is (nil, nil). It judges nothing: what an observation means depends
+// on the path — a caller that just started the agent wants WaitAgentLive's
+// gate, one that found it running already wants only positive evidence of a
+// death (apply.ObserveManagerLive). Exhaustion reports the last list error
+// (%v, not %w — see waitLiveOnce on why a list error is never wrapped); ctx
+// errors pass through unwrapped.
+func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) (*Agent, error) {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	var found *Agent
+	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
+		agents, err := list(ctx)
+		if err != nil {
+			lastErr = err
+			return false, nil
+		}
+		if a := FindAgent(agents, slug); a != nil {
+			copied := *a
+			found = &copied
+		}
+		return true, nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return nil, fmt.Errorf("observing agents: %v", lastErr)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return found, nil
 }
 
 // FindAgent returns a pointer to the first agent whose Slug matches, or nil

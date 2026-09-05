@@ -347,7 +347,7 @@ const (
 func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
 		return b.runtime.List(c, b.instanceProject)
-	}, spec.Name, b.liveAttempts, b.liveInterval)
+	}, spec.Name, scion.LiveBudget{Attempts: b.liveAttempts, Interval: b.liveInterval, Settle: b.liveSettle})
 	if err == nil {
 		return nil
 	}

@@ -164,6 +164,11 @@ type DispatchConfig struct {
 	// this root and refuses agent-planted symlinks. Empty ⇒ the staging
 	// directory's parent is used instead (tests); see Broker.stagingPath.
 	Tree string
+	// LiveSettle is how long a freshly started or resumed worker must STAY
+	// live before its dispatch is reported as up (scion.LiveBudget.Settle,
+	// lever#31). brokerctl sets the production value; zero — the default a
+	// test gets — is the first-observation gate.
+	LiveSettle time.Duration
 	// ManagerBootstrapDir is the host path to <tree>/.lever — where the
 	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
 	// Empty disables manager healing (audited as an error on lapse).
@@ -211,9 +216,11 @@ type Broker struct {
 	brokerCAPEM    string
 	brokerURL      string
 	// liveAttempts/liveInterval bound waitWorkerLive's post-start poll; tests
-	// shrink them per instance (like reenrolNow).
+	// shrink them per instance (like reenrolNow). liveSettle is the hold that
+	// follows (DispatchConfig.LiveSettle).
 	liveAttempts int
 	liveInterval time.Duration
+	liveSettle   time.Duration
 
 	instanceProject string
 	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
@@ -289,7 +296,7 @@ func New(c Config) *Broker {
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, tree: d.Tree,
-		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval,
+		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
 		reenrolEvents:       make(chan string, reenrolQueueDepth),

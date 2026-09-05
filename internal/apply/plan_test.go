@@ -303,3 +303,38 @@ func TestPlanAgentTemplateIsOrdered(t *testing.T) {
 		t.Errorf("agent-template (%d) must run BEFORE start-manager (%d): the prompt is staged at provisioning and never re-staged", at, sm)
 	}
 }
+
+// TestPlanLoadImageCarriesTarPath: each load-image step names the archive
+// its image ships in (lever#32) — the manager's tar for the manager image
+// and for a worker that inherits it, a worker's own tar for its own image,
+// and no tar for an image that still comes from host docker.
+func TestPlanLoadImageCarriesTarPath(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img:latest", ImageTar: "images/img.tar"},
+		Workers: []config.Worker{
+			{Name: "inherits", Dir: "w/a"},
+			{Name: "docker", Dir: "w/b", Image: "other:latest"},
+			{Name: "own", Dir: "w/c", Image: "third:latest", ImageTar: "images/third.tar"},
+		},
+	}
+	var got []Step
+	for _, s := range Plan(app, PlanOpts{}) {
+		if s.Kind == KindLoadImage {
+			got = append(got, s)
+		}
+	}
+	want := []Step{
+		{Kind: KindLoadImage, Target: "img:latest", TarPath: app.ManagerImageTarPath()},
+		{Kind: KindLoadImage, Target: "other:latest"},
+		{Kind: KindLoadImage, Target: "third:latest", TarPath: app.WorkerImageTarPath(app.Workers[2])},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("load-image steps = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("step %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}

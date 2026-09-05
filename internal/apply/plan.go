@@ -35,10 +35,13 @@ const (
 )
 
 // Step is one named bring-up operation. Kind drives the executor; Target
-// carries the operand (a dir to register, the manager slug, etc.).
+// carries the operand (a dir to register, the manager slug, etc.). TarPath
+// is set on load-image steps only: the host archive the image ships in, or
+// "" when the image comes from the host docker store (lever#32).
 type Step struct {
-	Kind   StepKind
-	Target string
+	Kind    StepKind
+	Target  string
+	TarPath string
 }
 
 // PlanOpts controls optional Plan behaviour.
@@ -73,16 +76,18 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	// image, which is then loaded once). Workers are started later by the
 	// manager, so their images must already be present — they can't be pulled
 	// under the egress allowlist. Dedup preserves first-seen order.
+	// Each ref carries its archive when the config ships one; Validate has
+	// already refused one ref from two different archives.
 	seen := map[string]bool{}
-	addLoad := func(img string) {
+	addLoad := func(img, tar string) {
 		if img != "" && !seen[img] {
 			seen[img] = true
-			steps = append(steps, Step{Kind: KindLoadImage, Target: img})
+			steps = append(steps, Step{Kind: KindLoadImage, Target: img, TarPath: tar})
 		}
 	}
-	addLoad(a.ManagerImage())
+	addLoad(a.ManagerImage(), a.ManagerImageTarPath())
 	for _, g := range a.Workers {
-		addLoad(a.WorkerImage(g))
+		addLoad(a.WorkerImage(g), a.WorkerImageTarPath(g))
 	}
 	steps = append(steps,
 		Step{Kind: KindInitMachine},

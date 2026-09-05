@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const Version = "0.19.0"
+const Version = "0.20.0"
 
 // VersionCmd returns the `version` command both binaries register.
 func VersionCmd() *cobra.Command {

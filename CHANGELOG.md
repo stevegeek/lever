@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-05
+
 A code-quality refactor across the module, plus two new config keys —
 `model:` and `instructions_file:` — and a named check for the one size limit
 scion never reported (#30). Apart from those, the user-visible differences

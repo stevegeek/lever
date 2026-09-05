@@ -7,6 +7,33 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`image_tar:` loads an agent image from a shipped docker archive** (#32).
+  `manager.image_tar` and `workers[].image_tar` name a `docker save` archive
+  that carries the image; `lever apply` streams it straight into the jail's
+  container runtime and never touches the host docker store, so a deploy host
+  needs the jail backend and the tar, not docker. The "already loaded" skip
+  compares the archive's config digest — the ID `podman load` assigns — with
+  the jail's, and `lever doctor` reads the baked Claude Code version from the
+  archive. The archive must carry the image's tag (a mismatch is a named
+  error); the path is root-confined and refused inside the mounted tree like
+  `prompt_file`, and one image ref may come from only one archive. A worker
+  that inherits the manager image inherits its archive. `lever apply
+  --dry-run` names the archive each load-image step reads. Reading the
+  manifest costs a handful of seeks, not a pass over the multi-GB file.
+
+### Fixed
+
+- **A rebuilt image no longer runs stale after `lever stop && lever up`**
+  (#26). `podman load` names a docker archive's image `docker.io/<ref>`, but
+  the container spec's unqualified ref resolved to a `localhost/<ref>` left by
+  an earlier load, so the recreated container silently ran the previous
+  image while `apply` and `doctor` reported the new one. Both load paths now
+  re-tag the freshly loaded image as `localhost/<ref>` (refs that name a
+  registry are left alone); the superseded copy goes dangling for the
+  existing prune. An alias failure fails the load-image step.
+
 ## [0.20.0] - 2026-09-05
 
 A code-quality refactor across the module, plus two new config keys —

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -169,4 +170,46 @@ func loadImage(ctx context.Context, r proc.Runner, prefix []string, uid string, 
 		return fmt.Errorf("loadimage: %w", sErr)
 	}
 	return nil
+}
+
+// LoadImageTar streams a shipped docker archive from the host into the jail's
+// rootless podman, never touching the host docker store. The archive must
+// carry imageRef (FindTarImage; a mismatch is a config error naming both),
+// which is checked before a byte is streamed.
+func LoadImageTar(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef, tarPath string) error {
+	imgs, err := ReadImageTar(tarPath)
+	if err != nil {
+		return err
+	}
+	if _, err := FindTarImage(imgs, imageRef); err != nil {
+		return fmt.Errorf("image tar %s: %w", tarPath, err)
+	}
+	return loadImage(ctx, r, prefix, uid, func(w io.Writer) error {
+		f, err := os.Open(tarPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			return fmt.Errorf("reading %s: %w", tarPath, err)
+		}
+		return nil
+	})
+}
+
+// ImageLoadedTar is ImageLoaded for a shipped archive: the jail's image ID
+// for imageRef is compared with the archive's config digest, which is the ID
+// `podman load` assigns, so the check is exact without a host docker store.
+// Fail-open like ImageLoaded: false when the tar is unreadable or lacks the
+// ref (LoadImageTar then reports the real error), or when the jail lacks it.
+func ImageLoadedTar(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef, tarPath string) bool {
+	imgs, err := ReadImageTar(tarPath)
+	if err != nil {
+		return false
+	}
+	img, err := FindTarImage(imgs, imageRef)
+	if err != nil {
+		return false
+	}
+	return img.ConfigDigest == jailImageID(ctx, r, prefix, uid, imageRef)
 }

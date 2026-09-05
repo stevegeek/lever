@@ -288,3 +288,39 @@ func TestImageTarLabel(t *testing.T) {
 		t.Fatal("a ref the tar lacks must be an error")
 	}
 }
+
+// TestLiveLoadImageTar drives the real load path into a real jail. Opt-in:
+// LEVER_LIVE_ORB_MACHINE (an OrbStack machine with rootless podman),
+// LEVER_LIVE_ORB_USER / LEVER_LIVE_ORB_UID (its run user), LEVER_TEST_IMAGE_TAR
+// (a `docker save` archive) and LEVER_TEST_IMAGE_REF (a tag it carries).
+// Loads the archive, then checks the tar-digest guard reports it present
+// and the localhost/ alias resolves to the same image.
+func TestLiveLoadImageTar(t *testing.T) {
+	machine, user, uid := os.Getenv("LEVER_LIVE_ORB_MACHINE"), os.Getenv("LEVER_LIVE_ORB_USER"), os.Getenv("LEVER_LIVE_ORB_UID")
+	tarPath, ref := os.Getenv("LEVER_TEST_IMAGE_TAR"), os.Getenv("LEVER_TEST_IMAGE_REF")
+	if machine == "" || user == "" || uid == "" || tarPath == "" || ref == "" {
+		t.Skip("set LEVER_LIVE_ORB_MACHINE, LEVER_LIVE_ORB_USER, LEVER_LIVE_ORB_UID, LEVER_TEST_IMAGE_TAR, LEVER_TEST_IMAGE_REF to run")
+	}
+	ctx := context.Background()
+	r := proc.RealRunner{}
+	prefix := orbPrefix(machine, user)
+	if err := LoadImageTar(ctx, r, prefix, uid, ref, tarPath); err != nil {
+		t.Fatalf("LoadImageTar: %v", err)
+	}
+	if !ImageLoadedTar(ctx, r, prefix, uid, ref, tarPath) {
+		t.Fatal("ImageLoadedTar must report the image present after a load")
+	}
+	imgs, err := ReadImageTar(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := FindTarImage(imgs, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := localhostAliasArgs(prefix, uid, ref)
+	if got := jailImageID(ctx, r, prefix, uid, alias[len(alias)-1]); got != img.ConfigDigest {
+		t.Fatalf("localhost alias %s resolves to %q, want %q", alias[len(alias)-1], got, img.ConfigDigest)
+	}
+	t.Logf("loaded %s from %s; jail id %s; alias %s ok", ref, tarPath, img.ConfigDigest, alias[len(alias)-1])
+}

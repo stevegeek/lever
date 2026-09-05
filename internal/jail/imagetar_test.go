@@ -187,8 +187,11 @@ func TestLoadImageTarStreamsFileIntoPodmanLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadImageTar: %v", err)
 	}
-	if len(r.Calls) != 1 || r.Calls[0].Name != "orb" {
-		t.Fatalf("want exactly one orb call (podman load), got %+v", r.Calls)
+	if len(r.Calls) == 0 || r.Calls[0].Name != "orb" {
+		t.Fatalf("want an orb call (podman load) first, got %+v", r.Calls)
+	}
+	if r.Called(func(c proc.Call) bool { return c.Name == "docker" }) {
+		t.Fatal("tar path must never call host docker")
 	}
 	got := append([]string{r.Calls[0].Name}, r.Calls[0].Args...)
 	if !reflect.DeepEqual(got, loadImageArgs(orbPrefix("lever-demo", "leveruser"), "501")) {

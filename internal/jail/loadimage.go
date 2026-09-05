@@ -129,7 +129,7 @@ func PruneImages(ctx context.Context, r proc.Runner, prefix []string, uid string
 // writes straight into the pipe. The consumer side (the jail's `podman load`)
 // goes through r.RunStdin like every other in-jail command.
 func LoadImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) error {
-	return loadImage(ctx, r, prefix, uid, func(w io.Writer) error {
+	return loadImageAndAlias(ctx, r, prefix, uid, imageRef, func(w io.Writer) error {
 		save := exec.CommandContext(ctx, "docker", "save", imageRef)
 		save.Stdout = w
 		if err := save.Run(); err != nil {
@@ -137,6 +137,59 @@ func LoadImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRe
 		}
 		return nil
 	})
+}
+
+// loadImageAndAlias is the shared tail of both load paths: stream the
+// archive in (loadImage), then give the freshly loaded image its localhost/
+// name (aliasLocalhost) so an unqualified container spec resolves to it.
+func loadImageAndAlias(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string, save func(io.Writer) error) error {
+	if err := loadImage(ctx, r, prefix, uid, save); err != nil {
+		return err
+	}
+	return aliasLocalhost(ctx, r, prefix, uid, imageRef)
+}
+
+// localhostAliasArgs returns the host argv that tags the docker.io/ name a
+// docker archive lands under in podman as the localhost/ name an unqualified
+// container spec resolves to. ref must be unqualified (see aliasLocalhost).
+func localhostAliasArgs(prefix []string, uid, ref string) []string {
+	tagged := ref
+	if !strings.ContainsAny(ref[strings.LastIndex(ref, "/")+1:], ":@") {
+		tagged += ":latest"
+	}
+	src := "docker.io/" + tagged
+	if !strings.Contains(tagged, "/") {
+		src = "docker.io/library/" + tagged
+	}
+	return slices.Concat(prefix, []string{
+		"env",
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
+		"podman", "tag", src, "localhost/" + tagged,
+	})
+}
+
+// aliasLocalhost closes lever#26. `podman load` of a docker archive names
+// the image docker.io/<RepoTag> (docker writes the tag unqualified), while
+// the container spec's unqualified <ref> resolves through podman's
+// short-name path to localhost/<ref> — a name a PREVIOUS load left behind,
+// so after a rebuild the recreated container silently runs the old image.
+// Tagging the fresh docker.io/ name as localhost/ makes both names one
+// image; the superseded copy goes dangling for the prune that follows. A
+// ref that names its registry (a '.' or ':' in its first component, or
+// localhost/) is loaded under that exact name and is left alone. Failure
+// is fatal: silently running the stale image is the bug being fixed.
+func aliasLocalhost(ctx context.Context, r proc.Runner, prefix []string, uid, ref string) error {
+	if i := strings.Index(ref, "/"); i > 0 {
+		if first := ref[:i]; strings.ContainsAny(first, ".:") || first == "localhost" {
+			return nil
+		}
+	}
+	args := localhostAliasArgs(prefix, uid, ref)
+	res, err := r.Run(ctx, nil, args[0], args[1:]...)
+	if err != nil {
+		return fmt.Errorf("loadimage: tagging %s as %s: %w: %s", args[len(args)-2], args[len(args)-1], err, strings.TrimSpace(res.Stderr+res.Stdout))
+	}
+	return nil
 }
 
 // loadImage pipes whatever save writes into the jail's `podman load`. save
@@ -184,7 +237,7 @@ func LoadImageTar(ctx context.Context, r proc.Runner, prefix []string, uid, imag
 	if _, err := FindTarImage(imgs, imageRef); err != nil {
 		return fmt.Errorf("image tar %s: %w", tarPath, err)
 	}
-	return loadImage(ctx, r, prefix, uid, func(w io.Writer) error {
+	return loadImageAndAlias(ctx, r, prefix, uid, imageRef, func(w io.Writer) error {
 		f, err := os.Open(tarPath)
 		if err != nil {
 			return err

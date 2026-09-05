@@ -250,3 +250,92 @@ func TestLoadImageLoadFailureBeforeDrainKeepsLoadStderr(t *testing.T) {
 		t.Errorf("load failure must be primary, got %q", err)
 	}
 }
+
+// TestLocalhostAliasArgs pins the post-load re-tag that closes lever#26: a
+// docker archive's unqualified RepoTag lands in podman as docker.io/<ref>,
+// while a container spec's unqualified <ref> resolves through the short-name
+// path to localhost/<ref> — which, after a rebuild, still points at the OLD
+// image. Tagging the fresh docker.io/ name as localhost/ makes both names
+// one image, and the superseded copy goes dangling for the prune.
+func TestLocalhostAliasArgs(t *testing.T) {
+	got := localhostAliasArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64")
+	want := []string{
+		"orb", "-m", "lever-demo", "-u", "leveruser",
+		"env",
+		"XDG_RUNTIME_DIR=/run/user/501",
+		"podman", "tag", "docker.io/scionlocal/lever-claude:arm64", "localhost/scionlocal/lever-claude:arm64",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("localhostAliasArgs:\n got  %v\n want %v", got, want)
+	}
+}
+
+// Only an unqualified ref has the two-name problem; a ref that names its
+// registry (or one already under localhost/) is loaded under that exact name
+// and needs no alias.
+func TestLocalhostAliasSkipsQualifiedRefs(t *testing.T) {
+	for _, ref := range []string{"ghcr.io/org/img:1", "localhost/scionlocal/x:latest", "reg:5000/img:1", "docker.io/scionlocal/x:latest"} {
+		r := proc.NewFakeRunner()
+		r.Script("orb", proc.Result{})
+		if err := aliasLocalhost(context.Background(), r, orbPrefix("m", "u"), "501", ref); err != nil {
+			t.Fatalf("%s: %v", ref, err)
+		}
+		if len(r.Calls) != 0 {
+			t.Errorf("%s: qualified ref must not be re-tagged, got %+v", ref, r.Calls)
+		}
+	}
+}
+
+// Both load paths alias after a successful load; a failed load does not.
+func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
+	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
+	if err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/lever-claude:arm64 localhost/scionlocal/lever-claude:arm64") {
+		t.Fatalf("want load then alias, got %+v", r.Calls)
+	}
+	// The docker-save path shares the same tail.
+	r = proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
+	if err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x", func(w io.Writer) error {
+		_, err := io.WriteString(w, "bytes")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/x:latest localhost/scionlocal/x:latest") {
+		t.Fatalf("want load then alias with :latest filled in, got %+v", r.Calls)
+	}
+	// A failed load never re-tags.
+	r = proc.NewFakeRunner()
+	if err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x", func(w io.Writer) error { return nil }); err == nil {
+		t.Fatal("want load error")
+	}
+	if len(r.Calls) != 1 {
+		t.Fatalf("a failed load must not be followed by a tag, got %+v", r.Calls)
+	}
+}
+
+// An alias failure is fatal: the container would otherwise run the stale
+// localhost/ image while apply reports success — the exact #26 failure.
+func TestLocalhostAliasFailureIsFatal(t *testing.T) {
+	r := &loadThenFail{FakeRunner: proc.NewFakeRunner()}
+	err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x:latest", func(w io.Writer) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "localhost/scionlocal/x:latest") {
+		t.Fatalf("err = %v, want the alias failure naming the target tag", err)
+	}
+}
+
+// loadThenFail accepts the stdin load and fails every plain Run (the tag).
+type loadThenFail struct{ *proc.FakeRunner }
+
+func (l *loadThenFail) RunStdin(ctx context.Context, in io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	io.Copy(io.Discard, in)
+	return proc.Result{}, nil
+}
+func (l *loadThenFail) Run(context.Context, map[string]string, string, ...string) (proc.Result, error) {
+	return proc.Result{Stderr: "Error: tag: no such image"}, errors.New("exit status 125")
+}

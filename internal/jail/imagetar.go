@@ -139,3 +139,18 @@ func normalizeRef(ref string) string {
 	}
 	return ref
 }
+
+// ImageTarLabel returns the value of label key on the image tagged ref in
+// the archive at tarPath ("" when the image carries no such label). It is
+// doctor's substitute for `docker image inspect` on a host with no docker.
+func ImageTarLabel(tarPath, ref, key string) (string, error) {
+	imgs, err := ReadImageTar(tarPath)
+	if err != nil {
+		return "", err
+	}
+	img, err := FindTarImage(imgs, ref)
+	if err != nil {
+		return "", fmt.Errorf("image tar %s: %w", tarPath, err)
+	}
+	return img.Labels[key], nil
+}

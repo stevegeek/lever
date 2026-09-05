@@ -267,3 +267,21 @@ func TestReadImageTarRealArchive(t *testing.T) {
 	}
 	t.Logf("tags %v labels %v", imgs[0].RepoTags, imgs[0].Labels)
 }
+
+// TestImageTarLabel: doctor reads an image's baked label from the archive
+// when there is no host docker store to inspect.
+func TestImageTarLabel(t *testing.T) {
+	path, _ := writeDockerArchive(t, t.TempDir(),
+		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}, labels: map[string]string{"claude_code_version": "2.1.240"}},
+		tarImageSpec{repoTags: []string{"scionlocal/bare:latest"}},
+	)
+	if v, err := ImageTarLabel(path, "scionlocal/lever-claude:arm64", "claude_code_version"); err != nil || v != "2.1.240" {
+		t.Fatalf("labelled: %q, %v", v, err)
+	}
+	if v, err := ImageTarLabel(path, "scionlocal/bare", "claude_code_version"); err != nil || v != "" {
+		t.Fatalf("absent label must be \"\" with no error, got %q, %v", v, err)
+	}
+	if _, err := ImageTarLabel(path, "scionlocal/other:latest", "claude_code_version"); err == nil {
+		t.Fatal("a ref the tar lacks must be an error")
+	}
+}

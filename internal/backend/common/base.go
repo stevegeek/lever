@@ -221,6 +221,18 @@ func (b *Base) ImageLoaded(ctx context.Context, imageRef string) bool {
 	return jail.ImageLoaded(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
+// LoadImageTar streams a docker archive on the host into the jail's rootless
+// podman; see jail.LoadImageTar.
+func (b *Base) LoadImageTar(ctx context.Context, imageRef, tarPath string) error {
+	return jail.LoadImageTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath)
+}
+
+// ImageLoadedTar reports whether the jail already holds imageRef at the
+// archive's config digest. Fail-open like ImageLoaded.
+func (b *Base) ImageLoadedTar(ctx context.Context, imageRef, tarPath string) bool {
+	return jail.ImageLoadedTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath)
+}
+
 // PruneJailImages reclaims dangling images from the jail's rootless podman.
 func (b *Base) PruneJailImages(ctx context.Context) error {
 	return jail.PruneImages(ctx, b.r, b.jailPrefix(), b.RunUID())

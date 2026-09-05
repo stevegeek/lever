@@ -925,18 +925,38 @@ func TestCheckClaudeVersion(t *testing.T) {
 	probes := func(v string, err error) doctorProbes {
 		return doctorProbes{claudeVersion: func(string) (string, error) { return v, err }}
 	}
-	if got := checkClaudeVersion("img", probes("2.1.207", nil)); !got.ok || !strings.Contains(got.detail, "2.1.207") {
+	if got := checkClaudeVersion("img", "", probes("2.1.207", nil)); !got.ok || !strings.Contains(got.detail, "2.1.207") {
 		t.Fatalf("expected pass reporting the version, got %+v", got)
 	}
 
 	// Missing label (older image) → informational pass, not a hard fail.
-	if got := checkClaudeVersion("img", probes("", nil)); !got.ok {
+	if got := checkClaudeVersion("img", "", probes("", nil)); !got.ok {
 		t.Fatalf("missing label should be informational, not a failure, got %+v", got)
 	}
 
 	// Inspect error → fail with actionable fix.
-	if got := checkClaudeVersion("img", probes("", fmt.Errorf("no such image"))); got.ok {
+	if got := checkClaudeVersion("img", "", probes("", fmt.Errorf("no such image"))); got.ok {
 		t.Fatalf("inspect error should fail the check")
+	}
+}
+
+// With an image_tar the label comes from the archive: the host docker probe
+// is never consulted (a deploy host may have no docker), the detail names
+// the tar, and a tar the ref is missing from fails with the tar named.
+func TestCheckClaudeVersionFromTar(t *testing.T) {
+	dockerProbe := func(string) (string, error) { return "", fmt.Errorf("docker: command not found") }
+	p := doctorProbes{
+		claudeVersion:    dockerProbe,
+		claudeVersionTar: func(tar, ref string) (string, error) { return "2.1.240", nil },
+	}
+	got := checkClaudeVersion("img", "/inst/images/img.tar", p)
+	if !got.ok || !strings.Contains(got.detail, "2.1.240") || !strings.Contains(got.detail, "img.tar") {
+		t.Fatalf("expected pass naming the version and the tar, got %+v", got)
+	}
+	p.claudeVersionTar = func(tar, ref string) (string, error) { return "", fmt.Errorf("image %q is not in the tar", ref) }
+	got = checkClaudeVersion("img", "/inst/images/img.tar", p)
+	if got.ok || !strings.Contains(got.detail, "img.tar") {
+		t.Fatalf("a tar read failure must fail the check naming the tar, got %+v", got)
 	}
 }
 

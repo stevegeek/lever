@@ -111,6 +111,12 @@ type Backend interface {
 	// Fail-open: false on any uncertainty (a not-yet-loaded or rebuilt image, or
 	// an inspect failure) so a broken check loads rather than wrongly skips.
 	ImageLoaded(ctx context.Context, imageRef string) bool
+	// LoadImageTar and ImageLoadedTar are the same pair for an image shipped
+	// as a docker archive on the host (config image_tar): the load streams
+	// the file into the jail and the guard compares the archive's config
+	// digest with the jail's image ID, so neither needs host docker.
+	LoadImageTar(ctx context.Context, imageRef, tarPath string) error
+	ImageLoadedTar(ctx context.Context, imageRef, tarPath string) bool
 	// PruneJailImages reclaims dangling (untagged, unreferenced) images from the
 	// jail's container store — the layers a rebuilt tag orphans on the grow-only
 	// jail disk. Never touches a tagged or container-referenced image.

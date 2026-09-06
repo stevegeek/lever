@@ -114,6 +114,9 @@ It is:
   already has agents to recover automatically, and re-minting is not attempted behind your back.
 - **Injected only into lever's own host-side Scion client calls**, as the `SCION_HUB_TOKEN`
   environment variable, by the capability broker and by `lever attach`/`lever msg`/`lever stop`.
+  It is handed to the guest on the child's stdin (or, for the interactive attach, through a 0600
+  file under the run user's `XDG_RUNTIME_DIR`), never on the host command line, so `ps` on the
+  host does not show it.
 - **Not the only host-side PAT.** A second, narrower host-side PAT
   (`agent:read,agent:list,project:read,agent:attach`) is minted in the same window when
   `remote.enabled: true`, for the remote-access proxy only; it is also stored under `.lever-state/`

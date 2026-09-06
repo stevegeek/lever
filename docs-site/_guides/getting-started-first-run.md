@@ -79,6 +79,9 @@ You'll see a `backend: <profile summary>` line, then the ordered plan:
   start-manager           hello-worker
 ```
 
+(With `manager.image_tar` set, the `load-image` line also names the archive it streams in:
+`load-image  scionlocal/lever-claude:arm64 (from /…/hello-worker/images/lever-claude.tar)`.)
+
 `bootstrap-token` mints the controller PAT that drives every later scion verb, through a throwaway
 dev-auth-on hub that is killed before any agent exists; `scion-server` then starts the real hub with
 `--dev-auth=false` (see [security model §4.2](/security-model/worker-isolation/)). `credential`

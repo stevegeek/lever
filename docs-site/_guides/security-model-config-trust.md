@@ -31,7 +31,8 @@ channel (point it at `credential_file: ~/.ssh/id_rsa`, `tree: /`, an attacker im
 the root unmounted removes that channel: agents can't see or edit what the host re-reads.
 
 **The boundary this draws — and what deliberately sits on the other side of it.** Operator-owned
-boot material (`lever.yaml`, `prompt_file`) is host-side and tamper-proof from inside the jail.
+boot material (`lever.yaml`, `prompt_file`, `instructions_file`, `image_tar`) is host-side and
+tamper-proof from inside the jail.
 Tree-resident material — `CLAUDE.md`, the skills scaffolded by `lever init`, the working files
 themselves — is *inside the mount* and therefore inside the agent's own blast radius: a
 compromised agent can rewrite its own `CLAUDE.md`, and Claude Code will auto-load the modified
@@ -68,6 +69,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `tree` | confined relative subdir (not `.`/absolute/`..`); also rejected if it is itself a git repository (an ancestor `.git` is allowed), see [§4.1](/security-model/worker-isolation/). |
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute), and rejected if it resolves inside the mounted `tree`. |
 | `manager.instructions_file`, `workers[].instructions_file` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`. The contents become the agent's standing user-level `~/.claude/CLAUDE.md`; scion re-projects its staged copy on every container start, so an agent that rewrites the managed block gets the host's text back. |
+| `manager.image_tar`, `workers[].image_tar` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`: the archive is the code the agent runs, so an agent must not be able to author the next bring-up's image. Needs a tag-bearing `image` (a digest pin cannot be matched against a tar's tags), the archive must carry that tag (a mismatch is a named error before a byte is streamed), and one image ref may come from only one archive. |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |

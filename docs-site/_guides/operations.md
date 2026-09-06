@@ -108,10 +108,38 @@ others if you split it into its own stanza.
 | `lever up` printed `is up.` but the manager is dead moments later, or doctor's `manager agent` row fails | the harness died after scion reported the record running — an oversized boot task (see `prompt_file`), or `claude --continue` with no conversation to continue | `lever up` holds the record for a 10 s settle window and reports `came up, then died` with the phase and container it saw; the container log in the guest holds the harness's last output. Fix the cause, then `lever up` again |
 | Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
 
+## Deploying an image as an archive
+
+A host that only runs an instance does not need Docker. Build the agent image where Docker is
+(`make lever-image`), save it, and ship the archive with the instance:
+
+```sh
+docker save -o images/lever-claude.tar scionlocal/lever-claude:arm64   # on the build machine
+```
+
+```yaml
+manager:
+  image: scionlocal/lever-claude          # the tag inside the archive (arch-resolved, as always)
+  image_tar: images/lever-claude.tar      # instance root, outside the mounted tree
+```
+
+`lever apply` streams the archive straight into the jail's container runtime and never consults
+the host Docker store; the "already loaded" skip compares the archive's config digest with the
+image ID in the jail, so a re-apply with an unchanged archive streams nothing. `lever doctor`
+reads the baked Claude Code version from the archive. A worker with no `image:` runs the manager
+image and ships in the same archive; a worker with its own `image:` names its own `image_tar`.
+One `docker save` of several tags writes shared layers once and loads every tag. Add the archive
+to `.gitignore` when the instance root is a repository. Details:
+[`image_tar`](/reference/config/#manager).
+
+To upgrade the image, replace the archive and run `lever apply` (the digest changes, so it
+streams), then `lever stop && lever up` to recreate the containers onto it.
+
 ## Upgrading lever
 
 1. Pull and rebuild: `cd lever_to && make all` (host binary), and if the agent-side binaries
-   changed, `make lever-image-bins` + rebuild your agent image, then `lever apply` to load it.
+   changed, `make lever-image-bins` + rebuild your agent image, then `lever apply` to load it
+   (or re-save it over the `image_tar` archive on a Docker-less host, then `lever apply`).
 2. `lever init` — refreshes the scaffolded skills (your edited and adopted copies are left
    alone; `--check` to preview). If you've customized scaffolds and doctor nags about them, accept them once with
    `lever init --adopt`.

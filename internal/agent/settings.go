@@ -16,17 +16,33 @@ import (
 // block at startup (verified live 2026-06-28), whereas the scion harness
 // env-overlay path is inert for our builtin harness. An empty path is a no-op
 // (enrol-only boot). Written 0600, parent directory 0700.
+//
+// path is <home>/.claude/settings.json: both the directory and the file are
+// agent-writable and boot runs this as root, so the read and the write are
+// confined to <home> (the grandparent) and a symlink at either component is
+// refused (see errRefusedPath). The grandparent must exist.
 func WriteSettingsEnv(path string, env map[string]string) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("settings dir %s: %w", filepath.Dir(path), err)
+	root, rel := splitAbove(path, 2)
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("settings %s: open %s: %w", path, root, err)
+	}
+	defer r.Close()
+	if err := checkedFile(r, rel); err != nil {
+		return err
+	}
+	if d := filepath.Dir(rel); d != "." {
+		if err := r.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("settings dir %s: %w", filepath.Dir(path), err)
+		}
 	}
 	// Merge into existing settings rather than clobber (claude may already have
 	// written model/permissions/etc; mcp config lives in a separate ~/.claude.json).
 	settings := map[string]any{}
-	if b, err := os.ReadFile(path); err == nil {
+	if b, err := r.ReadFile(rel); err == nil {
 		if err := json.Unmarshal(b, &settings); err != nil {
 			return fmt.Errorf("settings %s: parse existing: %w", path, err)
 		}
@@ -45,5 +61,5 @@ func WriteSettingsEnv(path string, env map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return r.WriteFile(rel, b, 0o600)
 }

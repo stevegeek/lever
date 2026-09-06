@@ -81,11 +81,23 @@ func Enrol(ctx context.Context, brokerURL string, caPEM []byte, ticket, cn strin
 }
 
 // Write persists the identity: agent.crt/ca.crt 0644, agent.key 0600, dir 0700.
+// dir's parent must exist (it is $HOME in production). The work is confined to
+// that parent and refuses a symlink at dir or at any of the three files: boot
+// calls this as root under the agent-writable home (see errRefusedPath).
 func (id Identity) Write(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	root, base := splitAbove(dir, 1)
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("agent: open %s: %w", root, err)
+	}
+	defer r.Close()
+	if err := refuseLink(r, base, true); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := r.MkdirAll(base, 0o700); err != nil {
+		return err
+	}
+	if err := r.Chmod(base, 0o700); err != nil {
 		return fmt.Errorf("agent: chmod dir: %w", err)
 	}
 	for _, f := range []struct {
@@ -97,7 +109,11 @@ func (id Identity) Write(dir string) error {
 		{"agent.key", id.KeyPEM, 0o600},
 		{"ca.crt", id.CAPEM, 0o644},
 	} {
-		if err := os.WriteFile(filepath.Join(dir, f.name), f.data, f.mode); err != nil {
+		p := filepath.Join(base, f.name)
+		if err := refuseLink(r, p, false); err != nil {
+			return err
+		}
+		if err := r.WriteFile(p, f.data, f.mode); err != nil {
 			return fmt.Errorf("agent: write %s: %w", f.name, err)
 		}
 	}

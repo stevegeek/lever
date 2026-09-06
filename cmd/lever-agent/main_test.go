@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -470,4 +471,32 @@ func TestResolveBrokerURLFallbackChain(t *testing.T) {
 			t.Errorf("got %q, want the URL from ./.lever/bootstrap.json", got)
 		}
 	})
+}
+
+// TestGatewayVerbStopsOnContextCancel pins that the gateway verb is wired to
+// the signal-bound ctx run installs (R1): with the ctx already cancelled the
+// verb returns nil promptly instead of serving until SIGKILL.
+func TestGatewayVerbStopsOnContextCancel(t *testing.T) {
+	idDir := callVerbWorkerID(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- cmdGateway(ctx, []string{"-id-dir", idDir, "-broker-url", "https://broker.invalid", "-listen", addr})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("gateway verb with a cancelled ctx = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("gateway verb did not return within 2s of ctx cancel")
+	}
 }

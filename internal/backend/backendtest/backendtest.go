@@ -77,11 +77,27 @@ func FakeScionCheckout(t *testing.T) string {
 	return root
 }
 
+// IsolateCache points os.UserCacheDir at a fresh per-test directory — HOME
+// for the darwin resolution, XDG_CACHE_HOME for the Linux one — so no test
+// touches the operator's real cache. It uses t.Setenv, so the calling test
+// must not be parallel. It returns the new HOME.
+func IsolateCache(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	return home
+}
+
 // StageFakeBuildOutput creates the file a faked `go build` would have written,
 // at the exact path scionbin.Resolve passes to `-o`. The install path
 // hashes that file for real, so it has to exist even when the build is a stub.
+// The cache is isolated first (IsolateCache): several packages stage the
+// same machine name, and their test processes run in parallel, so the real
+// per-user cache would be one shared, racy path that outlives the tests.
 func StageFakeBuildOutput(t *testing.T, machine string) {
 	t.Helper()
+	IsolateCache(t)
 	p, err := scionbin.OutputPath(machine)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +108,6 @@ func StageFakeBuildOutput(t *testing.T, machine string) {
 	if err := os.WriteFile(p, []byte("fake-scion-"+machine), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Remove(p) })
 }
 
 // Guest names the argv prefixes one backend uses to reach its guest, so the

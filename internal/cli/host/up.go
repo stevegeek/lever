@@ -167,7 +167,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
 			}
-			return execAttach(b, sc, app.Name, project)
+			return execAttach(cmd.Context(), b, sc, app.Name, project)
 		},
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")

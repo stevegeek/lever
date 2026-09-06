@@ -57,9 +57,10 @@ func TestJailCurlRunsInTheJailAndPassesTheTokenAsEnv(t *testing.T) {
 		t.Errorf("method/url = %q %q", r.call.Args[3], r.call.Args[4])
 	}
 	// The PAT travels in the environment, and the script references it by name.
-	// This is the same exposure every scion CLI call already accepts (the jail
-	// runner renders env as an `env K=V` argv prefix, and sh expands the value
-	// into curl's own argv): it is not narrower, but it must not be wider.
+	// This is the same channel every scion CLI call already uses (the jail
+	// runner keeps SCION_HUB_TOKEN off the host argv and exports it in the
+	// guest, and sh expands the value into curl's own in-guest argv): it must
+	// never be baked into the script text lever constructs.
 	if r.call.Env["SCION_HUB_TOKEN"] != "pat-secret" {
 		t.Errorf("token must be passed as env, got env=%v", r.call.Env)
 	}

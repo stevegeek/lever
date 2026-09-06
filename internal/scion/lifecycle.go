@@ -599,29 +599,28 @@ func (c *Client) Suspend(ctx context.Context, worker, project string) error {
 	return err
 }
 
-// AttachArgv returns the argv to attach interactively. The caller exec()s it to
-// hand over the TTY — it never goes through the runner, so it bypasses env()
-// entirely. When the client holds a controller PAT, it is embedded as an
-// `env SCION_HUB_TOKEN=<pat>` prefix (mirroring how the jail env is embedded
-// for attach — see internal/jail/attach.go) so the exec'd scion binary still
-// authenticates; omitted entirely when no token is set.
+// AttachArgv returns the in-jail argv to attach interactively. The caller
+// exec()s it (wrapped by the backend's AttachArgv) to hand over the TTY — it
+// never goes through the runner, so it bypasses env() entirely.
+//
+// It pins the ENDPOINT as an `env SCION_HUB_ENDPOINT=…` prefix: attach is the
+// one path that execs scion instead of going through Client.run, so without
+// this it falls back to the endpoint persisted in the jail's project config —
+// state lever does not own and which the controller-PAT mint window can leave
+// pointing at the throwaway hub it started on 48080. It deliberately does NOT
+// embed the controller PAT: the returned argv becomes part of a host process's
+// command line, readable by any local user via `ps`. The caller stages the
+// token in the guest instead (jail.StageHubToken + jail.WithHubTokenFromFile,
+// see internal/cli/host/attach.go), reading it from HubToken.
 func (c *Client) AttachArgv(worker, project string) []string {
 	argv := append([]string{c.bin, "attach", worker}, projectFlag(project)...)
-	// Pin the ENDPOINT as well as the token. Attach is the one path that execs
-	// scion instead of going through Client.run, so without this it falls back
-	// to the endpoint persisted in the jail's project config — state lever does
-	// not own and which the controller-PAT mint window can leave pointing at the
-	// throwaway hub it started on 48080. Every other lever call already passes
-	// the endpoint explicitly, which is why attach was the only verb that broke.
-	var env []string
-	if tok := c.currentHubToken(); tok != "" {
-		env = append(env, "SCION_HUB_TOKEN="+tok)
-	}
 	if c.hubEndpoint != "" {
-		env = append(env, "SCION_HUB_ENDPOINT="+c.hubEndpoint)
-	}
-	if len(env) > 0 {
-		argv = append(append([]string{"env"}, env...), argv...)
+		argv = append([]string{"env", "SCION_HUB_ENDPOINT=" + c.hubEndpoint}, argv...)
 	}
 	return argv
 }
+
+// HubToken is the controller PAT this client authenticates with, resolved
+// now from the lazy source ("" when none is set). For the attach path, which
+// cannot use env(); every other verb sends it through the runner itself.
+func (c *Client) HubToken() string { return c.currentHubToken() }

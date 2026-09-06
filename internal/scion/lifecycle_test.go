@@ -350,17 +350,21 @@ func TestAttachArgvNotRun(t *testing.T) {
 	}
 }
 
-// TestAttachArgvEmbedsHubTokenWhenPresent: the attach/TTY path bypasses
-// Client.env() (it's exec()'d directly, never through the runner), so the
-// controller PAT must be embedded into the returned argv itself — mirroring
-// how the jail env is embedded for attach (internal/jail/attach.go).
-func TestAttachArgvEmbedsHubTokenWhenPresent(t *testing.T) {
+// TestAttachArgvNeverEmbedsHubToken: the attach argv becomes part of a host
+// process's command line (`orb …`/`limactl …`), which `ps` shows to every
+// local user for the whole session — so the controller PAT must NOT appear in
+// it even when the client holds one. The caller stages it in the guest
+// instead (jail.StageHubToken), reading it from HubToken.
+func TestAttachArgvNeverEmbedsHubToken(t *testing.T) {
 	f := proc.NewFakeRunner()
 	c := New(f, Options{Bin: "scion", HubTokenSource: func() string { return "pat123" }})
 	argv := c.AttachArgv("a", "/g/a")
-	want := []string{"env", "SCION_HUB_TOKEN=pat123", "scion", "attach", "a", "-g", "/g/a"}
+	want := []string{"scion", "attach", "a", "-g", "/g/a"}
 	if strings.Join(argv, " ") != strings.Join(want, " ") {
 		t.Fatalf("argv=%v, want=%v", argv, want)
+	}
+	if got := c.HubToken(); got != "pat123" {
+		t.Fatalf("HubToken() = %q, want the lazy source's value", got)
 	}
 }
 
@@ -443,17 +447,20 @@ func TestAttachArgvPinsTheHubEndpoint(t *testing.T) {
 	}
 }
 
-// Both env assignments ride the same `env` prefix, and the scion command still
-// follows them.
-func TestAttachArgvCarriesTokenAndEndpointTogether(t *testing.T) {
+// The endpoint rides an `env` prefix and the scion command follows it; the
+// token does not ride along (see TestAttachArgvNeverEmbedsHubToken).
+func TestAttachArgvCarriesEndpointWithoutToken(t *testing.T) {
 	c := New(proc.NewFakeRunner(), Options{
 		HubEndpoint:    "http://127.0.0.1:8080",
 		HubTokenSource: func() string { return "tok" },
 	})
 	argv := c.AttachArgv("a", "/g/a")
 	joined := strings.Join(argv, " ")
-	if !strings.Contains(joined, "SCION_HUB_TOKEN=tok") || !strings.Contains(joined, "SCION_HUB_ENDPOINT=http://127.0.0.1:8080") {
-		t.Fatalf("both env assignments must be present, got %q", joined)
+	if !strings.Contains(joined, "SCION_HUB_ENDPOINT=http://127.0.0.1:8080") {
+		t.Fatalf("the endpoint assignment must be present, got %q", joined)
+	}
+	if strings.Contains(joined, "tok") {
+		t.Fatalf("the token must not be present, got %q", joined)
 	}
 	if i := indexOf(argv, "attach"); i < 0 || argv[i-1] != "scion" {
 		t.Fatalf("the scion attach command must follow the env prefix, got %q", joined)

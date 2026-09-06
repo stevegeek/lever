@@ -27,9 +27,10 @@ const maxBody = 64 << 10
 // curlScript runs one request from inside the jail. The Authorization header is
 // built HERE, from $SCION_HUB_TOKEN, so the shell expands it: a token embedded
 // in an argument value would not be re-expanded. The token reaches the jail
-// through the runner's `env K=V` prefix, exactly as every scion CLI call
-// already passes it (internal/scion/lifecycle.go) — the same exposure, not a
-// wider one.
+// through the runner's env, exactly as every scion CLI call already passes it
+// (internal/scion/client.go env()); the jail runner keeps that one key off the
+// host command line (internal/jail/hubtoken.go), so it is never visible to
+// `ps` on the host — only curl's own in-guest argv carries it, as before.
 //
 // -o - writes the body to stdout and -w appends a final line holding the status
 // code, so one stream carries both. curl expands the `\n` itself (verified live

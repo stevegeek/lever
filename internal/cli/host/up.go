@@ -189,14 +189,15 @@ func upProbeNotice(probeErr error, fresh bool) string {
 	return fmt.Sprintf("No running manager (%s) — bringing the application up.", reason)
 }
 
-// firstLine returns the first line of s, trimmed of surrounding whitespace.
-// Used to keep scion's raw CLI errors — which can carry an entire usage dump
-// after the first line — down to one short, printable reason.
+// firstLine returns the first line of s, trimmed of surrounding whitespace
+// and sanitized for the terminal. Used to keep scion's raw CLI errors —
+// which can carry an entire usage dump after the first line, and which the
+// jail can lace with escape sequences — down to one short, printable reason.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	return strings.TrimSpace(s)
+	return sanitizeTerminal(strings.TrimSpace(s))
 }
 
 func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {

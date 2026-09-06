@@ -50,19 +50,7 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 
 			probes := productionProbes(proc.RealRunner{})
 			checks := runDoctorChecks(cmd.Context(), app, state, b, probes)
-			failed := 0
-			for _, c := range checks {
-				if c.ok {
-					cmd.Printf("✓ %s — %s\n", c.name, c.detail)
-					continue
-				}
-				failed++
-				cmd.Printf("✗ %s — %s\n", c.name, c.detail)
-				if c.fix != "" {
-					cmd.Printf("    fix: %s\n", c.fix)
-				}
-			}
-			if failed > 0 {
+			if failed := printDoctorReport(cmd, checks); failed > 0 {
 				return fmt.Errorf("doctor: %d check(s) failed", failed)
 			}
 			return nil
@@ -70,6 +58,27 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
+}
+
+// printDoctorReport prints one row per check and returns how many failed.
+// This is the single point where check text reaches the terminal, so it is
+// where guest-supplied content (a phase, a container status, a slug, scion's
+// stderr relayed into a detail) is sanitized — see sanitizeTerminal.
+func printDoctorReport(cmd *cobra.Command, checks []checkResult) int {
+	failed := 0
+	for _, c := range checks {
+		name, detail := sanitizeTerminal(c.name), sanitizeTerminal(c.detail)
+		if c.ok {
+			cmd.Printf("✓ %s — %s\n", name, detail)
+			continue
+		}
+		failed++
+		cmd.Printf("✗ %s — %s\n", name, detail)
+		if c.fix != "" {
+			cmd.Printf("    fix: %s\n", sanitizeTerminal(c.fix))
+		}
+	}
+	return failed
 }
 
 // runDoctorChecks evaluates every health check in report order. The order is

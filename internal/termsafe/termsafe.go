@@ -1,22 +1,26 @@
-package host
+// Package termsafe makes guest-supplied strings safe to print on the
+// operator's terminal. It is a leaf package (stdlib only) so every host-side
+// surface that relays text from the jail — doctor and up rows, apply's log
+// lines, the error a command returns — can share the one choke point.
+package termsafe
 
 import (
 	"strings"
 	"unicode/utf8"
 )
 
-// sanitizeTerminal makes a string safe to print raw on the operator's
-// terminal. Strings that reach doctor and up rows come from the jail and the
-// hub — scion's stderr, agent phase and container status, the record's
-// image, slugs and roles, shared-dir names — and a compromised jail chooses
-// them: an OSC title or clipboard write, a CSI clear or cursor move that
+// Sanitize makes a string safe to print raw on the operator's terminal.
+// Strings that reach doctor and up rows, apply's log lines and returned
+// errors come from the jail and the hub — scion's stderr, agent phase and
+// container status, the record's image, slugs and roles, shared-dir names —
+// and a compromised jail chooses them: an OSC title or clipboard write, a CSI clear or cursor move that
 // overdraws earlier rows with a fake verdict, a C1 byte that a Latin-1
 // terminal reads as an introducer. Every ESC/C1-introduced sequence (CSI,
 // OSC, DCS, SOS, PM, APC, two-byte and nF escapes) is stripped whole;
 // every other C0 byte, DEL, lone C1 code point and invalid UTF-8 byte is
 // replaced by U+FFFD; printable UTF-8 passes unchanged. The %q print sites
 // need none of this — Go's quoting already escapes control characters.
-func sanitizeTerminal(s string) string {
+func Sanitize(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {

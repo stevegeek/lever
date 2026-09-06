@@ -13,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 func newDoctorCmd(factory BackendFactory) *cobra.Command {
@@ -63,11 +64,11 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 // printDoctorReport prints one row per check and returns how many failed.
 // This is the single point where check text reaches the terminal, so it is
 // where guest-supplied content (a phase, a container status, a slug, scion's
-// stderr relayed into a detail) is sanitized — see sanitizeTerminal.
+// stderr relayed into a detail) is sanitized — see termsafe.Sanitize.
 func printDoctorReport(cmd *cobra.Command, checks []checkResult) int {
 	failed := 0
 	for _, c := range checks {
-		name, detail := sanitizeTerminal(c.name), sanitizeTerminal(c.detail)
+		name, detail := termsafe.Sanitize(c.name), termsafe.Sanitize(c.detail)
 		if c.ok {
 			cmd.Printf("✓ %s — %s\n", name, detail)
 			continue
@@ -75,7 +76,7 @@ func printDoctorReport(cmd *cobra.Command, checks []checkResult) int {
 		failed++
 		cmd.Printf("✗ %s — %s\n", name, detail)
 		if c.fix != "" {
-			cmd.Printf("    fix: %s\n", sanitizeTerminal(c.fix))
+			cmd.Printf("    fix: %s\n", termsafe.Sanitize(c.fix))
 		}
 	}
 	return failed

@@ -26,7 +26,9 @@ func defaultFactory(name, machine string) (backend.Backend, error) {
 func NewRoot() *cobra.Command { return newRootWith(defaultFactory) }
 
 func newRootWith(bf BackendFactory) *cobra.Command {
-	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)"}
+	// SilenceErrors: the binary prints a returned error itself, sanitized —
+	// see cli.Execute. Usage on error stays per command (SilenceUsage).
+	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)", SilenceErrors: true}
 	root.AddCommand(cli.VersionCmd())
 	root.AddCommand(newProvisionCmd(bf), newDestroyCmd(bf), newStopCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newReloadCmd(bf), newAttachCmd(bf), newHostMsgCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf), newBackendsCmd(), newInitCmd(), newDirectiveCmd(), newWorkerCmd(bf), newRemoteCmd(bf))
 	return root

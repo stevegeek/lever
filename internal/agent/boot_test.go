@@ -297,3 +297,29 @@ func TestLoadBootstrapNormalizesBrokerURL(t *testing.T) {
 		t.Fatalf("NormalizeBrokerURL = %q", got)
 	}
 }
+
+// boot reads the bootstrap as ROOT (scion pre-start hook) from the
+// agent-writable tree: a symlink at .lever or at bootstrap.json is refused by
+// name (a non-regular file — a FIFO — would otherwise also hang the read).
+func TestLoadBootstrapRefusesSymlink(t *testing.T) {
+	ws := t.TempDir()
+	real := filepath.Join(ws, "real.json")
+	if err := os.WriteFile(real, []byte(`{"broker_url":"https://broker.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ws, ".lever")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(dir, "bootstrap.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBootstrap(filepath.Join(dir, "bootstrap.json")); !errors.Is(err, errRefusedPath) {
+		t.Fatalf("LoadBootstrap through a symlink: err = %v, want errRefusedPath", err)
+	}
+	// An absent bootstrap must still be reported as fs.ErrNotExist (sidecar's
+	// no-bootstrap-is-noop relies on it).
+	if _, err := LoadBootstrap(filepath.Join(ws, "missing", "bootstrap.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("absent bootstrap: err = %v, want fs.ErrNotExist", err)
+	}
+}

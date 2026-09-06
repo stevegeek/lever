@@ -55,7 +55,9 @@ type SidecarConfig struct {
 // no escalation — scion launches the sidecar at the agent's OWN uid (nothing it
 // couldn't already exec), and boot runs inside the pre-start hook, which scion
 // runs BEFORE it reads scion-services.yaml, so this write always wins over any
-// pre-seeded value before the spec is consumed.
+// pre-seeded value before the spec is consumed. What the agent must NOT get is
+// this write redirected: boot runs as root, so the write is confined to
+// c.HomeDir and a symlink at .scion or at the yaml is refused (errRefusedPath).
 func WriteSidecarSpecs(c SidecarConfig) error {
 	bs, err := LoadBootstrap(c.BootstrapPath)
 	if err != nil {
@@ -88,9 +90,21 @@ func WriteSidecarSpecs(c SidecarConfig) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(c.HomeDir, layout.Dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("scion dir %s: %w", dir, err)
+	home := c.HomeDir
+	if home == "" {
+		home = "."
 	}
-	return os.WriteFile(filepath.Join(dir, "scion-services.yaml"), b, 0o644)
+	r, err := os.OpenRoot(home)
+	if err != nil {
+		return fmt.Errorf("home %s: %w", home, err)
+	}
+	defer r.Close()
+	spec := filepath.Join(layout.Dir, "scion-services.yaml")
+	if err := checkedFile(r, spec); err != nil {
+		return err
+	}
+	if err := r.MkdirAll(layout.Dir, 0o755); err != nil {
+		return fmt.Errorf("scion dir %s: %w", filepath.Join(home, layout.Dir), err)
+	}
+	return r.WriteFile(spec, b, 0o644)
 }

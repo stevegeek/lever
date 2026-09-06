@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -148,5 +151,54 @@ func TestIdentityCN(t *testing.T) {
 	}
 	if _, err := (Identity{CertPEM: []byte("not pem")}).CN(); err == nil {
 		t.Fatal("CN on invalid PEM must error")
+	}
+}
+
+// The identity dir sits under the agent-writable $HOME, and boot (which calls
+// Write) runs as ROOT in scion's pre-start hook. An agent that turns
+// ~/.lever-id, or a file inside it, into a symlink would otherwise get root
+// to chmod the target 0700 and write attacker-chosen bytes through the link.
+// Write must refuse by name and leave the target untouched.
+func TestWriteIdentityRefusesSymlinkedDir(t *testing.T) {
+	id := Identity{CertPEM: []byte("c"), KeyPEM: []byte("k"), CAPEM: []byte("a")}
+	home := t.TempDir()
+	victim := filepath.Join(home, "victim")
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(home, ".lever-id")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	err := id.Write(link)
+	if !errors.Is(err, errRefusedPath) {
+		t.Fatalf("Write through a symlinked id dir: err = %v, want errRefusedPath", err)
+	}
+	if _, serr := os.Lstat(filepath.Join(victim, "agent.crt")); !errors.Is(serr, fs.ErrNotExist) {
+		t.Fatalf("agent.crt was written through the link into %s", victim)
+	}
+	assertMode(t, victim, 0o755) // not chmodded 0700 through the link
+}
+
+func TestWriteIdentityRefusesSymlinkedFile(t *testing.T) {
+	id := Identity{CertPEM: []byte("c"), KeyPEM: []byte("k"), CAPEM: []byte("a")}
+	home := t.TempDir()
+	victim := filepath.Join(home, "victim.txt")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".lever-id")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "agent.crt")); err != nil {
+		t.Fatal(err)
+	}
+	err := id.Write(dir)
+	if !errors.Is(err, errRefusedPath) {
+		t.Fatalf("Write over a symlinked agent.crt: err = %v, want errRefusedPath", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "original" {
+		t.Fatalf("victim rewritten through the link: %q", got)
 	}
 }

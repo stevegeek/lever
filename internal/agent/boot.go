@@ -25,9 +25,22 @@ func NormalizeBrokerURL(u string) string {
 }
 
 // LoadBootstrap reads the deposited bootstrap.json. BrokerURL is normalized via
-// NormalizeBrokerURL.
+// NormalizeBrokerURL. path is <tree>/.lever/bootstrap.json, staged by the host
+// (wire.Stage, which never stages through a link) in the agent-writable tree;
+// boot reads it as root, so the read is confined to <tree> and a symlink (or
+// any non-regular file) at .lever or at bootstrap.json is refused
+// (errRefusedPath). An absent file still reports fs.ErrNotExist.
 func LoadBootstrap(path string) (Bootstrap, error) {
-	b, err := os.ReadFile(path)
+	root, rel := splitAbove(path, 2)
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return Bootstrap{}, fmt.Errorf("agent: read bootstrap: %w", err)
+	}
+	defer r.Close()
+	if err := checkedFile(r, rel); err != nil {
+		return Bootstrap{}, err
+	}
+	b, err := r.ReadFile(rel)
 	if err != nil {
 		return Bootstrap{}, fmt.Errorf("agent: read bootstrap: %w", err)
 	}

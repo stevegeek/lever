@@ -123,3 +123,28 @@ func TestWriteSidecarSpecsEmptyBrokerURLIsNoop(t *testing.T) {
 		t.Fatalf("services file should not exist for a brokerless bootstrap; stat err = %v", err)
 	}
 }
+
+// scion-services.yaml is written by boot as ROOT (scion pre-start hook) under
+// the agent-writable $HOME: a symlink at ~/.scion or at the yaml itself must be
+// refused by name, with no write through the link.
+func TestWriteSidecarSpecsRefusesSymlink(t *testing.T) {
+	home := t.TempDir()
+	bootstrap := filepath.Join(home, "bootstrap.json")
+	if err := os.WriteFile(bootstrap, []byte(`{"broker_url":"https://broker.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(home, "victim")
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(home, ".scion")); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteSidecarSpecs(SidecarConfig{HomeDir: home, IDDir: filepath.Join(home, ".lever-id"), BootstrapPath: bootstrap, LLMAuth: LLMAuthSubscription})
+	if !errors.Is(err, errRefusedPath) {
+		t.Fatalf("WriteSidecarSpecs under a symlinked .scion: err = %v, want errRefusedPath", err)
+	}
+	if _, serr := os.Lstat(filepath.Join(victim, "scion-services.yaml")); !errors.Is(serr, fs.ErrNotExist) {
+		t.Fatal("scion-services.yaml was written through the linked dir")
+	}
+}

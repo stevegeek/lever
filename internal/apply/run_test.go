@@ -3540,3 +3540,30 @@ func TestStartManagerFreshDeleteFailureIsFatal(t *testing.T) {
 		t.Fatalf("resume/start = %d/%d, want 0/0 after a failed --fresh delete", r.resumeCalls, r.startCalls)
 	}
 }
+
+// TestStartManagerFreshBypassesPreRoleGuard: the pre-role record guard's own
+// remedy is "delete the agent so lever recreates it" — exactly what --fresh
+// does — so --fresh must not be refused by that guard. Before the discard
+// moved into apply it ran ahead of the guard in `up`; inside apply it runs
+// after observe, so the guard has to stand aside when the record is about to
+// be discarded anyway.
+func TestStartManagerFreshBypassesPreRoleGuard(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	deps := Deps{
+		Scion:           scion.New(r, scion.Options{}),
+		VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
+	}
+	if err := runApplyFresh(app, deps); err != nil {
+		t.Fatalf("--fresh must discard a role-defective record, not be refused by the guard: %v", err)
+	}
+	if r.deleteCalls != 1 || r.startCalls != 1 {
+		t.Fatalf("delete/start = %d/%d, want 1/1", r.deleteCalls, r.startCalls)
+	}
+	// Without --fresh the guard still refuses (the existing contract).
+	r = &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	deps.Scion = scion.New(r, scion.Options{})
+	if err := runApply(app, deps); !errors.Is(err, errPreRoleRefusal) {
+		t.Fatalf("plain up must still be refused by the guard, got %v", err)
+	}
+}

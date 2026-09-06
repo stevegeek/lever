@@ -1021,7 +1021,11 @@ func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, erro
 		return nil, fmt.Errorf("start-manager: observing agents: %w", err)
 	}
 	rec := scion.FindAgent(agents, r.app.Name)
-	if rec != nil {
+	// Under --fresh the record is about to be discarded whatever its role
+	// (convergeManager), and the guard's own remedy for a pre-role record IS
+	// "delete the agent so lever recreates it" — so refusing here would block
+	// the one verb that applies that remedy (review finding on lever#33).
+	if rec != nil && !r.fresh {
 		switch rec.Phase {
 		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
 			if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {

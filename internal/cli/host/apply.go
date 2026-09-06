@@ -807,6 +807,9 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// (image_tar); host docker is never consulted for those.
 		LoadImageTar:   b.LoadImageTar,
 		ImageLoadedTar: b.ImageLoadedTar,
+		// Every tag in an image_tar archive is held to the registry
+		// allowlist, not only the configured ref (R4). nil without one.
+		ImageTagPolicy: w.app.Security.ImageTagPolicy(),
 		// PruneImages reclaims the dangling image a rebuilt tag orphans, after a
 		// load. Best-effort (the apply step logs, never fails, on error).
 		PruneImages:      b.PruneJailImages,

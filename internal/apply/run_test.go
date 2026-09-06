@@ -39,6 +39,9 @@ func fillDeps(d Deps) Deps {
 	if d.ManagerLiveRetry == (RetryBudget{}) {
 		d.ManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Millisecond}
 	}
+	if d.PhaseSettleRetry == (RetryBudget{}) {
+		d.PhaseSettleRetry = RetryBudget{Attempts: 5, Interval: time.Millisecond}
+	}
 	if d.LoadImage == nil {
 		d.LoadImage = func(context.Context, string) error { return nil }
 	}
@@ -46,7 +49,7 @@ func fillDeps(d Deps) Deps {
 		d.ImageLoaded = func(context.Context, string) bool { return false }
 	}
 	if d.LoadImageTar == nil {
-		d.LoadImageTar = func(context.Context, string, string) error { return nil }
+		d.LoadImageTar = func(context.Context, string, string, func(string) error) error { return nil }
 	}
 	if d.ImageLoadedTar == nil {
 		d.ImageLoadedTar = func(context.Context, string, string) bool { return false }
@@ -294,6 +297,12 @@ type agentLifecycleRunner struct {
 	// (#22) bouncing the same record concurrently: apply's own verb errors, but
 	// the agent comes up anyway.
 	healerRecoversOnResumeFail bool
+	// settleAfterLists, when > 0, flips the record to settlePhase/
+	// settleContainer once this many observe lists have been served — models
+	// a transitional record (starting/stopping/…) that scion settles while
+	// apply polls it (P6). Zero = the record never leaves initPhase.
+	settleAfterLists             int
+	settlePhase, settleContainer string
 
 	phase, containerStatus string
 	inited                 bool
@@ -363,6 +372,10 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	case "list":
 		r.listCalls++
 		r.record(dir, env, name, args)
+		if r.settleAfterLists > 0 && r.listCalls > r.settleAfterLists {
+			r.phase, r.containerStatus = r.settlePhase, r.settleContainer
+			r.settleAfterLists = 0
+		}
 		if r.dieAfterLiveLists > 0 && r.phase == "running" {
 			r.liveLists++
 			if r.liveLists > r.dieAfterLiveLists {
@@ -933,30 +946,89 @@ func TestStartManagerResumeFailButHealerRecovered(t *testing.T) {
 	}
 }
 
-// TestStartManagerStartingPhaseRecoversFresh covers the OTHER unhandled-phase
-// shape: a "starting" record left behind by a `lever up` that was interrupted
-// mid-`scion start` on a prior run. WHY this also takes the loud
-// delete+fresh path rather than something smarter: `scion resume` is
-// documented for suspended/stopped records only (there is no verb to "finish
-// starting" or safely probe whether a half-started record is salvageable),
-// and `scion list --format json`'s phase field is the canonical state we
-// observe — we cannot be cleverer without scion exposing more verbs. So a
-// half-started record gets the same safe-floor recovery as any other
-// unhandled phase, converging `up` instead of bricking it.
-func TestStartManagerStartingPhaseRecoversFresh(t *testing.T) {
+// TestStartManagerTransitionalPhaseSettlesThenConverges (P6): a record caught
+// mid-transition — a concurrent `lever stop`, or a prior `up` interrupted
+// mid-`scion start` — is POLLED until scion settles it into a phase converge
+// knows, and converge then acts on THAT phase. Before P6 the transitional
+// snapshot took the loud delete+fresh path, so a routine `lever up` racing a
+// `stop` discarded the conversation.
+func TestStartManagerTransitionalPhaseSettlesThenConverges(t *testing.T) {
+	cases := []struct {
+		name, from, to, toContainer       string
+		wantStart, wantResume, wantDelete int
+	}{
+		{"starting settles running: no-op", "starting", "running", "Up 2 seconds", 0, 0, 0},
+		{"stopping settles suspended: resume", "stopping", "suspended", "stopped", 0, 1, 0},
+		{"created settles stopped: resume", "created", "stopped", "stopped", 0, 1, 0},
+		{"provisioning vanishes: create", "provisioning", "", "", 1, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: tc.from, initContainerStatus: "",
+				settleAfterLists: 3, settlePhase: tc.to, settleContainer: tc.toContainer}
+			var logged logSink
+			deps := Deps{
+				Scion: scion.New(r, scion.Options{}),
+				Log:   logged.logf,
+			}
+			if err := runApply(app, deps); err != nil {
+				t.Fatalf("a %q record that settles to %q must converge, not fail: %v", tc.from, tc.to, err)
+			}
+			if r.startCalls != tc.wantStart || r.resumeCalls != tc.wantResume || r.deleteCalls != tc.wantDelete {
+				t.Fatalf("start/resume/delete = %d/%d/%d, want %d/%d/%d", r.startCalls, r.resumeCalls, r.deleteCalls, tc.wantStart, tc.wantResume, tc.wantDelete)
+			}
+			if r.listCalls < 4 {
+				t.Errorf("listCalls = %d, want >= 4 (the transitional record must be re-observed until it settles)", r.listCalls)
+			}
+			for _, l := range logged.lines {
+				if strings.Contains(l, "previous session lost") || strings.Contains(l, "FRESH") {
+					t.Fatalf("no loss notice for a record that settled, got %q", l)
+				}
+			}
+		})
+	}
+}
+
+// TestStartManagerTransitionalPhaseNeverSettlesFailsWithoutDelete (P6): when
+// the record stays mid-transition for the whole settle budget, apply fails
+// loudly naming the phase and the operator's discard path (`up --fresh`) —
+// and touches nothing. Deleting on a phase we cannot act on was the bug.
+func TestStartManagerTransitionalPhaseNeverSettlesFailsWithoutDelete(t *testing.T) {
+	for _, phase := range []string{"created", "provisioning", "cloning", "starting", "stopping"} {
+		t.Run(phase, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: ""}
+			deps := Deps{
+				Scion:            scion.New(r, scion.Options{}),
+				PhaseSettleRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond},
+			}
+			err := runApply(app, deps)
+			testutil.WantErrContaining(t, err, phase, "--fresh")
+			if r.deleteCalls != 0 || r.startCalls != 0 || r.resumeCalls != 0 {
+				t.Fatalf("delete/start/resume = %d/%d/%d, want 0/0/0 (a record that never settles must not be touched)", r.deleteCalls, r.startCalls, r.resumeCalls)
+			}
+			if r.listCalls < 3 {
+				t.Errorf("listCalls = %d, want >= 3 (the settle budget must be spent before giving up)", r.listCalls)
+			}
+		})
+	}
+}
+
+// TestStartManagerUnknownPhaseFailsWithoutDelete (P6): a phase string lever
+// does not know — a newer scion enum, or a hostile hub — is refused loudly,
+// with the record and its conversation left in place. Only `up --fresh`
+// discards.
+func TestStartManagerUnknownPhaseFailsWithoutDelete(t *testing.T) {
 	app, f := newObserveFirstApp(t)
-	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: ""}
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "definitely-not-a-phase", initContainerStatus: "stopped"}
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
 	}
-	if err := runApply(app, deps); err != nil {
-		t.Fatalf("a half-started (\"starting\") record must recover fresh, not hard-fail: %v", err)
-	}
-	if r.deleteCalls != 1 || r.startCalls != 1 {
-		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1", r.deleteCalls, r.startCalls)
-	}
-	if r.resumeCalls != 0 {
-		t.Errorf("resumeCalls = %d, want 0 (a starting record is not resumable)", r.resumeCalls)
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "definitely-not-a-phase", "--fresh")
+	if r.deleteCalls != 0 || r.startCalls != 0 || r.resumeCalls != 0 {
+		t.Fatalf("delete/start/resume = %d/%d/%d, want 0/0/0 (an unrecognised phase must not be touched)", r.deleteCalls, r.startCalls, r.resumeCalls)
 	}
 }
 
@@ -3413,7 +3485,7 @@ func TestLoadImageStepUsesTarSourceWhenSet(t *testing.T) {
 	d := Deps{
 		LoadImage:   func(context.Context, string) error { dockerCalls++; return nil },
 		ImageLoaded: func(context.Context, string) bool { dockerCalls++; return false },
-		LoadImageTar: func(_ context.Context, ref, tar string) error {
+		LoadImageTar: func(_ context.Context, ref, tar string, _ func(string) error) error {
 			tarLoads++
 			gotRef, gotTar = ref, tar
 			return nil
@@ -3440,7 +3512,7 @@ func TestLoadImageStepUsesTarSourceWhenSet(t *testing.T) {
 func TestLoadImageStepSkipsWhenTarAlreadyLoaded(t *testing.T) {
 	var loads, prunes int
 	d := Deps{
-		LoadImageTar:   func(context.Context, string, string) error { loads++; return nil },
+		LoadImageTar:   func(context.Context, string, string, func(string) error) error { loads++; return nil },
 		ImageLoadedTar: func(context.Context, string, string) bool { return true },
 		PruneImages:    func(context.Context) error { prunes++; return nil },
 	}
@@ -3457,7 +3529,7 @@ func TestLoadImageStepSkipsWhenTarAlreadyLoaded(t *testing.T) {
 func TestLoadImageStepTarLoadErrorIsFatal(t *testing.T) {
 	var prunes int
 	d := Deps{
-		LoadImageTar: func(context.Context, string, string) error { return errors.New("tag mismatch") },
+		LoadImageTar: func(context.Context, string, string, func(string) error) error { return errors.New("tag mismatch") },
 		PruneImages:  func(context.Context) error { prunes++; return nil },
 	}
 	err := tarStep(d)
@@ -3491,7 +3563,10 @@ func runApplyFresh(app *config.App, deps Deps) error {
 // the suspended record after `stop` was resumed on the image it was created
 // with, and --fresh was dropped silently (lever#33).
 func TestStartManagerFreshDiscardsPresentRecord(t *testing.T) {
-	for _, phase := range []string{"suspended", "stopped", "running", "error"} {
+	// "starting" and the unknown string cover P6: --fresh is the operator's
+	// explicit discard, so it precedes the settle wait and the refusal a
+	// plain up applies to those phases (no polling: the record goes anyway).
+	for _, phase := range []string{"suspended", "stopped", "running", "error", "starting", "definitely-not-a-phase"} {
 		t.Run(phase, func(t *testing.T) {
 			app, f := newObserveFirstApp(t)
 			cs := "stopped"
@@ -3512,6 +3587,9 @@ func TestStartManagerFreshDiscardsPresentRecord(t *testing.T) {
 			}
 			if !strings.Contains(strings.Join(logged, "\n"), "--fresh") {
 				t.Errorf("the discard must be announced, got %q", logged)
+			}
+			if r.listCalls > 2 {
+				t.Errorf("listCalls = %d, want <= 2 (--fresh must not wait for a %s record to settle)", r.listCalls, phase)
 			}
 		})
 	}
@@ -3565,5 +3643,38 @@ func TestStartManagerFreshBypassesPreRoleGuard(t *testing.T) {
 	deps.Scion = scion.New(r, scion.Options{})
 	if err := runApply(app, deps); !errors.Is(err, errPreRoleRefusal) {
 		t.Fatalf("plain up must still be refused by the guard, got %v", err)
+	}
+}
+
+// TestRunLoadImageTarForwardsImageTagPolicy (R4): the archive load receives
+// Deps.ImageTagPolicy as its allowTag, so the jail package can check every
+// tag in the archive before a byte is streamed; a nil policy is forwarded
+// as nil (no check).
+func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
+	sentinel := errors.New("policy sentinel")
+	var got func(string) error
+	var calls int
+	d := fillDeps(Deps{
+		ImageTagPolicy: func(string) error { return sentinel },
+		LoadImageTar: func(_ context.Context, _, _ string, allow func(string) error) error {
+			calls++
+			got = allow
+			return nil
+		},
+	})
+	step := Step{Target: "scionlocal/x:arm64", TarPath: "/inst/images/x.tar"}
+	if err := runLoadImage(context.Background(), step, d); err != nil {
+		t.Fatalf("runLoadImage: %v", err)
+	}
+	if calls != 1 || got == nil || !errors.Is(got("anything"), sentinel) {
+		t.Fatalf("the configured policy must reach LoadImageTar (calls=%d, got nil=%v)", calls, got == nil)
+	}
+	d.ImageTagPolicy = nil
+	got = func(string) error { return nil }
+	if err := runLoadImage(context.Background(), step, d); err != nil {
+		t.Fatalf("runLoadImage: %v", err)
+	}
+	if got != nil {
+		t.Fatal("a nil policy must be forwarded as nil")
 	}
 }

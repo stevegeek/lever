@@ -295,7 +295,7 @@ func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
-	if err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path); err != nil {
+	if err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/lever-claude:arm64 localhost/scionlocal/lever-claude:arm64") {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,6 +71,25 @@ var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
 // probabilistic for a later death.
 var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second, Settle: 10 * time.Second}
 
+// defaultPhaseSettleRetry bounds settleManagerPhase's wait for a record caught
+// mid-transition (transitionalPhases). A container start (pre-start hook,
+// enrolment) or a graceful stop each take a few seconds on a warm VM and
+// longer on a cold one; the budget errs long because exhausting it is a loud
+// failure the operator has to act on, while a settle that lands early costs
+// nothing but one more list.
+var defaultPhaseSettleRetry = RetryBudget{Attempts: 60, Interval: time.Second}
+
+// transitionalPhases are the phases of scion's record enum
+// (pkg/agent/state/state.go) that a record only passes THROUGH: created,
+// provisioning and cloning on the way to a first start, starting on the way
+// to running, stopping on the way to suspended/stopped. convergeManager has
+// no verb for any of them, and a snapshot of one says nothing about where the
+// record ends up — so apply waits for it to settle (settleManagerPhase)
+// rather than acting on the snapshot. Before P6 such a snapshot took the loud
+// delete+fresh path, which discarded the conversation on a routine `lever up`
+// that raced a `lever stop`.
+var transitionalPhases = []string{"created", "provisioning", "cloning", "starting", "stopping"}
+
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
 // api-key instances. It is NOT a real credential: it exists only to satisfy
 // scion's start-time auth gate so the container (and lever-agent boot) can run.
@@ -92,9 +112,9 @@ type BootstrapMaterial = wire.Bootstrap
 type run struct {
 	app *config.App
 	d   Deps
-	// brokerStart and managerLive are the resolved retry budgets (Deps
-	// overrides or the defaults), fixed for the run.
-	brokerStart, managerLive RetryBudget
+	// brokerStart, managerLive and phaseSettle are the resolved retry
+	// budgets (Deps overrides or the defaults), fixed for the run.
+	brokerStart, managerLive, phaseSettle RetryBudget
 	// minted records whether THIS apply run actually minted fresh bootstrap
 	// material (as opposed to the mint-manager-bootstrap step tolerating an
 	// already-spent latch — e.g. an idempotent re-apply against the same broker
@@ -122,8 +142,8 @@ func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 
 // Deps are the executor's collaborators, injected so Run is testable offline.
 // LoadImage and friends are host-side (docker-save|podman-load); Scion runs IN
-// the jail (built on a JailRunner). Every func field except ReadCred is
-// REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
+// the jail (built on a JailRunner). Every func field except ReadCred and
+// ImageTagPolicy is REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
 // so a wiring gap fails loudly instead of silently skipping a step. The CLI
 // wires all of them (buildApplyDeps); tests fill the ones they do not assert
 // on with inert implementations.
@@ -141,9 +161,17 @@ type Deps struct {
 	// ships as a docker archive (Step.TarPath, from image_tar): the load
 	// streams the file into the jail and the guard compares the archive's
 	// config digest with the jail's ID, so neither touches host docker
-	// (lever#32). Same fail-open contract as ImageLoaded.
-	LoadImageTar   func(ctx context.Context, imageRef, tarPath string) error
+	// (lever#32). Same fail-open contract as ImageLoaded. The load takes
+	// ImageTagPolicy as its allowTag.
+	LoadImageTar   func(ctx context.Context, imageRef, tarPath string, allowTag func(ref string) error) error
 	ImageLoadedTar func(ctx context.Context, imageRef, tarPath string) bool
+	// ImageTagPolicy is applied to EVERY tag an image_tar archive carries
+	// before a byte of it is streamed into the jail (R4): a docker archive
+	// can hold several images and `podman load` imports all of them, so the
+	// config ref alone passing security.allowed_image_registries proved
+	// nothing about the rest. OPTIONAL: nil = no policy (the CLI wires
+	// config.Security.ImageTagPolicy, which is nil when no allowlist is set).
+	ImageTagPolicy func(ref string) error
 	// PruneImages reclaims dangling images from the jail after a load, so a
 	// rebuilt image does not ratchet the grow-only jail disk up by a full image
 	// size (the superseded copy goes untagged). A no-op when the load added a
@@ -314,6 +342,10 @@ type Deps struct {
 	// defaults (30 × 1 s and 15 × 1 s); tests shrink them.
 	BrokerStartRetry RetryBudget
 	ManagerLiveRetry RetryBudget
+	// PhaseSettleRetry bounds the wait for a manager record observed in a
+	// transitional phase (transitionalPhases) to settle into one converge
+	// can act on. Zero takes the production default (60 × 1 s).
+	PhaseSettleRetry RetryBudget
 }
 
 // check returns an error naming the first required collaborator left nil.
@@ -367,6 +399,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 	r := &run{app: app, d: d,
 		brokerStart: d.BrokerStartRetry.or(defaultBrokerStartRetry),
 		managerLive: d.ManagerLiveRetry.or(defaultManagerLiveRetry),
+		phaseSettle: d.PhaseSettleRetry.or(defaultPhaseSettleRetry),
 		fresh:       opts.Fresh,
 	}
 	// The plan is kept, not just ranged over: the converge-to-off reconciliation
@@ -647,7 +680,9 @@ func runLoadImage(ctx context.Context, s Step, d Deps) error {
 	loaded, load := d.ImageLoaded, d.LoadImage
 	if s.TarPath != "" {
 		loaded = func(ctx context.Context, ref string) bool { return d.ImageLoadedTar(ctx, ref, s.TarPath) }
-		load = func(ctx context.Context, ref string) error { return d.LoadImageTar(ctx, ref, s.TarPath) }
+		load = func(ctx context.Context, ref string) error {
+			return d.LoadImageTar(ctx, ref, s.TarPath, d.ImageTagPolicy)
+		}
 	}
 	if loaded(ctx, s.Target) {
 		return nil
@@ -781,8 +816,9 @@ func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 
 // startManager runs the start-manager plan step: observe the manager record,
 // then act on the delta (create / no-op / resume / forced resume / loud
-// recovery) and verify the container is actually live. The three unresumable
-// tails share recoverDeleteAndCreate.
+// recovery, or a refusal on a phase lever cannot act on) and verify the
+// container is actually live. The two unresumable tails and --fresh share
+// recoverDeleteAndCreate.
 func (r *run) startManager(ctx context.Context, s Step) error {
 	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
 	// Read the prompt before any waiting: a missing or unreadable prompt file
@@ -899,8 +935,10 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 	}, nil
 }
 
-// convergeManager acts on the observed manager record (nil when absent): create,
-// keep, resume, forced resume, or the loud delete+fresh recovery. acted reports
+// convergeManager acts on the observed manager record (nil when absent, already
+// settled out of any transitional phase by observeManager): create, keep,
+// resume, forced resume, the loud delete+fresh recovery, or — for a phase it
+// does not know — a refusal that leaves the record alone. acted reports
 // whether it started or resumed anything — what decides if the liveness gate
 // that follows must hold for the settle window (lever#31) or may take one look.
 func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) (acted bool, err error) {
@@ -945,23 +983,57 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 			return r.d.Scion.ResumeForce(ctx, r.app.Name, jp)
 		}))
 	default:
-		// Any other phase — scion's full enum also has created,
-		// provisioning, cloning, starting, and stopping (see
-		// pkg/agent/state/state.go) — is not resumable: `scion resume` is
-		// documented for suspended/stopped records only (`--force` only
-		// recovers "error", handled above), and `scion list`'s
-		// JSON phase field is the canonical (and only) signal we have, so we
-		// cannot be cleverer here without more scion verbs (e.g. there is no
-		// "wait for starting to settle" verb to poll instead). A record
-		// caught mid-transition by an
-		// interrupted prior `lever up` (phase "starting"/"created"/…) must
-		// still let `up` converge, so this takes the SAME loud delete+fresh
-		// recovery as a failed resume, rather than hard-failing (bricking)
-		// the apply with no path forward but a hard `lever destroy`.
-		return true, r.recoverDeleteAndCreate(ctx, jp, opts,
-			fmt.Sprintf("start-manager: manager %q in phase %q — deleting and starting FRESH (previous session lost)", r.app.Name, rec.Phase),
-			fmt.Sprintf("manager in phase %q", rec.Phase))
+		// A transitional phase was settled (or refused) by observeManager
+		// before this switch, so what lands here is a phase this lever does
+		// not know at all — a newer scion enum, or a hostile hub string. There
+		// is no verb to act on it, and guessing used to mean the loud
+		// delete+fresh path: a plain `lever up` discarding the conversation on
+		// a string it could not read (P6). Refuse instead, leaving the record
+		// (and its conversation) in place; the operator's discard is `up
+		// --fresh` (the arm above), which needs no phase at all.
+		return false, fmt.Errorf("start-manager: manager %q is in phase %q, which lever does not recognise; nothing was changed. Retry once it settles, or run `lever up --fresh` to discard the session and start over",
+			r.app.Name, rec.Phase)
 	}
+}
+
+// settleManagerPhase re-observes a manager record seen in a transitional
+// phase (transitionalPhases) until scion moves it to a phase convergeManager
+// can act on, or the record disappears (nil: a concurrent delete — the caller
+// then creates), or the settle budget runs out. Exhaustion is a hard error
+// naming the phase and the two ways out; it never touches the record. A
+// list error mid-poll is treated as "not yet" (the next attempt re-reads),
+// like waitManagerLive; a phase that is neither transitional nor known stops
+// the wait at once so convergeManager's default arm refuses it by name.
+func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agent) (*scion.Agent, error) {
+	b := r.phaseSettle
+	r.d.Log("start-manager: manager %q is in phase %q (mid-transition) — waiting up to %s for scion to settle it",
+		r.app.Name, rec.Phase, time.Duration(b.Attempts)*b.Interval)
+	cur := rec
+	var listErr error
+	err := retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
+		agents, err := r.d.Scion.List(ctx, jp)
+		if err != nil {
+			listErr = err
+			return false, nil
+		}
+		listErr = nil
+		cur = scion.FindAgent(agents, r.app.Name)
+		return cur == nil || !slices.Contains(transitionalPhases, cur.Phase), nil
+	})
+	if err == nil {
+		return cur, nil
+	}
+	if !errors.Is(err, retry.ErrExhausted) {
+		return nil, err
+	}
+	if listErr != nil {
+		// The last look failed, so cur is stale: say so rather than report
+		// a phase nobody observed on the final attempt.
+		return nil, fmt.Errorf("start-manager: manager %q was in phase %q and could not be re-observed within %s (last error: %v); nothing was changed. Retry, or run `lever up --fresh` to discard the session and start over",
+			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, listErr)
+	}
+	return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. Retry once it settles (is a `lever stop` still running?), or run `lever up --fresh` to discard the session and start over",
+		r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval)
 }
 
 // prepareAPIKeyMode conveys LEVER_LLM_AUTH=api-key to the manager container so
@@ -1008,23 +1080,31 @@ func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
 // transient broker-not-ready blip is retried, and only a persistent or
 // genuinely-different error is fatal.
 //
+// A record in a transitional phase is first waited on (settleManagerPhase),
+// so the role gate and the caller both see a settled one.
+//
 // The role gate only covers the phases convergeManager keeps the record in:
-// rec == nil creates one, and its default branch deletes and recreates it,
-// both of which stamp a role themselves. It returns rather than falling into
-// recoverDeleteAndCreate on purpose. That recovery discards the conversation,
-// and refusing here exists to give the operator the choice — losing the
-// session is one of the two ways out, not something a guard may take on
-// their behalf.
+// rec == nil creates one, and its default branch refuses anything else. It
+// returns rather than falling into recoverDeleteAndCreate on purpose. That
+// recovery discards the conversation, and refusing here exists to give the
+// operator the choice — losing the session is one of the two ways out, not
+// something a guard may take on their behalf.
 func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, error) {
 	agents, err := r.listAgentsRetry(ctx, jp)
 	if err != nil {
 		return nil, fmt.Errorf("start-manager: observing agents: %w", err)
 	}
 	rec := scion.FindAgent(agents, r.app.Name)
-	// Under --fresh the record is about to be discarded whatever its role
-	// (convergeManager), and the guard's own remedy for a pre-role record IS
-	// "delete the agent so lever recreates it" — so refusing here would block
-	// the one verb that applies that remedy (review finding on lever#33).
+	// Under --fresh the record is about to be discarded whatever its phase or
+	// role (convergeManager): waiting for it to settle would be pointless,
+	// and the guard's own remedy for a pre-role record IS "delete the agent
+	// so lever recreates it" — so refusing here would block the one verb
+	// that applies that remedy (review finding on lever#33).
+	if rec != nil && !r.fresh && slices.Contains(transitionalPhases, rec.Phase) {
+		if rec, err = r.settleManagerPhase(ctx, jp, rec); err != nil {
+			return nil, err
+		}
+	}
 	if rec != nil && !r.fresh {
 		switch rec.Phase {
 		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
@@ -1218,8 +1298,8 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) erro
 }
 
 // recoverDeleteAndCreate performs the LOUD delete+fresh recovery shared by
-// start-manager's three unresumable tails (a failed resume, a failed forced
-// resume, and any non-resumable phase): emit the caller's loud
+// start-manager's two unresumable tails (a failed resume, a failed forced
+// resume) and the operator's explicit `--fresh`: emit the caller's loud
 // previous-session-lost notice, delete the stale record, and — only if the
 // delete succeeds — fall back to startManagerCreate's fresh create.
 //

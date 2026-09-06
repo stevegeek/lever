@@ -97,10 +97,35 @@ of which were regressions introduced in 0.20.
   /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET
   /v1/models/{id}`); any other path is 403 and audited. Before, any method
   and path under the upstream was forwarded with the real key.
-- **Security: the jail listener bounds every route.** Request bodies must
-  arrive within 30 s (`/llm` included), and non-streaming routes time out
-  with 503 (control 30 s, worker verbs 5 m, tool calls 2 m). A trickling
-  body from the jail no longer holds a connection open indefinitely.
+- **Security: the jail listener bounds every request body.** Request bodies
+  must arrive within 30 s on every route (`/llm` included), and the small
+  JSON control routes time out with 503 after 30 s. A trickling body from
+  the jail no longer holds a connection open indefinitely. `/mcp/<tool>/`
+  and `/worker/*` carry no handler bound: `http.TimeoutHandler` buffers the
+  whole response, which would deliver a streaming MCP backend only when it
+  finished and cut a long tool call or dispatch with its output discarded.
+- **Security: the llm-proxy `GET /v1/models/{id}` id is charset-checked.**
+  Only `[A-Za-z0-9._:-]` is forwarded; a percent-encoded id (`..%2F..`) is
+  403 and audited instead of being decoded into another path upstream.
+- **Security: the worker workspace directory is created inside the
+  instance tree.** A manager that replaced `<tree>/workers` with a symlink
+  to a host path could make the host broker create directories there. The
+  mkdir now goes through an `os.Root` at the tree, refuses a link that
+  leaves it (403, before any ticket is staged), and still follows a link
+  that stays inside.
+- **Security: the staged attach PAT does not persist in the guest.** The
+  0600 file `lever attach`/`lever up` stage in the run user's
+  `XDG_RUNTIME_DIR` is removed by the guest wrapper as soon as it is read;
+  the token then lives only in the session's environment. Every attach
+  re-stages first.
+- **Security: guest-supplied text wrapped into a command's returned error or
+  into apply's log lines is sanitized before printing** (new
+  `internal/termsafe` package; the root command prints its own `Error:`
+  line). An unknown subcommand no longer prints cobra's usage hint.
+- **`lever init` creates a missing `tree:` directory** (0755, parent must
+  exist; a dangling symlink at the tree path is refused). The tree-confined
+  file helpers need the tree to exist, and the documented order runs `init`
+  before the first `up`. `--check` and doctor stay read-only.
 
 ### Changed
 
@@ -123,7 +148,8 @@ of which were regressions introduced in 0.20.
   and `apply.Deps.LoadImageTar` take an `allowTag` policy; `apply.Deps` gains
   optional `ImageTagPolicy` and `PhaseSettleRetry`. New `fsutil.ReadInTree`/
   `WriteInTree`. `brokerctl.NewSupervisor` takes a tool secret; `broker.Config` gains
-  `ToolSecret` and `Timeouts`.
+  `ToolSecret` and `Timeouts` (`Body`, `Control` only). `cli.Execute` prints errors;
+  `backendtest.IsolateCache` isolates the user cache dir in tests.
 
 ## [0.21.0] - 2026-09-06
 

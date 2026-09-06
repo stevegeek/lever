@@ -28,7 +28,8 @@ import (
 //   - Interactive commands (AttachArgv): stdin is the user's terminal, so
 //     StageHubToken first writes the token to a 0600 file in the run user's
 //     XDG_RUNTIME_DIR (a 0700 tmpfs owned by that user, emptied on reboot),
-//     and hubTokenReadScript reads it back into the environment before exec.
+//     and hubTokenReadScript reads it back into the environment, removes the
+//     file, then execs — the file exists only between stage and read.
 //
 // Both scripts refuse to run without XDG_RUNTIME_DIR rather than fall back
 // to a shared path; jailEnv sets it on every in-jail command.
@@ -51,7 +52,12 @@ const stageHubTokenScript = `[ -n "$XDG_RUNTIME_DIR" ] || exit 1; umask 077; rm 
 
 // hubTokenReadScript exports the staged token and execs the positionals.
 // `$(…)` strips trailing newlines only, which the token never carries.
-const hubTokenReadScript = `[ -n "$XDG_RUNTIME_DIR" ] || exit 1; t=$(cat "` + hubTokenFile + `") || exit 1; export ` + hubTokenEnv + `="$t"; exec "$@"`
+// The file is removed as soon as it is read, before the exec: the value is
+// in the environment from then on, and the attach is a syscall.Exec on the
+// host that never returns, so nothing host-side could clean up afterwards.
+// The staged file therefore lives only between StageHubToken and this read,
+// not for the whole session (and until reboot) as an at-rest copy of the PAT.
+const hubTokenReadScript = `[ -n "$XDG_RUNTIME_DIR" ] || exit 1; t=$(cat "` + hubTokenFile + `") || exit 1; rm -f "` + hubTokenFile + `"; export ` + hubTokenEnv + `="$t"; exec "$@"`
 
 // checkHubToken refuses a token the one-line transport could only truncate.
 func checkHubToken(tok string) error {
@@ -65,7 +71,9 @@ func checkHubToken(tok string) error {
 // jail (mode 0600) through r, the jail runner, so an interactive command
 // wrapped by WithHubTokenFromFile can read it there. The token travels on
 // stdin; the host argv carries only the fixed staging script. Call it right
-// before the attach so a re-minted PAT is what the session uses.
+// before EVERY attach: the read script consumes (removes) the file, so a
+// second attach without a fresh stage fails rather than run token-less —
+// and a re-minted PAT is what the session uses.
 func StageHubToken(ctx context.Context, r proc.Runner, tok string) error {
 	if tok == "" {
 		return fmt.Errorf("staging hub token: empty token")

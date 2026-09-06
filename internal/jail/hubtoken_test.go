@@ -2,6 +2,8 @@ package jail
 
 import (
 	"context"
+	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -195,9 +197,14 @@ func TestWithHubTokenFromFileWrapsInner(t *testing.T) {
 }
 
 // The read script, run by a real sh against a staged file, exports the token
-// and execs the inner command with every positional intact.
+// and execs the inner command with every positional intact — and removes the
+// staged file BEFORE the exec, so the PAT does not stay at rest in the guest
+// for the whole attach session and beyond (the attach is a syscall.Exec on
+// the host, so nothing host-side can clean up afterwards). The exec'd
+// command must not see the file either: the value is already in its env.
 func TestHubTokenReadScriptWithRealShell(t *testing.T) {
 	dir := t.TempDir()
+	staged := dir + "/lever-hub.pat"
 	r := proc.RealRunner{}
 	// Stage through the same script the runner uses, with XDG_RUNTIME_DIR
 	// pointed at a temp dir instead of the guest's /run/user/<uid>.
@@ -206,20 +213,37 @@ func TestHubTokenReadScriptWithRealShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stage: %v (stderr %q)", err, res.Stderr)
 	}
-	argv := WithHubTokenFromFile([]string{"sh", "-c", `printf '%s|%s|%s' "$SCION_HUB_TOKEN" "$1" "$2"`, "_", "a b", "-g"})
-	res, err = r.Run(context.Background(), map[string]string{"XDG_RUNTIME_DIR": dir}, argv[0], argv[1:]...)
-	if err != nil {
-		t.Fatalf("read: %v (stderr %q)", err, res.Stderr)
-	}
-	if res.Stdout != "pat-secret-value|a b|-g" {
-		t.Fatalf("stdout = %q", res.Stdout)
-	}
-	res, err = r.Run(context.Background(), nil, "sh", "-c", `stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"`, "_", dir+"/lever-hub.pat")
+	res, err = r.Run(context.Background(), nil, "sh", "-c", `stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"`, "_", staged)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
 	if got := strings.TrimSpace(res.Stdout); got != "600" {
 		t.Fatalf("staged file mode = %q, want 600", got)
+	}
+	argv := WithHubTokenFromFile([]string{"sh", "-c",
+		`printf '%s|%s|%s|' "$SCION_HUB_TOKEN" "$1" "$2"; [ -e "$XDG_RUNTIME_DIR/lever-hub.pat" ] && printf present || printf gone`,
+		"_", "a b", "-g"})
+	res, err = r.Run(context.Background(), map[string]string{"XDG_RUNTIME_DIR": dir}, argv[0], argv[1:]...)
+	if err != nil {
+		t.Fatalf("read: %v (stderr %q)", err, res.Stderr)
+	}
+	if res.Stdout != "pat-secret-value|a b|-g|gone" {
+		t.Fatalf("stdout = %q, want the token and positionals, with the staged file gone by exec time", res.Stdout)
+	}
+	if _, err := os.Stat(staged); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged file must be removed after the read script ran; stat err = %v", err)
+	}
+}
+
+// A second attach without a fresh stage must fail loudly, not run with an
+// empty token: the read script removes the file, so the next session needs
+// StageHubToken again (attachArgv always stages right before the exec).
+func TestHubTokenReadScriptFailsWhenFileAlreadyConsumed(t *testing.T) {
+	dir := t.TempDir()
+	r := proc.RealRunner{}
+	argv := WithHubTokenFromFile([]string{"true"})
+	if _, err := r.Run(context.Background(), map[string]string{"XDG_RUNTIME_DIR": dir}, argv[0], argv[1:]...); err == nil {
+		t.Fatal("read script must fail when no token is staged")
 	}
 }
 

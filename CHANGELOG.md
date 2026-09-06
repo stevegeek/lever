@@ -7,6 +7,14 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-06
+
+Two operator-facing fixes and one deployment feature. `image_tar:` ships an
+agent image as a `docker save` archive so a deploy host needs no Docker
+(#32); a loaded image is re-tagged so a rebuilt tag can no longer run stale
+(#26); and `lever up --fresh` now does what it says after a `lever stop`,
+with a doctor row that catches a manager left on an old image (#33).
+
 ### Added
 
 - **`image_tar:` loads an agent image from a shipped docker archive** (#32).

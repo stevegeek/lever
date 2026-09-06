@@ -740,3 +740,26 @@ func TestWorkerStartZeroSettleMissesALaterDeath(t *testing.T) {
 		t.Fatalf("zero settle returns on the first live look by design; got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+// A flag-shaped task (`--config=/lever/x.json`) is a manager error, not a
+// size problem: 400, by name, and nothing is started. The argv lever builds
+// already puts the task behind `--`; this is the layer that says so out loud.
+func TestWorkerStart_flagShapedTaskIs400WithoutStart(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
+		BootstrapDir: filepath.Join(t.TempDir(), ".lever"), Image: "img:1"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+	b := newTestBroker(t, rt, spec)
+	body, _ := json.Marshal(map[string]string{"worker": "worker", "task": "--config=/lever/x.json"})
+
+	rec := callWorker(t, b, "/worker/start", string(body), "test-manager")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "flag") {
+		t.Fatalf("the refusal must name the reason; body=%q", rec.Body.String())
+	}
+	if len(rt.started) != 0 {
+		t.Fatalf("no start may be attempted for a flag-shaped task; got %d", len(rt.started))
+	}
+}

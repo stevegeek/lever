@@ -67,7 +67,7 @@ func TestStartArgv(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	got := startArgv(f)
-	for _, want := range []string{"-g /g/a", "start a do x", "--harness claude", "--harness-auth oauth-token", "--image img:1", "--workspace /lever"} {
+	for _, want := range []string{"-g /g/a", "start --harness claude", "-- a do x", "--harness-auth oauth-token", "--image img:1", "--workspace /lever"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("argv %q missing %q", got, want)
 		}
@@ -512,7 +512,7 @@ func TestStartInstructionsGoOverStdinNotArgv(t *testing.T) {
 	if !strings.Contains(argv, "--config -") {
 		t.Fatalf("argv %q must ask scion to read inline config from stdin", argv)
 	}
-	if !strings.Contains(argv, "start a boot") {
+	if !strings.HasSuffix(argv, " -- a boot") {
 		t.Fatalf("argv %q must keep the task positional", argv)
 	}
 	if strings.Contains(argv, "Manual") {
@@ -792,5 +792,70 @@ func TestListDecodesImage(t *testing.T) {
 	}
 	if a := FindAgent(agents, "assistant"); a == nil || a.Image != "scionlocal/lever-claude:arm64" {
 		t.Fatalf("image not decoded: %+v", agents)
+	}
+}
+
+// The worker name and the task are the two positionals, and BOTH are chosen by
+// a caller lever does not trust (the manager, through the broker). scion's
+// start parses flags interspersed with positionals, so a task placed before
+// lever's flags with no `--` would bind as a flag: `--config=/lever/x.json`
+// would author the worker's inline config (volumes, user, env, services);
+// `--no-auth`, `--attach`, `--type`, `--thinking-level` likewise. Every flag
+// lever emits therefore comes FIRST, and the positionals sit behind a `--`
+// terminator — the same shape Client.Message already uses.
+func TestStartArgvPutsFlagsFirstThenTerminatorThenPositionals(t *testing.T) {
+	f := fakeScion(true)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "do x", Harness: "claude", Project: "/g/a",
+		Image: "img:1", Model: "m1", WorkspaceSubdir: "workers/a", Instructions: "manual"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	args := f.Calls[len(f.Calls)-1].Args
+	want := []string{"-g", "/g/a", "start", "--harness", "claude", "--harness-auth", "oauth-token",
+		"--role", "baseline", "--image", "img:1", "--model", "m1", "--workspace", "workers/a",
+		"--config", "-", "--", "a", "do x"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv =\n %q\nwant\n %q", args, want)
+	}
+}
+
+// startArgs is the argv builder under Start. It is exercised directly here
+// because Start's CheckTask backstop refuses a flag-shaped task before scion
+// is called at all — and the argv shape must hold on its own, as the layer
+// that protects a task which somehow got past that check.
+func TestStartArgsKeepsFlagShapedTaskPositional(t *testing.T) {
+	for _, task := range []string{"--config=/lever/x.json", "--no-auth", "--", "-b"} {
+		args := startArgs(StartOpts{Worker: "a", Task: task, Project: "/g/a"}, "")
+		i := indexOf(args, "--")
+		if i < 0 {
+			t.Fatalf("task %q: argv %q has no -- terminator", task, args)
+		}
+		if got := args[i+1:]; len(got) != 2 || got[0] != "a" || got[1] != task {
+			t.Fatalf("task %q: positionals after -- = %q, want [a %q]", task, got, task)
+		}
+		for _, a := range args[:i] {
+			if a == task {
+				t.Fatalf("task %q: appears before the -- terminator in %q", task, args)
+			}
+		}
+	}
+}
+
+// Defence in depth under the argv shape: a task that begins with "-" is
+// refused by name before any scion call, so a manager that tries to pass a
+// flag as a task learns why instead of starting a worker on a task of `--`.
+func TestStartRefusesFlagShapedTaskBeforeAnyScionCall(t *testing.T) {
+	for _, task := range []string{"--config=/x", "--", "-b"} {
+		f := fakeScion(false)
+		c := New(f, Options{})
+		err := c.Start(context.Background(), StartOpts{Worker: "a", Task: task, Project: "/g/a"})
+		var fe *TaskFlagError
+		if !errors.As(err, &fe) {
+			t.Fatalf("task %q: want *TaskFlagError, got %v", task, err)
+		}
+		if len(f.Calls) != 0 {
+			t.Fatalf("task %q: no scion call may be made; got %d call(s)", task, len(f.Calls))
+		}
 	}
 }

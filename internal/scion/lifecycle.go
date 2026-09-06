@@ -454,27 +454,14 @@ func (c *Client) Delete(ctx context.Context, worker, project string) error {
 
 func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	// Backstop for every caller: a task past the tmux cap can never start an
-	// agent, so refuse it here by name before any scion call (the earlier,
-	// friendlier checks at config load and request decode are the same test).
+	// agent, and a flag-shaped one is never a task, so refuse both here by
+	// name before any scion call (the earlier, friendlier checks at config
+	// load and request decode are the same test).
 	if err := CheckTask(o.Task); err != nil {
 		return err
 	}
 	if err := CheckInstructions(o.Instructions); err != nil {
 		return err
-	}
-	harness := o.Harness
-	if harness == "" {
-		harness = "claude"
-	}
-	args := projectFlag(o.Project)
-	args = append(args, "start", o.Worker, o.Task, "--harness", harness)
-	if o.APIKey {
-		// api-key: satisfy scion's start gate with the placeholder ANTHROPIC_API_KEY
-		// (set as a Hub secret host-side); the real credential is the in-container
-		// broker capability token. See StartOpts.APIKey.
-		args = append(args, "--harness-auth", "api-key")
-	} else {
-		args = append(args, "--harness-auth", "oauth-token")
 	}
 	// Pin the agent role whenever the installed scion understands roles at all.
 	//
@@ -489,6 +476,7 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	// Pre-#1089 scion has no roles at all, so omitting the flag there widens
 	// nothing: agents get the old fixed scope set.
 	supported, err := c.RolesSupported(ctx)
+	role := ""
 	switch {
 	case err != nil:
 		// Fail closed. This probe is a local exec of the binary we are about to
@@ -496,14 +484,64 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 		// guessing risks silently granting full authority.
 		return fmt.Errorf("determining scion agent-role support: %w", err)
 	case supported:
-		role := c.agentRole
+		role = c.agentRole
 		if role == "" {
 			role = agentRoleBaseline
 		}
-		args = append(args, "--role", role)
 	case c.agentRole != "":
 		return fmt.Errorf("scion.agent_role is %q but this scion has no --role flag "+
 			"(it predates scion#1089); remove the setting or move to a newer pin", c.agentRole)
+	}
+	args := startArgs(o, role)
+	if o.Instructions == "" {
+		_, runErr := c.run(ctx, "", args...)
+		return runErr
+	}
+	// Standing instructions travel as inline agent config on scion's STDIN.
+	// JSON, not YAML: scion's loader picks the JSON parser on a leading brace,
+	// and json.Marshal escapes anything a manual can contain, so no quoting
+	// rule of a config language can alter the text. Inline content, not a
+	// file:// URI, so nothing depends on where the scion binary runs or what
+	// its working directory is. See StartOpts.Instructions.
+	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions})
+	if err != nil {
+		return fmt.Errorf("encoding agent instructions: %w", err)
+	}
+	_, runErr := c.runStdin(ctx, bytes.NewReader(body), args...)
+	return runErr
+}
+
+// startArgs builds the `scion start` argv for o; role "" omits --role (the
+// installed scion has no roles, see Start).
+//
+// Every flag comes FIRST and the two positionals — worker name, then task —
+// sit behind a `--` terminator. Both positionals are chosen by a caller lever
+// does not trust (the manager, through the broker's /worker/start), and
+// scion's start parses flags interspersed with positionals (cobra's default):
+// a task placed before the flags with no terminator would bind as one of
+// scion's own flags. `--config=<path>` would author the worker's inline
+// config — volumes, user, env, services, system_prompt — and `--no-auth`,
+// `--attach`, `--type`, `--thinking-level` exist too; lever's trailing flags
+// only win where they name the same flag. `--` makes both positionals inert
+// whatever they contain, the shape Client.Message already uses. CheckTask
+// refuses a flag-shaped task independently, as the second layer.
+func startArgs(o StartOpts, role string) []string {
+	harness := o.Harness
+	if harness == "" {
+		harness = "claude"
+	}
+	args := projectFlag(o.Project)
+	args = append(args, "start", "--harness", harness)
+	if o.APIKey {
+		// api-key: satisfy scion's start gate with the placeholder ANTHROPIC_API_KEY
+		// (set as a Hub secret host-side); the real credential is the in-container
+		// broker capability token. See StartOpts.APIKey.
+		args = append(args, "--harness-auth", "api-key")
+	} else {
+		args = append(args, "--harness-auth", "oauth-token")
+	}
+	if role != "" {
+		args = append(args, "--role", role)
 	}
 	if o.Image != "" {
 		args = append(args, "--image", o.Image)
@@ -522,23 +560,10 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	} else if o.Workspace != "" {
 		args = append(args, "--workspace", o.Workspace)
 	}
-	if o.Instructions == "" {
-		_, runErr := c.run(ctx, "", args...)
-		return runErr
+	if o.Instructions != "" {
+		args = append(args, "--config", "-")
 	}
-	// Standing instructions travel as inline agent config on scion's STDIN.
-	// JSON, not YAML: scion's loader picks the JSON parser on a leading brace,
-	// and json.Marshal escapes anything a manual can contain, so no quoting
-	// rule of a config language can alter the text. Inline content, not a
-	// file:// URI, so nothing depends on where the scion binary runs or what
-	// its working directory is. See StartOpts.Instructions.
-	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions})
-	if err != nil {
-		return fmt.Errorf("encoding agent instructions: %w", err)
-	}
-	args = append(args, "--config", "-")
-	_, runErr := c.runStdin(ctx, bytes.NewReader(body), args...)
-	return runErr
+	return append(args, "--", o.Worker, o.Task)
 }
 
 // inlineAgentConfig is the subset of scion's inline agent config (`scion

@@ -101,6 +101,9 @@ type run struct {
 	// process; see ErrBootstrapLatched). start-manager's create path needs
 	// exactly that "did we mint fresh material this run" signal.
 	minted bool
+	// fresh is PlanOpts.Fresh: discard any present manager record at
+	// start-manager (lever#33).
+	fresh bool
 }
 
 // StageBootstrapMaterial writes m as the manager's one-time enrolment ticket
@@ -364,6 +367,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 	r := &run{app: app, d: d,
 		brokerStart: d.BrokerStartRetry.or(defaultBrokerStartRetry),
 		managerLive: d.ManagerLiveRetry.or(defaultManagerLiveRetry),
+		fresh:       opts.Fresh,
 	}
 	// The plan is kept, not just ranged over: the converge-to-off reconciliation
 	// below needs to know whether this run manages the hub at all (see
@@ -903,6 +907,16 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 	switch {
 	case rec == nil:
 		return true, r.startManagerCreate(ctx, opts)
+	case r.fresh:
+		// `up --fresh`: the operator asked to discard the session, whatever
+		// phase the record is in. Decided HERE, after the hub is up, because
+		// after `lever stop` the record is invisible until this step
+		// (lever#33). Loud, like every other discard; the create that follows
+		// is what puts a changed manager.image into effect (a resume keeps
+		// the image the record was created with).
+		return true, r.recoverDeleteAndCreate(ctx, jp, opts,
+			fmt.Sprintf("start-manager: --fresh — deleting manager %q (phase %q) and starting FRESH (previous session discarded)", r.app.Name, rec.Phase),
+			"--fresh delete")
 	case rec.Phase == scion.PhaseRunning:
 		// No-op — the liveness verify in startManager still confirms the
 		// container is actually up: a running RECORD with a dead container
@@ -1007,7 +1021,11 @@ func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, erro
 		return nil, fmt.Errorf("start-manager: observing agents: %w", err)
 	}
 	rec := scion.FindAgent(agents, r.app.Name)
-	if rec != nil {
+	// Under --fresh the record is about to be discarded whatever its role
+	// (convergeManager), and the guard's own remedy for a pre-role record IS
+	// "delete the agent so lever recreates it" — so refusing here would block
+	// the one verb that applies that remedy (review finding on lever#33).
+	if rec != nil && !r.fresh {
 		switch rec.Phase {
 		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
 			if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {

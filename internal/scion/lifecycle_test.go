@@ -779,3 +779,18 @@ func TestWaitAgentLiveSettleBlankColumnIsNotAStrike(t *testing.T) {
 		t.Fatalf("a blank between two dead readings does not break the chain, got %v", err)
 	}
 }
+
+// TestListDecodesImage: doctor compares the manager record's image with
+// manager.image (lever#33), so List must carry scion's `image` field — the
+// image the record was created with, which a resume never changes.
+func TestListDecodesImage(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"running","containerStatus":"Up 1 day","image":"scionlocal/lever-claude:arm64"}]`})
+	agents, err := New(f, Options{}).List(context.Background(), "/lever")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := FindAgent(agents, "assistant"); a == nil || a.Image != "scionlocal/lever-claude:arm64" {
+		t.Fatalf("image not decoded: %+v", agents)
+	}
+}

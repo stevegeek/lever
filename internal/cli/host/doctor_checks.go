@@ -651,6 +651,39 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		fmt.Sprintf("manager %q is not live: phase %q, container %q", name, a.Phase, a.ContainerStatus), fix}
 }
 
+// checkManagerImage compares the image the manager record was created with
+// against manager.image. A record keeps its image for life — `lever up`
+// resumes it unchanged, and only a create reads the config — so after a
+// manager.image edit the version row (which inspects the CONFIGURED image)
+// reads green while the manager runs something else (lever#33). Podman may
+// report the record's image qualified (docker.io/, or the localhost/ alias
+// the load step adds), so refs are compared normalised. Informational when
+// there is nothing to compare: no record (the manager row already fails),
+// a record without an image field, or no listing at all.
+func checkManagerImage(ctx context.Context, project, name, want string, list agentLister) checkResult {
+	const check = "manager image"
+	if list == nil || want == "" {
+		return checkResult{check, true, "not checked", ""}
+	}
+	agents, err := list(ctx, project)
+	if err != nil {
+		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+	}
+	a := scionpkg.FindAgent(agents, name)
+	if a == nil {
+		return checkResult{check, true, "not checked (no manager record)", ""}
+	}
+	if a.Image == "" {
+		return checkResult{check, true, "not checked (the record reports no image)", ""}
+	}
+	if jail.SameImageRef(a.Image, want) {
+		return checkResult{check, true, fmt.Sprintf("%q runs %s, as configured", name, a.Image), ""}
+	}
+	return checkResult{check, false,
+		fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want),
+		"run `lever up --fresh` to recreate the manager on the configured image (the conversation is discarded)"}
+}
+
 // braceList renders names as a shell brace-expansion hint ({a,b}) for the fix
 // text, or the bare name for a single entry.
 func braceList(names []string) string {
@@ -1088,5 +1121,5 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 	if v == "" {
 		return checkResult{name, true, "no claude_code_version label on " + source + " (pre-label image; rebuild to record it)", ""}
 	}
-	return checkResult{name, true, "baked " + v + " in " + source + " (running containers keep their version until recreated: `lever stop && lever up`)", ""}
+	return checkResult{name, true, "baked " + v + " in " + source + " (a manager keeps the image it was created on until recreated: `lever up --fresh`; the manager image row compares the two)", ""}
 }

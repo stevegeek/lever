@@ -124,6 +124,15 @@ func FindTarImage(imgs []TarImage, ref string) (TarImage, error) {
 	return TarImage{}, fmt.Errorf("image %q is not in the tar (tags present: %s)", ref, strings.Join(have, ", "))
 }
 
+// SameImageRef reports whether two image references name the same image
+// once podman's and docker's qualifications are stripped: "docker.io/" or the
+// "localhost/" alias the load step adds (aliasLocalhost), the implied
+// "library/", and an implied ":latest". A different tag or registry is a
+// different image.
+func SameImageRef(a, b string) bool {
+	return normalizeRef(strings.TrimPrefix(a, "localhost/")) == normalizeRef(strings.TrimPrefix(b, "localhost/"))
+}
+
 // normalizeRef canonicalises a docker image reference for equality: strips a
 // leading "docker.io/", prefixes the implied "library/" of a single-component
 // name, and appends ":latest" when the name carries no tag or digest. The tag

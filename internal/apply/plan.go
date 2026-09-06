@@ -55,6 +55,13 @@ type PlanOpts struct {
 	// never invoked; running init-machine on a fresh machine would fail (no scion
 	// binary). The full container path is a later milestone.
 	BrokerOnly bool
+	// Fresh carries `lever up --fresh` into the start-manager step: a present
+	// manager record, whatever its phase, is deleted and the manager created
+	// anew instead of resumed. It lives here rather than in `up` because after
+	// `lever stop` the hub is down until apply's scion-server step brings it
+	// up, so `up` can neither see the record nor delete it beforehand
+	// (lever#33). The plan itself is unchanged.
+	Fresh bool
 }
 
 // brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.

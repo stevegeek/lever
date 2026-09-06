@@ -22,9 +22,28 @@ version bump moves the block under the new version heading.
   that inherits the manager image inherits its archive. `lever apply
   --dry-run` names the archive each load-image step reads. Reading the
   manifest costs a handful of seeks, not a pass over the multi-GB file.
+- **`lever doctor` compares the manager's image with `manager.image`** (#33).
+  A record keeps the image it was created with and a resume never moves it,
+  so after a `manager.image` edit the version row (which inspects the
+  configured image) read green while the manager ran something else. The new
+  `manager image` row fails on a drift and names `lever up --fresh`; refs are
+  compared normalised, so podman's `docker.io/` or `localhost/` qualification
+  of the same tag is not a drift. The version row's own advice now names
+  `lever up --fresh` rather than `stop && up`, which resumes on the old image.
 
 ### Fixed
 
+- **`lever up --fresh` after `lever stop` now starts a fresh manager** (#33).
+  After `stop` the hub is down until apply's scion-server step, so `up`'s
+  phase probe failed, `--fresh` was decided on that failed probe and dropped,
+  and the suspended record was resumed on the image it was created with —
+  with `is up.` printed as if the request had been honoured. The flag now
+  rides into apply (`PlanOpts.Fresh`): the start-manager step deletes any
+  record it finds once the hub is up, whatever its phase, and creates the
+  manager anew; the discard is logged, and a failed delete fails the step
+  instead of falling through to a resume. `up`'s pre-apply delete is gone
+  (one mechanism), and the notice printed when the probe fails says what
+  `--fresh` will do.
 - **A rebuilt image no longer runs stale after `lever stop && lever up`**
   (#26). `podman load` names a docker archive's image `docker.io/<ref>`, but
   the container spec's unqualified ref resolved to a `localhost/<ref>` left by

@@ -61,9 +61,9 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 				return fmt.Errorf("unknown worker %q — declare it under `workers:` in %s", name, config.CanonicalName)
 			}
 
-			// Delete the scion record via the same runtime seam newDestroyCmd/
-			// restartManagerFresh reach through: a host-side scion client over the
-			// jail runner, authenticating with the controller PAT.
+			// Delete the scion record via the same runtime seam newDestroyCmd
+			// reaches through: a host-side scion client over the jail runner,
+			// authenticating with the controller PAT.
 			project := b.MountDest()
 			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
 			if err := sc.Delete(cmd.Context(), spec.Name, project); err != nil {

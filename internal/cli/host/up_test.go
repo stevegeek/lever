@@ -79,15 +79,18 @@ func TestUpDecision(t *testing.T) {
 		{"", false, upApply},
 		{"suspended", false, upResume},
 		{"running", false, upNone},
-		{"running", true, upRestart},
-		{"suspended", true, upRestart},
 		{"stopped", false, upApply},
-		// --fresh discards ANY present record: since 0.12 apply preserves an
+		// --fresh is ALWAYS the apply path, whatever the probe saw: apply's
+		// start-manager step carries the intent (PlanOpts.Fresh) and discards
+		// any present record once the hub is up. Deciding on the probe alone
+		// dropped --fresh after every `lever stop`, when the hub is down and
+		// the record invisible (lever#33); and since 0.12 apply preserves an
 		// error-phase record whose forced resume comes up dead (#3), so
-		// --fresh must be the escape hatch for a bricked record — not resume
-		// the very conversation the user asked to discard.
-		{"stopped", true, upRestart},
-		{"error", true, upRestart},
+		// --fresh must reach apply for a bricked record too.
+		{"running", true, upApply},
+		{"suspended", true, upApply},
+		{"stopped", true, upApply},
+		{"error", true, upApply},
 		{"", true, upApply},
 	}
 	for _, c := range cases {
@@ -97,28 +100,9 @@ func TestUpDecision(t *testing.T) {
 	}
 }
 
-// TestRestartManagerFreshIssuesDelete pins the "restart" decision's action:
-// `--fresh` over a running/suspended manager must discard the record with
-// `scion delete`, NOT `scion stop`. `scion stop` would leave a stopped record
-// that start-manager's observe-first switch (internal/apply/run.go) treats as
-// resumable — resuming it with `claude --continue` would restore the very
-// conversation `--fresh` asked to discard.
-func TestRestartManagerFreshIssuesDelete(t *testing.T) {
-	f := scionOKRunner()
-	sc := scion.New(f, scion.Options{})
-
-	if err := restartManagerFresh(context.Background(), sc, "hello", "/lever"); err != nil {
-		t.Fatalf("restartManagerFresh: %v", err)
-	}
-	if len(f.Calls) != 1 {
-		t.Fatalf("expected exactly one scion call, got %+v", f.Calls)
-	}
-	call := f.Calls[0]
-	if len(call.Args) == 0 || call.Args[0] != "delete" {
-		got := strings.Join(call.Args, " ")
-		t.Fatalf("restart must issue `scion delete`, not `scion stop`; got argv %q", got)
-	}
-}
+// The --fresh discard itself (`scion delete`, never `scion stop`, which would
+// leave a resumable stopped record) is pinned where it now lives: apply's
+// start-manager step, TestStartManagerFreshDiscardsPresentRecord.
 
 // TestFirstLine covers the extraction used to keep the fresh-bring-up probe
 // message to one short line: scion's error includes its entire usage dump
@@ -203,8 +187,7 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 		minLists int // list calls the gate must make
 		maxLists int
 	}{
-		{upApply, 0, 0},        // apply.Run gated it
-		{upRestart, 0, 0},      // ditto
+		{upApply, 0, 0},        // apply.Run gated it (--fresh included)
 		{upNone, 1, 1},         // one fresh observation, no settle
 		{upResume, 2, 1 << 20}, // live, then held: at least one re-observation
 	} {
@@ -228,5 +211,21 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond}}
 	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant"); err == nil {
 		t.Fatal("a resume over a dead manager must not pass the gate")
+	}
+}
+
+// TestUpProbeNotice: the line `up` prints when the probe could not see the
+// manager. With --fresh it must say the flag survives — that a record found
+// once the hub is up will be discarded — instead of the plain "bringing up"
+// that read as a silent downgrade to resume (lever#33).
+func TestUpProbeNotice(t *testing.T) {
+	err := errors.New("hub is not responding\nUsage: scion list ...")
+	plain := upProbeNotice(err, false)
+	if !strings.Contains(plain, "hub is not responding") || strings.Contains(plain, "Usage") || strings.Contains(plain, "--fresh") {
+		t.Errorf("plain notice = %q", plain)
+	}
+	fresh := upProbeNotice(err, true)
+	if !strings.Contains(fresh, "--fresh") || !strings.Contains(fresh, "discard") || !strings.Contains(fresh, "hub is not responding") {
+		t.Errorf("fresh notice = %q, want the flag, the discard, and the reason", fresh)
 	}
 }

@@ -36,22 +36,23 @@ func phaseOrAbsent(phase string, err error) (string, error) {
 type upAction string
 
 const (
-	upRestart upAction = "restart" // --fresh over a present record: delete, then apply
-	upApply   upAction = "apply"   // absent/stopped/error: full bring-up
-	upResume  upAction = "resume"  // suspended: resume the existing manager
-	upNone    upAction = "none"    // already running: nothing to do, just attach
+	upApply  upAction = "apply"  // absent/stopped/error, or --fresh: full bring-up (apply discards a present record under --fresh)
+	upResume upAction = "resume" // suspended: resume the existing manager
+	upNone   upAction = "none"   // already running: nothing to do, just attach
 )
 
 // upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
 func upDecision(phase string, fresh bool) upAction {
-	// --fresh discards ANY present record, whatever its phase. Since 0.12
-	// apply PRESERVES an error-phase record when its forced resume comes up
-	// dead (loud failure, no delete — see start-manager's #3 recovery), so
-	// --fresh is the only clean escape hatch for a genuinely-bricked record;
-	// limiting it to running/suspended would leave `up --fresh` resuming the
-	// very record the user asked to discard.
-	if fresh && phase != "" {
-		return upRestart
+	// --fresh discards ANY present record, whatever its phase, and the
+	// discard is apply's job (PlanOpts.Fresh, start-manager's converge step),
+	// never decided on the probe here: after `lever stop` the hub is down
+	// until apply's scion-server step, so the probe fails and the record is
+	// invisible — deciding on the probe dropped --fresh on exactly that path
+	// (lever#33). Since 0.12 apply also PRESERVES an error-phase record when
+	// its forced resume comes up dead (#3), so --fresh reaching apply is the
+	// only clean escape hatch for a genuinely-bricked record.
+	if fresh {
+		return upApply
 	}
 	switch phase {
 	case scion.PhaseRunning:
@@ -116,30 +117,22 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return err // possibly-transient probe failure: do NOT force apply
 			}
 			if probeErr != nil {
-				// The probe error proves the manager isn't up (hub down = fresh
-				// machine; project 404 = never hub-registered) — fall through to
-				// apply, which starts the hub / registers the manager, rather
-				// than dying. probeErr is scion's raw CLI error, which on a
-				// fresh machine includes scion's entire usage dump after the
-				// first line — keep only that first line so a normal fresh
-				// bring-up doesn't print a scary wall of text.
-				cmd.Printf("No running manager (%s) — bringing the application up.\n", firstLine(probeErr.Error()))
+				// The probe error proves the manager isn't up NOW (hub down
+				// after `lever stop` or on a fresh machine; project 404 =
+				// never hub-registered) — fall through to apply, which starts
+				// the hub / registers the manager, rather than dying. It does
+				// NOT prove the record is absent: after `stop` a suspended
+				// record is waiting behind the down hub, which is why --fresh
+				// rides into apply rather than being decided here (lever#33).
+				cmd.Println(upProbeNotice(probeErr, fresh))
 			}
 			decision := upDecision(phase, fresh)
 			switch decision {
-			case upRestart:
-				// A failed delete must be VISIBLE: with the record still
-				// present, the following apply's observe-first start-manager
-				// would RESUME the old conversation — silently defeating
-				// --fresh (re-review residual on finding I2).
-				if err := restartManagerFresh(cmd.Context(), sc, app.Name, project); err != nil {
-					return fmt.Errorf("--fresh: deleting the existing manager record: %w (without this the old session would be resumed)", err)
-				}
-				if err := apply.Run(cmd.Context(), app, deps, apply.PlanOpts{}); err != nil {
-					return err
-				}
 			case upApply:
-				if err := apply.Run(cmd.Context(), app, deps, apply.PlanOpts{}); err != nil {
+				// --fresh: apply's start-manager step deletes any record it
+				// finds once the hub is up and creates anew; a failed delete
+				// is fatal there, so the old session is never resumed silently.
+				if err := apply.Run(cmd.Context(), app, deps, apply.PlanOpts{Fresh: fresh}); err != nil {
 					return err
 				}
 			case upResume:
@@ -182,6 +175,20 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 	return c
 }
 
+// upProbeNotice is the line `up` prints when the phase probe could not see
+// the manager. probeErr is scion's raw CLI error, which on a fresh machine
+// includes scion's entire usage dump after the first line — keep only that
+// first line so a normal bring-up doesn't print a scary wall of text. Under
+// --fresh it must say what the flag will do, because the probe failing is
+// exactly the case where a silent resume used to happen (lever#33).
+func upProbeNotice(probeErr error, fresh bool) string {
+	reason := firstLine(probeErr.Error())
+	if fresh {
+		return fmt.Sprintf("No running manager observed (%s) — bringing the application up; --fresh will discard any manager record found once the hub is up.", reason)
+	}
+	return fmt.Sprintf("No running manager (%s) — bringing the application up.", reason)
+}
+
 // firstLine returns the first line of s, trimmed of surrounding whitespace.
 // Used to keep scion's raw CLI errors — which can carry an entire usage dump
 // after the first line — down to one short, printable reason.
@@ -190,18 +197,6 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
-}
-
-// restartManagerFresh discards the existing manager record entirely (`scion
-// delete`) for the "restart" (`--fresh` over a running/suspended manager)
-// decision, so the following apply's observe-first start-manager step
-// (internal/apply/run.go) sees the record ABSENT and takes the CREATE path.
-// It must NOT be `scion stop`: stop leaves a stopped record behind, and
-// start-manager treats a stopped record as resumable — it would RESUME the
-// old conversation with `claude --continue`, defeating the entire point of
-// `--fresh`.
-func restartManagerFresh(ctx context.Context, sc *scion.Client, name, project string) error {
-	return sc.Delete(ctx, name, project)
 }
 
 func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {

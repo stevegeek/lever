@@ -187,7 +187,9 @@ type DispatchConfig struct {
 // class. The listener itself sets only ReadHeaderTimeout and IdleTimeout — a
 // server-level ReadTimeout/WriteTimeout would cut a streamed /llm completion
 // — so these are applied per route (see JailHandler). Zero fields take the
-// defaults; tests shrink them.
+// defaults; tests shrink them. There is deliberately no handler bound for
+// the /mcp/<name>/ and /worker/* routes: a tool call may stream and a
+// dispatch may legitimately run long (JailHandler says why).
 type TimeoutConfig struct {
 	// Body bounds how long a client may take to deliver its request body, on
 	// EVERY jail route including /llm (a read deadline on the connection).
@@ -195,19 +197,12 @@ type TimeoutConfig struct {
 	// Control bounds the JSON control routes (provision, worker list, msg,
 	// directive, enrol, renew, request, tools): handler start to response.
 	Control time.Duration
-	// Tool bounds one proxied MCP call on a /mcp/<name>/ route.
-	Tool time.Duration
-	// Worker bounds the /worker/start|stop|suspend|resume routes: a start
-	// waits for scion and the liveness settle window, so it is the longest.
-	Worker time.Duration
 }
 
 // Default jail route deadlines (TimeoutConfig).
 const (
 	defaultJailBodyTimeout    = 30 * time.Second
 	defaultJailControlTimeout = 30 * time.Second
-	defaultJailToolTimeout    = 2 * time.Minute
-	defaultJailWorkerTimeout  = 5 * time.Minute
 )
 
 // withDefaults fills every zero field of tc.
@@ -215,8 +210,6 @@ func (tc TimeoutConfig) withDefaults() TimeoutConfig {
 	return TimeoutConfig{
 		Body:    cmp.Or(tc.Body, defaultJailBodyTimeout),
 		Control: cmp.Or(tc.Control, defaultJailControlTimeout),
-		Tool:    cmp.Or(tc.Tool, defaultJailToolTimeout),
-		Worker:  cmp.Or(tc.Worker, defaultJailWorkerTimeout),
 	}
 }
 

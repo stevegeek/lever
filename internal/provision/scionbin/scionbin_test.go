@@ -38,18 +38,8 @@ func TestResolveSourceMissingNeverBuilds(t *testing.T) {
 	}
 }
 
-// isolateCache points os.UserCacheDir at a fresh directory — HOME for the
-// darwin resolution, XDG_CACHE_HOME for the Linux one — so no test touches
-// the real per-user cache.
-func isolateCache(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-}
-
 func TestResolveSourceCrossCompiles(t *testing.T) {
-	isolateCache(t)
+	backendtest.IsolateCache(t)
 	f := proc.NewFakeRunner()
 	f.Script("go build", proc.Result{})
 	src := t.TempDir()
@@ -80,7 +70,7 @@ func TestResolveSourceCrossCompiles(t *testing.T) {
 // module, and cross-compile FROM the module's source dir using that absolute
 // binary (so the toolchain resolves outside any project dir).
 func TestResolveVersionBuildsFromPinnedModule(t *testing.T) {
-	isolateCache(t)
+	backendtest.IsolateCache(t)
 	const pin = "666333f9"
 	const moduleDir = "/mod/github.com/!google!cloud!platform/scion@v0.0.0-x"
 	f := proc.NewFakeRunner()
@@ -176,7 +166,7 @@ func TestBuildsWebAssets(t *testing.T) {
 // host-side hash and the root install into the jail. It goes under the
 // operator's own cache directory, in a directory lever creates 0700.
 func TestResolveBuildsUnderThePerUserCacheDir(t *testing.T) {
-	isolateCache(t)
+	backendtest.IsolateCache(t)
 	f := proc.NewFakeRunner()
 	f.Script("go build", proc.Result{})
 	out, err := scionbin.Resolve(context.Background(), f, scionbin.Spec{Source: t.TempDir()}, "arm64", "lever-jail")

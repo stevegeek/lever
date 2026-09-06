@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // phaseOrAbsent treats a failed phase probe as "absent" (no manager found)
@@ -197,7 +198,7 @@ func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	return sanitizeTerminal(strings.TrimSpace(s))
+	return termsafe.Sanitize(strings.TrimSpace(s))
 }
 
 func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {

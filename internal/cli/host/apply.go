@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,6 +31,7 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -106,10 +108,18 @@ type logFunc func(format string, args ...any)
 
 func (f logFunc) printf(format string, args ...any) {
 	if f == nil {
-		fmt.Fprintf(os.Stderr, format+"\n", args...)
+		logLine(os.Stderr, format, args...)
 		return
 	}
 	f(format, args...)
+}
+
+// logLine is the one write site for apply's user-facing lines. The
+// arguments wrap errors from the jail and the hub (scion's stderr, a
+// container status) via %v, so the formatted line goes through
+// termsafe.Sanitize before it reaches the terminal.
+func logLine(w io.Writer, format string, args ...any) {
+	fmt.Fprintln(w, termsafe.Sanitize(fmt.Sprintf(format, args...)))
 }
 
 // remoteController owns the apply-time remote-proxy lifecycle: spawning the
@@ -986,8 +996,8 @@ func (w *applyWiring) ensureAgentTemplate(ctx context.Context, projectDir string
 // silently lost.
 func (w *applyWiring) log(format string, args ...any) {
 	if w.cmd != nil {
-		w.cmd.PrintErrf(format+"\n", args...)
+		logLine(w.cmd.ErrOrStderr(), format, args...)
 		return
 	}
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	logLine(os.Stderr, format, args...)
 }

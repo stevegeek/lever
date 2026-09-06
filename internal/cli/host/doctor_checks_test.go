@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1316,5 +1317,24 @@ func TestCheckClaudeVersionAdvisesFresh(t *testing.T) {
 	got := checkClaudeVersion("img", "", p)
 	if !strings.Contains(got.detail, "lever up --fresh") || strings.Contains(got.detail, "stop && lever up") {
 		t.Fatalf("detail = %q", got.detail)
+	}
+}
+
+// TestCheckOperatorSkillsMissingTreeFailsWithoutCreating: doctor is
+// read-only — a tree that does not exist yet is a failed row pointing at
+// `lever init` (which creates it), never created here.
+func TestCheckOperatorSkillsMissingTreeFailsWithoutCreating(t *testing.T) {
+	root := t.TempDir()
+	tree := filepath.Join(root, "workspace")
+	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}}
+	res := checkOperatorSkills(app, state.ForConfig(root))
+	if res.ok {
+		t.Fatalf("missing tree must fail: %+v", res)
+	}
+	if !strings.Contains(res.fix, "lever init") {
+		t.Fatalf("fix must point at lever init: %+v", res)
+	}
+	if _, err := os.Lstat(tree); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("doctor must not create the tree (err=%v)", err)
 	}
 }

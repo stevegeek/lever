@@ -6,11 +6,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -451,5 +455,175 @@ func TestAdoptStaleUnmodifiedScaffoldNotAdopted(t *testing.T) {
 	sres, _ := syncSkills(app, stateDir, false, false)
 	if sres[0].Action != skillRefreshed {
 		t.Fatalf("stale scaffold must refresh on plain init: %+v", sres)
+	}
+}
+
+// --- R2: the scaffold engine never follows the tree out to a host file ---
+
+// hostFileFixture plants an operator-owned file OUTSIDE the tree (the
+// instance's lever.yaml sits exactly there) that no scaffold pass may touch.
+func hostFileFixture(t *testing.T, tree string) string {
+	t.Helper()
+	p := filepath.Join(filepath.Dir(tree), "lever.yaml")
+	if err := os.WriteFile(p, []byte("host: config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func assertHostFileUntouched(t *testing.T, p string) {
+	t.Helper()
+	if b, err := os.ReadFile(p); err != nil || string(b) != "host: config\n" {
+		t.Fatalf("host file changed: %q err=%v", b, err)
+	}
+}
+
+func TestScaffoldRefusesSymlinkedTargetsOutOfTree(t *testing.T) {
+	skillRel := filepath.FromSlash(opRel)
+	cases := []struct {
+		name   string
+		rel    string // link placed at tree/rel
+		target func(host string) string
+	}{
+		{"SKILL.md -> existing host file", skillRel, func(h string) string { return h }},
+		{"SKILL.md -> dangling host path", skillRel, func(h string) string { return h + ".missing" }},
+		{"CLAUDE.md -> existing host file", "CLAUDE.md", func(string) string { return filepath.Join("..", "lever.yaml") }},
+		{"CLAUDE.md -> dangling host path", "CLAUDE.md", func(string) string { return filepath.Join("..", "nope") }},
+		{".claude dir -> host dir", ".claude", func(h string) string { return filepath.Dir(h) }},
+		{".claude dir -> dangling host dir", ".claude", func(h string) string { return filepath.Join(filepath.Dir(h), "gone") }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			app, tree, stateDir := scaffoldFixture(t)
+			host := hostFileFixture(t, tree)
+			link := filepath.Join(tree, c.rel)
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(c.target(host), link); err != nil {
+				t.Fatal(err)
+			}
+			for _, force := range []bool{false, true} {
+				_, err := syncSkills(app, stateDir, force, false)
+				if c.rel == "CLAUDE.md" {
+					_, err = ensureClaudeMDBlock(tree, stateDir, force, false)
+				}
+				if !errors.Is(err, fsutil.ErrEscapesTree) {
+					t.Fatalf("write mode (force=%v): err=%v, want fsutil.ErrEscapesTree", force, err)
+				}
+			}
+			// Check mode (doctor) and --adopt read the same paths: same refusal.
+			_, err := syncSkills(app, stateDir, false, true)
+			if c.rel == "CLAUDE.md" {
+				_, err = ensureClaudeMDBlock(tree, stateDir, false, true)
+			}
+			if !errors.Is(err, fsutil.ErrEscapesTree) {
+				t.Fatalf("check mode: err=%v, want fsutil.ErrEscapesTree", err)
+			}
+			if _, err := adoptSkills(app, stateDir); !errors.Is(err, fsutil.ErrEscapesTree) {
+				t.Fatalf("adopt: err=%v, want fsutil.ErrEscapesTree", err)
+			}
+			assertHostFileUntouched(t, host)
+			for _, p := range []string{host + ".missing", filepath.Join(filepath.Dir(host), "nope"), filepath.Join(filepath.Dir(host), "gone")} {
+				if _, err := os.Lstat(p); err == nil {
+					t.Fatalf("scaffold created the dangling link's host target %s", p)
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(filepath.Dir(host), "skills")); err == nil {
+				t.Fatal("scaffold created directories under the host dir")
+			}
+			if _, err := os.Stat(stateDir.Skills()); c.rel != "CLAUDE.md" && err == nil {
+				t.Fatal("no hash must be recorded for a refused target")
+			}
+		})
+	}
+}
+
+// The case commit 22880a9 kept alive: a CLAUDE.md (or .claude) that is a
+// symlink INSIDE the tree is written through, in place, link intact.
+func TestScaffoldFollowsSymlinksInsideTree(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	real := filepath.Join(tree, "docs", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("# mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("docs", "CLAUDE.md"), filepath.Join(tree, "CLAUDE.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tree, "shared", ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("shared", ".claude"), filepath.Join(tree, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	if act, err := ensureClaudeMDBlock(tree, stateDir, false, false); err != nil || act != skillCreated {
+		t.Fatalf("block through in-tree link: act=%v err=%v", act, err)
+	}
+	if fi, _ := os.Lstat(filepath.Join(tree, "CLAUDE.md")); fi.Mode()&fs.ModeSymlink == 0 {
+		t.Fatal("in-place write must keep the CLAUDE.md link")
+	}
+	b, _ := os.ReadFile(real)
+	if !strings.HasPrefix(string(b), "# mine\n") || !strings.Contains(string(b), claudeMDBlock()) {
+		t.Fatalf("link target not appended to:\n%s", b)
+	}
+	if fi, _ := os.Stat(real); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("in-place write must keep the target's mode: %v", fi.Mode().Perm())
+	}
+	res, err := syncSkills(app, stateDir, false, false)
+	if err != nil || res[0].Action != skillCreated {
+		t.Fatalf("skill through in-tree dir link: %+v err=%v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "shared", ".claude", "skills", "lever-operator", "SKILL.md")); err != nil {
+		t.Fatalf("SKILL.md not written through the .claude link: %v", err)
+	}
+	if act, _ := ensureClaudeMDBlock(tree, stateDir, false, true); act != skillUnchanged {
+		t.Fatalf("check through link: %v", act)
+	}
+}
+
+func TestScaffoldRefusesNonRegularFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no FIFOs on windows")
+	}
+	app, tree, stateDir := scaffoldFixture(t)
+	if err := syscall.Mkfifo(filepath.Join(tree, "CLAUDE.md"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op := filepath.Join(tree, filepath.FromSlash(opRel))
+	if err := os.MkdirAll(filepath.Dir(op), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(op, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 3)
+	go func() { _, err := ensureClaudeMDBlock(tree, stateDir, false, true); done <- err }()
+	go func() { _, err := syncSkills(app, stateDir, false, false); done <- err }()
+	go func() { _, err := adoptSkills(app, stateDir); done <- err }()
+	for range 3 {
+		select {
+		case err := <-done:
+			if !errors.Is(err, fsutil.ErrNotRegularFile) {
+				t.Fatalf("FIFO: err=%v, want fsutil.ErrNotRegularFile", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a FIFO in the tree hung the scaffold pass")
+		}
+	}
+}
+
+func TestScaffoldCapsReads(t *testing.T) {
+	app, tree, stateDir := scaffoldFixture(t)
+	if err := os.WriteFile(filepath.Join(tree, "CLAUDE.md"), make([]byte, fsutil.MaxTreeFileSize+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureClaudeMDBlock(tree, stateDir, false, true); !errors.Is(err, fsutil.ErrFileTooLarge) {
+		t.Fatalf("oversize CLAUDE.md: err=%v, want fsutil.ErrFileTooLarge", err)
+	}
+	if _, err := adoptSkills(app, stateDir); !errors.Is(err, fsutil.ErrFileTooLarge) {
+		t.Fatalf("adopt oversize CLAUDE.md: err=%v, want fsutil.ErrFileTooLarge", err)
 	}
 }

@@ -189,9 +189,18 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	// Refuse it here by name, whatever the worker's phase — a running worker
 	// would ignore the task, but a manager sending one this size has a bug it
 	// needs to hear about, not a silent 200.
+	//
+	// A flag-shaped task (one that begins with "-") is refused the same way
+	// with 400: it is never a task, and lever's start argv keeps it behind
+	// `--` regardless — this is the layer that says so by name.
 	if err := scion.CheckTask(req.Task); err != nil {
 		b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
-		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		status := http.StatusBadRequest
+		var tooLong *scion.TaskTooLongError
+		if errors.As(err, &tooLong) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	phase, err := b.phaseOf(r.Context(), spec)

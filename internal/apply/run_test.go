@@ -478,7 +478,7 @@ func TestStartManagerObserveFirstCreatesWhenAbsent(t *testing.T) {
 	if r.resumeCalls != 0 || r.deleteCalls != 0 {
 		t.Errorf("resumeCalls=%d deleteCalls=%d, want 0/0 (absent record must CREATE, not resume/delete)", r.resumeCalls, r.deleteCalls)
 	}
-	if !sawScionCall(f, "start hello") || !sawScionCall(f, "--model claude-opus-5") {
+	if !sawScionCall(f, "-- hello") || !sawScionCall(f, "--model claude-opus-5") {
 		t.Errorf("manager create must carry the configured model; argv=%q", joinedCalls(f))
 	}
 }
@@ -1464,7 +1464,7 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 		t.Fatal("host step load-image not called")
 	}
 	j := joinedCalls(f)
-	for _, want := range []string{"init --machine", "config set --global image_registry scionlocal", "server start", "init --non-interactive", "hub link", "start hello"} {
+	for _, want := range []string{"init --machine", "config set --global image_registry scionlocal", "server start", "init --non-interactive", "hub link", "-- hello"} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing scion call %q in: %q", want, j)
 		}
@@ -1991,7 +1991,7 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	var sawPrompt bool
 	for _, c := range f.Calls {
 		j := strings.Join(c.Args, " ")
-		if strings.Contains(j, "start hello") && strings.Contains(j, "Dispatch the worker to create HELLO.") {
+		if strings.Contains(j, "-- hello") && strings.Contains(j, "Dispatch the worker to create HELLO.") {
 			sawPrompt = true
 		}
 	}
@@ -2595,7 +2595,7 @@ func TestStartUsesJailPath(t *testing.T) {
 	var sawJailG, sawWorkspace bool
 	for _, c := range f.Calls {
 		j := strings.Join(c.Args, " ")
-		if strings.Contains(j, "start hello") {
+		if strings.Contains(j, "-- hello") {
 			if strings.Contains(j, "-g "+tree) {
 				t.Errorf("start call used host path: %q", j)
 			}
@@ -3194,7 +3194,7 @@ func TestStartManagerPassesInstructionsOnStdin(t *testing.T) {
 	}
 	var start *proc.Call
 	for i := range f.Calls {
-		if j := strings.Join(f.Calls[i].Args, " "); strings.Contains(j, "start hello") {
+		if j := strings.Join(f.Calls[i].Args, " "); strings.Contains(j, "-- hello") {
 			start = &f.Calls[i]
 		}
 	}
@@ -3202,7 +3202,7 @@ func TestStartManagerPassesInstructionsOnStdin(t *testing.T) {
 		t.Fatalf("no manager start call; calls=%+v", f.Calls)
 	}
 	argv := strings.Join(start.Args, " ")
-	if !strings.Contains(argv, "start hello Read your manual, then begin.") || !strings.Contains(argv, "--config -") {
+	if !strings.Contains(argv, "-- hello Read your manual, then begin.") || !strings.Contains(argv, "--config -") {
 		t.Fatalf("start argv %q must keep the task positional and add --config -", argv)
 	}
 	if strings.Contains(argv, "Standing orders") {
@@ -3246,7 +3246,7 @@ func TestStartManagerFailsFastOnOversizedPrompt(t *testing.T) {
 		t.Fatalf("error %q must name the prompt file", err)
 	}
 	for _, c := range f.Calls {
-		if j := strings.Join(c.Args, " "); strings.Contains(j, "start hello") {
+		if j := strings.Join(c.Args, " "); strings.Contains(j, "-- hello") {
 			t.Fatalf("no start may be attempted for an oversized prompt; got %q", j)
 		}
 	}
@@ -3278,7 +3278,7 @@ func TestStartManagerRefusesUnsendableInstructionsNamingTheFile(t *testing.T) {
 		t.Fatalf("want an error naming manual.md and the file:// rule, got %v", err)
 	}
 	for _, c := range f.Calls {
-		if j := strings.Join(c.Args, " "); strings.Contains(j, "start hello") {
+		if j := strings.Join(c.Args, " "); strings.Contains(j, "-- hello") {
 			t.Fatalf("no start may be attempted; got %q", j)
 		}
 	}

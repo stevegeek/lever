@@ -114,3 +114,19 @@ func TestCheckTaskSizeRuleSurvivesFlagRule(t *testing.T) {
 		t.Fatal("over-budget flag-shaped task must be refused")
 	}
 }
+
+// TestCheckTaskFlagRuleIsShapeNotPrefix: only a flag SHAPE is refused. A
+// markdown list item or a negative number starts with "-" and is a task.
+func TestCheckTaskFlagRuleIsShapeNotPrefix(t *testing.T) {
+	for _, task := range []string{"- do the thing\n- then this", "-1 is the answer", "-. odd but not a flag"} {
+		if err := CheckTask(task); err != nil {
+			t.Errorf("CheckTask(%q) = %v, want nil (not flag-shaped)", task, err)
+		}
+	}
+	for _, task := range []string{"-b", "--config=/lever/x.json", "--", "-", "---", "--no-auth rest", "-a rest"} {
+		var fe *TaskFlagError
+		if err := CheckTask(task); !errors.As(err, &fe) {
+			t.Errorf("CheckTask(%q) = %v, want *TaskFlagError", task, err)
+		}
+	}
+}

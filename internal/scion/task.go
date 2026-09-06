@@ -71,7 +71,7 @@ func (e *TaskTooLongError) Error() string {
 		e.Bytes, apostropheArgvCost, e.Budget)
 }
 
-// TaskFlagError reports a task that begins with "-". A task is never a flag:
+// TaskFlagError reports a flag-shaped task (see flagShaped). A task is never a flag:
 // scion's start parses flags interspersed with positionals, so such a task
 // would bind as one of scion's own flags (`--config=<path>` authors the
 // agent's inline config; `--no-auth`, `--attach`, `--type`, `--thinking-level`
@@ -96,11 +96,31 @@ func CheckTask(task string) error {
 	if n := TaskArgvBytes(task); n > TaskArgvBudget {
 		return &TaskTooLongError{Bytes: n, Budget: TaskArgvBudget}
 	}
-	if strings.HasPrefix(task, "-") {
+	if flagShaped(task) {
 		prefix, _, _ := strings.Cut(task, " ")
 		return &TaskFlagError{Prefix: prefix}
 	}
 	return nil
+}
+
+// flagShaped reports whether task's first token would parse as a flag: one or
+// two dashes followed by a letter ("-b", "--config=/x"), or a token made only
+// of dashes ("--", the terminator). A markdown list item ("- do x") or a
+// negative number ("-1") is a task, not a flag, and Client.Start's `--`
+// terminator keeps even those inert.
+func flagShaped(task string) bool {
+	tok, _, _ := strings.Cut(task, " ")
+	if tok == "" || tok[0] != '-' {
+		return false
+	}
+	rest := strings.TrimLeft(tok, "-")
+	if rest == "" {
+		// Dashes alone: a task that IS the terminator ("--") is refused; a
+		// list item ("- do x") has text after its dash and is a task.
+		return tok == task
+	}
+	c := rest[0]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // MaxInstructionsBytes caps StartOpts.Instructions. The text travels inside

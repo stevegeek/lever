@@ -581,3 +581,53 @@ func TestLoginFailureNamesTheConfiguredLog(t *testing.T) {
 		}
 	}
 }
+
+// TestUnpinnedIdentityIsNeverAssertedToTheHub: with allowed_users empty the
+// gate verifies NOTHING about Tailscale-User-Login (the header is not even
+// required), so the hub login must be driven for the unnamed operator, not
+// for whatever the header happens to say — otherwise the hub's user row names
+// an identity nothing checked. With allowed_users set, the login that passed
+// the gate is exactly what the hub records (the guide's "Who the hub thinks
+// you are"), and that path must keep working unchanged.
+func TestUnpinnedIdentityIsNeverAssertedToTheHub(t *testing.T) {
+	cases := []struct {
+		name      string
+		allowed   []string
+		header    string
+		wantLogin string
+	}{
+		{"empty list, header ignored", nil, "someone@example.test", ""},
+		{"empty list, no header", nil, "", ""},
+		{"pinned, the verified login is asserted", []string{"op@example.test"}, "op@example.test", "op@example.test"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := newRecordingHub(t)
+			sess := &stubSession{cookie: "sess-value"}
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+				ServeHost: "mac.ts.net", Session: sess, AllowedUsers: tc.allowed})
+			// Both places a login is driven from: a shell request and an
+			// intercepted sign-in navigation.
+			for _, path := range []string{"/", loginPathPrefix} {
+				req := proxyRequest(http.MethodGet, path, nil)
+				if tc.header != "" {
+					req.Header.Set("Tailscale-User-Login", tc.header)
+				}
+				rw := httptest.NewRecorder()
+				h.ServeHTTP(rw, req)
+				if rw.Code != http.StatusOK && rw.Code != http.StatusFound {
+					t.Fatalf("GET %s = %d", path, rw.Code)
+				}
+			}
+			_, _, logins := sess.state()
+			if len(logins) == 0 {
+				t.Fatal("no login was driven")
+			}
+			for _, l := range logins {
+				if l != tc.wantLogin {
+					t.Fatalf("the session was requested for %q, want %q", l, tc.wantLogin)
+				}
+			}
+		})
+	}
+}

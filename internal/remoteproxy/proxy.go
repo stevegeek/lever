@@ -516,6 +516,9 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The identity the hub is told about, which is NOT always the header:
+	// the login is verified only when AllowedUsers pins it. See operatorFor.
+	operator := g.operatorFor(login)
 	line.Decision = DecisionAllow
 	// Status is filled in by ModifyResponse/ErrorHandler once the
 	// upstream round trip completes; the audit call happens there too,
@@ -536,7 +539,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// its own callbacks (isLoginPath excludes it).
 	if cfg.Session != nil && isLoginPath(r.URL.Path) &&
 		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
-		g.serveLogin(w, r, &line, login)
+		g.serveLogin(w, r, &line, operator)
 		return
 	}
 
@@ -545,7 +548,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the proxy's life performs the login, and an instance nobody opens a
 	// browser at never logs in at all.
 	if cfg.Session != nil && !isAPIPath(r.URL.Path) {
-		cookie, err := cfg.Session.Cookie(r.Context(), login)
+		cookie, err := cfg.Session.Cookie(r.Context(), operator)
 		if err != nil {
 			g.denyNoSession(w, &line)
 			return
@@ -555,7 +558,24 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// re-runs the request, and a body has already been consumed by then.
 		state.retryable = r.Method == http.MethodGet || r.Method == http.MethodHead
 	}
-	g.forward(w, r, state, login)
+	g.forward(w, r, state, operator)
+}
+
+// operatorFor is the identity the proxy asserts to the hub on the operator's
+// behalf: the session cache key, and the login the OIDC provider mints a code
+// for (identityFor). It is the Tailscale login ONLY when AllowedUsers pins it,
+// because that check is the only thing that ever verifies the header: with
+// the list empty the gate does not require the header at all, so its value
+// is a claim nobody checked and must not become a hub user row. The hub then
+// records the unnamed placeholder operator instead — which is what the
+// remote-access guide documents, and one more reason to set allowed_users.
+//
+// Called AFTER authorize, so a non-empty AllowedUsers means login is in it.
+func (g *gate) operatorFor(login string) string {
+	if len(g.cfg.AllowedUsers) == 0 {
+		return ""
+	}
+	return login
 }
 
 // authorize runs every check that decides whether the request may reach the
@@ -610,8 +630,8 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 
 // serveLogin answers an intercepted sign-in navigation: drive the hub login
 // for this operator, then send the browser back into the app.
-func (g *gate) serveLogin(w http.ResponseWriter, r *http.Request, line *AuditLine, login string) {
-	if _, err := g.cfg.Session.Cookie(r.Context(), login); err != nil {
+func (g *gate) serveLogin(w http.ResponseWriter, r *http.Request, line *AuditLine, operator string) {
+	if _, err := g.cfg.Session.Cookie(r.Context(), operator); err != nil {
 		g.denyNoSession(w, line)
 		return
 	}
@@ -624,7 +644,7 @@ func (g *gate) serveLogin(w http.ResponseWriter, r *http.Request, line *AuditLin
 // shell request is held back just long enough to learn whether the hub
 // accepted the session; if it did not, the session is replaced and the
 // request repeated once.
-func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, login string) {
+func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, operator string) {
 	if !state.retryable {
 		r = r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
 		g.rp.ServeHTTP(w, r)
@@ -644,8 +664,8 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 	// login page it cannot complete (the login is server-side; the SPA's
 	// login button leads to an authorization endpoint that does not
 	// resolve, by design — see Provider.handleAuthorize).
-	g.cfg.Session.Invalidate(login, state.cookie)
-	cookie, err := g.cfg.Session.Cookie(r.Context(), login)
+	g.cfg.Session.Invalidate(operator, state.cookie)
+	cookie, err := g.cfg.Session.Cookie(r.Context(), operator)
 	if err != nil {
 		g.denyNoSession(w, state.line)
 		return

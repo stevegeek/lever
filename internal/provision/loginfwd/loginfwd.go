@@ -54,9 +54,12 @@ const goMod = "module lever-login-forward\n\ngo 1.22\n"
 
 // Build cross-compiles the forwarder for goarch ("arm64"/"amd64") and returns
 // the host-local path of the result. machine names the build directory under
-// os.TempDir so two jails on one host never share one.
+// buildDir so two jails on one host never share one.
 func Build(ctx context.Context, r proc.Runner, goarch, machine string) (string, error) {
-	dir := filepath.Join(os.TempDir(), "lever-loginfwd-"+machine)
+	dir, err := buildDir(machine)
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("login forwarder build dir: %w", err)
 	}
@@ -78,4 +81,21 @@ func Build(ctx context.Context, r proc.Runner, goarch, machine string) (string, 
 		return "", fmt.Errorf("cross-compile the login forwarder (remote access needs a Go toolchain on this host): %w", err)
 	}
 	return out, nil
+}
+
+// buildDir is the host directory the forwarder for machine is staged and
+// built in: under the operator's own cache directory, beside the scion
+// binary and web-asset builds (scionbin.OutputDir, webassets.CacheRoot).
+//
+// Not os.TempDir. On a Linux host /tmp is shared by every local user, and
+// MkdirAll on a fixed name there succeeds on a directory somebody else
+// created first — which hands them the source, the module file and the
+// output between the host-side hash and the root install into the jail.
+// Under the user's cache dir nobody else can write the path.
+func buildDir(machine string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache dir for the login forwarder build: %w", err)
+	}
+	return filepath.Join(cache, "lever", "loginfwd", machine), nil
 }

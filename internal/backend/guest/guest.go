@@ -217,18 +217,62 @@ func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 // every call site today (not attacker input), but it — and its derived .tmp
 // — are still shell-quoted, because they are interpolated into the guest
 // script.
+//
+// The file is opened ONCE: the same descriptor is hashed, then streamed (see
+// hashedHandle). Hashing by path and reopening by path would leave a window
+// in which the path can be pointed at another file, and the build outputs
+// this installs used to live in the shared /tmp.
 func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}
 	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
+	h, err := hashHandle(f)
 	if err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
 	}
-	if err := g.pipeInto(ctx, g.RootPrefix, f, installRootBinaryScript(destPath, fi.Size())); err != nil {
+	return g.installFromHandle(ctx, h, destPath)
+}
+
+// hashedHandle is an open host file together with the digest and byte count
+// of exactly the bytes it will stream: they were computed from this
+// descriptor, and it is rewound to the start afterwards.
+type hashedHandle struct {
+	f      *os.File
+	size   int64
+	digest string // hex sha256
+}
+
+// hashHandle hashes f from its current offset to EOF and rewinds it.
+func hashHandle(f *os.File) (hashedHandle, error) {
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return hashedHandle{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return hashedHandle{}, err
+	}
+	return hashedHandle{f: f, size: n, digest: hex.EncodeToString(h.Sum(nil))}, nil
+}
+
+// installFromHandle streams h into the guest at destPath (InstallRootBinary's
+// guest-side script), hashing the bytes on their way out. A stream whose
+// bytes do not hash to h.digest is reported as an error: the one writer a
+// held descriptor cannot exclude is one that rewrites the same inode in
+// place, and a same-size rewrite passes the guest's byte-count check. By
+// then the guest has already swapped the file in, so this cannot undo the
+// install — it makes the apply fail loudly instead of trusting the bytes,
+// and the next apply re-streams because the guest digest no longer matches.
+func (g Guest) installFromHandle(ctx context.Context, h hashedHandle, destPath string) error {
+	sent := sha256.New()
+	if err := g.pipeInto(ctx, g.RootPrefix, io.TeeReader(h.f, sent), installRootBinaryScript(destPath, h.size)); err != nil {
 		return fmt.Errorf("install %s into guest: %w", destPath, err)
+	}
+	if got := hex.EncodeToString(sent.Sum(nil)); got != h.digest {
+		return fmt.Errorf("install %s into guest: the host file changed while it was being streamed (verified sha256 %s, sent %s); "+
+			"the guest holds unverified bytes — re-run apply", destPath, h.digest, got)
 	}
 	return nil
 }
@@ -263,20 +307,6 @@ func (g Guest) guestFileDigest(ctx context.Context, path string) string {
 	return ""
 }
 
-// hashFile returns the hex sha256 of a host-local file.
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 // InstallRootBinaryIfChanged installs localPath at destPath unless the guest
 // already holds exactly those bytes, and reports whether it installed.
 //
@@ -296,15 +326,25 @@ func hashFile(path string) (string, error) {
 // Fails open: if the guest digest cannot be read for any reason — no such file,
 // no sha256sum, an unreadable path — lever installs. Being wrong that way costs
 // redundant work; the other way would skip a real install.
+//
+// The host file is opened once and the same descriptor is hashed, compared
+// and streamed, so the bytes the guest receives are the bytes whose digest
+// decided the install (hashedHandle). Reopening by path between the two
+// would let anyone who can write the path swap the file in the gap.
 func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) (bool, error) {
-	want, err := hashFile(localPath)
+	f, err := os.Open(localPath)
 	if err != nil {
 		return false, fmt.Errorf("hashing %s: %w", localPath, err)
 	}
-	if g.guestFileDigest(ctx, destPath) == want {
+	defer func() { _ = f.Close() }()
+	h, err := hashHandle(f)
+	if err != nil {
+		return false, fmt.Errorf("hashing %s: %w", localPath, err)
+	}
+	if g.guestFileDigest(ctx, destPath) == h.digest {
 		return false, nil
 	}
-	if err := g.InstallRootBinary(ctx, localPath, destPath); err != nil {
+	if err := g.installFromHandle(ctx, h, destPath); err != nil {
 		return false, err
 	}
 	return true, nil

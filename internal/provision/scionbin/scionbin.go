@@ -96,7 +96,7 @@ func (e *SourceError) Error() string {
 func (e *SourceError) Unwrap() error { return e.Err }
 
 // Resolve produces a host-local scion binary for goarch ("arm64"/"amd64").
-// machine names the output file in os.TempDir so two jails on one host never
+// machine names the output file under OutputDir so two jails on one host never
 // share a build output.
 //
 // The Binary branch returns before any toolchain is touched, which is what
@@ -124,7 +124,13 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 		goBin, buildDir = gb, dir
 	}
 
-	out := OutputPath(machine)
+	out, err := OutputPath(machine)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
+		return "", fmt.Errorf("scion build dir: %w", err)
+	}
 	if _, err := r.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": goarch},
 		goBin, "build", "-o", out, "./cmd/scion"); err != nil {
 		return "", fmt.Errorf("cross-compile scion: %w", err)
@@ -132,9 +138,32 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 	return out, nil
 }
 
+// OutputDir is the host directory Resolve writes cross-compiled scion
+// binaries into: the operator's own cache directory, beside the web-asset
+// builds (internal/provision/webassets.CacheRoot), created 0700 by Resolve.
+//
+// Not os.TempDir. On a Linux host /tmp is shared by every local user, and a
+// fixed name there is a path anyone can pre-create — and then swap out
+// between the host-side hash and the root install into the jail
+// (internal/backend/guest). Under the user's cache dir nobody else can write
+// the path. There is no build cache to protect: Go's own build cache makes
+// the cross-compile incremental whatever the output path, so the only thing
+// that lives here is the last output for each machine.
+func OutputDir() (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache dir for the scion build: %w", err)
+	}
+	return filepath.Join(cache, "lever", "scion-bin"), nil
+}
+
 // OutputPath is where Resolve writes a cross-compiled scion for machine.
-func OutputPath(machine string) string {
-	return filepath.Join(os.TempDir(), "lever-scion-"+machine)
+func OutputPath(machine string) (string, error) {
+	dir, err := OutputDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "lever-scion-"+machine), nil
 }
 
 // FetchModule downloads the pinned scion module via the Go module system and

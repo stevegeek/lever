@@ -301,8 +301,9 @@ same agent could have obtained a hub session for any identity it cared to assert
 **Who the hub thinks you are.** The provider asserts the Tailscale login the proxy already verified
 against `allowed_users`, so the hub's user row names that identity, and two operators get two
 sessions rather than sharing one. With `allowed_users` unset there is no verified identity to
-assert and a placeholder is used instead — another reason to set it. lever never sets
-`admin_emails`, so the hub creates these users at its ordinary `member` role.
+assert and a placeholder (`lever-operator@lever.local`) is used instead, whatever the header says —
+another reason to set it. lever never sets `admin_emails`, so the hub creates these users at its
+ordinary `member` role.
 
 **Turning this on restarts the hub, once.** Scion reads the `oidc_login` block at startup only, so
 the first `lever apply` after enabling remote access rewrites the guest's `~/.scion/settings.yaml`

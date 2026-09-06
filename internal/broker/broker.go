@@ -170,7 +170,7 @@ type DispatchConfig struct {
 	// staging enrolment material. Everything below it is agent-writable and the
 	// broker writes there as the operator, so wire.Stage confines every write to
 	// this root and refuses agent-planted symlinks. Empty ⇒ the staging
-	// directory's parent is used instead (tests); see Broker.stagingPath.
+	// directory's parent is used instead (tests); see Broker.treePath.
 	Tree string
 	// LiveSettle is how long a freshly started or resumed worker must STAY
 	// live before its dispatch is reported as up (scion.LiveBudget.Settle,

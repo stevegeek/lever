@@ -14,6 +14,9 @@ import (
 
 // Uses /bin/sh indirectly? No — no shell. We launch a real, simple command that
 // exits 0 quickly to prove argv assembly + lifecycle, then a long-running one.
+// testToolSecret stands in for the per-boot secret Serve mints.
+const testToolSecret = "test-tool-secret"
+
 // trackedCount returns the number of currently-tracked child processes.
 func trackedCount(s *Supervisor) int {
 	s.mu.Lock()
@@ -26,7 +29,7 @@ func TestSupervisorStartsConfiguredToolsWithFlags(t *testing.T) {
 	// process is launched with our injected flags appended (argv inspection via a
 	// recording fake is overkill here — assert no error + clean Stop).
 	tools := []ToolSpec{{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:3201"}}
-	s := NewSupervisor(tools, "http://127.0.0.1:8444", filepath.Join(t.TempDir(), "tool-logs"))
+	s := NewSupervisor(tools, "http://127.0.0.1:8444", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := s.Start(ctx); err != nil {
@@ -36,7 +39,7 @@ func TestSupervisorStartsConfiguredToolsWithFlags(t *testing.T) {
 }
 
 func TestSupervisorRejectsEmptyCommand(t *testing.T) {
-	s := NewSupervisor([]ToolSpec{{Name: "db", Command: nil, Backend: "x"}}, "http://127.0.0.1:8444", filepath.Join(t.TempDir(), "tool-logs"))
+	s := NewSupervisor([]ToolSpec{{Name: "db", Command: nil, Backend: "x"}}, "http://127.0.0.1:8444", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
 	if err := s.Start(context.Background()); err == nil {
 		t.Fatal("a tool with no command must error")
 	}
@@ -50,7 +53,7 @@ func TestSupervisorStartCleansUpOnPartialFailure(t *testing.T) {
 		{Name: "ok", Command: []string{"true"}, Backend: "127.0.0.1:1"},
 		{Name: "bad", Command: nil, Backend: "127.0.0.1:2"},
 	}
-	s := NewSupervisor(tools, "http://127.0.0.1:8444", filepath.Join(t.TempDir(), "tool-logs"))
+	s := NewSupervisor(tools, "http://127.0.0.1:8444", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
 	if err := s.Start(context.Background()); err == nil {
 		t.Fatal("Start must error when a tool has no command")
 	}
@@ -65,7 +68,7 @@ func TestSupervisorSkipsExternalTools(t *testing.T) {
 	tools := []ToolSpec{
 		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
 	}
-	s := NewSupervisor(tools, "http://127.0.0.1:1", filepath.Join(t.TempDir(), "tool-logs"))
+	s := NewSupervisor(tools, "http://127.0.0.1:1", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start with only external tools must succeed (nothing to spawn): %v", err)
 	}
@@ -80,7 +83,7 @@ func TestSupervisorMixedSpawnsOnlySupervised(t *testing.T) {
 		{Name: "ext", External: true, Backend: "127.0.0.1:3300"},
 		{Name: "db", Command: []string{"/bin/sleep", "60"}, Backend: "127.0.0.1:3201"},
 	}
-	s := NewSupervisor(tools, "http://127.0.0.1:1", filepath.Join(t.TempDir(), "tool-logs"))
+	s := NewSupervisor(tools, "http://127.0.0.1:1", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -96,7 +99,7 @@ func TestSupervisorPerToolLogs(t *testing.T) {
 		{Name: "alpha", Command: []string{"sh", "-c", "echo ALPHA_OUT"}},
 		{Name: "beta", Command: []string{"sh", "-c", "echo BETA_OUT"}},
 	}
-	s := NewSupervisor(tools, "http://127.0.0.1:0", filepath.Join(dir, "tool-logs"))
+	s := NewSupervisor(tools, "http://127.0.0.1:0", filepath.Join(dir, "tool-logs"), testToolSecret)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -131,5 +134,47 @@ func TestToolSpecsCarriesWhatTheSupervisorNeeds(t *testing.T) {
 	}
 	if len(ToolSpecs(nil)) != 0 {
 		t.Fatal("no tools must map to no specs")
+	}
+}
+
+// The supervisor hands every supervised tool the per-boot shared secret through
+// LEVER_TOOL_SECRET (the only inherited variable besides PATH); captool requires
+// it on every request so a jail agent that reaches the tool port directly is
+// refused. It travels via the environment, never argv (ps-visible).
+func TestSupervisorPassesToolSecretInEnv(t *testing.T) {
+	dir := t.TempDir()
+	tools := []ToolSpec{{Name: "db", Command: []string{"sh", "-c", "echo SECRET=$LEVER_TOOL_SECRET; echo HOME=$HOME"}}}
+	s := NewSupervisor(tools, "http://127.0.0.1:0", filepath.Join(dir, "tool-logs"), "per-boot-secret")
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	s.Stop()
+	out, _ := os.ReadFile(filepath.Join(dir, "tool-logs", "db.log"))
+	if !strings.Contains(string(out), "SECRET=per-boot-secret") {
+		t.Fatalf("tool did not receive LEVER_TOOL_SECRET: %q", out)
+	}
+	// The env stays minimal: nothing else from the host is inherited.
+	if !strings.Contains(string(out), "HOME=\n") {
+		t.Fatalf("tool env must stay minimal (no inherited HOME): %q", out)
+	}
+}
+
+func TestNewToolSecretIsRandomHex(t *testing.T) {
+	a, err := NewToolSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewToolSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a) != 64 || a == b {
+		t.Fatalf("NewToolSecret = %q / %q; want two distinct 32-byte hex strings", a, b)
+	}
+	for _, r := range a {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			t.Fatalf("NewToolSecret produced a non-hex rune %q in %q", r, a)
+		}
 	}
 }

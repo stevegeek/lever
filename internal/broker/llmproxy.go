@@ -13,8 +13,9 @@ import (
 
 // llmProxyHandler verifies an llm capability token, strips it, injects the real
 // Console key, and reverse-proxies (streaming) to the FIXED upstream
-// (b.llmUpstream — never client-controlled, so no SSRF). Fail closed on any
-// auth/verify failure; never log key or token bytes.
+// (b.llmUpstream — never client-controlled, so no SSRF) — for the Messages-API
+// paths in llmPathAllowed only. Fail closed on any auth/verify failure; never
+// log key or token bytes.
 func (b *Broker) llmProxyHandler() http.Handler {
 	rp := &httputil.ReverseProxy{}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
@@ -74,9 +75,35 @@ func (b *Broker) llmProxyHandler() http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		// capability(llm) admits the Messages API only — never the rest of
+		// what the Console key permits (files, batches, admin endpoints).
+		if !llmPathAllowed(r.Method, r.URL.EscapedPath()) {
+			b.audit("llm", caller, "deny", "path not allowlisted: "+r.Method+" "+r.URL.EscapedPath(), "id", tokID)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		b.audit("llm", caller, "allow", "", "id", tokID)
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// llmPathAllowed reports whether method + path (post-StripPrefix, escaped
+// form so a percent-encoded spelling cannot slip past) is one of the
+// Messages-API endpoints Claude Code calls through ANTHROPIC_BASE_URL:
+// create/count-tokens messages and list/get models. Exact matches only — no
+// trailing slash, no deeper segments (batches, files, organizations, …).
+func llmPathAllowed(method, path string) bool {
+	switch method {
+	case http.MethodPost:
+		return path == "/v1/messages" || path == "/v1/messages/count_tokens"
+	case http.MethodGet:
+		if path == "/v1/models" {
+			return true
+		}
+		id, ok := strings.CutPrefix(path, "/v1/models/")
+		return ok && id != "" && !strings.Contains(id, "/")
+	}
+	return false
 }
 
 // bearerToken extracts and base64url-decodes the capability token from the

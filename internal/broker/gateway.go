@@ -18,6 +18,13 @@ import (
 	"github.com/stevegeek/lever/internal/mcp"
 )
 
+// toolSecretHeader carries the per-boot broker-to-tool shared secret
+// (Config.ToolSecret) on every request proxied to a first-party tool. The
+// same literal is captool.ToolSecretHeader; the two are pinned together by
+// the captool e2e test (this package cannot import captool: its tests import
+// brokertest, which imports this package).
+const toolSecretHeader = "X-Lever-Tool-Secret"
+
 // rewriteUpstream is the shared ProxyRequest rewrite for the broker-side
 // reverse proxies (MCP gateway and llm-proxy): route to target, pin the
 // outbound Host, and drop client-supplied forwarding/identity headers.
@@ -73,6 +80,14 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		}
 		if !b.authorizeToolCall(w, r, t, caller, body) {
 			return
+		}
+		// A first-party tool refuses any request without the per-boot secret
+		// — the proof that the request came through this gateway and that
+		// X-Lever-Caller above is the broker's word, not the agent's. Never
+		// sent to a third-party backend (set AFTER the X-Lever-* scrub, so an
+		// inbound forgery is already gone).
+		if t.FirstParty && b.toolSecret != "" {
+			r.Header.Set(toolSecretHeader, b.toolSecret)
 		}
 		rp.ServeHTTP(w, r)
 	}), nil

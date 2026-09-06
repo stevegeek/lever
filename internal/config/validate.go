@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/opsig"
@@ -206,6 +207,25 @@ func (a *App) Validate() error {
 			return fmt.Errorf("config: manager.allow_ports must not include the broker admin port (%d) — this would hand the jailed agent a direct, unauthenticated path to /bootstrap, /revoke, /bump-epoch (the egress allowlist is the only thing isolating the host-loopback admin API from the guest)", adminPort)
 		}
 	}
+	// A first-party (supervised) tool's backend port must not be opened to the
+	// jail either. The tool trusts the X-Lever-Caller header the broker sets on
+	// every proxied request, so an agent dialling the port directly would name
+	// any caller it likes and skip the broker's mTLS CN binding, per-agent
+	// revocation and audit (the per-boot tool secret is defence in depth, not a
+	// reason to open the port). External tools are the operator's own servers
+	// and are not checked here.
+	for _, t := range a.Broker.Tools {
+		if t.External {
+			continue
+		}
+		port, ok := backendPort(t.Backend)
+		if !ok {
+			continue
+		}
+		if slices.Contains(a.Manager.AllowPorts, port) {
+			return fmt.Errorf("config: manager.allow_ports must not include %d, the backend port of first-party broker tool %q — the jailed agent could dial the tool directly and bypass the broker (mTLS caller binding, per-agent revocation, audit); agents reach a first-party tool only through the broker's /mcp/%s/ route", port, t.Name, t.Name)
+		}
+	}
 	// prompt_file is host-only (read at the root, NOT in the mount) and must stay
 	// inside the instance root.
 	if a.Manager.PromptFile != "" && !confinedRel(a.Manager.PromptFile) {
@@ -240,6 +260,28 @@ func (a *App) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// backendPort extracts the TCP port from a tool backend — a bare host:port,
+// host:port/path, or scheme://host:port/path (the same shapes broker.backendURL
+// accepts). ok is false when no numeric port can be read; the shape rules for
+// backends live elsewhere, so an unparsable value is simply not port-checked.
+func backendPort(backend string) (int, bool) {
+	if i := strings.Index(backend, "://"); i >= 0 {
+		backend = backend[i+3:]
+	}
+	if i := strings.IndexByte(backend, '/'); i >= 0 {
+		backend = backend[:i]
+	}
+	_, portStr, err := net.SplitHostPort(backend)
+	if err != nil {
+		return 0, false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		return 0, false
+	}
+	return port, true
 }
 
 // managerAlias is the literal name the broker's operator-directive channel

@@ -2,6 +2,8 @@ package brokerctl
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,12 +35,31 @@ func ToolSpecs(tools []config.Tool) []ToolSpec {
 	return specs
 }
 
+// toolSecretEnv is the environment variable a supervised tool reads its
+// broker-to-tool shared secret from (captool.ToolSecretEnv — spelled here so
+// brokerctl does not import the tool SDK).
+const toolSecretEnv = "LEVER_TOOL_SECRET"
+
+// NewToolSecret mints the per-boot broker-to-tool shared secret: 32 random
+// bytes, hex-encoded (header- and environment-safe). Serve mints one, hands it
+// to the broker (Config.ToolSecret) and to every supervised tool (via the
+// environment) — so a request that reaches a first-party tool's loopback port
+// without passing through the broker is refused by the tool.
+func NewToolSecret() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("brokerctl: tool secret: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
 // Supervisor launches + tears down the configured first-party tool subprocesses; external tools (broker-fronted, not spawned) are skipped.
 // Tools are host-side, bind loopback, and self-register over the broker admin URL.
 type Supervisor struct {
 	tools      []ToolSpec
 	adminURL   string
 	toolLogDir string
+	toolSecret string
 
 	mu    sync.Mutex
 	cmds  []*exec.Cmd
@@ -46,11 +67,13 @@ type Supervisor struct {
 }
 
 // NewSupervisor builds a supervisor for tools, injecting adminURL as each
-// tool's -admin flag. Each supervised tool's combined stdout/stderr is written
-// to its own <toolLogDir>/<name>.log so per-tool forensics aren't muddled in a
-// shared file.
-func NewSupervisor(tools []ToolSpec, adminURL, toolLogDir string) *Supervisor {
-	return &Supervisor{tools: tools, adminURL: adminURL, toolLogDir: toolLogDir}
+// tool's -admin flag and toolSecret as its LEVER_TOOL_SECRET environment
+// variable (NewToolSecret; the environment, never argv, so it is not
+// ps-visible). Each supervised tool's combined stdout/stderr is written to its
+// own <toolLogDir>/<name>.log so per-tool forensics aren't muddled in a shared
+// file.
+func NewSupervisor(tools []ToolSpec, adminURL, toolLogDir, toolSecret string) *Supervisor {
+	return &Supervisor{tools: tools, adminURL: adminURL, toolLogDir: toolLogDir, toolSecret: toolSecret}
 }
 
 // Start launches every configured tool as a host subprocess: no shell, an
@@ -77,6 +100,9 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		args = append(args, "-backend", t.Backend, "-admin", s.adminURL)
 		cmd := exec.CommandContext(ctx, t.Command[0], args...)
 		cmd.Env = []string{"PATH=" + config.ToolSupervisorPATH} // minimal, no inherited secrets
+		if s.toolSecret != "" {
+			cmd.Env = append(cmd.Env, toolSecretEnv+"="+s.toolSecret)
+		}
 		lf, err := os.OpenFile(filepath.Join(s.toolLogDir, toolLogName(t.Name)),
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {

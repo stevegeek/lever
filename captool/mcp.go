@@ -9,9 +9,16 @@ import (
 
 // serveHTTP runs a single JSON-RPC request through the shared MCP skeleton
 // (mcp.Dispatch): tools/call is gated in verify.go; initialize and tools/list
-// are open (no credentialed action). The body read is bounded by
+// are open (no credentialed action). Every request must first present the
+// broker's tool secret — without it the caller did not come through the
+// broker, and X-Lever-Caller is worthless. The body read is bounded by
 // mcp.MaxBodyBytes.
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.secretOK(r.Header.Get(ToolSecretHeader)) {
+		s.audit("", "", "deny", "missing or wrong tool secret (request did not come through the broker)")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	caller := r.Header.Get("X-Lever-Caller")
 	mcp.ServeHTTP(w, r, func(ctx context.Context, body []byte) []byte {
 		return mcp.Dispatch(ctx, body, mcp.Service{

@@ -121,6 +121,9 @@ func TestFirstLine(t *testing.T) {
 		{"single line input is unchanged", "no git origin remote found for this project.", "no git origin remote found for this project."},
 		{"empty input stays empty", "", ""},
 		{"leading/trailing whitespace on the first line is trimmed", "  Error: project not found (status: 404)  \nUsage:\n  scion list\n", "Error: project not found (status: 404)"},
+		// scion colours its errors; a compromised jail can emit anything.
+		{"ANSI colour on the first line is stripped", "\x1b[1;31mError:\x1b[0m hub down\nUsage:\n", "Error: hub down"},
+		{"OSC title and CR on the first line are neutralised", "ok\x1b]0;pwned\x07\rrow\nrest", "ok\ufffdrow"},
 	}
 	for _, c := range cases {
 		if got := firstLine(c.input); got != c.want {

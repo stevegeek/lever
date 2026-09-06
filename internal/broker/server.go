@@ -20,15 +20,25 @@ import (
 //
 // Every route runs under the per-route deadlines of b.timeouts: the request
 // body must arrive within Body (a connection read deadline; the listener has
-// no ReadTimeout because /llm streams), and every non-streaming route also
-// runs under an http.TimeoutHandler — Control for the JSON routes, Worker
-// for the dispatch verbs, Tool for a proxied MCP call — answering 503 when
-// the handler overruns. /llm carries only the body deadline: a streamed
-// completion legitimately outlives any fixed handler bound.
+// no ReadTimeout because /llm streams), and the small JSON control routes
+// also run under an http.TimeoutHandler (Control), answering 503 when the
+// handler overruns.
+//
+// /llm, /mcp/<tool>/ and /worker/* carry ONLY the body deadline. An
+// http.TimeoutHandler buffers the whole response and offers no Flusher, so
+// under one a streaming backend (an MCP streamable-HTTP text/event-stream
+// answer, a streamed completion) delivers nothing until it finishes, and a
+// legitimately long tool call or dispatch is cut at the bound with its
+// buffered output discarded. A per-write deadline is not used either: re-armed
+// on each write it would cut a quiet, long-lived MCP event stream, and cleared
+// after each write it bounds only writes past the kernel send buffer. The
+// handler side of these routes is therefore unbounded, as it was before the
+// body deadline was added: the agent-side client and the runtime calls carry
+// their own timeouts, and a client that goes away cancels the request context.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
 	control := func(h http.HandlerFunc) http.Handler { return b.bounded(h, b.timeouts.Control) }
-	worker := func(h http.HandlerFunc) http.Handler { return b.bounded(h, b.timeouts.Worker) }
+	worker := func(h http.HandlerFunc) http.Handler { return withBodyDeadline(b.timeouts.Body, h) }
 	// Method patterns: every JSON route is POST-only; /tools is the lone GET.
 	// A wrong method 405s at the mux, before any handler runs.
 	mux.Handle("POST "+wire.PathProvision, control(b.handleProvision))
@@ -57,7 +67,7 @@ func (b *Broker) JailHandler() http.Handler {
 		}
 		// Strip the /mcp/<name> prefix so the tool proxy sees a clean path.
 		prefix := "/mcp/" + name
-		mux.Handle(prefix+"/", http.StripPrefix(prefix, b.bounded(handler, b.timeouts.Tool)))
+		mux.Handle(prefix+"/", http.StripPrefix(prefix, withBodyDeadline(b.timeouts.Body, handler)))
 	}
 	if b.apiKey != nil {
 		mux.Handle("/llm/", http.StripPrefix("/llm", withBodyDeadline(b.timeouts.Body, b.llmProxyHandler())))
@@ -65,12 +75,13 @@ func (b *Broker) JailHandler() http.Handler {
 	return mux
 }
 
-// bounded wraps a non-streaming jail route: the request body must arrive
-// within b.timeouts.Body and h must finish within d, else the client gets
-// 503 and h's eventual output is discarded (http.TimeoutHandler also
-// cancels the request context, so a runtime call or proxy hop in flight is
-// abandoned). The body deadline is set on the OUTER writer: TimeoutHandler's
-// writer has no connection to set it on.
+// bounded wraps a control route (a small JSON exchange, never streamed): the
+// request body must arrive within b.timeouts.Body and h must finish within
+// d, else the client gets 503 and h's eventual output is discarded
+// (http.TimeoutHandler also cancels the request context, so a call in flight
+// is abandoned). The body deadline is set on the OUTER writer: TimeoutHandler's
+// writer has no connection to set it on. Not for a route that streams or
+// legitimately runs long — see JailHandler.
 func (b *Broker) bounded(h http.Handler, d time.Duration) http.Handler {
 	return withBodyDeadline(b.timeouts.Body, http.TimeoutHandler(h, d, "request timed out"))
 }

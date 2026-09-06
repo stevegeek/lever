@@ -206,6 +206,14 @@ broker:
 	}
 	cfg.Persistence.Revocation = rev
 	cfg.Persistence.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
+	// The per-boot broker-to-tool secret, exactly as serve.go wires it: the
+	// gateway presents it to the first-party tool and the supervisor hands it
+	// to the tool it spawns; the tool refuses a request without it.
+	toolSecret, err := NewToolSecret()
+	if err != nil {
+		t.Fatalf("NewToolSecret: %v", err)
+	}
+	cfg.ToolSecret = toolSecret
 	b := broker.New(cfg)
 
 	jailLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -227,7 +235,7 @@ broker:
 	// ── Supervise the REAL lever-tool-db subprocess ────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sup := NewSupervisor(ToolSpecs(app.Broker.Tools), adminURL, st.ToolLogDir())
+	sup := NewSupervisor(ToolSpecs(app.Broker.Tools), adminURL, st.ToolLogDir(), toolSecret)
 	if err := sup.Start(ctx); err != nil {
 		t.Fatalf("supervisor start: %v", err)
 	}

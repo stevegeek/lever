@@ -243,6 +243,8 @@ func TestLLMProxyAllowlistsMessagesAPIPaths(t *testing.T) {
 		{http.MethodPost, "/llm/v1/messages/count_tokens", true},
 		{http.MethodGet, "/llm/v1/models", true},
 		{http.MethodGet, "/llm/v1/models/claude-opus-5", true},
+		{http.MethodGet, "/llm/v1/models/claude-3-5-sonnet-20241022", true},
+		{http.MethodGet, "/llm/v1/models/org:custom_model.v2", true},
 
 		{http.MethodGet, "/llm/v1/messages", false},
 		{http.MethodDelete, "/llm/v1/messages", false},
@@ -254,6 +256,16 @@ func TestLLMProxyAllowlistsMessagesAPIPaths(t *testing.T) {
 		{http.MethodGet, "/llm/v1/organizations/me", false},
 		{http.MethodGet, "/llm/v1/models/", false},
 		{http.MethodGet, "/llm/v1/models/a/b", false},
+		// The model id is charset-restricted, not merely slash-free: a
+		// percent-encoded traversal (or any encoded byte) must not reach the
+		// upstream, which would decode it into a different path.
+		{http.MethodGet, "/llm/v1/models/..%2F..%2Ffiles", false},
+		{http.MethodGet, "/llm/v1/models/%2E%2E", false},
+		{http.MethodGet, "/llm/v1/models/claude%2Dopus-5", false},
+		{http.MethodGet, "/llm/v1/models/claude%20opus", false},
+		{http.MethodGet, "/llm/v1/models/claude-opus-5?x=1", true},
+		{http.MethodGet, "/llm/v1/models/claude-opus-5;v=2", false},
+		{http.MethodGet, "/llm/v1/models/model@2", false},
 		{http.MethodPost, "/llm/v1/messages/", false},
 		{http.MethodPost, "/llm/v1/%6Dessages", false}, // percent-encoded: EscapedPath is matched, not the decoded Path
 		{http.MethodPost, "/llm/", false},

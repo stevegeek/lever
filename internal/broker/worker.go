@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -37,7 +39,7 @@ type WorkerRuntime interface {
 type WorkerSpec struct {
 	Name            string // worker identity (== scion agent slug within the instance project)
 	WorkspaceSubdir string // relative --workspace: path RELATIVE to the project root, e.g. "workers/worker" — scion mounts this subtree at /workspace
-	HostWorkspace   string // host path to the same subdir, e.g. <tree>/workers/worker; MkdirAll'd before start (scion's guard requires it to exist)
+	HostWorkspace   string // host path to the same subdir, e.g. <tree>/workers/worker; created tree-confined before start (ensureWorkspaceDir; scion's guard requires it to exist)
 	BootstrapDir    string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
 	Image           string // effective agent image
 	Model           string // effective LLM model; empty ⇒ no --model, scion decides
@@ -143,7 +145,7 @@ func (b *Broker) stageFreshTicket(cn, dir string) error {
 		return fmt.Errorf("ticket: %w", err)
 	}
 	bs := wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
-	root, rel, err := b.stagingPath(dir)
+	root, rel, err := b.treePath(dir)
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
@@ -153,28 +155,132 @@ func (b *Broker) stageFreshTicket(cn, dir string) error {
 	return nil
 }
 
-// stagingPath splits an absolute staging directory into the confinement anchor
-// wire.Stage needs and the path below it. The anchor is the instance tree: it is
-// the mount point, so an agent cannot replace it, while everything under it is
+// treePath splits an absolute directory under the instance tree into the
+// confinement anchor the host-side writes need (wire.Stage, ensureWorkspaceDir)
+// and the path below it. The anchor is the instance tree: it is the mount
+// point, so an agent cannot replace it, while everything under it is
 // agent-writable.
 //
 // With no tree wired (a Broker built directly in a test) it falls back to the
-// staging directory's parent. That still refuses a symlink planted at `.lever`
-// itself — the reachable attack, since that is the name inside an agent's own
+// directory's parent. That still refuses a symlink planted at `.lever` itself
+// — the reachable attack, since that is the name inside an agent's own
 // workspace — but not one planted at an ancestor. Production always sets Tree
 // (brokerctl.decorateConfig), which is what closes the ancestor case too.
-func (b *Broker) stagingPath(dir string) (root, rel string, err error) {
+func (b *Broker) treePath(dir string) (root, rel string, err error) {
 	if b.tree == "" {
 		return filepath.Dir(dir), filepath.Base(dir), nil
 	}
 	rel, err = filepath.Rel(b.tree, dir)
 	if err != nil {
-		return "", "", fmt.Errorf("staging dir %q is not under the instance tree %q: %w", dir, b.tree, err)
+		return "", "", fmt.Errorf("dir %q is not under the instance tree %q: %w", dir, b.tree, err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("staging dir %q escapes the instance tree %q", dir, b.tree)
+		return "", "", fmt.Errorf("dir %q escapes the instance tree %q", dir, b.tree)
 	}
 	return b.tree, rel, nil
+}
+
+// ensureWorkspaceDir creates spec.HostWorkspace (scion's guard requires the
+// --workspace subdir to exist before start) confined to the instance tree.
+// The path is agent-writable and the broker runs as the operator: a plain
+// os.MkdirAll would follow a `<tree>/workers` the manager replaced with a
+// symlink to an absolute host path and create directories there. The walk
+// (refuseEscapingDir) names the refusal with fsutil.ErrEscapesTree; the
+// mkdir itself goes through an os.Root at the tree, which re-checks every
+// component at the syscall, so a swap between the walk and the mkdir is
+// refused rather than followed. A symlink that stays inside the tree (an
+// operator's own layout) is followed, as before.
+func (b *Broker) ensureWorkspaceDir(spec WorkerSpec) error {
+	root, rel, err := b.treePath(spec.HostWorkspace)
+	if err != nil {
+		return err
+	}
+	if b.tree == "" {
+		// No tree wired (a Broker built directly in a test): the workspace's
+		// parent may not exist yet either, so anchor at the nearest existing
+		// ancestor and create everything below it.
+		root, rel, err = existingAnchor(spec.HostWorkspace)
+		if err != nil {
+			return err
+		}
+	}
+	if err := refuseEscapingDir(root, rel); err != nil {
+		return err
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return r.MkdirAll(rel, 0o755)
+}
+
+// existingAnchor splits dir at its nearest existing PROPER ancestor: root
+// exists, rel (at least dir's base name) is what lies below it.
+func existingAnchor(dir string) (root, rel string, err error) {
+	root = filepath.Dir(dir)
+	for {
+		if _, err := os.Stat(root); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", "", err
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return "", "", fmt.Errorf("no existing ancestor for %q", dir)
+		}
+		root = parent
+	}
+	if rel, err = filepath.Rel(root, dir); err != nil {
+		return "", "", err
+	}
+	return root, rel, nil
+}
+
+// refuseEscapingDir walks rel below root one component at a time (the
+// directory-shaped counterpart of fsutil's confineInTree): a symlink
+// component may resolve only inside the real root, else — or when it
+// dangles — the walk fails with fsutil.ErrEscapesTree; an existing component
+// that is not a directory is a plain error. An absent component ends the walk
+// (MkdirAll creates the rest).
+func refuseEscapingDir(root, rel string) error {
+	if rel == "" || rel == "." || !filepath.IsLocal(rel) {
+		return fmt.Errorf("%q: %w", rel, fsutil.ErrEscapesTree)
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	cur := root
+	for _, p := range strings.Split(filepath.ToSlash(rel), "/") {
+		cur = filepath.Join(cur, p)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(cur)
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("%s: dangling symbolic link: %w", cur, fsutil.ErrEscapesTree)
+			}
+			if err != nil {
+				return err
+			}
+			if resolved != realRoot && !strings.HasPrefix(resolved, realRoot+string(filepath.Separator)) {
+				return fmt.Errorf("%s: symbolic link to %s: %w", cur, resolved, fsutil.ErrEscapesTree)
+			}
+			if fi, err = os.Stat(cur); err != nil {
+				return err
+			}
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s: not a directory", cur)
+		}
+	}
+	return nil
 }
 
 func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +392,19 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		http.Error(w, "instructions error", http.StatusInternalServerError)
 		return
 	}
+	// The workspace dir comes BEFORE the ticket: a refused (out-of-tree)
+	// workspace must not spend one. Creating the directory is idempotent and
+	// harmless on its own.
+	if err := b.ensureWorkspaceDir(spec); err != nil {
+		if errors.Is(err, fsutil.ErrEscapesTree) {
+			b.audit("worker", b.manager, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
+			http.Error(w, "forbidden: worker workspace escapes the instance tree", http.StatusForbidden)
+			return
+		}
+		b.audit("worker", b.manager, "error", "start "+spec.Name+": workspace dir: "+err.Error())
+		http.Error(w, "workspace error", http.StatusInternalServerError)
+		return
+	}
 	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
 		b.audit("worker", b.manager, "error", "start "+err.Error())
 		http.Error(w, "stage error", http.StatusInternalServerError)
@@ -297,11 +416,6 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 			http.Error(w, "runtime error", http.StatusBadGateway)
 			return
 		}
-	}
-	if err := os.MkdirAll(spec.HostWorkspace, 0o755); err != nil {
-		b.audit("worker", b.manager, "error", "workspace dir: "+err.Error())
-		http.Error(w, "runtime error", http.StatusBadGateway)
-		return
 	}
 	if err := b.runtime.Start(ctx, scion.StartOpts{
 		Worker: spec.Name, Task: task, Harness: "claude",

@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -761,5 +763,73 @@ func TestWorkerStart_flagShapedTaskIs400WithoutStart(t *testing.T) {
 	}
 	if len(rt.started) != 0 {
 		t.Fatalf("no start may be attempted for a flag-shaped task; got %d", len(rt.started))
+	}
+}
+
+// A manager that swaps <tree>/workers for a symlink to an absolute host path
+// must not make the host broker create directories there: the workspace
+// mkdir is confined to the instance tree, and the dispatch is refused by
+// name BEFORE a ticket is staged or a start is attempted.
+func TestWorkerStart_workspaceSymlinkOutOfTreeIsRefused(t *testing.T) {
+	tree := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(tree, "workers")); err != nil {
+		t.Fatal(err)
+	}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+		HostWorkspace: filepath.Join(tree, "workers", "worker"),
+		BootstrapDir:  filepath.Join(tree, "workers", "worker", ".lever"), Image: "img:1"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+	var buf bytes.Buffer
+	b := New(testConfig(t, withAudit(&buf), withManager("test-manager", ""), withRuntime(rt, spec),
+		func(c *Config) { c.Dispatch.Tree = tree }))
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("SECURITY: the broker created %v outside the tree", entries)
+	}
+	if len(rt.started) != 0 {
+		t.Fatalf("no start may happen for a refused workspace; got %d", len(rt.started))
+	}
+	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("no ticket may be staged for a refused workspace (stat err %v)", err)
+	}
+	if !strings.Contains(buf.String(), fsutil.ErrEscapesTree.Error()) {
+		t.Fatalf("refusal must be audited by name; log=%s", buf.String())
+	}
+}
+
+// A symlink that stays INSIDE the tree (an operator's own layout) keeps
+// working: the workspace is created at the resolved location and the worker
+// starts as before.
+func TestWorkerStart_workspaceInTreeSymlinkIsFollowed(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tree, "real-workers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real-workers", filepath.Join(tree, "workers")); err != nil {
+		t.Fatal(err)
+	}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+		HostWorkspace: filepath.Join(tree, "workers", "worker"),
+		BootstrapDir:  filepath.Join(tree, "workers", "worker", ".lever"), Image: "img:1"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+	b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt, spec),
+		func(c *Config) { c.Dispatch.Tree = tree }))
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if fi, err := os.Stat(filepath.Join(tree, "real-workers", "worker")); err != nil || !fi.IsDir() {
+		t.Fatalf("workspace not created at the resolved in-tree location: %v", err)
+	}
+	if len(rt.started) != 1 {
+		t.Fatalf("start calls = %d, want 1", len(rt.started))
 	}
 }

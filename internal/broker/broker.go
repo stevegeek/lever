@@ -59,6 +59,7 @@ type Config struct {
 	LLM         LLMConfig
 	Dispatch    DispatchConfig
 	Directives  DirectiveConfig
+	Timeouts    TimeoutConfig
 
 	// Log receives the audit decisions; nil ⇒ a discard logger.
 	Log *slog.Logger
@@ -182,6 +183,43 @@ type DispatchConfig struct {
 	ManagerBootstrapDir string
 }
 
+// TimeoutConfig bounds request handling on the jail listener, per route
+// class. The listener itself sets only ReadHeaderTimeout and IdleTimeout — a
+// server-level ReadTimeout/WriteTimeout would cut a streamed /llm completion
+// — so these are applied per route (see JailHandler). Zero fields take the
+// defaults; tests shrink them.
+type TimeoutConfig struct {
+	// Body bounds how long a client may take to deliver its request body, on
+	// EVERY jail route including /llm (a read deadline on the connection).
+	Body time.Duration
+	// Control bounds the JSON control routes (provision, worker list, msg,
+	// directive, enrol, renew, request, tools): handler start to response.
+	Control time.Duration
+	// Tool bounds one proxied MCP call on a /mcp/<name>/ route.
+	Tool time.Duration
+	// Worker bounds the /worker/start|stop|suspend|resume routes: a start
+	// waits for scion and the liveness settle window, so it is the longest.
+	Worker time.Duration
+}
+
+// Default jail route deadlines (TimeoutConfig).
+const (
+	defaultJailBodyTimeout    = 30 * time.Second
+	defaultJailControlTimeout = 30 * time.Second
+	defaultJailToolTimeout    = 2 * time.Minute
+	defaultJailWorkerTimeout  = 5 * time.Minute
+)
+
+// withDefaults fills every zero field of tc.
+func (tc TimeoutConfig) withDefaults() TimeoutConfig {
+	return TimeoutConfig{
+		Body:    cmp.Or(tc.Body, defaultJailBodyTimeout),
+		Control: cmp.Or(tc.Control, defaultJailControlTimeout),
+		Tool:    cmp.Or(tc.Tool, defaultJailToolTimeout),
+		Worker:  cmp.Or(tc.Worker, defaultJailWorkerTimeout),
+	}
+}
+
 // DirectiveConfig configures the operator-directive UDS admin channel.
 type DirectiveConfig struct {
 	// Verifier gates the channel: nil means directives are disabled and every
@@ -260,6 +298,7 @@ type Broker struct {
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
 	toolSecret string // presented to first-party tools (see Config.ToolSecret)
+	timeouts   TimeoutConfig
 }
 
 // New builds a Broker from c.
@@ -295,6 +334,7 @@ func New(c Config) *Broker {
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
 		log: c.Log, version: c.Version, configHash: c.ConfigHash, toolSecret: c.ToolSecret,
+		timeouts: c.Timeouts.withDefaults(),
 		// persisted state
 		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
 		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),

@@ -17,24 +17,34 @@ import (
 // /directive/check, /enrol, /renew, /request, and one gated proxy per
 // currently-registered tool under /mcp/<name>/. Tool routes are bound at
 // call time — tools must be registered before JailHandler() is called.
+//
+// Every route runs under the per-route deadlines of b.timeouts: the request
+// body must arrive within Body (a connection read deadline; the listener has
+// no ReadTimeout because /llm streams), and every non-streaming route also
+// runs under an http.TimeoutHandler — Control for the JSON routes, Worker
+// for the dispatch verbs, Tool for a proxied MCP call — answering 503 when
+// the handler overruns. /llm carries only the body deadline: a streamed
+// completion legitimately outlives any fixed handler bound.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
+	control := func(h http.HandlerFunc) http.Handler { return b.bounded(h, b.timeouts.Control) }
+	worker := func(h http.HandlerFunc) http.Handler { return b.bounded(h, b.timeouts.Worker) }
 	// Method patterns: every JSON route is POST-only; /tools is the lone GET.
 	// A wrong method 405s at the mux, before any handler runs.
-	mux.HandleFunc("POST "+wire.PathProvision, b.handleProvision)
-	mux.HandleFunc("POST "+wire.PathWorkerStart, b.handleWorkerStart)
-	mux.HandleFunc("POST "+wire.PathWorkerStop, b.handleWorkerStop)
-	mux.HandleFunc("POST "+wire.PathWorkerSuspend, b.handleWorkerSuspend)
-	mux.HandleFunc("POST "+wire.PathWorkerResume, b.handleWorkerResume)
-	mux.HandleFunc("POST "+wire.PathWorkerList, b.handleWorkerList)
-	mux.HandleFunc("POST "+wire.PathMsgSend, b.handleMsgSend)
-	mux.HandleFunc("POST "+wire.PathMsgList, b.handleMsgList)
-	mux.HandleFunc("POST "+wire.PathDirectiveConsume, b.handleDirectiveConsume)
-	mux.HandleFunc("POST "+wire.PathDirectiveCheck, b.handleDirectiveCheck)
-	mux.HandleFunc("POST "+wire.PathEnrol, b.handleEnrol)
-	mux.HandleFunc("POST "+wire.PathRenew, b.handleRenew)
-	mux.HandleFunc("POST "+wire.PathRequest, b.handleRequest)
-	mux.HandleFunc("GET "+wire.PathTools, b.handleTools)
+	mux.Handle("POST "+wire.PathProvision, control(b.handleProvision))
+	mux.Handle("POST "+wire.PathWorkerStart, worker(b.handleWorkerStart))
+	mux.Handle("POST "+wire.PathWorkerStop, worker(b.handleWorkerStop))
+	mux.Handle("POST "+wire.PathWorkerSuspend, worker(b.handleWorkerSuspend))
+	mux.Handle("POST "+wire.PathWorkerResume, worker(b.handleWorkerResume))
+	mux.Handle("POST "+wire.PathWorkerList, control(b.handleWorkerList))
+	mux.Handle("POST "+wire.PathMsgSend, control(b.handleMsgSend))
+	mux.Handle("POST "+wire.PathMsgList, control(b.handleMsgList))
+	mux.Handle("POST "+wire.PathDirectiveConsume, control(b.handleDirectiveConsume))
+	mux.Handle("POST "+wire.PathDirectiveCheck, control(b.handleDirectiveCheck))
+	mux.Handle("POST "+wire.PathEnrol, control(b.handleEnrol))
+	mux.Handle("POST "+wire.PathRenew, control(b.handleRenew))
+	mux.Handle("POST "+wire.PathRequest, control(b.handleRequest))
+	mux.Handle("GET "+wire.PathTools, control(b.handleTools))
 
 	for _, name := range b.reg.Names() {
 		if name == ReservedLLMTool {
@@ -47,12 +57,35 @@ func (b *Broker) JailHandler() http.Handler {
 		}
 		// Strip the /mcp/<name> prefix so the tool proxy sees a clean path.
 		prefix := "/mcp/" + name
-		mux.Handle(prefix+"/", http.StripPrefix(prefix, handler))
+		mux.Handle(prefix+"/", http.StripPrefix(prefix, b.bounded(handler, b.timeouts.Tool)))
 	}
 	if b.apiKey != nil {
-		mux.Handle("/llm/", http.StripPrefix("/llm", b.llmProxyHandler()))
+		mux.Handle("/llm/", http.StripPrefix("/llm", withBodyDeadline(b.timeouts.Body, b.llmProxyHandler())))
 	}
 	return mux
+}
+
+// bounded wraps a non-streaming jail route: the request body must arrive
+// within b.timeouts.Body and h must finish within d, else the client gets
+// 503 and h's eventual output is discarded (http.TimeoutHandler also
+// cancels the request context, so a runtime call or proxy hop in flight is
+// abandoned). The body deadline is set on the OUTER writer: TimeoutHandler's
+// writer has no connection to set it on.
+func (b *Broker) bounded(h http.Handler, d time.Duration) http.Handler {
+	return withBodyDeadline(b.timeouts.Body, http.TimeoutHandler(h, d, "request timed out"))
+}
+
+// withBodyDeadline puts a read deadline of d on the connection before h runs,
+// bounding the request-body read (net/http clears the post-header deadline
+// when the server has no ReadTimeout). Per request: the server re-arms the
+// header and idle deadlines itself between requests. Best-effort — a writer
+// with no connection (a test recorder) reports ErrNotSupported and is left
+// alone.
+func withBodyDeadline(d time.Duration, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(d))
+		h.ServeHTTP(w, r)
+	})
 }
 
 // handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
@@ -109,6 +142,8 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		// of the serve. Only started when the hook is installed at all.
 		go b.runHealer(ctx)
 	}
+	// No ReadTimeout/WriteTimeout here: /llm streams. Body and handler
+	// deadlines are per route (JailHandler, b.timeouts).
 	jailSrv := &http.Server{
 		Handler: b.JailHandler(), TLSConfig: tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,

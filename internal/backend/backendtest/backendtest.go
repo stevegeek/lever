@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
 // ClosedChainRunner answers `iptables -S LEVER_EGRESS` through Host (the
@@ -81,7 +82,13 @@ func FakeScionCheckout(t *testing.T) string {
 // hashes that file for real, so it has to exist even when the build is a stub.
 func StageFakeBuildOutput(t *testing.T, machine string) {
 	t.Helper()
-	p := filepath.Join(os.TempDir(), "lever-scion-"+machine)
+	p, err := scionbin.OutputPath(machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(p, []byte("fake-scion-"+machine), 0o755); err != nil {
 		t.Fatal(err)
 	}

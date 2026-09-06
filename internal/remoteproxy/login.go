@@ -462,11 +462,13 @@ func (d *LoginDriver) recordLogin(operator string, status int, err error) {
 	d.audit(line)
 }
 
-// unnamedOperator is the identity asserted when the tailnet front end supplied
-// no login at all — which only happens when remote.allowed_users is unset, so
-// the proxy has nothing to pin and nothing to assert. It is a placeholder
-// identity for the hub's user row, not a claim about who is connected; setting
-// allowed_users is what makes the hub's record name a real person.
+// unnamedOperator is the identity asserted when the gate hands the driver no
+// login — which is every request while remote.allowed_users is unset: the
+// allowlist is the only check that ever verifies Tailscale-User-Login, so with
+// it empty the header is an unverified claim and the gate withholds it (see
+// gate.operatorFor). It is a placeholder identity for the hub's user row, not
+// a claim about who is connected; setting allowed_users is what makes the
+// hub's record name a real person.
 const (
 	unnamedOperator      = "lever-operator"
 	unnamedOperatorEmail = "lever-operator@lever.local"

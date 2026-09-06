@@ -130,10 +130,23 @@ func TestLoginForwarderRefusesANonLoopbackListen(t *testing.T) {
 	}
 }
 
+// isolateCache points os.UserCacheDir at a fresh directory — HOME for the
+// darwin resolution, XDG_CACHE_HOME for the Linux one — so no test touches
+// the real per-user cache.
+func isolateCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+}
+
 // TestBuildCrossCompilesWithTheResolvedGo pins the argv: the absolute go
 // binary, an offline module build, and -trimpath for a reproducible hash.
+// The build directory is the operator's own: under the user cache dir and
+// 0700, never a predictable name in the shared os.TempDir where another local
+// user could pre-create it and swap the binary before the root install.
 func TestBuildCrossCompilesWithTheResolvedGo(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	isolateCache(t)
 	f := fakeRunner()
 	f.Script("go env GOROOT", fakeResult("/opt/go\n"))
 	f.Script("/opt/go/bin/go build", fakeResult(""))
@@ -141,8 +154,18 @@ func TestBuildCrossCompilesWithTheResolvedGo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if filepath.Base(out) != "lever-login-forward" || !strings.Contains(out, "lever-loginfwd-m") {
+	if filepath.Base(out) != "lever-login-forward" || filepath.Base(filepath.Dir(out)) != "m" || !strings.Contains(out, "loginfwd") {
 		t.Fatalf("output path %q", out)
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, cache+string(filepath.Separator)) {
+		t.Fatalf("output %q is not under the user cache dir %q", out, cache)
+	}
+	if fi, err := os.Stat(filepath.Dir(out)); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("build directory: %v, err=%v, want a 0700 directory", fi, err)
 	}
 	for _, name := range []string{"main.go", "go.mod"} {
 		if _, err := os.Stat(filepath.Join(filepath.Dir(out), name)); err != nil {
@@ -164,8 +187,24 @@ func TestBuildCrossCompilesWithTheResolvedGo(t *testing.T) {
 }
 
 func TestBuildFailsWithoutGo(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	isolateCache(t)
 	if _, err := Build(context.Background(), fakeRunner(), "arm64", "m"); err == nil {
 		t.Fatal("expected an error when go is not resolvable")
+	}
+}
+
+// Without a resolvable cache dir there is nowhere safe to build; Build must
+// say so rather than fall back to a shared location.
+func TestBuildFailsWithoutAUserCacheDir(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	f := fakeRunner()
+	f.Script("go env GOROOT", fakeResult("/opt/go\n"))
+	f.Script("/opt/go/bin/go build", fakeResult(""))
+	if _, err := Build(context.Background(), f, "arm64", "m"); err == nil {
+		t.Fatal("expected an error when the user cache dir cannot be resolved")
+	}
+	if f.Called(lexec.Subcommand("/opt/go/bin/go", "build")) {
+		t.Fatal("go build must not run without a build directory")
 	}
 }

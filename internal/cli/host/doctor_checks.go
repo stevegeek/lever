@@ -21,6 +21,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
@@ -63,8 +64,11 @@ type doctorProbes struct {
 	// nodeToolchain validates node+npm for the scion web-asset build and
 	// returns the node version.
 	nodeToolchain func() (string, error)
-	// claudeVersion reads the baked Claude Code version label of an image.
-	claudeVersion func(imageRef string) (string, error)
+	// claudeVersion reads the baked Claude Code version label of an image
+	// from the host docker store; claudeVersionTar reads it from the docker
+	// archive the image ships in (image_tar), for a host with no docker.
+	claudeVersion    func(imageRef string) (string, error)
+	claudeVersionTar func(tarPath, imageRef string) (string, error)
 	// remoteHealthz issues GET /healthz through the remote-access proxy.
 	remoteHealthz func(port int, tsLogin string) (int, error)
 	// remoteLogin inspects the local OIDC provider on its loopback port.
@@ -77,10 +81,13 @@ type doctorProbes struct {
 // docker) run through r.
 func productionProbes(r proc.Runner) doctorProbes {
 	return doctorProbes{
-		dial:            tcpDial,
-		goVersion:       func() (string, error) { return goVersionProbe(r) },
-		nodeToolchain:   func() (string, error) { return nodeToolchainProbe(r) },
-		claudeVersion:   func(imageRef string) (string, error) { return claudeVersionProbe(r, imageRef) },
+		dial:          tcpDial,
+		goVersion:     func() (string, error) { return goVersionProbe(r) },
+		nodeToolchain: func() (string, error) { return nodeToolchainProbe(r) },
+		claudeVersion: func(imageRef string) (string, error) { return claudeVersionProbe(r, imageRef) },
+		claudeVersionTar: func(tarPath, imageRef string) (string, error) {
+			return jail.ImageTarLabel(tarPath, imageRef, "claude_code_version")
+		},
 		remoteHealthz:   remoteHealthzProbe,
 		remoteLogin:     remoteLoginProbe,
 		remoteJailLogin: remoteJailLoginProbe,
@@ -1058,18 +1065,28 @@ func claudeVersionProbe(r proc.Runner, imageRef string) (string, error) {
 }
 
 // checkClaudeVersion reports the Claude Code version baked into the manager
-// image. It reads a label (no container run). A missing label means a
-// pre-label image and is reported informationally, not as a failure; an
-// inspect error (image not built/loaded) is a real fault.
-func checkClaudeVersion(imageRef string, p doctorProbes) checkResult {
+// image. It reads a label (no container run) — from the archive when the
+// image ships as one (tarPath, from image_tar), else from host docker. A
+// missing label means a pre-label image and is reported informationally, not
+// as a failure; an inspect error (image not built/loaded, tar unreadable or
+// mistagged) is a real fault.
+func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 	const name = "agent claude version"
-	v, err := p.claudeVersion(imageRef)
+	source := imageRef
+	var v string
+	var err error
+	if tarPath != "" {
+		source = imageRef + " (from " + tarPath + ")"
+		v, err = p.claudeVersionTar(tarPath, imageRef)
+	} else {
+		v, err = p.claudeVersion(imageRef)
+	}
 	if err != nil {
-		return checkResult{name, false, "could not inspect image " + imageRef + ": " + err.Error(),
+		return checkResult{name, false, "could not inspect image " + source + ": " + err.Error(),
 			"build/load the agent image (`lever apply`) before this check can read its baked version"}
 	}
 	if v == "" {
-		return checkResult{name, true, "no claude_code_version label on " + imageRef + " (pre-label image; rebuild to record it)", ""}
+		return checkResult{name, true, "no claude_code_version label on " + source + " (pre-label image; rebuild to record it)", ""}
 	}
-	return checkResult{name, true, "baked " + v + " in " + imageRef + " (running containers keep their version until recreated: `lever stop && lever up`)", ""}
+	return checkResult{name, true, "baked " + v + " in " + source + " (running containers keep their version until recreated: `lever stop && lever up`)", ""}
 }

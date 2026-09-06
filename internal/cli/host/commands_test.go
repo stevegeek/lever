@@ -56,6 +56,8 @@ func (s *stubBackend) AttachArgv(inner []string) []string {
 }
 func (s *stubBackend) LoadImage(context.Context, string) error                  { return nil }
 func (s *stubBackend) ImageLoaded(context.Context, string) bool                 { return false }
+func (s *stubBackend) LoadImageTar(context.Context, string, string) error       { return nil }
+func (s *stubBackend) ImageLoadedTar(context.Context, string, string) bool      { return false }
 func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
 func (s *stubBackend) EnsureHubLogin(_ context.Context, spec types.HubLogin) (bool, error) {

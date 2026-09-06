@@ -45,6 +45,12 @@ func fillDeps(d Deps) Deps {
 	if d.ImageLoaded == nil {
 		d.ImageLoaded = func(context.Context, string) bool { return false }
 	}
+	if d.LoadImageTar == nil {
+		d.LoadImageTar = func(context.Context, string, string) error { return nil }
+	}
+	if d.ImageLoadedTar == nil {
+		d.ImageLoadedTar = func(context.Context, string, string) bool { return false }
+	}
 	if d.PruneImages == nil {
 		d.PruneImages = func(context.Context) error { return nil }
 	}
@@ -3390,4 +3396,84 @@ func TestDefaultManagerLiveRetryHoldsForTenSeconds(t *testing.T) {
 	if defaultManagerLiveRetry.Settle < 10*time.Second {
 		t.Fatalf("default settle = %s, want >= 10s", defaultManagerLiveRetry.Settle)
 	}
+}
+
+// tarStep runs a load-image step whose image ships in an archive.
+func tarStep(d Deps) error {
+	return (&run{app: &config.App{}, d: fillDeps(d)}).step(context.Background(),
+		Step{Kind: KindLoadImage, Target: "img", TarPath: "/inst/images/img.tar"})
+}
+
+// TestLoadImageStepUsesTarSourceWhenSet: with a TarPath the step loads from
+// the archive and never consults host docker (lever#32); the prune after a
+// load is unchanged.
+func TestLoadImageStepUsesTarSourceWhenSet(t *testing.T) {
+	var dockerCalls, tarLoads, prunes int
+	var gotRef, gotTar string
+	d := Deps{
+		LoadImage:   func(context.Context, string) error { dockerCalls++; return nil },
+		ImageLoaded: func(context.Context, string) bool { dockerCalls++; return false },
+		LoadImageTar: func(_ context.Context, ref, tar string) error {
+			tarLoads++
+			gotRef, gotTar = ref, tar
+			return nil
+		},
+		ImageLoadedTar: func(context.Context, string, string) bool { return false },
+		PruneImages:    func(context.Context) error { prunes++; return nil },
+	}
+	if err := tarStep(d); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if dockerCalls != 0 {
+		t.Errorf("host-docker collaborators called %d times, want 0", dockerCalls)
+	}
+	if tarLoads != 1 || gotRef != "img" || gotTar != "/inst/images/img.tar" {
+		t.Errorf("LoadImageTar calls = %d (%q, %q), want 1 (img, /inst/images/img.tar)", tarLoads, gotRef, gotTar)
+	}
+	if prunes != 1 {
+		t.Errorf("PruneImages calls = %d, want 1", prunes)
+	}
+}
+
+// TestLoadImageStepSkipsWhenTarAlreadyLoaded: the tar-digest guard skips the
+// stream and the prune exactly as the host-docker guard does.
+func TestLoadImageStepSkipsWhenTarAlreadyLoaded(t *testing.T) {
+	var loads, prunes int
+	d := Deps{
+		LoadImageTar:   func(context.Context, string, string) error { loads++; return nil },
+		ImageLoadedTar: func(context.Context, string, string) bool { return true },
+		PruneImages:    func(context.Context) error { prunes++; return nil },
+	}
+	if err := tarStep(d); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if loads != 0 || prunes != 0 {
+		t.Errorf("loads = %d, prunes = %d, want 0/0 (already loaded)", loads, prunes)
+	}
+}
+
+// TestLoadImageStepTarLoadErrorIsFatal: a tar load failure propagates and
+// the prune does not run.
+func TestLoadImageStepTarLoadErrorIsFatal(t *testing.T) {
+	var prunes int
+	d := Deps{
+		LoadImageTar: func(context.Context, string, string) error { return errors.New("tag mismatch") },
+		PruneImages:  func(context.Context) error { prunes++; return nil },
+	}
+	err := tarStep(d)
+	testutil.WantErrContaining(t, err, "tag mismatch")
+	if prunes != 0 {
+		t.Errorf("PruneImages calls = %d, want 0 after a failed load", prunes)
+	}
+}
+
+// The tar collaborators are required like every other: a wiring gap fails
+// loudly before the first step.
+func TestRunRefusesMissingTarDeps(t *testing.T) {
+	d := fillDeps(Deps{Scion: scion.New(proc.NewFakeRunner(), scion.Options{})})
+	d.LoadImageTar = nil
+	testutil.WantErrContaining(t, d.check(), "LoadImageTar")
+	d = fillDeps(Deps{Scion: scion.New(proc.NewFakeRunner(), scion.Options{})})
+	d.ImageLoadedTar = nil
+	testutil.WantErrContaining(t, d.check(), "ImageLoadedTar")
 }

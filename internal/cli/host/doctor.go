@@ -108,7 +108,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents) },
 		func() checkResult { return checkAgentCert(state, time.Now()) },
 		func() checkResult { return checkToolBackends(app.Broker.Tools, probes) },
-		func() checkResult { return checkClaudeVersion(app.ManagerImage(), probes) },
+		func() checkResult { return checkClaudeVersion(app.ManagerImage(), app.ManagerImageTarPath(), probes) },
 		func() checkResult { return checkCredentialFile(app.Manager.CredentialFile) },
 		func() checkResult { return checkMcpJsonInTree(app.Tree) },
 		func() checkResult { return checkGoToolchain(app.Scion, probes) },

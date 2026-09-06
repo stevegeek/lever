@@ -134,6 +134,13 @@ type Deps struct {
 	// fail-open by construction (false on any uncertainty), so a wrong answer
 	// costs a redundant load, never a wrongly-skipped one.
 	ImageLoaded func(ctx context.Context, imageRef string) bool
+	// LoadImageTar and ImageLoadedTar are the same pair for an image that
+	// ships as a docker archive (Step.TarPath, from image_tar): the load
+	// streams the file into the jail and the guard compares the archive's
+	// config digest with the jail's ID, so neither touches host docker
+	// (lever#32). Same fail-open contract as ImageLoaded.
+	LoadImageTar   func(ctx context.Context, imageRef, tarPath string) error
+	ImageLoadedTar func(ctx context.Context, imageRef, tarPath string) bool
 	// PruneImages reclaims dangling images from the jail after a load, so a
 	// rebuilt image does not ratchet the grow-only jail disk up by a full image
 	// size (the superseded copy goes untagged). A no-op when the load added a
@@ -315,6 +322,8 @@ func (d Deps) check() error {
 	}{
 		{"LoadImage", d.LoadImage == nil},
 		{"ImageLoaded", d.ImageLoaded == nil},
+		{"LoadImageTar", d.LoadImageTar == nil},
+		{"ImageLoadedTar", d.ImageLoadedTar == nil},
 		{"PruneImages", d.PruneImages == nil},
 		{"Scion", d.Scion == nil},
 		{"StartBroker", d.StartBroker == nil},
@@ -626,14 +635,20 @@ func (r *run) agentTemplate(ctx context.Context, s Step) error {
 }
 
 // runLoadImage runs the load-image step: skip the multi-GB re-import when the
-// jail already holds this exact image (same ID; fail-open — ImageLoaded returns
+// jail already holds this exact image (same ID; fail-open — the guard returns
 // false on any doubt), otherwise load and then best-effort prune the superseded
-// dangling image.
+// dangling image. The source is the step's archive when it has one (image_tar),
+// else the host docker store.
 func runLoadImage(ctx context.Context, s Step, d Deps) error {
-	if d.ImageLoaded(ctx, s.Target) {
+	loaded, load := d.ImageLoaded, d.LoadImage
+	if s.TarPath != "" {
+		loaded = func(ctx context.Context, ref string) bool { return d.ImageLoadedTar(ctx, ref, s.TarPath) }
+		load = func(ctx context.Context, ref string) error { return d.LoadImageTar(ctx, ref, s.TarPath) }
+	}
+	if loaded(ctx, s.Target) {
 		return nil
 	}
-	if err := d.LoadImage(ctx, s.Target); err != nil {
+	if err := load(ctx, s.Target); err != nil {
 		return err
 	}
 	// After a load, prune dangling images: when this load superseded a tag

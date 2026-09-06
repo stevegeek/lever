@@ -107,6 +107,7 @@ scion:
   version: e82a2a08                  # pin a scion commit; fetched + cross-compiled into the jail
 manager:
   image: scionlocal/lever-claude
+  # image_tar: images/lever-claude.tar   # optional; ship the image as a docker archive, no host docker needed
   model: claude-opus-5               # optional; alias or model ID for `scion start --model`
   prompt_file: prompt.md             # boot TASK (first user turn, keep it short); resolved at the ROOT (host-only, outside the mount)
   instructions_file: manual.md       # standing instructions -> the agent's CLAUDE.md, via a file, never argv; same resolution
@@ -126,6 +127,7 @@ workers:
   - name: scratch
     dir: workers/scratch              # relative to tree (i.e. workspace/workers/scratch)
     # image: <ref>                   # optional; defaults to manager.image
+    # image_tar: <path>             # optional; the archive shipping THIS worker's image (needs image:)
     # model: <alias|id>             # optional; defaults to manager.model
     obtain:
       - { tool: db, op: read }       # this worker may obtain db/read capabilities
@@ -183,6 +185,7 @@ failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-h
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `image` | string | **in practice** | - | Container image for the manager agent. Also the default image for workers that don't set their own (see `workers[].image`). `lever apply` loads this image into the jail's container runtime. Validated for safe ref characters. Without it, agents can't start. |
+| `image_tar` | path | no | - | A docker archive (`docker save` output) that ships `image`. When set, `lever apply` streams this file straight into the jail's container runtime and never touches the host docker store — a deploy host needs no docker at all, and the "already loaded" skip compares the archive's config digest with the jail's image ID. The archive must carry `image`'s tag (a mismatch is a named error; a multi-image archive is fine); `image` cannot be digest-pinned. Same resolution and confinement as `prompt_file`: instance root, host-only, **outside** the mounted `tree` (enforced), since the archive is the code the agent runs. `lever doctor` reads the baked Claude Code version from the archive instead of docker. Add it to `.gitignore` when the root is a repository. |
 | `model` | string | no | - | The LLM the manager runs on, passed to `scion start --model`: a scion alias (`small`, `medium`, `large`, `extra-large`/`xl`) or an explicit model ID (e.g. `claude-opus-5`). Also the default model for workers that don't set their own (see `workers[].model`). Omit to let the pinned scion resolve the model itself. **Create-time only:** `scion resume` has no `--model`, so changing this does not re-point an agent that already exists — only a freshly created one. Editing *only* this key also leaves a **running broker** untouched, so workers that inherit it keep the old model until the broker restarts (see *Worker model inheritance* below). |
 | `prompt_file` | path | no | - | A file whose contents become the manager's boot task — the agent's **first user turn**. Resolved at the instance **root** (host-only, **outside** the mount, so an agent can't rewrite its own next boot prompt). Must be a confined relative path (no `..`, not absolute). Omit to start with scion's default task. **Keep it short:** the task travels on scion's command line, where tmux caps the whole start command at 16 KiB, so `lever apply` refuses a prompt over a 15 KiB budget (bytes plus 3 per apostrophe) by name. Must resolve **outside** the mounted `tree` (enforced). Standing instructions belong in `instructions_file`. |
 | `instructions_file` | path | no | - | A file whose contents become the manager's **standing instructions** — who it is and how it must operate — delivered through scion's `agent_instructions` channel into the agent's **user-level** `~/.claude/CLAUDE.md` (a managed block, beside any project `CLAUDE.md` in the tree), never on the command line, so it has no size ceiling of the kind `prompt_file` has (it is capped at 512 KiB, half of scion's 1 MiB hub-request limit). Same resolution and confinement as `prompt_file`: instance root, host-only, and **outside** the mounted `tree` (enforced). Must not begin with `file://`, which scion would read as a file reference. **Create-time only:** scion stages the text when it provisions the agent and re-projects that staged copy on every later start (an agent that edits its own managed block gets it back at the next start), but an edited file reaches only a freshly created agent, not one being resumed. |
@@ -199,6 +202,7 @@ failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-h
 | `name` | string | **yes** | - | Worker identity (its agent slug / hub project name). |
 | `dir` | path | **yes** | - | Worker directory, **relative to `tree`** and inside it. Mounted in place, so files the worker writes appear on the host. Must not be absolute or escape the tree (`..`). |
 | `image` | string | no | `manager.image` | Container image for this worker. Set it to give a worker a different toolchain; omit to inherit the manager image (the common single-image case). `lever apply` loads **each distinct** image into the jail. |
+| `image_tar` | path | no | inherited with `image` | The archive shipping this worker's own `image`, as for `manager.image_tar`. Requires `image`; a worker with no `image` runs the manager image and so ships in the manager's archive. One image ref may come from only one archive. |
 | `model` | string | no | `manager.model` | The LLM this worker runs on. Set it to give a worker a different capability/cost point; omit to inherit the manager's model (and, if that is unset too, scion's own default). Resolved host-side from config, so the manager cannot choose it when it asks for a worker to be started. Create-time only, as for `manager.model`. |
 | `instructions_file` | path | no | - | This worker's standing instructions, as for `manager.instructions_file`. **Not inherited** from the manager — the manager's manual describes orchestration authority a worker must not hold — so a worker without it gets no lever instructions. The path is config-resolved on the host (the manager cannot choose it); the contents are read at each fresh dispatch, so an edit reaches the next newly created worker without a broker restart. The task a manager sends with a dispatch is subject to the same 15 KiB budget as `prompt_file`; the broker refuses an oversized one with 413 and the reason, whatever the worker's phase. |
 | `llm_auth` | enum | no | inherits `broker.llm_auth` | Same as `manager.llm_auth`, per worker, but the instance-uniform rule still applies. |
@@ -356,8 +360,9 @@ remote:
   deliberately not `manager:` — so an edit to `manager.model` alone reaches a newly created worker
   only after the broker restarts for another reason. Setting `workers[].model` explicitly is the
   direct route. This is the same trade-off `image:` inheritance already makes.
-- **Worker image inheritance:** a worker with no `image:` runs on `manager.image`. The bring-up plan
-  loads every distinct image once (deduped). At dispatch the capability broker reads the config
+- **Worker image inheritance:** a worker with no `image:` runs on `manager.image` (and ships in
+  `manager.image_tar`, when set). The bring-up plan loads every distinct image once (deduped),
+  from its archive when the config names one, else from the host docker store. At dispatch the capability broker reads the config
   directly and supplies each worker's resolved image, so `agent start NAME` takes no image argument.
   The manager names a configured worker; the broker resolves paths, image and credentials host-side.
 - **In-place mounts:** the `tree` subdir (and each `workers[].dir` within it) is bind-mounted into the

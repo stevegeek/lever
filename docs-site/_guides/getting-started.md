@@ -45,7 +45,9 @@ protect.
 - **The agent image** `scionlocal/lever-claude:<arch>` on your host Docker. `lever apply` loads it
   into the jail; it cannot be pulled from inside. Build it with `make lever-image`; see
   [step 1a](/getting-started/install/#1a-build-the-agent-image). Confirm with
-  `docker images | grep scionlocal/lever-claude`.
+  `docker images | grep scionlocal/lever-claude`. A host that only *runs* an instance needs no
+  Docker at all: ship the image as a `docker save` archive and point `manager.image_tar` at it
+  (see [deploying an image as an archive](/operations/#deploying-an-image-as-an-archive)).
 - **A Claude OAuth token** in a file (mint with `claude setup-token`) for this subscription demo.
   Point `manager.credential_file` at it. Use a least-privilege token; in subscription mode it is
   projected into the agent containers ([security model §6](/security-model/credentials/)).

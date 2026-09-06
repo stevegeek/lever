@@ -445,6 +445,10 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			}
 			if dryRun {
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
+					if s.TarPath != "" {
+						cmd.Printf("  %-16s %s (from %s)\n", s.Kind, s.Target, s.TarPath)
+						continue
+					}
 					cmd.Printf("  %-16s %s\n", s.Kind, s.Target)
 				}
 				return nil
@@ -799,6 +803,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// holds the exact bytes (same image ID as the host) — see the Deps field
 		// doc. Fail-open in the backend, so a check failure just loads.
 		ImageLoaded: b.ImageLoaded,
+		// The tar pair serves images the config ships as an archive
+		// (image_tar); host docker is never consulted for those.
+		LoadImageTar:   b.LoadImageTar,
+		ImageLoadedTar: b.ImageLoadedTar,
 		// PruneImages reclaims the dangling image a rebuilt tag orphans, after a
 		// load. Best-effort (the apply step logs, never fails, on error).
 		PruneImages:      b.PruneJailImages,

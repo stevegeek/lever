@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -52,4 +53,30 @@ func (a *App) WorkerImage(g Worker) string {
 		return archImage(g.Image, imageArch)
 	}
 	return a.ManagerImage()
+}
+
+// ManagerImageTarPath returns the absolute path of the archive that ships
+// the manager image, or "" when the image comes from host docker. Resolved
+// at the instance ROOT like ManagerPromptPath, for the same reason: the
+// archive is the code the agent runs, so an agent in the mount must not be
+// able to author it.
+func (a *App) ManagerImageTarPath() string {
+	if a.Manager.ImageTar == "" {
+		return ""
+	}
+	return filepath.Join(a.dir, a.Manager.ImageTar)
+}
+
+// WorkerImageTarPath returns the archive that ships a worker's image: its
+// own `image_tar` when it names its own `image:`, the manager's when it
+// inherits the manager image (which is where that image ships), and "" when
+// it names an image with no tar (host docker) or no tar exists at all.
+func (a *App) WorkerImageTarPath(g Worker) string {
+	if g.Image != "" {
+		if g.ImageTar == "" {
+			return ""
+		}
+		return filepath.Join(a.dir, g.ImageTar)
+	}
+	return a.ManagerImageTarPath()
 }

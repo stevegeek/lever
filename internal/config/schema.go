@@ -176,6 +176,14 @@ func (m AutoReenrolMode) valid() bool {
 
 type Manager struct {
 	Image string `yaml:"image"`
+	// ImageTar is an optional docker archive (`docker save` output) that
+	// carries Image. When set, `lever apply` streams this file into the jail
+	// and never touches the host docker store, so a deploy host needs no
+	// docker at all (lever#32). The archive must be tagged with Image (a
+	// mismatch is a named error). Host-only and root-confined like
+	// PromptFile: the tar decides what code runs as the agent, so an agent
+	// in the mounted tree must not be able to author it.
+	ImageTar string `yaml:"image_tar"`
 	// Model pins the LLM the agent runs on, passed through verbatim as
 	// `scion start --model` (a scion alias like `large`, or an explicit model
 	// ID). Empty ⇒ lever emits no flag and scion resolves the model itself,
@@ -204,7 +212,11 @@ type Worker struct {
 	Name  string `yaml:"name"`
 	Dir   string `yaml:"dir"`
 	Image string `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
-	Model string `yaml:"model"` // optional; empty ⇒ inherit Manager.Model
+	// ImageTar: the archive carrying this worker's own Image (see
+	// Manager.ImageTar). Requires Image; a worker with no Image inherits the
+	// manager's image AND its tar, since that is where the image ships.
+	ImageTar string `yaml:"image_tar"`
+	Model    string `yaml:"model"` // optional; empty ⇒ inherit Manager.Model
 	// InstructionsFile: this worker's standing instructions (see
 	// Manager.InstructionsFile). Deliberately NOT inherited from the manager —
 	// the manager's manual describes orchestration authority a worker must not

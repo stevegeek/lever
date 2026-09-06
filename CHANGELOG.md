@@ -83,9 +83,35 @@ of which were regressions introduced in 0.20.
 - **Security: the remote proxy asserts the Tailscale login to the hub only
   when `remote.allowed_users` pins it.** With the list empty the hub records
   the documented placeholder operator instead of an unverified header value.
+- **Security: a `manager.allow_ports` entry equal to a first-party tool's
+  backend port is rejected at config load.** The jail could otherwise dial the
+  tool past the broker and self-assert the caller, bypassing the mTLS
+  binding, per-agent revocation and the audit log. The docs "Full example"
+  no longer lists the `db` port. As defence in depth the broker mints a
+  per-boot secret, hands it to each supervised first-party tool as
+  `LEVER_TOOL_SECRET`, and presents it as `X-Lever-Tool-Secret` on every
+  proxied request; captool refuses any request without it and fails closed
+  when unconfigured. Tools built on captool need no change under the
+  supervisor.
+- **Security: `capability(llm)` proxies only the Messages API** (`POST
+  /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET
+  /v1/models/{id}`); any other path is 403 and audited. Before, any method
+  and path under the upstream was forwarded with the real key.
+- **Security: the jail listener bounds every route.** Request bodies must
+  arrive within 30 s (`/llm` included), and non-streaming routes time out
+  with 503 (control 30 s, worker verbs 5 m, tool calls 2 m). A trickling
+  body from the jail no longer holds a connection open indefinitely.
 
 ### Changed
 
+- **Security model docs state a residual:** a compromised manager can redeem
+  a worker's staged enrolment ticket during the stage→boot window (tickets
+  are staged inside the manager's whole-tree mount, and `/provision` on the
+  jail listener mints one for the acceptance harness) and hold that worker's
+  identity, so worker-only grants and worker-targeted directives are not
+  manager-proof until tickets are staged outside the manager's mount. The
+  substitution is audit-visible. Removing the jail-side `/provision` route
+  needs the acceptance harness moved to a host-side mint first.
 - **Operator skill: the chat-reply recipe** puts `--` before the positionals,
   uses `--channel=`/`--thread-id=`, quotes every envelope value and states
   that the fields are untrusted. Run `lever init` to refresh the scaffold.
@@ -96,7 +122,8 @@ of which were regressions introduced in 0.20.
   new; the scionbin tests are an external test package. `Backend.LoadImageTar`
   and `apply.Deps.LoadImageTar` take an `allowTag` policy; `apply.Deps` gains
   optional `ImageTagPolicy` and `PhaseSettleRetry`. New `fsutil.ReadInTree`/
-  `WriteInTree`.
+  `WriteInTree`. `brokerctl.NewSupervisor` takes a tool secret; `broker.Config` gains
+  `ToolSecret` and `Timeouts`.
 
 ## [0.21.0] - 2026-09-06
 

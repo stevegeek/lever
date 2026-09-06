@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -53,6 +54,25 @@ func (a *App) WorkerImage(g Worker) string {
 		return archImage(g.Image, imageArch)
 	}
 	return a.ManagerImage()
+}
+
+// ImageTagPolicy returns the check apply applies to every tag an image_tar
+// archive carries before it is streamed into the jail (jail.LoadImageTar's
+// allowTag), or nil when no allowed_image_registries is configured. It is
+// the same whole-component prefix rule validateImage applies to the config's
+// own image refs — an archive can hold more images than the one the config
+// names, and each of them gets imported (R4).
+func (s Security) ImageTagPolicy() func(ref string) error {
+	if len(s.AllowedImageRegistries) == 0 {
+		return nil
+	}
+	allowed := strings.Join(s.AllowedImageRegistries, ", ")
+	return func(ref string) error {
+		if !registryAllowed(ref, s.AllowedImageRegistries) {
+			return fmt.Errorf("image %q is not from an allowed registry (allowed: %s)", ref, allowed)
+		}
+		return nil
+	}
 }
 
 // ManagerImageTarPath returns the absolute path of the archive that ships

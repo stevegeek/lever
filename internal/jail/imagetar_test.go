@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -183,7 +184,7 @@ func TestLoadImageTarStreamsFileIntoPodmanLoad(t *testing.T) {
 	want, _ := os.ReadFile(path)
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
-	err := LoadImageTar(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64", path)
+	err := LoadImageTar(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64", path, nil)
 	if err != nil {
 		t.Fatalf("LoadImageTar: %v", err)
 	}
@@ -208,7 +209,7 @@ func TestLoadImageTarRejectsMissingTag(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
-	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:latest", path)
+	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:latest", path, nil)
 	if err == nil || !strings.Contains(err.Error(), "scionlocal/lever-claude:latest") || !strings.Contains(err.Error(), path) {
 		t.Fatalf("err = %v, want the ref and the tar path named", err)
 	}
@@ -304,7 +305,7 @@ func TestLiveLoadImageTar(t *testing.T) {
 	ctx := context.Background()
 	r := proc.RealRunner{}
 	prefix := orbPrefix(machine, user)
-	if err := LoadImageTar(ctx, r, prefix, uid, ref, tarPath); err != nil {
+	if err := LoadImageTar(ctx, r, prefix, uid, ref, tarPath, nil); err != nil {
 		t.Fatalf("LoadImageTar: %v", err)
 	}
 	if !ImageLoadedTar(ctx, r, prefix, uid, ref, tarPath) {
@@ -345,5 +346,51 @@ func TestSameImageRef(t *testing.T) {
 		if got := SameImageRef(c.a, c.b); got != c.want {
 			t.Errorf("SameImageRef(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// R4: a docker archive can carry several images and `podman load` imports
+// every one of them, so the policy (the registry allowlist, wired from
+// config) is applied to EVERY RepoTag before a byte is streamed. A refused
+// tag is named with its reason, and nothing reaches the jail.
+func TestLoadImageTarRefusesDisallowedTagBeforeLoad(t *testing.T) {
+	path, _ := writeDockerArchive(t, t.TempDir(),
+		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}},
+		tarImageSpec{repoTags: []string{"scionlocal/ok:latest", "evil/miner:latest"}})
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
+	allow := func(ref string) error {
+		if strings.HasPrefix(ref, "scionlocal/") {
+			return nil
+		}
+		return fmt.Errorf("image %q is not from an allowed registry (allowed: scionlocal)", ref)
+	}
+	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path, allow)
+	if err == nil || !strings.Contains(err.Error(), "evil/miner:latest") || !strings.Contains(err.Error(), "not from an allowed registry") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("err = %v, want the refused tag, the reason and the tar path named", err)
+	}
+	if len(r.Calls) != 0 {
+		t.Fatalf("nothing must be loaded when the archive carries a refused tag, got %+v", r.Calls)
+	}
+}
+
+// An archive whose every tag passes the policy loads as before.
+func TestLoadImageTarLoadsWhenEveryTagIsAllowed(t *testing.T) {
+	path, _ := writeDockerArchive(t, t.TempDir(),
+		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}},
+		tarImageSpec{repoTags: []string{"scionlocal/tool:latest"}})
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
+	var seen []string
+	allow := func(ref string) error { seen = append(seen, ref); return nil }
+	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path, allow)
+	if err != nil {
+		t.Fatalf("LoadImageTar: %v", err)
+	}
+	if len(r.Calls) == 0 || r.Calls[0].Name != "orb" {
+		t.Fatalf("want the podman load call, got %+v", r.Calls)
+	}
+	if !reflect.DeepEqual(seen, []string{"scionlocal/lever-claude:arm64", "scionlocal/tool:latest"}) {
+		t.Fatalf("policy must see every tag in the archive, saw %v", seen)
 	}
 }

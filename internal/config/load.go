@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -40,10 +42,40 @@ func confinedRel(p string) bool {
 
 // insideTree reports whether path (absolute) is tree itself or lies under it,
 // component-wise — a sibling that merely shares a prefix ("ws-notes" beside
-// "ws") is outside.
+// "ws") is outside. The test is lexical: callers pass both sides through
+// resolveExisting first, so a symlink on either side has already been
+// followed.
 func insideTree(tree, path string) bool {
 	rel, err := filepath.Rel(tree, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExisting returns p (absolute) with every symlink in its deepest
+// existing ancestor followed (filepath.EvalSymlinks) and the missing tail
+// re-joined lexically. A path that does not exist yet — a prompt file apply
+// reports later, a tree `lever init` has not created — is thereby placed in
+// the real directory it would land in, so a link at the instance root that
+// points into the tree (`img -> ws`) cannot make `img/boot.md` look like
+// root-owned material (R3). Any error other than "does not exist" is the
+// caller's to report.
+func resolveExisting(p string) (string, error) {
+	p = filepath.Clean(p)
+	var tail []string
+	for {
+		resolved, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			return filepath.Join(append([]string{resolved}, tail...)...), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", err
+		}
+		tail = append([]string{filepath.Base(p)}, tail...)
+		p = parent
+	}
 }
 
 // resolvePath expands a leading ~/ to the home dir, makes a relative path
@@ -104,6 +136,14 @@ func LoadNoHostChecks(path string) (*App, error) {
 	if abs, err := filepath.Abs(app.Tree); err == nil {
 		app.Tree = abs
 	}
+	// realTree is what the tree checks below compare against: app.Tree with
+	// symlinks followed (the lexical path stays in app.Tree — it is what gets
+	// mounted). Both sides of every insideTree test below are resolved the
+	// same way, so a link on either side is seen through (R3).
+	realTree, err := resolveExisting(app.Tree)
+	if err != nil {
+		return nil, fmt.Errorf("config: tree %s: %w", app.Tree, err)
+	}
 	app.Scion.Source = resolvePath(app.Scion.Source, app.dir)
 	app.Scion.Binary = resolvePath(app.Scion.Binary, app.dir)
 	// At most one scion mode. NOT "exactly one": config.Load also runs for
@@ -132,7 +172,11 @@ func LoadNoHostChecks(path string) (*App, error) {
 		if m.path == "" {
 			continue
 		}
-		if insideTree(app.Tree, m.path) {
+		p, err := resolveExisting(m.path)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s (%s): %w", m.key, m.path, err)
+		}
+		if insideTree(realTree, p) {
 			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and it would be installed as the engine they run under",
 				m.key, m.path, app.Tree)
 		}
@@ -163,13 +207,25 @@ func LoadNoHostChecks(path string) (*App, error) {
 		// Abs: app.dir is the config's directory as given, so a relative
 		// config path yields a relative file path, and Rel against the
 		// absolute tree would then fail — passing the check by accident.
+		// Then symlinks are followed (resolveExisting), so a link at the
+		// root into the tree is caught like a plain in-tree path.
 		p, err := filepath.Abs(m.path)
 		if err != nil {
 			return nil, fmt.Errorf("config: %s (%s): %w", m.key, m.path, err)
 		}
-		if insideTree(app.Tree, p) {
+		if p, err = resolveExisting(p); err != nil {
+			return nil, fmt.Errorf("config: %s (%s): %w", m.key, m.path, err)
+		}
+		if insideTree(realTree, p) {
 			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and this file is boot material the host must own — move it up to the instance root",
 				m.key, m.path, app.Tree)
+		}
+		// When the file exists it must be a regular file (same rule as the
+		// scion binary, scionbin.VerifyELFArch): a directory, FIFO or device
+		// is not material the host can read as a prompt or an archive. A
+		// missing file is apply's to report — it names the step that needs it.
+		if fi, err := os.Stat(p); err == nil && !fi.Mode().IsRegular() {
+			return nil, fmt.Errorf("config: %s (%s) is not a regular file", m.key, m.path)
 		}
 	}
 	if r := app.Scion.AgentRole; r != "" && !slices.Contains(scionAgentRoles, r) {

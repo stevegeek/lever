@@ -234,13 +234,32 @@ func loadImage(ctx context.Context, r proc.Runner, prefix []string, uid string, 
 // rootless podman, never touching the host docker store. The archive must
 // carry imageRef (FindTarImage; a mismatch is a config error naming both),
 // which is checked before a byte is streamed.
-func LoadImageTar(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef, tarPath string) error {
+//
+// allowTag, when non-nil, is applied to EVERY RepoTag the archive carries —
+// not just imageRef — before the stream starts: `podman load` imports every
+// image in the archive, so an archive that also ships an image from a
+// registry the config does not allow would otherwise land it in the jail
+// store unchecked (R4; config.Security.ImageTagPolicy is what apply wires).
+// A refused tag fails the load by name with the policy's reason. An image
+// with no RepoTags at all cannot be judged by tag and is let through: it
+// loads untagged, and the dangling-image prune that follows a load removes
+// it.
+func LoadImageTar(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef, tarPath string, allowTag func(ref string) error) error {
 	imgs, err := ReadImageTar(tarPath)
 	if err != nil {
 		return err
 	}
 	if _, err := FindTarImage(imgs, imageRef); err != nil {
 		return fmt.Errorf("image tar %s: %w", tarPath, err)
+	}
+	if allowTag != nil {
+		for _, img := range imgs {
+			for _, t := range img.RepoTags {
+				if err := allowTag(t); err != nil {
+					return fmt.Errorf("image tar %s: refusing to load: it carries tag %q, and %w", tarPath, t, err)
+				}
+			}
+		}
 	}
 	return loadImageAndAlias(ctx, r, prefix, uid, imageRef, func(w io.Writer) error {
 		f, err := os.Open(tarPath)

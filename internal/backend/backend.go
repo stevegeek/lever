@@ -114,8 +114,10 @@ type Backend interface {
 	// LoadImageTar and ImageLoadedTar are the same pair for an image shipped
 	// as a docker archive on the host (config image_tar): the load streams
 	// the file into the jail and the guard compares the archive's config
-	// digest with the jail's image ID, so neither needs host docker.
-	LoadImageTar(ctx context.Context, imageRef, tarPath string) error
+	// digest with the jail's image ID, so neither needs host docker. allowTag
+	// (nil = no policy) is applied to every tag the archive carries before a
+	// byte is streamed — see jail.LoadImageTar.
+	LoadImageTar(ctx context.Context, imageRef, tarPath string, allowTag func(ref string) error) error
 	ImageLoadedTar(ctx context.Context, imageRef, tarPath string) bool
 	// PruneJailImages reclaims dangling (untagged, unreferenced) images from the
 	// jail's container store — the layers a rebuilt tag orphans on the grow-only

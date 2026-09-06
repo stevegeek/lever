@@ -118,6 +118,15 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	defer logf.Close()
 	cfg.Log = slog.New(slog.NewTextHandler(logf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	// Per-boot broker-to-tool shared secret: the gateway presents it to every
+	// first-party tool, the supervisor hands it to each tool it spawns, and a
+	// tool refuses any request without it (a direct dial past the broker).
+	toolSecret, err := NewToolSecret()
+	if err != nil {
+		return err
+	}
+	cfg.ToolSecret = toolSecret
+
 	b := broker.New(cfg)
 
 	jailLn, adminLn, dirLn, err := bindListeners(app, st)
@@ -162,7 +171,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 
-	sup := NewSupervisor(ToolSpecs(app.Broker.Tools), adminURL, st.ToolLogDir())
+	sup := NewSupervisor(ToolSpecs(app.Broker.Tools), adminURL, st.ToolLogDir(), toolSecret)
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}

@@ -122,7 +122,7 @@ func TestVerifyDeniesBeforeRegisterWithoutPanic(t *testing.T) {
 	// Build a server the same way as other tests but do NOT set pubKey —
 	// simulating tools/call arriving before Register() completes.
 	s, err := New(Config{
-		Name: "db", Backend: "127.0.0.1:0", AdminURL: "http://127.0.0.1:0",
+		Name: "db", Backend: "127.0.0.1:0", AdminURL: "http://127.0.0.1:0", Secret: testToolSecret,
 		Operations: []Operation{{
 			Name:    "read",
 			Handler: func(_ ValidatedContext, _ map[string]string) (any, error) { ran = true; return nil, nil },

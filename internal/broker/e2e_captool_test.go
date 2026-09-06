@@ -30,6 +30,12 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
+// e2eToolSecret is the per-boot shared secret both sides of the proxy seam
+// hold: the broker (Config.ToolSecret) presents it, captool (Config.Secret)
+// requires it. The two header-name literals (broker.toolSecretHeader,
+// captool.ToolSecretHeader) meet here — a drift fails this file.
+const e2eToolSecret = "e2e-tool-secret"
+
 // dbRow is one row in the in-memory store the captool handler reads from.
 type dbRow struct {
 	Table string
@@ -78,10 +84,11 @@ func readHandler(_ captool.ValidatedContext, args map[string]string) (any, error
 
 // newCaptoolDB stands up a real captool.Server for the "db" tool, mounted on its
 // own httptest server, registered with the broker over the loopback admin
-// listener. It returns the captool httptest server (so the caller can defer
-// Close) — the broker now has "db" registered as a first-party tool whose
-// backend is that server. Both servers are registered with t.Cleanup.
-func newCaptoolDB(t *testing.T, b *Broker) {
+// listener. It returns the captool server's URL (the tool's "loopback port",
+// for the direct-dial step) — the broker now has "db" registered as a
+// first-party tool whose backend is that server. Both servers are registered
+// with t.Cleanup.
+func newCaptoolDB(t *testing.T, b *Broker) string {
 	t.Helper()
 
 	// Loopback admin listener: captool.Register POSTs /register here and caches
@@ -104,6 +111,7 @@ func newCaptoolDB(t *testing.T, b *Broker) {
 		Name:     "db",
 		Backend:  captoolTS.URL, // broker proxies /mcp/db/ here
 		AdminURL: adminTS.URL,
+		Secret:   e2eToolSecret, // the broker presents this on every proxied request
 		Operations: []captool.Operation{{
 			Name:        "read",
 			Description: "read rows from a table filtered by name",
@@ -141,6 +149,7 @@ func newCaptoolDB(t *testing.T, b *Broker) {
 	if err := captoolSrv.Register(context.Background()); err != nil {
 		t.Fatalf("captool.Register: %v", err)
 	}
+	return captoolTS.URL
 }
 
 // mcpCall POSTs a tools/call to /mcp/db/ as the given client and returns the
@@ -167,12 +176,12 @@ func mcpCall(t *testing.T, client *http.Client, url, token string, args map[stri
 func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	// ── Setup: broker + rules (manager may delegate db.read to worker; worker is
 	// a pure executor with no obtain) ─────────────────────────────────────────
-	cfg := testConfig(t) // AllowDelegate("manager","db","read","worker"); no worker obtain
+	cfg := testConfig(t, withToolSecret(e2eToolSecret)) // AllowDelegate("manager","db","read","worker"); no worker obtain
 	b := New(cfg)
 
 	// Stand up the REAL captool "db" tool and register it first-party with the
 	// broker BEFORE the jail handler binds its gateway routes.
-	newCaptoolDB(t, b)
+	captoolURL := newCaptoolDB(t, b)
 
 	srv := jailServer(t, b)
 	defer srv.Close()
@@ -297,6 +306,27 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 		t.Fatalf("SECURITY: dropped-filter call returned 200 with data: %s", text)
 	}
 	assertNoRows(t, droppedFilterResp, "alice")
+
+	// ── Step 6 (DENIED: broker bypass) — the same VALID token, posted straight
+	// to the tool's own port with a self-asserted X-Lever-Caller, as an agent
+	// with a manager.allow_ports hole to that port could. Without the broker's
+	// per-boot tool secret the tool refuses before any MCP dispatch. ──────────
+	bypassBody, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "read", "arguments": map[string]any{
+			"table": "A", "filter": "alice", "_capability": capToken}},
+	})
+	bypassReq, _ := http.NewRequest(http.MethodPost, captoolURL+"/", bytes.NewReader(bypassBody))
+	bypassReq.Header.Set("X-Lever-Caller", "worker")
+	bypassResp, err := http.DefaultClient.Do(bypassReq)
+	if err != nil {
+		t.Fatalf("direct dial: %v", err)
+	}
+	defer bypassResp.Body.Close()
+	if bypassResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("SECURITY: direct dial past the broker got %d, want 401", bypassResp.StatusCode)
+	}
+	assertNoRows(t, bypassResp, "alice")
 }
 
 // mcpResultText reads the MCP JSON-RPC response and returns the text content of

@@ -5,15 +5,32 @@ package captool
 
 import (
 	"crypto/ed25519"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
 
 const defaultEpochTTL = 5 * time.Second
+
+// The broker-to-tool shared secret. The broker's tool supervisor mints one
+// random secret per boot, hands it to every supervised first-party tool via
+// ToolSecretEnv (environment, never argv), and the broker's gateway presents
+// it in ToolSecretHeader on every request it proxies to such a tool. A
+// request without the exact value is refused before any MCP dispatch, so a
+// jail agent that reaches the tool's loopback port directly (a
+// manager.allow_ports hole; config load rejects the obvious case) cannot
+// self-assert X-Lever-Caller — the header is only trusted behind the secret.
+// The broker side spells the same header literal (internal/broker/gateway.go,
+// toolSecretHeader); the broker's captool e2e test pins the two together.
+const (
+	ToolSecretHeader = "X-Lever-Tool-Secret"
+	ToolSecretEnv    = "LEVER_TOOL_SECRET"
+)
 
 // ParamSpec is one declared argument of an Operation (drives the MCP schema).
 type ParamSpec struct{ Name, Type, Description string }
@@ -55,6 +72,12 @@ type Config struct {
 	Operations []Operation
 	EpochTTL   time.Duration // freshness cache TTL (default 5s)
 	Log        *slog.Logger
+	// Secret is the broker-to-tool shared secret (see ToolSecretHeader).
+	// Empty ⇒ read from the ToolSecretEnv environment variable, which is how
+	// the broker's supervisor delivers it. With neither set the server fails
+	// closed: every request is refused (401) — it cannot tell a brokered
+	// request from a direct dial.
+	Secret string
 }
 
 // Server is a running captool MCP server.
@@ -66,6 +89,7 @@ type Server struct {
 	ops      map[string]Operation
 	log      *slog.Logger
 	epochTTL time.Duration
+	secret   []byte // broker-to-tool shared secret; empty ⇒ refuse every request
 
 	mu      sync.Mutex
 	pubKey  ed25519.PublicKey
@@ -94,10 +118,24 @@ func New(c Config) (*Server, error) {
 		}
 		ops[o.Name] = o
 	}
+	secret := c.Secret
+	if secret == "" {
+		secret = os.Getenv(ToolSecretEnv)
+	}
+	if secret == "" {
+		c.Log.Warn("captool.no_tool_secret", "tool", c.Name,
+			"detail", "no broker tool secret (Config.Secret / "+ToolSecretEnv+"): every request will be refused; run this tool under the lever broker supervisor")
+	}
 	return &Server{
 		name: c.Name, version: c.Version, backend: c.Backend, adminURL: c.AdminURL,
-		ops: ops, log: c.Log, epochTTL: c.EpochTTL,
+		ops: ops, log: c.Log, epochTTL: c.EpochTTL, secret: []byte(secret),
 	}, nil
+}
+
+// secretOK reports whether presented is exactly the configured tool secret.
+// Constant-time on the bytes; an unconfigured (empty) secret matches nothing.
+func (s *Server) secretOK(presented string) bool {
+	return len(s.secret) > 0 && subtle.ConstantTimeCompare([]byte(presented), s.secret) == 1
 }
 
 // Handler returns the MCP-over-HTTP handler (mount on Config.Backend).

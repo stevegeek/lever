@@ -299,6 +299,10 @@ type Agent struct {
 	// 0 on a 409 "already exists"; reports "resumed" on a container whose
 	// harness dies moments later), so Phase alone is not trusted.
 	ContainerStatus string `json:"containerStatus"`
+	// Image is the container image the record was CREATED with; a resume
+	// redispatches it unchanged, so it can drift from the config's
+	// manager.image after an edit (lever#33). Doctor compares the two.
+	Image string `json:"image"`
 }
 
 // Phase values for Agent.Phase. These mirror upstream scion's agent-state wire

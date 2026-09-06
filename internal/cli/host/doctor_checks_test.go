@@ -1272,3 +1272,49 @@ func TestCheckManagerLive(t *testing.T) {
 		t.Fatalf("list error must read as not-checked with only the first line: %+v", r)
 	}
 }
+
+// TestCheckManagerImage: the manager runs the image its record was created
+// with; a resume never moves it, so a changed manager.image reads as healthy
+// on the version row alone (lever#33). This row compares the record with the
+// config and points at `lever up --fresh`.
+func TestCheckManagerImage(t *testing.T) {
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	cases := []struct {
+		label      string
+		list       agentLister
+		ok         bool
+		wantDetail string
+		wantFix    string
+	}{
+		{"same", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), true, "scionlocal/lever-claude:arm64", ""},
+		{"same, podman-qualified", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), true, "", ""},
+		{"drifted", listing(scion.Agent{Slug: "assistant", Phase: "suspended", Image: "scionlocal/lever-claude:v1"}), false, "scionlocal/lever-claude:v1", "lever up --fresh"},
+		{"no record", listing(scion.Agent{Slug: "scratch", Phase: "running", Image: "x"}), true, "not checked", ""},
+		{"record without image", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "not checked", ""},
+		{"list fails", func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, true, "not checked", ""},
+	}
+	for _, c := range cases {
+		r := checkManagerImage(context.Background(), "/lever", "assistant", "scionlocal/lever-claude:arm64", c.list)
+		if r.ok != c.ok {
+			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
+		}
+		if !strings.Contains(r.detail, c.wantDetail) {
+			t.Errorf("%s: detail %q should mention %q", c.label, r.detail, c.wantDetail)
+		}
+		if !strings.Contains(r.fix, c.wantFix) {
+			t.Errorf("%s: fix %q should mention %q", c.label, r.fix, c.wantFix)
+		}
+	}
+}
+
+// The version row's advice must name the verb that actually recreates the
+// manager: `lever stop && lever up` resumes the record on its old image.
+func TestCheckClaudeVersionAdvisesFresh(t *testing.T) {
+	p := doctorProbes{claudeVersion: func(string) (string, error) { return "2.1.240", nil }}
+	got := checkClaudeVersion("img", "", p)
+	if !strings.Contains(got.detail, "lever up --fresh") || strings.Contains(got.detail, "stop && lever up") {
+		t.Fatalf("detail = %q", got.detail)
+	}
+}

@@ -324,3 +324,26 @@ func TestLiveLoadImageTar(t *testing.T) {
 	}
 	t.Logf("loaded %s from %s; jail id %s; alias %s ok", ref, tarPath, img.ConfigDigest, alias[len(alias)-1])
 }
+
+// TestSameImageRef: the record's image may come back qualified by podman
+// (docker.io/, or the localhost/ alias the load step adds) while the config
+// names it unqualified; those are one image. A different tag is not.
+func TestSameImageRef(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"scionlocal/lever-claude:arm64", "scionlocal/lever-claude:arm64", true},
+		{"docker.io/scionlocal/lever-claude:arm64", "scionlocal/lever-claude:arm64", true},
+		{"localhost/scionlocal/lever-claude:arm64", "scionlocal/lever-claude:arm64", true},
+		{"alpine", "docker.io/library/alpine:latest", true},
+		{"scionlocal/lever-claude:latest", "scionlocal/lever-claude:arm64", false},
+		{"scionlocal/lever-claude:arm64", "scionlocal/other:arm64", false},
+		{"ghcr.io/x/y:1", "x/y:1", false},
+	}
+	for _, c := range cases {
+		if got := SameImageRef(c.a, c.b); got != c.want {
+			t.Errorf("SameImageRef(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}

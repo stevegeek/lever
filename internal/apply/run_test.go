@@ -3477,3 +3477,66 @@ func TestRunRefusesMissingTarDeps(t *testing.T) {
 	d.ImageLoadedTar = nil
 	testutil.WantErrContaining(t, d.check(), "ImageLoadedTar")
 }
+
+// runApplyFresh is runApply with the --fresh intent carried into the plan
+// (lever#33): `up` cannot delete a record while the hub is down, so the
+// converge step must do it once the hub is up.
+func runApplyFresh(app *config.App, deps Deps) error {
+	return Run(context.Background(), app, fillDeps(deps), PlanOpts{Fresh: true})
+}
+
+// TestStartManagerFreshDiscardsPresentRecord: with Fresh set, ANY present
+// record — the suspended one `lever stop` leaves, a running one, an error one
+// — is deleted and the manager created anew; nothing is resumed. Without it
+// the suspended record after `stop` was resumed on the image it was created
+// with, and --fresh was dropped silently (lever#33).
+func TestStartManagerFreshDiscardsPresentRecord(t *testing.T) {
+	for _, phase := range []string{"suspended", "stopped", "running", "error"} {
+		t.Run(phase, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			cs := "stopped"
+			if phase == "running" {
+				cs = "Up 4 days"
+			}
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: cs}
+			var logged []string
+			deps := Deps{
+				Scion: scion.New(r, scion.Options{}),
+				Log:   func(format string, a ...any) { logged = append(logged, fmt.Sprintf(format, a...)) },
+			}
+			if err := runApplyFresh(app, deps); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if r.deleteCalls != 1 || r.startCalls != 1 || r.resumeCalls != 0 {
+				t.Fatalf("delete/start/resume = %d/%d/%d, want 1/1/0 (fresh must discard the %s record and create)", r.deleteCalls, r.startCalls, r.resumeCalls, phase)
+			}
+			if !strings.Contains(strings.Join(logged, "\n"), "--fresh") {
+				t.Errorf("the discard must be announced, got %q", logged)
+			}
+		})
+	}
+}
+
+// Fresh over an ABSENT record is a plain create: nothing to delete.
+func TestStartManagerFreshWithNoRecordJustCreates(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	if err := runApplyFresh(app, Deps{Scion: scion.New(r, scion.Options{})}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.deleteCalls != 0 || r.startCalls != 1 {
+		t.Fatalf("delete/start = %d/%d, want 0/1", r.deleteCalls, r.startCalls)
+	}
+}
+
+// A delete that fails under --fresh is fatal: with the record still present,
+// resuming it would silently defeat the flag.
+func TestStartManagerFreshDeleteFailureIsFatal(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped", deleteErr: errors.New("hub: 500")}
+	err := runApplyFresh(app, Deps{Scion: scion.New(r, scion.Options{})})
+	testutil.WantErrContaining(t, err, "delete failed")
+	if r.resumeCalls != 0 || r.startCalls != 0 {
+		t.Fatalf("resume/start = %d/%d, want 0/0 after a failed --fresh delete", r.resumeCalls, r.startCalls)
+	}
+}

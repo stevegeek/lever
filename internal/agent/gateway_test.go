@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -323,8 +325,76 @@ func TestGatewayProxyIdleConnTimeout(t *testing.T) {
 }
 
 func TestGatewayRejectsNonLoopbackListen(t *testing.T) {
-	err := Gateway(GatewayConfig{Listen: "0.0.0.0:8462", BrokerURL: "https://broker.example", CAPEM: []byte("ca"), IDDir: t.TempDir()})
+	err := Gateway(context.Background(), GatewayConfig{Listen: "0.0.0.0:8462", BrokerURL: "https://broker.example", CAPEM: []byte("ca"), IDDir: t.TempDir()})
 	if !errors.Is(err, errNotLoopback) {
 		t.Fatalf("Gateway must reject a non-loopback listen addr, got err=%v", err)
+	}
+}
+
+// freeLoopbackAddr reserves and releases a loopback port so a test can hand
+// Gateway a concrete --listen it can then dial (a ":0" listen would hide the
+// chosen port inside Gateway).
+func freeLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// TestGatewayStopsOnContextCancel pins the R1 fix: main installs a
+// SIGINT/SIGTERM-bound ctx for every verb (which removes the default terminate
+// disposition), so Gateway MUST return promptly and cleanly (nil) when that ctx
+// is cancelled — otherwise the sidecar holding the agent leaf outlives a stop
+// until SIGKILL.
+func TestGatewayStopsOnContextCancel(t *testing.T) {
+	caInst, err := ca.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeLeaf(t, dir, caInst, time.Now())
+	addr := freeLoopbackAddr(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Gateway(ctx, GatewayConfig{Listen: addr, BrokerURL: "https://broker.invalid", CAPEM: caInst.CertPEM(), IDDir: dir})
+	}()
+	// Wait until the listener is actually accepting, so the cancel exercises a
+	// SERVING gateway rather than one that never got as far as Serve.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Gateway returned before the listener came up: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("gateway listener never came up on %s", addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Gateway after ctx cancel = %v, want nil (a signal is a clean stop)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Gateway did not return within 2s of ctx cancel")
+	}
+	if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+		c.Close()
+		t.Fatalf("listener on %s still accepting after Gateway returned", addr)
 	}
 }

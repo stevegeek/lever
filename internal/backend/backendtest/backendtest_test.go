@@ -3,10 +3,14 @@ package backendtest
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
 var orb = Guest{Machine: "m", User: "orb -m m", Root: "orb -u root -m m", Alias: "host.orb.internal"}
@@ -146,5 +150,39 @@ func TestRunVersionCases(t *testing.T) {
 	})
 	if len(seen) != 2 {
 		t.Fatalf("check ran %d times, want 2", len(seen))
+	}
+}
+
+// TestStageFakeBuildOutputIsolatesTheUserCache: the staged file lands under
+// a per-test HOME, never under the operator's real cache dir — two packages
+// staging the same machine name in parallel test processes must not race
+// on one real path or leave directories behind.
+func TestStageFakeBuildOutputIsolatesTheUserCache(t *testing.T) {
+	realCache, err := os.UserCacheDir()
+	if err != nil {
+		t.Skip("no user cache dir:", err)
+	}
+	realHome := os.Getenv("HOME")
+	const machine = "lever-backendtest-isolation"
+
+	StageFakeBuildOutput(t, machine)
+
+	home := os.Getenv("HOME")
+	if home == realHome {
+		t.Fatal("HOME must point at a per-test directory after staging")
+	}
+	p, err := scionbin.OutputPath(machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(p, home+string(filepath.Separator)) {
+		t.Fatalf("staged path %q is not under the isolated HOME %q", p, home)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("staged file missing: %v", err)
+	}
+	realPath := filepath.Join(realCache, "lever", "scion-bin", "lever-scion-"+machine)
+	if _, err := os.Lstat(realPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("real cache path %q must stay untouched (err=%v)", realPath, err)
 	}
 }

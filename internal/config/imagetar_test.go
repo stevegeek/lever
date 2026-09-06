@@ -113,3 +113,29 @@ func TestNoImageTarMeansNoPath(t *testing.T) {
 		t.Fatalf("unset image_tar must resolve to \"\", got %q", got)
 	}
 }
+
+// ImageTagPolicy is the archive-tag check apply hands jail.LoadImageTar (R4):
+// nil when no registry allowlist is configured, else the same prefix rule
+// validateImage applies to the config's own refs.
+func TestImageTagPolicy(t *testing.T) {
+	var s Security
+	if s.ImageTagPolicy() != nil {
+		t.Fatal("no allowed_image_registries: want a nil policy (no check)")
+	}
+	s.AllowedImageRegistries = []string{"scionlocal", "ghcr.io/stevegeek"}
+	pol := s.ImageTagPolicy()
+	if pol == nil {
+		t.Fatal("allowlist configured: want a policy")
+	}
+	for _, ok := range []string{"scionlocal/lever-claude:arm64", "scionlocal", "ghcr.io/stevegeek/x:v1"} {
+		if err := pol(ok); err != nil {
+			t.Errorf("%q: want allowed, got %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"scionlocalevil/x:latest", "alpine:latest", "docker.io/scionlocal/x", "ghcr.io/other/x"} {
+		err := pol(bad)
+		if err == nil || !strings.Contains(err.Error(), bad) || !strings.Contains(err.Error(), "allowed registry") {
+			t.Errorf("%q: want a refusal naming the ref and the allowlist, got %v", bad, err)
+		}
+	}
+}

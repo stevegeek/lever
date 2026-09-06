@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/mcp"
 )
@@ -96,5 +98,39 @@ func TestServeStdioLineCapMatchesHTTPBodyCap(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("over-cap line was answered: %q", out.String())
+	}
+}
+
+// TestServeStdioReturnsOnContextCancel pins the R1 fix for serve-capability:
+// the verb's ctx is SIGINT/SIGTERM-bound, so ServeStdio must return promptly
+// (and cleanly, nil) on cancel even while blocked waiting for the next line on
+// a stdin that never closes — rather than only cancelling an in-flight broker
+// call and going back to the read.
+func TestServeStdioReturnsOnContextCancel(t *testing.T) {
+	srv := NewMCPServer(MCPConfig{BrokerURL: "https://broker.invalid", AgentCN: "worker", Client: http.DefaultClient})
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	t.Cleanup(func() { inW.Close(); outR.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ServeStdio(ctx, inR, outW, srv) }()
+
+	// Prove the loop is live before cancelling: one message in, one reply out.
+	if _, err := io.WriteString(inW, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bufio.NewReader(outR).ReadString('\n')
+	if err != nil || !strings.Contains(reply, `"result"`) {
+		t.Fatalf("first message not answered: %q, %v", reply, err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeStdio after ctx cancel = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeStdio did not return within 2s of ctx cancel while blocked on stdin")
 	}
 }

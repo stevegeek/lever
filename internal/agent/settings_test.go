@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,5 +87,49 @@ func TestWriteSettingsEnvRejectsCorruptExisting(t *testing.T) {
 	}
 	if err := WriteSettingsEnv(path, map[string]string{"X": "y"}); err == nil {
 		t.Fatal("a corrupt settings.json must not be silently overwritten")
+	}
+}
+
+// settings.json is read-modify-written by boot as ROOT (scion pre-start hook)
+// under the agent-writable $HOME: a symlink at ~/.claude or at settings.json
+// must be refused by name, with no write through the link.
+func TestWriteSettingsEnvRefusesSymlinkedFile(t *testing.T) {
+	home := t.TempDir()
+	victim := filepath.Join(home, "victim.json")
+	if err := os.WriteFile(victim, []byte(`{"model":"keep"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".claude")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "settings.json")
+	if err := os.Symlink(victim, path); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteSettingsEnv(path, map[string]string{"X": "y"})
+	if !errors.Is(err, errRefusedPath) {
+		t.Fatalf("WriteSettingsEnv over a symlink: err = %v, want errRefusedPath", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != `{"model":"keep"}` {
+		t.Fatalf("victim rewritten through the link: %s", got)
+	}
+}
+
+func TestWriteSettingsEnvRefusesSymlinkedDir(t *testing.T) {
+	home := t.TempDir()
+	victim := filepath.Join(home, "victim")
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(home, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteSettingsEnv(filepath.Join(home, ".claude", "settings.json"), map[string]string{"X": "y"})
+	if !errors.Is(err, errRefusedPath) {
+		t.Fatalf("WriteSettingsEnv under a symlinked dir: err = %v, want errRefusedPath", err)
+	}
+	if _, serr := os.Lstat(filepath.Join(victim, "settings.json")); !errors.Is(serr, fs.ErrNotExist) {
+		t.Fatal("settings.json was written through the linked dir")
 	}
 }

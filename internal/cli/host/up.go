@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // phaseOrAbsent treats a failed phase probe as "absent" (no manager found)
@@ -167,7 +168,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
 			}
-			return execAttach(b, sc, app.Name, project)
+			return execAttach(cmd.Context(), b, sc, app.Name, project)
 		},
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
@@ -189,14 +190,15 @@ func upProbeNotice(probeErr error, fresh bool) string {
 	return fmt.Sprintf("No running manager (%s) — bringing the application up.", reason)
 }
 
-// firstLine returns the first line of s, trimmed of surrounding whitespace.
-// Used to keep scion's raw CLI errors — which can carry an entire usage dump
-// after the first line — down to one short, printable reason.
+// firstLine returns the first line of s, trimmed of surrounding whitespace
+// and sanitized for the terminal. Used to keep scion's raw CLI errors —
+// which can carry an entire usage dump after the first line, and which the
+// jail can lace with escape sequences — down to one short, printable reason.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	return strings.TrimSpace(s)
+	return termsafe.Sanitize(strings.TrimSpace(s))
 }
 
 func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (string, error) {

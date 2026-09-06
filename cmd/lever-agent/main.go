@@ -41,8 +41,11 @@ func run(argv []string) error {
 		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call>")
 	}
 	// One signal-bound context for every verb: SIGINT/SIGTERM cancels the
-	// network call in flight (or the renew loop) instead of leaving the
-	// process hanging in a dial or a read.
+	// network call in flight (or the renew loop, the gateway listener, the
+	// serve-capability stdin read) instead of leaving the process hanging in a
+	// dial or a read. NotifyContext replaces the default terminate disposition,
+	// so every long-lived verb MUST return on ctx.Done or it outlives the
+	// signal until SIGKILL.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	switch argv[1] {
@@ -53,7 +56,7 @@ func run(argv []string) error {
 	case "renew":
 		return cmdRenew(ctx, argv[2:])
 	case "gateway":
-		return cmdGateway(argv[2:])
+		return cmdGateway(ctx, argv[2:])
 	case "provision":
 		return cmdProvision(ctx, argv[2:])
 	case "request", "delegate", "call":
@@ -326,8 +329,9 @@ func cmdRenew(ctx context.Context, args []string) error {
 // cert for its process lifetime, so it can't follow the 24h-TTL leaf's rotation).
 // Claude talks plaintext to --listen; the proxy re-reads <id-dir>/agent.{crt,key}
 // per handshake. Flags: --id-dir, --broker-url / --bootstrap (broker URL + CA),
-// --listen (loopback only).
-func cmdGateway(args []string) error {
+// --listen (loopback only). Serves until the signal-bound ctx is cancelled,
+// then shuts the listener down and returns nil (exit 0).
+func cmdGateway(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity (cert+key+ca)", "path to bootstrap.json (for broker URL + CA)")
 	listen := fs.String("listen", agent.LocalGatewayAddr, "loopback address to serve plaintext MCP/LLM traffic on")
@@ -349,7 +353,7 @@ func cmdGateway(args []string) error {
 	if len(caPEM) == 0 {
 		return fmt.Errorf("gateway: no CA found in %s or bootstrap", *idDir)
 	}
-	return agent.Gateway(agent.GatewayConfig{Listen: *listen, BrokerURL: bURL, CAPEM: caPEM, IDDir: *idDir})
+	return agent.Gateway(ctx, agent.GatewayConfig{Listen: *listen, BrokerURL: bURL, CAPEM: caPEM, IDDir: *idDir})
 }
 
 // bootstrapPathOrDefault resolves an empty --bootstrap the same way

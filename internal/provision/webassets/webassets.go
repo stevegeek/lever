@@ -96,9 +96,10 @@ func SourceDir(ctx context.Context, r proc.Runner, spec scionbin.Spec) (string, 
 
 // CacheRoot is the host directory holding per-pin scion web builds.
 //
-// A user CACHE directory, not TempDir where the cross-compiled scion binary
-// goes: that binary is one file that Go's build cache reproduces in seconds,
-// whereas this holds a ~280-package node_modules per pin and losing it to a
+// A user CACHE directory, like the cross-compiled scion binary and the login
+// forwarder (scionbin.OutputDir, loginfwd) since the shared-/tmp fix: those
+// are single files Go's build cache reproduces in seconds, whereas this
+// holds a ~280-package node_modules per pin and losing it to a
 // tmp sweep costs a full re-download. Exported so `lever doctor` can probe the
 // node toolchain from the SAME directory the build will run in — see
 // CheckNodeToolchain.

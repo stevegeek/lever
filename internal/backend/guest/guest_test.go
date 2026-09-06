@@ -596,3 +596,88 @@ func TestInstallRootBinaryRefusesShortStream(t *testing.T) {
 		t.Fatalf("installed = %q, %v", data, err)
 	}
 }
+
+// swapOnProbe is a Runner that alters the host artifact the moment the guest
+// digest probe runs — that is, BETWEEN the host-side hash and the stream into
+// the guest — the way another local user could on a shared /tmp. rename
+// replaces the path with a new inode (the classic swap); otherwise the bytes
+// are rewritten in place through the same inode.
+type swapOnProbe struct {
+	*proc.FakeRunner
+	path   string
+	with   string
+	rename bool
+}
+
+func (s *swapOnProbe) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if slices.Contains(args, "/usr/bin/sha256sum") {
+		if s.rename {
+			tmp := s.path + ".swap"
+			if err := os.WriteFile(tmp, []byte(s.with), 0o755); err != nil {
+				panic(err)
+			}
+			if err := os.Rename(tmp, s.path); err != nil {
+				panic(err)
+			}
+		} else if err := os.WriteFile(s.path, []byte(s.with), 0o755); err != nil {
+			panic(err)
+		}
+	}
+	return s.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (s *swapOnProbe) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return s.RunIn(ctx, "", env, name, args...)
+}
+
+// TestInstallIfChangedStreamsTheBytesItHashed: the bytes that reach the guest
+// must be the bytes the host hashed. Hashing by path and then reopening by
+// path leaves a window in which the path can be pointed at a different file;
+// holding one descriptor from hash to stream closes it.
+func TestInstallIfChangedStreamsTheBytesItHashed(t *testing.T) {
+	local, _ := stageBinary(t, "scion-bytes")
+	shape := prefixShapes("lever-jail")[0]
+	f := proc.NewFakeRunner()
+	f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", proc.Result{Code: 1})
+	f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
+	r := &swapOnProbe{FakeRunner: f, path: local, with: "evil-bytes!", rename: true}
+	g := Guest{Host: r, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
+
+	installed, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion")
+	if err != nil {
+		t.Fatalf("InstallRootBinaryIfChanged: %v", err)
+	}
+	if !installed || installCalls(f) != 1 {
+		t.Fatalf("installed=%v, install calls=%d", installed, installCalls(f))
+	}
+	for _, c := range f.Calls {
+		if len(c.Args) > 1 && c.Args[len(c.Args)-2] == "-c" && strings.Contains(c.Args[len(c.Args)-1], "cat > ") {
+			if c.Stdin != "scion-bytes" {
+				t.Fatalf("the guest received %q, not the bytes the host hashed", c.Stdin)
+			}
+		}
+	}
+}
+
+// TestInstallIfChangedRefusesBytesThatChangedUnderTheHandle: a writer that
+// holds the same inode (same-size rewrite, so the guest's byte count still
+// matches) is the one case a single descriptor cannot prevent. The stream is
+// hashed on the way out and compared with what was verified, so it fails
+// loudly instead of silently trusting what arrived.
+func TestInstallIfChangedRefusesBytesThatChangedUnderTheHandle(t *testing.T) {
+	local, _ := stageBinary(t, "scion-bytes")
+	shape := prefixShapes("lever-jail")[0]
+	f := proc.NewFakeRunner()
+	f.Script(strings.Join(shape.userPrefix, " ")+" /usr/bin/sha256sum", proc.Result{Code: 1})
+	f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
+	r := &swapOnProbe{FakeRunner: f, path: local, with: "evil-bytes!"} // same length, same inode
+	g := Guest{Host: r, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-jail"}
+
+	_, err := g.InstallRootBinaryIfChanged(context.Background(), local, "/usr/local/bin/scion")
+	if err == nil {
+		t.Fatal("expected an error when the streamed bytes do not hash to what was verified")
+	}
+	if !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("error should say the file changed under the install: %v", err)
+	}
+}

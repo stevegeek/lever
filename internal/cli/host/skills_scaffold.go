@@ -21,7 +21,10 @@ import (
 // hashes recorded in the state dir's state.State.Skills file, with
 // owner-blessed customizations tracked in state.State.SkillsAdopted
 // (`init --adopt`).
-// Pure file operations — no jail interaction.
+// Pure file operations — no jail interaction. Every read and write of a
+// tree file goes through fsutil.ReadInTree/WriteInTree: the tree is
+// agent-writable, so a scaffold path replaced by a symlink out of the tree
+// (to lever.yaml, the state dir, a shell rc) is refused rather than followed.
 
 type skillAction string
 
@@ -130,14 +133,13 @@ func syncSkills(app *config.App, stateDir state.State, force, check bool) ([]ski
 	var results []skillSyncResult
 	dirty, adoptedDirty := false, false
 	for _, tgt := range skillTargets(app) {
-		abs := filepath.Join(app.Tree, filepath.FromSlash(tgt.relPath))
 		want := skills.Hash(tgt.content)
 		recorded, hasRecord := st[tgt.relPath]
 		adoptedHash, hasAdopted := adopted[tgt.relPath]
-		onDisk, readErr := os.ReadFile(abs)
+		onDisk, readErr := fsutil.ReadInTree(app.Tree, tgt.relPath)
 		exists := readErr == nil
 		if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
-			return nil, fmt.Errorf("read %s: %w", abs, readErr)
+			return nil, fmt.Errorf("read %s: %w", tgt.relPath, readErr)
 		}
 		var onDiskHash string
 		if exists {
@@ -147,11 +149,8 @@ func syncSkills(app *config.App, stateDir state.State, force, check bool) ([]ski
 			hasRecord && onDiskHash == recorded,
 			hasAdopted && onDiskHash == adoptedHash, force, check)
 		if write {
-			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-				return nil, err
-			}
-			if err := os.WriteFile(abs, tgt.content, 0o644); err != nil {
-				return nil, err
+			if err := fsutil.WriteInTree(app.Tree, tgt.relPath, tgt.content, 0o644); err != nil {
+				return nil, fmt.Errorf("write %s: %w", tgt.relPath, err)
 			}
 			// Content is the framework scaffold again — any adoption record
 			// would bless content that no longer exists.
@@ -234,15 +233,35 @@ func claudeMDBlock() string {
 		skillMarkerEnd
 }
 
-// writeClaudeMDWithBlock rewrites CLAUDE.md so it carries the current marker
-// block: replaced in place when markers exist, appended otherwise.
-func writeClaudeMDWithBlock(path, s, block string) error {
+// writeClaudeMDWithBlock rewrites the tree's CLAUDE.md so it carries the
+// current marker block: replaced in place when markers exist, appended
+// otherwise. Written in place (not by rename) so a CLAUDE.md that is itself
+// a symlink inside the tree keeps working and keeps its mode; a link that
+// leaves the tree is refused (fsutil.ErrEscapesTree).
+func writeClaudeMDWithBlock(tree, s, block string) error {
 	begin := strings.Index(s, skillMarkerBegin)
 	end := strings.Index(s, skillMarkerEnd)
 	if begin == -1 || end == -1 || end < begin {
-		return os.WriteFile(path, []byte(s+"\n"+block+"\n"), 0o644)
+		return writeClaudeMD(tree, s+"\n"+block+"\n")
 	}
-	return os.WriteFile(path, []byte(s[:begin]+block+s[end+len(skillMarkerEnd):]), 0o644)
+	return writeClaudeMD(tree, s[:begin]+block+s[end+len(skillMarkerEnd):])
+}
+
+func writeClaudeMD(tree, content string) error {
+	if err := fsutil.WriteInTree(tree, claudeMDAdoptKey, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", claudeMDAdoptKey, err)
+	}
+	return nil
+}
+
+// readClaudeMD reads the tree's CLAUDE.md through the tree confinement (the
+// file is agent-writable; see fsutil.ReadInTree). Absent is fs.ErrNotExist.
+func readClaudeMD(tree string) ([]byte, error) {
+	b, err := fsutil.ReadInTree(tree, claudeMDAdoptKey)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read %s: %w", claudeMDAdoptKey, err)
+	}
+	return b, err
 }
 
 // claudeMDBlockCurrent reports whether s carries the current marker block.
@@ -258,9 +277,8 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(tree, "CLAUDE.md")
 	block := claudeMDBlock()
-	b, err := os.ReadFile(path)
+	b, err := readClaudeMD(tree)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if check {
@@ -273,7 +291,7 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 				return "", err
 			}
 		}
-		return skillCreated, os.WriteFile(path, []byte(block+"\n"), 0o644)
+		return skillCreated, writeClaudeMD(tree, block+"\n")
 	case err != nil:
 		return "", err
 	}
@@ -293,7 +311,7 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 		if err := saveAdoptedState(stateDir, adopted); err != nil {
 			return "", err
 		}
-		return skillForced, writeClaudeMDWithBlock(path, s, block)
+		return skillForced, writeClaudeMDWithBlock(tree, s, block)
 	}
 	begin := strings.Index(s, skillMarkerBegin)
 	end := strings.Index(s, skillMarkerEnd)
@@ -301,7 +319,7 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 		if check {
 			return skillMissing, nil
 		}
-		return skillCreated, writeClaudeMDWithBlock(path, s, block)
+		return skillCreated, writeClaudeMDWithBlock(tree, s, block)
 	}
 	current := s[begin : end+len(skillMarkerEnd)]
 	if current == block {
@@ -310,7 +328,7 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 	if check {
 		return skillStale, nil
 	}
-	return skillRefreshed, writeClaudeMDWithBlock(path, s, block)
+	return skillRefreshed, writeClaudeMDWithBlock(tree, s, block)
 }
 
 // skillsUpToDate is doctor's predicate over a check-mode run. An adopted
@@ -355,14 +373,13 @@ func adoptSkills(app *config.App, stateDir state.State) ([]skillSyncResult, erro
 		}
 	}
 	for _, tgt := range skillTargets(app) {
-		abs := filepath.Join(app.Tree, filepath.FromSlash(tgt.relPath))
-		onDisk, readErr := os.ReadFile(abs)
+		onDisk, readErr := fsutil.ReadInTree(app.Tree, tgt.relPath)
 		switch {
 		case errors.Is(readErr, fs.ErrNotExist):
 			results = append(results, skillSyncResult{RelPath: tgt.relPath, Action: skillMissing})
 			continue
 		case readErr != nil:
-			return nil, fmt.Errorf("read %s: %w", abs, readErr)
+			return nil, fmt.Errorf("read %s: %w", tgt.relPath, readErr)
 		}
 		onDiskHash := skills.Hash(onDisk)
 		if onDiskHash == skills.Hash(tgt.content) {
@@ -384,7 +401,7 @@ func adoptSkills(app *config.App, stateDir state.State) ([]skillSyncResult, erro
 	// adopting a CLAUDE.md that deliberately omits the block is the point.
 	// But a file carrying the current block needs no baseline (and a record
 	// would freeze future block refreshes).
-	b, err := os.ReadFile(filepath.Join(app.Tree, "CLAUDE.md"))
+	b, err := readClaudeMD(app.Tree)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		results = append(results, skillSyncResult{RelPath: claudeMDAdoptKey, Action: skillMissing})

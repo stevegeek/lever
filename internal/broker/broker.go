@@ -59,6 +59,7 @@ type Config struct {
 	LLM         LLMConfig
 	Dispatch    DispatchConfig
 	Directives  DirectiveConfig
+	Timeouts    TimeoutConfig
 
 	// Log receives the audit decisions; nil ⇒ a discard logger.
 	Log *slog.Logger
@@ -69,6 +70,13 @@ type Config struct {
 	// instead of silently reusing it (#19). Both optional (empty = unreported).
 	Version    string
 	ConfigHash string
+	// ToolSecret is the per-boot broker-to-tool shared secret (minted by
+	// brokerctl.Serve, delivered to each supervised first-party tool through
+	// its environment). The gateway presents it in X-Lever-Tool-Secret on
+	// every request it proxies to a FIRST-PARTY tool; captool refuses a
+	// request without it, so X-Lever-Caller is never trusted on a direct dial
+	// past the broker. Empty ⇒ no header is sent (tests, embedders).
+	ToolSecret string
 }
 
 // IdentityConfig is the broker's keys, CA and policy: everything that decides
@@ -162,7 +170,7 @@ type DispatchConfig struct {
 	// staging enrolment material. Everything below it is agent-writable and the
 	// broker writes there as the operator, so wire.Stage confines every write to
 	// this root and refuses agent-planted symlinks. Empty ⇒ the staging
-	// directory's parent is used instead (tests); see Broker.stagingPath.
+	// directory's parent is used instead (tests); see Broker.treePath.
 	Tree string
 	// LiveSettle is how long a freshly started or resumed worker must STAY
 	// live before its dispatch is reported as up (scion.LiveBudget.Settle,
@@ -173,6 +181,36 @@ type DispatchConfig struct {
 	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
 	// Empty disables manager healing (audited as an error on lapse).
 	ManagerBootstrapDir string
+}
+
+// TimeoutConfig bounds request handling on the jail listener, per route
+// class. The listener itself sets only ReadHeaderTimeout and IdleTimeout — a
+// server-level ReadTimeout/WriteTimeout would cut a streamed /llm completion
+// — so these are applied per route (see JailHandler). Zero fields take the
+// defaults; tests shrink them. There is deliberately no handler bound for
+// the /mcp/<name>/ and /worker/* routes: a tool call may stream and a
+// dispatch may legitimately run long (JailHandler says why).
+type TimeoutConfig struct {
+	// Body bounds how long a client may take to deliver its request body, on
+	// EVERY jail route including /llm (a read deadline on the connection).
+	Body time.Duration
+	// Control bounds the JSON control routes (provision, worker list, msg,
+	// directive, enrol, renew, request, tools): handler start to response.
+	Control time.Duration
+}
+
+// Default jail route deadlines (TimeoutConfig).
+const (
+	defaultJailBodyTimeout    = 30 * time.Second
+	defaultJailControlTimeout = 30 * time.Second
+)
+
+// withDefaults fills every zero field of tc.
+func (tc TimeoutConfig) withDefaults() TimeoutConfig {
+	return TimeoutConfig{
+		Body:    cmp.Or(tc.Body, defaultJailBodyTimeout),
+		Control: cmp.Or(tc.Control, defaultJailControlTimeout),
+	}
 }
 
 // DirectiveConfig configures the operator-directive UDS admin channel.
@@ -252,6 +290,8 @@ type Broker struct {
 
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
+	toolSecret string // presented to first-party tools (see Config.ToolSecret)
+	timeouts   TimeoutConfig
 }
 
 // New builds a Broker from c.
@@ -286,7 +326,8 @@ func New(c Config) *Broker {
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
-		log: c.Log, version: c.Version, configHash: c.ConfigHash,
+		log: c.Log, version: c.Version, configHash: c.ConfigHash, toolSecret: c.ToolSecret,
+		timeouts: c.Timeouts.withDefaults(),
 		// persisted state
 		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
 		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),

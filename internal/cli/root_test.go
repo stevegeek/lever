@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -42,5 +43,40 @@ func TestFormatVersion(t *testing.T) {
 		if got := formatVersion(c.base, c.rev, c.dirty, c.modVer); got != c.want {
 			t.Errorf("%s: formatVersion(%q,%q,%v,%q) = %q, want %q", c.name, c.base, c.rev, c.dirty, c.modVer, got, c.want)
 		}
+	}
+}
+
+// TestExecutePrintsErrorsSanitized: a returned error is printed by Execute,
+// not cobra, so guest-supplied text in it (a scion stderr line, a hub slug)
+// reaches the terminal with its escape sequences stripped. The exit code
+// stays 1 on error, 0 otherwise, and success prints nothing.
+func TestExecutePrintsErrorsSanitized(t *testing.T) {
+	newRoot := func(err error) *cobra.Command {
+		root := &cobra.Command{Use: "lever"}
+		root.AddCommand(&cobra.Command{
+			Use:          "boom",
+			SilenceUsage: true,
+			RunE:         func(*cobra.Command, []string) error { return err },
+		})
+		root.SetArgs([]string{"boom"})
+		return root
+	}
+	var stderr bytes.Buffer
+	root := newRoot(errors.New("scion: \x1b]0;pwned\x07\x1b[2K\x1b[1;32mall good\x1b[0m"))
+	root.SetOut(&stderr) // usage, were it printed, would land here too
+	root.SetErr(&stderr)
+	if code := Execute(root, &stderr); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if got, want := stderr.String(), "Error: scion: all good\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+
+	stderr.Reset()
+	if code := Execute(newRoot(nil), &stderr); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("success must print nothing: %q", stderr.String())
 	}
 }

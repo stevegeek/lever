@@ -51,6 +51,19 @@ mechanism, viewed at the manager's wider scope. A compromised *manager* therefor
 whole-tree reach ([§7](/security-model/compromise/)); this isolation guarantee is about one *worker* reaching another worker's
 subdirectory, not about bounding the manager.
 
+**Residual: a compromised manager can hold a worker's identity.** A worker's enrolment ticket is
+staged at `<tree>/<dir>/.lever/bootstrap.json` — inside the worker's subdirectory, which is inside
+the manager's whole-tree mount — and the jail listener's `/provision` route mints a fresh ticket
+for any declared worker to the manager (the acceptance harness uses it). Between staging and the
+worker's boot the ticket is unspent, and `/enrol` signs any CSR whose CN matches the ticket, so a
+manager that redeems it first enrols *as* that worker: it gains the worker's `obtain:` grants, its
+inbox, and any operator directive targeted at it (the enrolment bumps the worker's directive
+generation, so the real worker's later boot fails to enrol and the substitution is visible in the
+broker audit log, not silent). Worker-only grants and worker-targeted directives are therefore
+**not manager-proof** today. The fix — staging worker tickets outside the manager's mount, and
+retiring the jail-side `/provision` route once the acceptance harness no longer needs it — is
+future work; until then, treat every worker grant as reachable by the manager.
+
 **Scion's default shared directory is removed, because it would defeat this.** The hub stamps a
 `scratchpad` shared directory on every new project and mounts it **read-write into every agent of that project**,
 at `/scion-volumes/scratchpad`. That is a writable channel between the manager and every worker, and
@@ -114,6 +127,9 @@ It is:
   already has agents to recover automatically, and re-minting is not attempted behind your back.
 - **Injected only into lever's own host-side Scion client calls**, as the `SCION_HUB_TOKEN`
   environment variable, by the capability broker and by `lever attach`/`lever msg`/`lever stop`.
+  It is handed to the guest on the child's stdin (or, for the interactive attach, through a 0600
+  file under the run user's `XDG_RUNTIME_DIR`), never on the host command line, so `ps` on the
+  host does not show it.
 - **Not the only host-side PAT.** A second, narrower host-side PAT
   (`agent:read,agent:list,project:read,agent:attach`) is minted in the same window when
   `remote.enabled: true`, for the remote-access proxy only; it is also stored under `.lever-state/`

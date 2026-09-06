@@ -9,9 +9,12 @@
 package cli
 
 import (
+	"fmt"
+	"io"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 const Version = "0.21.0"
@@ -64,4 +67,20 @@ func formatVersion(base, rev string, dirty bool, modVersion string) string {
 	default:
 		return base
 	}
+}
+
+// Execute runs root and returns the process exit code: 0, or 1 when a
+// command returned an error. The error line is printed here, not by cobra:
+// an error can wrap text the jail chose (scion's stderr, a hub slug, a
+// container status), and cobra's own `Error: <err>` would relay it raw. The
+// line is passed through termsafe.Sanitize first. Execute sets
+// SilenceErrors on root so cobra prints nothing; SilenceUsage is left to
+// each command as before.
+func Execute(root *cobra.Command, stderr io.Writer) int {
+	root.SilenceErrors = true
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(stderr, "Error:", termsafe.Sanitize(err.Error()))
+		return 1
+	}
+	return 0
 }

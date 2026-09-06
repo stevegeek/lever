@@ -81,3 +81,52 @@ func TestCheckInstructions(t *testing.T) {
 		t.Fatalf("file:// anywhere but the start is plain text: %v", err)
 	}
 }
+
+// A task is never a flag. scion's start parses flags interspersed with
+// positionals, so a task beginning with "-" is refused by name (lever's argv
+// puts it behind `--` anyway — this is the second layer). Leading whitespace
+// or a dash later in the text is not a flag to cobra and passes.
+func TestCheckTaskRefusesLeadingDash(t *testing.T) {
+	for _, task := range []string{"-", "--", "-b", "--config=/lever/x.json", "--no-auth"} {
+		err := CheckTask(task)
+		var fe *TaskFlagError
+		if !errors.As(err, &fe) {
+			t.Fatalf("CheckTask(%q) = %v, want *TaskFlagError", task, err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "flag") || !strings.Contains(msg, "-") {
+			t.Fatalf("CheckTask(%q) error must name the reason, got %q", task, msg)
+		}
+	}
+	for _, task := range []string{"", "do x", " -not a flag", "fix --config handling", "a\n- list"} {
+		if err := CheckTask(task); err != nil {
+			t.Fatalf("CheckTask(%q) = %v, want nil", task, err)
+		}
+	}
+}
+
+// The size rule still holds for a task that also begins with "-": whichever
+// error comes first, an over-budget task never passes.
+func TestCheckTaskSizeRuleSurvivesFlagRule(t *testing.T) {
+	if err := CheckTask(strings.Repeat("x", TaskArgvBudget+1)); err == nil {
+		t.Fatal("over-budget task must still be refused")
+	}
+	if err := CheckTask(strings.Repeat("-", TaskArgvBudget+1)); err == nil {
+		t.Fatal("over-budget flag-shaped task must be refused")
+	}
+}
+
+// TestCheckTaskFlagRuleIsShapeNotPrefix: only a flag SHAPE is refused. A
+// markdown list item or a negative number starts with "-" and is a task.
+func TestCheckTaskFlagRuleIsShapeNotPrefix(t *testing.T) {
+	for _, task := range []string{"- do the thing\n- then this", "-1 is the answer", "-. odd but not a flag"} {
+		if err := CheckTask(task); err != nil {
+			t.Errorf("CheckTask(%q) = %v, want nil (not flag-shaped)", task, err)
+		}
+	}
+	for _, task := range []string{"-b", "--config=/lever/x.json", "--", "-", "---", "--no-auth rest", "-a rest"} {
+		var fe *TaskFlagError
+		if err := CheckTask(task); !errors.As(err, &fe) {
+			t.Errorf("CheckTask(%q) = %v, want *TaskFlagError", task, err)
+		}
+	}
+}

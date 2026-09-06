@@ -227,3 +227,79 @@ func TestLLMProxyRevokedDenyAuditCarriesTokenID(t *testing.T) {
 		t.Fatalf("revoked llm deny must carry the token id %q, got: %s", id, out)
 	}
 }
+
+// capability(llm) is a Messages-API capability, not a blanket pass to the
+// upstream: only the endpoints Claude Code uses through ANTHROPIC_BASE_URL
+// are proxied. Anything else the Console key would permit (files, batches,
+// admin, or a wrong method on a permitted path) is refused with an audit line
+// and never reaches the upstream.
+func TestLLMProxyAllowlistsMessagesAPIPaths(t *testing.T) {
+	cases := []struct {
+		method, path string
+		allowed      bool
+	}{
+		{http.MethodPost, "/llm/v1/messages", true},
+		{http.MethodPost, "/llm/v1/messages?beta=true", true},
+		{http.MethodPost, "/llm/v1/messages/count_tokens", true},
+		{http.MethodGet, "/llm/v1/models", true},
+		{http.MethodGet, "/llm/v1/models/claude-opus-5", true},
+		{http.MethodGet, "/llm/v1/models/claude-3-5-sonnet-20241022", true},
+		{http.MethodGet, "/llm/v1/models/org:custom_model.v2", true},
+
+		{http.MethodGet, "/llm/v1/messages", false},
+		{http.MethodDelete, "/llm/v1/messages", false},
+		{http.MethodPost, "/llm/v1/models", false},
+		{http.MethodPost, "/llm/v1/messages/batches", false},
+		{http.MethodGet, "/llm/v1/messages/batches/mb_1", false},
+		{http.MethodPost, "/llm/v1/files", false},
+		{http.MethodGet, "/llm/v1/files/file_1/content", false},
+		{http.MethodGet, "/llm/v1/organizations/me", false},
+		{http.MethodGet, "/llm/v1/models/", false},
+		{http.MethodGet, "/llm/v1/models/a/b", false},
+		// The model id is charset-restricted, not merely slash-free: a
+		// percent-encoded traversal (or any encoded byte) must not reach the
+		// upstream, which would decode it into a different path.
+		{http.MethodGet, "/llm/v1/models/..%2F..%2Ffiles", false},
+		{http.MethodGet, "/llm/v1/models/%2E%2E", false},
+		{http.MethodGet, "/llm/v1/models/claude%2Dopus-5", false},
+		{http.MethodGet, "/llm/v1/models/claude%20opus", false},
+		{http.MethodGet, "/llm/v1/models/claude-opus-5?x=1", true},
+		{http.MethodGet, "/llm/v1/models/claude-opus-5;v=2", false},
+		{http.MethodGet, "/llm/v1/models/model@2", false},
+		{http.MethodPost, "/llm/v1/messages/", false},
+		{http.MethodPost, "/llm/v1/%6Dessages", false}, // percent-encoded: EscapedPath is matched, not the decoded Path
+		{http.MethodPost, "/llm/", false},
+	}
+	for _, c := range cases {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			var gotKey, gotAuth string
+			up := fakeAnthropic(t, &gotKey, &gotAuth)
+			defer up.Close()
+			b, caller := newTestBrokerForLLM(t, []byte("sk-REAL-KEY"), up.URL)
+			var buf bytes.Buffer
+			b.log = slog.New(slog.NewTextHandler(&buf, nil))
+			tok := mintLLM(t, b.keys.Private, caller, b.MinEpoch())
+
+			rec := httptest.NewRecorder()
+			req := newMTLSRequest(t, b, caller, c.method, c.path, strings.NewReader(`{}`))
+			req.Header.Set("Authorization", "Bearer "+tok)
+			b.JailHandler().ServeHTTP(rec, req)
+
+			if c.allowed {
+				if rec.Code != http.StatusOK || gotKey != "sk-REAL-KEY" {
+					t.Fatalf("status=%d upstream key=%q; want proxied 200", rec.Code, gotKey)
+				}
+				return
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status=%d, want 403 for a non-allowlisted path", rec.Code)
+			}
+			if gotKey != "" {
+				t.Fatal("SECURITY: non-allowlisted path reached the upstream with the real key")
+			}
+			if !strings.Contains(buf.String(), "path not allowlisted") {
+				t.Fatalf("deny must be audited; log=%s", buf.String())
+			}
+		})
+	}
+}

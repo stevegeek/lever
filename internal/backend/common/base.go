@@ -223,8 +223,8 @@ func (b *Base) ImageLoaded(ctx context.Context, imageRef string) bool {
 
 // LoadImageTar streams a docker archive on the host into the jail's rootless
 // podman; see jail.LoadImageTar.
-func (b *Base) LoadImageTar(ctx context.Context, imageRef, tarPath string) error {
-	return jail.LoadImageTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath)
+func (b *Base) LoadImageTar(ctx context.Context, imageRef, tarPath string, allowTag func(ref string) error) error {
+	return jail.LoadImageTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath, allowTag)
 }
 
 // ImageLoadedTar reports whether the jail already holds imageRef at the

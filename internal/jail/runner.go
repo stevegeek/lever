@@ -4,16 +4,19 @@
 // by `env [-C dir] K=V… cmd args`. GNU `env` sets the jail environment (and
 // cwd via -C) with no shell quoting, so scion.Client runs unchanged inside the
 // jail. The host runner it wraps is the real one (the prefix binary runs on
-// the host).
+// the host). The one exception to `env K=V` is the controller PAT
+// (SCION_HUB_TOKEN), which the host argv must never carry — see hubtoken.go.
 package jail
 
 import (
 	"context"
 	"io"
+	"maps"
 	"os"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -91,18 +94,38 @@ func envKVs(env map[string]string) []string {
 	return kvs
 }
 
-// argv builds the full host argv (prefix included) for an in-jail command.
-func (r *Runner) argv(dir string, env map[string]string, name string, args []string) []string {
+// argv builds the full host argv (prefix included) for an in-jail command,
+// and returns the hub token it withheld from that argv ("" when env carries
+// none). With a token the shape is
+//
+//	<prefix> env <jailEnv> sh -c <hubTokenStdinScript> _ env [-C dir] K=V… cmd args
+//
+// so the guest wrapper reads the token from stdin and execs the same `env …`
+// command the token-less shape runs directly.
+func (r *Runner) argv(dir string, env map[string]string, name string, args []string) ([]string, string, error) {
+	tok := env[hubTokenEnv]
+	if err := checkHubToken(tok); err != nil {
+		return nil, "", err
+	}
 	argv := append([]string{}, r.cfg.Prefix...)
+	if tok != "" {
+		env = maps.Clone(env)
+		delete(env, hubTokenEnv)
+		argv = append(argv, "env")
+		argv = append(argv, r.jailEnv()...)
+		argv = append(argv, "sh", "-c", hubTokenStdinScript, "_")
+	}
 	argv = append(argv, "env")
 	if dir != "" {
 		argv = append(argv, "-C", dir)
 	}
-	argv = append(argv, r.jailEnv()...)
+	if tok == "" {
+		argv = append(argv, r.jailEnv()...)
+	}
 	argv = append(argv, envKVs(env)...)
 	argv = append(argv, name)
 	argv = append(argv, args...)
-	return argv
+	return argv, tok, nil
 }
 
 func (r *Runner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
@@ -110,12 +133,30 @@ func (r *Runner) Run(ctx context.Context, env map[string]string, name string, ar
 }
 
 func (r *Runner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
-	argv := r.argv(dir, env, name, args)
-	return r.cfg.Host.Run(ctx, nil, argv[0], argv[1:]...)
+	argv, tok, err := r.argv(dir, env, name, args)
+	if err != nil {
+		return proc.Result{}, err
+	}
+	if tok == "" {
+		return r.cfg.Host.Run(ctx, nil, argv[0], argv[1:]...)
+	}
+	return r.cfg.Host.RunStdin(ctx, strings.NewReader(tok+"\n"), nil, argv[0], argv[1:]...)
 }
 
 func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
-	argv := r.argv("", env, name, args)
+	argv, tok, err := r.argv("", env, name, args)
+	if err != nil {
+		return proc.Result{}, err
+	}
+	if tok != "" {
+		// The token line leads; the payload follows on the same stream.
+		line := strings.NewReader(tok + "\n")
+		if stdin == nil {
+			stdin = line
+		} else {
+			stdin = io.MultiReader(line, stdin)
+		}
+	}
 	return r.cfg.Host.RunStdin(ctx, stdin, nil, argv[0], argv[1:]...)
 }
 
@@ -123,7 +164,9 @@ func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]s
 // the jail. It mirrors RunIn's prefix+env shape but returns the argv for the
 // caller to exec() directly — interactive TTY handover can't go through the
 // Runner. inner is the in-jail command (e.g. the argv from
-// scion.Client.AttachArgv).
+// scion.Client.AttachArgv). inner carries no hub token: a caller that needs
+// one stages it with StageHubToken and wraps inner in WithHubTokenFromFile,
+// so the token is read in the guest and the host argv stays secret-free.
 func (r *Runner) AttachArgv(inner []string) []string {
 	return slices.Concat(r.cfg.Prefix, []string{"env"}, r.jailEnv(), inner)
 }

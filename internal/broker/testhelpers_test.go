@@ -114,6 +114,12 @@ func withAudit(buf *bytes.Buffer) configOpt {
 	return func(c *Config) { c.Log = slog.New(slog.NewTextHandler(buf, nil)) }
 }
 
+// withToolSecret sets the per-boot secret the gateway presents to first-party
+// tools (brokerctl.Serve mints one in production).
+func withToolSecret(secret string) configOpt {
+	return func(c *Config) { c.ToolSecret = secret }
+}
+
 // withPolicy replaces the default policy with one built by build (nil ⇒ an
 // empty default-deny policy).
 func withPolicy(build func(*rules.Policy)) configOpt {

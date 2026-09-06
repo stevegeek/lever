@@ -17,25 +17,50 @@ import (
 // the jail and no cross-container TLS for the MCP channel. The bridge is not
 // streaming — one message in, one synchronous reply out — which is all the
 // capability tool (request/delegate/directive_*) needs; revisit if the MCP
-// session ever needs notifications. Returns when r reaches EOF or fails. A
-// line longer than mcp.MaxBodyBytes fails the session (bufio.ErrTooLong) —
+// session ever needs notifications. Returns when r reaches EOF or fails, or
+// (nil) when ctx is cancelled — the verb's ctx is SIGINT/SIGTERM-bound, and a
+// blocking read on a stdin that never closes must not outlive the signal. The
+// reader goroutine is left parked in its read on cancel; the process exits.
+// A line longer than mcp.MaxBodyBytes fails the session (bufio.ErrTooLong) —
 // the same 1 MiB cap the HTTP transport applies per request.
 func ServeStdio(ctx context.Context, r io.Reader, w io.Writer, srv *MCPServer) error {
-	scanner := bufio.NewScanner(r)
-	// +1: the scanner's limit must also hold the line's delimiter.
-	scanner.Buffer(make([]byte, 0, 64*1024), mcp.MaxBodyBytes+1)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
+	lines := make(chan []byte)
+	errc := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(r)
+		// +1: the scanner's limit must also hold the line's delimiter.
+		scanner.Buffer(make([]byte, 0, 64*1024), mcp.MaxBodyBytes+1)
+		defer func() {
+			errc <- scanner.Err()
+			close(lines)
+		}()
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			select {
+			case lines <- bytes.Clone(line): // Scan reuses its buffer
+			case <-ctx.Done():
+				return
+			}
 		}
-		out := bytes.TrimSpace(srv.Handle(ctx, line))
-		if len(out) == 0 {
-			continue
-		}
-		if _, err := fmt.Fprintf(w, "%s\n", out); err != nil {
-			return fmt.Errorf("serve-capability: write reply: %w", err)
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case line, ok := <-lines:
+			if !ok {
+				return <-errc
+			}
+			out := bytes.TrimSpace(srv.Handle(ctx, line))
+			if len(out) == 0 {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "%s\n", out); err != nil {
+				return fmt.Errorf("serve-capability: write reply: %w", err)
+			}
 		}
 	}
-	return scanner.Err()
 }

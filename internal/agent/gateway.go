@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -178,11 +179,19 @@ type GatewayConfig struct {
 	IDDir     string // directory holding the rotating agent.{crt,key}
 }
 
+// gatewayShutdownGrace bounds how long a cancelled Gateway waits for in-flight
+// proxied requests before dropping them (mirrors broker.ServeListeners).
+const gatewayShutdownGrace = 5 * time.Second
+
 // Gateway runs the loopback reverse-proxy: it accepts plaintext HTTP from
 // in-container Claude on c.Listen and forwards to the real broker at c.BrokerURL
-// over mTLS, presenting the rotating agent leaf from c.IDDir. Blocks until the
-// listener closes (process signal).
-func Gateway(c GatewayConfig) error {
+// over mTLS, presenting the rotating agent leaf from c.IDDir. Blocks until ctx
+// is cancelled (the verb's SIGINT/SIGTERM-bound ctx) or the listener fails. A
+// cancel is a clean stop: in-flight requests get gatewayShutdownGrace to
+// finish, anything still open (a long SSE stream) is then closed, and the
+// return is nil so the sidecar exits 0. Without this the process — whose
+// signal disposition main replaced with the ctx — served until SIGKILL.
+func Gateway(ctx context.Context, c GatewayConfig) error {
 	if err := requireLoopback(c.Listen); err != nil {
 		return err
 	}
@@ -195,7 +204,20 @@ func Gateway(c GatewayConfig) error {
 		return fmt.Errorf("gateway: listen %s: %w", c.Listen, err)
 	}
 	srv := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}
-	return srv.Serve(ln)
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(ln) }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	shutCtx, cancel := context.WithTimeout(context.Background(), gatewayShutdownGrace)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		_ = srv.Close() // grace expired: drop what is still open
+	}
+	<-errc // Serve returns ErrServerClosed as soon as Shutdown begins
+	return nil
 }
 
 // requireLoopback fails closed unless listenAddr binds a loopback IP. The proxy

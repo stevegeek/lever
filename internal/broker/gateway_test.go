@@ -482,3 +482,69 @@ func TestBackendURL(t *testing.T) {
 		}
 	}
 }
+
+// The broker presents the per-boot tool secret (Config.ToolSecret) on every
+// request it proxies to a FIRST-PARTY tool, so captool can refuse a request
+// that reached its loopback port without passing through the broker. A forged
+// inbound value is scrubbed with the other X-Lever-* headers first.
+func TestGatewayFirstPartyInjectsToolSecret(t *testing.T) {
+	var gotSecret string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSecret = r.Header.Get(toolSecretHeader)
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)
+	}))
+	defer up.Close()
+	b := New(testConfig(t, withToolSecret("per-boot-secret")))
+	_ = b.reg.Register(firstPartyTool("db", up.URL, "read"))
+
+	for _, method := range []string{"initialize", "tools/call"} {
+		gotSecret = ""
+		body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+		if method == "tools/call" {
+			cap := mintFor(t, b, "worker", nil)
+			body = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+		}
+		r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+		r.TLS = leafFor(t, b, "worker")
+		r.Header.Set(toolSecretHeader, "forged") // must be replaced, never forwarded
+		w := httptest.NewRecorder()
+		h, _ := b.gatewayHandler("db")
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", method, w.Code, w.Body.String())
+		}
+		if gotSecret != "per-boot-secret" {
+			t.Fatalf("%s: %s = %q, want the broker's secret", method, toolSecretHeader, gotSecret)
+		}
+	}
+}
+
+// A third-party (non-first-party) tool never receives the secret: it is not a
+// captool server, and the value must not leak to an arbitrary backend.
+func TestGatewayThirdPartyGetsNoToolSecret(t *testing.T) {
+	var gotSecret string
+	var sawHeader bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawHeader = r.Header[toolSecretHeader]
+		gotSecret = r.Header.Get(toolSecretHeader)
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)
+	}))
+	defer up.Close()
+	b := New(testConfig(t, withToolSecret("per-boot-secret")))
+	_ = b.reg.Register(regTool("db", up.URL, "read"))
+
+	cap := mintFor(t, b, "worker", nil)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + cap + `"}}}`
+	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
+	r.TLS = leafFor(t, b, "worker")
+	r.Header.Set(toolSecretHeader, "forged")
+	w := httptest.NewRecorder()
+	h, _ := b.gatewayHandler("db")
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if sawHeader || gotSecret != "" {
+		t.Fatalf("third-party tool received %s=%q; want no header at all", toolSecretHeader, gotSecret)
+	}
+}

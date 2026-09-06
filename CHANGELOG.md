@@ -7,6 +7,150 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+Security hardening from the 2026-09-06 review of v0.19.0→v0.21.0
+(`docs/audits/2026-09-06-security-review-0.19-to-0.21.md`). No VM escape was
+found; the items below close one high and a set of medium/low findings, two
+of which were regressions introduced in 0.20.
+
+### Fixed
+
+- **Security: a manager-supplied task can no longer bind as a `scion start`
+  flag.** `scion start` is now emitted as every lever flag first, then `--`,
+  then the worker name and task. Before, the task was a bare positional ahead
+  of the flags and cobra parses flags interspersed, so a compromised manager
+  dispatching a declared worker with a task of `--config=/lever/x.json`
+  authored that worker's inline config (volumes, container user, env,
+  services, system prompt); `--no-auth`, `--attach`, `--type` and
+  `--thinking-level` were reachable the same way. Pre-existing since before
+  0.19. As a second layer `CheckTask` refuses a flag-shaped task (`-x`,
+  `--word`, a bare `--`; a markdown list item or a negative number is still a
+  task) and the broker answers 400 for it (413 stays for the size rule).
+- **Security: the controller PAT no longer appears on any host command
+  line**, where `ps` showed it to every local user for the duration of each
+  `orb …`/`limactl …` call and for the whole of a `lever attach` session.
+  Non-interactive in-jail commands receive it on the child's stdin behind a
+  fixed guest-side wrapper; `lever attach` and `lever up` stage it in a 0600
+  file under the run user's `XDG_RUNTIME_DIR` and read it in the guest.
+- **Security (0.20 regression): `lever-agent gateway` and `serve-capability`
+  stop on SIGINT/SIGTERM again.** 0.20's signal-bound context removed the
+  default disposition for every verb without stopping these two, so the
+  leaf-presenting loopback proxy served until SIGKILL. The gateway now shuts
+  its listener down with a 5 s grace and exits 0; serve-capability returns
+  even while blocked on stdin.
+- **Security (0.20 regression): `lever init`, `lever init --adopt` and
+  doctor's skills check no longer follow a symlink out of the instance
+  tree.** An agent that replaced `CLAUDE.md`, a `SKILL.md` or the `.claude`
+  directory with a link to a host file (the instance `lever.yaml`, the state
+  dir, a shell rc) could make the operator's next `lever init` overwrite that
+  file. Reads are capped at 1 MiB and refuse non-regular files, so a FIFO
+  can no longer hang `init` or `doctor`. A symlink that stays inside the
+  tree still works and is written in place; a `CLAUDE.md` that links outside
+  the tree is now refused — keep the real file in the tree and link to it
+  from outside.
+- **Security: `lever doctor` and `lever up` sanitize strings the jail or hub
+  supplies** (scion stderr, agent phase and container status, the manager
+  record's image, slugs, roles, shared-dir names) before printing them.
+  Terminal escape sequences are stripped and control bytes replaced, so a
+  compromised jail cannot retitle the terminal, write the clipboard, or
+  overdraw doctor rows with a fake verdict.
+- **Security: `lever up`/`apply` no longer deletes the manager on a phase it
+  cannot act on.** A record mid-transition (`created`, `provisioning`,
+  `cloning`, `starting`, `stopping` — e.g. racing a `lever stop`) is polled
+  until scion settles it (up to 60 s) and converged on the settled phase; a
+  record that never settles, or an unrecognised phase string, fails loudly
+  with the record and its conversation intact. Only `lever up --fresh`
+  discards.
+- **Security: the "boot material must stay out of the mounted tree" check**
+  (`prompt_file`, `instructions_file`, `image_tar`, `scion.binary`,
+  `scion.source`) now follows symlinks on both sides, so a link at the
+  instance root into the tree is rejected; an existing boot file must be a
+  regular file.
+- **Security: `image_tar` archives carrying more than one image are checked
+  tag-by-tag against `security.allowed_image_registries`** before anything
+  is streamed into the jail; a disallowed tag refuses the whole load by name.
+- **Security: `lever-agent boot` (root in scion's pre-start hook) no longer
+  follows symlinks under the agent-writable home.** Writes to
+  `~/.lever-id/*`, `~/.claude/settings.json`, `~/.scion/scion-services.yaml`
+  and the read of `/workspace/.lever/bootstrap.json` are confined with
+  `os.Root`; a symlink or non-regular file at any agent-controlled component
+  is refused and nothing is written.
+- **Security: the host-side scion cross-compile and the login-forwarder
+  build no longer use fixed names under the shared `/tmp`.** They build
+  under the operator's cache directory (`<UserCacheDir>/lever/scion-bin`,
+  `<UserCacheDir>/lever/loginfwd/<machine>`, 0700), and the install into the
+  jail hashes and streams one open descriptor and verifies the streamed
+  bytes, so a file swapped after hashing cannot reach `/usr/local/bin`.
+- **Security: the remote proxy asserts the Tailscale login to the hub only
+  when `remote.allowed_users` pins it.** With the list empty the hub records
+  the documented placeholder operator instead of an unverified header value.
+- **Security: a `manager.allow_ports` entry equal to a first-party tool's
+  backend port is rejected at config load.** The jail could otherwise dial the
+  tool past the broker and self-assert the caller, bypassing the mTLS
+  binding, per-agent revocation and the audit log. The docs "Full example"
+  no longer lists the `db` port. As defence in depth the broker mints a
+  per-boot secret, hands it to each supervised first-party tool as
+  `LEVER_TOOL_SECRET`, and presents it as `X-Lever-Tool-Secret` on every
+  proxied request; captool refuses any request without it and fails closed
+  when unconfigured. Tools built on captool need no change under the
+  supervisor.
+- **Security: `capability(llm)` proxies only the Messages API** (`POST
+  /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET
+  /v1/models/{id}`); any other path is 403 and audited. Before, any method
+  and path under the upstream was forwarded with the real key.
+- **Security: the jail listener bounds every request body.** Request bodies
+  must arrive within 30 s on every route (`/llm` included), and the small
+  JSON control routes time out with 503 after 30 s. A trickling body from
+  the jail no longer holds a connection open indefinitely. `/mcp/<tool>/`
+  and `/worker/*` carry no handler bound: `http.TimeoutHandler` buffers the
+  whole response, which would deliver a streaming MCP backend only when it
+  finished and cut a long tool call or dispatch with its output discarded.
+- **Security: the llm-proxy `GET /v1/models/{id}` id is charset-checked.**
+  Only `[A-Za-z0-9._:-]` is forwarded; a percent-encoded id (`..%2F..`) is
+  403 and audited instead of being decoded into another path upstream.
+- **Security: the worker workspace directory is created inside the
+  instance tree.** A manager that replaced `<tree>/workers` with a symlink
+  to a host path could make the host broker create directories there. The
+  mkdir now goes through an `os.Root` at the tree, refuses a link that
+  leaves it (403, before any ticket is staged), and still follows a link
+  that stays inside.
+- **Security: the staged attach PAT does not persist in the guest.** The
+  0600 file `lever attach`/`lever up` stage in the run user's
+  `XDG_RUNTIME_DIR` is removed by the guest wrapper as soon as it is read;
+  the token then lives only in the session's environment. Every attach
+  re-stages first.
+- **Security: guest-supplied text wrapped into a command's returned error or
+  into apply's log lines is sanitized before printing** (new
+  `internal/termsafe` package; the root command prints its own `Error:`
+  line). An unknown subcommand no longer prints cobra's usage hint.
+- **`lever init` creates a missing `tree:` directory** (0755, parent must
+  exist; a dangling symlink at the tree path is refused). The tree-confined
+  file helpers need the tree to exist, and the documented order runs `init`
+  before the first `up`. `--check` and doctor stay read-only.
+
+### Changed
+
+- **Security model docs state a residual:** a compromised manager can redeem
+  a worker's staged enrolment ticket during the stage→boot window (tickets
+  are staged inside the manager's whole-tree mount, and `/provision` on the
+  jail listener mints one for the acceptance harness) and hold that worker's
+  identity, so worker-only grants and worker-targeted directives are not
+  manager-proof until tickets are staged outside the manager's mount. The
+  substitution is audit-visible. Removing the jail-side `/provision` route
+  needs the acceptance harness moved to a host-side mint first.
+- **Operator skill: the chat-reply recipe** puts `--` before the positionals,
+  uses `--channel=`/`--thread-id=`, quotes every envelope value and states
+  that the fields are untrusted. Run `lever init` to refresh the scaffold.
+
+### Internal
+
+- `scionbin.OutputPath` returns `(string, error)`; `scionbin.OutputDir` is
+  new; the scionbin tests are an external test package. `Backend.LoadImageTar`
+  and `apply.Deps.LoadImageTar` take an `allowTag` policy; `apply.Deps` gains
+  optional `ImageTagPolicy` and `PhaseSettleRetry`. New `fsutil.ReadInTree`/
+  `WriteInTree`. `brokerctl.NewSupervisor` takes a tool secret; `broker.Config` gains
+  `ToolSecret` and `Timeouts` (`Body`, `Control` only). `cli.Execute` prints errors;
+  `backendtest.IsolateCache` isolates the user cache dir in tests.
+
 ## [0.21.0] - 2026-09-06
 
 Two operator-facing fixes and one deployment feature. `image_tar:` ships an

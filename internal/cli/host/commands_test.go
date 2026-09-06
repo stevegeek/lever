@@ -54,9 +54,11 @@ func (s *stubBackend) JailRunner() proc.Runner {
 func (s *stubBackend) AttachArgv(inner []string) []string {
 	return append([]string{"stub-attach"}, inner...)
 }
-func (s *stubBackend) LoadImage(context.Context, string) error                  { return nil }
-func (s *stubBackend) ImageLoaded(context.Context, string) bool                 { return false }
-func (s *stubBackend) LoadImageTar(context.Context, string, string) error       { return nil }
+func (s *stubBackend) LoadImage(context.Context, string) error  { return nil }
+func (s *stubBackend) ImageLoaded(context.Context, string) bool { return false }
+func (s *stubBackend) LoadImageTar(context.Context, string, string, func(string) error) error {
+	return nil
+}
 func (s *stubBackend) ImageLoadedTar(context.Context, string, string) bool      { return false }
 func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }

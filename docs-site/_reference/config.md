@@ -111,14 +111,17 @@ manager:
   model: claude-opus-5               # optional; alias or model ID for `scion start --model`
   prompt_file: prompt.md             # boot TASK (first user turn, keep it short); resolved at the ROOT (host-only, outside the mount)
   instructions_file: manual.md       # standing instructions -> the agent's CLAUDE.md, via a file, never argv; same resolution
-  allow_ports: [3101, 3201]          # host tool ports the jail may reach
+  # Host ports the jail may reach DIRECTLY (an MCP server you run yourself).
+  # Never a first-party tool's backend port (3201 below): the jail would dial
+  # the tool past the broker, and config load rejects it.
+  allow_ports: [3101]
 broker:
   llm_auth: api-key                  # the default; no real key in any container
   api_key_file: ~/.secrets/anthropic-key   # 0600; injected host-side by the /llm proxy
   tools:
     - name: db
       command: [lever-tool-db]       # supervised subprocess the broker proxies to
-      backend: 127.0.0.1:3201        # loopback address it listens on (injected as -backend)
+      backend: 127.0.0.1:3201        # loopback address it listens on (injected as -backend); reachable from the jail only via the broker
       operations:
         - { name: read, params: [query, table] }  # optional: declared arg names — mint rejects constraints on any other key
       allowed_values:

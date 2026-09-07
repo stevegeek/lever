@@ -18,7 +18,7 @@ import (
 // provisioned "worker" ticket and returns its path.
 func writeBootstrap(t *testing.T, env *brokertest.Env, dir string) string {
 	t.Helper()
-	ticket := env.ProvisionWorker(t, "worker")
+	ticket := env.WorkerTicket(t, "worker")
 	bsPath := filepath.Join(dir, "bootstrap.json")
 	bs, _ := json.Marshal(Bootstrap{
 		Ticket:    ticket,

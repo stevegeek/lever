@@ -178,9 +178,14 @@ type DispatchConfig struct {
 	// test gets — is the first-observation gate.
 	LiveSettle time.Duration
 	// ManagerBootstrapDir is the host path to <tree>/.lever — where the
-	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
+	// MANAGER's bootstrap.json is staged (workers go through Tickets).
 	// Empty disables manager healing (audited as an error on lapse).
 	ManagerBootstrapDir string
+	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
+	// instance tree (jail.StageWorkerTicket in production). The manager
+	// mounts the whole tree, so nothing a worker must redeem may be written
+	// there. nil ⇒ every worker dispatch fails closed at the staging step.
+	Tickets TicketStager
 }
 
 // TimeoutConfig bounds request handling on the jail listener, per route
@@ -276,6 +281,7 @@ type Broker struct {
 	// seam (time.Now in production). reenrolMu guards the two maps only.
 	autoReenrol         string
 	managerBootstrapDir string
+	ticketStager        TicketStager
 	reenrolEvents       chan string
 	reenrolNow          func() time.Time
 	reenrolMu           sync.Mutex
@@ -340,6 +346,7 @@ func New(c Config) *Broker {
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
+		ticketStager:        d.Tickets,
 		reenrolEvents:       make(chan string, reenrolQueueDepth),
 		reenrolNow:          time.Now,
 		reenrolLast:         map[string]time.Time{},

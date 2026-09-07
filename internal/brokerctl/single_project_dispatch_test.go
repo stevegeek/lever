@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -48,6 +49,16 @@ type fakeWorkerRuntime struct {
 	resumed      []string
 	listCalls    int
 	listProjects []string
+	staged       map[string]int // worker -> envelopes staged through the guest channel
+}
+
+// StageWorkerTicket makes the fake the guest ticket channel too.
+func (f *fakeWorkerRuntime) StageWorkerTicket(_ context.Context, worker string, _ []byte) error {
+	if f.staged == nil {
+		f.staged = map[string]int{}
+	}
+	f.staged[worker]++
+	return nil
 }
 
 func (f *fakeWorkerRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
@@ -147,9 +158,9 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	}
 
 	// Config-derived, path-authoritative worker specs — the SAME production
-	// function Serve calls (see serve.go dispatchConfig: Workers: WorkerSpecs(app, jailMount)).
+	// function Serve calls (see serve.go dispatchConfig: Workers: WorkerSpecs(app, jailMount, env.JailUID)).
 	const jailMount = "/lever"
-	specs := WorkerSpecs(app, jailMount)
+	specs := WorkerSpecs(app, jailMount, "501")
 	if len(specs) != 2 {
 		t.Fatalf("WorkerSpecs = %d specs, want 2", len(specs))
 	}
@@ -180,6 +191,10 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		t.Fatalf("decorateConfig InstanceProject = %q, want backend MountDest %q", cfg.Dispatch.InstanceProject, jailMount)
 	}
 	cfg.Dispatch.Runtime = rt
+	// The no-env path also leaves the ticket channel unwired and the specs
+	// without a ticket directory (no jail uid); inject both like the runtime.
+	cfg.Dispatch.Tickets = rt
+	cfg.Dispatch.Workers = specs
 	b := broker.New(cfg)
 
 	call := func(method, path, body string) *httptest.ResponseRecorder {
@@ -222,6 +237,24 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	}
 	if optsA.WorkspaceSubdir == optsB.WorkspaceSubdir {
 		t.Fatalf("each worker must get its OWN workspace subdir, got the same for both: %q", optsA.WorkspaceSubdir)
+	}
+
+	// --- Point: each worker's ticket went to the guest channel under ITS
+	// name, and its container mounts exactly its own ticket directory —
+	// nothing was written under the tree. ---
+	if rt.staged["a"] != 1 || rt.staged["b"] != 1 {
+		t.Fatalf("staged tickets = %v, want one each for a and b", rt.staged)
+	}
+	if len(optsA.Volumes) != 1 || optsA.Volumes[0].Source != "/run/user/501/lever/tickets/a" || !optsA.Volumes[0].ReadOnly {
+		t.Fatalf("worker a volumes = %+v, want its own ticket dir read-only", optsA.Volumes)
+	}
+	if len(optsB.Volumes) != 1 || optsB.Volumes[0].Source != "/run/user/501/lever/tickets/b" {
+		t.Fatalf("worker b volumes = %+v, want its own ticket dir", optsB.Volumes)
+	}
+	for _, s := range specs {
+		if _, err := os.Stat(filepath.Join(s.HostWorkspace, ".lever")); !os.IsNotExist(err) {
+			t.Fatalf("worker %q: a .lever directory exists under its tree subdir (err %v)", s.Name, err)
+		}
 	}
 
 	// --- Point: each worker's HostWorkspace dir was actually created on

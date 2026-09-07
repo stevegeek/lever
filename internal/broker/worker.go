@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -34,15 +35,40 @@ type WorkerRuntime interface {
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
 
+// TicketStager delivers a worker's marshalled enrolment envelope
+// (wire.Bootstrap) to the guest location only that worker's container
+// mounts. Production is jail.StageWorkerTicket over the jail runner; tests
+// record. The broker runs on the host, so this is the ONE way a worker
+// ticket leaves the broker process.
+type TicketStager interface {
+	StageWorkerTicket(ctx context.Context, worker string, payload []byte) error
+}
+
+// Where a worker finds its staged ticket INSIDE its container: the broker
+// mounts the guest ticket directory (WorkerSpec.TicketDir) read-only at
+// workerTicketMount and points lever-agent boot at it through
+// workerTicketEnv (cmd/lever-agent's $LEVER_BOOTSTRAP; the pre-start hook
+// also probes the mount itself). The manager's container has no such mount.
+const (
+	workerTicketMount = "/run/lever"
+	workerTicketPath  = workerTicketMount + "/bootstrap.json"
+	workerTicketEnv   = "LEVER_BOOTSTRAP"
+)
+
 // WorkerSpec is the config-derived, path-authoritative description of one worker.
 // The broker never accepts any of these from the manager; they come from config.
 type WorkerSpec struct {
 	Name            string // worker identity (== scion agent slug within the instance project)
 	WorkspaceSubdir string // relative --workspace: path RELATIVE to the project root, e.g. "workers/worker" — scion mounts this subtree at /workspace
 	HostWorkspace   string // host path to the same subdir, e.g. <tree>/workers/worker; created tree-confined before start (ensureWorkspaceDir; scion's guard requires it to exist)
-	BootstrapDir    string // host path to <tree>/<dir>/.lever (where bootstrap.json is staged)
-	Image           string // effective agent image
-	Model           string // effective LLM model; empty ⇒ no --model, scion decides
+	// TicketDir is the GUEST path of this worker's ticket directory
+	// (jail.WorkerTicketDir: under the run user's XDG_RUNTIME_DIR, outside
+	// every container's default view), where TicketStager writes
+	// bootstrap.json and which the worker's container mounts read-only at
+	// workerTicketMount. Empty ⇒ the worker cannot be dispatched.
+	TicketDir string
+	Image     string // effective agent image
+	Model     string // effective LLM model; empty ⇒ no --model, scion decides
 	// InstructionsPath is the HOST path of this worker's standing-instructions
 	// file, "" when it has none. Config-authoritative like the rest of the spec
 	// (the manager cannot choose it), but its CONTENT is read at dispatch, not
@@ -133,18 +159,28 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	return "", nil
 }
 
-// stageFreshTicket mints a one-use enrolment ticket for cn and stages a fresh
-// bootstrap.json under dir (the same host authority `lever up` uses), via the
-// shared wire.Stage — the single construction+deposit path for the enrolment
-// envelope. Called on the fresh-start and resume dispatch paths and by the
-// auto-re-enrol healer, which heals the manager too — hence (cn, dir), not a
-// WorkerSpec.
-func (b *Broker) stageFreshTicket(cn, dir string) error {
+// bootstrapFor mints a one-use enrolment ticket for cn and wraps it in the
+// envelope lever-agent boot consumes: the ONE construction site for a
+// Bootstrap the broker issues (manager and worker alike).
+func (b *Broker) bootstrapFor(cn string) (wire.Bootstrap, error) {
 	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
 	if err != nil {
-		return fmt.Errorf("ticket: %w", err)
+		return wire.Bootstrap{}, fmt.Errorf("ticket: %w", err)
 	}
-	bs := wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}
+	return wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}, nil
+}
+
+// stageFreshTicket mints a one-use enrolment ticket for the MANAGER (cn) and
+// stages a fresh bootstrap.json under dir — <tree>/.lever, inside the tree
+// the manager itself mounts, which is fine for the manager's own ticket —
+// via the shared wire.Stage, the same host authority `lever up` uses. Called
+// by the auto-re-enrol healer. Workers never take this path: see
+// stageWorkerTicket.
+func (b *Broker) stageFreshTicket(cn, dir string) error {
+	bs, err := b.bootstrapFor(cn)
+	if err != nil {
+		return err
+	}
 	root, rel, err := b.treePath(dir)
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
@@ -153,6 +189,47 @@ func (b *Broker) stageFreshTicket(cn, dir string) error {
 		return fmt.Errorf("stage: %w", err)
 	}
 	return nil
+}
+
+// stageWorkerTicket mints a one-use enrolment ticket for spec and stages the
+// envelope in the GUEST, at spec.TicketDir, through the configured
+// TicketStager — never in the instance tree. The tree is the manager's
+// whole-tree mount, so a ticket staged there (the pre-0.22 layout,
+// <tree>/<dir>/.lever/bootstrap.json) sat readable by the manager between
+// staging and the worker's boot, and a manager that redeemed it first held
+// the worker's identity: its obtain: grants, its inbox, the operator
+// directives addressed to it. The guest runtime dir is visible to no
+// container by default; the worker's own container mounts exactly its
+// directory (workerTicketVolumes). Called on the fresh-start and resume
+// dispatch paths, by the healer and by the admin /worker-ticket route.
+func (b *Broker) stageWorkerTicket(ctx context.Context, spec WorkerSpec) error {
+	if b.ticketStager == nil {
+		return fmt.Errorf("stage: no worker ticket channel is wired (DispatchConfig.Tickets)")
+	}
+	if spec.TicketDir == "" {
+		return fmt.Errorf("stage: worker %q has no ticket directory", spec.Name)
+	}
+	bs, err := b.bootstrapFor(spec.Name)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(bs)
+	if err != nil {
+		return fmt.Errorf("stage: marshal: %w", err)
+	}
+	if err := b.ticketStager.StageWorkerTicket(ctx, spec.Name, raw); err != nil {
+		return fmt.Errorf("stage: %w", err)
+	}
+	return nil
+}
+
+// workerTicketVolumes is the container-side half of the channel: the
+// worker's guest ticket directory mounted read-only at workerTicketMount,
+// and LEVER_BOOTSTRAP pointing lever-agent boot at the file. Create-time
+// material (scion keeps a record's volumes and env across resumes).
+func workerTicketVolumes(spec WorkerSpec) ([]scion.VolumeMount, map[string]string) {
+	return []scion.VolumeMount{{Source: spec.TicketDir, Target: workerTicketMount, ReadOnly: true}},
+		map[string]string{workerTicketEnv: workerTicketPath}
 }
 
 // treePath splits an absolute directory under the instance tree into the
@@ -355,7 +432,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 	// ticket is long spent — without this it wedges into phase=error
 	// (live-hit 2026-07-31). Harmless when the leaf is still valid: boot
 	// skips enrol and the ticket ages out unspent.
-	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
+	if err := b.stageWorkerTicket(ctx, spec); err != nil {
 		b.audit("worker", b.manager, "error", "resume "+err.Error())
 		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
@@ -379,8 +456,9 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
-// startFreshWorker provisions an absent worker: mint a one-use ticket, stage the
-// worker's OWN bootstrap, then scion start.
+// startFreshWorker provisions an absent worker: mint a one-use ticket, stage it
+// in the guest for that worker alone, then scion start with the ticket
+// directory mounted into the new container.
 func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
 	ctx := r.Context()
 	// Read the standing instructions BEFORE any side effect (ticket, env,
@@ -405,7 +483,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		http.Error(w, "workspace error", http.StatusInternalServerError)
 		return
 	}
-	if err := b.stageFreshTicket(spec.Name, spec.BootstrapDir); err != nil {
+	if err := b.stageWorkerTicket(ctx, spec); err != nil {
 		b.audit("worker", b.manager, "error", "start "+err.Error())
 		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
@@ -417,11 +495,12 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 			return
 		}
 	}
+	volumes, env := workerTicketVolumes(spec)
 	if err := b.runtime.Start(ctx, scion.StartOpts{
 		Worker: spec.Name, Task: task, Harness: "claude",
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
 		Image: spec.Image, Model: spec.Model, APIKey: spec.APIKey,
-		Instructions: instructions,
+		Instructions: instructions, Volumes: volumes, Env: env,
 	}); err != nil {
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)

@@ -44,7 +44,7 @@ func allowLLM(t *testing.T, env *brokertest.Env, agent string) {
 // enrolWorker provisions and enrols "worker" against env, returning its identity.
 func enrolWorker(t *testing.T, env *brokertest.Env) Identity {
 	t.Helper()
-	ticket := env.ProvisionWorker(t, "worker")
+	ticket := env.WorkerTicket(t, "worker")
 	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
 	if err != nil {
 		t.Fatalf("enrolWorker: %v", err)
@@ -91,7 +91,7 @@ func assertMode(t *testing.T, path string, want uint32) {
 
 func TestEnrolReturnsSignedIdentity(t *testing.T) {
 	env := testBroker(t)
-	ticket := env.ProvisionWorker(t, "worker")
+	ticket := env.WorkerTicket(t, "worker")
 	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +107,7 @@ func TestEnrolReturnsSignedIdentity(t *testing.T) {
 
 func TestEnrolRejectsCNMismatch(t *testing.T) {
 	env := testBroker(t)
-	ticket := env.ProvisionWorker(t, "worker")
+	ticket := env.WorkerTicket(t, "worker")
 	// A CSR CN that doesn't match the ticket's worker must be rejected by the broker.
 	if _, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "evil"); err == nil {
 		t.Fatal("enrol with CN != ticket worker must fail")

@@ -1,6 +1,7 @@
 package brokertest
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -8,27 +9,31 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
-func TestNewTestBrokerProvisionsAndRejectsStrangers(t *testing.T) {
+func TestNewTestBrokerMintsWorkerTicketsHostSide(t *testing.T) {
 	env := NewTestBroker(t, Config{})
-	if ticket := env.ProvisionWorker(t, "worker"); ticket == "" {
+	if ticket := env.WorkerTicket(t, "worker"); ticket == "" {
 		t.Fatal("empty ticket")
 	}
-	// A client with no cert must not reach /provision.
-	resp, err := env.ClientFor(t, "nobody").Post(env.Server.URL+"/provision", "application/json", nil)
+	// No agent-facing route mints a worker ticket: /provision is gone from the
+	// jail listener, whoever asks.
+	body := []byte(`{"worker":"worker"}`)
+	resp, err := env.ClientFor(t, "manager").Post(env.Server.URL+"/provision", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("a non-manager identity must not provision")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("/provision on the jail listener: status %d, want 404", resp.StatusCode)
 	}
 }
 
 func TestNewTestBrokerHonoursConfig(t *testing.T) {
 	env := NewTestBroker(t, Config{Workers: []string{"alpha"}, ManagerIdentity: "boss"})
-	c := Client(env.CA, Cert(t, env.CA, "boss"), "")
-	if ticket := ProvisionWorker(t, c, env.Server.URL, "alpha"); ticket == "" {
+	if ticket := env.WorkerTicket(t, "alpha"); ticket == "" {
 		t.Fatal("empty ticket")
+	}
+	if env.Tickets.Last("worker") != nil {
+		t.Fatal("an undeclared worker must have nothing staged")
 	}
 }
 

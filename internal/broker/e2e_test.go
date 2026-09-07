@@ -1,6 +1,6 @@
 package broker
 
-// e2e_test.go exercises the full provision→enrol→request→exercise path over
+// e2e_test.go exercises the full mint→enrol→request→exercise path over
 // real mTLS: a live httptest.Server with the broker CA's ServerTLSConfigSource, real
 // TLS clients that pin the broker CA, and a fake upstream MCP backend.
 
@@ -53,9 +53,9 @@ func agentClient(t *testing.T, b *Broker, cert tls.Certificate) *http.Client {
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
 }
 
-// TestE2EProvisionEnrolRequestExercise exercises the full four-step flow over
+// TestE2EMintEnrolRequestExercise exercises the full four-step flow over
 // real mTLS and a fake upstream MCP backend.
-func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
+func TestE2EMintEnrolRequestExercise(t *testing.T) {
 	// ── Setup: fake upstream backend ──────────────────────────────────────────
 	var backendReached bool
 	var backendBody string
@@ -80,26 +80,11 @@ func TestE2EProvisionEnrolRequestExercise(t *testing.T) {
 	managerClient := agentClient(t, b, managerCert)
 
 	// ─────────────────────────────────────────────────────────────────────────
-	// Step 1: provision — manager POSTs /provision {worker:"worker"} → ticket.
+	// Step 1: mint — the HOST (broker process) mints the worker's ticket; a
+	// dispatch stages it in the guest for that worker's container alone. No
+	// agent-facing route mints one (the manager could redeem it first).
 	// ─────────────────────────────────────────────────────────────────────────
-	provBody, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
-	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	defer provResp.Body.Close()
-	if provResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(provResp.Body)
-		t.Fatalf("provision: status=%d body=%s", provResp.StatusCode, body)
-	}
-	var provResult wire.ProvisionResponse
-	if err := json.NewDecoder(provResp.Body).Decode(&provResult); err != nil {
-		t.Fatalf("provision: decode: %v", err)
-	}
-	if provResult.Ticket == "" {
-		t.Fatal("provision: empty ticket")
-	}
-	ticket := provResult.Ticket
+	ticket := mintWorkerTicket(t, b, "worker")
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Step 2: enrol — worker self-generates a keypair, POSTs /enrol {ticket,csr}

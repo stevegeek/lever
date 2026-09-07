@@ -76,12 +76,6 @@ func TestRequestNon200(t *testing.T) {
 	assertWireError(t, err, "agent: request", 403, "policy: may not obtain (tool=db op=read)")
 }
 
-func TestProvisionNon200(t *testing.T) {
-	srv := errServer(t, http.StatusForbidden, "policy: not a manager")
-	_, err := Provision(context.Background(), srv.URL, srv.Client(), "worker")
-	assertWireError(t, err, "agent: provision", 403, "policy: not a manager")
-}
-
 func TestListToolsNon200(t *testing.T) {
 	srv := errServer(t, http.StatusForbidden, "tools: denied")
 	_, err := ListTools(context.Background(), srv.URL, srv.Client())

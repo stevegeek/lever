@@ -9,7 +9,6 @@ const (
 	PathEnrol            = "/enrol"
 	PathRenew            = "/renew"
 	PathRequest          = "/request"
-	PathProvision        = "/provision"
 	PathTools            = "/tools"
 	PathWorkerStart      = "/worker/start"
 	PathWorkerStop       = "/worker/stop"
@@ -29,6 +28,9 @@ const (
 	PathBumpEpoch = "/bump-epoch"
 	PathRevoke    = "/revoke"
 	PathBootstrap = "/bootstrap"
+	// PathWorkerTicket mints AND stages a worker's enrolment ticket through
+	// the broker's guest channel (the acceptance harness's host-side mint).
+	PathWorkerTicket = "/worker-ticket"
 )
 
 // Operator-directive (UDS) admin channel routes.

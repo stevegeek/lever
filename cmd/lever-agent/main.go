@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,7 +37,7 @@ var errNoIdentity = errors.New("no identity")
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|provision|request|delegate|call>")
+		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|request|delegate|call>")
 	}
 	// One signal-bound context for every verb: SIGINT/SIGTERM cancels the
 	// network call in flight (or the renew loop, the gateway listener, the
@@ -57,8 +56,6 @@ func run(argv []string) error {
 		return cmdRenew(ctx, argv[2:])
 	case "gateway":
 		return cmdGateway(ctx, argv[2:])
-	case "provision":
-		return cmdProvision(ctx, argv[2:])
 	case "request", "delegate", "call":
 		return cmdCLI(ctx, argv[1], argv[2:])
 	default:
@@ -365,57 +362,6 @@ func bootstrapPathOrDefault(path string) string {
 	return defaultBootstrapPath()
 }
 
-// cmdProvision mints a one-use enrolment ticket for a worker via the broker's
-// /provision endpoint (manager-CN-gated). The resulting Bootstrap JSON is written
-// to -out (0600) so the acceptance harness can drop it in the jail for boot.
-func cmdProvision(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
-	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the manager identity (cert+key+ca)", "path to bootstrap.json (for broker URL if -broker-url not set)")
-	worker := fs.String("worker", "", "worker name to provision a ticket for")
-	out := fs.String("out", "", "path to write the worker bootstrap JSON (0600)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *worker == "" {
-		return fmt.Errorf("provision: -worker is required")
-	}
-	if *out == "" {
-		return fmt.Errorf("provision: -out is required")
-	}
-
-	id, ok := agent.LoadIdentity(*idDir)
-	if !ok {
-		return fmt.Errorf("provision: %w in %s — run 'lever-agent boot' first", errNoIdentity, *idDir)
-	}
-
-	// Resolve broker URL: explicit flag wins, else from bootstrap file. The CA
-	// is always the identity's pinned CA regardless of how the URL resolves.
-	bURL, err := resolveBrokerURL(*brokerURL, *bootstrapPath)
-	if err != nil {
-		return fmt.Errorf("provision: %w", err)
-	}
-
-	client, err := id.Client()
-	if err != nil {
-		return fmt.Errorf("provision: build mTLS client: %w", err)
-	}
-
-	ticket, err := agent.Provision(ctx, bURL, client, *worker)
-	if err != nil {
-		return fmt.Errorf("provision: %w", err)
-	}
-
-	bs := agent.Bootstrap{Ticket: ticket, BrokerCA: string(id.CAPEM), BrokerURL: bURL, AgentCN: *worker}
-	data, err := json.Marshal(bs)
-	if err != nil {
-		return fmt.Errorf("provision: marshal bootstrap: %w", err)
-	}
-	if err := os.WriteFile(*out, data, 0o600); err != nil {
-		return fmt.Errorf("provision: write bootstrap: %w", err)
-	}
-	return nil
-}
-
 // cliArgs is what one capability verb (request, delegate, call) parsed from
 // its flags, plus the remaining key=value constraints.
 type cliArgs struct {
@@ -581,10 +527,10 @@ func resolveBrokerURL(brokerURL, bootstrapPath string) (string, error) {
 }
 
 // commonFlags registers the id-dir/broker-url/bootstrap trio shared verbatim by
-// the five lazy-resolving subcommands (serve-capability, renew, gateway,
-// provision, cmdCLI) and returns the bound pointers. The id-dir and bootstrap
-// help strings genuinely differ per command (provision names the *manager*
-// identity; gateway's bootstrap also carries the CA), so they are passed in; the
+// the four lazy-resolving subcommands (serve-capability, renew, gateway,
+// cmdCLI) and returns the bound pointers. The id-dir and bootstrap help
+// strings genuinely differ per command (gateway's bootstrap also carries the
+// CA), so they are passed in; the
 // broker-url flag is identical everywhere. cmdBoot is deliberately NOT a caller:
 // it has no --broker-url and eagerly resolves its --bootstrap default.
 func commonFlags(fs *flag.FlagSet, idDirHelp, bootstrapHelp string) (idDir, brokerURL, bootstrap *string) {

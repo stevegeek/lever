@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
@@ -66,7 +67,7 @@ func (b *Broker) runHealer(ctx context.Context) {
 // from the healer goroutine (and directly by tests). The steps, in order:
 // policy gate, throttle, revocation, ticket re-stage, bounce.
 func (b *Broker) healLapse(ctx context.Context, cn string) {
-	dir, slug, ok := b.healTarget(cn)
+	stage, slug, ok := b.healTarget(cn)
 	if !ok {
 		return
 	}
@@ -80,14 +81,10 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
 		return
 	}
-	if dir == "" {
-		b.audit("reenrol", cn, "error", "no bootstrap dir configured for this identity")
-		return
-	}
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
 	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
 	// audit line.
-	if err := b.stageFreshTicket(cn, dir); err != nil {
+	if err := stage(ctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return
 	}
@@ -104,27 +101,34 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 }
 
 // healTarget applies the policy gates (mode, configured identity) and
-// resolves where the heal acts: the bootstrap dir to re-stage into and the
-// scion slug to bounce, which differ between manager and worker. ok is false
-// when cn is not healable at all; dir may be "" for a configured identity
-// with no bootstrap dir, which the caller audits.
-func (b *Broker) healTarget(cn string) (dir, slug string, ok bool) {
+// resolves how the heal acts: the re-stage step and the scion slug to
+// bounce, which differ between manager and worker. The manager's ticket goes
+// to <tree>/.lever on the host (its own mount); a worker's goes to the guest
+// through the ticket channel, like a dispatch. ok is false when cn is not
+// healable at all; a manager with no bootstrap dir configured fails at the
+// stage step, which the caller audits.
+func (b *Broker) healTarget(cn string) (stage func(context.Context) error, slug string, ok bool) {
 	switch b.autoReenrol {
 	case autoReenrolOff:
-		return "", "", false
+		return nil, "", false
 	case autoReenrolManager:
 		if cn != b.manager {
-			return "", "", false
+			return nil, "", false
 		}
 	}
 	spec, isWorker := b.workerSpec(cn)
 	if cn != b.manager && !isWorker {
-		return "", "", false
+		return nil, "", false
 	}
 	if isWorker {
-		return spec.BootstrapDir, spec.Name, true
+		return func(ctx context.Context) error { return b.stageWorkerTicket(ctx, spec) }, spec.Name, true
 	}
-	return b.managerBootstrapDir, b.managerSlug, true
+	return func(context.Context) error {
+		if b.managerBootstrapDir == "" {
+			return errors.New("no bootstrap dir configured for this identity")
+		}
+		return b.stageFreshTicket(cn, b.managerBootstrapDir)
+	}, b.managerSlug, true
 }
 
 // admitReenrol is the per-CN cooldown + attempt cap, and records the attempt

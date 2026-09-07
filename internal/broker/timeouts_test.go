@@ -224,7 +224,7 @@ func (s *slowStartRuntime) Start(ctx context.Context, o scion.StartOpts) error {
 func TestJailWorkerRouteSlowStartCompletes(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir:  filepath.Join(t.TempDir(), ".lever")}
+		TicketDir:     "/run/user/501/lever/tickets/worker"}
 	rt := &slowStartRuntime{fakeRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}, delay: 400 * time.Millisecond}
 	b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt, spec),
 		withTimeouts(TimeoutConfig{Control: 100 * time.Millisecond})))

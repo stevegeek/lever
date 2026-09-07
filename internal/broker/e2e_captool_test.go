@@ -1,7 +1,7 @@
 package broker
 
 // e2e_captool_test.go exercises the WHOLE first-party capability chain over real
-// mTLS: manager provisions a worker, the worker enrols (mTLS cert), the manager
+// mTLS: the host mints a worker ticket, the worker enrols (mTLS cert), the manager
 // delegates a constrained `db.read` capability to the worker, and the worker
 // calls the gated MCP gateway. The "db" backend is a REAL captool.Server that
 // independently re-verifies the forwarded token (signature + bound_agent +
@@ -189,28 +189,12 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	managerCert := signedCert(t, b, "manager")
 	managerClient := agentClient(t, b, managerCert)
 
-	// ── Step 1: provision — manager → ticket ──────────────────────────────────
-	provBody, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
-	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	defer provResp.Body.Close()
-	if provResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(provResp.Body)
-		t.Fatalf("provision: status=%d body=%s", provResp.StatusCode, body)
-	}
-	var provResult wire.ProvisionResponse
-	if err := json.NewDecoder(provResp.Body).Decode(&provResult); err != nil {
-		t.Fatalf("provision: decode: %v", err)
-	}
-	if provResult.Ticket == "" {
-		t.Fatal("provision: empty ticket")
-	}
+	// ── Step 1: mint — host authority → ticket (staged in the guest by a dispatch)
+	ticket := mintWorkerTicket(t, b, "worker")
 
 	// ── Step 1b: enrol — worker self-generates a key, POSTs /enrol → cert ──────
 	workerCSRPEM, workerKeyPEM := csrWithKey(t, "worker")
-	enrolReqBody, _ := json.Marshal(wire.EnrolRequest{Ticket: provResult.Ticket, CSR: string(workerCSRPEM)})
+	enrolReqBody, _ := json.Marshal(wire.EnrolRequest{Ticket: ticket, CSR: string(workerCSRPEM)})
 	certlessClient := agentClient(t, b, tls.Certificate{})
 	enrolResp, err := certlessClient.Post(srv.URL+"/enrol", "application/json", bytes.NewReader(enrolReqBody))
 	if err != nil {

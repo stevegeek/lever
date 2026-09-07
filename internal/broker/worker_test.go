@@ -17,6 +17,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // fakeRuntime records calls and returns scripted results; satisfies WorkerRuntime.
@@ -50,6 +51,37 @@ type fakeRuntime struct {
 	// the harness died after scion reported success.
 	dieAfterLists int
 	actedLists    int
+	// staged records every worker ticket the broker handed to the guest
+	// channel (TicketStager), newest last; stageErr makes the channel fail.
+	staged   map[string][][]byte
+	stageErr error
+}
+
+// StageWorkerTicket satisfies TicketStager: the fake is also the guest
+// channel, so a test reads what a dispatch staged without touching disk.
+func (f *fakeRuntime) StageWorkerTicket(_ context.Context, worker string, payload []byte) error {
+	if f.stageErr != nil {
+		return f.stageErr
+	}
+	if f.staged == nil {
+		f.staged = map[string][][]byte{}
+	}
+	f.staged[worker] = append(f.staged[worker], payload)
+	return nil
+}
+
+// lastStaged decodes the newest envelope staged for worker, or fails.
+func (f *fakeRuntime) lastStaged(t *testing.T, worker string) wire.Bootstrap {
+	t.Helper()
+	ps := f.staged[worker]
+	if len(ps) == 0 {
+		t.Fatalf("no ticket staged for %q", worker)
+	}
+	var bs wire.Bootstrap
+	if err := json.Unmarshal(ps[len(ps)-1], &bs); err != nil {
+		t.Fatalf("staged envelope for %q is not a Bootstrap: %v", worker, err)
+	}
+	return bs
 }
 
 func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
@@ -151,10 +183,9 @@ func callWorker(t *testing.T, b *Broker, path, body, cn string) *httptest.Respon
 }
 
 func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
-	dir := t.TempDir()
 	hostWorkspace := filepath.Join(t.TempDir(), "workers", "worker") // does NOT exist yet
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: hostWorkspace,
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", Model: "claude-opus-5", APIKey: true}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1", Model: "claude-opus-5", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 
@@ -167,24 +198,14 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	if fi, err := os.Stat(hostWorkspace); err != nil || !fi.IsDir() {
 		t.Fatalf("host workspace not created: %v", err)
 	}
-	// bootstrap staged 0600 with the broker CA/URL and the worker CN
-	raw, err := os.ReadFile(filepath.Join(spec.BootstrapDir, "bootstrap.json"))
-	if err != nil {
-		t.Fatalf("bootstrap not staged: %v", err)
-	}
-	var bs struct {
-		Ticket    string `json:"ticket"`
-		BrokerCA  string `json:"broker_ca"`
-		BrokerURL string `json:"broker_url"`
-		AgentCN   string `json:"agent_cn"`
-	}
-	_ = json.Unmarshal(raw, &bs)
+	// the envelope went to the GUEST channel with the broker CA/URL and the
+	// worker CN — and nowhere in the tree (the manager's mount)
+	bs := rt.lastStaged(t, "worker")
 	if bs.Ticket == "" || bs.BrokerCA != "CA-PEM" || bs.BrokerURL != "https://10.0.0.2:8080" || bs.AgentCN != "worker" {
 		t.Fatalf("bad bootstrap: %+v", bs)
 	}
-	fi, _ := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json"))
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("bootstrap perms = %v, want 0600", fi.Mode().Perm())
+	if _, err := os.Stat(filepath.Join(hostWorkspace, ".lever")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("SECURITY: a ticket directory was created inside the worker's tree subdir (stat err %v)", err)
 	}
 	// scion start called with the constant instance project (-g) + per-worker
 	// --workspace subdir (no longer equal to each other) + api-key + image +
@@ -202,13 +223,21 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	if got.Task != "do it" {
 		t.Fatalf("StartOpts.Task = %q, want \"do it\"", got.Task)
 	}
+	// the new container mounts exactly its own ticket directory, read-only,
+	// and boot is pointed at the file
+	if len(got.Volumes) != 1 || got.Volumes[0].Source != spec.TicketDir || got.Volumes[0].Target != "/run/lever" || !got.Volumes[0].ReadOnly {
+		t.Fatalf("StartOpts.Volumes = %+v, want the ticket dir mounted read-only at /run/lever", got.Volumes)
+	}
+	if got.Env["LEVER_BOOTSTRAP"] != "/run/lever/bootstrap.json" {
+		t.Fatalf("StartOpts.Env = %v, want LEVER_BOOTSTRAP at the mounted file", got.Env)
+	}
 	if len(rt.envSets) != 1 || rt.envSetProj[0] != testInstanceProject {
 		t.Fatalf("EnvSet calls = %d (proj %v), want 1 at the instance project", len(rt.envSets), rt.envSetProj)
 	}
 }
 
 func TestWorkerStart_running_isNoop(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "worker", Phase: "running"}},
 	}}
@@ -224,7 +253,7 @@ func TestWorkerStart_running_isNoop(t *testing.T) {
 
 func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
-		BootstrapDir: filepath.Join(t.TempDir(), ".lever")}
+		TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
 	}}
@@ -244,8 +273,8 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 	// otherwise re-enrol with a spent ticket and wedge into phase=error
 	// (live-hit 2026-07-31). Harmless when the leaf is still valid — boot
 	// skips enrol and the ticket ages out unspent.
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); err != nil {
-		t.Fatal("resume must stage a fresh bootstrap ticket")
+	if bs := rt.lastStaged(t, "worker"); bs.AgentCN != "worker" {
+		t.Fatalf("resume must stage a fresh bootstrap ticket for the worker, got %+v", bs)
 	}
 }
 
@@ -253,9 +282,8 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 // non-running phase (e.g. "exited") takes the resume path — a fresh ticket is
 // staged (see the suspended-phase test) but scion start is never re-run.
 func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
-	bootstrapDir := filepath.Join(t.TempDir(), ".lever")
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
-		BootstrapDir: bootstrapDir}
+		TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "worker", Phase: "exited"}},
 	}}
@@ -272,7 +300,7 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 		t.Fatalf("started = %d, want 0 (must not re-provision)", len(rt.started))
 	}
 	// fresh ticket staged for the re-enrol-on-boot path
-	if _, err := os.Stat(filepath.Join(bootstrapDir, "bootstrap.json")); err != nil {
+	if len(rt.staged["worker"]) != 1 {
 		t.Fatal("terminal-phase resume must stage a fresh bootstrap ticket")
 	}
 }
@@ -281,9 +309,8 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 // with a fresh ticket staged — the 2026-07-31 wedge (spent-ticket enrol deny
 // -> error phase -> 409 on every message) heals without a purge.
 func TestWorkerStart_errorPhase_resumeForce(t *testing.T) {
-	bootstrapDir := filepath.Join(t.TempDir(), ".lever")
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
-		BootstrapDir: bootstrapDir}
+		TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "worker", Phase: "error"}},
 	}}
@@ -296,7 +323,7 @@ func TestWorkerStart_errorPhase_resumeForce(t *testing.T) {
 		t.Fatalf("verbs: forced=%d resumed=%d started=%d, want force-only",
 			len(rt.resumeForced), len(rt.resumed), len(rt.started))
 	}
-	if _, err := os.Stat(filepath.Join(bootstrapDir, "bootstrap.json")); err != nil {
+	if len(rt.staged["worker"]) != 1 {
 		t.Fatal("error-phase resume must stage a fresh bootstrap ticket")
 	}
 }
@@ -307,7 +334,7 @@ func TestWorkerStart_errorPhase_resumeForce(t *testing.T) {
 // not the new one.
 func TestWorkerStartRefusesTaskMismatch(t *testing.T) {
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch",
-		BootstrapDir: filepath.Join(t.TempDir(), ".lever")}
+		TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "scratch", Phase: "suspended"}},
 	}}
@@ -337,9 +364,8 @@ func TestWorkerStartRefusesTaskMismatch(t *testing.T) {
 // After a successful Start, an un-live container (crash-loop) must surface as a
 // loud error, NOT a false {Phase:"running"}.
 func TestWorkerStartLivenessTimeout(t *testing.T) {
-	dir := t.TempDir()
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
-		BootstrapDir: filepath.Join(dir, ".lever")}
+		TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, exitedAfterStart: true} // absent, then Exited after Start
 	b := newTestBroker(t, rt, spec)
 	b.liveAttempts, b.liveInterval = 3, time.Millisecond
@@ -388,9 +414,8 @@ func (r *midPollListFailRuntime) List(ctx context.Context, project string) ([]sc
 // reports the worker running/live. This behavior must survive the WaitAgentLive
 // extraction (plan B3).
 func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
-	dir := t.TempDir()
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
-		BootstrapDir: filepath.Join(dir, ".lever")}
+		TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &midPollListFailRuntime{
 		fakeRuntime:  &fakeRuntime{agents: map[string][]scion.Agent{}}, // absent -> Start path
 		failAfterAct: 2,                                                // two blips inside the liveness poll before a live record
@@ -411,11 +436,11 @@ func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
 	}
 }
 
-// TestWorkerStartStageFailure forces stageBootstrap to fail — BootstrapDir sits
-// directly under a read-only parent so its MkdirAll is denied — on BOTH the
-// fresh-start (absent) and resume (existing non-running) paths, and asserts each
-// returns 500 with body "stage error" and dispatches no scion verb. These
-// stage-failure branches otherwise have zero coverage.
+// TestWorkerStartStageFailure makes the guest ticket channel fail on BOTH
+// the fresh-start (absent) and resume (existing non-running) paths, and
+// asserts each returns 500 with body "stage error" and dispatches no scion
+// verb. A worker whose ticket did not land must not be started to fail at
+// enrol behind a runtime error.
 func TestWorkerStartStageFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -425,17 +450,9 @@ func TestWorkerStartStageFailure(t *testing.T) {
 		{"resume", map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			parent := t.TempDir()
-			if err := os.Chmod(parent, 0o500); err != nil {
-				t.Fatal(err)
-			}
-			// Restore write before TempDir's own cleanup removes the tree (LIFO:
-			// this runs before the removal registered at t.TempDir() time).
-			t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
 			spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
-				HostWorkspace: t.TempDir(),
-				BootstrapDir:  filepath.Join(parent, ".lever")} // MkdirAll denied under 0500 parent
-			rt := &fakeRuntime{agents: tc.agents}
+				HostWorkspace: t.TempDir(), TicketDir: "/run/user/501/lever/tickets/worker"}
+			rt := &fakeRuntime{agents: tc.agents, stageErr: errors.New("guest write failed")}
 			b := newTestBroker(t, rt, spec)
 
 			rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
@@ -455,8 +472,34 @@ func TestWorkerStartStageFailure(t *testing.T) {
 	}
 }
 
+// A worker with no ticket directory, or a broker with no ticket channel
+// wired, fails closed at the staging step — never a start whose boot cannot
+// find a ticket.
+func TestWorkerStartRefusesWithoutTicketChannel(t *testing.T) {
+	t.Run("no_ticket_dir", func(t *testing.T) {
+		spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: t.TempDir()}
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+		b := newTestBroker(t, rt, spec)
+		rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"x"}`, "test-manager")
+		if rec.Code != http.StatusInternalServerError || len(rt.started) != 0 || len(rt.staged) != 0 {
+			t.Fatalf("status = %d started=%d staged=%d, want 500 and nothing dispatched or staged", rec.Code, len(rt.started), len(rt.staged))
+		}
+	})
+	t.Run("no_stager", func(t *testing.T) {
+		spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: t.TempDir(),
+			TicketDir: "/run/user/501/lever/tickets/worker"}
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+		b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt, spec),
+			func(c *Config) { c.Dispatch.Tickets = nil }))
+		rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"x"}`, "test-manager")
+		if rec.Code != http.StatusInternalServerError || len(rt.started) != 0 {
+			t.Fatalf("status = %d started=%d, want 500 and no start", rec.Code, len(rt.started))
+		}
+	})
+}
+
 func TestWorkerStart_authz(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
 	b := newTestBroker(t, &fakeRuntime{agents: map[string][]scion.Agent{}}, spec)
 	// wrong CN
 	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "intruder"); rec.Code != http.StatusForbidden {
@@ -499,8 +542,8 @@ func TestWorkerList(t *testing.T) {
 		},
 	}}
 	b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt,
-		WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()},
-		WorkerSpec{Name: "helper", WorkspaceSubdir: "workers/helper", BootstrapDir: t.TempDir()},
+		WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"},
+		WorkerSpec{Name: "helper", WorkspaceSubdir: "workers/helper", TicketDir: "/run/user/501/lever/tickets/worker"},
 	)))
 	req := httptest.NewRequest("POST", "/worker/list", nil)
 	req.TLS = fakeTLSWithCN("test-manager")
@@ -551,7 +594,7 @@ func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 // whose scion runtime is nil and pins the status both must answer.
 func assertNilRuntimeVerbs(t *testing.T, cn string, want int) {
 	t.Helper()
-	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
 	b := newTestBroker(t, nil, spec)
 	for _, path := range []string{"/worker/start", "/worker/list"} {
 		rec := callWorker(t, b, path, `{"worker":"worker","task":"go"}`, cn)
@@ -562,7 +605,7 @@ func assertNilRuntimeVerbs(t *testing.T, cn string, want int) {
 }
 
 func TestWorkerLifecycleVerbs(t *testing.T) {
-	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", BootstrapDir: t.TempDir()}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)
 
@@ -589,9 +632,8 @@ func TestWorkerLifecycleVerbs(t *testing.T) {
 }
 
 func TestWorkerStart_deniesRevokedManager(t *testing.T) {
-	dir := t.TempDir()
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: t.TempDir(),
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", APIKey: true}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1", APIKey: true}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	b := newTestBroker(t, rt, spec)
 	b.Revoke("test-manager")
@@ -601,7 +643,7 @@ func TestWorkerStart_deniesRevokedManager(t *testing.T) {
 		t.Fatalf("revoked manager dispatch: status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
 	// No bootstrap staged, no start attempted.
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !errors.Is(err, fs.ErrNotExist) {
+	if len(rt.staged) != 0 {
 		t.Fatal("revoked dispatch must not stage bootstrap")
 	}
 }
@@ -616,7 +658,7 @@ func TestWorkerStart_absent_passesInstructionsFromHostFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", InstructionsPath: manual}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1", InstructionsPath: manual}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 
@@ -638,7 +680,7 @@ func TestWorkerStart_absent_passesInstructionsFromHostFile(t *testing.T) {
 func TestWorkerStart_absent_missingInstructionsFileFailsBeforeStaging(t *testing.T) {
 	dir := t.TempDir()
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", InstructionsPath: filepath.Join(dir, "absent.md")}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1", InstructionsPath: filepath.Join(dir, "absent.md")}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 
@@ -650,8 +692,8 @@ func TestWorkerStart_absent_missingInstructionsFileFailsBeforeStaging(t *testing
 	if len(rt.started) != 0 {
 		t.Fatalf("no start may happen without the instructions; got %d", len(rt.started))
 	}
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
-		t.Fatalf("no ticket may be staged when the instructions file is unreadable (stat err %v)", err)
+	if len(rt.staged) != 0 {
+		t.Fatal("no ticket may be staged when the instructions file is unreadable")
 	}
 }
 
@@ -660,7 +702,7 @@ func TestWorkerStart_absent_missingInstructionsFileFailsBeforeStaging(t *testing
 // error for a container that exited "command too long" (lever#30).
 func TestWorkerStart_oversizedTaskIs413WithoutStart(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir: filepath.Join(t.TempDir(), ".lever"), Image: "img:1"}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 	body, _ := json.Marshal(map[string]string{"worker": "worker", "task": strings.Repeat("x", scion.TaskArgvBudget+1)})
@@ -688,7 +730,7 @@ func TestWorkerStart_absent_oversizedInstructionsFailBeforeStaging(t *testing.T)
 		t.Fatal(err)
 	}
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1", InstructionsPath: manual}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1", InstructionsPath: manual}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 
@@ -700,8 +742,8 @@ func TestWorkerStart_absent_oversizedInstructionsFailBeforeStaging(t *testing.T)
 	if len(rt.started) != 0 {
 		t.Fatalf("no start may happen; got %d", len(rt.started))
 	}
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !os.IsNotExist(err) {
-		t.Fatalf("no ticket may be staged (stat err %v)", err)
+	if len(rt.staged) != 0 {
+		t.Fatal("no ticket may be staged")
 	}
 }
 
@@ -710,9 +752,8 @@ func TestWorkerStart_absent_oversizedInstructionsFailBeforeStaging(t *testing.T)
 // manager hears WHY — "came up, then died" with the observation — instead of a
 // 200 "running" over an exited container.
 func TestWorkerStartFailsWhenHarnessDiesDuringSettle(t *testing.T) {
-	dir := t.TempDir()
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1"}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, dieAfterLists: 2}
 	b := newTestBroker(t, rt, spec)
 	b.liveAttempts, b.liveInterval, b.liveSettle = 3, time.Millisecond, 30*time.Millisecond
@@ -731,9 +772,8 @@ func TestWorkerStartFailsWhenHarnessDiesDuringSettle(t *testing.T) {
 // config gets — is the first-observation gate: the same death goes unseen.
 // Pinned so the production default cannot be dropped without a test moving.
 func TestWorkerStartZeroSettleMissesALaterDeath(t *testing.T) {
-	dir := t.TempDir()
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir: filepath.Join(dir, ".lever"), Image: "img:1"}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, dieAfterLists: 1}
 	b := newTestBroker(t, rt, spec)
 	b.liveAttempts, b.liveInterval = 3, time.Millisecond
@@ -748,7 +788,7 @@ func TestWorkerStartZeroSettleMissesALaterDeath(t *testing.T) {
 // already puts the task behind `--`; this is the layer that says so out loud.
 func TestWorkerStart_flagShapedTaskIs400WithoutStart(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
-		BootstrapDir: filepath.Join(t.TempDir(), ".lever"), Image: "img:1"}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := newTestBroker(t, rt, spec)
 	body, _ := json.Marshal(map[string]string{"worker": "worker", "task": "--config=/lever/x.json"})
@@ -778,7 +818,7 @@ func TestWorkerStart_workspaceSymlinkOutOfTreeIsRefused(t *testing.T) {
 	}
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		HostWorkspace: filepath.Join(tree, "workers", "worker"),
-		BootstrapDir:  filepath.Join(tree, "workers", "worker", ".lever"), Image: "img:1"}
+		TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	var buf bytes.Buffer
 	b := New(testConfig(t, withAudit(&buf), withManager("test-manager", ""), withRuntime(rt, spec),
@@ -795,8 +835,8 @@ func TestWorkerStart_workspaceSymlinkOutOfTreeIsRefused(t *testing.T) {
 	if len(rt.started) != 0 {
 		t.Fatalf("no start may happen for a refused workspace; got %d", len(rt.started))
 	}
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("no ticket may be staged for a refused workspace (stat err %v)", err)
+	if len(rt.staged) != 0 {
+		t.Fatal("no ticket may be staged for a refused workspace")
 	}
 	if !strings.Contains(buf.String(), fsutil.ErrEscapesTree.Error()) {
 		t.Fatalf("refusal must be audited by name; log=%s", buf.String())
@@ -816,7 +856,7 @@ func TestWorkerStart_workspaceInTreeSymlinkIsFollowed(t *testing.T) {
 	}
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		HostWorkspace: filepath.Join(tree, "workers", "worker"),
-		BootstrapDir:  filepath.Join(tree, "workers", "worker", ".lever"), Image: "img:1"}
+		TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
 	b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt, spec),
 		func(c *Config) { c.Dispatch.Tree = tree }))

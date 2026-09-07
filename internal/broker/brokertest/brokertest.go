@@ -9,6 +9,7 @@ package brokertest
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -35,7 +36,7 @@ import (
 type Config struct {
 	// Workers are the dispatchable worker names (default: "worker").
 	Workers []string
-	// ManagerIdentity is the CN the broker accepts /provision from
+	// ManagerIdentity is the CN the broker treats as the manager
 	// (default: "manager").
 	ManagerIdentity string
 }
@@ -49,6 +50,38 @@ type Env struct {
 	Keys     token.KeyPair
 	Rules    *rules.Policy
 	Registry *registry.Registry
+	// Tickets records every worker envelope the broker staged through its
+	// guest channel (broker.DispatchConfig.Tickets), newest last per worker.
+	Tickets *TicketRecorder
+}
+
+// TicketRecorder is a broker.TicketStager that keeps the staged payloads in
+// memory: the test-side stand-in for the guest runtime directory.
+type TicketRecorder struct {
+	mu     sync.Mutex
+	staged map[string][][]byte
+}
+
+// StageWorkerTicket records payload for worker.
+func (r *TicketRecorder) StageWorkerTicket(_ context.Context, worker string, payload []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.staged == nil {
+		r.staged = map[string][][]byte{}
+	}
+	r.staged[worker] = append(r.staged[worker], append([]byte(nil), payload...))
+	return nil
+}
+
+// Last returns the newest envelope staged for worker, or nil.
+func (r *TicketRecorder) Last(worker string) []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ps := r.staged[worker]
+	if len(ps) == 0 {
+		return nil
+	}
+	return ps[len(ps)-1]
 }
 
 // NewTestBroker builds a broker from cfg and serves its jail handler over
@@ -73,8 +106,9 @@ func NewTestBroker(t *testing.T, cfg Config) *Env {
 	pol := rules.NewPolicy()
 	specs := make([]broker.WorkerSpec, 0, len(cfg.Workers))
 	for _, w := range cfg.Workers {
-		specs = append(specs, broker.WorkerSpec{Name: w})
+		specs = append(specs, broker.WorkerSpec{Name: w, TicketDir: "/run/user/1000/lever/tickets/" + w})
 	}
+	rec := &TicketRecorder{}
 	b := broker.New(broker.Config{
 		Identity: broker.IdentityConfig{
 			Keys:            kp,
@@ -84,7 +118,7 @@ func NewTestBroker(t *testing.T, cfg Config) *Env {
 			Registry:        reg,
 			ManagerIdentity: cfg.ManagerIdentity,
 		},
-		Dispatch: broker.DispatchConfig{Workers: specs},
+		Dispatch: broker.DispatchConfig{Workers: specs, Tickets: rec},
 	})
 	src, err := caInst.NewServerCertSource("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
@@ -103,7 +137,7 @@ func NewTestBroker(t *testing.T, cfg Config) *Env {
 	srv.TLS = tlsCfg
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	return &Env{Broker: b, Server: srv, CA: caInst, Keys: kp, Rules: pol, Registry: reg}
+	return &Env{Broker: b, Server: srv, CA: caInst, Keys: kp, Rules: pol, Registry: reg, Tickets: rec}
 }
 
 // CSRWithKey returns a PEM CSR for cn plus the matching EC private key PEM.
@@ -127,7 +161,7 @@ func CSRWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 }
 
 // Cert issues a CA-signed client cert for cn — the simulated-agent technique:
-// skip provision/enrol and mint the leaf directly from the CA.
+// skip mint/enrol and mint the leaf directly from the CA.
 func Cert(t *testing.T, caInst *ca.CA, cn string) tls.Certificate {
 	t.Helper()
 	csrPEM, keyPEM := CSRWithKey(t, cn)
@@ -163,36 +197,33 @@ func (e *Env) ClientFor(t *testing.T, cn string) *http.Client {
 	return Client(e.CA, Cert(t, e.CA, cn), "")
 }
 
-// ProvisionWorker POSTs /provision {worker} as the manager and returns the
-// ticket the broker minted.
-func (e *Env) ProvisionWorker(t *testing.T, worker string) string {
-	t.Helper()
-	return ProvisionWorker(t, e.ClientFor(t, "manager"), e.Server.URL, worker)
-}
-
-// ProvisionWorker POSTs /provision {worker} to brokerURL with client (which
-// must present a manager cert) and returns the ticket.
-func ProvisionWorker(t *testing.T, client *http.Client, brokerURL, worker string) string {
+// WorkerTicket mints a ticket for worker the way the host does — through the
+// broker's admin /worker-ticket route, which stages the envelope in the guest
+// channel (here: Tickets) — and returns the ticket from the staged envelope.
+// No agent-facing route mints a worker ticket.
+func (e *Env) WorkerTicket(t *testing.T, worker string) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"worker": worker})
-	resp, err := client.Post(brokerURL+"/provision", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("provision: POST /provision: %v", err)
+	r := httptest.NewRequest(http.MethodPost, "/worker-ticket", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	e.Broker.AdminHandler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("worker-ticket: status %d: %s", w.Code, w.Body.String())
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("provision: status %d", resp.StatusCode)
+	raw := e.Tickets.Last(worker)
+	if raw == nil {
+		t.Fatalf("worker-ticket: nothing staged for %q", worker)
 	}
-	var result struct {
+	var bs struct {
 		Ticket string `json:"ticket"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("provision: decode: %v", err)
+	if err := json.Unmarshal(raw, &bs); err != nil {
+		t.Fatalf("worker-ticket: staged envelope: %v", err)
 	}
-	if result.Ticket == "" {
-		t.Fatal("provision: empty ticket")
+	if bs.Ticket == "" {
+		t.Fatal("worker-ticket: empty ticket")
 	}
-	return result.Ticket
+	return bs.Ticket
 }
 
 // FakeAdmin is a stand-in for the broker's admin listener as the captool SDK

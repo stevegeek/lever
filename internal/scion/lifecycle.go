@@ -303,6 +303,9 @@ type Agent struct {
 	// redispatches it unchanged, so it can drift from the config's
 	// manager.image after an edit (lever#33). Doctor compares the two.
 	Image string `json:"image"`
+	// ContainerID is the runtime container id scion reports for the record
+	// ("" when none is running). Doctor inspects a worker's mounts by it.
+	ContainerID string `json:"containerId"`
 }
 
 // Phase values for Agent.Phase. These mirror upstream scion's agent-state wire
@@ -391,6 +394,18 @@ type StartOpts struct {
 	// re-project the staged copy, so an agent that rewrites its own CLAUDE.md
 	// managed block gets the staged text back at its next start.
 	Instructions string
+	// Volumes are extra bind mounts for the agent container, sent as scion
+	// inline config `volumes` beside Instructions. The broker uses one: the
+	// worker's enrolment-ticket directory (jail.WorkerTicketDir), mounted
+	// read-only at /run/lever, so the ticket is visible to that container
+	// alone and never to the manager's whole-tree mount. CREATE-time only,
+	// like Instructions: scion merges the inline config into the agent
+	// record and a resume redispatches the stored volumes unchanged.
+	Volumes []VolumeMount
+	// Env is extra container environment, sent as inline config `env`. The
+	// broker sets LEVER_BOOTSTRAP so lever-agent boot reads the mounted
+	// ticket. CREATE-time only, as Volumes.
+	Env map[string]string
 	// Workspace is the path mounted as /workspace in the agent container,
 	// passed as `--workspace`. For directory projects this MUST be set to the
 	// (in-jail) project tree to get a live in-place bind mount: scion's default
@@ -493,19 +508,19 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 			"(it predates scion#1089); remove the setting or move to a newer pin", c.agentRole)
 	}
 	args := startArgs(o, role)
-	if o.Instructions == "" {
+	if !o.hasInlineConfig() {
 		_, runErr := c.run(ctx, "", args...)
 		return runErr
 	}
-	// Standing instructions travel as inline agent config on scion's STDIN.
-	// JSON, not YAML: scion's loader picks the JSON parser on a leading brace,
-	// and json.Marshal escapes anything a manual can contain, so no quoting
-	// rule of a config language can alter the text. Inline content, not a
-	// file:// URI, so nothing depends on where the scion binary runs or what
-	// its working directory is. See StartOpts.Instructions.
-	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions})
+	// Standing instructions, volumes and env travel as inline agent config on
+	// scion's STDIN. JSON, not YAML: scion's loader picks the JSON parser on a
+	// leading brace, and json.Marshal escapes anything a manual can contain,
+	// so no quoting rule of a config language can alter the text. Inline
+	// content, not a file:// URI, so nothing depends on where the scion
+	// binary runs or what its working directory is. See StartOpts.Instructions.
+	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions, Volumes: o.Volumes, Env: o.Env})
 	if err != nil {
-		return fmt.Errorf("encoding agent instructions: %w", err)
+		return fmt.Errorf("encoding inline agent config: %w", err)
 	}
 	_, runErr := c.runStdin(ctx, bytes.NewReader(body), args...)
 	return runErr
@@ -560,18 +575,38 @@ func startArgs(o StartOpts, role string) []string {
 	} else if o.Workspace != "" {
 		args = append(args, "--workspace", o.Workspace)
 	}
-	if o.Instructions != "" {
+	if o.hasInlineConfig() {
 		args = append(args, "--config", "-")
 	}
 	return append(args, "--", o.Worker, o.Task)
 }
 
+// hasInlineConfig reports whether Start must send an inline config on stdin:
+// any of instructions, volumes or env is set. Absent all three, the argv is
+// byte-identical to a plain start and nothing is written to scion's stdin.
+func (o StartOpts) hasInlineConfig() bool {
+	return o.Instructions != "" || len(o.Volumes) > 0 || len(o.Env) > 0
+}
+
+// VolumeMount is one container bind mount, in scion's own inline-config
+// shape (`volumes:` entries of type local): source is a guest path, target
+// the path inside the container.
+type VolumeMount struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+}
+
 // inlineAgentConfig is the subset of scion's inline agent config (`scion
-// config-schema`) lever sends. Only the one field: everything else an agent
-// needs is already a flag, and an inline value would silently override the
-// template chain for that field.
+// config-schema`) lever sends: the standing instructions, extra volumes and
+// extra env. Everything else an agent needs is already a flag, and an inline
+// value would silently override the template chain for that field. Every
+// field is omitempty: scion reads a PRESENT empty agent_instructions as
+// "inline-provided" and would then skip the template's instructions.
 type inlineAgentConfig struct {
-	AgentInstructions string `json:"agent_instructions"`
+	AgentInstructions string            `json:"agent_instructions,omitempty"`
+	Volumes           []VolumeMount     `json:"volumes,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`
 }
 
 func (c *Client) Resume(ctx context.Context, worker, project string) error {

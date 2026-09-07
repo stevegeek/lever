@@ -866,3 +866,78 @@ func TestStartRefusesFlagShapedTaskBeforeAnyScionCall(t *testing.T) {
 		}
 	}
 }
+
+// A worker's enrolment ticket reaches its container as a read-only volume
+// plus an env pointer, both as scion inline config on STDIN — the same
+// `--config -` channel the standing instructions use — so a start with
+// volumes or env but no instructions still sends the config, and the argv
+// shape (flags, `--`, positionals) is unchanged.
+func TestStartVolumesAndEnvGoOverStdin(t *testing.T) {
+	f := fakeScion(true)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "do x", Project: "/g/a", WorkspaceSubdir: "workers/a",
+		Volumes: []VolumeMount{{Source: "/run/user/501/lever/tickets/a", Target: "/run/lever", ReadOnly: true}},
+		Env:     map[string]string{"LEVER_BOOTSTRAP": "/run/lever/bootstrap.json"}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	want := []string{"-g", "/g/a", "start", "--harness", "claude", "--harness-auth", "oauth-token",
+		"--role", "baseline", "--workspace", "workers/a", "--config", "-", "--", "a", "do x"}
+	if strings.Join(last.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv =\n %q\nwant\n %q", last.Args, want)
+	}
+	var body struct {
+		AgentInstructions *string           `json:"agent_instructions"`
+		Volumes           []VolumeMount     `json:"volumes"`
+		Env               map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal([]byte(last.Stdin), &body); err != nil {
+		t.Fatalf("stdin is not valid JSON: %v (%q)", err, last.Stdin)
+	}
+	if body.AgentInstructions != nil {
+		t.Fatalf("agent_instructions must be absent when no instructions are configured (scion treats a present empty string as inline-provided), got %q", *body.AgentInstructions)
+	}
+	if len(body.Volumes) != 1 || body.Volumes[0].Source != "/run/user/501/lever/tickets/a" || body.Volumes[0].Target != "/run/lever" || !body.Volumes[0].ReadOnly {
+		t.Fatalf("volumes = %+v", body.Volumes)
+	}
+	if !strings.Contains(last.Stdin, `"read_only":true`) {
+		t.Fatalf("stdin %q must spell the read-only flag the way scion's VolumeMount reads it (read_only)", last.Stdin)
+	}
+	if body.Env["LEVER_BOOTSTRAP"] != "/run/lever/bootstrap.json" {
+		t.Fatalf("env = %v", body.Env)
+	}
+}
+
+// Instructions, volumes and env share one inline config document.
+func TestStartInlineConfigCarriesInstructionsVolumesAndEnvTogether(t *testing.T) {
+	f := fakeScion(false)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a", Instructions: "manual",
+		Volumes: []VolumeMount{{Source: "/src", Target: "/dst", ReadOnly: true}}, Env: map[string]string{"K": "v"}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var body inlineAgentConfig
+	if err := json.Unmarshal([]byte(f.Calls[len(f.Calls)-1].Stdin), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.AgentInstructions != "manual" || len(body.Volumes) != 1 || body.Env["K"] != "v" {
+		t.Fatalf("inline config = %+v", body)
+	}
+}
+
+// scion's listing carries the runtime container id; doctor inspects a
+// worker's mounts by it.
+func TestListParsesContainerID(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: `[{"slug":"w","phase":"running","containerStatus":"Up 1 second","containerId":"abc123"}]`})
+	c := New(f, Options{})
+	agents, err := c.List(context.Background(), "/lever")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].ContainerID != "abc123" {
+		t.Fatalf("agents = %+v", agents)
+	}
+}

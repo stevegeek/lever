@@ -1338,3 +1338,61 @@ func TestCheckOperatorSkillsMissingTreeFailsWithoutCreating(t *testing.T) {
 		t.Fatalf("doctor must not create the tree (err=%v)", err)
 	}
 }
+
+func TestCheckWorkerTicketMounts(t *testing.T) {
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	mountsOf := func(m map[string][]string) mountLister {
+		return func(_ context.Context, id string) ([]string, error) {
+			targets, ok := m[id]
+			if !ok {
+				return nil, fmt.Errorf("no such container")
+			}
+			return targets, nil
+		}
+	}
+	both := listing(
+		scion.Agent{Slug: "a", Phase: "running", ContainerID: "ca"},
+		scion.Agent{Slug: "b", Phase: "suspended", ContainerID: "cb"},
+		scion.Agent{Slug: "assistant", Phase: "running", ContainerID: "cm"})
+	cases := []struct {
+		label      string
+		workers    []string
+		list       agentLister
+		mounts     mountLister
+		ok         bool
+		wantDetail string
+		wantFix    string
+	}{
+		{"all mounted", []string{"a", "b"}, both,
+			mountsOf(map[string][]string{"ca": {"/workspace", "/run/lever"}, "cb": {"/run/lever"}}), true, "2 worker container(s) mount /run/lever", ""},
+		{"one pre-channel", []string{"a", "b"}, both,
+			mountsOf(map[string][]string{"ca": {"/workspace", "/run/lever"}, "cb": {"/workspace"}}), false, "worker b was created before", "lever worker purge b --force"},
+		{"both pre-channel", []string{"a", "b"}, both,
+			mountsOf(map[string][]string{"ca": {"/workspace"}, "cb": {"/workspace"}}), false, "worker {a,b}", "purge {a,b}"},
+		{"manager mount never inspected", []string{"a"}, both,
+			mountsOf(map[string][]string{"ca": {"/run/lever"}}), true, "1 worker", ""},
+		{"no record", []string{"ghost"}, both, mountsOf(nil), true, "no worker container", ""},
+		{"no container id", []string{"a"}, listing(scion.Agent{Slug: "a", Phase: "stopped"}), mountsOf(nil), true, "no worker container", ""},
+		{"inspect fails", []string{"a"}, both, mountsOf(map[string][]string{}), true, "not checked for worker a", ""},
+		{"list fails", []string{"a"}, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, mountsOf(nil), true, "not checked", ""},
+		{"no workers", nil, both, mountsOf(nil), true, "no workers declared", ""},
+		{"nil probes", []string{"a"}, nil, nil, true, "not checked", ""},
+	}
+	for _, c := range cases {
+		r := checkWorkerTicketMounts(context.Background(), "/lever", c.workers, c.list, c.mounts)
+		if r.name != "worker ticket mounts" {
+			t.Fatalf("%s: name = %q", c.label, r.name)
+		}
+		if r.ok != c.ok {
+			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
+		}
+		if !strings.Contains(r.detail, c.wantDetail) {
+			t.Errorf("%s: detail %q should mention %q", c.label, r.detail, c.wantDetail)
+		}
+		if !strings.Contains(r.fix, c.wantFix) {
+			t.Errorf("%s: fix %q should mention %q", c.label, r.fix, c.wantFix)
+		}
+	}
+}

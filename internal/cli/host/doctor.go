@@ -10,6 +10,7 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -112,6 +113,14 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	listAgents := func(ctx context.Context, project string) ([]scionpkg.Agent, error) {
 		return jailScion.List(ctx, project)
 	}
+	// A worker's ticket mount is read off its container, through the jail.
+	inspectMounts := func(ctx context.Context, containerID string) ([]string, error) {
+		return jail.ContainerMountTargets(ctx, jr, containerID)
+	}
+	workerNames := make([]string, 0, len(app.Workers))
+	for _, w := range app.Workers {
+		workerNames = append(workerNames, w.Name)
+	}
 
 	checks := []func() checkResult{
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
@@ -131,6 +140,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkRemote(ctx, app, state, probes, jr) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },
+		func() checkResult {
+			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
+		},
 		func() checkResult { return checkScionProjectInJail(ctx, b) },
 	}
 	out := make([]checkResult, 0, len(checks))

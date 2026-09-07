@@ -25,8 +25,7 @@ inter-agent isolation here).
 
 Config validation also rejects two workers whose `dir`s overlap (the same subtree, or one an
 ancestor of the other; `validateWorkerDirsDisjoint`, `internal/config/config.go`), since the outer
-worker would otherwise mount the inner one's workspace, including the unspent enrolment ticket the
-broker stages at `<dir>/.lever/bootstrap.json`. A worker named `manager` is rejected separately: the
+worker would otherwise mount the inner one's whole workspace. A worker named `manager` is rejected separately: the
 operator-directive channel resolves that literal name to the manager regardless of
 `broker.manager_identity`, so such a worker could never be addressed.
 
@@ -51,18 +50,22 @@ mechanism, viewed at the manager's wider scope. A compromised *manager* therefor
 whole-tree reach ([§7](/security-model/compromise/)); this isolation guarantee is about one *worker* reaching another worker's
 subdirectory, not about bounding the manager.
 
-**Residual: a compromised manager can hold a worker's identity.** A worker's enrolment ticket is
-staged at `<tree>/<dir>/.lever/bootstrap.json` — inside the worker's subdirectory, which is inside
-the manager's whole-tree mount — and the jail listener's `/provision` route mints a fresh ticket
-for any declared worker to the manager (the acceptance harness uses it). Between staging and the
-worker's boot the ticket is unspent, and `/enrol` signs any CSR whose CN matches the ticket, so a
-manager that redeems it first enrols *as* that worker: it gains the worker's `obtain:` grants, its
-inbox, and any operator directive targeted at it (the enrolment bumps the worker's directive
-generation, so the real worker's later boot fails to enrol and the substitution is visible in the
-broker audit log, not silent). Worker-only grants and worker-targeted directives are therefore
-**not manager-proof** today. The fix — staging worker tickets outside the manager's mount, and
-retiring the jail-side `/provision` route once the acceptance harness no longer needs it — is
-future work; until then, treat every worker grant as reachable by the manager.
+**A worker's enrolment ticket never enters the tree.** Until 0.22 a worker's single-use ticket
+was staged at `<tree>/<dir>/.lever/bootstrap.json` — inside the manager's whole-tree mount — and
+the jail listener's `/provision` route minted a fresh one for any declared worker to the manager.
+Between staging and the worker's boot the ticket was unspent, and `/enrol` signs any CSR whose CN
+matches the ticket, so a manager that redeemed it first enrolled *as* that worker and gained its
+`obtain:` grants, its inbox and any operator directive targeted at it. The broker now stages a
+worker's ticket in the **guest**, under the run user's `XDG_RUNTIME_DIR`
+(`/run/user/<uid>/lever/tickets/<worker>/bootstrap.json`, 0700 directories, 0600 file, a tmpfs no
+container mounts by default), and starts the worker's container with exactly that directory as a
+read-only volume at `/run/lever`. The ticket is therefore visible to one container, the worker's
+own; the manager's mount does not contain it and no route an agent can reach mints one
+(`/provision` is gone; the host-side `/worker-ticket` on the loopback admin listener replaces it
+for the acceptance harness). Every start and resume re-stages a fresh ticket, so the tmpfs being
+emptied on a VM reboot costs nothing. A worker created before 0.22 has no `/run/lever` mount and
+cannot re-enrol; `lever doctor` names it and the fix is `lever worker purge NAME --force` followed
+by a re-dispatch.
 
 **Scion's default shared directory is removed, because it would defeat this.** The hub stamps a
 `scratchpad` shared directory on every new project and mounts it **read-write into every agent of that project**,

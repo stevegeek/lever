@@ -14,6 +14,28 @@ of which were regressions introduced in 0.20.
 
 ### Fixed
 
+- **Security: a compromised manager can no longer take a worker's identity.**
+  A worker's single-use enrolment ticket was staged at
+  `<tree>/<dir>/.lever/bootstrap.json`, inside the manager's whole-tree
+  mount, and the jail listener's `/provision` route minted a fresh one for
+  any declared worker to the manager; between staging and the worker's boot
+  the manager could redeem it and enrol as that worker, gaining its `obtain:`
+  grants, its inbox and the operator directives addressed to it. The broker
+  now stages worker tickets in the guest, under the run user's
+  `XDG_RUNTIME_DIR` (`/run/user/<uid>/lever/tickets/<worker>/`, 0700/0600,
+  a tmpfs no container mounts by default), and starts the worker's container
+  with exactly that directory as a read-only volume at `/run/lever`
+  (`LEVER_BOOTSTRAP=/run/lever/bootstrap.json`). Nothing is written under
+  the worker's tree subdirectory any more. `/provision`, `lever-agent
+  provision` and `agent.Provision` are removed; the loopback admin listener
+  gains `/worker-ticket`, which mints and stages through the same channel
+  for the acceptance harness. Resume and the auto-re-enrol healer re-stage
+  through the channel. **A worker created before this release has no
+  `/run/lever` mount and cannot re-enrol**: the new `lever doctor` row
+  "worker ticket mounts" names it; run `lever worker purge NAME --force`
+  and dispatch it again (its work product in the tree is kept). Needs an
+  agent image rebuild (`make lever-image`: the pre-start hook selects the
+  mounted ticket) and `lever up --fresh`.
 - **Security: a manager-supplied task can no longer bind as a `scion start`
   flag.** `scion start` is now emitted as every lever flag first, then `--`,
   then the worker name and task. Before, the task was a bare positional ahead
@@ -129,20 +151,26 @@ of which were regressions introduced in 0.20.
 
 ### Changed
 
-- **Security model docs state a residual:** a compromised manager can redeem
-  a worker's staged enrolment ticket during the stage→boot window (tickets
-  are staged inside the manager's whole-tree mount, and `/provision` on the
-  jail listener mints one for the acceptance harness) and hold that worker's
-  identity, so worker-only grants and worker-targeted directives are not
-  manager-proof until tickets are staged outside the manager's mount. The
-  substitution is audit-visible. Removing the jail-side `/provision` route
-  needs the acceptance harness moved to a host-side mint first.
+- **`lever worker purge` removes the worker's staged ticket from the guest
+  runtime dir** instead of `<dir>/.lever/bootstrap.json`; it still never
+  touches the workspace.
+- **Config: the worker-dir overlap error** no longer cites the enrolment
+  ticket (it is not in the tree any more); overlapping dirs stay refused.
 - **Operator skill: the chat-reply recipe** puts `--` before the positionals,
   uses `--channel=`/`--thread-id=`, quotes every envelope value and states
   that the fields are untrusted. Run `lever init` to refresh the scaffold.
 
 ### Internal
 
+- `broker.WorkerSpec.BootstrapDir` is replaced by `TicketDir` (a guest
+  path); `broker.DispatchConfig` gains `Tickets` (a `TicketStager`);
+  `brokerctl.WorkerSpecs` takes the jail uid; `scion.StartOpts` gains
+  `Volumes` and `Env` (inline config) and `scion.Agent` gains `ContainerID`;
+  `wire.ProvisionRequest/Response` become `WorkerTicketRequest/Response` on
+  the admin path `/worker-ticket`; new `jail.StageWorkerTicket`,
+  `RemoveWorkerTicket`, `WorkerTicketDir`, `ContainerMountTargets`;
+  `brokertest.Env` gains `Tickets` and `WorkerTicket` replaces
+  `ProvisionWorker`.
 - `scionbin.OutputPath` returns `(string, error)`; `scionbin.OutputDir` is
   new; the scionbin tests are an external test package. `Backend.LoadImageTar`
   and `apply.Deps.LoadImageTar` take an `allowTag` policy; `apply.Deps` gains

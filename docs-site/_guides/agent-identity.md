@@ -20,7 +20,9 @@ The agent generates a keypair **inside its container** — the private key never
 redeems a **single-use enrolment ticket** at the broker's `/enrol`. The broker burns the ticket on
 redeem and binds it to the CSR's CN, so a leaked ticket cannot be replayed or used to mint a
 different identity. (The manager's ticket comes from the once-per-broker-process `/bootstrap`
-latch; a worker's from the manager-gated `/provision`.) The broker's CA signs a **leaf
+latch and is staged at `<tree>/.lever/bootstrap.json`; a worker's is minted by the broker on
+dispatch and staged in the guest runtime dir, mounted read-only at `/run/lever` into that worker's
+container only — never into the tree the manager mounts.) The broker's CA signs a **leaf
 certificate** (`internal/cap/ca/issue.go`), written to `<id-dir>/agent.{crt,key}`. The leaf's CN
 is the agent's identity; every capability the broker mints is bound to it.
 

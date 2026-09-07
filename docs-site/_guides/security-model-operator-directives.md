@@ -162,15 +162,11 @@ could present as another agent's identity.
 - Metadata — a directive's existence, its target, and roughly when it was consumed — can leak to a
   compromised hub. Accepted, given ids are already treated as public; no directive *content* leaks
   this way.
-- A **compromised manager can take a worker's identity** during the stage→boot window: the
-  worker's unspent enrolment ticket sits inside the manager's whole-tree mount (and the jail-side
-  `/provision` route mints one on request), and `/enrol` signs whichever CSR redeems it first. A
-  manager that does so holds the worker's CN and generation, so a directive *targeted at that
-  worker* — including one the manager could not consume as itself — is consumable by the manager.
-  "Manager→worker authority laundering" above still holds (the manager gains nothing signed for
-  itself), but worker-targeted directives are not manager-proof until worker tickets are staged
-  outside the manager's mount ([§4.1](/security-model/worker-isolation/)). The substitution is
-  visible: the real worker's enrolment then fails and both events are in the broker audit log.
+- A worker-targeted directive is consumable only by that worker: since 0.22 a worker's enrolment
+  ticket is staged in the guest runtime dir and mounted into that worker's container alone
+  ([§4.1](/security-model/worker-isolation/)), so the manager cannot redeem it and hold the
+  worker's CN and generation. The earlier residual — the ticket sat inside the manager's whole-tree
+  mount during the stage→boot window — is closed.
 
 ### 11.7 Where this fits
 

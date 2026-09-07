@@ -323,3 +323,41 @@ func TestLoadBootstrapRefusesSymlink(t *testing.T) {
 		t.Fatalf("absent bootstrap: err = %v, want fs.ErrNotExist", err)
 	}
 }
+
+// A WORKER's bootstrap is not in its workspace: the broker mounts the guest
+// ticket directory read-only at /run/lever and points boot at
+// /run/lever/bootstrap.json through LEVER_BOOTSTRAP. LoadBootstrap reads that
+// shape through the same two-levels-up os.Root confinement, so a link planted
+// at either component is still refused.
+func TestLoadBootstrapReadsMountedWorkerTicket(t *testing.T) {
+	root := t.TempDir() // stands in for "/"
+	dir := filepath.Join(root, "run", "lever")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "bootstrap.json")
+	if err := os.WriteFile(p, []byte(`{"ticket":"t","broker_url":"https://broker:8443/","agent_cn":"worker"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := LoadBootstrap(p)
+	if err != nil {
+		t.Fatalf("LoadBootstrap(mounted ticket): %v", err)
+	}
+	if bs.Ticket != "t" || bs.AgentCN != "worker" || bs.BrokerURL != "https://broker:8443" {
+		t.Fatalf("bootstrap = %+v", bs)
+	}
+	// The mount directory itself replaced by a link is refused, as is the file.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(elsewhere, "bootstrap.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBootstrap(p); !errors.Is(err, errRefusedPath) {
+		t.Fatalf("LoadBootstrap through a linked mount dir: err = %v, want errRefusedPath", err)
+	}
+}

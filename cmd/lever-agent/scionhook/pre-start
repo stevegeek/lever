@@ -3,13 +3,17 @@
 # launches. Runs as root in the pre-start phase; lever-agent writes 0600 key
 # files which sciontool then chowns to the agent user.
 #
-# Bootstrap-path alignment: Task 6 (internal/cli/agent.go stageWorkerBootstrap)
-# writes the bootstrap to <workerProject>/.lever/bootstrap.json, and the
-# container's scion workspace CWD is /workspace. Therefore ./.lever/bootstrap.json
-# (lever-agent boot's canonical default) resolves correctly — no override needed.
-# We let the default take effect rather than hardcoding $HOME/workspace/... which
-# could diverge if the image bakes a different mount point. The absolute in-image
-# path is validated at instance image-bake / Task-8 acceptance time.
+# Bootstrap path — two layouts, one reader (lever-agent boot):
+#   manager: /workspace/.lever/bootstrap.json. `lever apply` stages the manager's
+#            ticket at <tree>/.lever, and scion mounts the tree at /workspace.
+#   worker:  /run/lever/bootstrap.json. The broker stages a worker's ticket in
+#            the GUEST runtime dir (never in the tree, which the manager mounts
+#            whole) and mounts that directory read-only at /run/lever into the
+#            worker's container alone, with LEVER_BOOTSTRAP naming the file.
+# The env var wins when set; else the worker mount is used when present; else
+# the manager path. Always absolute: the hook's CWD is the agent home, not
+# /workspace (verified live 2026-06-28), so boot's relative default fails here.
+#
 # LLM-auth mode: the launcher sets LEVER_LLM_AUTH=api-key for an agent that must
 # route the model through the broker /llm proxy (holding only a capability(llm)
 # token). Default 'subscription' = no change (claude uses CLAUDE_CODE_OAUTH_TOKEN
@@ -21,14 +25,16 @@
 # LLM token after this hook. scion reads that file just after pre-start hooks; it
 # must be written at runtime because ~/.scion is under the /home/scion bind-mount.
 set -eu
-# Bootstrap path: pass it ABSOLUTELY. scion mounts the agent's project tree at
-# /workspace in the container and `lever apply` stages the bootstrap at
-# <tree>/.lever/bootstrap.json → /workspace/.lever/bootstrap.json. boot's default
-# (./.lever/bootstrap.json) does NOT resolve here: the pre-start hook's CWD is the
-# agent home, not /workspace (verified live 2026-06-28), so the relative default
-# fails with "read bootstrap: no such file".
+bootstrap="${LEVER_BOOTSTRAP:-}"
+if [ -z "$bootstrap" ]; then
+  if [ -e /run/lever/bootstrap.json ]; then
+    bootstrap=/run/lever/bootstrap.json
+  else
+    bootstrap=/workspace/.lever/bootstrap.json
+  fi
+fi
 lever-agent boot \
   --id-dir "$HOME/.lever-id" \
-  --bootstrap /workspace/.lever/bootstrap.json \
+  --bootstrap "$bootstrap" \
   --llm-auth "${LEVER_LLM_AUTH:-subscription}" \
   --settings "$HOME/.claude/settings.json"

@@ -14,7 +14,9 @@ import (
 //
 // `lever-agent boot` runs as ROOT in scion's pre-start hook, and every file it
 // touches (~/.lever-id/*, ~/.claude/settings.json, ~/.scion/scion-services.yaml,
-// /workspace/.lever/bootstrap.json) sits in a tree the agent (uid 1000) owns.
+// the manager's /workspace/.lever/bootstrap.json) sits in a tree the agent
+// (uid 1000) owns. A worker's /run/lever/bootstrap.json is a root-owned
+// read-only mount, but it takes the same path: one reader, one rule.
 // Following a link there would hand the agent a root write (chmod 0700 the
 // target, write attacker-chosen bytes through it) or a root read (a FIFO also
 // hangs the read). So, mirroring wire.Stage on the host side, all work goes
@@ -27,8 +29,9 @@ var errRefusedPath = errors.New("agent: refusing to follow a symbolic link under
 // splitAbove returns the directory depth levels above path as an os.Root
 // anchor, with path made relative to it. depth counts the agent-controlled
 // components in the production layout: 1 for ~/.lever-id (root = $HOME),
-// 2 for ~/.claude/settings.json and <ws>/.lever/bootstrap.json. The anchor
-// must already exist; a relative path anchors at ".".
+// 2 for ~/.claude/settings.json, <ws>/.lever/bootstrap.json and
+// /run/lever/bootstrap.json. The anchor must already exist; a relative path
+// anchors at ".".
 func splitAbove(path string, depth int) (root, rel string) {
 	path = filepath.Clean(path)
 	root = path

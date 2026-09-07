@@ -87,8 +87,8 @@ type IdentityConfig struct {
 	Tickets  *ca.TicketStore
 	Rules    *rules.Policy
 	Registry *registry.Registry
-	// ManagerIdentity is the cert CN permitted to call /provision and the
-	// worker/msg routes.
+	// ManagerIdentity is the cert CN permitted to call the worker/msg
+	// routes.
 	ManagerIdentity string
 	// ManagerSlug is the manager's scion agent slug — the app name (apply's
 	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
@@ -199,8 +199,8 @@ type TimeoutConfig struct {
 	// Body bounds how long a client may take to deliver its request body, on
 	// EVERY jail route including /llm (a read deadline on the connection).
 	Body time.Duration
-	// Control bounds the JSON control routes (provision, worker list, msg,
-	// directive, enrol, renew, request, tools): handler start to response.
+	// Control bounds the JSON control routes (worker list, msg, directive,
+	// enrol, renew, request, tools): handler start to response.
 	Control time.Duration
 }
 

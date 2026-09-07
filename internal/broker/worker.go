@@ -115,8 +115,8 @@ func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 
 // requireManagerWorker is the shared preamble of the worker dispatch routes:
 // authenticate the caller as the manager, THEN decode the body into req (so
-// an unauthenticated caller gets 403, never 400 — matching /msg and
-// /provision), then authorize the named worker against config and check the
+// an unauthenticated caller gets 403, never 400 — matching /msg), then
+// authorize the named worker against config and check the
 // runtime is wired. Returns the resolved spec, or writes 403/400/502.
 func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, req any, worker func() string) (WorkerSpec, bool) {
 	// A revoked manager cannot dispatch or tear down workers. Dispatching a worker

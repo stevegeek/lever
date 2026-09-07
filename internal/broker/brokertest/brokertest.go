@@ -1,7 +1,7 @@
 // Package brokertest holds the broker fixtures the agent, brokerctl and
 // captool tests share: an in-process broker behind an mTLS httptest server,
-// CA-issued client certs and the clients that present them, the
-// manager-side provision call, and a fake admin endpoint for the captool SDK.
+// CA-issued client certs and the clients that present them, the host-side
+// worker-ticket mint, and a fake admin endpoint for the captool SDK.
 //
 // It imports internal/broker, so broker's own tests cannot use it; they keep
 // their in-package helpers.

@@ -685,9 +685,10 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 		"run `lever up --fresh` to recreate the manager on the configured image (the conversation is discarded)"}
 }
 
-// mountLister returns the in-container mount points of a jail container
-// (jail.ContainerMountTargets in production).
-type mountLister func(ctx context.Context, containerID string) ([]string, error)
+// mountLister returns the in-container mount points of a jail container by
+// id or name (jail.ContainerMountTargets in production); jail.ErrNoContainer
+// when there is none.
+type mountLister func(ctx context.Context, ref string) ([]string, error)
 
 // workerTicketMount is where a worker's container sees its enrolment ticket
 // directory (the broker's read-only volume; see broker.WorkerSpec.TicketDir).
@@ -698,9 +699,10 @@ const workerTicketMount = "/run/lever"
 // worker has no /run/lever mount, and its next re-enrolment (a resume after
 // its leaf lapsed, the healer's bounce) cannot find a ticket — the broker no
 // longer stages one in the tree. The fix is a purge and a re-dispatch, which
-// creates the container with the mount. Workers with no record or no
-// container are skipped; a listing or inspect failure is "not checked",
-// never a pass.
+// creates the container with the mount. The container is found by the id
+// scion reports or, when the pin reports none (89ed0fe8 does not), by
+// scion's container name. Workers with no record or no container are
+// skipped; a listing or inspect failure is "not checked", never a pass.
 func checkWorkerTicketMounts(ctx context.Context, project string, workers []string, list agentLister, mounts mountLister) checkResult {
 	const check = "worker ticket mounts"
 	if len(workers) == 0 {
@@ -717,10 +719,17 @@ func checkWorkerTicketMounts(ctx context.Context, project string, workers []stri
 	checked := 0
 	for _, name := range workers {
 		a := scionpkg.FindAgent(agents, name)
-		if a == nil || a.ContainerID == "" {
+		if a == nil {
 			continue
 		}
-		targets, err := mounts(ctx, a.ContainerID)
+		ref := a.ContainerID
+		if ref == "" {
+			ref = jail.ContainerName(hubProjectKey(project), name)
+		}
+		targets, err := mounts(ctx, ref)
+		if errors.Is(err, jail.ErrNoContainer) {
+			continue
+		}
 		if err != nil {
 			unchecked = append(unchecked, name)
 			continue

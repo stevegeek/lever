@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stevegeek/lever/internal/jail"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1343,11 +1345,16 @@ func TestCheckWorkerTicketMounts(t *testing.T) {
 	listing := func(agents ...scion.Agent) agentLister {
 		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
 	}
-	mountsOf := func(m map[string][]string) mountLister {
-		return func(_ context.Context, id string) ([]string, error) {
-			targets, ok := m[id]
+	// mountsOf answers by container ref; an absent ref is jail.ErrNoContainer
+	// unless it is listed under broken, which is an inspect failure.
+	mountsOf := func(m map[string][]string, broken ...string) mountLister {
+		return func(_ context.Context, ref string) ([]string, error) {
+			if slices.Contains(broken, ref) {
+				return nil, fmt.Errorf("podman exploded")
+			}
+			targets, ok := m[ref]
 			if !ok {
-				return nil, fmt.Errorf("no such container")
+				return nil, fmt.Errorf("inspect %s: %w", ref, jail.ErrNoContainer)
 			}
 			return targets, nil
 		}
@@ -1374,8 +1381,11 @@ func TestCheckWorkerTicketMounts(t *testing.T) {
 		{"manager mount never inspected", []string{"a"}, both,
 			mountsOf(map[string][]string{"ca": {"/run/lever"}}), true, "1 worker", ""},
 		{"no record", []string{"ghost"}, both, mountsOf(nil), true, "no worker container", ""},
-		{"no container id", []string{"a"}, listing(scion.Agent{Slug: "a", Phase: "stopped"}), mountsOf(nil), true, "no worker container", ""},
-		{"inspect fails", []string{"a"}, both, mountsOf(map[string][]string{}), true, "not checked for worker a", ""},
+		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
+		{"no container id, found by name", []string{"a"}, listing(scion.Agent{Slug: "a", Phase: "running"}),
+			mountsOf(map[string][]string{"lever--a": {"/workspace"}}), false, "worker a was created before", "purge a"},
+		{"no container at all", []string{"a"}, listing(scion.Agent{Slug: "a", Phase: "stopped"}), mountsOf(nil), true, "no worker container", ""},
+		{"inspect fails", []string{"a"}, both, mountsOf(map[string][]string{}, "ca"), true, "not checked for worker a", ""},
 		{"list fails", []string{"a"}, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, mountsOf(nil), true, "not checked", ""},
 		{"no workers", nil, both, mountsOf(nil), true, "no workers declared", ""},
 		{"nil probes", []string{"a"}, nil, nil, true, "not checked", ""},

@@ -7,6 +7,21 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-09-11
+
+### Fixed
+
+- **`lever up` no longer refuses a manager record in phase `resumed`.**
+  `resumed` is not in scion's hub phase enum: it is the local runtime's
+  interim status after `scion resume`, held on the record until the
+  container's own sciontool reports `running` (16s, live on 2026-09-11).
+  A `lever up` inside that window — here, right after the broker's lapse
+  healer bounced the manager under an attached PTY — hit the
+  unknown-phase refusal ("which lever does not recognise; nothing was
+  changed"). `resumed` is now a transitional phase: apply polls it until it
+  settles, exactly like `starting` and `stopping`. Nothing else changed;
+  the refusal for a truly unknown string stays.
+
 ## [0.22.0] - 2026-09-11
 
 Security release. Worker enrolment tickets leave the instance tree: a

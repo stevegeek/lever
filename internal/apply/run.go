@@ -88,7 +88,14 @@ var defaultPhaseSettleRetry = RetryBudget{Attempts: 60, Interval: time.Second}
 // rather than acting on the snapshot. Before P6 such a snapshot took the loud
 // delete+fresh path, which discarded the conversation on a routine `lever up`
 // that raced a `lever stop`.
-var transitionalPhases = []string{"created", "provisioning", "cloning", "starting", "stopping"}
+//
+// "resumed" is not in scion's hub phase enum (pkg/agent/state/state.go); it
+// is the local runtime's interim status after `scion resume`, written to the
+// record until the container's own sciontool reports "running" (16s live on
+// 2026-09-11: the broker's lapse healer bounced the manager and a `lever up`
+// inside that window was refused as an unknown phase). It settles on its own,
+// so it is transitional here too.
+var transitionalPhases = []string{"created", "provisioning", "cloning", "starting", "stopping", "resumed"}
 
 // apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
 // api-key instances. It is NOT a real credential: it exists only to satisfy

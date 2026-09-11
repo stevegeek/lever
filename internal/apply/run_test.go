@@ -961,6 +961,12 @@ func TestStartManagerTransitionalPhaseSettlesThenConverges(t *testing.T) {
 		{"stopping settles suspended: resume", "stopping", "suspended", "stopped", 0, 1, 0},
 		{"created settles stopped: resume", "created", "stopped", "stopped", 0, 1, 0},
 		{"provisioning vanishes: create", "provisioning", "", "", 1, 0, 0},
+		// "resumed" is scion's local-runtime interim status after a resume,
+		// held until the container's own sciontool reports "running" (live:
+		// 16s on 2026-09-11, when the broker's lapse healer bounced the
+		// manager under an attached PTY and the operator's `lever up` landed
+		// inside that window and was refused as an unknown phase).
+		{"resumed settles running: no-op", "resumed", "running", "Up 2 seconds", 0, 0, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -995,7 +1001,7 @@ func TestStartManagerTransitionalPhaseSettlesThenConverges(t *testing.T) {
 // loudly naming the phase and the operator's discard path (`up --fresh`) —
 // and touches nothing. Deleting on a phase we cannot act on was the bug.
 func TestStartManagerTransitionalPhaseNeverSettlesFailsWithoutDelete(t *testing.T) {
-	for _, phase := range []string{"created", "provisioning", "cloning", "starting", "stopping"} {
+	for _, phase := range []string{"created", "provisioning", "cloning", "starting", "stopping", "resumed"} {
 		t.Run(phase, func(t *testing.T) {
 			app, f := newObserveFirstApp(t)
 			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: ""}

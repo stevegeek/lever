@@ -294,10 +294,10 @@ const managerAlias = "manager"
 //
 // Sibling isolation rests on each worker mounting only its own subtree: a
 // sibling's directory is "simply not a mount source". An overlap voids that for
-// the pair. The outer worker reads and writes the inner one's whole workspace,
-// which includes the fresh, UNSPENT enrolment ticket the broker stages at
-// <dir>/.lever/bootstrap.json on every resume — redeem it first and the outer
-// worker enrols as the inner worker's CN, taking its capability grants.
+// the pair. The outer worker reads and writes the inner one's whole workspace
+// — its work product, its notes, anything it is asked to keep to itself.
+// (Enrolment tickets are no longer at stake here: since 0.22 they are staged
+// in the guest runtime dir and mounted into one container each.)
 func (a *App) validateWorkerDirsDisjoint() error {
 	for i, outer := range a.Workers {
 		for j, inner := range a.Workers {
@@ -306,7 +306,7 @@ func (a *App) validateWorkerDirsDisjoint() error {
 			}
 			if pathOverlaps(outer.Dir, inner.Dir) {
 				return fmt.Errorf("config: workers %q (dir %q) and %q (dir %q) overlap — one is the other, or contains it; "+
-					"each worker must mount a subtree no other worker can reach, or it can read its sibling's workspace and steal the enrolment ticket staged there",
+					"each worker must mount a subtree no other worker can reach, or it can read and write its sibling's workspace",
 					outer.Name, outer.Dir, inner.Name, inner.Dir)
 			}
 		}

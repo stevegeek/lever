@@ -125,20 +125,6 @@ func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 	}
 }
 
-// TestProvisionVerbAcceptedByRun verifies that run() dispatches "provision" and
-// that the provision flags parse correctly. It uses a temp dir as -id-dir so there
-// is no identity — cmdProvision errors with "no identity", which proves dispatch
-// and flag parsing succeeded without a "flag provided but not defined" error.
-func TestProvisionVerbAcceptedByRun(t *testing.T) {
-	err := run([]string{"lever-agent", "provision", "-worker", "worker", "-out", t.TempDir() + "/w.json", "-id-dir", t.TempDir()})
-	if err == nil {
-		t.Fatal("expected an error (no identity), got nil")
-	}
-	if isFlagParseError(err) {
-		t.Fatalf("provision flags must parse: %v", err)
-	}
-}
-
 // captureStdout redirects os.Stdout for the duration of fn and returns whatever
 // fn printed. Small outputs only (the pipe buffer is not drained concurrently).
 func captureStdout(t *testing.T, fn func()) string {

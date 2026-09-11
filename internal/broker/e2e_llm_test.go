@@ -28,22 +28,12 @@ func TestE2ELLMProxyOverRealMTLS(t *testing.T) {
 	srv := jailServer(t, b)
 	defer srv.Close()
 
-	// Provision worker (manager) → ticket.
-	managerClient := agentClient(t, b, signedCert(t, b, "manager"))
-	provBody, _ := json.Marshal(wire.ProvisionRequest{Worker: "worker"})
-	provResp, err := managerClient.Post(srv.URL+"/provision", "application/json", bytes.NewReader(provBody))
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	defer provResp.Body.Close()
-	var prov wire.ProvisionResponse
-	if err := json.NewDecoder(provResp.Body).Decode(&prov); err != nil || prov.Ticket == "" {
-		t.Fatalf("provision: decode=%v ticket=%q", err, prov.Ticket)
-	}
+	// Host-side mint of the worker's ticket (a dispatch stages it in the guest).
+	ticket := mintWorkerTicket(t, b, "worker")
 
 	// Enrol worker (certless) → signed cert + own key → mTLS client.
 	csrPEM, keyPEM := csrWithKey(t, "worker")
-	enrolBody, _ := json.Marshal(wire.EnrolRequest{Ticket: prov.Ticket, CSR: string(csrPEM)})
+	enrolBody, _ := json.Marshal(wire.EnrolRequest{Ticket: ticket, CSR: string(csrPEM)})
 	enrolResp, err := agentClient(t, b, tls.Certificate{}).Post(srv.URL+"/enrol", "application/json", bytes.NewReader(enrolBody))
 	if err != nil {
 		t.Fatalf("enrol: %v", err)

@@ -19,14 +19,14 @@ func TestWorkerSpecs(t *testing.T) {
 			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md"},
 		},
 	}
-	specs := WorkerSpecs(app, "/lever")
+	specs := WorkerSpecs(app, "/lever", "501")
 	if len(specs) != 2 {
 		t.Fatalf("specs = %d, want 2", len(specs))
 	}
 	w := specs[0]
 	if w.Name != "worker" || w.WorkspaceSubdir != "workers/worker" ||
 		w.HostWorkspace != filepath.Join("/host/tree", "workers/worker") ||
-		w.BootstrapDir != filepath.Join("/host/tree", "workers/worker", ".lever") ||
+		w.TicketDir != "/run/user/501/lever/tickets/worker" ||
 		w.Image != "mgr:img" /* inherits manager */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
 		t.Fatalf("bad worker spec: %+v", w)
 	}
@@ -40,6 +40,16 @@ func TestWorkerSpecs(t *testing.T) {
 	}
 	if w.InstructionsPath != "" {
 		t.Fatalf("worker without instructions_file must get none, got %q", w.InstructionsPath)
+	}
+}
+
+// Without a jail uid there is no runtime dir to stage into: the spec carries
+// no ticket directory and the broker refuses to dispatch the worker rather
+// than fall back to a path inside the tree.
+func TestWorkerSpecsWithoutJailUIDHaveNoTicketDir(t *testing.T) {
+	app := &config.App{Tree: "/host/tree", Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}}}
+	if specs := WorkerSpecs(app, "/lever", ""); specs[0].TicketDir != "" {
+		t.Fatalf("TicketDir = %q, want empty", specs[0].TicketDir)
 	}
 }
 

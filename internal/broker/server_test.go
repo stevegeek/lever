@@ -78,24 +78,31 @@ func TestAdminHandlerRegisterAddsTool(t *testing.T) {
 	}
 }
 
-// TestJailHandlerRoutesProvision confirms the jail mux wires /provision correctly.
-// We test without a TLS state to trigger an auth error — the handler must not 404.
-func TestJailHandlerRoutesProvision(t *testing.T) {
+// The jail (agent-facing) listener serves NO ticket-minting route: /provision
+// used to hand the MANAGER a fresh ticket for any declared worker, which let a
+// compromised manager enrol as that worker. It answers 404 now, whoever asks.
+func TestJailHandlerDoesNotServeProvision(t *testing.T) {
 	b := New(testConfig(t))
 	h := b.JailHandler()
-
 	r := httptest.NewRequest("POST", "/provision", bytes.NewReader([]byte(`{"worker":"worker"}`)))
-	// No TLS → handleProvision will reject (not manager) but must NOT 404.
+	r.TLS = leafFor(t, b, "manager")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-
-	if w.Code == http.StatusNotFound {
-		t.Fatalf("/provision returned 404 — not routed in JailHandler")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/provision on the jail handler returned %d, want 404", w.Code)
+	}
+	// Nor the host-side mint: that is admin/loopback only.
+	r = httptest.NewRequest("POST", wire.PathWorkerTicket, bytes.NewReader([]byte(`{"worker":"worker"}`)))
+	r.TLS = leafFor(t, b, "manager")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("%s on the jail handler returned %d, want 404", wire.PathWorkerTicket, w.Code)
 	}
 }
 
 // TestAdminHandlerDoesNotExposeProvision verifies that /provision is NOT served
-// on the admin handler (should 404 or 405).
+// on the admin handler either (should 404).
 func TestAdminHandlerDoesNotExposeProvision(t *testing.T) {
 	b := New(testConfig(t))
 	h := b.AdminHandler()
@@ -148,7 +155,6 @@ func TestRoutesRejectWrongMethod(t *testing.T) {
 		method string
 		path   string
 	}{
-		{jail, http.MethodGet, wire.PathProvision},
 		{jail, http.MethodGet, wire.PathWorkerStart},
 		{jail, http.MethodGet, wire.PathWorkerList},
 		{jail, http.MethodGet, wire.PathMsgSend},
@@ -164,6 +170,7 @@ func TestRoutesRejectWrongMethod(t *testing.T) {
 		{admin, http.MethodGet, wire.PathBumpEpoch},
 		{admin, http.MethodGet, wire.PathRevoke},
 		{admin, http.MethodGet, wire.PathBootstrap},
+		{admin, http.MethodGet, wire.PathWorkerTicket},
 	}
 	for _, tc := range cases {
 		r := httptest.NewRequest(tc.method, tc.path, bytes.NewReader([]byte(`{}`)))

@@ -122,7 +122,7 @@ func TestRenewOnceSubscriptionLeavesSettingsAlone(t *testing.T) {
 
 func TestRenewReturnsFreshCertSameCN(t *testing.T) {
 	env := testBroker(t)
-	ticket := env.ProvisionWorker(t, "worker")
+	ticket := env.WorkerTicket(t, "worker")
 	id, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "worker")
 	if err != nil {
 		t.Fatal(err)

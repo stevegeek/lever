@@ -2,10 +2,9 @@ package host
 
 import (
 	"bytes"
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
@@ -24,21 +23,13 @@ func workerInstanceDir(t *testing.T) string {
 }
 
 // TestWorkerPurgeDeletesRecordNotWorkspace is the RISK-GATE test: purge deletes
-// the scion record and the staged bootstrap, but NEVER the HostWorkspace (the
-// worker's work product).
+// the scion record and the worker's staged ticket in the guest, but NEVER the
+// HostWorkspace (the worker's work product) — and it writes nothing under it.
 func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	dir := workerInstanceDir(t)
 	t.Chdir(dir)
 
 	hostWorkspace := filepath.Join(dir, "workspace", "workers", "scratch")
-	bootstrapDir := filepath.Join(hostWorkspace, ".lever")
-	if err := os.MkdirAll(bootstrapDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	bootstrap := filepath.Join(bootstrapDir, "bootstrap.json")
-	if err := os.WriteFile(bootstrap, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	// A work-product file that MUST survive the purge.
 	product := filepath.Join(hostWorkspace, "result.txt")
 	if err := os.WriteFile(product, []byte("keep me"), 0o644); err != nil {
@@ -53,6 +44,7 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	}
 
 	f := scionOKRunner()
+	f.Script("sh", proc.Result{})
 	root := stubRoot(&stubBackend{runner: f})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -63,9 +55,10 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 		t.Fatalf("purge: %v (%s)", err, out.String())
 	}
 
-	// scion delete scratch -g /lever ... was called.
-	if len(f.Calls) != 1 {
-		t.Fatalf("expected exactly one scion call (delete), got %+v", f.Calls)
+	// scion delete scratch -g /lever ... was called, then the guest ticket
+	// directory for scratch was removed — and nothing else.
+	if len(f.Calls) != 2 {
+		t.Fatalf("expected two jail calls (delete, ticket removal), got %+v", f.Calls)
 	}
 	call := f.Calls[0]
 	if call.Name != "scion" || len(call.Args) < 2 || call.Args[0] != "delete" || call.Args[1] != "scratch" {
@@ -78,17 +71,19 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	if !containsArg(call.Args, "/lever") {
 		t.Fatalf("delete must target the instance project /lever, got args %v", call.Args)
 	}
-
-	// The staged bootstrap is gone.
-	if _, err := os.Stat(bootstrap); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("bootstrap.json must be removed, stat err = %v", err)
+	if rm := f.Calls[1]; rm.Name != "sh" || !strings.Contains(rm.Argv(), "lever/tickets/$1") || rm.Args[len(rm.Args)-1] != "scratch" {
+		t.Fatalf("expected the guest ticket removal for scratch, got %+v", rm)
 	}
+
 	// The HostWorkspace and its work product survive.
 	if _, err := os.Stat(hostWorkspace); err != nil {
 		t.Fatalf("HostWorkspace must survive purge, stat err = %v", err)
 	}
 	if b, err := os.ReadFile(product); err != nil || string(b) != "keep me" {
 		t.Fatalf("work product must survive purge: err=%v content=%q", err, string(b))
+	}
+	if entries, _ := os.ReadDir(hostWorkspace); len(entries) != 1 {
+		t.Fatalf("purge must write nothing under the workspace, got %v", entries)
 	}
 }
 
@@ -98,16 +93,7 @@ func TestWorkerPurgeRequiresForce(t *testing.T) {
 	dir := workerInstanceDir(t)
 	t.Chdir(dir)
 
-	bootstrapDir := filepath.Join(dir, "workspace", "workers", "scratch", ".lever")
-	if err := os.MkdirAll(bootstrapDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	bootstrap := filepath.Join(bootstrapDir, "bootstrap.json")
-	if err := os.WriteFile(bootstrap, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	f := proc.NewFakeRunner() // no scripts: any scion call errors loudly
+	f := proc.NewFakeRunner() // no scripts: any jail call errors loudly
 	root := stubRoot(&stubBackend{runner: f})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -118,10 +104,7 @@ func TestWorkerPurgeRequiresForce(t *testing.T) {
 		t.Fatal("purge without --force must error")
 	}
 	if len(f.Calls) != 0 {
-		t.Fatalf("purge without --force must not call scion, got %+v", f.Calls)
-	}
-	if _, err := os.Stat(bootstrap); err != nil {
-		t.Fatalf("bootstrap.json must survive a refused purge, stat err = %v", err)
+		t.Fatalf("purge without --force must not touch the jail, got %+v", f.Calls)
 	}
 }
 

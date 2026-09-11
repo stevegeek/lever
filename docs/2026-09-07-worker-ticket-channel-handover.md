@@ -185,3 +185,30 @@ reduces to B.
   release (0.22.0) before or after this; the assistant needs `make install`,
   `lever init`, an agent image rebuild (`make lever-image`) and
   `lever up --fresh` to pick everything up.
+
+## 9. Validation record (2026-09-07, branch `feat/worker-ticket-channel`)
+
+Status: IMPLEMENTED (plan B, steps 1–9). Unit suite green; independent
+subagent review found no blocking issues. Live, on `tmp-remote-e2e`
+(OrbStack, scion pin `89ed0fe8`, agent image rebuilt with the new hook):
+
+- `lever acceptance` on a fresh throwaway machine: all six checks PASS with
+  the worker enrolled from the guest-staged ticket (admin `/worker-ticket`).
+- Pre-channel worker record (created 2026-08-17): the new doctor row named
+  it (`no /run/lever mount`), its resume died on `enrol deny: ca: unknown
+  ticket` as documented. Note: this pin lists an empty `containerId`, so
+  the row falls back to scion's container name `<project>--<worker>`.
+- `lever worker purge worker --force` + fresh dispatch (a host-side mTLS
+  client playing the manager): the broker staged
+  `/run/user/501/lever/tickets/worker/bootstrap.json` (0700/0600, run
+  user), the container carries the mount `/run/lever` (RW=false,
+  nosuid,nodev) and `LEVER_BOOTSTRAP=/run/lever/bootstrap.json`, the
+  worker enrolled (`op=enrol caller=worker decision=allow`), doctor green.
+  The manager container sees neither `/run/lever` nor `/run/user`.
+- `scion resume` of that worker keeps the mount; the broker re-staged a
+  fresh ticket first (file mtime moved), the worker renewed its leaf.
+- Nothing was written under `<tree>/workers/worker/.lever` at any step.
+- `resume --force` (error-phase recovery) was not exercised live: the same
+  hub record (`AppliedConfig.InlineConfig.Volumes`) and persisted
+  `scion-agent.json` drive it, so the mount is expected to persist as on
+  plain resume.

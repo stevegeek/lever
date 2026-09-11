@@ -31,14 +31,19 @@ type RenewResponse struct {
 	Cert string `json:"cert"`
 }
 
-// ProvisionRequest is the body of POST /provision (manager only).
-type ProvisionRequest struct {
+// WorkerTicketRequest is the body of POST /worker-ticket (admin/loopback):
+// mint a one-use enrolment ticket for a declared worker and stage it in the
+// guest exactly as a dispatch would. No ticket value crosses the wire.
+type WorkerTicketRequest struct {
 	Worker string `json:"worker"`
 }
 
-// ProvisionResponse carries the one-time enrolment ticket.
-type ProvisionResponse struct {
-	Ticket string `json:"ticket"`
+// WorkerTicketResponse names where the staged bootstrap.json sits in the
+// guest (the run user's runtime dir), for a caller that boots the worker
+// identity by hand (the acceptance harness).
+type WorkerTicketResponse struct {
+	Worker string `json:"worker"`
+	Path   string `json:"path"`
 }
 
 // ---- capabilities ----

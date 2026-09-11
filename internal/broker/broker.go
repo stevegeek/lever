@@ -87,8 +87,8 @@ type IdentityConfig struct {
 	Tickets  *ca.TicketStore
 	Rules    *rules.Policy
 	Registry *registry.Registry
-	// ManagerIdentity is the cert CN permitted to call /provision and the
-	// worker/msg routes.
+	// ManagerIdentity is the cert CN permitted to call the worker/msg
+	// routes.
 	ManagerIdentity string
 	// ManagerSlug is the manager's scion agent slug — the app name (apply's
 	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
@@ -178,9 +178,14 @@ type DispatchConfig struct {
 	// test gets — is the first-observation gate.
 	LiveSettle time.Duration
 	// ManagerBootstrapDir is the host path to <tree>/.lever — where the
-	// MANAGER's bootstrap.json is staged (workers carry theirs in WorkerSpec).
+	// MANAGER's bootstrap.json is staged (workers go through Tickets).
 	// Empty disables manager healing (audited as an error on lapse).
 	ManagerBootstrapDir string
+	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
+	// instance tree (jail.StageWorkerTicket in production). The manager
+	// mounts the whole tree, so nothing a worker must redeem may be written
+	// there. nil ⇒ every worker dispatch fails closed at the staging step.
+	Tickets TicketStager
 }
 
 // TimeoutConfig bounds request handling on the jail listener, per route
@@ -194,8 +199,8 @@ type TimeoutConfig struct {
 	// Body bounds how long a client may take to deliver its request body, on
 	// EVERY jail route including /llm (a read deadline on the connection).
 	Body time.Duration
-	// Control bounds the JSON control routes (provision, worker list, msg,
-	// directive, enrol, renew, request, tools): handler start to response.
+	// Control bounds the JSON control routes (worker list, msg, directive,
+	// enrol, renew, request, tools): handler start to response.
 	Control time.Duration
 }
 
@@ -276,6 +281,7 @@ type Broker struct {
 	// seam (time.Now in production). reenrolMu guards the two maps only.
 	autoReenrol         string
 	managerBootstrapDir string
+	ticketStager        TicketStager
 	reenrolEvents       chan string
 	reenrolNow          func() time.Time
 	reenrolMu           sync.Mutex
@@ -340,6 +346,7 @@ func New(c Config) *Broker {
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
+		ticketStager:        d.Tickets,
 		reenrolEvents:       make(chan string, reenrolQueueDepth),
 		reenrolNow:          time.Now,
 		reenrolLast:         map[string]time.Time{},

@@ -1,16 +1,13 @@
 package host
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 )
 
 // newWorkerCmd is the host-side worker admin command. Distinct from the
@@ -22,7 +19,7 @@ func newWorkerCmd(factory BackendFactory) *cobra.Command {
 	return cmd
 }
 
-// newWorkerPurgeCmd deletes a worker's scion record and its staged bootstrap so
+// newWorkerPurgeCmd deletes a worker's scion record and its staged ticket so
 // the worker can be re-dispatched fresh with a NEW task (scion pins the task at
 // creation, so a resume can only replay the original). It is the sanctioned
 // teardown the worker path lacked — no hub-API surgery. It NEVER deletes the
@@ -34,11 +31,11 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "purge NAME",
 		Args:  cobra.ExactArgs(1),
-		Short: "Delete a worker's scion record + staged bootstrap (keeps its work product)",
+		Short: "Delete a worker's scion record + staged ticket (keeps its work product)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			if !force {
-				return fmt.Errorf("`lever worker purge %s` deletes the worker's scion record and staged bootstrap so it can run a new task (its work product in the workspace is KEPT); re-run with --force to proceed", name)
+				return fmt.Errorf("`lever worker purge %s` deletes the worker's scion record and staged ticket so it can run a new task (its work product in the workspace is KEPT); re-run with --force to proceed", name)
 			}
 
 			// Config (and its beside-the-config state dir) is discovered from the
@@ -54,9 +51,9 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			}
 
 			// Resolve the worker spec from config with the SAME derivation the
-			// broker/apply use (brokerctl.WorkerSpecs), so HostWorkspace/BootstrapDir
+			// broker/apply use (brokerctl.WorkerSpecs), so HostWorkspace/TicketDir
 			// match exactly — never a manager-supplied or ad-hoc path.
-			spec, ok := findWorkerSpec(brokerctl.WorkerSpecs(app, b.MountDest()), name)
+			spec, ok := findWorkerSpec(brokerctl.WorkerSpecs(app, b.MountDest(), b.RunUID()), name)
 			if !ok {
 				return fmt.Errorf("unknown worker %q — declare it under `workers:` in %s", name, config.CanonicalName)
 			}
@@ -70,15 +67,13 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 				return fmt.Errorf("deleting worker %q scion record: %w", spec.Name, err)
 			}
 
-			// Remove the staged bootstrap (a spent, worker-specific ticket) — but
-			// ONLY that file (and the .lever dir if now empty). HostWorkspace, which
-			// the bootstrap dir lives inside, holds the worker's work product and is
-			// never touched.
-			bootstrap := filepath.Join(spec.BootstrapDir, "bootstrap.json")
-			if err := os.Remove(bootstrap); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				cmd.PrintErrf("warning: removing staged bootstrap %s: %v\n", bootstrap, err)
+			// Remove the staged ticket (a spent, worker-specific envelope) from
+			// the guest runtime dir. HostWorkspace holds the worker's work
+			// product and is never touched; nothing of the worker's lives in
+			// the tree but that.
+			if err := jail.RemoveWorkerTicket(cmd.Context(), b.JailRunner(), spec.Name); err != nil {
+				cmd.PrintErrf("warning: removing staged ticket for %q: %v\n", spec.Name, err)
 			}
-			_ = os.Remove(spec.BootstrapDir) // removed only if now empty
 
 			cmd.Printf("worker %q purged — scion record deleted; work product in %s kept.\n", spec.Name, spec.HostWorkspace)
 			return nil

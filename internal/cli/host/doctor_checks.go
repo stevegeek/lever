@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -682,6 +683,75 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 	return checkResult{check, false,
 		fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want),
 		"run `lever up --fresh` to recreate the manager on the configured image (the conversation is discarded)"}
+}
+
+// mountLister returns the in-container mount points of a jail container by
+// id or name (jail.ContainerMountTargets in production); jail.ErrNoContainer
+// when there is none.
+type mountLister func(ctx context.Context, ref string) ([]string, error)
+
+// workerTicketMount is where a worker's container sees its enrolment ticket
+// directory (the broker's read-only volume; see broker.WorkerSpec.TicketDir).
+const workerTicketMount = "/run/lever"
+
+// checkWorkerTicketMounts finds worker records created BEFORE the guest
+// ticket channel (0.22): scion keeps a record's volumes for life, so such a
+// worker has no /run/lever mount, and its next re-enrolment (a resume after
+// its leaf lapsed, the healer's bounce) cannot find a ticket — the broker no
+// longer stages one in the tree. The fix is a purge and a re-dispatch, which
+// creates the container with the mount. The container is found by the id
+// scion reports or, when the pin reports none (89ed0fe8 does not), by
+// scion's container name. Workers with no record or no container are
+// skipped; a listing or inspect failure is "not checked", never a pass.
+func checkWorkerTicketMounts(ctx context.Context, project string, workers []string, list agentLister, mounts mountLister) checkResult {
+	const check = "worker ticket mounts"
+	if len(workers) == 0 {
+		return checkResult{check, true, "no workers declared", ""}
+	}
+	if list == nil || mounts == nil {
+		return checkResult{check, true, "not checked", ""}
+	}
+	agents, err := list(ctx, project)
+	if err != nil {
+		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+	}
+	var stale, unchecked []string
+	checked := 0
+	for _, name := range workers {
+		a := scionpkg.FindAgent(agents, name)
+		if a == nil {
+			continue
+		}
+		ref := a.ContainerID
+		if ref == "" {
+			ref = jail.ContainerName(hubProjectKey(project), name)
+		}
+		targets, err := mounts(ctx, ref)
+		if errors.Is(err, jail.ErrNoContainer) {
+			continue
+		}
+		if err != nil {
+			unchecked = append(unchecked, name)
+			continue
+		}
+		checked++
+		if !slices.Contains(targets, workerTicketMount) {
+			stale = append(stale, name)
+		}
+	}
+	if len(stale) > 0 {
+		return checkResult{check, false,
+			fmt.Sprintf("worker %s was created before the guest ticket channel (no %s mount): its next enrolment cannot find a ticket",
+				braceList(stale), workerTicketMount),
+			fmt.Sprintf("run `lever worker purge %s --force`, then dispatch it again from the manager (its work product in the tree is kept)", braceList(stale))}
+	}
+	if len(unchecked) > 0 {
+		return checkResult{check, true, fmt.Sprintf("not checked for worker %s (could not inspect its container)", braceList(unchecked)), ""}
+	}
+	if checked == 0 {
+		return checkResult{check, true, "no worker container to inspect", ""}
+	}
+	return checkResult{check, true, fmt.Sprintf("%d worker container(s) mount %s", checked, workerTicketMount), ""}
 }
 
 // braceList renders names as a shell brace-expansion hint ({a,b}) for the fix

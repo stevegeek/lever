@@ -35,8 +35,8 @@ func TestHealLapsedRunningWorker(t *testing.T) {
 	b, spec, _ := reenrolBroker(t, rt, "all")
 	b.healLapse(context.Background(), "scratch")
 
-	if cn := stagedCN(t, spec.BootstrapDir); cn != "scratch" {
-		t.Fatalf("staged bootstrap CN = %q, want scratch", cn)
+	if bs := rt.lastStaged(t, spec.Name); bs.AgentCN != "scratch" {
+		t.Fatalf("staged bootstrap CN = %q, want scratch", bs.AgentCN)
 	}
 	if len(rt.suspend) != 1 || rt.suspend[0] != "scratch" {
 		t.Fatalf("suspend calls = %v, want [scratch]", rt.suspend)
@@ -120,7 +120,7 @@ func TestHealRefusesRevoked(t *testing.T) {
 	b.Revoke("scratch")
 	b.healLapse(context.Background(), "scratch")
 
-	if _, err := os.Stat(filepath.Join(spec.BootstrapDir, "bootstrap.json")); err == nil {
+	if len(rt.staged[spec.Name]) != 0 {
 		t.Fatal("revoked identity must not get a staged ticket")
 	}
 	if len(rt.resumed)+len(rt.resumeForced)+len(rt.suspend) != 0 {

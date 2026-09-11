@@ -13,7 +13,7 @@ import (
 )
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
-// Routes: /provision, /worker/*, /msg/send, /msg/list, /directive/consume,
+// Routes: /worker/*, /msg/send, /msg/list, /directive/consume,
 // /directive/check, /enrol, /renew, /request, and one gated proxy per
 // currently-registered tool under /mcp/<name>/. Tool routes are bound at
 // call time — tools must be registered before JailHandler() is called.
@@ -41,7 +41,6 @@ func (b *Broker) JailHandler() http.Handler {
 	worker := func(h http.HandlerFunc) http.Handler { return withBodyDeadline(b.timeouts.Body, h) }
 	// Method patterns: every JSON route is POST-only; /tools is the lone GET.
 	// A wrong method 405s at the mux, before any handler runs.
-	mux.Handle("POST "+wire.PathProvision, control(b.handleProvision))
 	mux.Handle("POST "+wire.PathWorkerStart, worker(b.handleWorkerStart))
 	mux.Handle("POST "+wire.PathWorkerStop, worker(b.handleWorkerStop))
 	mux.Handle("POST "+wire.PathWorkerSuspend, worker(b.handleWorkerSuspend))
@@ -105,7 +104,10 @@ func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.
-// Routes /register, /epoch, /bump-epoch, /revoke, /bootstrap — no capability-gated or agent-facing endpoints.
+// Routes /register, /epoch, /bump-epoch, /revoke, /bootstrap, /worker-ticket
+// — no capability-gated or agent-facing endpoints. Nothing an agent can
+// reach mints an enrolment ticket: the manager's comes from /bootstrap, a
+// worker's from a dispatch or /worker-ticket, both host-side.
 func (b *Broker) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathRegister, b.handleRegister)
@@ -113,6 +115,7 @@ func (b *Broker) AdminHandler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathBumpEpoch, b.handleBumpEpoch)
 	mux.HandleFunc("POST "+wire.PathRevoke, b.handleRevoke)
 	mux.HandleFunc("POST "+wire.PathBootstrap, b.handleBootstrap)
+	mux.HandleFunc("POST "+wire.PathWorkerTicket, b.handleWorkerTicket)
 	return mux
 }
 

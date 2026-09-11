@@ -156,6 +156,10 @@ func withManager(cn, slug string) configOpt {
 func withRuntime(rt WorkerRuntime, specs ...WorkerSpec) configOpt {
 	return func(c *Config) {
 		c.Dispatch.Runtime, c.Dispatch.Workers = rt, specs
+		// The fake runtime doubles as the guest ticket channel.
+		if s, ok := rt.(TicketStager); ok {
+			c.Dispatch.Tickets = s
+		}
 		c.Dispatch.BrokerCAPEM, c.Dispatch.BrokerURL = "CA-PEM", "https://10.0.0.2:8080"
 		c.Dispatch.InstanceProject = testInstanceProject
 	}
@@ -255,7 +259,7 @@ func reenrolBroker(t *testing.T, rt WorkerRuntime, mode string) (*Broker, Worker
 	t.Helper()
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch",
 		HostWorkspace: filepath.Join(t.TempDir(), "ws"),
-		BootstrapDir:  filepath.Join(t.TempDir(), ".lever")}
+		TicketDir:     "/run/user/501/lever/tickets/scratch"}
 	managerDir := filepath.Join(t.TempDir(), ".lever")
 	b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt, spec),
 		func(c *Config) { c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = mode, managerDir }))
@@ -342,4 +346,17 @@ func signedCert(t *testing.T, b *Broker, cn string) tls.Certificate {
 func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
 	t.Helper()
 	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{signedCert(t, b, cn).Leaf}}
+}
+
+// mintWorkerTicket is the host authority's half of a worker dispatch — the
+// broker mints the ticket itself and hands it to the guest channel — for a
+// test that plays the worker's boot by hand. Nothing an agent can reach
+// mints a worker ticket any more (the jail /provision route is gone).
+func mintWorkerTicket(t *testing.T, b *Broker, worker string) string {
+	t.Helper()
+	bs, err := b.bootstrapFor(worker)
+	if err != nil {
+		t.Fatalf("mint worker ticket: %v", err)
+	}
+	return bs.Ticket
 }

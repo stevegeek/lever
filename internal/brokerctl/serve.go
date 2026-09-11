@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/daemon"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -239,12 +240,12 @@ func persistenceConfig(st state.State) (broker.PersistenceConfig, error) {
 func dispatchConfig(app *config.App, st state.State, be backend.Backend, env ServeEnv) (broker.DispatchConfig, error) {
 	jailMount := be.MountDest()
 	d := broker.DispatchConfig{
-		Workers:         WorkerSpecs(app, jailMount),
+		Workers:         WorkerSpecs(app, jailMount, env.JailUID),
 		InstanceProject: jailMount,
 		WorkerToWorker:  app.WorkerToWorkerMessaging(),
 		// Natural-lapse auto-re-enrol (#22): mode from config; the manager's
 		// bootstrap.json lives at <tree>/.lever (mint-manager-bootstrap stages it
-		// there; workers carry their dir in WorkerSpec.BootstrapDir).
+		// there; a worker's goes to the guest through Tickets, see below).
 		AutoReenrol:         string(app.EffectiveAutoReenrol()),
 		ManagerBootstrapDir: filepath.Join(app.Tree, ".lever"),
 		// Confinement anchor for every bootstrap.json the broker stages (see
@@ -283,6 +284,10 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
 	sc := HostScionClient(jr, st, app.Scion.AgentRole)
 	d.Runtime = sc
+	// Worker enrolment tickets go to the guest runtime dir over the same jail
+	// runner, never into the tree the manager mounts (jail.StageWorkerTicket;
+	// the spec's TicketDir names the directory the worker container mounts).
+	d.Tickets = jailTicketStager{jr}
 	// Worker resume meets the same pre-role record hazard as the manager's
 	// (see broker.DispatchConfig.VerifyAgentRole). The hub read rides the same
 	// jail runner and controller PAT as every other lever hub call.
@@ -337,4 +342,11 @@ func bindListeners(app *config.App, st state.State) (jailLn, adminLn, dirLn net.
 		dirLn = ul
 	}
 	return jailLn, adminLn, dirLn, nil
+}
+
+// jailTicketStager is broker.TicketStager over the jail runner.
+type jailTicketStager struct{ r proc.Runner }
+
+func (s jailTicketStager) StageWorkerTicket(ctx context.Context, worker string, payload []byte) error {
+	return jail.StageWorkerTicket(ctx, s.r, worker, payload)
 }

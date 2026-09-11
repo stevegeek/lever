@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,9 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // acceptanceCheckNames returns the six acceptance checks in a fixed, documented order. The
@@ -120,10 +123,12 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 		bootDir:   bootstrapDirInJail(app, b.MountDest()),
 		managerID: vmIDDir("manager"),
 		workerID:  vmIDDir("worker"),
+		adminURL:  fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort()),
+		admin:     &http.Client{Timeout: brokerAdminTimeout},
 	}
 
 	// 2b. Setup phase: install lever-agent in the VM, then enrol the manager and
-	//     provision+enrol the worker. FAIL-CLOSED — any setup error aborts the
+	//     mint+enrol the worker. FAIL-CLOSED — any setup error aborts the
 	//     gate with a clear message (never a vacuous check pass).
 	if err := h.setup(ctx, b); err != nil {
 		return fmt.Errorf("acceptance: setup: %w", err)
@@ -186,6 +191,11 @@ type acceptanceHarness struct {
 	bootDir   string // in-jail dir containing bootstrap.json (broker URL + CA)
 	managerID string // in-jail dir holding the manager's mTLS identity (the delegator)
 	workerID  string // in-jail dir holding the worker's mTLS identity (the executor)
+	// adminURL/admin reach the broker's loopback admin API from the host: the
+	// worker's ticket is minted there (/worker-ticket) and staged into the
+	// guest by the broker, the way a real dispatch does it.
+	adminURL string
+	admin    *http.Client
 }
 
 // vmIDDir returns a distinct, non-empty, VM-writable identity directory per role.
@@ -240,8 +250,9 @@ func installLeverAgent(ctx context.Context, b backend.Backend) error {
 
 // setup makes the VM gate runnable: install lever-agent, create the VM-writable
 // identity-dir parents, enrol the manager from the deposited bootstrap, then
-// provision a worker ticket (as manager) and enrol the worker. Every step is
-// fail-closed — a setup error aborts the gate (never a vacuous check pass).
+// mint+stage a worker ticket host-side (broker admin API) and enrol the worker
+// from where the broker staged it. Every step is fail-closed — a setup error
+// aborts the gate (never a vacuous check pass).
 func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error {
 	// 1) Install lever-agent into the VM (copied in as root; isolated machines
 	//    have no host-fs mount, so a shared-mount exec is impossible).
@@ -259,15 +270,18 @@ func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error 
 	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
 		return fmt.Errorf("enrol manager (lever-agent boot): %w: %s", err, res.Stdout+res.Stderr)
 	}
-	// 4) Provision a worker ticket AS the manager (manager-CN-gated /provision),
-	//    writing the worker bootstrap to a VM-writable path, then enrol the worker.
-	// TODO(hardening): this fixed /tmp path (and the vmIDDir parents) would collide
-	// across concurrent `lever acceptance` runs; fine for the single-run merge gate.
-	wbs := "/tmp/lever-acceptance/worker-bootstrap.json"
-	if res, err := h.jr.Run(ctx, nil, "lever-agent", "provision", "-worker", "worker", "-out", wbs, "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
-		return fmt.Errorf("provision worker (lever-agent provision): %w: %s", err, res.Stdout+res.Stderr)
+	// 4) Mint the worker's ticket HOST-SIDE through the broker's admin API. The
+	//    broker stages it in the guest runtime dir (the same channel a dispatch
+	//    uses; nothing an agent can reach mints a worker ticket), and answers
+	//    with the guest path. Then enrol the worker from that file, as the run
+	//    user, which is who the jail runner runs as.
+	// TODO(hardening): the vmIDDir parents would collide across concurrent
+	// `lever acceptance` runs; fine for the single-run merge gate.
+	var wt wire.WorkerTicketResponse
+	if err := httpjson.Post(ctx, h.admin, h.adminURL+wire.PathWorkerTicket, wire.WorkerTicketRequest{Worker: "worker"}, &wt); err != nil {
+		return fmt.Errorf("mint worker ticket (broker %s): %w", wire.PathWorkerTicket, err)
 	}
-	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.workerID, "-bootstrap", wbs); err != nil {
+	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.workerID, "-bootstrap", wt.Path); err != nil {
 		return fmt.Errorf("enrol worker (lever-agent boot): %w: %s", err, res.Stdout+res.Stderr)
 	}
 	return nil

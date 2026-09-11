@@ -7,10 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-Security hardening from the 2026-09-06 review of v0.19.0→v0.21.0
-(`docs/audits/2026-09-06-security-review-0.19-to-0.21.md`). No VM escape was
-found; the items below close one high and a set of medium/low findings, two
-of which were regressions introduced in 0.20.
+## [0.22.0] - 2026-09-11
+
+Security release. Worker enrolment tickets leave the instance tree: a
+worker's ticket is now staged in the guest runtime dir and mounted
+read-only into that worker's container alone, so a compromised manager can
+no longer redeem it and hold the worker's identity (`/provision` is gone).
+Plus the hardening from the 2026-09-06 review of v0.19.0→v0.21.0
+(`docs/audits/2026-09-06-security-review-0.19-to-0.21.md`): no VM escape
+was found; the items below close one high and a set of medium/low findings,
+two of which were regressions introduced in 0.20. Upgrading needs an agent
+image rebuild (`make lever-image`) and, for a worker created before 0.22,
+`lever worker purge NAME --force` + a re-dispatch (doctor names it).
 
 ### Fixed
 

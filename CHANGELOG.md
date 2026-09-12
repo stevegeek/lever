@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`lever doctor`'s `manager agent` row reads the harness activity.** The
+  row now shows the hub-side activity scion's Claude Code hooks report and
+  the age of its last change (`activity completed, 3m0s ago`), and fails on
+  `stalled`, `crashed` or `offline` with a live container. A harness that
+  cannot complete a turn — no guest DNS (lever#34), an expired credential,
+  an API outage — kept a running phase and an `Up` container, so until now
+  it read exactly like a healthy idle manager. The hub's stall sweeper marks
+  it after `stalled_threshold` (default 5 min); a long `working` stays
+  green, since real work looks the same from the host.
+
 ## [0.22.2] - 2026-09-12
 
 ### Fixed

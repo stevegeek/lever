@@ -306,6 +306,35 @@ type Agent struct {
 	// ContainerID is the runtime container id scion reports for the record
 	// ("" when none is running). Doctor inspects a worker's mounts by it.
 	ContainerID string `json:"containerId"`
+	// LastActivityEvent is when Activity last changed (zero when the hub has
+	// not reported one). Doctor shows its age next to the activity.
+	LastActivityEvent time.Time `json:"lastActivityEvent,omitempty"`
+}
+
+// Activity values for Agent.Activity, the harness-level state scion's Claude
+// Code hooks report to the hub (pkg/agent/state/state.go upstream): a prompt
+// submit sets working, the Stop hook completed, a notification
+// waiting_for_input; the hub's sweeper sets stalled when no activity event
+// arrives within its stalled_threshold (default 5 min). A harness that cannot
+// reach the model API sits in working until the sweeper marks it stalled
+// (lever#34), which is the one signal that tells a dead turn from an idle one.
+const (
+	ActivityWorking         = "working"
+	ActivityWaitingForInput = "waiting_for_input"
+	ActivityCompleted       = "completed"
+	ActivityStalled         = "stalled"
+	ActivityOffline         = "offline"
+	ActivityCrashed         = "crashed"
+)
+
+// ActivityDead reports an activity the hub uses for a harness that has
+// stopped turning: stalled, crashed or offline.
+func ActivityDead(activity string) bool {
+	switch activity {
+	case ActivityStalled, ActivityCrashed, ActivityOffline:
+		return true
+	}
+	return false
 }
 
 // Phase values for Agent.Phase. These mirror upstream scion's agent-state wire

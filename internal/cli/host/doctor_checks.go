@@ -614,13 +614,23 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, error)
 
 // checkManagerLive reports whether the manager agent is actually up: a record
-// exists, its phase is running, and its container is live. Before lever#31
-// none of doctor's checks read the manager at all, so fourteen green rows
-// could sit over an instance with no manager container — "doctor passes"
-// meant "the plumbing is fine", never "the agent works". This is the one row
-// that says the second thing. A list error is "not checked" (a down jail or
-// hub is another check's finding), never a pass.
-func checkManagerLive(ctx context.Context, project, name string, list agentLister) checkResult {
+// exists, its phase is running, its container is live, and — since lever#34 —
+// its harness is still turning. Before lever#31 none of doctor's checks read
+// the manager at all, so fourteen green rows could sit over an instance with
+// no manager container — "doctor passes" meant "the plumbing is fine", never
+// "the agent works". This is the one row that says the second thing.
+//
+// The activity is the hub-side state scion's Claude Code hooks report
+// (scion.Activity*), shown with the age of its last change. A harness that
+// cannot complete a turn — no guest DNS (lever#34), an expired credential, an
+// API outage — keeps a live container and a running phase, and until this row
+// read the activity it was indistinguishable from a healthy idle manager. The
+// hub's stall sweeper marks such a harness stalled after its threshold
+// (default 5 min); that, crashed and offline fail the row. A long working
+// stays green: real work looks the same from here, and `lever attach` is the
+// way to tell. A list error is "not checked" (a down jail or hub is another
+// check's finding), never a pass.
+func checkManagerLive(ctx context.Context, project, name string, list agentLister, now time.Time) checkResult {
 	const check = "manager agent"
 	if list == nil {
 		return checkResult{check, true, "not checked", ""}
@@ -635,7 +645,12 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 			"run `lever up`"}
 	}
 	if a.Phase == "running" && scionpkg.ContainerLive(a.ContainerStatus) {
-		return checkResult{check, true, fmt.Sprintf("%q is running (container %s)", name, a.ContainerStatus), ""}
+		if scionpkg.ActivityDead(a.Activity) {
+			return checkResult{check, false,
+				fmt.Sprintf("manager %q has a live container but its harness is %s — it is not completing turns", name, activityAge(a, now)),
+				"`lever attach` shows the harness (a stuck LLM call ends in `Request timed out`); on lima check the `guest DNS` row (lever#34), then the credential row; `lever stop` and `lever up` restart the harness"}
+		}
+		return checkResult{check, true, fmt.Sprintf("%q is running (container %s; %s)", name, a.ContainerStatus, activityAge(a, now)), ""}
 	}
 	if a.Phase == "running" && a.ContainerStatus == "" {
 		// The container column is refreshed by the runtime broker's heartbeat,
@@ -684,6 +699,19 @@ func checkGuestDNS(ctx context.Context, closedEgress bool, jr proc.Runner) check
 	return checkResult{check, false,
 		fmt.Sprintf("the guest cannot resolve %s (%s) — an agent's every LLM call will time out while every other row stays green", guestDNSProbeName, why),
 		"in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows which DROP the lookups hit; on lima the resolver path is the LIMADNS DNAT to the host alias, which `lever apply` ACCEPTs in the open posture (lever#34) — re-run `lever apply`, then `lever up`"}
+}
+
+// activityAge renders an agent's activity with the age of its last change:
+// "activity completed, 3m0s ago", or without the age when the hub reported
+// no event time, or "no activity reported" when the field is empty.
+func activityAge(a *scionpkg.Agent, now time.Time) string {
+	if a.Activity == "" {
+		return "no activity reported"
+	}
+	if a.LastActivityEvent.IsZero() {
+		return "activity " + a.Activity
+	}
+	return fmt.Sprintf("activity %s, %s ago", a.Activity, now.Sub(a.LastActivityEvent).Truncate(time.Second))
 }
 
 // checkManagerImage compares the image the manager record was created with

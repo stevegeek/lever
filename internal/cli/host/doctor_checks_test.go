@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend/types"
@@ -1236,6 +1237,7 @@ func TestProductionProbesWiresEveryField(t *testing.T) {
 // checkManagerLive (lever#31): the one doctor row that says whether the agent
 // itself is up, not just the plumbing around it.
 func TestCheckManagerLive(t *testing.T) {
+	now := time.Date(2026, 9, 12, 8, 0, 0, 0, time.UTC)
 	listing := func(agents ...scion.Agent) agentLister {
 		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
 	}
@@ -1247,6 +1249,14 @@ func TestCheckManagerLive(t *testing.T) {
 		wantFix    string
 	}{
 		{"running", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days"}), true, "Up 4 days", ""},
+		// Activity and its age ride along on a live manager; a dead activity
+		// (the hub's stall sweeper, lever#34) fails the row even though the
+		// container is up — that is the DNS-dead / bad-credential shape.
+		{"running, completed", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "completed", LastActivityEvent: now.Add(-3 * time.Minute)}), true, "activity completed, 3m0s ago", ""},
+		{"running, working long", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "working", LastActivityEvent: now.Add(-40 * time.Minute)}), true, "activity working, 40m0s ago", ""},
+		{"running, no event time", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "waiting_for_input"}), true, "activity waiting_for_input)", ""},
+		{"running, stalled", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "stalled", LastActivityEvent: now.Add(-6 * time.Minute)}), false, "stalled", "guest DNS"},
+		{"running, crashed", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "crashed"}), false, "crashed", "lever attach"},
 		{"absent", listing(scion.Agent{Slug: "scratch", Phase: "running", ContainerStatus: "Up 1 second"}), false, "no record", "lever up"},
 		{"crashed", listing(scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}), false, `phase "error"`, "--force"},
 		{"suspended", listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"}), false, `phase "suspended"`, "resume"},
@@ -1255,7 +1265,7 @@ func TestCheckManagerLive(t *testing.T) {
 		{"running record, blank column", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "no container status", ""},
 	}
 	for _, c := range cases {
-		r := checkManagerLive(context.Background(), "/lever", "assistant", c.list)
+		r := checkManagerLive(context.Background(), "/lever", "assistant", c.list, now)
 		if r.ok != c.ok {
 			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
 		}
@@ -1270,7 +1280,7 @@ func TestCheckManagerLive(t *testing.T) {
 	// and never a finding of its own — a down jail is another row's job.
 	r := checkManagerLive(context.Background(), "/lever", "assistant", func(context.Context, string) ([]scion.Agent, error) {
 		return nil, errors.New("connection refused\nusage: scion list ...")
-	})
+	}, now)
 	if !r.ok || !strings.Contains(r.detail, "not checked") || strings.Contains(r.detail, "usage") {
 		t.Fatalf("list error must read as not-checked with only the first line: %+v", r)
 	}

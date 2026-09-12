@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-09-12
+
 ### Fixed
 
 - **`lima` + `egress: open`: the guest and every agent container have DNS

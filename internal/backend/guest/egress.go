@@ -14,13 +14,16 @@ import (
 // is already live, it returns the alias parsed from the live chain and does NOT
 // flush. resolve returns the (v4, v6) host-alias addresses as seen from the
 // guest; it is only called when a rebuild happens (DNS is available then).
+// dns (nil = none) returns the guest resolver's DNAT targets on the alias
+// (egress.DNSForward, lever#34) to ACCEPT in the OPEN posture; it is never
+// called in the closed posture, where DNS stays dropped by design.
 //
 // rebuilt reports whether a full reset+resolve+apply ran. On the I2 skip path
 // (rebuilt=false) v6 is always "" — existingClosedAlias parses only the v4
 // ACCEPT rule from the live chain, so it cannot recover v6 — and callers MUST
 // NOT treat that empty v6 as authoritative (e.g. must not use it to overwrite
 // a previously-resolved v6 alias). Only trust v6 when rebuilt is true.
-func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v4, v6 string, err error), allowedPorts []int, closedInternet bool) (v4, v6 string, rebuilt bool, err error) {
+func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v4, v6 string, err error), dns func(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error), allowedPorts []int, closedInternet bool) (v4, v6 string, rebuilt bool, err error) {
 	// I2 — never briefly open egress under a running closed instance. If the closed
 	// posture is ALREADY active (LEVER_EGRESS has the catch-all DROP), a running
 	// jailed agent depends on it; flushing+rebuilding would leave the chain empty
@@ -56,7 +59,13 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 	if err != nil {
 		return "", "", false, err
 	}
-	for _, rule := range egress.BuildRules(v4, v6, allowedPorts, closedInternet) {
+	var forwards []egress.DNSForward
+	if !closedInternet && dns != nil && v4 != "" {
+		if forwards, err = dns(ctx, v4); err != nil {
+			return "", "", false, fmt.Errorf("egress: resolver forward targets: %w", err)
+		}
+	}
+	for _, rule := range egress.BuildRulesDNS(v4, v6, allowedPorts, closedInternet, forwards) {
 		if _, err := g.RootRun(ctx, append([]string{rule.Family.Binary()}, rule.Args...)...); err != nil {
 			return "", "", false, fmt.Errorf("apply %s: %w", rule.Render(), err)
 		}

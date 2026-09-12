@@ -52,6 +52,11 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 - **`egress: open` (default):** `OUTPUT` default-ACCEPT; `LEVER_EGRESS` ACCEPTs the allowlisted host
   `host:port`s on the alias, DROPs the rest of the host alias and the private ranges above. **Public
   internet stays open** (for the model API and package installs). See the exfiltration caveat in [§8](/security-model/compromise/).
+  On `lima` the open posture also ACCEPTs the guest resolver's DNAT targets on the alias (the
+  `LIMADNS` chain rewrites `192.168.5.3:53` to `host.lima.internal:<port>` before the filter chain
+  sees it), read from the live chain at apply time — the only way DNS reaches the host agent's
+  resolver, and scoped to those exact `proto:port` pairs. Never emitted in the closed posture. See
+  [backends](/reference/backends/#lima--the-non-orbstack-path).
 - **`egress: closed`:** additionally a **catch-all DROP** for both families at the end of the chain,
   with loopback (`-o lo`) ACCEPTed *first* so the in-machine scion hub (127.0.0.1:8080) and host-alias
   tools keep working. The jail can then reach **only** the already-ACCEPTed broker port; arbitrary

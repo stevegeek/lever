@@ -213,3 +213,67 @@ func dropIdx(rules []Rule) int {
 	}
 	return -1
 }
+
+// --- lever#34: Lima's LIMADNS DNAT targets (guest resolver → host alias:port) ---
+
+const limaDNSChain = "-N LIMADNS\n" +
+	"-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT --to-destination 192.168.5.2:41234\n" +
+	"-A LIMADNS -d 192.168.5.3/32 -p tcp -m tcp --dport 53 -j DNAT --to-destination 192.168.5.2:41235\n"
+
+func TestParseDNATTargetsReadsLimaDNSChain(t *testing.T) {
+	got := ParseDNATTargets(limaDNSChain, "192.168.5.2")
+	want := []DNSForward{{"udp", 41234}, {"tcp", 41235}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+func TestParseDNATTargetsIgnoresOtherHostsAndJunk(t *testing.T) {
+	out := "-N LIMADNS\n" +
+		"-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT --to-destination 10.9.9.9:53\n" + // not the alias
+		"-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT --to-destination 192.168.5.2:notaport\n" +
+		"-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT --to-destination 192.168.5.2\n" + // no port
+		"-A LIMADNS -d 192.168.5.3/32 -p sctp --dport 53 -j DNAT --to-destination 192.168.5.2:1\n" + // not tcp/udp
+		"-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j ACCEPT\n" + // not a DNAT
+		"garbage line\n"
+	if got := ParseDNATTargets(out, "192.168.5.2"); len(got) != 0 {
+		t.Fatalf("expected no targets, got %v", got)
+	}
+	if got := ParseDNATTargets("", "192.168.5.2"); len(got) != 0 {
+		t.Fatalf("empty input must yield no targets, got %v", got)
+	}
+}
+
+// TestBuildRulesDNSAcceptsForwardTargetsBeforeAliasDropOpenOnly pins the
+// lever#34 fix: in the OPEN posture the DNAT targets of the guest's resolver
+// are ACCEPTed on the alias, BEFORE the alias DROP, for exactly the parsed
+// proto/port pairs. In the CLOSED posture DNS stays dropped by design (agents
+// dial the broker by IP), so no such rule is emitted.
+func TestBuildRulesDNSAcceptsForwardTargetsBeforeAliasDropOpenOnly(t *testing.T) {
+	dns := []DNSForward{{"udp", 41234}, {"tcp", 41235}}
+	open := familyArgs(BuildRulesDNS("192.168.5.2", "", []int{8443}, false, dns), IPv4)
+	udpIdx := indexOfRule(open, "-d 192.168.5.2 -p udp --dport 41234 -j ACCEPT")
+	tcpIdx := indexOfRule(open, "-d 192.168.5.2 -p tcp --dport 41235 -j ACCEPT")
+	dropIdx := indexOfRule(open, "-d 192.168.5.2 -j DROP")
+	if udpIdx < 0 || tcpIdx < 0 {
+		t.Fatalf("open posture must ACCEPT each DNS forward target:\n%s", strings.Join(open, "\n"))
+	}
+	if dropIdx < 0 || udpIdx > dropIdx || tcpIdx > dropIdx {
+		t.Fatalf("DNS forward ACCEPTs (udp=%d tcp=%d) must precede the alias DROP (%d)", udpIdx, tcpIdx, dropIdx)
+	}
+	closed := familyArgs(BuildRulesDNS("192.168.5.2", "", []int{8443}, true, dns), IPv4)
+	if indexOfRule(closed, "--dport 41234") >= 0 || indexOfRule(closed, "--dport 41235") >= 0 {
+		t.Fatalf("closed posture must NOT open the DNS forward targets:\n%s", strings.Join(closed, "\n"))
+	}
+	// No targets → byte-identical to BuildRules.
+	a := BuildRules("192.168.5.2", "fd07::fe", []int{8443}, false)
+	b := BuildRulesDNS("192.168.5.2", "fd07::fe", []int{8443}, false, nil)
+	if len(a) != len(b) {
+		t.Fatalf("BuildRulesDNS with no targets must equal BuildRules: %d vs %d rules", len(a), len(b))
+	}
+	for i := range a {
+		if a[i].Family != b[i].Family || !slices.Equal(a[i].Args, b[i].Args) {
+			t.Fatalf("rule %d differs: %v vs %v", i, a[i], b[i])
+		}
+	}
+}

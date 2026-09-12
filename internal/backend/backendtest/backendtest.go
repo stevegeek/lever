@@ -63,6 +63,42 @@ func (r *ClosedChainRunner) Run(ctx context.Context, env map[string]string, name
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
+// NATChainRunner answers `iptables -t nat -S <Chain>` through Host with Out
+// (a canned nat chain, e.g. LimaDNSChain) and records that the read happened,
+// falling through to the embedded FakeRunner for everything else. Same reason
+// as ClosedChainRunner: the generic "...sudo iptables" Script key is a prefix
+// of this call too, and which key wins is nondeterministic.
+type NATChainRunner struct {
+	*proc.FakeRunner
+	Host  string
+	Chain string
+	Out   string
+	Read  bool
+}
+
+// LimaDNSChain is the `iptables -t nat -S LIMADNS` output of a booted Lima
+// guest with the host resolver on: the guest resolver (192.168.5.3:53) DNATed
+// to the host alias on two per-boot ports. HostAliasV4 stands in for
+// 192.168.5.2 so the fixtures' ahosts answers line up.
+const LimaDNSChain = "-N LIMADNS\n" +
+	"-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT --to-destination " + HostAliasV4 + ":41234\n" +
+	"-A LIMADNS -d 192.168.5.3/32 -p tcp -m tcp --dport 53 -j DNAT --to-destination " + HostAliasV4 + ":41235\n"
+
+func (r *NATChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == r.Host && strings.Contains(strings.Join(args, " "), "iptables -t nat -S "+r.Chain) {
+		r.Read = true
+		// Recorded like any other call, so argv assertions can see the read.
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Stdout: r.Out}, nil
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// Run is re-declared for the same reason as ClosedChainRunner.Run.
+func (r *NATChainRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
 // FakeScionCheckout writes the minimum of a scion checkout that the web-asset
 // path inspects: a web/ holding package.json.
 func FakeScionCheckout(t *testing.T) string {

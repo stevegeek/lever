@@ -70,3 +70,16 @@ not depend on Lima's auto-inference.
 
 `host.lima.internal` (resolving to `192.168.5.2`) is the host alias, the direct analog of OrbStack's `host.orb.internal`: it's how an agent
 reaches the broker and any allowlisted host tool port.
+
+**Guest DNS goes through the host alias too.** Lima's guest resolver (`192.168.5.3`) is a nat-table
+DNAT (Lima's `LIMADNS` chain) to the host agent's DNS server at `host.lima.internal:<per-boot
+port>`, and nat `OUTPUT` runs before filter `OUTPUT`, so every lookup reaches `LEVER_EGRESS` as a
+new dial to the alias on a non-allowlisted port. Under `egress: open`, lever reads the live
+`LIMADNS` chain at apply time and ACCEPTs exactly those DNAT targets ahead of the alias DROP, so the
+guest and every agent container resolve names through the host's own resolver (VPN and split-DNS
+included). Without that carve-out (lever < 0.22.2) a subscription-mode agent never resolved
+`api.anthropic.com` and every turn ended in `Request timed out` while `lever up` and `lever doctor`
+stayed green. Under `egress: closed` DNS stays dropped by design; agents dial the broker by IP.
+`lever doctor`'s `guest DNS` row resolves a public name from inside the guest so a DNS-dead jail
+is no longer indistinguishable from a healthy idle one. OrbStack is unaffected: its resolver path
+is not in the dropped set.

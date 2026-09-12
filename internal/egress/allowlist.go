@@ -6,6 +6,7 @@
 package egress
 
 import (
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +60,69 @@ var (
 // that fact is enforced, so a missing grant shows up as a hung discovery fetch
 // rather than as anything mentioning firewalls.
 func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool) []Rule {
+	return BuildRulesDNS(aliasV4, aliasV6, allowedPorts, closedInternet, nil)
+}
+
+// DNSForward is one destination the guest's DNS traffic is rewritten to on
+// the host alias: a (proto, port) pair read from a backend's nat-table DNAT
+// (see ParseDNATTargets). It exists for Lima (lever#34): the guest resolver
+// address is DNATed in the nat table to <host alias>:<per-boot port> BEFORE
+// the filter OUTPUT chain sees the packet, so every lookup arrives in
+// LEVER_EGRESS as a NEW dial to the alias on a non-allowlisted port and hits
+// the alias DROP — no DNS in the guest or any agent container.
+type DNSForward struct {
+	Proto string // "udp" | "tcp"
+	Port  int
+}
+
+// ParseDNATTargets extracts the DNSForward targets from `iptables -t nat -S
+// <chain>` output whose --to-destination host is aliasV4: for Lima that is the
+// LIMADNS chain (`-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT
+// --to-destination 192.168.5.2:41234`). Only tcp/udp DNAT rules to the alias
+// count; anything else (another host, no port, a non-DNAT rule) is skipped, so
+// the caller never ACCEPTs a port the resolver path does not actually use.
+func ParseDNATTargets(out, aliasV4 string) []DNSForward {
+	var targets []DNSForward
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "-A" {
+			continue
+		}
+		var proto, dest string
+		var dnat bool
+		for i := 0; i+1 < len(f); i++ {
+			switch f[i] {
+			case "-p":
+				proto = f[i+1]
+			case "-j":
+				dnat = f[i+1] == "DNAT"
+			case "--to-destination":
+				dest = f[i+1]
+			}
+		}
+		if !dnat || (proto != "udp" && proto != "tcp") {
+			continue
+		}
+		host, portStr, err := net.SplitHostPort(dest)
+		if err != nil || host != aliasV4 {
+			continue
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			continue
+		}
+		targets = append(targets, DNSForward{proto, port})
+	}
+	return targets
+}
+
+// BuildRulesDNS is BuildRules plus, in the OPEN posture only, an ACCEPT to the
+// v4 alias for each DNS forward target, placed with the per-port allows (so
+// before the alias DROP). In the closed posture dns is ignored: DNS stays
+// dropped there by design (agents dial the broker by its resolved IP, see
+// security-model §2.2), and opening the resolver would widen containment.
+// With no targets the ruleset is identical to BuildRules.
+func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool, dns []DNSForward) []Rule {
 	ports := append([]int(nil), allowedPorts...)
 	sort.Ints(ports)
 	var rules []Rule
@@ -85,6 +149,14 @@ func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool
 		}
 		if aliasV6 != "" {
 			rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-p", "tcp", "--dport", strconv.Itoa(p), "-j", "ACCEPT")})
+		}
+	}
+	// 1a) ACCEPT the guest resolver's DNAT targets on the alias (lever#34), open
+	// posture only. Same shape as the per-port allows above; nothing else in
+	// the chain changes, and the closed posture never emits these.
+	if !closedInternet && aliasV4 != "" {
+		for _, d := range dns {
+			rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-p", d.Proto, "--dport", strconv.Itoa(d.Port), "-j", "ACCEPT")})
 		}
 	}
 	// 1b) ACCEPT established replies TO THE HOST ALIAS, before the alias DROP

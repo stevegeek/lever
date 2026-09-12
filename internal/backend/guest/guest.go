@@ -82,8 +82,10 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// egress posture on the same VM) does NOT re-run apt. This is not just an
 	// optimisation: once lever's egress chain is active it drops the RFC1918
 	// ranges, which on Lima include the guest's own DNS upstream (systemd-resolved
-	// forwards to a 192.168.x address), so `apt-get update` can no longer resolve
-	// the mirrors and hangs. The first EnsureUp (fresh VM, no chain yet) installs
+	// forwards to a 192.168.x address). The open posture ACCEPTs that resolver
+	// path since lever#34 (egress.DNSForward), but the closed posture drops it by
+	// design, so `apt-get update` may no longer resolve the mirrors and would
+	// hang. The first EnsureUp (fresh VM, no chain yet) installs
 	// everything; subsequent ones find the packages present and skip apt entirely,
 	// needing no guest DNS. `dpkg -s <pkgs>` succeeds iff ALL are installed.
 	//

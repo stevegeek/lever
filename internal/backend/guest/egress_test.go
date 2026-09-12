@@ -2,10 +2,12 @@ package guest
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -34,7 +36,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	r.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
 	g := orbGuest(r, "lever-jail")
 
-	v4, _, rebuilt, err := g.ApplyEgress(context.Background(), noopResolve(t), []int{8443}, true)
+	v4, _, rebuilt, err := g.ApplyEgress(context.Background(), noopResolve(t), nil, []int{8443}, true)
 	if err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
 		f.Run(context.Background(), nil, "orb", "-m", "lever-jail", "getent", "ahosts", "host.orb.internal")
 		return "0.250.250.254", "fd07::fe", nil
 	}
-	if _, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, []int{8443}, true); err != nil {
+	if _, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	} else if !rebuilt {
 		t.Fatal("rebuilt should be true when the chain is not already closed")
@@ -99,7 +101,7 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }
-	if _, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, []int{3305}, false); err != nil {
+	if _, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{3305}, false); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	} else if !rebuilt {
 		t.Fatal("rebuilt should be true on a normal (open-posture) apply")
@@ -116,5 +118,70 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	}
 	if !sawAccept || !sawDrop {
 		t.Fatalf("accept=%t drop=%t", sawAccept, sawDrop)
+	}
+}
+
+// --- lever#34: resolver DNAT targets ACCEPTed in the open posture only ---
+
+func TestApplyEgressAcceptsResolverForwardTargetsBeforeAliasDrop(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	g := orbGuest(f, "lever-jail")
+
+	resolve := func(context.Context) (string, string, error) { return "192.168.5.2", "", nil }
+	var askedFor string
+	dns := func(_ context.Context, alias string) ([]egress.DNSForward, error) {
+		askedFor = alias
+		return []egress.DNSForward{{Proto: "udp", Port: 41234}, {Proto: "tcp", Port: 41235}}, nil
+	}
+	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, dns, []int{8443}, false); err != nil {
+		t.Fatalf("ApplyEgress: %v", err)
+	}
+	// The hook is asked for the RESOLVED alias, so it can filter DNAT targets
+	// to the alias host.
+	if askedFor != "192.168.5.2" {
+		t.Fatalf("dns hook must receive the resolved v4 alias, got %q", askedFor)
+	}
+	udp := f.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d 192.168.5.2 -p udp --dport 41234 -j ACCEPT"))
+	tcp := f.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d 192.168.5.2 -p tcp --dport 41235 -j ACCEPT"))
+	drop := f.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d 192.168.5.2 -j DROP"))
+	if udp < 0 || tcp < 0 || drop < 0 {
+		t.Fatalf("expected udp/tcp forward ACCEPTs and the alias DROP: udp=%d tcp=%d drop=%d", udp, tcp, drop)
+	}
+	if udp > drop || tcp > drop {
+		t.Fatalf("forward ACCEPTs (udp=%d tcp=%d) must precede the alias DROP (%d)", udp, tcp, drop)
+	}
+}
+
+func TestApplyEgressNeverAsksResolverForwardWhenClosed(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	g := orbGuest(f, "lever-jail")
+
+	resolve := func(context.Context) (string, string, error) { return "192.168.5.2", "", nil }
+	dns := func(context.Context, string) ([]egress.DNSForward, error) {
+		t.Fatal("the closed posture keeps DNS dropped by design: the forward hook must not run")
+		return nil, nil
+	}
+	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, dns, []int{8443}, true); err != nil {
+		t.Fatalf("ApplyEgress: %v", err)
+	}
+	if f.Called(proc.ArgvContains("--dport 41234")) {
+		t.Fatal("closed posture must not ACCEPT a resolver forward port")
+	}
+}
+
+func TestApplyEgressResolverForwardErrorFails(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	g := orbGuest(f, "lever-jail")
+
+	resolve := func(context.Context) (string, string, error) { return "192.168.5.2", "", nil }
+	dns := func(context.Context, string) ([]egress.DNSForward, error) { return nil, errors.New("boom") }
+	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, dns, []int{8443}, false); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected the hook error to surface, got %v", err)
 	}
 }

@@ -652,6 +652,40 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		fmt.Sprintf("manager %q is not live: phase %q, container %q", name, a.Phase, a.ContainerStatus), fix}
 }
 
+// guestDNSProbeName is the name doctor resolves from inside the guest: the
+// one every subscription-mode agent must reach on its first turn.
+const guestDNSProbeName = "api.anthropic.com"
+
+// checkGuestDNS resolves a public name from inside the guest, through the
+// same resolver path the agent containers use. Before lever#34 a guest with
+// no DNS looked exactly like a healthy idle one — `lever up` succeeded and
+// every doctor row was green, because they prove the containers are up, not
+// that a lookup completes — while the agent's every LLM call timed out (on
+// lima, LEVER_EGRESS dropped the LIMADNS DNAT to the host alias). Closed
+// egress drops DNS by design (agents dial the broker by IP), so the row is
+// informational there. The probe is bounded: a dead resolver path makes
+// getent wait on systemd-resolved's own retries.
+func checkGuestDNS(ctx context.Context, closedEgress bool, jr proc.Runner) checkResult {
+	const check = "guest DNS"
+	if closedEgress {
+		return checkResult{check, true, "not checked (closed egress drops DNS by design; agents dial the broker by IP)", ""}
+	}
+	res, err := jr.Run(ctx, nil, "timeout", "10", "getent", "ahosts", guestDNSProbeName)
+	if err == nil && strings.TrimSpace(res.Stdout) != "" {
+		return checkResult{check, true, guestDNSProbeName + " resolves in the guest", ""}
+	}
+	why := "no answer"
+	if err != nil {
+		why = firstLine(err.Error())
+	}
+	if res.Code == 124 {
+		why = "lookup timed out after 10s"
+	}
+	return checkResult{check, false,
+		fmt.Sprintf("the guest cannot resolve %s (%s) — an agent's every LLM call will time out while every other row stays green", guestDNSProbeName, why),
+		"in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows which DROP the lookups hit; on lima the resolver path is the LIMADNS DNAT to the host alias, which `lever apply` ACCEPTs in the open posture (lever#34) — re-run `lever apply`, then `lever up`"}
+}
+
 // checkManagerImage compares the image the manager record was created with
 // against manager.image. A record keeps its image for life — `lever up`
 // resumes it unchanged, and only a create reads the config — so after a

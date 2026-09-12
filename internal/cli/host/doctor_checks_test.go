@@ -1406,3 +1406,39 @@ func TestCheckWorkerTicketMounts(t *testing.T) {
 		}
 	}
 }
+
+// lever#34: the guest-DNS row is the one that tells a DNS-dead jail from a
+// healthy idle one.
+func TestCheckGuestDNS(t *testing.T) {
+	const probe = "timeout 10 getent ahosts api.anthropic.com"
+	answered := proc.NewFakeRunner()
+	answered.Script(probe, proc.Result{Stdout: "160.79.104.10 STREAM api.anthropic.com\n"})
+	if got := checkGuestDNS(context.Background(), false, answered); !got.ok || !strings.Contains(got.detail, "resolves") {
+		t.Fatalf("an answered lookup must pass, got %+v", got)
+	}
+
+	// getent exits 2 with no output when the name does not resolve.
+	silent := proc.NewFakeRunner()
+	silent.Script(probe, proc.Result{Code: 2})
+	got := checkGuestDNS(context.Background(), false, silent)
+	if got.ok || !strings.Contains(got.detail, "cannot resolve") || !strings.Contains(got.fix, "LIMADNS") {
+		t.Fatalf("a failed lookup must fail naming the lima resolver path, got %+v", got)
+	}
+
+	// A resolver that never answers hits the probe's own timeout (exit 124).
+	hung := proc.NewFakeRunner()
+	hung.Script(probe, proc.Result{Code: 124})
+	if got := checkGuestDNS(context.Background(), false, hung); got.ok || !strings.Contains(got.detail, "timed out") {
+		t.Fatalf("a hung lookup must fail as a timeout, got %+v", got)
+	}
+
+	// Closed egress: DNS is dropped by design, so the row is informational and
+	// the guest is never probed.
+	never := proc.NewFakeRunner()
+	if got := checkGuestDNS(context.Background(), true, never); !got.ok || !strings.Contains(got.detail, "not checked") {
+		t.Fatalf("closed egress must be informational, got %+v", got)
+	}
+	if len(never.Calls) != 0 {
+		t.Fatalf("closed egress must not probe the guest: %+v", never.Calls)
+	}
+}

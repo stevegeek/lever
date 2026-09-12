@@ -7,6 +7,28 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lima` + `egress: open`: the guest and every agent container have DNS
+  again (lever#34).** Lima routes the guest resolver (`192.168.5.3:53`)
+  through a nat-table DNAT (`LIMADNS`) to the host agent's DNS server at
+  `host.lima.internal:<per-boot port>`, and nat `OUTPUT` runs before filter
+  `OUTPUT`, so every lookup reached `LEVER_EGRESS` as a new dial to the host
+  alias on a non-allowlisted port and hit the alias DROP. A subscription-mode
+  agent never resolved `api.anthropic.com`; every turn ended in `Request timed
+  out` while `lever up` and `lever doctor` stayed green. `lever apply` now
+  reads the live `LIMADNS` chain and ACCEPTs exactly its DNAT targets (proto
+  and port) ahead of the alias DROP, in the open posture only; the closed
+  posture still drops DNS by design. The host's own resolver keeps answering
+  (no public resolver is substituted), OrbStack is unchanged, and a guest
+  without the chain gets the same ruleset as before.
+
+### Added
+
+- **`lever doctor` row `guest DNS`.** Resolves `api.anthropic.com` from inside
+  the guest (bounded to 10s) so a DNS-dead jail is no longer indistinguishable
+  from a healthy idle one; informational under closed egress.
+
 ## [0.22.1] - 2026-09-11
 
 ### Fixed

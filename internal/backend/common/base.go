@@ -15,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -48,6 +49,11 @@ type Hooks struct {
 	// ResolveHostAlias resolves the host tool alias's (v4, v6) as seen from inside
 	// the jail. Kept per-backend because each has a dedicated exact-argv test.
 	ResolveHostAlias func(ctx context.Context) (v4, v6 string, err error)
+	// DNSForward returns the guest resolver's DNAT targets on the host alias,
+	// ACCEPTed in the open posture so DNS survives the alias DROP (lever#34).
+	// nil when the backend's resolver path is not routed through the alias
+	// (orbstack); lima reads its LIMADNS nat chain.
+	DNSForward func(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error)
 }
 
 // Options is the caller-supplied part of a backend's construction — what the
@@ -181,7 +187,7 @@ func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
 // is kept: nothing reads the v6 one back, and the I2 skip path cannot supply
 // it (existingClosedAlias parses only v4 from the live chain).
 func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
-	v4, _, _, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, allowedPorts, closedInternet)
+	v4, _, _, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, b.hooks.DNSForward, allowedPorts, closedInternet)
 	if err != nil {
 		return err
 	}

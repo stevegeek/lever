@@ -19,6 +19,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -51,6 +52,7 @@ func New(r proc.Runner, vm string, opts common.Options) *Lima {
 				}
 			},
 			ResolveHostAlias: l.resolveHostAlias,
+			DNSForward:       l.resolverForward,
 		},
 	})
 	return l
@@ -326,6 +328,28 @@ func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) 
 		return "", "", fmt.Errorf("%s resolved to no addresses", hostAlias)
 	}
 	return v4, v6, nil
+}
+
+// limaDNSChain is the nat-table chain Lima's guest boot script
+// (cidata boot.Linux/09-host-dns-setup.sh) fills with the DNAT that routes the
+// guest resolver address (192.168.5.3:53) to the host agent's DNS server on
+// <host alias>:<per-boot port>. It is inserted first in nat OUTPUT, so the
+// filter OUTPUT chain (LEVER_EGRESS) sees the rewritten destination.
+const limaDNSChain = "LIMADNS"
+
+// resolverForward is the Base DNSForward hook (lever#34): it reads the live
+// LIMADNS chain and returns its DNAT targets on the alias, so ApplyEgress can
+// ACCEPT them ahead of the alias DROP in the open posture. The ports change on
+// every VM boot and lever re-applies egress on every `up`, so reading them at
+// apply time is exact. A missing chain (hostResolver disabled, or a Lima that
+// routes DNS differently) yields no targets rather than an error: the alias
+// DROP then stays as it was, and doctor's guest-DNS row reports the outcome.
+func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error) {
+	res, err := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain)
+	if err != nil {
+		return nil, nil
+	}
+	return egress.ParseDNATTargets(res.Stdout, aliasV4), nil
 }
 
 var _ backend.Backend = (*Lima)(nil)

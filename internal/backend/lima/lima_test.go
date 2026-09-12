@@ -546,3 +546,70 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 	}
 	backendtest.AssertNoNodeTooling(t, f)
 }
+
+// --- lever#34: Lima's LIMADNS DNAT targets are ACCEPTed in the open posture ---
+
+// natRunner scripts a Running VM whose guest answers the LIMADNS chain read.
+func natRunner(chain string) *backendtest.NATChainRunner {
+	r := &backendtest.NATChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "limactl", Chain: "LIMADNS", Out: chain}
+	scriptedVM(r.FakeRunner)
+	return r
+}
+
+func TestEnsureUpOpenPostureAcceptsLimaDNSForwardTargets(t *testing.T) {
+	r := natRunner(backendtest.LimaDNSChain)
+	l := New(r, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{
+		MachineName: vm, ProjectTree: tree, AllowedPorts: []int{3305},
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	// The chain is read in the guest as root, exact argv.
+	if !r.Called(proc.ArgvPrefix("limactl", "shell", vm, "sudo", "iptables", "-t", "nat", "-S", "LIMADNS")) {
+		t.Fatalf("expected `limactl shell %s sudo iptables -t nat -S LIMADNS`; calls=%+v", vm, r.Calls)
+	}
+	alias := backendtest.HostAliasV4
+	udp := r.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d " + alias + " -p udp --dport 41234 -j ACCEPT"))
+	tcp := r.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d " + alias + " -p tcp --dport 41235 -j ACCEPT"))
+	drop := r.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d " + alias + " -j DROP"))
+	if udp < 0 || tcp < 0 || drop < 0 {
+		t.Fatalf("expected the DNAT-target ACCEPTs and the alias DROP: udp=%d tcp=%d drop=%d", udp, tcp, drop)
+	}
+	if udp > drop || tcp > drop {
+		t.Fatalf("DNAT-target ACCEPTs (udp=%d tcp=%d) must precede the alias DROP (%d)", udp, tcp, drop)
+	}
+}
+
+func TestEnsureUpClosedPostureLeavesLimaDNSDropped(t *testing.T) {
+	r := natRunner(backendtest.LimaDNSChain)
+	l := New(r, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{
+		MachineName: vm, ProjectTree: tree, AllowedPorts: []int{8443}, ClosedInternet: true,
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if r.Read {
+		t.Fatal("closed posture must not read LIMADNS: DNS stays dropped there by design")
+	}
+	if r.Called(proc.ArgvContains("--dport 41234")) || r.Called(proc.ArgvContains("--dport 41235")) {
+		t.Fatal("closed posture must not ACCEPT the resolver's DNAT targets")
+	}
+}
+
+func TestEnsureUpWithoutLimaDNSChainAddsNoForwardRules(t *testing.T) {
+	// A guest with no LIMADNS chain (hostResolver off): the generic scripted
+	// `sudo iptables` answers the read with nothing, so no target is parsed and
+	// the ruleset is the plain open posture.
+	f := proc.NewFakeRunner()
+	scriptedVM(f)
+	l := New(f, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{
+		MachineName: vm, ProjectTree: tree, AllowedPorts: []int{3305},
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if f.Called(proc.ArgvContains("-p udp")) {
+		t.Fatalf("no DNAT targets → no udp ACCEPT; calls=%+v", f.Calls)
+	}
+	backendtest.AssertEgressRules(t, f, "3305")
+}

@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-09-12
+
 ### Added
 
 - **`lever doctor`'s `manager agent` row reads the harness activity.** The

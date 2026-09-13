@@ -143,7 +143,7 @@ func projectFlag(project string) []string {
 func (c *Client) runValue(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), clean(res.Stdout+res.Stderr))
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(res.Stdout+res.Stderr))
 	}
 	return strings.TrimSpace(res.Stdout), nil
 }
@@ -152,7 +152,7 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	out := res.Stdout + res.Stderr
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), clean(out))
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -168,7 +168,7 @@ func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) 
 	res, err := c.r.RunStdin(ctx, stdin, c.env(), c.bin, args...)
 	out := res.Stdout + res.Stderr
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), clean(out))
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -251,6 +251,15 @@ func clean(output string) string {
 		keep = append(keep, l)
 	}
 	return strings.TrimSpace(strings.Join(keep, "\n"))
+}
+
+// cleanErr is clean for text that becomes an ERROR: it also masks the
+// credentials scion's runtime error echoes (RedactSecrets, lever#37). Kept
+// apart from clean because parseJSON runs clean on output lever parses —
+// agent inbox messages are relayed verbatim, and a body that merely mentions
+// `-e DEBUG=true` must reach its recipient untouched.
+func cleanErr(output string) string {
+	return RedactSecrets(clean(output))
 }
 
 // parseJSON strips ANSI escapes and the dev-auth WARNING banner (which scion

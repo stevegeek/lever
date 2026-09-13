@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,7 @@ type fakeRuntime struct {
 	resumeProj     []string
 	resumeForced   []string
 	resumeForceErr error
+	resumeErr      error // lever#37: a runtime error whose text carries the container env
 	stopped        []string
 	stopProj       []string
 	suspend        []string
@@ -128,7 +130,7 @@ func (f *fakeRuntime) Start(_ context.Context, o scion.StartOpts) error {
 func (f *fakeRuntime) Resume(_ context.Context, worker, project string) error {
 	f.resumed = append(f.resumed, worker)
 	f.resumeProj = append(f.resumeProj, project)
-	return nil
+	return f.resumeErr
 }
 func (f *fakeRuntime) ResumeForce(_ context.Context, worker, project string) error {
 	f.resumeForced = append(f.resumeForced, worker)
@@ -871,5 +873,90 @@ func TestWorkerStart_workspaceInTreeSymlinkIsFollowed(t *testing.T) {
 	}
 	if len(rt.started) != 1 {
 		t.Fatalf("start calls = %d, want 1", len(rt.started))
+	}
+}
+
+// lever#36: the resume VERB (`lever-manager agent resume`, POST
+// /worker/resume) must stage a fresh one-use ticket before scion resumes the
+// container, exactly as the start-path resume does. The ticket directory is a
+// tmpfs under the run user's XDG_RUNTIME_DIR, so a jail machine restart
+// empties it; without re-staging podman refuses the record's volume
+// ("statfs …/lever/tickets/<w>: no such file or directory") on every
+// resume after `lever stop && lever up`.
+func TestWorkerResumeVerbStagesFreshTicket(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+		TicketDir: "/run/user/501/lever/tickets/worker"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
+	}}
+	b := newTestBroker(t, rt, spec)
+	rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if bs := rt.lastStaged(t, "worker"); bs.AgentCN != "worker" {
+		t.Fatalf("/worker/resume must stage a fresh bootstrap ticket for the worker, got %+v", bs)
+	}
+	if len(rt.resumed) != 1 {
+		t.Fatalf("resumed = %d, want 1", len(rt.resumed))
+	}
+	// A staging failure must not reach scion: resuming without a ticket is
+	// exactly the wedge this test exists for.
+	rt2 := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
+	}, stageErr: errors.New("channel down")}
+	b2 := newTestBroker(t, rt2, spec)
+	rec = callWorker(t, b2, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusInternalServerError || len(rt2.resumed) != 0 {
+		t.Fatalf("a failed stage must refuse with 500 and not resume: status=%d resumed=%d", rec.Code, len(rt2.resumed))
+	}
+	// A role refusal is a policy deny (409 with the reason), not a runtime
+	// error — the same reading the start-path resume gives it.
+	rt3 := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
+	}}
+	b3 := newTestBroker(t, rt3, spec)
+	b3.verifyRole = func(context.Context, string) error { return errors.New("stored role reads as full") }
+	var buf bytes.Buffer
+	b3.log = slog.New(slog.NewTextHandler(&buf, nil))
+	rec = callWorker(t, b3, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "stored role") {
+		t.Fatalf("role refusal: status=%d body=%q, want 409 with the reason", rec.Code, rec.Body.String())
+	}
+	if len(rt3.resumed) != 0 || len(rt3.staged) != 0 {
+		t.Fatalf("a refused resume must neither stage nor resume: resumed=%d staged=%d", len(rt3.resumed), len(rt3.staged))
+	}
+	if !strings.Contains(buf.String(), "decision=deny") {
+		t.Fatalf("role refusal must audit as deny:\n%s", buf.String())
+	}
+}
+
+// lever#37: a runtime error echoes scion's `podman run … -e KEY=VALUE …`
+// command line, container env included. Whatever the scion client failed to
+// scrub, the audit line itself must never carry a credential.
+func TestWorkerVerbAuditNeverCarriesRuntimeSecrets(t *testing.T) {
+	const token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789"
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+		TicketDir: "/run/user/501/lever/tickets/worker"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
+	}, resumeErr: errors.New("scion resume worker: Error: container run failed: podman run -d -e CLAUDE_CODE_OAUTH_TOKEN=" + token + " -e SCION_AGENT_SLUG=worker --name w img failed: exit status 125 (output: statfs /run/user/501/lever/tickets/worker: no such file or directory)")}
+	b := newTestBroker(t, rt, spec)
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	out := buf.String()
+	if strings.Contains(out, token) {
+		t.Fatalf("audit log carries the OAuth token:\n%s", out)
+	}
+	// The operator still gets the part they need: the key name and the cause.
+	if !strings.Contains(out, "CLAUDE_CODE_OAUTH_TOKEN=") || !strings.Contains(out, "statfs") {
+		t.Fatalf("audit line lost the useful part of the error:\n%s", out)
+	}
+	if strings.Contains(rec.Body.String(), token) {
+		t.Fatalf("HTTP body carries the token: %s", rec.Body.String())
 	}
 }

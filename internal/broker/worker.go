@@ -589,12 +589,44 @@ func (b *Broker) handleWorkerSuspend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
-	b.workerVerb(w, r, func(ctx context.Context, s WorkerSpec) error {
-		if err := b.checkAgentRole(ctx, s.Name); err != nil {
-			return err
-		}
-		return b.runtime.Resume(ctx, s.Name, b.instanceProject)
-	})
+	// Not workerVerb: that helper folds every failure into error/502
+	// "runtime error", and this verb has two refusals that are not runtime
+	// errors and must read as such in the audit log — the same branches
+	// resumeExistingWorker takes on the start path.
+	var req wire.WorkerRequest
+	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
+		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	// Stage a fresh one-use ticket BEFORE resuming, as resumeExistingWorker
+	// does (lever#36): the record's ticket volume is a tmpfs directory under
+	// the run user's XDG_RUNTIME_DIR, so a jail machine restart empties it
+	// and podman refuses the mount source ("statfs …/lever/tickets/<w>: no
+	// such file or directory") on every resume until something re-stages —
+	// and this verb is the one the manager actually uses. Also covers the
+	// re-enrol case the start path documents.
+	if err := b.stageWorkerTicket(ctx, spec); err != nil {
+		b.audit("worker", b.manager, "error", "resume "+err.Error())
+		http.Error(w, "stage error", http.StatusInternalServerError)
+		return
+	}
+	if err := b.runtime.Resume(ctx, spec.Name, b.instanceProject); err != nil {
+		b.audit("worker", b.manager, "error", r.URL.Path+" "+spec.Name+": "+err.Error())
+		http.Error(w, "runtime error", http.StatusBadGateway)
+		return
+	}
+	phase, perr := b.phaseOf(ctx, spec)
+	if perr != nil {
+		phase = "unknown"
+	}
+	b.audit("worker", b.manager, "allow", r.URL.Path+" "+spec.Name)
+	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: phase})
 }
 
 // checkAgentRole runs the pre-role record guard for one agent, if wired.

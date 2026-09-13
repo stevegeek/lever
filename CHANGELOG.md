@@ -7,6 +7,28 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Security: the broker's audit log no longer records credentials from a
+  runtime error (lever#37).** When `scion resume`/`scion start` fails at
+  `podman run`, scion's error repeats the whole command line it ran, `-e
+  KEY=VALUE` pairs included — in subscription mode that is the operator's
+  `CLAUDE_CODE_OAUTH_TOKEN`. The broker audited that text verbatim, so the
+  token landed in `.lever-state/broker.log` and its rotations. The scion
+  client now masks every env value (the key stays) and any `sk-ant-…` token
+  in the text it hands on, and the broker's audit applies the same mask as a
+  backstop. **If your broker.log already carries a token line, rotate the
+  token and delete the rotated logs** — the fix stops new leaks, it does not
+  scrub old files.
+- **`lever-manager agent resume` works again after a jail machine restart
+  (lever#36).** `POST /worker/resume` never re-staged the worker's ticket;
+  only the start-path resume did. The ticket directory is a tmpfs under the
+  run user's `XDG_RUNTIME_DIR`, so after `lever stop && lever up` every
+  resume failed at `podman run` with `statfs …/lever/tickets/<w>: no such
+  file or directory` and the manager could not deliver work. The resume
+  verb now stages a fresh one-use ticket before scion resumes the record; a
+  staging failure refuses the resume instead of wedging it.
+
 ## [0.22.3] - 2026-09-12
 
 ### Added

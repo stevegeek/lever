@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.22.4] - 2026-09-13
+
 ### Fixed
 
 - **Security: the broker's audit log no longer records credentials from a

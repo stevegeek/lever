@@ -7,6 +7,46 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-14
+
+### Fixed
+
+- **The hub tokens no longer expire under you.** `lever apply` minted the
+  controller and remote PATs without `--expires`, so every instance ran on
+  scion's 90-day default and would have lost every hub call the day it
+  lapsed, with nothing in `doctor` to say so. Tokens are now minted with
+  `--expires 360d`, and each is recorded beside itself
+  (`.lever-state/controller.pat.json`, `remote.pat.json`: scopes asked for,
+  scopes granted, expiry, the hub's id for the token). Apply re-mints in the
+  same throwaway dev-auth window — which runs fine beside the live hub —
+  when the record says it must: no record (every token minted before this
+  release), a scope set that differs from the one lever now mints, or fewer
+  than 30 days left; it then revokes the superseded token by id. **The first
+  apply after upgrading re-mints both tokens once**; the broker and the remote
+  proxy read the token file per call, so nothing restarts.
+- **The controller and remote PATs carry `agent:message`.** Newer scions
+  (the messaging-mode work, scion#1391 onward) gate a token's message sends on
+  that scope alone, where older ones gated them on `agent:attach`; the
+  `agent:manage` alias did not expand to it when existing tokens were minted.
+  Without it `lever msg send`, the broker's message relay and
+  operator-directive delivery 403 on the next scion pin.
+
+### Added
+
+- **The hub enforces the agent-role ceiling.** `register-project` writes the
+  project's maximum and default agent role to the role lever stamps
+  (`baseline`, or `scion.agent_role`) through scion's project-settings route,
+  read-modify-write so no other setting is lost, and verifies the hub kept it.
+  Until now lever's own `--role` stamp was the only bound; a create issued by
+  anything else could ask for `full`. New doctor row `agent role ceiling`.
+- **Doctor row `hub tokens`**: scope set and days left per token, failing on
+  drift, on a missing record, or inside the renew window.
+- **Grandfathered roles are refused like unset ones.** scion's role migration
+  stamps `full` on every record that stored no role and marks it
+  `agentRoleGrandfathered`; lever's resume guard and the `agent authorization
+  roles` doctor row now read the marker and treat such a record as the
+  promotion it is.
+
 ## [0.22.4] - 2026-09-13
 
 ### Fixed

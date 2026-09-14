@@ -87,7 +87,8 @@ dev-auth-on hub that is killed before any agent exists; `scion-server` then star
 `--dev-auth=false` (see [security model §4.2](/security-model/worker-isolation/)). `credential`
 (present because this example sets `credential_file`) stages the manager's Claude OAuth token.
 `register-project` is the one `scion init`/`hub link` for the whole instance; the manager and every
-worker are agents inside it. Workers are not started here; the manager dispatches them on demand
+worker are agents inside it, and the step also strips scion's default shared scratchpad and writes
+the project's agent-role ceiling (see [security model §4.3](/security-model/worker-isolation/)). Workers are not started here; the manager dispatches them on demand
 (step 6).
 
 ## 4. Scaffold the operator skills (`lever init`)

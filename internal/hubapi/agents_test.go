@@ -216,3 +216,36 @@ func TestAgentIDRefusesARecordWithNoID(t *testing.T) {
 		t.Fatal("a record with no id must be an error, not an empty filter")
 	}
 }
+
+// scion's role migration stamps `full` on every record that stored no role,
+// with a marker saying so. That is the same promotion the empty-role guard
+// exists to refuse, wearing a stored role.
+func TestAgentsReadsTheGrandfatheredFlag(t *testing.T) {
+	f := agentsScript(`{"agents":[
+	  {"slug":"legacy","appliedConfig":{"agentRole":"full","agentRoleGrandfathered":true}},
+	  {"slug":"assistant","appliedConfig":{"agentRole":"baseline"}}
+	]}`)
+	got, err := (&Client{T: f}).Agents(context.Background(), "lever", "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range got {
+		want := a.Slug == "legacy"
+		if a.RoleGrandfathered != want {
+			t.Errorf("agent %q grandfathered = %v, want %v", a.Slug, a.RoleGrandfathered, want)
+		}
+	}
+}
+
+func TestVerifyAgentRoleRefusesAGrandfatheredRecord(t *testing.T) {
+	c := &Client{T: agentsScript(`{"agents":[{"slug":"assistant","appliedConfig":{"agentRole":"full","agentRoleGrandfathered":true}}]}`)}
+	err := VerifyAgentRole(context.Background(), yesRoles, c, "lever", "assistant")
+	if err == nil {
+		t.Fatal("a grandfathered full record must be refused like an unrolled one")
+	}
+	for _, want := range []string{"assistant", "grandfather", "full", "LOST"} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Errorf("refusal should mention %q, got:\n%v", want, err)
+		}
+	}
+}

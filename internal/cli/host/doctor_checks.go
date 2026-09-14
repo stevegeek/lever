@@ -575,13 +575,19 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 		return checkResult{name, true, "no agent records yet", ""}
 	}
 
+	// A grandfathered role is scion's migration writing `full` where nothing
+	// was stored: the same hazard as an unrolled record, and named as such
+	// rather than listed among the healthy ones.
 	var unrolled, held []string
 	for _, a := range agents {
-		if a.Role == "" {
+		switch {
+		case a.RoleGrandfathered:
+			unrolled = append(unrolled, a.Slug+" (grandfathered to "+a.Role+")")
+		case a.Role == "":
 			unrolled = append(unrolled, a.Slug)
-			continue
+		default:
+			held = append(held, a.Slug+"="+a.Role)
 		}
-		held = append(held, a.Slug+"="+a.Role)
 	}
 	if len(unrolled) == 0 {
 		return checkResult{name, true,
@@ -1254,4 +1260,99 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 		return checkResult{name, true, "no claude_code_version label on " + source + " (pre-label image; rebuild to record it)", ""}
 	}
 	return checkResult{name, true, "baked " + v + " in " + source + " (a manager keeps the image it was created on until recreated: `lever up --fresh`; the manager image row compares the two)", ""}
+}
+
+// checkPATTokens judges the hub tokens on disk by the records lever kept at
+// mint (state.PATRecord): the scope set must be the one this lever mints
+// with, and the expiry must be outside apply's renew window. The hub itself
+// cannot be asked — a UAT may not list tokens — so a token without a record
+// is a finding: it was minted by a lever that recorded nothing, which also
+// means scion's 90-day default expiry and no agent:message. The fix is always
+// the same re-apply, which re-mints inside the throwaway dev-auth window.
+func checkPATTokens(st state.State, remoteEnabled bool, now time.Time) checkResult {
+	const name = "hub tokens"
+	const fix = "run `lever apply` (it re-mints the token in the bootstrap dev-auth window and revokes the old one)"
+	type tokenCheck struct {
+		label string
+		load  func() (string, error)
+		rec   func() (state.PATRecord, bool, error)
+		want  []string
+	}
+	checks := []tokenCheck{{"controller", st.LoadControllerPAT, st.LoadControllerPATRecord, controllerPATScopes()}}
+	if remoteEnabled {
+		checks = append(checks, tokenCheck{"remote", st.LoadRemotePAT, st.LoadRemotePATRecord, remotePATScopes()})
+	}
+	var details []string
+	for _, c := range checks {
+		tok, err := c.load()
+		if err != nil {
+			return checkResult{name, false, c.label + " token: " + err.Error(), fix}
+		}
+		rec, found, err := c.rec()
+		if err != nil {
+			return checkResult{name, false, c.label + " token record: " + err.Error(), fix}
+		}
+		if reason := patMintReason(tok, rec, found, c.want, now); reason != "" {
+			return checkResult{name, false, c.label + " token: " + reason, fix}
+		}
+		if rec.ExpiresAt.IsZero() {
+			details = append(details, c.label+" expiry unknown (scion printed none at mint)")
+			continue
+		}
+		details = append(details, fmt.Sprintf("%s expires in %d days (%s)",
+			c.label, int(rec.ExpiresAt.Sub(now).Hours()/24), rec.ExpiresAt.Format("2006-01-02")))
+	}
+	return checkResult{name, true, strings.Join(details, "; "), ""}
+}
+
+// roleCeilingReader reads the project's hub-side role ceiling. Injected so
+// the check is unit-testable without a hub.
+type roleCeilingReader func(ctx context.Context, project string) (hubapi.RoleCeiling, error)
+
+// checkAgentRoleCeiling reports whether the hub caps agent creates in the
+// project at the role lever stamps (apply.Deps.EnsureAgentRoleCeiling). An
+// unset ceiling means the hub reads `full`, and lever's own --role stamp is
+// then the only bound.
+//
+// The setting exists only on a scion with roles (both landed in scion#1089),
+// so the installed binary is probed first, as checkAgentRoles does: a scion
+// that predates roles has no ceiling to read and that is not a finding.
+//
+// An unreachable hub is not a finding; a hub that ANSWERED unusably is, as for
+// shared directories.
+func checkAgentRoleCeiling(ctx context.Context, project, want string, rolesSupported func(context.Context) (bool, error), read roleCeilingReader) checkResult {
+	const name = "agent role ceiling"
+	if read == nil || rolesSupported == nil {
+		return checkResult{name, true, "not checked", ""}
+	}
+	roles, perr := rolesSupported(ctx)
+	if perr != nil {
+		return checkResult{name, true, fmt.Sprintf("not checked (cannot tell whether this scion understands roles: %v)", perr), ""}
+	}
+	if !roles {
+		return checkResult{name, true, "not applicable: this scion predates agent roles (scion#1089), so it has no ceiling setting", ""}
+	}
+	c, err := read(ctx, project)
+	if err != nil {
+		if hubAnswered(err) {
+			return checkResult{name, false,
+				"could not read the project's settings: " + err.Error(),
+				"the hub answered, so this is not a down instance — check the controller PAT " +
+					"(`" + stateDirName() + "/`) and that the hub knows a project named " + project}
+		}
+		return checkResult{name, true, "not checked (hub not reachable): " + err.Error(), ""}
+	}
+	if c.Max == want && c.Default == want {
+		return checkResult{name, true,
+			fmt.Sprintf("the hub caps every agent create in %s at %s (max and default)", project, want), ""}
+	}
+	show := func(v string) string {
+		if v == "" {
+			return "unset (the hub reads that as full)"
+		}
+		return v
+	}
+	return checkResult{name, false,
+		fmt.Sprintf("project %s: max agent role %s, default %s; want both %s", project, show(c.Max), show(c.Default), want),
+		"run `lever apply` (register-project writes the ceiling through the project settings route)"}
 }

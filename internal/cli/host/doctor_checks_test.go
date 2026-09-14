@@ -1452,3 +1452,155 @@ func TestCheckGuestDNS(t *testing.T) {
 		t.Fatalf("closed egress must not probe the guest: %+v", never.Calls)
 	}
 }
+
+func TestCheckPATTokensPassesOnACurrentRecord(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	now := time.Now()
+	seedPAT(t, st, "controller", "tok")
+	r := checkPATTokens(st, false, now)
+	if !r.ok {
+		t.Fatalf("a current record must pass; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "expires in") {
+		t.Errorf("detail should say when the token expires, got %q", r.detail)
+	}
+}
+
+// The live case on every instance minted before records existed: no
+// agent:message, a 90-day expiry nobody knows about.
+func TestCheckPATTokensFailsWithoutARecord(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	if err := st.SaveControllerPAT("tok"); err != nil {
+		t.Fatal(err)
+	}
+	r := checkPATTokens(st, false, time.Now())
+	if r.ok {
+		t.Fatalf("a token without a record must fail; got %+v", r)
+	}
+	if !strings.Contains(r.fix, "lever apply") {
+		t.Errorf("fix should be a re-apply, got %q", r.fix)
+	}
+}
+
+func TestCheckPATTokensFailsOnScopeDrift(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "tok")
+	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: []string{"agent:manage"}, ExpiresAt: time.Now().Add(200 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	r := checkPATTokens(st, false, time.Now())
+	if r.ok || !strings.Contains(r.detail, "scopes") {
+		t.Fatalf("drifted scopes must fail and say so; got %+v", r)
+	}
+}
+
+func TestCheckPATTokensFailsNearExpiry(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "tok")
+	now := time.Now()
+	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(), ExpiresAt: now.Add(3 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	r := checkPATTokens(st, false, now)
+	if r.ok || !strings.Contains(r.detail, "expire") {
+		t.Fatalf("a token inside the renew window must fail; got %+v", r)
+	}
+}
+
+func TestCheckPATTokensFailsWhenNoTokenExists(t *testing.T) {
+	r := checkPATTokens(state.ForConfig(t.TempDir()), false, time.Now())
+	if r.ok {
+		t.Fatalf("no controller PAT at all must fail; got %+v", r)
+	}
+}
+
+func TestCheckPATTokensCoversTheRemoteTokenWhenEnabled(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "tok")
+	if err := st.SaveRemotePAT("rtok"); err != nil {
+		t.Fatal(err)
+	}
+	r := checkPATTokens(st, true, time.Now())
+	if r.ok || !strings.Contains(r.detail, "remote") {
+		t.Fatalf("a remote token without a record must fail and name the remote token; got %+v", r)
+	}
+	if r := checkPATTokens(st, false, time.Now()); !r.ok {
+		t.Fatalf("with remote disabled the remote token is nobody's business; got %+v", r)
+	}
+}
+
+func TestCheckAgentRoleCeilingPassesWhenSet(t *testing.T) {
+	read := func(context.Context, string) (hubapi.RoleCeiling, error) {
+		return hubapi.RoleCeiling{Max: "baseline", Default: "baseline"}, nil
+	}
+	r := checkAgentRoleCeiling(context.Background(), "lever", "baseline", rolesYes, read)
+	if !r.ok || !strings.Contains(r.detail, "baseline") {
+		t.Fatalf("got %+v", r)
+	}
+}
+
+func TestCheckAgentRoleCeilingFailsWhenUnsetOrWider(t *testing.T) {
+	for _, c := range []hubapi.RoleCeiling{{}, {Max: "full", Default: "baseline"}, {Max: "baseline", Default: ""}} {
+		read := func(context.Context, string) (hubapi.RoleCeiling, error) { return c, nil }
+		r := checkAgentRoleCeiling(context.Background(), "lever", "baseline", rolesYes, read)
+		if r.ok {
+			t.Fatalf("ceiling %+v must fail", c)
+		}
+		if !strings.Contains(r.fix, "lever apply") {
+			t.Errorf("fix should be a re-apply, got %q", r.fix)
+		}
+	}
+}
+
+func TestCheckAgentRoleCeilingHubDownIsNotChecked(t *testing.T) {
+	read := func(context.Context, string) (hubapi.RoleCeiling, error) {
+		return hubapi.RoleCeiling{}, errors.New("dial: refused")
+	}
+	r := checkAgentRoleCeiling(context.Background(), "lever", "baseline", rolesYes, read)
+	if !r.ok || !strings.Contains(r.detail, "not checked") {
+		t.Fatalf("got %+v", r)
+	}
+	answered := func(context.Context, string) (hubapi.RoleCeiling, error) {
+		return hubapi.RoleCeiling{}, &hubapi.APIError{Status: 403, Msg: "forbidden"}
+	}
+	if r := checkAgentRoleCeiling(context.Background(), "lever", "baseline", rolesYes, answered); r.ok {
+		t.Fatalf("a hub that answered 403 is a finding; got %+v", r)
+	}
+}
+
+// A record scion's migration promoted to full is the same hazard as an
+// unrolled one, and the doctor must name it as such rather than list it
+// among the healthy "slug=full" records.
+func TestCheckAgentRolesFlagsGrandfatheredRecords(t *testing.T) {
+	list := func(context.Context, string) ([]hubapi.Agent, error) {
+		return []hubapi.Agent{{Slug: "legacy", Role: "full", RoleGrandfathered: true}, {Slug: "scratch", Role: "baseline"}}, nil
+	}
+	r := checkAgentRoles(context.Background(), "lever", rolesYes, list)
+	if r.ok {
+		t.Fatalf("a grandfathered record must fail; got %+v", r)
+	}
+	if !strings.Contains(r.detail, "legacy") || !strings.Contains(r.detail, "grandfather") {
+		t.Errorf("detail should name the record and the migration, got %q", r.detail)
+	}
+}
+
+// The ceiling setting landed in the same scion commit as roles (scion#1089),
+// so a scion without --role has no ceiling to read: not a finding, and the
+// hub is not even asked. A probe that cannot answer is "not checked", never a
+// finding either.
+func TestCheckAgentRoleCeilingSkipsAPreRolesScion(t *testing.T) {
+	asked := false
+	read := func(context.Context, string) (hubapi.RoleCeiling, error) {
+		asked = true
+		return hubapi.RoleCeiling{}, nil
+	}
+	r := checkAgentRoleCeiling(context.Background(), "lever", "baseline", rolesNo, read)
+	if !r.ok || asked || !strings.Contains(r.detail, "predates") {
+		t.Fatalf("got %+v asked=%v", r, asked)
+	}
+	probeErr := func(context.Context) (bool, error) { return false, errors.New("exec: scion: not found") }
+	r = checkAgentRoleCeiling(context.Background(), "lever", "baseline", probeErr, read)
+	if !r.ok || asked || !strings.Contains(r.detail, "not checked") {
+		t.Fatalf("got %+v asked=%v", r, asked)
+	}
+}

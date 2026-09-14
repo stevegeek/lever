@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,5 +191,49 @@ func wantTeardownVia(t *testing.T, verb string) {
 	}
 	if !sb.down {
 		t.Fatalf("`lever %s` must call Backend.Teardown", verb)
+	}
+}
+
+// The records go with the tokens: a stale record beside a fresh token would
+// describe the wrong token, and a record without a token is noise.
+func TestRemovePATsClearsTokensAndRecords(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "c")
+	seedPAT(t, st, "remote", "r")
+	if err := removePATs(st); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord()} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s should be removed, stat err = %v", p, err)
+		}
+	}
+	if err := removePATs(st); err != nil {
+		t.Fatalf("a second removal must be a no-op, got %v", err)
+	}
+}
+
+// One removal failing must not shield the others: a remote.pat left behind
+// is reused on the next up and rejected by the fresh hub — the case this
+// cleanup exists for. Every path is attempted and every failure reported.
+func TestRemovePATsAttemptsEveryFileOnFailure(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "c")
+	seedPAT(t, st, "remote", "r")
+	// A non-empty directory in the controller token's place cannot be removed.
+	if err := os.Remove(st.ControllerPAT()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(st.ControllerPAT(), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := removePATs(st)
+	if err == nil || !strings.Contains(err.Error(), "controller.pat") {
+		t.Fatalf("want an error naming controller.pat, got %v", err)
+	}
+	for _, p := range []string{st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord()} {
+		if _, serr := os.Stat(p); !errors.Is(serr, os.ErrNotExist) {
+			t.Errorf("%s should still be removed, stat err = %v", p, serr)
+		}
 	}
 }

@@ -597,7 +597,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	f := patMintRunner("pat-mint-xyz")
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -645,8 +645,8 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	}
 
 	// scion requires --project (name/ID) and --name; project name is the jail
-	// mount's basename ("lever"). Exact scopes string — no agent:message (every
-	// interactive verb, message included, gates on agent:attach).
+	// mount's basename ("lever"). The scope set is exact; agent:message is on
+	// it because newer scions gate a UAT's message sends on that scope alone.
 	tokenArgs := strings.Join(f.Calls[iToken].Args, " ")
 	if !strings.Contains(tokenArgs, "--project lever") {
 		t.Fatalf("hub token create args = %q, want --project lever", tokenArgs)
@@ -654,8 +654,12 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	if !strings.Contains(tokenArgs, "--name lever-controller") {
 		t.Fatalf("hub token create args = %q, want --name lever-controller", tokenArgs)
 	}
-	if !strings.Contains(tokenArgs, "--scopes agent:manage,agent:attach,project:read") {
-		t.Fatalf("hub token create args = %q, want --scopes agent:manage,agent:attach,project:read", tokenArgs)
+	if got, want := scopesArg(t, f.Calls[iToken]), "agent:manage,agent:attach,agent:message,project:read,project:update"; got != want {
+		t.Fatalf("hub token create --scopes = %q, want %q", got, want)
+	}
+	// Never scion's 90-day default: an expiring token takes the instance down.
+	if !strings.Contains(tokenArgs, "--expires "+patExpires) {
+		t.Fatalf("hub token create args = %q, want --expires %s", tokenArgs, patExpires)
 	}
 	// Token create runs in the project dir so scion resolves the project context.
 	if f.Calls[iToken].Dir != jailMount {
@@ -674,7 +678,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	// Second call: PAT already persisted → no-op. In particular, no second
 	// throwaway server start (the agent-free mint window opens at most once).
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false, patMintOpts{}); err != nil {
 		t.Fatalf("second ensureControllerPAT: %v", err)
 	}
 	if len(f.Calls) != callsAfterFirst {
@@ -742,7 +746,7 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	scriptTokenCreate(f, "lever-controller", "pat-controller-1")
 	scriptTokenCreate(f, "lever-remote", "pat-remote-1")
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -779,11 +783,11 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	// to remotePATScopes; see remotePATScopes's doc for why that must never
 	// happen for the remote-proxy token).
 	controllerCall := tokenCreateCallFor(t, f.Calls, "lever-controller")
-	if got, want := scopesArg(t, controllerCall), "agent:manage,agent:attach,project:read,project:update"; got != want {
+	if got, want := scopesArg(t, controllerCall), "agent:manage,agent:attach,agent:message,project:read,project:update"; got != want {
 		t.Fatalf("controller mint --scopes = %q, want %q", got, want)
 	}
 	remoteCall := tokenCreateCallFor(t, f.Calls, "lever-remote")
-	if got, want := scopesArg(t, remoteCall), "agent:read,agent:list,project:read,agent:attach"; got != want {
+	if got, want := scopesArg(t, remoteCall), "agent:read,agent:list,project:read,agent:attach,agent:message"; got != want {
 		t.Fatalf("remote mint --scopes = %q, want %q", got, want)
 	}
 
@@ -822,9 +826,7 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
-	if err := st.SaveControllerPAT("pat-controller-existing"); err != nil {
-		t.Fatal(err)
-	}
+	seedPAT(t, st, "controller", "pat-controller-existing")
 
 	f := proc.NewFakeRunner()
 	scriptPATMintChain(f)
@@ -833,7 +835,7 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	// mistakenly re-mints the controller PAT, the fake runner errors on the
 	// unscripted command and fails the test.
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -866,16 +868,12 @@ func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
-	if err := st.SaveControllerPAT("pat-controller-existing"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SaveRemotePAT("pat-remote-existing"); err != nil {
-		t.Fatal(err)
-	}
+	seedPAT(t, st, "controller", "pat-controller-existing")
+	seedPAT(t, st, "remote", "pat-remote-existing")
 
 	f := proc.NewFakeRunner() // no scripts: any call is an error
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 	if len(f.Calls) != 0 {
@@ -897,7 +895,7 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	// Deliberately NOT scripting "--name lever-remote": remoteEnabled=false
 	// must never touch it.
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 

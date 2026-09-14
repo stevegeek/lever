@@ -106,11 +106,13 @@ it do exactly that. Lever closes this: the real, long-lived Scion hub inside the
 Instead, every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
 capability broker on the manager's behalf, and by `lever` itself for attach/msg/stop) is
 authenticated with a **controller PAT**: a Scion hub token scoped to exactly
-`agent:manage,agent:attach,project:read,project:update` (`agent:attach` is load-bearing — the
-`agent:manage` alias alone 403s on `start`, since scion gates every interactive verb, including
-`start`, on `agent:attach`; `project:update` is required because the shared-dirs endpoint used for
-the scratchpad removal in §4.1 gates on project update, and `agent:manage` does not expand to it).
-It is:
+`agent:manage,agent:attach,agent:message,project:read,project:update` (`agent:attach` is
+load-bearing — the `agent:manage` alias alone 403s on `start`, since scion gates the lifecycle
+actions on `agent:attach`; `agent:message` is what newer scions gate a token's message sends on,
+and the alias did not expand to it when older tokens were minted; `project:update` is required
+because the shared-dirs endpoint used for the scratchpad removal in §4.1 and the project-settings
+route used for the role ceiling in §4.3 both gate on project update, and `agent:manage` does not
+expand to it). It is:
 
 - **Minted through a throwaway, jail-local hub.** Before any agent container exists, bring-up starts
   a temporary `scion server --dev-auth=true` on a fixed private port (48080) no agent ever learns, initializes the
@@ -120,21 +122,28 @@ It is:
 - **Persisted host-side only**, `0600`, under `.lever-state/` — never written into the mounted
   tree, never set as a container environment variable or Scion hub secret, so there is no path by
   which an agent inside the jail can read it.
-- **Minted once and reused verbatim.** The PAT persists across `stop`→`up`, and `lever apply`
-  short-circuits on any PAT already on disk: it is never validated against the hub, and nothing
-  re-mints it. Only `lever destroy` clears it. So a PAT the hub no longer accepts — after the hub
-  database is reset, after the jail is deleted out of band rather than with `lever destroy`, or
-  after a lever upgrade widened the scope set — is a **hard bring-up failure** the operator has to
-  resolve, by clearing `.lever-state/controller.pat` (which re-runs the agent-free mint window on
-  the next apply) or by destroying the instance. lever does not re-enable dev-auth on a hub that
-  already has agents to recover automatically, and re-minting is not attempted behind your back.
+- **Recorded, and re-minted only for a reason.** Beside each token lever keeps a record
+  (`controller.pat.json`) of the scopes it asked for, the scopes the hub granted, and the expiry.
+  Tokens are minted with `--expires 360d` (scion's default is 90 days, its maximum a year), and
+  `lever apply` re-opens the agent-free mint window — beside a running hub, which shares the same
+  database — only when the record says it must: no token on disk, no record (a token minted by a
+  lever older than records, whose scopes and 90-day expiry nobody can vouch for), a scope set that
+  differs from the one this lever mints, or fewer than 30 days of life left. A re-mint persists the
+  new token and record first, then revokes the superseded token by the id the record kept (best
+  effort, reported if it fails). `lever doctor`'s `hub tokens` row applies the same test and names
+  the reason. Nothing else touches the token: it persists across `stop`→`up`, and only
+  `lever destroy` clears it. A PAT the hub no longer accepts for a reason the record cannot see —
+  after the hub database is reset, or after the jail is deleted out of band rather than with
+  `lever destroy` — is still a **hard bring-up failure** the operator resolves by clearing
+  `.lever-state/controller.pat` (which re-runs the mint window on the next apply) or by destroying
+  the instance.
 - **Injected only into lever's own host-side Scion client calls**, as the `SCION_HUB_TOKEN`
   environment variable, by the capability broker and by `lever attach`/`lever msg`/`lever stop`.
   It is handed to the guest on the child's stdin (or, for the interactive attach, through a 0600
   file under the run user's `XDG_RUNTIME_DIR`), never on the host command line, so `ps` on the
   host does not show it.
 - **Not the only host-side PAT.** A second, narrower host-side PAT
-  (`agent:read,agent:list,project:read,agent:attach`) is minted in the same window when
+  (`agent:read,agent:list,project:read,agent:attach,agent:message`) is minted in the same window when
   `remote.enabled: true`, for the remote-access proxy only; it is also stored under `.lever-state/`
   and never enters the jail. See [remote access](/remote-access/).
 
@@ -142,6 +151,17 @@ The result: even a fully compromised worker or manager container has no credenti
 talk to the Scion hub directly. It cannot register a project, request an arbitrary mount, or
 list/attach to another agent. All of that is host-side-only, gated by the controller PAT, and, for
 dispatch specifically, further gated by the config-declared subdirectory per [§5.4](/security-model/config-trust/).
+
+### 4.3 The hub enforces the role ceiling too
+
+Every agent lever creates is stamped `--role baseline` ([config `agent_role`](/reference/config/)),
+which bounds the scopes in the agent's own hub token. On its own that stamp is the only bound: a
+create issued by anything other than lever — a manager holding a stolen controller PAT, a scion
+path lever does not drive — could ask for `full`. So `register-project` also writes the project's
+**maximum and default agent role** to the same role, through scion's project-settings route (gated
+on `project:update`), and verifies the hub kept it. The hub then refuses any create above the
+ceiling regardless of who asks. `lever doctor`'s `agent role ceiling` row reads it back; an unset
+ceiling is a finding, because scion reads unset as `full`.
 
 **Residual.** This closes the isolation gap between workers, and between an agent and the hub
 itself. It does not change the manager's own trust position: the manager legitimately mounts the

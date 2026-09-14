@@ -107,6 +107,9 @@ func fillDeps(d Deps) Deps {
 	if d.RepairScionHubEndpoint == nil {
 		d.RepairScionHubEndpoint = func(context.Context, string) error { return nil }
 	}
+	if d.EnsureAgentRoleCeiling == nil {
+		d.EnsureAgentRoleCeiling = func(context.Context, string) error { return nil }
+	}
 	if d.VerifyAgentRole == nil {
 		d.VerifyAgentRole = func(context.Context, string, string) error { return nil }
 	}
@@ -3683,4 +3686,59 @@ func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
 	if got != nil {
 		t.Fatal("a nil policy must be forwarded as nil")
 	}
+}
+
+// TestRegisterEnsuresTheAgentRoleCeilingOnBothPaths: the ceiling is a
+// project setting the hub enforces at agent create, so like the shared-dir
+// strip it must be written whether the registration was already sound or was
+// just re-inited — a project created before this step existed has none.
+func TestRegisterEnsuresTheAgentRoleCeilingOnBothPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registered bool
+	}{
+		{"already registered", true},
+		{"fresh registration", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := t.TempDir()
+			f := scionOKRunner()
+			app := helloApp(tree)
+			var calls []string
+			deps := Deps{
+				JailMount: "/lever",
+				Scion:     hubScion(f, app),
+				ScionProjectRegistered: func(context.Context, string) (bool, error) {
+					return tc.registered, nil
+				},
+				EnsureAgentRoleCeiling: func(_ context.Context, project string) error {
+					calls = append(calls, project)
+					return nil
+				},
+			}
+			if err := runApply(app, deps); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(calls) != 1 || calls[0] != "lever" {
+				t.Fatalf("EnsureAgentRoleCeiling calls = %+v, want [lever]", calls)
+			}
+		})
+	}
+}
+
+// A ceiling the hub refused is a bring-up failure: the alternative is an
+// instance whose only role bound is lever's own --role stamp, while the
+// operator believes the hub enforces one too.
+func TestRegisterFailsWhenTheCeilingFails(t *testing.T) {
+	tree := t.TempDir()
+	f := scionOKRunner()
+	app := helloApp(tree)
+	deps := Deps{
+		JailMount: "/lever",
+		Scion:     hubScion(f, app),
+		EnsureAgentRoleCeiling: func(context.Context, string) error {
+			return errForbidden
+		},
+	}
+	testutil.WantErrIs(t, runApply(app, deps), errForbidden)
 }

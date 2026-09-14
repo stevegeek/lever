@@ -303,22 +303,111 @@ func removeJailFile(ctx context.Context, jr proc.Runner, jailPath string) error 
 const throwawayHubPort = 48080
 
 // controllerPATScopes is the EXACT scope set the controller PAT is minted
-// with. agent:message is deliberately omitted — the scion authz review found
-// every interactive verb, message included, gates on agent:attach.
-// project:update is required for the post-register scratchpad-shared-dir strip
-// (scion#925): the shared-dirs REST endpoint gates on project ActionUpdate,
-// and agent:manage does NOT expand to project:update.
+// with. agent:attach is what scion's start/stop/suspend/restart actions gate
+// a user caller on; agent:message is what a UAT's message sends gate on from
+// scion's messaging-mode work onward (older scions gated message on attach,
+// and the alias did not expand to it, so a token minted before this scope
+// was added cannot message on a newer hub); project:update is required for
+// the post-register scratchpad-shared-dir strip (scion#925: the shared-dirs
+// REST endpoint gates on project ActionUpdate, and agent:manage does NOT
+// expand to project:update) and for the agent-role ceiling on the project
+// settings route. Changing this set makes the next apply re-mint (see
+// patMintReason) — that is the point of recording what was requested.
 func controllerPATScopes() []string {
-	return []string{"agent:manage", "agent:attach", "project:read", "project:update"}
+	return []string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update"}
 }
 
 // remotePATScopes is the EXACT scope set the remote-access PAT is minted
-// with: interactive (attach gates every interactive verb, message included)
-// plus read/list — and nothing that can create, delete, or reconfigure.
-// The remote proxy injects this token; it must never carry agent:manage,
-// agent:create/delete, project:update, or any secret scope.
+// with: interactive (attach + message — the same class of power, text into a
+// running agent) plus read/list — and nothing that can create, delete, or
+// reconfigure. The remote proxy injects this token; it must never carry
+// agent:manage, agent:create/delete, project:update, or any secret scope.
 func remotePATScopes() []string {
-	return []string{"agent:read", "agent:list", "project:read", "agent:attach"}
+	return []string{"agent:read", "agent:list", "project:read", "agent:attach", "agent:message"}
+}
+
+// patExpires is the lifetime lever asks for at mint. scion's default is 90
+// days and its maximum a year; a token that expires takes every hub call with
+// it, so lever asks for (just under) the maximum and re-mints inside
+// patRenewWindow of the end. 360d rather than 1y keeps clear of scion's
+// "no later than now+1y" check whichever clock evaluates it.
+const patExpires = "360d"
+
+// patRenewWindow is how long before expiry apply re-mints. A month covers an
+// instance that is only applied occasionally.
+const patRenewWindow = 30 * 24 * time.Hour
+
+// patMintOpts are the clock and the warning sink ensureControllerPAT uses;
+// zero values mean time.Now and stderr.
+type patMintOpts struct {
+	Now  func() time.Time
+	Warn func(format string, args ...any)
+}
+
+func (o patMintOpts) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}
+
+func (o patMintOpts) warn(format string, args ...any) {
+	if o.Warn != nil {
+		o.Warn(format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+}
+
+// patReasonAbsent is patMintReason's answer for a first mint.
+const patReasonAbsent = "no token on disk"
+
+// patMintReason says why a token must be (re)minted, or "" when the one on
+// disk is still the one lever wants. tok is the token as stored (empty when
+// absent), rec/found its record (see state.PATRecord), want the scope set
+// this lever mints with.
+//
+// A token without a record is re-minted: it was minted by a lever that did
+// not record scopes or expiry, so it may lack a scope this lever needs and it
+// certainly carries scion's 90-day default expiry. An unknown expiry ON a
+// record is not a reason — a scion that prints none would otherwise force a
+// mint on every apply.
+func patMintReason(tok string, rec state.PATRecord, found bool, want []string, now time.Time) string {
+	if tok == "" {
+		return patReasonAbsent
+	}
+	if !found {
+		return "the token has no record of its scopes or expiry (minted by an older lever)"
+	}
+	if !sameScopeSet(rec.Requested, want) {
+		return fmt.Sprintf("the token was minted with scopes %s; this lever needs %s",
+			strings.Join(rec.Requested, ","), strings.Join(want, ","))
+	}
+	if !rec.ExpiresAt.IsZero() {
+		if !rec.ExpiresAt.After(now) {
+			return fmt.Sprintf("the token expired on %s", rec.ExpiresAt.Format(time.RFC3339))
+		}
+		if rec.ExpiresAt.Before(now.Add(patRenewWindow)) {
+			return fmt.Sprintf("the token expires on %s (within %s)", rec.ExpiresAt.Format(time.RFC3339), patRenewWindow)
+		}
+	}
+	return ""
+}
+
+func sameScopeSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, s := range a {
+		seen[s] = true
+	}
+	for _, s := range b {
+		if !seen[s] {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureControllerPAT backs Deps.EnsureControllerPAT, the "bootstrap-token"
@@ -368,12 +457,26 @@ func remotePATScopes() []string {
 // --scopes`, and the scopes agent:manage/agent:attach/project:read all exist;
 // the residual dev-token is at the jail user's ~/.scion/dev-token (resolved
 // in-jail below, not assumed).
-func ensureControllerPAT(ctx context.Context, jr proc.Runner, state state.State, tree, jailMount string, remoteEnabled bool) error {
-	ctok, _ := state.LoadControllerPAT()
-	rtok, _ := state.LoadRemotePAT()
-	needController := ctok == ""
-	needRemote := remoteEnabled && rtok == ""
-	if !needController && !needRemote {
+func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tree, jailMount string, remoteEnabled bool, o patMintOpts) error {
+	now := o.now()
+	ctok, _ := st.LoadControllerPAT()
+	crec, cfound, err := st.LoadControllerPATRecord()
+	if err != nil {
+		return fmt.Errorf("bootstrap-token: %w", err)
+	}
+	controllerReason := patMintReason(ctok, crec, cfound, controllerPATScopes(), now)
+	remoteReason := ""
+	var rrec state.PATRecord
+	if remoteEnabled {
+		rtok, _ := st.LoadRemotePAT()
+		var rfound bool
+		rrec, rfound, err = st.LoadRemotePATRecord()
+		if err != nil {
+			return fmt.Errorf("bootstrap-token: %w", err)
+		}
+		remoteReason = patMintReason(rtok, rrec, rfound, remotePATScopes(), now)
+	}
+	if controllerReason == "" && remoteReason == "" {
 		return nil // nothing to mint; no dev-auth window
 	}
 	tw := scion.New(jr, scion.Options{HubEndpoint: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)})
@@ -416,25 +519,63 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, state state.State,
 	// basename (jailMount is a constant mount root, so this is stable). Each
 	// PAT's label is fixed — one controller PAT and (when enabled) one remote
 	// PAT per instance.
-	if needController {
-		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-controller", controllerPATScopes())
-		if err != nil {
-			return fmt.Errorf("bootstrap-token: hub token create: %w", err)
+	//
+	// Each mint persists the token, then its record, and only then revokes
+	// the token it replaced (by the id the old record kept). That order means
+	// a failure at any point leaves a working token on disk: the old one
+	// until the new one is saved, the new one after. The revoke is
+	// best-effort — the superseded token is referenced nowhere, and failing
+	// apply over it would leave the operator worse off — but it is reported,
+	// because a valid token nobody holds is still a valid token.
+	mint := func(name string, scopes []string, old state.PATRecord, reason string,
+		save func(string) error, saveRec func(state.PATRecord) error) error {
+		// A first mint is the normal bring-up and says nothing; replacing a
+		// token an operator may be holding elsewhere is worth a line.
+		if reason != patReasonAbsent {
+			o.warn("bootstrap-token: re-minting %s: %s", name, reason)
 		}
-		if err := state.SaveControllerPAT(pat); err != nil {
-			return fmt.Errorf("bootstrap-token: persisting controller PAT: %w", err)
+		tok, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), name, scopes, patExpires)
+		if err != nil {
+			return fmt.Errorf("bootstrap-token: hub token create %s: %w", name, err)
+		}
+		if err := save(tok.Token); err != nil {
+			return fmt.Errorf("bootstrap-token: persisting %s: %w", name, err)
+		}
+		if err := saveRec(state.PATRecord{
+			ID: tok.ID, Requested: scopes, Granted: tok.Scopes, MintedAt: now, ExpiresAt: tok.ExpiresAt,
+		}); err != nil {
+			return fmt.Errorf("bootstrap-token: persisting %s record: %w", name, err)
+		}
+		if old.ID != "" {
+			if err := tw.HubTokenRevoke(ctx, jp, old.ID); err != nil {
+				o.warn("bootstrap-token: could not revoke the superseded %s token %s (it stays valid in the hub until %s): %v",
+					name, old.ID, expiryText(old.ExpiresAt), err)
+			}
+		}
+		return nil
+	}
+	if controllerReason != "" {
+		if err := mint("lever-controller", controllerPATScopes(), crec, controllerReason,
+			st.SaveControllerPAT, st.SaveControllerPATRecord); err != nil {
+			return err
 		}
 	}
-	if needRemote {
-		pat, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), "lever-remote", remotePATScopes())
-		if err != nil {
-			return fmt.Errorf("bootstrap-token: remote token create: %w", err)
-		}
-		if err := state.SaveRemotePAT(pat); err != nil {
-			return fmt.Errorf("bootstrap-token: persisting remote PAT: %w", err)
+	if remoteReason != "" {
+		if err := mint("lever-remote", remotePATScopes(), rrec, remoteReason,
+			st.SaveRemotePAT, st.SaveRemotePATRecord); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// expiryText renders a record's expiry for a message; zero means scion did
+// not say.
+func expiryText(t time.Time) string {
+	if t.IsZero() {
+		return "its expiry (unknown)"
+	}
+	return t.Format(time.RFC3339)
 }
 
 func newApplyCmd(bf BackendFactory) *cobra.Command {
@@ -858,6 +999,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ScionProjectRegistered: b.ScionProjectRegistered,
 
 		StripProjectSharedDirs: w.stripProjectSharedDirs,
+		EnsureAgentRoleCeiling: w.ensureAgentRoleCeiling,
 		RepairScionHubEndpoint: w.repairScionHubEndpoint,
 		VerifyAgentRole:        w.verifyAgentRole,
 
@@ -902,7 +1044,7 @@ func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error
 
 // ensureControllerPAT backs Deps.EnsureControllerPAT — see the free function.
 func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
-	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), w.app.RemoteEnabled())
+	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), w.app.RemoteEnabled(), patMintOpts{})
 }
 
 // hub is the Hub REST client, over curl in the jail with the controller PAT.
@@ -919,6 +1061,32 @@ func (w *applyWiring) hub() *hubapi.Client {
 // exists and why the removal must go through the hub.
 func (w *applyWiring) stripProjectSharedDirs(ctx context.Context, projectName string) error {
 	return w.hub().StripSharedDir(ctx, projectName, scion.DefaultHubEndpoint, scionScratchpadSharedDir)
+}
+
+// ensureAgentRoleCeiling backs Deps.EnsureAgentRoleCeiling — see the free
+// function. The role is the same function the `scion start` stamp uses, so
+// the two cannot drift apart, and the probe is the same one Start uses.
+func (w *applyWiring) ensureAgentRoleCeiling(ctx context.Context, projectName string) error {
+	return ensureAgentRoleCeiling(ctx, w.sc.RolesSupported, w.hub(), projectName, scion.EffectiveAgentRole(w.app.Scion.AgentRole))
+}
+
+// ensureAgentRoleCeiling asks the hub to cap every agent create in the
+// project at role — see apply.Deps.EnsureAgentRoleCeiling — on a scion that
+// has roles at all. The ceiling setting landed in the same scion commit as
+// `--role` (scion#1089), so the flag probe is an exact gate: a scion without
+// it has no ceiling to write, and the hub is not asked. A probe that cannot
+// answer fails closed, exactly as the --role stamp does in scion.Client.Start
+// (the binary about to run agents cannot even say whether it has roles).
+func ensureAgentRoleCeiling(ctx context.Context, rolesSupported func(context.Context) (bool, error), hub *hubapi.Client, projectName, role string) error {
+	supported, err := rolesSupported(ctx)
+	if err != nil {
+		return fmt.Errorf("determining scion agent-role support before writing the project's role ceiling: %w", err)
+	}
+	if !supported {
+		return nil
+	}
+	_, err = hub.EnsureAgentRoleCeiling(ctx, projectName, scion.DefaultHubEndpoint, role)
+	return err
 }
 
 // repairScionHubEndpoint puts the project's recorded hub endpoint back to the

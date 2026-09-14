@@ -30,6 +30,15 @@ type Doer interface {
 	Do(ctx context.Context, method, path string) (status int, body []byte, err error)
 }
 
+// BodyDoer is a Doer that can also send a request body. Only the project
+// settings write needs one; a Client whose Doer lacks it refuses that write
+// rather than send an empty body, because the settings route is a whole-object
+// PUT and an empty body would wipe every project setting.
+type BodyDoer interface {
+	Doer
+	DoBody(ctx context.Context, method, path string, body []byte) (status int, respBody []byte, err error)
+}
+
 // Client talks to the hub as the controller PAT. It is safe for concurrent use
 // when its Doer is.
 type Client struct {
@@ -75,6 +84,18 @@ func (c *Client) do(ctx context.Context, method, path string) (int, []byte, erro
 		return 0, nil, errNoTransport
 	}
 	return c.T.Do(ctx, method, path)
+}
+
+// doBody issues one request with a JSON body through the Doer's body path.
+func (c *Client) doBody(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	if c.T == nil {
+		return 0, nil, errNoTransport
+	}
+	bd, ok := c.T.(BodyDoer)
+	if !ok {
+		return 0, nil, fmt.Errorf("hubapi: transport cannot send a request body (%s %s)", method, path)
+	}
+	return bd.DoBody(ctx, method, path, body)
 }
 
 // get issues a GET and decodes a 2xx JSON body into out.

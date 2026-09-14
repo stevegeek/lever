@@ -312,6 +312,15 @@ type Deps struct {
 	// — the same name ensureControllerPAT passes to `hub token create` — so
 	// the two stay consistent by construction.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
+	// EnsureAgentRoleCeiling writes the project's max/default agent role so the
+	// HUB refuses any create above the role lever stamps — the hub-side
+	// counterpart of `--role` (see hubapi.Client.EnsureAgentRoleCeiling). Runs
+	// on both register paths, like the strip, because a project created before
+	// this step existed has no ceiling. A failure is fatal to apply for the
+	// same reason: an instance whose only role bound is lever's own stamp,
+	// while the operator believes the hub enforces one, is a silent
+	// regression.
+	EnsureAgentRoleCeiling func(ctx context.Context, projectName string) error
 	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the project's
 	// scion registration when it no longer matches the real hub. Minting the
 	// controller PAT `hub link`s the project against a THROWAWAY hub on its own
@@ -749,7 +758,7 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
 		}
-		return r.d.StripProjectSharedDirs(ctx, path.Base(jp))
+		return r.settleProject(ctx, path.Base(jp))
 	}
 
 	// Remove a stale `.scion` marker FILE left in the tree by a previous
@@ -786,7 +795,18 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	if err := r.d.Scion.HubLink(ctx, jp); err != nil {
 		return err
 	}
-	return r.d.StripProjectSharedDirs(ctx, path.Base(jp))
+	return r.settleProject(ctx, path.Base(jp))
+}
+
+// settleProject is the hub-side project state both register paths converge
+// on: no cross-agent shared dir, and a role ceiling. Both are what the hub
+// records for the project, so both must hold whether the registration was
+// just made or found sound.
+func (r *run) settleProject(ctx context.Context, projectName string) error {
+	if err := r.d.StripProjectSharedDirs(ctx, projectName); err != nil {
+		return err
+	}
+	return r.d.EnsureAgentRoleCeiling(ctx, projectName)
 }
 
 // mintManagerBootstrap runs the mint-manager-bootstrap step: mint the

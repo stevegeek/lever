@@ -2,12 +2,14 @@ package host
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 func newDestroyCmd(factory BackendFactory) *cobra.Command {
@@ -46,17 +48,8 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 					// mints a fresh one — otherwise ensureControllerPAT's idempotent
 					// no-op reuses the stale PAT and the new hub's fresh DB rejects
 					// it ("authentication failed" at readiness).
-					if rerr := removeIfPresent(st.ControllerPAT()); rerr != nil {
-						cmd.PrintErrf("warning: removing stale controller PAT: %v\n", rerr)
-					}
-					// Same reasoning applies to the remote-access PAT: it is minted
-					// against the same jail hub DB, so it goes stale the moment the
-					// DB dies with the machine. Left behind, ensureControllerPAT's
-					// needRemote check would see it as still-present and skip the
-					// re-mint on the next `up`, leaving the remote proxy injecting a
-					// token the fresh hub has never issued.
-					if rerr := removeIfPresent(st.RemotePAT()); rerr != nil {
-						cmd.PrintErrf("warning: removing stale remote PAT: %v\n", rerr)
+					if rerr := removePATs(st); rerr != nil {
+						cmd.PrintErrf("warning: removing stale PATs: %v\n", rerr)
 					}
 				}
 			} else {
@@ -89,6 +82,23 @@ func clearStagedRuntimeState(app *config.App) {
 
 // removeIfPresent deletes path. A missing file is not an error; any other
 // removal failure is returned so the caller can warn.
+// removePATs clears both hub tokens and their records. The tokens were minted
+// against the jail hub's DB, which dies with the machine; a token left behind
+// would be reused by ensureControllerPAT and rejected by the fresh hub, and a
+// record left behind would describe a token that no longer exists.
+// Every path is attempted whatever happens to the others: a remote.pat left
+// behind because the controller token's removal failed would be reused on
+// the next up and rejected by the fresh hub. Each failure is reported.
+func removePATs(st state.State) error {
+	var errs []error
+	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord()} {
+		if err := removeIfPresent(p); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", filepath.Base(p), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func removeIfPresent(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err

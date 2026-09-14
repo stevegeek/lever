@@ -19,6 +19,11 @@ type Agent struct {
 	// roles — which scion#1102 resolves to `full`, not `baseline`. Callers must
 	// treat empty as "unknown authority", never as a default.
 	Role string
+	// RoleGrandfathered is scion's marker for a Role its role migration wrote,
+	// not one an operator chose: every record that stored no role was stamped
+	// `full` once, and marked. To lever that is the empty-role hazard wearing
+	// a stored role, and every consumer of Role treats it as such.
+	RoleGrandfathered bool
 }
 
 // wireAgent decodes the subset of the hub's agent record lever reads. The hub
@@ -29,7 +34,8 @@ type wireAgent struct {
 	Slug          string `json:"slug"`
 	Name          string `json:"name"`
 	AppliedConfig *struct {
-		AgentRole string `json:"agentRole"`
+		AgentRole              string `json:"agentRole"`
+		AgentRoleGrandfathered bool   `json:"agentRoleGrandfathered"`
 	} `json:"appliedConfig"`
 }
 
@@ -90,6 +96,7 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 			rec := Agent{ID: a.ID, Slug: a.Slug, Name: a.Name}
 			if a.AppliedConfig != nil {
 				rec.Role = a.AppliedConfig.AgentRole
+				rec.RoleGrandfathered = a.AppliedConfig.AgentRoleGrandfathered
 			}
 			out = append(out, rec)
 		}
@@ -138,7 +145,19 @@ func VerifyAgentRole(ctx context.Context, rolesSupported func(context.Context) (
 	}
 	// An absent record is not this guard's business: the caller creates one, and
 	// the create path stamps a role.
-	if rec, found := FindAgent(agents, agentName); !found || rec.Role != "" {
+	rec, found := FindAgent(agents, agentName)
+	if !found {
+		return nil
+	}
+	if rec.RoleGrandfathered {
+		return fmt.Errorf("agent %q stores role %q only because scion's role migration grandfathered it there: the record was created by a scion older than agent roles (scion#1089), "+
+			"and the migration stamps FULL hub authority (agent create, agent lifecycle, project-secret-read) on every such record, "+
+			"which is the same promotion an unset role gets.\n"+
+			"  A stored role is immutable and `scion resume` takes no --role flag, so lever cannot repair this for you.\n"+
+			"  Either delete the agent so lever recreates it (it stamps --role baseline, but the conversation is LOST), "+
+			"or pin a scion older than the migration until you are ready to lose the session", agentName, rec.Role)
+	}
+	if rec.Role != "" {
 		return nil
 	}
 	return fmt.Errorf("agent %q has no role stored on its hub record, and this scion resolves that to FULL hub authority "+

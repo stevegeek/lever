@@ -398,15 +398,20 @@ fails or an agent received a message you do not recognise.
 ## The remote PAT
 
 `apply` mints a Scion hub token scoped to exactly `agent:read`, `agent:list`, `project:read`,
-`agent:attach` — enough for the full interactive surface (chat, transcript, attach) but nothing
-that creates, deletes, or reconfigures an agent, and nothing that reads a project secret. It's
-persisted host-side only, `.lever-state/remote.pat`, mode `0600`, and is a **different** token from
-the controller PAT the broker itself uses.
+`agent:attach`, `agent:message` — enough for the full interactive surface (chat, transcript,
+attach) but nothing that creates, deletes, or reconfigures an agent, and nothing that reads a
+project secret. It's persisted host-side only, `.lever-state/remote.pat`, mode `0600`, and is a
+**different** token from the controller PAT the broker itself uses.
 
-**Expiry is not checked by lever.** The hub's default token lifetime is 90 days; lever has no
-cheap way to read a token's remaining lifetime back from the hub, so `lever doctor` cannot warn you
-before it lapses. If remote access starts
-failing auth for no other visible reason, re-mint by deleting the file and re-applying:
+**Expiry and scopes are recorded, not asked.** The hub will not tell a token holder anything about
+the token, so lever keeps a record beside it (`.lever-state/remote.pat.json`: scopes asked for,
+scopes granted, expiry) and mints with `--expires 360d`. `lever apply` re-mints — in the same
+throwaway dev-auth window as the controller PAT, and revokes the old token — when the record is
+missing (a token minted by an older lever, on scion's 90-day default), when the scope set differs
+from the one this lever mints, or with fewer than 30 days left; `lever doctor`'s `hub tokens` row
+reports the same. The proxy reads the token file per request, so a re-mint needs no restart. If
+remote access starts failing auth for a reason the record cannot see (a reset hub database, say),
+re-mint by deleting the file and re-applying:
 
 ```sh
 rm .lever-state/remote.pat

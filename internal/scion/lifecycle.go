@@ -356,6 +356,17 @@ const (
 // roles and the instance did not name one.
 const agentRoleBaseline = "baseline"
 
+// EffectiveAgentRole is the role lever stamps on every agent it creates and
+// the ceiling it asks the hub to enforce on the project: the configured
+// scion.agent_role, else baseline. One function, so the stamp and the ceiling
+// cannot disagree.
+func EffectiveAgentRole(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return agentRoleBaseline
+}
+
 // RolesSupported reports whether the installed scion understands agent roles —
 // whether it accepts `start --role` (scion#1089). Exported for the pre-role
 // record guard (hubapi.VerifyAgentRole), which must know whether an EXISTING
@@ -528,10 +539,7 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 		// guessing risks silently granting full authority.
 		return fmt.Errorf("determining scion agent-role support: %w", err)
 	case supported:
-		role = c.agentRole
-		if role == "" {
-			role = agentRoleBaseline
-		}
+		role = EffectiveAgentRole(c.agentRole)
 	case c.agentRole != "":
 		return fmt.Errorf("scion.agent_role is %q but this scion has no --role flag "+
 			"(it predates scion#1089); remove the setting or move to a newer pin", c.agentRole)

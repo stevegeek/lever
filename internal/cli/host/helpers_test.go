@@ -81,6 +81,7 @@ const (
 	argvScionHubLink     = "scion hub link"
 	argvScionServerStop  = "scion server stop"
 	argvScionTokenCreate = "scion hub token create"
+	argvScionTokenRevoke = "scion hub token revoke"
 	argvShPrintf         = "sh -c printf" // $HOME resolution for the dev-token path
 	argvShGuardedRm      = "sh -c if"     // the guarded removeJailFile rm
 )

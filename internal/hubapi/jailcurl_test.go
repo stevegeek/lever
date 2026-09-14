@@ -187,3 +187,24 @@ func TestJailCurlTrimsTrailingSlashOnBaseURL(t *testing.T) {
 		t.Errorf("url = %q", got)
 	}
 }
+
+// A write carries its body through the environment, like the token: sh
+// expands it into curl's in-guest argv, so the JSON is never quoted into the
+// script text lever builds.
+func TestJailCurlDoBodySendsJSONFromEnv(t *testing.T) {
+	r := &scriptedRunner{res: proc.Result{Stdout: "{}\n200"}}
+	status, _, err := jailCurl(r, "pat").DoBody(context.Background(), "PUT", "/api/v1/x", []byte(`{"a":1}`))
+	if err != nil || status != 200 {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if r.call.Env["LEVER_HUB_BODY"] != `{"a":1}` {
+		t.Errorf("body must travel as env, got %v", r.call.Env)
+	}
+	script := r.call.Args[1]
+	if !strings.Contains(script, "$LEVER_HUB_BODY") || !strings.Contains(script, "Content-Type: application/json") {
+		t.Errorf("script must send the body as JSON: %q", script)
+	}
+	if r.call.Args[3] != "PUT" || !strings.HasSuffix(r.call.Args[4], "/api/v1/x") {
+		t.Errorf("method/url = %q %q", r.call.Args[3], r.call.Args[4])
+	}
+}

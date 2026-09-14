@@ -42,6 +42,14 @@ const curlScript = `exec curl -sS --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' "$2"`
 
+// curlBodyScript is curlScript for a request with a JSON body. The body
+// rides the environment for the same reason the token does: sh expands it
+// into curl's in-guest argv, so lever never quotes JSON into script text.
+const curlBodyScript = `exec curl -sS --connect-timeout 5 --max-time 20 ` +
+	`-o - -w '\n%{http_code}' -X "$1" ` +
+	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' ` +
+	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
+
 // JailCurl is a Doer that runs each request inside the jail with curl.
 //
 // The hub binds the jail's loopback. Lever's Lima template suppresses every
@@ -60,6 +68,15 @@ type JailCurl struct {
 }
 
 func (j *JailCurl) Do(ctx context.Context, method, path string) (int, []byte, error) {
+	return j.run(ctx, method, path, nil)
+}
+
+// DoBody is Do with a JSON request body; it makes JailCurl a BodyDoer.
+func (j *JailCurl) DoBody(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	return j.run(ctx, method, path, body)
+}
+
+func (j *JailCurl) run(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
 	tok := ""
 	if j.Token != nil {
 		tok = j.Token()
@@ -69,8 +86,13 @@ func (j *JailCurl) Do(ctx context.Context, method, path string) (int, []byte, er
 	}
 
 	url := strings.TrimRight(j.BaseURL, "/") + path
-	res, err := j.Runner.Run(ctx, map[string]string{"SCION_HUB_TOKEN": tok},
-		"sh", "-c", curlScript, "_", method, url)
+	env := map[string]string{"SCION_HUB_TOKEN": tok}
+	script := curlScript
+	if body != nil {
+		env["LEVER_HUB_BODY"] = string(body)
+		script = curlBodyScript
+	}
+	res, err := j.Runner.Run(ctx, env, "sh", "-c", script, "_", method, url)
 	if err != nil {
 		if res.Code == curlNotFound {
 			return 0, nil, fmt.Errorf("%s %s: %w (is it provisioned?): %s",

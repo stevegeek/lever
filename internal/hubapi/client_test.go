@@ -21,8 +21,18 @@ type fakeDoer struct {
 	replies map[string]reply
 	// seq lets a key answer differently on successive calls (the DELETE then
 	// verify-read sequence).
-	seq   map[string][]reply
-	calls []string
+	seq    map[string][]reply
+	calls  []string
+	bodies map[string]string
+}
+
+// bodies records the request body of every DoBody call, keyed like calls.
+func (f *fakeDoer) DoBody(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	if f.bodies == nil {
+		f.bodies = map[string]string{}
+	}
+	f.bodies[method+" "+path] = string(body)
+	return f.Do(ctx, method, path)
 }
 
 func (f *fakeDoer) Do(_ context.Context, method, path string) (int, []byte, error) {

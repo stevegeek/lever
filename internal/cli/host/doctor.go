@@ -104,6 +104,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	listAgentRoles := func(ctx context.Context, project string) ([]hubapi.Agent, error) {
 		return hc.Agents(ctx, project, scionpkg.DefaultHubEndpoint)
 	}
+	readCeiling := func(ctx context.Context, project string) (hubapi.RoleCeiling, error) {
+		return hc.AgentRoleCeiling(ctx, project, scionpkg.DefaultHubEndpoint)
+	}
 	// The role check needs the scion IN THE JAIL, which is the binary that
 	// will actually resolve the stored role — not the host's.
 	jailScion := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole)
@@ -139,8 +142,12 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkOperatorSkills(app, state) },
 		func() checkResult { return checkDirectives(app, state) },
 		func() checkResult { return checkRemote(ctx, app, state, probes, jr) },
+		func() checkResult { return checkPATTokens(state, app.RemoteEnabled(), time.Now()) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },
+		func() checkResult {
+			return checkAgentRoleCeiling(ctx, project, scionpkg.EffectiveAgentRole(app.Scion.AgentRole), rolesSupported, readCeiling)
+		},
 		func() checkResult {
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},

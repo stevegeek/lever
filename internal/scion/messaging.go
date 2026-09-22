@@ -48,7 +48,8 @@ func (c *Client) Inbox(ctx context.Context, unread bool, project string) ([]Even
 		args = append(args, "--all")
 	}
 	args = append(args, projectFlag(project)...)
-	out, err := c.run(ctx, "", args...)
+	// runValue: stdout only, so stderr warnings cannot corrupt the JSON.
+	out, err := c.runValue(ctx, "", args...)
 	if err != nil {
 		return nil, err
 	}

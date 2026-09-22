@@ -170,7 +170,7 @@ func (b runtimeBroker) ready() bool {
 func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {
 	args := append([]string{"hub", "brokers", "--format", "json"}, projectFlag(project)...)
 	err := retry.Until(ctx, c.brokerReadyAttempts, c.brokerReadyInterval, func() (bool, error) {
-		out, err := c.run(ctx, "", args...)
+		out, err := c.runValue(ctx, "", args...)
 		if err != nil {
 			return false, nil
 		}

@@ -485,7 +485,9 @@ type StartOpts struct {
 func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	args := append([]string{"list", "--format", "json"}, projectFlag(project)...)
 	args = append(args, "--non-interactive")
-	out, err := c.run(ctx, "", args...)
+	// runValue: stdout only. scion writes settings warnings to stderr, and
+	// folded in after the JSON they break the parse. See runValue.
+	out, err := c.runValue(ctx, "", args...)
 	if err != nil {
 		return nil, err
 	}

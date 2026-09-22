@@ -38,6 +38,26 @@ func TestListParsesAgents(t *testing.T) {
 	}
 }
 
+// Newer scion warns on stderr about settings keys it does not recognise, and
+// the warning text itself contains brackets. Folded in after the JSON it broke
+// the parse ("invalid character '2' after top-level value"), so List reads
+// stdout alone.
+func TestListIgnoresStderrWarnings(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("scion list --format json -g /lever --non-interactive", proc.Result{
+		Stdout: `[{"slug":"a","phase":"running"}]`,
+		Stderr: "2026/09/22 21:39:27 WARN settings file contains unrecognized keys (these will be ignored) keys=\"[hub.project_id server]\"\n",
+	})
+	c := New(f, Options{})
+	agents, err := c.List(context.Background(), "/lever")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Slug != "a" {
+		t.Fatalf("agents=%+v", agents)
+	}
+}
+
 // fakeScion scripts a runner for the Start tests. Start first probes
 // `scion start --help` to learn whether this scion understands --role
 // (scion#1089), so the probe needs its own scripted answer. The two keys do not

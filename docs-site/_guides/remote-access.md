@@ -421,6 +421,28 @@ lever apply
 This is the same repair shape as the controller-PAT re-mint: a brief, jail-loopback-only dev-auth
 window, agent-free, that mints a fresh token and nothing else.
 
+## The remote web role
+
+The browser does not run as the remote PAT. It runs as the **hub user** the sign-in created (see
+[who the hub thinks you are](#how-the-browser-is-logged-in)), and scion gives a new user no role on
+any project. So `apply` also creates a custom project role, `lever-remote`, with the same surface as
+the remote PAT (`agent.read`, `agent.list`, `project.read`, `agent.attach`, `agent.message`), and
+binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
+unset, it binds the placeholder `lever-operator@lever.local`.
+
+Role administration is hub-admin only and scion refuses it to every token, so this happens in the
+same throwaway dev-auth window as the PAT mints. `.lever-state/remote-role.json` records the role,
+its permission set, and each user bound; a window opens only while that record does not cover every
+allowed user with the current permission set. `lever doctor`'s `remote web role` row reads the
+same record.
+
+**A user exists only after its first sign-in.** On a fresh setup, the web UI answers 403 until the
+role is bound: sign in once from the phone, then run `lever apply`. Until then, `apply` warns and
+opens the window on every run to try again.
+
+Removing a user from `allowed_users` does **not** remove its binding. The proxy then refuses that
+login before it reaches the hub, but the hub user keeps the role.
+
 ## What this does NOT do
 
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —

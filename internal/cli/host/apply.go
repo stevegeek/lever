@@ -337,11 +337,15 @@ const patExpires = "360d"
 // instance that is only applied occasionally.
 const patRenewWindow = 30 * 24 * time.Hour
 
-// patMintOpts are the clock and the warning sink ensureControllerPAT uses;
-// zero values mean time.Now and stderr.
+// patMintOpts are the clock, the warning sink and the admin-hub test seam
+// ensureControllerPAT uses; zero values mean time.Now, stderr and the real
+// throwaway hub.
 type patMintOpts struct {
 	Now  func() time.Time
 	Warn func(format string, args ...any)
+	// AdminHub, when set, replaces the throwaway hub transport the remote
+	// web role grant uses (curl in the jail with the dev token). Tests only.
+	AdminHub hubapi.Doer
 }
 
 func (o patMintOpts) now() time.Time {
@@ -417,10 +421,17 @@ func sameScopeSet(a, b []string) bool {
 // driven with, and (when remote access is configured on) the narrower
 // remote-access PAT the remote proxy injects on the operator's behalf.
 //
+// The same window also grants the remote web role (ensureRemoteWebRole) when
+// remote access is on and remote-role.json does not yet cover every allowed
+// user with the current permission set: role admin is hub-admin only, so the
+// dev identity here is the only principal lever has that can do it.
+//
 // Idempotent per token: a PAT already persisted in state short-circuits its
 // own mint (survives `down`→`up`; clearStagedRuntimeState only wipes
-// tree/.lever/*). If NEITHER token is
-// missing this is a complete no-op — no window opens at all.
+// tree/.lever/*). If NEITHER token is missing and the role grant is complete,
+// this is a complete no-op — no window opens at all. An allowed user with no
+// hub user yet keeps the grant incomplete, so every apply opens a window
+// until that user has signed in once.
 //
 // Why one window: the dev-auth mint window is the sensitive part (a
 // throwaway hub with auth off, reachable from the jail loopback only, but
@@ -448,7 +459,7 @@ func sameScopeSet(a, b []string) bool {
 // jr/tree/jailMount are passed explicitly (rather than closing over
 // app/b) purely so this function is unit-testable with fakes; jr is the same
 // jail exec.Runner buildApplyDeps already has (this function needs no other
-// backend access). remoteEnabled is App.RemoteEnabled() — plumbed as a bool
+// backend access). remote is remoteAccessFor(app) — plumbed as a value
 // rather than closing over *config.App for the same testability reason.
 //
 // Live-validated against scion 37a54a8e: `scion server start` runs workstation
@@ -457,7 +468,7 @@ func sameScopeSet(a, b []string) bool {
 // --scopes`, and the scopes agent:manage/agent:attach/project:read all exist;
 // the residual dev-token is at the jail user's ~/.scion/dev-token (resolved
 // in-jail below, not assumed).
-func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tree, jailMount string, remoteEnabled bool, o patMintOpts) error {
+func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tree, jailMount string, remote remoteAccess, o patMintOpts) error {
 	now := o.now()
 	ctok, _ := st.LoadControllerPAT()
 	crec, cfound, err := st.LoadControllerPATRecord()
@@ -467,7 +478,8 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	controllerReason := patMintReason(ctok, crec, cfound, controllerPATScopes(), now)
 	remoteReason := ""
 	var rrec state.PATRecord
-	if remoteEnabled {
+	roleReason := ""
+	if remote.Enabled {
 		rtok, _ := st.LoadRemotePAT()
 		var rfound bool
 		rrec, rfound, err = st.LoadRemotePATRecord()
@@ -475,9 +487,14 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 			return fmt.Errorf("bootstrap-token: %w", err)
 		}
 		remoteReason = patMintReason(rtok, rrec, rfound, remotePATScopes(), now)
+		rolerec, rolefound, err := st.LoadRemoteRoleRecord()
+		if err != nil {
+			return fmt.Errorf("bootstrap-token: %w", err)
+		}
+		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remoteRolePermissions())
 	}
-	if controllerReason == "" && remoteReason == "" {
-		return nil // nothing to mint; no dev-auth window
+	if controllerReason == "" && remoteReason == "" && roleReason == "" {
+		return nil // nothing to mint or grant; no dev-auth window
 	}
 	tw := scion.New(jr, scion.Options{HubEndpoint: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)})
 	// Register the kill BEFORE ServerStart so a partial start — e.g. a throwaway
@@ -566,7 +583,41 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 			return err
 		}
 	}
+	if roleReason != "" {
+		grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote.Emails, now, o)
+	}
 	return nil
+}
+
+// grantRemoteWebRole runs ensureRemoteWebRole against the throwaway hub and
+// persists its record. A failure is a warning, not an apply error: the PATs
+// are already minted and the instance works without the web UI, and the
+// unwritten record makes the next apply retry (and `lever doctor` names it).
+func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, emails []string, now time.Time, o patMintOpts) {
+	fail := func(err error) {
+		o.warn("bootstrap-token: remote web role not granted, so the web UI may answer 403; the next `lever apply` retries: %v", err)
+	}
+	hub := o.AdminHub
+	if hub == nil {
+		tok, err := readDevToken(ctx, jr)
+		if err != nil {
+			fail(err)
+			return
+		}
+		hub = &hubapi.JailCurl{
+			Runner:  jr,
+			BaseURL: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort),
+			Token:   func() string { return tok },
+		}
+	}
+	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, emails, now, o.warn)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if err := st.SaveRemoteRoleRecord(rec); err != nil {
+		fail(fmt.Errorf("persisting remote-role.json: %w", err))
+	}
 }
 
 // expiryText renders a record's expiry for a message; zero means scion did
@@ -1044,7 +1095,7 @@ func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error
 
 // ensureControllerPAT backs Deps.EnsureControllerPAT — see the free function.
 func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
-	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), w.app.RemoteEnabled(), patMintOpts{})
+	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), patMintOpts{})
 }
 
 // hub is the Hub REST client, over curl in the jail with the controller PAT.

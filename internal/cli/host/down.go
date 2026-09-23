@@ -85,13 +85,15 @@ func clearStagedRuntimeState(app *config.App) {
 // removePATs clears both hub tokens and their records. The tokens were minted
 // against the jail hub's DB, which dies with the machine; a token left behind
 // would be reused by ensureControllerPAT and rejected by the fresh hub, and a
-// record left behind would describe a token that no longer exists.
+// record left behind would describe a token that no longer exists. The
+// remote web role record goes too: the role and its bindings live in the
+// same DB, and a record left behind would stop the next apply granting them.
 // Every path is attempted whatever happens to the others: a remote.pat left
 // behind because the controller token's removal failed would be reused on
 // the next up and rejected by the fresh hub. Each failure is reported.
 func removePATs(st state.State) error {
 	var errs []error
-	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord()} {
+	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole()} {
 		if err := removeIfPresent(p); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", filepath.Base(p), err))
 		}

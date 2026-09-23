@@ -80,7 +80,7 @@ func TestEnsureControllerPATWritesTheRecord(t *testing.T) {
 		"  ID:      a8bf56c4-383e-4e6a-ac2c-db7fe509c688\n" +
 		"  Scopes:  agent:create, agent:attach, project:read\n" +
 		"  Expires: 2027-09-09T10:08:14Z\n\nToken: scion_pat_new\n"})
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", false, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	rec, found, err := st.LoadControllerPATRecord()
@@ -112,7 +112,7 @@ func TestEnsureControllerPATRemintsOnScopeDriftAndRevokesTheOld(t *testing.T) {
 	}
 	f := patMintRunner("pat-new")
 	f.Script(argvScionTokenRevoke, proc.Result{})
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", false, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if tok, _ := st.LoadControllerPAT(); tok != "pat-new" {
@@ -139,7 +139,7 @@ func TestEnsureControllerPATRemintsALegacyTokenWithoutARecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := patMintRunner("pat-new")
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", false, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if tok, _ := st.LoadControllerPAT(); tok != "pat-new" {
@@ -158,7 +158,7 @@ func TestEnsureControllerPATRemintsNearExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := patMintRunner("pat-new")
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", false, patMintOpts{Now: func() time.Time { return now }}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{Now: func() time.Time { return now }}); err != nil {
 		t.Fatal(err)
 	}
 	if tok, _ := st.LoadControllerPAT(); tok != "pat-new" {
@@ -178,7 +178,7 @@ func TestEnsureControllerPATRevokeFailureIsAWarning(t *testing.T) {
 	f := patMintRunner("pat-new") // revoke unscripted => fails
 	var warned []string
 	warn := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", false, patMintOpts{Warn: warn}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{Warn: warn}); err != nil {
 		t.Fatalf("a failed revoke must not fail apply: %v", err)
 	}
 	if len(warned) == 0 || !strings.Contains(strings.Join(warned, "\n"), "old-id") {
@@ -198,7 +198,7 @@ func TestEnsurePATsRemintsRemoteOnDriftOnly(t *testing.T) {
 	scriptPATMintChain(f)
 	scriptTokenCreate(f, "lever-remote", "pat-remote-new")
 	f.Script(argvScionTokenRevoke, proc.Result{})
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", true, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{Enabled: true}, patMintOpts{AdminHub: newFakeAdminHub()}); err != nil {
 		t.Fatal(err)
 	}
 	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvScionTokenCreate) }); n != 1 {

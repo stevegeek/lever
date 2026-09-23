@@ -1305,6 +1305,38 @@ func checkPATTokens(st state.State, remoteEnabled bool, now time.Time) checkResu
 	return checkResult{name, true, strings.Join(details, "; "), ""}
 }
 
+// checkRemoteWebRole reports whether the remote web UI's hub users hold the
+// lever-remote project role (see remoteWebRoleName): remote-role.json must
+// cover every allowed user with the current permission set. It reads that
+// record only — the grant needs hub-admin, which doctor never has — so it
+// says what lever last granted, not what the hub holds now.
+func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
+	const name = "remote web role"
+	if !remote.Enabled {
+		return checkResult{name, true, "disabled", ""}
+	}
+	const fix = "run `lever apply` (it grants the role in the bootstrap dev-auth window)"
+	rec, found, err := st.LoadRemoteRoleRecord()
+	if err != nil {
+		return checkResult{name, false, err.Error(), fix}
+	}
+	reason := remoteRoleReason(rec, found, remote.Emails, remoteRolePermissions())
+	if reason == "" {
+		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s",
+			remoteWebRoleName, strings.Join(remote.Emails, ", ")), ""}
+	}
+	detail := "the web UI will answer 403: " + reason
+	for _, e := range remote.Emails {
+		if _, bound := rec.Bound[e]; !bound && !slices.Contains(rec.Pending, e) {
+			return checkResult{name, false, detail, fix}
+		}
+	}
+	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, remoteRolePermissions()) {
+		return checkResult{name, false, detail, remoteRoleFix}
+	}
+	return checkResult{name, false, detail, fix}
+}
+
 // roleCeilingReader reads the project's hub-side role ceiling. Injected so
 // the check is unit-testable without a hub.
 type roleCeilingReader func(ctx context.Context, project string) (hubapi.RoleCeiling, error)

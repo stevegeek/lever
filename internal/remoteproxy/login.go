@@ -485,3 +485,19 @@ func identityFor(login string) Identity {
 	}
 	return Identity{Subject: "lever-remote:" + login, Email: login, Name: login}
 }
+
+// HubUserEmails is the set of hub user emails the proxy's sign-ins can
+// create, given remote.allowed_users: one per allowed login, or the single
+// placeholder operator when the list is empty (see identityFor). It is what
+// the bootstrap-token step binds to the remote web role, so the hub users it
+// names are exactly the ones this proxy signs in.
+func HubUserEmails(allowedUsers []string) []string {
+	if len(allowedUsers) == 0 {
+		return []string{identityFor("").Email}
+	}
+	out := make([]string, 0, len(allowedUsers))
+	for _, l := range allowedUsers {
+		out = append(out, identityFor(l).Email)
+	}
+	return out
+}

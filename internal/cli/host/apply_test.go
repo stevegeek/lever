@@ -597,7 +597,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	f := patMintRunner("pat-mint-xyz")
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -678,7 +678,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	// Second call: PAT already persisted → no-op. In particular, no second
 	// throwaway server start (the agent-free mint window opens at most once).
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatalf("second ensureControllerPAT: %v", err)
 	}
 	if len(f.Calls) != callsAfterFirst {
@@ -746,7 +746,7 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	scriptTokenCreate(f, "lever-controller", "pat-controller-1")
 	scriptTokenCreate(f, "lever-remote", "pat-remote-1")
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{Enabled: true}, patMintOpts{AdminHub: newFakeAdminHub()}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -835,7 +835,7 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	// mistakenly re-mints the controller PAT, the fake runner errors on the
 	// unscripted command and fails the test.
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{Enabled: true}, patMintOpts{AdminHub: newFakeAdminHub()}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
@@ -862,18 +862,25 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	}
 }
 
-// TestEnsurePATsNoWindowWhenNothingMissing: both PATs already persisted —
-// nothing to mint, so no dev-auth window opens at all (zero scion calls).
+// TestEnsurePATsNoWindowWhenNothingMissing: both PATs already persisted and
+// the remote web role recorded — nothing to mint or grant, so no dev-auth
+// window opens at all (zero scion calls).
 func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 	seedPAT(t, st, "controller", "pat-controller-existing")
 	seedPAT(t, st, "remote", "pat-remote-existing")
+	// ...and the remote web role already granted to the (placeholder) user.
+	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: remoteRolePermissions(),
+		Bound: map[string]string{"lever-operator@lever.local": "user-1"}}); err != nil {
+		t.Fatal(err)
+	}
 
 	f := proc.NewFakeRunner() // no scripts: any call is an error
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, true, patMintOpts{}); err != nil {
+	ra := remoteAccess{Enabled: true, Emails: []string{"lever-operator@lever.local"}}
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, ra, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 	if len(f.Calls) != 0 {
@@ -895,7 +902,7 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	// Deliberately NOT scripting "--name lever-remote": remoteEnabled=false
 	// must never touch it.
 
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, false, patMintOpts{}); err != nil {
+	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 

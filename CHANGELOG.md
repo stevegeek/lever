@@ -7,6 +7,23 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The remote web UI no longer answers 403.** `lever remote` signs the
+  browser in as a hub user (one per `remote.allowed_users` login), and since
+  scion's permission rework such a user holds no role on the instance
+  project, so chat and the `/events` stream were refused. When remote access
+  is on, `lever apply` now creates a custom project role, `lever-remote`, with
+  the remote PAT's surface (`agent.read`, `agent.list`, `project.read`,
+  `agent.attach`, `agent.message`), and binds each allowed user's hub user to
+  it on the project. It runs in the bootstrap dev-auth window (role admin is
+  hub-admin only) and is recorded in `.lever-state/remote-role.json`; a window
+  opens only while that record does not cover every allowed user with the
+  current permission set. A user who has never signed in has no hub user yet:
+  apply warns, and the next apply after that first sign-in binds it. `lever
+  doctor` has a `remote web role` row. Removing a user from `allowed_users`
+  does not remove its binding.
+
 ## [0.23.0] - 2026-09-14
 
 ### Fixed

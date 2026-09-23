@@ -3,8 +3,10 @@
 // lever drives scion through its CLI. This package covers only the hub
 // operations the CLI does not expose — today, listing a project's agents,
 // resolving one's hub id and verifying its stored role (see Agents, AgentID,
-// VerifyAgentRole) and removing a project's shared directories (see
-// StripSharedDir). Keep it that way: reach for the CLI first.
+// VerifyAgentRole), removing a project's shared directories (see
+// StripSharedDir) and, in the dev-auth mint window only, the role admin the
+// remote web UI needs (see roles.go). Keep it that way: reach for the CLI
+// first.
 //
 // Requests run INSIDE the jail (see JailCurl), never from the host. The hub
 // binds the jail's loopback, and lever's Lima template suppresses every

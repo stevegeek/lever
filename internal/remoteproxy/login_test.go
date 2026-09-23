@@ -534,6 +534,17 @@ func TestIdentityForAnUnnamedOperator(t *testing.T) {
 	}
 }
 
+// The emails the bootstrap step binds must be the ones sign-in creates.
+func TestHubUserEmailsMatchIdentityFor(t *testing.T) {
+	if got := HubUserEmails(nil); len(got) != 1 || got[0] != unnamedOperatorEmail {
+		t.Fatalf("HubUserEmails(nil) = %v, want the placeholder", got)
+	}
+	got := HubUserEmails([]string{"a@github", "b@github"})
+	if len(got) != 2 || got[0] != identityFor("a@github").Email || got[1] != identityFor("b@github").Email {
+		t.Fatalf("HubUserEmails = %v", got)
+	}
+}
+
 func TestLoginAuditNeverCarriesTheSession(t *testing.T) {
 	d, hub, _, psink := newTestDriver(t)
 	sink := &auditSink{}

@@ -195,15 +195,19 @@ func wantTeardownVia(t *testing.T, verb string) {
 }
 
 // The records go with the tokens: a stale record beside a fresh token would
-// describe the wrong token, and a record without a token is noise.
+// describe the wrong token, and a record without a token is noise. The
+// remote web role record goes too, or the fresh hub would never get the role.
 func TestRemovePATsClearsTokensAndRecords(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "c")
 	seedPAT(t, st, "remote", "r")
+	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{RoleID: "role"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := removePATs(st); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord()} {
+	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole()} {
 		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s should be removed, stat err = %v", p, err)
 		}

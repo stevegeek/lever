@@ -426,8 +426,8 @@ window, agent-free, that mints a fresh token and nothing else.
 The browser does not run as the remote PAT. It runs as the **hub user** the sign-in created (see
 [who the hub thinks you are](#how-the-browser-is-logged-in)), and scion gives a new user no role on
 any project. So `apply` also creates a custom project role, `lever-remote`, with the same surface as
-the remote PAT (`agent.read`, `agent.list`, `project.read`, `agent.attach`, `agent.message`), and
-binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
+the remote PAT (`agent.read`, `agent.list`, `project.read`, `agent.attach`, `agent.message`) plus
+`project.list`, which only the web UI's project list needs, and binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
 unset, it binds the placeholder `lever-operator@lever.local`.
 
 Role administration is hub-admin only and scion refuses it to every token, so this happens in the

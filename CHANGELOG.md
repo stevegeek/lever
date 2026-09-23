@@ -15,7 +15,7 @@ version bump moves the block under the new version heading.
   project, so chat and the `/events` stream were refused. When remote access
   is on, `lever apply` now creates a custom project role, `lever-remote`, with
   the remote PAT's surface (`agent.read`, `agent.list`, `project.read`,
-  `agent.attach`, `agent.message`), and binds each allowed user's hub user to
+  `agent.attach`, `agent.message`) plus `project.list` for the SPA's project list, and binds each allowed user's hub user to
   it on the project. It runs in the bootstrap dev-auth window (role admin is
   hub-admin only) and is recorded in `.lever-state/remote-role.json`; a window
   opens only while that record does not cover every allowed user with the

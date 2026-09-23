@@ -43,7 +43,10 @@ func remoteRolePermissions() []string {
 	for i, s := range scopes {
 		out[i] = strings.Replace(s, ":", ".", 1)
 	}
-	return out
+	// project.list is web-only and read-only: without it the SPA's project
+	// list (GET /api/v1/projects, ResolveListScopes "project.list") comes back
+	// empty. The remote PAT does not need it, so it is not a PAT scope.
+	return append(out, "project.list")
 }
 
 // remoteAccess is what the bootstrap-token step needs to know about the

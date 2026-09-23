@@ -139,10 +139,10 @@ func collectWarnings() (*[]string, func(string, ...any)) {
 	return &w, func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
 }
 
-// The five permissions are the remote PAT's scopes in registry form: the
-// role and the token must name the same surface.
+// The role is the remote PAT's scopes in registry form, plus project.list,
+// which only the SPA's project list needs.
 func TestRemoteRolePermissionsMirrorTheRemotePAT(t *testing.T) {
-	want := []string{"agent.read", "agent.list", "project.read", "agent.attach", "agent.message"}
+	want := []string{"agent.read", "agent.list", "project.read", "agent.attach", "agent.message", "project.list"}
 	if got := remoteRolePermissions(); !slices.Equal(got, want) {
 		t.Fatalf("remoteRolePermissions = %v, want %v", got, want)
 	}

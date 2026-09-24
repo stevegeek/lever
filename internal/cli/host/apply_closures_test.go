@@ -317,3 +317,23 @@ func TestLeverMayClaimTemplate(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureScionTelemetryBindsTheConfiguredMode: unset means off (scion's
+// own default makes every hook wait out OTLP timeouts), and scion-default
+// asks the guest to hand the key back.
+func TestEnsureScionTelemetryBindsTheConfiguredMode(t *testing.T) {
+	for _, c := range []struct {
+		mode config.ScionTelemetryMode
+		off  bool
+	}{{"", true}, {config.ScionTelemetryOff, true}, {config.ScionTelemetryScionDefault, false}} {
+		sb := &stubBackend{telemetryChanged: true}
+		w := &applyWiring{b: sb, app: &config.App{Scion: config.ScionConfig{Telemetry: c.mode}}}
+		changed, err := w.ensureScionTelemetry(context.Background())
+		if err != nil || !changed {
+			t.Fatalf("%q: changed=%v err=%v", c.mode, changed, err)
+		}
+		if len(sb.telemetryCalls) != 1 || sb.telemetryCalls[0] != c.off {
+			t.Fatalf("%q: EnsureScionTelemetry calls = %v, want [%v]", c.mode, sb.telemetryCalls, c.off)
+		}
+	}
+}

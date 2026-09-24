@@ -184,6 +184,9 @@ func (a *App) Validate() error {
 	if !a.Broker.AutoReenrol.valid() {
 		return fmt.Errorf("config: broker.auto_reenrol %q must be one of all|manager|off (or unset = all)", a.Broker.AutoReenrol)
 	}
+	if !a.Scion.Telemetry.valid() {
+		return fmt.Errorf("config: scion.telemetry %q must be one of off|scion-default (or unset = off)", a.Scion.Telemetry)
+	}
 	if err := validateDisk(a.Disk); err != nil {
 		return err
 	}

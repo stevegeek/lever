@@ -26,6 +26,8 @@ type stubBackend struct {
 	hubLoginCalls     []types.HubLogin
 	hubLoginDisabled  int            // DisableHubLogin call count
 	hubLoginRemoved   bool           // DisableHubLogin's "the hub config changed" answer
+	telemetryCalls    []bool         // EnsureScionTelemetry "off" arguments, in call order
+	telemetryChanged  bool           // EnsureScionTelemetry's "the file changed" answer
 	leverTemplates    int            // EnsureLeverTemplate call count
 	upCfg             backend.Config // the Config the last EnsureUp received
 }
@@ -69,6 +71,10 @@ func (s *stubBackend) EnsureHubLogin(_ context.Context, spec types.HubLogin) (bo
 func (s *stubBackend) DisableHubLogin(context.Context) (bool, error) {
 	s.hubLoginDisabled++
 	return s.hubLoginRemoved, nil
+}
+func (s *stubBackend) EnsureScionTelemetry(_ context.Context, off bool) (bool, error) {
+	s.telemetryCalls = append(s.telemetryCalls, off)
+	return s.telemetryChanged, nil
 }
 func (s *stubBackend) EnsureLeverTemplate(context.Context) (bool, error) {
 	s.leverTemplates++

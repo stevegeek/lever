@@ -1604,3 +1604,56 @@ func TestCheckAgentRoleCeilingSkipsAPreRolesScion(t *testing.T) {
 		t.Fatalf("got %+v asked=%v", r, asked)
 	}
 }
+
+func TestCheckScionTelemetry(t *testing.T) {
+	settings := func(s string) settingsReader {
+		return func(context.Context) ([]byte, error) { return []byte(s), nil }
+	}
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	mgr := listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerID: "c1"})
+	envIs := func(v string, set bool) envReader {
+		return func(_ context.Context, ref, key string) (string, bool, error) {
+			if ref != "c1" || key != "SCION_TELEMETRY_ENABLED" {
+				return "", false, fmt.Errorf("unexpected %s %s", ref, key)
+			}
+			return v, set, nil
+		}
+	}
+	const off = "telemetry:\n  enabled: false\n"
+	cases := []struct {
+		label      string
+		mode       config.ScionTelemetryMode
+		read       settingsReader
+		list       agentLister
+		env        envReader
+		ok         bool
+		wantDetail string
+		wantFix    string
+	}{
+		{"off, converged, manager matches", config.ScionTelemetryOff, settings(off), mgr, envIs("false", true), true, "SCION_TELEMETRY_ENABLED=false", ""},
+		{"off, settings missing the block", config.ScionTelemetryOff, settings("version: 1\n"), mgr, envIs("false", true), false, "scion's default", "lever apply"},
+		{"off, manager predates it", config.ScionTelemetryOff, settings(off), mgr, envIs("", false), false, "unset", "lever stop && lever up"},
+		{"off, manager started with true", config.ScionTelemetryOff, settings(off), mgr, envIs("true", true), false, "=true", "lever stop && lever up"},
+		{"off, no manager record", config.ScionTelemetryOff, settings(off), listing(), envIs("", false), true, "no manager record", ""},
+		{"off, no container", config.ScionTelemetryOff, settings(off), mgr,
+			func(context.Context, string, string) (string, bool, error) { return "", false, jail.ErrNoContainer }, true, "no manager container", ""},
+		{"scion-default leaves scion's telemetry alone", config.ScionTelemetryScionDefault, settings(""), mgr, envIs("", false), true, "scion's default", ""},
+		{"settings unreadable", config.ScionTelemetryOff,
+			func(context.Context) ([]byte, error) { return nil, fmt.Errorf("machine down") }, mgr, envIs("", false), true, "not checked", ""},
+		{"settings garbage", config.ScionTelemetryOff, settings("telemetry:\n  enabled: maybe\n"), mgr, envIs("", false), false, "cannot be read", "lever apply"},
+	}
+	for _, c := range cases {
+		r := checkScionTelemetry(context.Background(), c.mode, c.read, "/lever", "assistant", c.list, c.env)
+		if r.ok != c.ok {
+			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
+		}
+		if !strings.Contains(r.detail, c.wantDetail) {
+			t.Errorf("%s: detail %q should mention %q", c.label, r.detail, c.wantDetail)
+		}
+		if !strings.Contains(r.fix, c.wantFix) {
+			t.Errorf("%s: fix %q should mention %q", c.label, r.fix, c.wantFix)
+		}
+	}
+}

@@ -1105,9 +1105,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// DisableHubLogin removes the guest-side bridge when remote access is
 		// off — see apply.Deps.DisableHubLogin for why leaving it running is
 		// the part that matters.
-		DisableHubLogin:     b.DisableHubLogin,
-		EnsureAgentTemplate: w.ensureAgentTemplate,
-		Log:                 w.log,
+		DisableHubLogin:      b.DisableHubLogin,
+		EnsureScionTelemetry: w.ensureScionTelemetry,
+		EnsureAgentTemplate:  w.ensureAgentTemplate,
+		Log:                  w.log,
 	}
 }
 
@@ -1195,6 +1196,12 @@ func (w *applyWiring) ensureHubLogin(ctx context.Context) (bool, error) {
 		HostAddress: w.brokerHost,
 		ClientID:    remoteproxy.LoginClientID,
 	})
+}
+
+// ensureScionTelemetry binds config scion.telemetry to the guest settings
+// edit — see apply.Deps.EnsureScionTelemetry.
+func (w *applyWiring) ensureScionTelemetry(ctx context.Context) (bool, error) {
+	return w.b.EnsureScionTelemetry(ctx, w.app.EffectiveScionTelemetry() == config.ScionTelemetryOff)
 }
 
 // ensureAgentTemplate puts lever's overlay template in front of scion's stock

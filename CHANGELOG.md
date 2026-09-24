@@ -9,6 +9,22 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **Agent turns no longer take minutes: sciontool telemetry is off by
+  default.** Since scion#1792 sciontool telemetry defaults on. With no cloud
+  destination, the in-container OTLP receiver refuses to start, and every
+  Claude hook (Pre/PostToolUse on every tool call) waited out a 10 s export
+  and a 5 s shutdown timeout against `127.0.0.1:4317`. A new config key,
+  `scion.telemetry` (`off` default | `scion-default`), makes `lever apply`
+  write `telemetry.enabled: false` into the jail's `~/.scion/settings.yaml`
+  (idempotent, other keys and comments kept; `scion-default` removes only
+  the exact block lever wrote). Agents read the block when they start, so
+  apply logs a change and restarts nothing: run `lever stop && lever up`
+  once after upgrading. A new `scion telemetry` doctor row shows the
+  setting in the jail and the manager container's `SCION_TELEMETRY_ENABLED`,
+  and fails when the two disagree. lever has no `local` mode, because with
+  cloud export off the receiver drops all data (sciontool has no local
+  sink). See the config reference.
+
 - **The remote web UI no longer answers 403.** `lever remote` signs the
   browser in as a hub user (one per `remote.allowed_users` login), and since
   scion's permission rework such a user holds no role on the instance

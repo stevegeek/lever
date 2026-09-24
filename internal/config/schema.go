@@ -259,6 +259,43 @@ type ScionConfig struct {
 	// only if you know why. Naming any role on a scion that has no --role flag
 	// is a hard error, never a silent downgrade.
 	AgentRole string `yaml:"agent_role"`
+	// Telemetry selects what lever writes into the jail's ~/.scion/settings.yaml
+	// `telemetry:` block, which scion turns into the SCION_TELEMETRY_* env of
+	// every agent it starts. off (the default) | scion-default. See
+	// ScionTelemetryMode.
+	Telemetry ScionTelemetryMode `yaml:"telemetry"`
+}
+
+// ScionTelemetryMode selects the agents' sciontool telemetry posture.
+//
+//   - off (the default): lever writes `telemetry.enabled: false`. Since
+//     scion#1792 sciontool telemetry defaults ON, but with no cloud destination
+//     configured the in-container OTLP receiver refuses to start, so every
+//     Claude hook (8 events, including Pre/PostToolUse on EVERY tool call) dials
+//     127.0.0.1:4317, is refused, and waits out a ~10 s export and a 5 s
+//     shutdown timeout. A trivial turn took minutes. There is no local sink to
+//     lose: without a cloud exporter the receiver drops everything it accepts.
+//   - scion-default: lever leaves the key to scion (and to the operator). It
+//     removes only the exact block `off` wrote. Use it when you configure
+//     scion telemetry yourself — e.g. a cloud destination, which is new egress
+//     and a credential in the jail, so lever does not manage it.
+//
+// A "local" mode (receiver up, cloud export off) was considered and not built:
+// the receiver then drops every span and log it accepts (there is no local
+// file/console sink in sciontool), so it would be pure overhead, and scion's
+// claude provisioner refuses an enabled telemetry block that names no cloud
+// provider or endpoint.
+type ScionTelemetryMode string
+
+const (
+	ScionTelemetryOff          ScionTelemetryMode = "off"
+	ScionTelemetryScionDefault ScionTelemetryMode = "scion-default"
+)
+
+// valid reports whether m is a declared mode or unset (unset resolves to
+// ScionTelemetryOff via EffectiveScionTelemetry).
+func (m ScionTelemetryMode) valid() bool {
+	return m == "" || m == ScionTelemetryOff || m == ScionTelemetryScionDefault
 }
 
 // scionAgentRoles is the set of roles scion#1089 defines. Validated so a typo

@@ -80,6 +80,9 @@ func fillDeps(d Deps) Deps {
 	if d.EnsureHubLogin == nil {
 		d.EnsureHubLogin = func(context.Context) (bool, error) { return false, nil }
 	}
+	if d.EnsureScionTelemetry == nil {
+		d.EnsureScionTelemetry = func(context.Context) (bool, error) { return false, nil }
+	}
 	if d.DisableHubLogin == nil {
 		d.DisableHubLogin = func(context.Context) (bool, error) { return false, nil }
 	}
@@ -2928,6 +2931,78 @@ func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
 	// hub whose login path silently does not work.
 	if _, err := run(t, false, errors.New("no go toolchain")); err == nil {
 		t.Fatal("EnsureHubLogin's failure did not fail the apply")
+	}
+}
+
+// TestScionServerConvergesTelemetryWithoutRestarting pins the telemetry
+// edit's place and its restraint: it runs in the scion-server step before the
+// hub starts (so a first bring-up creates hub and manager with it in place),
+// a failure fails the apply, and a change is only LOGGED — it never bounces a
+// running hub, whose restart drops every agent's connection.
+func TestScionServerConvergesTelemetryWithoutRestarting(t *testing.T) {
+	run := func(t *testing.T, changed bool, ensureErr error) (calls []proc.Call, logs []string, ensured int, err error) {
+		t.Helper()
+		f := scionOKRunner()
+		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+			Manager: config.Manager{Image: "img"}}
+		deps := Deps{
+			Scion: hubScion(f, app),
+			EnsureScionTelemetry: func(context.Context) (bool, error) {
+				ensured++
+				// Before the hub starts: nothing has run `scion server start` yet.
+				for _, c := range f.Calls {
+					if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" && c.Args[1] == "start" {
+						t.Error("telemetry converged after the hub started — a first bring-up would start it on scion's default")
+					}
+				}
+				return changed, ensureErr
+			},
+			Log: func(format string, a ...any) { logs = append(logs, fmt.Sprintf(format, a...)) },
+		}
+		err = runApply(app, deps)
+		return f.Calls, logs, ensured, err
+	}
+	stopped := func(calls []proc.Call) bool {
+		for _, c := range calls {
+			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" && c.Args[1] == "stop" {
+				return true
+			}
+		}
+		return false
+	}
+	mentions := func(logs []string) bool {
+		for _, l := range logs {
+			if strings.Contains(l, "telemetry") && strings.Contains(l, "lever stop && lever up") {
+				return true
+			}
+		}
+		return false
+	}
+
+	calls, logs, ensured, err := run(t, false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if ensured != 1 {
+		t.Fatalf("EnsureScionTelemetry called %d times, want 1", ensured)
+	}
+	if stopped(calls) || mentions(logs) {
+		t.Fatalf("a converged telemetry block restarted the hub or logged a change: logs=%q", logs)
+	}
+
+	calls, logs, _, err = run(t, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stopped(calls) {
+		t.Fatal("a telemetry change restarted the hub — lever must not bounce a running hub for it")
+	}
+	if !mentions(logs) {
+		t.Fatalf("a telemetry change did not tell the operator how to apply it: %q", logs)
+	}
+
+	if _, _, _, err := run(t, false, errors.New("guest unreachable")); err == nil {
+		t.Fatal("EnsureScionTelemetry's failure did not fail the apply")
 	}
 }
 

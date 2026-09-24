@@ -175,8 +175,50 @@ base64-encoded` error by encoding the credential yourself; upgrade the pin.
 | `source` | path | no | - | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. Requires a Go toolchain on the host, but no module fetch. Also needs node >= 20 + npm when [`remote.enabled`](#remote); the web UI is rebuilt whenever you edit `web/`. |
 | `binary` | path | no | - | Path to an **already-built linux scion binary**, installed into the jail as-is. Unlike the two above it needs **no Go toolchain, no module cache and no egress** on the machine hosting the jail — and no node, since lever builds no web UI for it: with [`remote.enabled`](#remote) the hub serves whatever assets that binary embeds (upstream's `make all` embeds them), or its "Web UI Not Available" page if it embeds none — build it on a workstation and ship it. Relative paths resolve against the config file's directory. lever checks the ELF header against the guest's architecture before installing, so a wrong-arch build fails immediately instead of as `exec format error` at manager start. **Its integrity is yours to guarantee**: unlike `version`, no module-proxy checksum stands behind it. |
 | `agent_role` | string | no | - | Overrides the role lever stamps on every `scion start`: `none`, `readonly`, `baseline` or `full`. **You do not need to set it.** Empty means lever picks `baseline` whenever the installed scion supports `--role` (lever probes the binary for the flag); scion's own default for an unspecified role is `full` (agent create, lifecycle and project-secret-read). `readonly` cannot heartbeat, so a live agent cannot run on it. `full` grants exactly the hub authority the jail model exists to withhold. Naming a role on a scion that has no `--role` flag is a hard error, never a silent downgrade. The same role is written as the project's maximum and default agent role on the hub, so the hub refuses a create above it whoever asks (see [security model §4.3](/security-model/worker-isolation/)). |
+| `telemetry` | enum | no | `off` | Agent telemetry posture (`off` \| `scion-default`), written into the jail's `~/.scion/settings.yaml`. `off` writes `telemetry.enabled: false`, so every agent starts with `SCION_TELEMETRY_ENABLED=false`. `scion-default` leaves the key to scion and to you. See [agent telemetry](#agent-telemetry-sciontelemetry) below. |
 
 Whichever mode you use, lever records the installed binary's sha256 in the jail and skips the copy when it already matches, so an unchanged scion is not re-streamed on every `lever up`.
+
+#### Agent telemetry (`scion.telemetry`)
+
+Since scion#1792, sciontool telemetry is on by default, and cloud export is on by default too.
+lever configures no cloud destination, so the OTLP receiver that `sciontool init` starts in each
+agent container refuses to start. Every `sciontool hook` call still tries to export to
+`127.0.0.1:4317` in the container. The call then waits out a 10 s export timeout and a 5 s
+shutdown timeout. Claude Code fires 8 hook events, and Pre/PostToolUse fire on every tool call.
+A trivial turn took more than two minutes.
+
+- **`off` (the default).** `lever apply` writes this top-level block into the jail's
+  `~/.scion/settings.yaml`, and keeps all other keys and comments:
+
+  ```yaml
+  telemetry:
+    enabled: false
+  ```
+
+  If the block has other keys, lever keeps them and sets only `enabled: false`. An explicit
+  `enabled: true` is overridden, because this key is the switch. (`scion config set` refuses this
+  key, so lever edits the file.) scion turns the block into `SCION_TELEMETRY_ENABLED=false` for
+  every agent that it starts.
+- **`scion-default`.** lever does not manage the key. It removes only the exact block that `off`
+  wrote, and leaves a block with more keys unchanged. Use this mode only when you configure scion
+  telemetry yourself. A cloud destination adds egress and a credential in the jail, so lever does
+  not manage it.
+
+**The setting applies when an agent starts.** The runtime broker reads the file at each agent
+start. A running container keeps the env that it started with, and the hub reads the block only at
+its own startup. When apply changes the file, it logs the change and restarts nothing. Run
+`lever stop && lever up` to apply the change to the hub and the manager. The manager
+conversation is kept. The `scion telemetry` row of `lever doctor` shows the setting in the jail. It
+also shows the `SCION_TELEMETRY_ENABLED` value that the manager container started with, and it
+fails when the two do not agree.
+
+**lever has no `local` mode.** With cloud export off (`SCION_TELEMETRY_CLOUD_ENABLED=false`),
+the in-container receiver starts on `127.0.0.1:4317`/`4318` with no new egress. But the receiver
+drops every span and log that it accepts, because sciontool has no local file or console sink. The
+`telemetry.local` settings produce env vars that no sciontool code reads. Also, scion's Claude
+provisioner refuses an enabled telemetry block that names no cloud provider or endpoint. A local
+mode would thus add work to every hook and give no data.
 
 **With [`remote.enabled`](#remote), `version:` and `source:` additionally need node >= 20 + npm on
 the host.** Neither carries built web assets, so lever builds the hub's web UI host-side from the

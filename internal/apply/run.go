@@ -245,6 +245,18 @@ type Deps struct {
 	// disableHubLogin for what counts as a change and why the forwarder does
 	// not.
 	DisableHubLogin func(ctx context.Context) (bool, error)
+	// EnsureScionTelemetry converges the top-level `telemetry:` block of the
+	// guest's ~/.scion/settings.yaml on config scion.telemetry (the CLI binds
+	// the mode), reporting whether the file changed. It runs in the
+	// scion-server step, before the hub starts, so a first bring-up creates
+	// the hub and the manager with it already in place.
+	//
+	// A change is LOGGED, never acted on: the runtime broker reads the block at
+	// every agent start, but a running container keeps the env it was created
+	// with and the hub caches the block at its own startup. `lever stop &&
+	// lever up` applies it everywhere; lever does not bounce a running hub or
+	// manager for a telemetry posture.
+	EnsureScionTelemetry func(ctx context.Context) (bool, error)
 	// EnsureAgentTemplate backs the agent-template step: put lever's overlay
 	// template in front of scion's stock `default` so newly provisioned agents
 	// do NOT launch with `--system-prompt '# Placeholder'`, which replaces
@@ -385,6 +397,7 @@ func (d Deps) check() error {
 		{"RearmBootstrap", d.RearmBootstrap == nil},
 		{"EnsureHubLogin", d.EnsureHubLogin == nil},
 		{"DisableHubLogin", d.DisableHubLogin == nil},
+		{"EnsureScionTelemetry", d.EnsureScionTelemetry == nil},
 		{"EnsureAgentTemplate", d.EnsureAgentTemplate == nil},
 		{"StartRemoteProxy", d.StartRemoteProxy == nil},
 		{"StopRemoteProxy", d.StopRemoteProxy == nil},
@@ -621,6 +634,14 @@ func (r *run) step(ctx context.Context, s Step) error {
 // left running. The next apply converges it: EnsureHubLogin is idempotent, and
 // with remote access turned off DisableHubLogin removes it outright.
 func (r *run) scionServer(ctx context.Context) error {
+	telemetryChanged, err := r.d.EnsureScionTelemetry(ctx)
+	if err != nil {
+		return fmt.Errorf("scion telemetry: %w", err)
+	}
+	if telemetryChanged {
+		r.d.Log("lever: agent telemetry in the jail's scion settings is now %q (scion.telemetry) — agents started from here on use it; "+
+			"a hub or manager that was already running keeps the old setting until `lever stop && lever up`", r.app.EffectiveScionTelemetry())
+	}
 	changed, err := r.d.EnsureHubLogin(ctx)
 	if err != nil {
 		return fmt.Errorf("hub login: %w", err)

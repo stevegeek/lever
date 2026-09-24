@@ -171,6 +171,12 @@ func (a *App) EffectiveAutoReenrol() AutoReenrolMode {
 	return cmp.Or(a.Broker.AutoReenrol, AutoReenrolAll)
 }
 
+// EffectiveScionTelemetry is the agents' sciontool telemetry posture: the
+// configured value, or ScionTelemetryOff when unset. Validated at load.
+func (a *App) EffectiveScionTelemetry() ScionTelemetryMode {
+	return cmp.Or(a.Scion.Telemetry, ScionTelemetryOff)
+}
+
 func (a *App) brokerLLMAuthDefault() LLMAuthMode {
 	return cmp.Or(a.Broker.LLMAuth, LLMAuthAPIKey)
 }

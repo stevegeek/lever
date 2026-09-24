@@ -120,6 +120,11 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	inspectMounts := func(ctx context.Context, containerID string) ([]string, error) {
 		return jail.ContainerMountTargets(ctx, jr, containerID)
 	}
+	// One variable of a container's env, filtered in the guest — see
+	// jail.ContainerEnvValue for why the rest never leaves it.
+	readContainerEnv := func(ctx context.Context, ref, key string) (string, bool, error) {
+		return jail.ContainerEnvValue(ctx, jr, ref, key)
+	}
 	workerNames := make([]string, 0, len(app.Workers))
 	for _, w := range app.Workers {
 		workerNames = append(workerNames, w.Name)
@@ -129,6 +134,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
 		func() checkResult { return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, time.Now()) },
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
+		func() checkResult {
+			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
+		},
 		func() checkResult { return checkAgentCert(state, time.Now()) },
 		func() checkResult { return checkToolBackends(app.Broker.Tools, probes) },
 		func() checkResult { return checkClaudeVersion(app.ManagerImage(), app.ManagerImageTarPath(), probes) },

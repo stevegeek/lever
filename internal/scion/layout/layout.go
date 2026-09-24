@@ -94,6 +94,10 @@ const (
 	KeyMessageBroker = "message_broker"
 	// KeyEnabled is the boolean that switches a block on.
 	KeyEnabled = "enabled"
+	// KeyTelemetry is the TOP-LEVEL telemetry block (V1TelemetryConfig) — a
+	// sibling of KeyServer, not under it. scion turns it into every agent's
+	// SCION_TELEMETRY_* env at start (pkg/config/telemetry_convert.go).
+	KeyTelemetry = "telemetry"
 )
 
 // OIDCLogin is scion's oidc_login block as it appears under `server:` in

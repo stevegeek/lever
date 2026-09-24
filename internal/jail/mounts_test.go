@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -87,4 +90,68 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestContainerEnvValue(t *testing.T) {
+	host := proc.NewFakeRunner()
+	host.Script("orb", proc.Result{Stdout: "SCION_TELEMETRY_ENABLED=false\n"})
+	jr := New(Config{Host: host, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	v, set, err := ContainerEnvValue(context.Background(), jr, "lever--mgr", "SCION_TELEMETRY_ENABLED")
+	if err != nil || !set || v != "false" {
+		t.Fatalf("ContainerEnvValue = %q, %v, %v", v, set, err)
+	}
+	// The filtering runs in the guest: the argv carries the script and the
+	// key, and nothing asks podman for the whole env on the host side.
+	argv := host.Calls[0].Argv()
+	for _, want := range []string{"XDG_RUNTIME_DIR=/run/user/501", "sh -c", "lever--mgr SCION_TELEMETRY_ENABLED", `grep -E "^$2="`} {
+		if !contains(argv, want) {
+			t.Fatalf("argv %q lacks %q", argv, want)
+		}
+	}
+
+	host = proc.NewFakeRunner()
+	host.Script("orb", proc.Result{Stdout: ""})
+	jr = New(Config{Host: host, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	if _, set, err := ContainerEnvValue(context.Background(), jr, "abc", "SCION_TELEMETRY_ENABLED"); err != nil || set {
+		t.Fatalf("an absent variable: set=%v err=%v", set, err)
+	}
+	for _, bad := range [][2]string{{"", "K"}, {"--all", "K"}, {"abc", "K; rm -rf /"}, {"abc", ""}} {
+		if _, _, err := ContainerEnvValue(context.Background(), jr, bad[0], bad[1]); err == nil {
+			t.Fatalf("ref %q key %q must be refused", bad[0], bad[1])
+		}
+	}
+	if len(host.Calls) != 1 {
+		t.Fatal("a refused argument must not reach the guest")
+	}
+
+	jr = New(Config{Host: failingRunner{`Error: no such container "x"`}, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	if _, _, err := ContainerEnvValue(context.Background(), jr, "x", "K"); !errors.Is(err, ErrNoContainer) {
+		t.Fatalf("err = %v, want ErrNoContainer", err)
+	}
+}
+
+// TestContainerEnvScriptFiltersInTheGuest runs the guest script against a
+// stub podman, so the grep, the exit status and the "one line only" promise
+// are proven rather than asserted from the argv.
+func TestContainerEnvScriptFiltersInTheGuest(t *testing.T) {
+	dir := t.TempDir()
+	stub := "#!/bin/sh\n" +
+		`case "$*" in *missing*) echo 'Error: no such container' >&2; exit 125;; esac` + "\n" +
+		"printf 'ANTHROPIC_API_KEY=sk-secret\\nSCION_TELEMETRY_ENABLED=false\\nSCION_TELEMETRY_ENABLED_X=1\\n'\n"
+	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(ref string) (string, error) {
+		cmd := exec.Command("sh", "-c", containerEnvScript, "sh", ref, "SCION_TELEMETRY_ENABLED")
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+		out, err := cmd.Output()
+		return string(out), err
+	}
+	out, err := run("mgr")
+	if err != nil || out != "SCION_TELEMETRY_ENABLED=false\n" {
+		t.Fatalf("script output = %q, %v", out, err)
+	}
+	if _, err := run("missing"); err == nil {
+		t.Fatal("podman's failure was swallowed")
+	}
 }

@@ -269,6 +269,12 @@ func (b *Base) DisableHubLogin(ctx context.Context) (bool, error) {
 	return b.Guest().DisableHubLogin(ctx)
 }
 
+// EnsureScionTelemetry converges the guest settings' `telemetry:` block,
+// reporting whether the file changed — see backend.Backend.
+func (b *Base) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error) {
+	return b.Guest().EnsureScionTelemetry(ctx, off)
+}
+
 // ReadScionProjectState reads scion's registration state from the machine for
 // `lever doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
 // machine-only guest prefix, so it needs no EnsureUp.

@@ -1252,6 +1252,34 @@ func TestAutoReenrolKnob(t *testing.T) {
 	}
 }
 
+func TestScionTelemetryKnob(t *testing.T) {
+	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"
+	// Default (absent) = off: scion's own default makes every hook wait out
+	// an OTLP export timeout against a receiver that never started.
+	app, err := LoadNoHostChecks(writeConfig(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.EffectiveScionTelemetry(); got != ScionTelemetryOff {
+		t.Fatalf("default scion.telemetry = %q, want %q", got, ScionTelemetryOff)
+	}
+	for _, v := range []ScionTelemetryMode{ScionTelemetryOff, ScionTelemetryScionDefault} {
+		app, err := LoadNoHostChecks(writeConfig(t, base+"scion:\n  version: abc123\n  telemetry: "+string(v)+"\n"))
+		if err != nil {
+			t.Fatalf("%s: %v", v, err)
+		}
+		if got := app.EffectiveScionTelemetry(); got != v {
+			t.Fatalf("scion.telemetry = %q, want %q", got, v)
+		}
+	}
+	// "local" is deliberately not a mode (see ScionTelemetryMode).
+	for _, bad := range []string{"local", "on", "true"} {
+		if _, err := LoadNoHostChecks(writeConfig(t, base+"scion:\n  version: abc123\n  telemetry: "+bad+"\n")); err == nil {
+			t.Fatalf("expected load error for scion.telemetry %q", bad)
+		}
+	}
+}
+
 func TestScionBinaryIsMutuallyExclusive(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"binary+source", "scion:\n  binary: ./dist/scion\n  source: ./scion-src\n"},

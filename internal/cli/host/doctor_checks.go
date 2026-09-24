@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -27,6 +28,7 @@ import (
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -1392,4 +1394,99 @@ func checkAgentRoleCeiling(ctx context.Context, project, want string, rolesSuppo
 	return checkResult{name, false,
 		fmt.Sprintf("project %s: max agent role %s, default %s; want both %s", project, show(c.Max), show(c.Default), want),
 		"run `lever apply` (register-project writes the ceiling through the project settings route)"}
+}
+
+// scionTelemetryEnv is the variable scion turns the settings' telemetry.enabled
+// into for every agent it starts (pkg/config/telemetry_convert.go).
+const scionTelemetryEnv = "SCION_TELEMETRY_ENABLED"
+
+// settingsReader returns the jail's ~/.scion/settings.yaml ("" when absent).
+type settingsReader func(ctx context.Context) ([]byte, error)
+
+// envReader reads one variable from a jail container's creation env
+// (jail.ContainerEnvValue in production).
+type envReader func(ctx context.Context, ref, key string) (value string, set bool, err error)
+
+// readJailScionSettings is the production settingsReader, as the run user
+// (the same file the hub and runtime broker read).
+func readJailScionSettings(jr proc.Runner) settingsReader {
+	return func(ctx context.Context) ([]byte, error) {
+		res, err := jr.Run(ctx, nil, "sh", "-c", `f="$HOME/`+layout.SettingsRel+`"; if [ -f "$f" ]; then cat "$f"; fi`)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(res.Stdout), nil
+	}
+}
+
+// checkScionTelemetry reports the agents' sciontool telemetry posture: what
+// the jail's settings say (config scion.telemetry, written by apply), and
+// whether the running manager was started with it. scion#1792 turned
+// telemetry on by default; with no cloud destination every Claude hook waits
+// out OTLP timeouts against a receiver that never started, so a trivial turn
+// takes minutes while every other row is green. The settings reach an agent
+// only at START, so a settings file that is right beside a manager created
+// before it is the case this row exists to name.
+func checkScionTelemetry(ctx context.Context, mode config.ScionTelemetryMode, read settingsReader, project, name string, list agentLister, env envReader) checkResult {
+	const check = "scion telemetry"
+	if read == nil {
+		return checkResult{check, true, "not checked", ""}
+	}
+	raw, err := read(ctx)
+	if err != nil {
+		return checkResult{check, true, "not checked (could not read the jail's scion settings): " + firstLine(err.Error()), ""}
+	}
+	setting, err := guest.ScionTelemetryEnabled(raw)
+	if err != nil {
+		return checkResult{check, false, "the jail's " + layout.SettingsRel + " cannot be read as settings: " + firstLine(err.Error()),
+			"fix the file in the jail, then run `lever apply`"}
+	}
+	settingOff := setting == "false"
+	describe := "telemetry.enabled: false"
+	if !settingOff {
+		describe = "telemetry ON (scion's default)"
+		if setting == "true" {
+			describe = "telemetry.enabled: true"
+		}
+	}
+	if mode == config.ScionTelemetryOff && !settingOff {
+		return checkResult{check, false,
+			fmt.Sprintf("scion.telemetry is off but the jail's settings say %s — every agent hook waits out OTLP export timeouts", describe),
+			"run `lever apply`, then `lever stop && lever up` so the manager starts with it"}
+	}
+	detail := fmt.Sprintf("scion.telemetry %s; jail settings: %s", mode, describe)
+	if !settingOff || list == nil || env == nil {
+		// scion-default with scion's own telemetry: the operator's choice, and
+		// nothing lever promised to compare the manager against.
+		return checkResult{check, true, detail, ""}
+	}
+	agents, err := list(ctx, project)
+	if err != nil {
+		return checkResult{check, true, detail + "; manager not checked (could not list agents)", ""}
+	}
+	a := scionpkg.FindAgent(agents, name)
+	if a == nil {
+		return checkResult{check, true, detail + "; no manager record to compare", ""}
+	}
+	ref := a.ContainerID
+	if ref == "" {
+		ref = jail.ContainerName(hubProjectKey(project), name)
+	}
+	v, set, err := env(ctx, ref, scionTelemetryEnv)
+	if errors.Is(err, jail.ErrNoContainer) {
+		return checkResult{check, true, detail + "; no manager container to compare", ""}
+	}
+	if err != nil {
+		return checkResult{check, true, detail + "; manager not checked (could not inspect its container)", ""}
+	}
+	if set && v == "false" {
+		return checkResult{check, true, detail + fmt.Sprintf("; manager %q runs with %s=false", name, scionTelemetryEnv), ""}
+	}
+	got := "unset (scion's default: on)"
+	if set {
+		got = v
+	}
+	return checkResult{check, false,
+		fmt.Sprintf("the jail's settings turn telemetry off but manager %q was started with %s=%s — its every hook still waits out OTLP export timeouts", name, scionTelemetryEnv, got),
+		"run `lever stop && lever up` (the conversation is kept) so the manager starts with the current settings"}
 }

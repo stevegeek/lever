@@ -158,6 +158,12 @@ type Backend interface {
 	// part of the answer: no hub ever reads it, and a restart is too expensive
 	// to spend on a change the hub cannot see. See guest.DisableHubLogin.
 	DisableHubLogin(ctx context.Context) (bool, error)
+	// EnsureScionTelemetry converges the top-level `telemetry:` block of the
+	// guest's ~/.scion/settings.yaml (config scion.telemetry): off=true writes
+	// `enabled: false`; off=false removes only the exact block lever wrote.
+	// It reports whether the file changed. Agents read the block at START, so
+	// a change does not reach a running manager — see guest.EnsureScionTelemetry.
+	EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 	Teardown(ctx context.Context) error
 	// Stop powers the machine off but keeps its disk intact — distinct from
 	// Teardown, which deletes the machine. Idempotent: a no-op if the machine

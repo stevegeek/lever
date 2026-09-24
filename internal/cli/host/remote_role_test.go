@@ -36,8 +36,8 @@ type fakeAdminHub struct {
 	blockPreview bool
 	// failCreateConstraint makes every constraint create answer 500.
 	failCreateConstraint bool
-	calls        []string // "METHOD path", in order
-	next         int
+	calls                []string // "METHOD path", in order
+	next                 int
 }
 
 type fakeConstraint struct {

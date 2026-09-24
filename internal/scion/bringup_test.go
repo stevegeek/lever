@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 // okScion returns a runner that answers every scion verb with success, and a
@@ -291,15 +296,116 @@ func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 
 func TestServerStopArgv(t *testing.T) {
 	f, c := okScion()
+	f.Script("sh -c f=", proc.Result{}) // no live pid: nothing to wait on
 	if err := c.ServerStop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Calls) != 1 {
-		t.Fatalf("want 1 call, got %d", len(f.Calls))
+	if len(f.Calls) != 2 {
+		t.Fatalf("want 2 calls (pid probe, stop), got %d: %+v", len(f.Calls), f.Calls)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	if probe := f.Calls[0]; probe.Name != "sh" || probe.Args[len(probe.Args)-1] != layout.ServerPIDRel {
+		t.Errorf("first call = %+v, want the pid probe on %s", probe, layout.ServerPIDRel)
+	}
+	got := strings.Join(f.Calls[1].Args, " ")
 	if got != "server stop" {
 		t.Errorf("args = %q", got)
+	}
+}
+
+// A live scion pid is waited on after the stop, so the next start does not
+// race the old daemon for its ports (scion's stop returns after 500 ms).
+func TestServerStopWaitsForTheOldPid(t *testing.T) {
+	f, c := okScion()
+	f.Script("sh -c f=", proc.Result{Stdout: "4242"})
+	f.Script("sh -c i=0", proc.Result{})
+	if err := c.ServerStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	iStop := f.CallIndex(proc.ArgvPrefix("scion", "server", "stop"))
+	iWait := f.CallIndex(proc.ArgvContains("i=0", "_ 4242"))
+	if iStop < 0 || iWait < 0 || iWait < iStop {
+		t.Fatalf("want stop then a wait on pid 4242; calls=%+v", f.Calls)
+	}
+}
+
+// A daemon that outlives the bounded wait fails the stop: the caller's next
+// start would hit a port conflict.
+func TestServerStopFailsWhenTheOldPidLingers(t *testing.T) {
+	f, c := okScion()
+	f.Script("sh -c f=", proc.Result{Stdout: "4242"})
+	// "sh -c i=0" unscripted: the fake fails it, as the script's exit 1 would.
+	err := c.ServerStop(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "pid 4242") {
+		t.Fatalf("err = %v, want a failure naming pid 4242", err)
+	}
+}
+
+// A pid file whose pid is not a scion server is removed by the probe and is
+// neither signalled by lever nor waited on.
+func TestServerStopSkipsAStalePid(t *testing.T) {
+	f, c := okScion()
+	f.Script("sh -c f=", proc.Result{Stdout: "stale:77"})
+	if err := c.ServerStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.Called(proc.ArgvContains("i=0")) {
+		t.Fatalf("waited on a stale pid; calls=%+v", f.Calls)
+	}
+}
+
+// The probe script itself, against a real shell and /proc (Linux only): a
+// pid file naming a live process that is not a scion server is removed.
+func TestServerPIDProbeScriptRemovesAStalePidFile(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+		t.Skip("needs /proc")
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, layout.Dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sleeper := exec.Command("sleep", "30")
+	if err := sleeper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sleeper.Process.Kill(); _ = sleeper.Wait() }()
+	pidFile := filepath.Join(home, layout.ServerPIDRel)
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(sleeper.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if !strings.HasPrefix(string(out), "stale:") {
+		t.Fatalf("probe printed %q, want stale:<pid>", out)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("stale pid file still there (stat err %v)", err)
+	}
+}
+
+// The throwaway dev-auth hub's argv: web off, so the Hub API binds --port and
+// every non-public route needs the Bearer dev token.
+func TestServerStartArgvWebDisabled(t *testing.T) {
+	f, c := okScion()
+	if err := c.ServerStart(context.Background(), ServerOpts{HubPort: 48080, DisableWeb: true, DevAuth: true, Exclusive: true}); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if got != "server start --port 48080 --enable-web=false --dev-auth=true" {
+		t.Errorf("args = %q", got)
+	}
+}
+
+func TestServerStartRejectsEnableAndDisableWeb(t *testing.T) {
+	f, c := okScion()
+	if err := c.ServerStart(context.Background(), ServerOpts{EnableWeb: true, DisableWeb: true}); err == nil {
+		t.Fatal("want an error for EnableWeb with DisableWeb")
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("ran %d call(s) for an invalid option set", len(f.Calls))
 	}
 }
 
@@ -347,10 +453,20 @@ func TestServerStopTolerantOfNotRunning(t *testing.T) {
 		if err := c.ServerStop(context.Background()); err != nil {
 			t.Fatalf("ServerStop must tolerate scion's own not-running answer %q: %v", stderr, err)
 		}
-		if len(f.Calls) != 1 {
-			t.Fatalf("want 1 call, got %d", len(f.Calls))
+		if n := countScion(f.Calls); n != 1 {
+			t.Fatalf("want 1 scion call, got %d", n)
 		}
 	}
+}
+
+func countScion(calls []proc.Call) int {
+	n := 0
+	for _, c := range calls {
+		if c.Name == "scion" {
+			n++
+		}
+	}
+	return n
 }
 
 // A stop that fails for any OTHER reason is still a failure: tolerance is for

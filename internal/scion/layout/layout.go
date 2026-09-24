@@ -47,6 +47,13 @@ const (
 	// DevTokenRel is the residual dev-auth admin token scion writes on first
 	// start (<scionDir>/dev-token). lever deletes it once apply is done.
 	DevTokenRel = Dir + "/dev-token"
+
+	// ServerPIDRel is the pid file of scion's server daemon
+	// (pkg/daemon/daemon.go PIDFileName("server") under config.GetGlobalDir).
+	// scion keeps ONE per home, whatever port the daemon binds, and `scion
+	// server stop` signals whatever pid it names after a signal-0 liveness
+	// check only.
+	ServerPIDRel = Dir + "/server.pid"
 )
 
 // ProjectMarker is the in-tree marker scion writes under a registered

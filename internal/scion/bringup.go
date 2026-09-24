@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/retry"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 // AlreadyRunning reports whether err is a scion "already running" error — used to
@@ -234,6 +235,23 @@ type ServerOpts struct {
 	// live — a `--port 48080` start binds :8080). So --web-port is what actually
 	// controls the Hub API port. Zero lets scion pick its default (8080).
 	WebPort int
+	// HubPort, when > 0, passes --port: the port the Hub API binds when the
+	// web frontend is OFF (DisableWeb). With the frontend on, scion ignores
+	// --port and mounts the API on --web-port instead; with it off the hub
+	// runs its own HTTP server on cfg.Hub.Port, which --port sets
+	// (cmd/server_foreground.go, the `if !enableWeb` branch and the
+	// `Changed("port")` override). The co-located runtime broker follows it
+	// (resolveHubListenPort).
+	HubPort int
+	// DisableWeb passes --enable-web=false, the only way to turn scion's web
+	// frontend off in workstation mode (see EnableWeb). Only the throwaway
+	// dev-auth hub sets it: with the frontend on, scion's devAuthMiddleware
+	// (pkg/hub/web.go) signs ANY session-less request in as the dev
+	// super-admin, and sessionToBearerMiddleware turns that session into API
+	// authority. With it off, every non-public Hub API route needs the
+	// Bearer dev token (pkg/hub/auth.go). Set HubPort with it: the API then
+	// binds --port, not --web-port. Mutually exclusive with EnableWeb.
+	DisableWeb bool
 	// Exclusive refuses to treat an already-running daemon as success. scion
 	// keeps ONE server pid file per jail home, whatever the port, so a start
 	// beside a running hub is answered "server is already running" about THAT
@@ -258,7 +276,8 @@ type ServerOpts struct {
 	// AFTER the defaults are applied). Only an explicit --enable-web=false
 	// would turn it off.
 	//
-	// lever must never pass that. With web disabled the Hub API stops being
+	// The LIVE hub must never pass that (only the throwaway dev-auth hub
+	// does, see DisableWeb). With web disabled the Hub API stops being
 	// mounted on the web server and binds cfg.Hub.Port — 9810 — instead
 	// (cmd/server_foreground.go, the `if !enableWeb` branch), while lever's
 	// whole model puts the Hub API on --web-port 8080: the broker, the agents'
@@ -330,9 +349,19 @@ type ServerOpts struct {
 // ServerStop, and internal/apply does exactly that, on both the on- and the
 // off-transition of remote access.
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
+	if o.DisableWeb && o.EnableWeb {
+		return errors.New("scion server start: EnableWeb and DisableWeb are mutually exclusive")
+	}
 	args := []string{"server", "start"}
 	if o.WebPort > 0 {
 		args = append(args, "--web-port", strconv.Itoa(o.WebPort))
+	}
+	if o.HubPort > 0 {
+		args = append(args, "--port", strconv.Itoa(o.HubPort))
+	}
+	if o.DisableWeb {
+		// Equals form: a bare boolean flag cannot carry false.
+		args = append(args, "--enable-web=false")
 	}
 	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
 	// Equals form, like --web-assets-dir below, so the argv matches scion's
@@ -373,11 +402,90 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 // the whole apply. Do not fold the two predicates back together — see
 // notRunning for why.
 //
+// Two guards wrap the stop itself:
+//
+//   - Before it, the pid file is checked (serverPIDProbe). scion signals
+//     whatever pid ~/.scion/server.pid names after a signal-0 liveness check
+//     only (pkg/daemon/daemon.go StopComponent), so after a VM reboot a
+//     stale file can name an unrelated process of the jail user. A pid whose
+//     /proc cmdline is not a scion server has its pid file removed instead
+//     of being signalled.
+//   - After it, the old daemon is waited on (waitPIDGone). scion's stop
+//     sends SIGINT and returns after a fixed 500 ms, before the process has
+//     necessarily exited and released its ports, so a start right after it
+//     can fail with a port conflict.
+//
+// The probe is best-effort: if the jail shell itself fails, the stop runs as
+// it did before, without the wait.
+//
 // NOTE (live): if the pinned scion build lacks `server stop`, callers should
 // fall back to a jail-process kill; this stays the seam either way.
 func (c *Client) ServerStop(ctx context.Context) error {
+	pid, _ := c.serverPIDProbe(ctx)
 	if _, err := c.run(ctx, "", "server", "stop"); err != nil && !AlreadyRunning(err) && !notRunning(err) {
 		return err
+	}
+	if pid > 0 {
+		return c.waitPIDGone(ctx, pid)
+	}
+	return nil
+}
+
+// serverPIDProbeScript prints the pid the server pid file names when that pid
+// is a live scion server, prints nothing when there is no file or the pid is
+// not alive (scion itself then treats the daemon as not running), and REMOVES
+// the file when the pid is alive but is not a scion server — the stale file a
+// reboot leaves, whose pid now belongs to something else. $1 is the pid file
+// path relative to $HOME. The cmdline test matches scion's own daemon argv,
+// `scion server start --foreground ...` (cmd/server_daemon.go
+// buildDaemonStartArgs).
+const serverPIDProbeScript = `f="$HOME/$1"
+[ -f "$f" ] || exit 0
+pid=$(tr -cd '0-9' < "$f")
+[ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
+case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
+*scion*" server "*) printf '%s' "$pid" ;;
+*) rm -f -- "$f"; printf 'stale:%s' "$pid" ;;
+esac`
+
+// serverPIDProbe runs serverPIDProbeScript in the jail and returns the live
+// scion server's pid, or 0 when there is none (or the file was stale and is
+// now gone).
+func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {
+	res, err := c.r.Run(ctx, nil, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel)
+	if err != nil {
+		return 0, err
+	}
+	out := strings.TrimSpace(res.Stdout)
+	if out == "" || strings.HasPrefix(out, "stale:") {
+		return 0, nil
+	}
+	pid, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, fmt.Errorf("server pid probe printed %q", out)
+	}
+	return pid, nil
+}
+
+// serverExitWait bounds waitPIDGone. scion's daemon shuts its HTTP servers
+// down on SIGINT; that is normally well under a second.
+const serverExitWait = 15 * time.Second
+
+// waitPIDGoneScript waits (bounded, in tenths of a second) until /proc/$1 is
+// gone. It exits 1 if the process is still there when $2 tenths have passed.
+const waitPIDGoneScript = `i=0
+while [ -e "/proc/$1" ]; do
+  [ "$i" -ge "$2" ] && exit 1
+  sleep 0.1
+  i=$((i+1))
+done`
+
+// waitPIDGone blocks until the stopped daemon's pid has exited, so its ports
+// are free for the next start.
+func (c *Client) waitPIDGone(ctx context.Context, pid int) error {
+	tenths := int(serverExitWait / (100 * time.Millisecond))
+	if _, err := c.r.Run(ctx, nil, "sh", "-c", waitPIDGoneScript, "_", strconv.Itoa(pid), strconv.Itoa(tenths)); err != nil {
+		return fmt.Errorf("scion server stop: the hub (pid %d) was still running %s after the stop: %w", pid, serverExitWait, err)
 	}
 	return nil
 }

@@ -34,6 +34,8 @@ type fakeAdminHub struct {
 	previews map[string]fakePreview
 	// blockPreview makes every preview answer with commitBlocked.
 	blockPreview bool
+	// failCreateConstraint makes every constraint create answer 500.
+	failCreateConstraint bool
 	calls        []string // "METHOD path", in order
 	next         int
 }
@@ -209,6 +211,8 @@ func (h *fakeAdminHub) constraintRoute(method string, u *url.URL, body []byte) (
 			}
 		}
 		return 200, map[string]any{"items": items, "totalCount": len(items)}, true
+	case method == http.MethodPost && u.Path == base && h.failCreateConstraint:
+		return 500, map[string]string{"error": "scripted create failure"}, true
 	case method == http.MethodPost && u.Path == base:
 		var req struct {
 			hubapi.ConstraintDraft

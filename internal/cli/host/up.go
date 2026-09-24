@@ -105,14 +105,19 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			w, err := buildApplyDeps(cmd.Context(), app, path, bf, applyOpts{Cmd: cmd})
+			// The bring-up runs under a signal-aware context (see
+			// applySignalContext); the attach below does not, so the
+			// operator's keys go to the manager, not to this handler.
+			ctx, stop := applySignalContext(cmd.Context())
+			defer stop()
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
 			if err != nil {
 				return err
 			}
 			deps, b, sc := w.deps, w.b, w.sc
 			project := b.MountDest() // in-jail project path == mount root
 
-			phase, probeErr := managerPhase(cmd.Context(), sc, project, app.Name)
+			phase, probeErr := managerPhase(ctx, sc, project, app.Name)
 			phase, err = phaseOrAbsent(phase, probeErr)
 			if err != nil {
 				return err // possibly-transient probe failure: do NOT force apply
@@ -133,7 +138,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// --fresh: apply's start-manager step deletes any record it
 				// finds once the hub is up and creates anew; a failed delete
 				// is fatal there, so the old session is never resumed silently.
-				if err := apply.Run(cmd.Context(), app, deps, apply.PlanOpts{Fresh: fresh}); err != nil {
+				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh}); err != nil {
 					return err
 				}
 			case upResume:
@@ -141,10 +146,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// apply.Run, so apply's pre-role record guard would not run on
 				// the commonest path of all (stop suspends; up resumes). Run it
 				// here for the same reason apply does.
-				if err := verifyManagerRole(cmd.Context(), deps, project, app.Name); err != nil {
+				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
-				if err := sc.Resume(cmd.Context(), app.Name, project); err != nil {
+				if err := sc.Resume(ctx, app.Name, project); err != nil {
 					return err
 				}
 			case upNone:
@@ -153,7 +158,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// role on every refresh, so an unrolled record acquires full
 				// authority without ever restarting. `lever attach` still
 				// reaches the manager if the operator needs it while deciding.
-				if err := verifyManagerRole(cmd.Context(), deps, project, app.Name); err != nil {
+				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
 			}
@@ -161,9 +166,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// the "is up." print with no observation at all, and the apply
 			// paths returned on the first live look — over a harness that dies
 			// a moment later (lever#31). Gate every path before claiming up.
-			if err := gateAfterUp(cmd.Context(), deps, decision, project, app.Name); err != nil {
+			if err := gateAfterUp(ctx, deps, decision, project, app.Name); err != nil {
 				return err
 			}
+			stop()
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil

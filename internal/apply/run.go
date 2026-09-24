@@ -189,7 +189,7 @@ type Deps struct {
 	ReadCred    func(path string) (string, error) // nil ⇒ defaultReadCred
 	JailMount   string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
 	// HubSessionSecret is the hub's session-cookie signing key, threaded into
-	// every hub start this package orders (hubServerOpts). The CLI ensures it
+	// every hub start this package orders (HubServerOpts). The CLI ensures it
 	// host-side before Run (state.State.EnsureSessionSecret), so the same
 	// key survives hub restarts and browser sessions with it. An argv-only
 	// option: a hub already running keeps its old key until something restarts
@@ -477,7 +477,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		// counts:
 		//
 		//   - Nothing lever starts reads it. With remote access off lever
-		//     passes no --web-assets-dir at all (hubServerOpts), and the
+		//     passes no --web-assets-dir at all (HubServerOpts), and the
 		//     restart above takes the flag out of a running hub's argv. Note
 		//     this is NOT the same as the hub having no UI: scion's
 		//     workstation defaults keep the web frontend on either way (see
@@ -561,7 +561,7 @@ func (r *run) disableHubLogin(ctx context.Context, steps []Step) error {
 	if err := r.d.Scion.ServerStop(ctx); err != nil {
 		return fmt.Errorf("restart the hub: %w", err)
 	}
-	return r.d.Scion.ServerStart(ctx, hubServerOpts(r.app, r.d.HubSessionSecret))
+	return r.d.Scion.ServerStart(ctx, HubServerOpts(r.app, r.d.HubSessionSecret))
 }
 
 // planHas reports whether the plan includes a step of this kind.
@@ -657,16 +657,17 @@ func (r *run) scionServer(ctx context.Context) error {
 			return fmt.Errorf("hub login: restart the hub: %w", err)
 		}
 	}
-	return r.d.Scion.ServerStart(ctx, hubServerOpts(r.app, r.d.HubSessionSecret))
+	return r.d.Scion.ServerStart(ctx, HubServerOpts(r.app, r.d.HubSessionSecret))
 }
 
-// hubServerOpts is the ONE description of how lever starts the hub for a given
-// config. Both starts share it — this step's, and the restart disableHubLogin
-// orders when remote access has just been turned off — because the whole point
+// HubServerOpts is the ONE description of how lever starts the hub for a given
+// config. Every start shares it — this step's, the restart disableHubLogin
+// orders when remote access has just been turned off, and the CLI's restart
+// of the live hub after a failed bootstrap-token window — because the whole point
 // of that restart is to replace an argv that no longer matches the config. Two
 // copies of this could disagree, and the restart would then re-apply the very
 // flags it exists to drop.
-func hubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
+func HubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
 	opts := scion.ServerOpts{
 		WebPort:       scion.DefaultHubPort,
 		DevAuth:       false,

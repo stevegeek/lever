@@ -9,6 +9,41 @@ version bump moves the block under the new version heading.
 
 ### Security
 
+- **The bootstrap dev-auth window no longer hands agents hub admin.** The
+  throwaway dev-auth hub now starts with `--enable-web=false --port 48080`.
+  Before, scion's web frontend was on by default, and its dev-auth
+  middleware signed any request without a session in as the dev
+  super-admin; agent containers reach jail-loopback ports, so a polling
+  agent could mint tokens valid on the live hub. With the frontend off,
+  every non-public route needs the Bearer dev token, which agents cannot
+  read. The window also refuses to open while any container runs in the
+  jail, because a dev-auth hub re-issues an agent token with the full role
+  on refresh. Optional work (remote role grant, a token inside its renew
+  window) is then skipped with a warning; a token the instance needs fails
+  the apply with the repair (`lever stop`, then `lever up`).
+
+- **An interrupted apply closes the dev-auth window.** `lever apply`, `up`
+  and `reload` cancel on SIGINT/SIGTERM instead of dying, and the window's
+  cleanup (stop the throwaway hub, delete `~/.scion/dev-token`) runs on a
+  context of its own. A window that fails after it stopped the live hub
+  starts the live hub again, or says that it is down and how to recover.
+  New `lever doctor` row `dev-auth window` fails when a hub answers on the
+  jail's 127.0.0.1:48080 or the dev token file exists.
+
+- **Hub stop is safe after a reboot and waits for the old daemon.** Before
+  `scion server stop`, lever checks that the pid in `~/.scion/server.pid` is
+  a scion server (`/proc/<pid>/cmdline`); a stale file naming another
+  process is removed instead of signalled. After the stop, lever waits (up
+  to 15 s) for that pid to exit, so the next start does not hit a port
+  conflict.
+
+- **The remote web role and ceiling grant runs in every dev-auth window**
+  when remote access is on, not only when `remote-role.json` says it is
+  incomplete, so a reset hub database gets the role and the project-create
+  ceiling back. A ceiling replacement that deleted the old constraint and
+  then failed to create the new one now fails the apply (the user would
+  otherwise have no ceiling) instead of warning.
+
 - **The remote proxy no longer forwards hub routes that skip RBAC or make
   the caller an owner.** It refuses `/api/v1/system/*` except `GET
   /api/v1/system/status`: scion runs no role check there (loopback-only

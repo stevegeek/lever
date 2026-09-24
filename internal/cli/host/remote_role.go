@@ -207,7 +207,7 @@ func readDevToken(ctx context.Context, jr proc.Runner) (string, error) {
 // place: lever does not revoke here (see the remote-access guide).
 func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey string, emails []string, now time.Time, warn func(string, ...any)) (state.RemoteRoleRecord, error) {
 	perms := remoteRolePermissions()
-	projectID, err := hc.ProjectID(ctx, projectKey, fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort))
+	projectID, err := hc.ProjectID(ctx, projectKey, throwawayHubURL)
 	if err != nil {
 		return state.RemoteRoleRecord{}, err
 	}
@@ -339,10 +339,15 @@ func systemRole(defs []hubapi.RoleDefinition, name string) (hubapi.RoleDefinitio
 //
 // Idempotent: a constraint with lever's name, this subject and this set is
 // kept. One with the name but another subject (the hub user was re-created)
-// or another set is deleted and created again; scion has no partial update
-// without an If-Match header, and the window runs while the live hub is
-// stopped, so there is no gap anyone can use. A recovery-disabled one is
-// scion's offline-recovery state and is not lever's to undo.
+// or another set is deleted and created again. The new one cannot be created
+// first: scion keeps constraint names unique per scope (pkg/ent/schema
+// accessconstraint.go, index name+scope_type+scope_id), and scion has no
+// partial update without an If-Match header. The window runs while the live
+// hub is stopped, so the gap is not usable while it lasts; but if the create
+// then fails, the user is left with no ceiling at all, so that returns
+// errCeilingRemoved, which fails the apply instead of warning. A
+// recovery-disabled one is scion's offline-recovery state and is not lever's
+// to undo.
 func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID string, perms []string, warn func(string, ...any)) (string, error) {
 	name := remoteCeilingName(email)
 	have, err := hc.AccessConstraintsNamed(ctx, name)
@@ -369,16 +374,42 @@ func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID s
 		}
 		stale = append(stale, c)
 	}
+	deleted := 0
 	for _, c := range stale {
 		warn("remote web ceiling: access constraint %s (%s) does not match (subject %s, permissions %s); replacing it",
 			name, c.ID, c.Subject.PrincipalID, strings.Join(c.MaximumPermissions, ","))
 		if err := hc.DeleteAccessConstraint(ctx, c.ID, c.Revision); err != nil {
-			return "", fmt.Errorf("deleting access constraint %s: %w", c.ID, err)
+			return "", ceilingRemovedIf(deleted > 0, fmt.Errorf("deleting access constraint %s: %w", c.ID, err))
 		}
+		deleted++
 	}
 	if keep != "" {
 		return keep, nil
 	}
+	got, err := createCeiling(ctx, hc, name, userID, perms)
+	if err != nil {
+		return "", ceilingRemovedIf(deleted > 0, err)
+	}
+	return got, nil
+}
+
+// errCeilingRemoved marks a ceiling replacement that deleted the old
+// constraint and then failed: the user now has no project-create ceiling.
+// grantRemoteWebRole fails the apply on it rather than warning.
+var errCeilingRemoved = errors.New("the old project-create ceiling was deleted and the new one was not written, " +
+	"so this user can create projects until a `lever apply` completes the grant")
+
+// ceilingRemovedIf marks err with errCeilingRemoved when a delete already
+// succeeded.
+func ceilingRemovedIf(removed bool, err error) error {
+	if !removed {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errCeilingRemoved, err)
+}
+
+// createCeiling writes one lever ceiling and checks the hub kept it.
+func createCeiling(ctx context.Context, hc *hubapi.Client, name, userID string, perms []string) (string, error) {
 	got, err := hc.CreateAccessConstraint(ctx, hubapi.ConstraintDraft{
 		Name:    name,
 		Purpose: remoteCeilingPurpose,

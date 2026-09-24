@@ -114,19 +114,35 @@ because the shared-dirs endpoint used for the scratchpad removal in §4.1 and th
 route used for the role ceiling in §4.3 both gate on project update, and `agent:manage` does not
 expand to it). It is:
 
-- **Minted through a throwaway, jail-local hub.** Before any agent container exists, bring-up starts
-  a temporary `scion server --dev-auth=true` on a fixed private port (48080) no agent ever learns, initializes the
-  instance's single project against it, mints the PAT, then kills that throwaway server (removing
-  the dev-auth token file it left behind) and starts the real `--dev-auth=false` hub agents actually
-  run against.
+- **Minted through a throwaway, jail-local hub, with no container running.** Bring-up stops the
+  live hub (scion keeps one server pid file per jail home), then starts a temporary
+  `scion server start --port 48080 --enable-web=false --dev-auth=true`, initializes the instance's
+  single project against it, mints the PAT, stops that throwaway server, deletes the dev-auth token
+  file it left behind, and starts the real `--dev-auth=false` hub agents actually run against. The
+  port is NOT secret: an agent container reaches jail-loopback ports through pasta's
+  `--map-host-loopback` address. Two things keep the window closed to agents instead:
+  - The throwaway runs with the web frontend OFF. With it on, scion signs any request without a
+    session in as the dev super-admin (`devAuthMiddleware`). With it off, every non-public Hub API
+    route needs the Bearer dev token, which lives only in the jail user's `~/.scion/dev-token` and
+    is never mounted into an agent container.
+  - The window does not open while any container runs in the jail (`podman ps`). A dev-auth hub
+    re-issues an agent's token with the full role on refresh, signed with the key the live hub
+    also uses, so an agent must not reach it at all. When containers run, a window needed only for
+    optional work (the remote role grant, a token inside its renew window) is skipped with a
+    warning; one the instance needs (no controller token, an expired one, a scope change) fails the
+    apply and names the repair: `lever stop`, then `lever up`.
+
+  An interrupted apply (SIGINT, SIGTERM) still stops the throwaway, deletes the dev token and, when
+  the window failed, starts the live hub again. `lever doctor`'s `dev-auth window` row fails if a
+  hub answers on the jail's 127.0.0.1:48080 or the dev token file exists.
 - **Persisted host-side only**, `0600`, under `.lever-state/` — never written into the mounted
   tree, never set as a container environment variable or Scion hub secret, so there is no path by
   which an agent inside the jail can read it.
 - **Recorded, and re-minted only for a reason.** Beside each token lever keeps a record
   (`controller.pat.json`) of the scopes it asked for, the scopes the hub granted, and the expiry.
   Tokens are minted with `--expires 360d` (scion's default is 90 days, its maximum a year), and
-  `lever apply` re-opens the agent-free mint window — beside a running hub, which shares the same
-  database — only when the record says it must: no token on disk, no record (a token minted by a
+  `lever apply` re-opens the mint window (after it stops the live hub, which shares the same
+  database) only when the record says it must: no token on disk, no record (a token minted by a
   lever older than records, whose scopes and 90-day expiry nobody can vouch for), a scope set that
   differs from the one this lever mints, or fewer than 30 days of life left. A re-mint persists the
   new token and record first, then revokes the superseded token by the id the record kept (best

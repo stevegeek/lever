@@ -1490,3 +1490,40 @@ func checkScionTelemetry(ctx context.Context, mode config.ScionTelemetryMode, re
 		fmt.Sprintf("the jail's settings turn telemetry off but manager %q was started with %s=%s — its every hook still waits out OTLP export timeouts", name, scionTelemetryEnv, got),
 		"run `lever stop && lever up` (the conversation is kept) so the manager starts with the current settings"}
 }
+
+// devAuthWindowProbeScript prints "token" when the jail user's scion dev token
+// exists and "listening" when something answers HTTP on the throwaway hub's
+// port. $1 is the dev-token path relative to $HOME, $2 the port.
+const devAuthWindowProbeScript = `out=""
+[ -e "$HOME/$1" ] && out="token"
+curl -s -o /dev/null -m 3 "http://127.0.0.1:$2/healthz" && out="$out listening"
+printf '%s' "$out"`
+
+// checkDevAuthWindow reports a bootstrap dev-auth window that was left open:
+// the throwaway dev-auth hub still listening on the jail's
+// 127.0.0.1:throwawayHubPort, or scion's dev token still on disk. Either is an
+// admin credential surface: the hub answers its dev token with super-admin
+// authority, and scion reuses a token file it finds on the next dev-auth
+// start. The window closes both itself, on success, failure and SIGINT/
+// SIGTERM alike (closeDevAuthWindow); what is left here survived a SIGKILL, a
+// crash, or a cleanup that failed.
+func checkDevAuthWindow(ctx context.Context, jr proc.Runner) checkResult {
+	const check = "dev-auth window"
+	res, err := jr.Run(ctx, nil, "sh", "-c", devAuthWindowProbeScript, "_", layout.DevTokenRel, strconv.Itoa(throwawayHubPort))
+	if err != nil {
+		return checkResult{check, false, "could not probe the jail: " + firstLine(err.Error()), "run `lever doctor` again once the jail is up"}
+	}
+	out := res.Stdout
+	listening, token := strings.Contains(out, "listening"), strings.Contains(out, "token")
+	switch {
+	case listening:
+		return checkResult{check, false,
+			fmt.Sprintf("a hub answers on the jail's 127.0.0.1:%d, the port of the bootstrap dev-auth hub; it grants super-admin to its dev token, and agents can reach jail-loopback ports", throwawayHubPort),
+			"in the jail, `scion server stop` stops it and `rm ~/" + layout.DevTokenRel + "` removes its token; then `lever apply` starts the live hub"}
+	case token:
+		return checkResult{check, false,
+			"the jail user's ~/" + layout.DevTokenRel + " exists; it is a hub admin credential, and the next dev-auth start reuses it",
+			"in the jail, `rm ~/" + layout.DevTokenRel + "`"}
+	}
+	return checkResult{check, true, "closed (no dev-auth hub, no dev token)", ""}
+}

@@ -638,10 +638,15 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("calls out of order: prestop=%d start=%d init=%d link=%d token=%d stop=%d", stops[0], iStart, iInit, iLink, iToken, stops[1])
 	}
 
-	// Fixed throwaway port, distinct from the real hub's 8080; dev-auth ON.
+	// Fixed throwaway port, distinct from the real hub's 8080; dev-auth ON;
+	// web OFF, so no dev auto-login and the API binds --port.
 	startArgs := strings.Join(f.Calls[iStart].Args, " ")
-	if !strings.Contains(startArgs, "--web-port 48080") || !strings.Contains(startArgs, "--dev-auth=true") {
-		t.Fatalf("throwaway server start args = %q, want --web-port 48080 --dev-auth=true", startArgs)
+	if startArgs != "server start --port 48080 --enable-web=false --dev-auth=true" {
+		t.Fatalf("throwaway server start args = %q, want --port 48080 --enable-web=false --dev-auth=true", startArgs)
+	}
+	// The container check runs before the live hub is stopped.
+	if iPs := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvPodmanPs) }); iPs < 0 || iPs > stops[0] {
+		t.Fatalf("container check at %d, want before the first stop at %d", iPs, stops[0])
 	}
 
 	// init/hub-link run inside the jail project dir (the tree root).
@@ -761,17 +766,16 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
 		t.Fatalf("scion server start calls = %d, want 1 (one shared window)", n)
 	}
-	// The throwaway mint hub must never gain the web flags even though
-	// remoteEnabled is true here: EnableWeb/BaseURL are for the REAL,
+	// The throwaway mint hub must keep the web frontend OFF even though
+	// remoteEnabled is true here: EnableWeb/web assets are for the REAL,
 	// dev-auth-OFF hub the scion-server apply step starts right after this
-	// one (internal/apply/run.go) — this hub is a dev-auth-ON, agent-free
-	// bootstrap window that must stay unreachable/no-SPA regardless of the
-	// remote-access setting.
+	// one (internal/apply/run.go). A dev-auth hub with the frontend on signs
+	// any session-less request in as the super-admin.
 	for _, c := range f.Calls {
 		if callHasPrefix(c, "scion server start") {
 			joined := strings.Join(c.Args, " ")
-			if strings.Contains(joined, "--enable-web") || strings.Contains(joined, "--base-url") {
-				t.Fatalf("throwaway mint hub must not carry web flags: %q", joined)
+			if !strings.Contains(joined, "--enable-web=false") || strings.Contains(joined, "--web-assets-dir") || strings.Contains(joined, "--base-url") {
+				t.Fatalf("throwaway mint hub must run with --enable-web=false and no web flags: %q", joined)
 			}
 		}
 	}
@@ -987,7 +991,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	// bootstrap-token precedes scion-server: the throwaway (48080, dev-auth
 	// ON) server start must land BEFORE the real hub's (8080, dev-auth OFF).
 	iThrowaway := callIndex(f.Calls, func(c proc.Call) bool {
-		return callHasPrefix(c, "scion server start --web-port 48080")
+		return callHasPrefix(c, "scion server start --port 48080")
 	})
 	iReal := callIndex(f.Calls, func(c proc.Call) bool {
 		return callHasPrefix(c, "scion server start --web-port 8080")

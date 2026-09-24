@@ -35,11 +35,13 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			if err := brokerctl.StopBroker(stateFor(path)); err != nil {
 				return err
 			}
-			w, err := buildApplyDeps(cmd.Context(), app, path, bf, applyOpts{Cmd: cmd})
+			ctx, stop := applySignalContext(cmd.Context())
+			defer stop()
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
 			if err != nil {
 				return err
 			}
-			if err := apply.Run(cmd.Context(), app, w.deps, apply.PlanOpts{}); err != nil {
+			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
 			cmd.Printf("application %q reloaded (broker restarted on the current config).\n", app.Name)

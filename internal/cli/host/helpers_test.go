@@ -84,14 +84,16 @@ const (
 	argvScionTokenRevoke = "scion hub token revoke"
 	argvShPrintf         = "sh -c printf" // $HOME resolution for the dev-token path
 	argvShGuardedRm      = "sh -c if"     // the guarded removeJailFile rm
+	argvPodmanPs         = "podman ps"    // the window's running-container check
 )
 
 // scriptPATMintChain registers the throwaway-window call chain shared by every
-// ensureControllerPAT test (server start → list poll → init → hub link →
-// server stop → dev-token resolve/rm), everything except the "hub token
+// ensureControllerPAT test (container check → server start → list poll →
+// init → hub link → server stop → dev-token resolve/rm), everything except the "hub token
 // create" calls themselves — those differ per test by --name/token, so each
 // test scripts them via scriptTokenCreate or patMintRunner.
 func scriptPATMintChain(f *proc.FakeRunner) {
+	f.Script(argvPodmanPs, proc.Result{}) // no container running
 	f.Script(argvScionServerStart, proc.Result{})
 	f.Script(argvScionList, proc.Result{})
 	f.Script(argvScionInit, proc.Result{})

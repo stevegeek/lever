@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -291,16 +292,39 @@ func removeJailFile(ctx context.Context, jr proc.Runner, jailPath string) error 
 	return nil
 }
 
-// throwawayHubPort is the port ensureControllerPAT's throwaway dev-auth hub is
-// reached on — a distinct port from the real hub (8080). lever runs scion in
-// workstation (combined) mode, where the Hub API rides the web server's port and
-// the standalone --port flag is IGNORED (verified live: `--port 48080` binds
-// :8080); --web-port is what actually binds it (verified: `--web-port 48080`
-// binds :48080). ServerStart emits --web-port, so the throwaway lands here,
-// physically isolated from the real dev-auth-OFF hub the scion-server apply step
-// starts on 8080 right after. The throwaway's dev-auth window is agent-free +
-// jail-loopback only (the "agent-free window").
+// throwawayHubPort is the port ensureControllerPAT's throwaway dev-auth hub
+// binds its Hub API on — a distinct port from the real hub (8080).
+//
+// The throwaway runs with the web frontend OFF (scion.ServerOpts.DisableWeb).
+// With the frontend on, scion's devAuthMiddleware (pkg/hub/web.go) signs any
+// session-less request in as the dev super-admin, and an agent container
+// reaches jail-loopback ports (169.254.1.2:<port> through pasta
+// --map-host-loopback), so a polling agent could become hub admin during the
+// window. With the frontend off, scion mounts no web server: the Hub API runs
+// its own HTTP server on cfg.Hub.Port, which --port sets
+// (cmd/server_foreground.go, the `if !enableWeb` branch), and every
+// non-public route needs the Bearer dev token (pkg/hub/auth.go). --web-port is
+// then inert, which is why the live hub, whose frontend is on, is the one that
+// uses --web-port.
+//
+// Web off does not make the throwaway safe to run beside agents: a dev-auth
+// hub upgrades an agent's token to the full role on refresh
+// (pkg/hub/server.go GenerateAgentToken), and the refreshed token is signed
+// with the key the live hub also uses. So the window also refuses to open
+// while any container runs (see ensureControllerPAT).
 const throwawayHubPort = 48080
+
+// throwawayHubURL is the endpoint the window's scion CLI calls and admin
+// calls use. The scion CLI finds the dev token by itself (cmd/hub.go
+// getHubClient falls back to ~/.scion/dev-token); the admin calls read it
+// with readDevToken.
+var throwawayHubURL = fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)
+
+// windowCleanupTimeout bounds the window's cleanup (stop the throwaway, wait
+// for it to exit, delete the dev token, restart the live hub after a
+// failure). The cleanup runs on a context detached from the apply's, so an
+// interrupted apply still cleans up.
+const windowCleanupTimeout = 2 * time.Minute
 
 // controllerPATScopes is the EXACT scope set the controller PAT is minted
 // with. agent:attach is what scion's start/stop/suspend/restart actions gate
@@ -349,6 +373,11 @@ type patMintOpts struct {
 	// AdminHub, when set, replaces the throwaway hub transport the remote
 	// web role grant uses (curl in the jail with the dev token). Tests only.
 	AdminHub hubapi.Doer
+	// RestartHub starts the live hub with its normal options. The window
+	// stops the live hub before it starts the throwaway, so a window that
+	// fails calls this to bring the live hub back. nil: the error says the
+	// hub is down and how to recover.
+	RestartHub func(ctx context.Context) error
 }
 
 func (o patMintOpts) now() time.Time {
@@ -401,6 +430,18 @@ func patMintReason(tok string, rec state.PATRecord, found bool, want []string, n
 	return ""
 }
 
+// patUrgent reports whether a token must be minted before apply can go on:
+// every mint reason except the renew window, where the token on disk still
+// works.
+func patUrgent(tok string, rec state.PATRecord, found bool, want []string, now time.Time) bool {
+	if patMintReason(tok, rec, found, want, now) == "" {
+		return false
+	}
+	renewOnly := tok != "" && found && sameScopeSet(rec.Requested, want) &&
+		(rec.ExpiresAt.IsZero() || rec.ExpiresAt.After(now))
+	return !renewOnly
+}
+
 func sameScopeSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -425,41 +466,59 @@ func sameScopeSet(a, b []string) bool {
 // remote-access PAT (minted and recorded; the proxy itself now sends the
 // operator's hub session instead).
 //
-// The same window also grants the remote web role and its project-create
-// ceiling (ensureRemoteWebRole) when remote access is on and remote-role.json
-// does not yet cover every allowed user with the current permission set and
-// a ceiling: role admin is hub-admin only, so the
-// dev identity here is the only principal lever has that can do it.
+// When remote access is on, EVERY window that opens also runs the remote web
+// role and project-create ceiling grant (ensureRemoteWebRole): role admin is
+// hub-admin only, so the dev identity here is the only principal lever has
+// that can do it. The grant is idempotent and cheap, and running it only when
+// remote-role.json says it is incomplete would trust a record that a reset hub
+// database makes stale. remote-role.json alone still opens a window when it
+// does not cover every allowed user with the current permission set and a
+// ceiling. An allowed user with no hub user yet keeps the grant incomplete, so
+// every apply opens a window until that user has signed in once.
 //
 // Idempotent per token: a PAT already persisted in state short-circuits its
 // own mint (survives `down`→`up`; clearStagedRuntimeState only wipes
 // tree/.lever/*). If NEITHER token is missing and the role grant is complete,
-// this is a complete no-op — no window opens at all. An allowed user with no
-// hub user yet keeps the grant incomplete, so every apply opens a window
-// until that user has signed in once.
+// this is a complete no-op — no window opens at all.
 //
 // Why one window: the dev-auth mint window is the sensitive part (a
-// throwaway hub with auth off, reachable from the jail loopback only, but
-// still an open admin surface while it's up). Minting both tokens in the
-// SAME window on a fresh bootstrap — the common case, remote.enabled set
-// from the start — preserves the "agent-free window, opened once" property
-// instead of opening it twice. If the controller PAT already exists and
-// remote is enabled later (instance upgraded, remote.enabled flipped on
-// after first bring-up), a second window opens for the remote mint alone;
-// that is the same brief, jail-loopback-only repair shape already documented
-// for a controller-PAT re-mint (delete state + `lever apply`).
+// throwaway hub with dev auth on, reachable from the jail loopback, and an
+// admin surface while it's up). Minting both tokens in the SAME window on a
+// fresh bootstrap — the common case, remote.enabled set from the start —
+// opens it once instead of twice. If the controller PAT already exists and
+// remote is enabled later, a second window opens for the remote mint alone.
 //
-// This opens the window by: start a throwaway dev-auth-ON hub on
-// throwawayHubPort, `scion init` + `hub link` the project tree (idempotent —
-// they already run on every controller re-mint against an existing project;
-// the same tolerance covers a remote-only mint), mint whichever PAT(s) are
-// missing scoped to exactly controllerPATScopes / remotePATScopes, persist
-// each 0600, stop the throwaway hub, and best-effort delete scion's residual
-// dev-token file so it doesn't linger as an open admin credential once the
-// real hub takes over. The throwaway and real hub share the same jail
-// ~/.scion DB BY CONSTRUCTION (both `scion server start` invocations run in
-// the same jail home) — no data-dir control point is needed for the minted
-// project + PAT(s) to carry over.
+// The window never runs beside a running container. An agent container
+// reaches jail-loopback ports, and a dev-auth hub gives an agent that asks it
+// for a token refresh a full-role token the live hub accepts too (see
+// throwawayHubPort). So the window first lists the jail's running containers.
+// When any run (or the list fails), a window that is only needed for work
+// apply can go on without — the role grant, the remote PAT, a controller PAT
+// inside its renew window — is skipped with a warning; one the instance
+// cannot run without (no controller PAT, an expired one, a scope change) fails
+// the apply and names the repair (`lever stop`, then `lever up`: after a
+// power-off no container runs until the manager is resumed, which is after
+// this step).
+//
+// This opens the window by: stop the live hub (scion keeps one server pid
+// file per jail home, so the throwaway cannot run beside it), start a
+// throwaway dev-auth-ON, web-OFF hub on throwawayHubPort, `scion init` + `hub
+// link` the project tree (idempotent — they already run on every controller
+// re-mint against an existing project; the same tolerance covers a
+// remote-only mint), mint whichever PAT(s) are missing scoped to exactly
+// controllerPATScopes / remotePATScopes, persist each 0600, run the role
+// grant, stop the throwaway hub, and delete scion's residual dev-token file so
+// it doesn't linger as an open admin credential once the real hub takes over.
+// The throwaway and real hub share the same jail ~/.scion DB BY CONSTRUCTION
+// (both `scion server start` invocations run in the same jail home) — no
+// data-dir control point is needed for the minted project + PAT(s) to carry
+// over.
+//
+// The cleanup (throwaway stop, dev-token delete, and after a failure the live
+// hub restart through o.RestartHub) runs on a context detached from ctx with
+// windowCleanupTimeout, so an interrupted apply (the apply commands cancel ctx
+// on SIGINT/SIGTERM) still closes the window. `lever doctor` reports a window
+// left open anyway (checkDevAuthWindow).
 //
 // jr/tree/jailMount are passed explicitly (rather than closing over
 // app/b) purely so this function is unit-testable with fakes; jr is the same
@@ -467,13 +526,11 @@ func sameScopeSet(a, b []string) bool {
 // backend access). remote is remoteAccessFor(app) — plumbed as a value
 // rather than closing over *config.App for the same testability reason.
 //
-// Live-validated against scion 37a54a8e: `scion server start` runs workstation
-// (combined) mode where --port is inert and --web-port binds the Hub API
-// (ServerStart emits --web-port); `scion server stop`, `hub token create
-// --scopes`, and the scopes agent:manage/agent:attach/project:read all exist;
-// the residual dev-token is at the jail user's ~/.scion/dev-token (resolved
-// in-jail below, not assumed).
-func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tree, jailMount string, remote remoteAccess, o patMintOpts) error {
+// Live-validated against scion 37a54a8e: `scion server stop`, `hub token
+// create --scopes`, and the scopes agent:manage/agent:attach/project:read all
+// exist; the residual dev-token is at the jail user's ~/.scion/dev-token
+// (resolved in-jail below, not assumed).
+func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tree, jailMount string, remote remoteAccess, o patMintOpts) (err error) {
 	now := o.now()
 	ctok, _ := st.LoadControllerPAT()
 	crec, cfound, err := st.LoadControllerPATRecord()
@@ -481,6 +538,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		return fmt.Errorf("bootstrap-token: %w", err)
 	}
 	controllerReason := patMintReason(ctok, crec, cfound, controllerPATScopes(), now)
+	urgent := patUrgent(ctok, crec, cfound, controllerPATScopes(), now)
 	remoteReason := ""
 	var rrec state.PATRecord
 	roleReason := ""
@@ -501,47 +559,39 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	if controllerReason == "" && remoteReason == "" && roleReason == "" {
 		return nil // nothing to mint or grant; no dev-auth window
 	}
-	tw := scion.New(jr, scion.Options{HubEndpoint: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)})
-	// Register the kill BEFORE ServerStart so a partial start — e.g. a throwaway
-	// dev-auth server left running from a prior failed invocation, whose
-	// readiness poll then times out — is still stopped rather than leaked as a
-	// dev-auth-on admin server. ServerStop tolerates a not-running server; a
-	// live run against a scion build without `server stop` needs a
-	// jail-pid-kill fallback instead (see ServerStop's doc comment) — a
-	// live-validation item, not implemented here.
-	//
-	// Then a best-effort delete of scion's residual dev-token so it doesn't
-	// linger as an open admin credential once the real dev-auth-OFF hub takes
-	// over. scion writes it to <scionDir>/dev-token, default ~/.scion/dev-token
-	// (pkg/apiclient/devauth.go), where ~ is the JAIL USER's home (here
-	// /home/stephen — NOT /home/scion, which is the agent-container user).
-	// Resolve that home in-jail rather than hardcode it, then remove through
-	// the guarded removeJailFile helper.
-	//
-	// scion keeps one server pid file per jail home, so the throwaway cannot
-	// run beside a live hub: its start is refused as "already running" about
-	// the live hub, and a stop would stop the live hub. So the live hub (or a
-	// throwaway a failed run left behind) is stopped first, on purpose; the
-	// scion-server step that follows this one starts the real hub again.
+	if blocked := windowBlocked(ctx, jr); blocked != "" {
+		why := strings.Join(nonEmpty(controllerReason, remoteReason, roleReason), "; ")
+		if urgent {
+			return fmt.Errorf("bootstrap-token: the controller token must be minted (%s), but the dev-auth window cannot open: %s. "+
+				"Agents can reach the jail loopback, and the window's dev-auth hub would hand them admin-grade tokens. "+
+				"Run `lever stop`, then `lever up` (the manager conversation is kept)", controllerReason, blocked)
+		}
+		o.warn("bootstrap-token: skipped the dev-auth window (%s): %s; apply goes on without it. "+
+			"To run it, `lever stop`, then `lever up`", why, blocked)
+		return nil
+	}
+
+	tw := scion.New(jr, scion.Options{HubEndpoint: throwawayHubURL})
+	started := false
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), windowCleanupTimeout)
+		defer cancel()
+		err = closeDevAuthWindow(cctx, jr, tw, started, err, o)
+	}()
+	// The live hub (or a throwaway a failed run left behind) is stopped first,
+	// on purpose: scion keeps one server pid file per jail home, so the
+	// throwaway's start would be refused as "already running" about the live
+	// hub, and its stop would stop the live hub. ServerStop waits for the old
+	// daemon to exit, so the throwaway's port check does not race it. The
+	// scion-server step that follows this one starts the real hub again; a
+	// failure from here on restarts it in the cleanup.
 	if err := tw.ServerStop(ctx); err != nil {
 		return fmt.Errorf("bootstrap-token: stopping the hub for the dev-auth window: %w", err)
 	}
-	started := false
-	defer func() {
-		// Only a throwaway this call started is stopped: after a refused
-		// start the pid file names some other daemon.
-		if started {
-			_ = tw.ServerStop(ctx)
-		}
-		if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
-			if h := strings.TrimSpace(home.Stdout); h != "" {
-				_ = removeJailFile(ctx, jr, h+"/"+layout.DevTokenRel)
-			}
-		}
-	}()
-	if err := tw.ServerStart(ctx, scion.ServerOpts{WebPort: throwawayHubPort, DevAuth: true, Exclusive: true}); err != nil {
+	if err := tw.ServerStart(ctx, scion.ServerOpts{HubPort: throwawayHubPort, DisableWeb: true, DevAuth: true, Exclusive: true}); err != nil {
 		// A start that did launch the daemon but timed out on readiness still
-		// owns the pid file; stop it unless scion refused outright.
+		// owns the pid file; stop it unless scion refused outright (then the
+		// pid file names some other daemon).
 		started = !scion.AlreadyRunning(err)
 		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
 	}
@@ -606,17 +656,90 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 			return err
 		}
 	}
-	if roleReason != "" {
-		grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote.Emails, now, o)
+	if remote.Enabled {
+		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote.Emails, now, o); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
+// nonEmpty returns the non-empty strings of ss, in order.
+func nonEmpty(ss ...string) []string {
+	var out []string
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// windowBlocked says why the dev-auth window must not open now, or "" when it
+// may: any running container in the jail blocks it, and so does a list that
+// fails (the window cannot prove it runs agent-free). All containers, not
+// only scion's agents: any container lever's netns setup gives the loopback
+// map can reach the throwaway hub.
+func windowBlocked(ctx context.Context, jr proc.Runner) string {
+	res, err := jr.Run(ctx, nil, "podman", "ps", "--format", "{{.Names}}")
+	if err != nil {
+		return "lever cannot list the jail's running containers (" + firstLine(err.Error()) + ")"
+	}
+	names := strings.Fields(res.Stdout)
+	if len(names) == 0 {
+		return ""
+	}
+	return "containers are running in the jail (" + strings.Join(names, ", ") + ")"
+}
+
+// closeDevAuthWindow is the window's cleanup; err is the window's own result
+// and the return value replaces it. It stops the throwaway (when this window
+// started it), deletes the residual dev token, and, when the window failed,
+// starts the live hub again, since the window stopped it.
+//
+// A throwaway that will not stop is an error even on a successful window: a
+// dev-auth hub left running is the open admin surface this function exists to
+// close, and the next step's start would be refused about it anyway.
+//
+// scion writes the dev token to <scionDir>/dev-token, default
+// ~/.scion/dev-token (pkg/apiclient/devauth.go), where ~ is the JAIL USER's
+// home (NOT /home/scion, which is the agent-container user). That home is
+// resolved in-jail rather than hardcoded. scion reuses an existing file on the
+// next dev-auth start, so a file this delete misses is also the next window's
+// token; `lever doctor` reports it (checkDevAuthWindow).
+func closeDevAuthWindow(ctx context.Context, jr proc.Runner, tw *scion.Client, started bool, err error, o patMintOpts) error {
+	if started {
+		if serr := tw.ServerStop(ctx); serr != nil {
+			err = errors.Join(err, fmt.Errorf("bootstrap-token: the throwaway dev-auth hub on 127.0.0.1:%d did not stop: %w; "+
+				"stop it with `scion server stop` in the jail, then run `lever apply`", throwawayHubPort, serr))
+		}
+	}
+	if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
+		if h := strings.TrimSpace(home.Stdout); h != "" {
+			_ = removeJailFile(ctx, jr, h+"/"+layout.DevTokenRel)
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	if o.RestartHub == nil {
+		return fmt.Errorf("%w; the live hub is stopped (the dev-auth window stopped it): run `lever apply` again to start it", err)
+	}
+	if rerr := o.RestartHub(ctx); rerr != nil {
+		return fmt.Errorf("%w; the live hub is stopped (the dev-auth window stopped it) and restarting it failed: %v. "+
+			"Run `lever apply` again, or `lever stop`, then `lever up`", err, rerr)
+	}
+	return fmt.Errorf("%w (the live hub was started again)", err)
+}
+
 // grantRemoteWebRole runs ensureRemoteWebRole against the throwaway hub and
-// persists its record. A failure is a warning, not an apply error: the PATs
-// are already minted and the instance works without the web UI, and the
+// persists its record. Most failures are a warning, not an apply error: the
+// PATs are already minted and the instance works without the web UI, and the
 // unwritten record makes the next apply retry (and `lever doctor` names it).
-func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, emails []string, now time.Time, o patMintOpts) {
+// The exception is errCeilingRemoved: the grant deleted a user's ceiling and
+// could not write the new one, so that user can create projects until the next
+// apply — that fails the apply.
+func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, emails []string, now time.Time, o patMintOpts) error {
 	fail := func(err error) {
 		o.warn("bootstrap-token: remote web role not granted, so the web UI may answer 403; the next `lever apply` retries: %v", err)
 	}
@@ -625,22 +748,26 @@ func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, pro
 		tok, err := readDevToken(ctx, jr)
 		if err != nil {
 			fail(err)
-			return
+			return nil
 		}
 		hub = &hubapi.JailCurl{
 			Runner:  jr,
-			BaseURL: fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort),
+			BaseURL: throwawayHubURL,
 			Token:   func() string { return tok },
 		}
 	}
 	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, emails, now, o.warn)
+	if errors.Is(err, errCeilingRemoved) {
+		return fmt.Errorf("bootstrap-token: remote web role: %w", err)
+	}
 	if err != nil {
 		fail(err)
-		return
+		return nil
 	}
 	if err := st.SaveRemoteRoleRecord(rec); err != nil {
 		fail(fmt.Errorf("persisting remote-role.json: %w", err))
 	}
+	return nil
 }
 
 // expiryText renders a record's expiry for a message; zero means scion did
@@ -650,6 +777,24 @@ func expiryText(t time.Time) string {
 		return "its expiry (unknown)"
 	}
 	return t.Format(time.RFC3339)
+}
+
+// applySignalContext returns a context that SIGINT or SIGTERM cancels, for
+// the commands that run apply. Without it the default signal action kills
+// lever at once and no deferred cleanup runs — for the bootstrap-token step
+// that means a throwaway dev-auth hub left listening, its dev token left on
+// disk, and the live hub left stopped. With it, the step in flight fails on
+// the cancelled context and its cleanup runs (on a context of its own; see
+// closeDevAuthWindow). The first signal also restores the default action, so
+// a second Ctrl-C still kills lever at once. stop must be called; it releases
+// the signals and cancels the context.
+func applySignalContext(parent context.Context) (ctx context.Context, stop func()) {
+	ctx, stop = signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	return ctx, stop
 }
 
 func newApplyCmd(bf BackendFactory) *cobra.Command {
@@ -678,11 +823,13 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			w, err := buildApplyDeps(cmd.Context(), app, path, bf, applyOpts{Cmd: cmd})
+			ctx, stop := applySignalContext(cmd.Context())
+			defer stop()
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
 			if err != nil {
 				return err
 			}
-			if err := apply.Run(cmd.Context(), app, w.deps, apply.PlanOpts{}); err != nil {
+			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
 			cmd.Printf("application %q is up.\n", app.Name)
@@ -1118,8 +1265,16 @@ func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error
 }
 
 // ensureControllerPAT backs Deps.EnsureControllerPAT — see the free function.
+//
+// RestartHub starts the live hub exactly as the scion-server step would
+// (apply.HubServerOpts), through the live client, so a window that failed
+// after stopping the live hub does not leave the instance without one.
 func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
-	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), patMintOpts{})
+	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), patMintOpts{
+		RestartHub: func(ctx context.Context) error {
+			return w.sc.ServerStart(ctx, apply.HubServerOpts(w.app, w.deps.HubSessionSecret))
+		},
+	})
 }
 
 // hub is the Hub REST client, over curl in the jail with the controller PAT.

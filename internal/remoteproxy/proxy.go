@@ -4,9 +4,10 @@
 // carries the verified operator's OWN hub web session, obtained host-side by
 // the login driver (login.go), and nothing the client sent in Authorization
 // or Cookie. So the hub authorizes each request as that operator's hub user,
-// and the narrowing lives in the hub: the lever-remote project role and the
-// project-create access constraint `lever apply` grants that user (see
-// internal/cli/host/remote_role.go). That injection is exactly why network
+// and the narrowing lives mostly in the hub: the lever-remote project role and
+// the project-create access constraint `lever apply` grants that user (see
+// internal/cli/host/remote_role.go). The proxy itself refuses the routes the
+// hub does not narrow for that session (mintsCredential, refusedRoute). That injection is exactly why network
 // provenance alone must never authenticate a browser-borne cross-site request: any website open on a
 // tailnet device can make the browser send requests that arrive "from the
 // tailnet". The origin rules below are therefore load-bearing security, not
@@ -171,6 +172,62 @@ func mintsCredential(method, p string) bool {
 	return true
 }
 
+// refusedRoute reports whether a request names a hub route the proxy never
+// forwards, whatever the hub would decide. Each group below is one the hub's
+// own authorization does not narrow for the session the proxy injects:
+//
+//   - /api/v1/system/* (pkg/hub/server.go, route class RouteWorkstation). These
+//     run no RBAC at all: requireWorkstation only checks that the hub is not
+//     hosted, and assertLoopback passes because the proxy reaches the hub from
+//     127.0.0.1 inside the jail. They rewrite the image registry (PUT
+//     registry), delete harness configs (POST init), rewrite the super-admin's
+//     email (PUT identity), and list or create guest directories (fs/list,
+//     fs/mkdir). Only GET status is forwarded: the SPA reads it on every load
+//     (web/src/client/main.ts). An unknown route under the prefix is refused,
+//     so a new one fails closed.
+//   - Project creation: POST /api/v1/projects, /api/v1/projects/register and
+//     POST /api/v1/projects/<id>/clone, and the legacy /api/v1/groves
+//     aliases. Each one makes the caller the new project's owner. `lever
+//     apply` caps project.create for the operator's hub user, but a user who
+//     signs in for the first time holds hub-member (project.create included)
+//     until the next apply binds them, so the proxy refuses these routes on
+//     its own, regardless of hub state.
+//   - /auth/callback/*: the hub's OAuth callback. Only the login driver needs
+//     it, and the driver dials the hub directly (login.go), never through
+//     this handler. A client that calls it with the injected session gets a
+//     302 to /login?error=state_mismatch, which is noise at best.
+//
+// p is the DECODED path, as for mintsCredential.
+func refusedRoute(method, p string) bool {
+	if p == "/api/v1/system" || strings.HasPrefix(p, "/api/v1/system/") {
+		return !(p == "/api/v1/system/status" && (method == http.MethodGet || method == http.MethodHead))
+	}
+	if p == callbackPath || strings.HasPrefix(p, callbackPath+"/") {
+		return true
+	}
+	for _, base := range []string{"/api/v1/projects", "/api/v1/groves"} {
+		if p == base {
+			return method != http.MethodGet && method != http.MethodHead
+		}
+		rest, ok := strings.CutPrefix(p, base+"/")
+		if !ok {
+			continue
+		}
+		id, sub, _ := strings.Cut(rest, "/")
+		if id == "register" {
+			return true
+		}
+		if sub == "clone" || strings.HasPrefix(sub, "clone/") {
+			return true
+		}
+	}
+	return false
+}
+
+// callbackPath is the hub's OAuth callback route (pkg/hub/web.go
+// handleOAuthCallback, /auth/callback/<provider>).
+const callbackPath = "/auth/callback"
+
 // loginPathPrefix is the hub's login route (it routes /auth/login/, see
 // pkg/hub/web.go handleOAuthLogin). The SPA reaches it two ways: the shell's
 // Sign-in link navigates to the bare path, and the login page's provider
@@ -178,9 +235,8 @@ func mintsCredential(method, p string) bool {
 const loginPathPrefix = "/auth/login"
 
 // isLoginPath reports whether p is the hub's login route, bare or with a
-// provider. Deliberately NOT the callback route: /auth/callback/ is the hub's
-// own to receive, and intercepting it would break the very handshake the
-// login driver performs.
+// provider. Not the callback route: refusedRoute refuses /auth/callback/
+// outright, since the login driver reaches it without this handler.
 func isLoginPath(p string) bool {
 	return p == loginPathPrefix || strings.HasPrefix(p, loginPathPrefix+"/")
 }
@@ -215,6 +271,7 @@ const (
 	DecisionDenyOrigin    Decision = "deny-origin"
 	DecisionDenyUser      Decision = "deny-user"
 	DecisionDenyMint      Decision = "deny-credential-mint"
+	DecisionDenyRoute     Decision = "deny-route"
 	DecisionDenyNoSession Decision = "deny-no-session"
 	DecisionLoginRedirect Decision = "login-redirect"
 	// Login-driver decisions (login.go).
@@ -239,7 +296,7 @@ type AuditLine struct {
 	Path    string    `json:"path"`
 	// Decision is the outcome: one of the Decision constants. The gate emits
 	// DecisionAllow, DecisionDenyHost, DecisionDenyOrigin, DecisionDenyUser,
-	// DecisionDenyMint, DecisionDenyNoSession and, for an intercepted sign-in
+	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
 	// navigation, DecisionLoginRedirect; the login driver DecisionOIDCSession
 	// and DecisionOIDCSessionFailed; the provider the DecisionOIDC* values and
 	// DecisionDenyAuthorize.
@@ -286,13 +343,15 @@ func truncateAudit(v string) string {
 const responseHeaderTimeout = 45 * time.Second
 
 // secFetchSiteAllowed reports whether v is a Sec-Fetch-Site value a
-// same-origin or same-site request can carry. Anything else — including
-// values the Fetch Metadata spec hasn't defined yet — is refused: an
-// allowlist, not a denylist of "cross-site", so an unrecognized value fails
-// closed instead of silently passing.
+// same-origin request or a user-initiated navigation can carry. Anything else
+// is refused: an allowlist, not a denylist of "cross-site", so an
+// unrecognized value fails closed instead of silently passing. "same-site" is
+// refused too: another page on a sibling tailnet name (a different machine
+// under the same ts.net registrable domain) is same-site, and the proxy
+// answers only its own origin.
 func secFetchSiteAllowed(v string) bool {
 	switch strings.ToLower(v) {
-	case "same-origin", "same-site", "none":
+	case "same-origin", "none":
 		return true
 	}
 	return false
@@ -379,7 +438,7 @@ func rewriteUpstream(target *url.URL) func(*httputil.ProxyRequest) {
 		pr.Out.Header.Del("Authorization")
 		pr.Out.Header.Del("Cookie")
 		for k := range pr.Out.Header {
-			if strings.HasPrefix(strings.ToLower(k), "tailscale-") {
+			if clientIdentityHeader(k) {
 				pr.Out.Header.Del(k)
 			}
 		}
@@ -388,6 +447,28 @@ func rewriteUpstream(target *url.URL) func(*httputil.ProxyRequest) {
 		}
 		pr.SetXForwarded()
 	}
+}
+
+// clientIdentityHeader reports whether a request header names an identity or
+// a credential to the hub, other than Authorization and Cookie. None of these
+// is ever the client's to send. Tailscale-* is trusted by the gate, never by
+// the hub. The rest are the headers scion's auth middleware reads
+// (pkg/hub/auth.go, brokerauth.go, federation_auth.go): X-Scion-* (agent
+// token, broker HMAC headers, on-behalf-of, federation token, plugin name),
+// the trusted-proxy X-Forwarded-User-* set, the IAP assertion and X-API-Key.
+func clientIdentityHeader(k string) bool {
+	k = strings.ToLower(k)
+	switch {
+	case strings.HasPrefix(k, "tailscale-"),
+		strings.HasPrefix(k, "x-scion-"),
+		strings.HasPrefix(k, "x-forwarded-user-"):
+		return true
+	}
+	switch k {
+	case "x-goog-iap-jwt-assertion", "x-api-key":
+		return true
+	}
+	return false
 }
 
 // completeAudit is the ReverseProxy ModifyResponse hook: strip the hub's
@@ -563,8 +644,9 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the shell GETs that follow heal it through the retry in forward. The
 	// driver cannot recurse into this branch: its own step 1 GETs
 	// /auth/login/oidc with its own client, dialled straight at the hub.
-	// /auth/callback/ is NOT intercepted — the hub must keep receiving
-	// its own callbacks (isLoginPath excludes it).
+	// /auth/callback/ never gets this far: authorize refuses it (see
+	// refusedRoute), and the driver's own callback leg dials the hub
+	// directly too.
 	if isLoginPath(r.URL.Path) && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		g.serveLogin(w, r, &line, operator)
 		return
@@ -654,6 +736,10 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 		g.deny(w, line, http.StatusForbidden, DecisionDenyMint, "the remote proxy does not hand out hub credentials")
 		return false
 	}
+	if refusedRoute(r.Method, r.URL.Path) {
+		g.deny(w, line, http.StatusForbidden, DecisionDenyRoute, "the remote proxy does not forward this route")
+		return false
+	}
 	return true
 }
 
@@ -714,7 +800,10 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 // anything it reads as a browser navigation (pkg/hub/web.go
 // sessionAuthMiddleware). Nothing else is treated as a session problem — in
 // particular a 403 is the hub refusing an ACTION, which a new session would
-// not change.
+// not change. A login redirect that carries ?error= is not one either: scion
+// sends those only from its OAuth callback (state_mismatch, no_code, …), and
+// treating one as "session unknown" would let any client force a fresh login
+// per request.
 func sessionRejected(resp *http.Response) bool {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return true
@@ -722,8 +811,14 @@ func sessionRejected(resp *http.Response) bool {
 	if resp.StatusCode != http.StatusFound {
 		return false
 	}
-	loc := resp.Header.Get("Location")
-	return strings.HasPrefix(loc, "/auth/login") || strings.HasPrefix(loc, "/login")
+	u, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil || u.Scheme != "" || u.Host != "" {
+		return false
+	}
+	if u.Path != "/login" && !isLoginPath(u.Path) {
+		return false
+	}
+	return !u.Query().Has("error")
 }
 
 // sessionRetryWriter withholds a response the gate is about to replace.

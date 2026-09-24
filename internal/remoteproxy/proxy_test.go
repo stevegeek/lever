@@ -463,7 +463,8 @@ func TestMultipleSecFetchSiteHeadersRejected(t *testing.T) {
 }
 
 // TestSecFetchSiteAllowlist: Sec-Fetch-Site must be an allowlist of
-// {same-origin, same-site, none} rather than a denylist of {cross-site} —
+// {same-origin, none} rather than a denylist of {cross-site} — same-site is
+// a sibling tailnet name, not this proxy's origin, and
 // any other/unrecognized value (a future spec addition, a spoofed value
 // from a non-browser client, a typo) must be refused, not silently passed.
 func TestSecFetchSiteAllowlist(t *testing.T) {
@@ -472,7 +473,7 @@ func TestSecFetchSiteAllowlist(t *testing.T) {
 		wantStatus int
 	}{
 		{"same-origin", 200},
-		{"same-site", 200},
+		{"same-site", http.StatusForbidden},
 		{"none", 200},
 		{"cross-site", http.StatusForbidden},
 		{"unrecognized-value", http.StatusForbidden},
@@ -968,4 +969,135 @@ func setResponseHeaderTimeout(t *testing.T, h http.Handler, d time.Duration) {
 		t.Fatal("handler has no jail transport — the config needs DialContext")
 	}
 	tr.ResponseHeaderTimeout = d
+}
+
+// TestHubRoutesTheProxyNeverForwards pins refusedRoute against scion's route
+// table. /api/v1/system/* runs no RBAC (RouteWorkstation, loopback-only, and
+// the proxy dials from loopback), so every route there is refused except the
+// status read the SPA makes on load. Project create, register and clone make
+// the caller an owner, and are refused whatever the hub would decide. The
+// rows cover every /api/v1/system route in pkg/hub/route_metadata.go.
+func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		refused      bool
+	}{
+		{"GET", "/api/v1/system/status", false},
+		{"HEAD", "/api/v1/system/status", false},
+		{"POST", "/api/v1/system/status", true},
+		{"PUT", "/api/v1/system/status", true},
+		{"GET", "/api/v1/system/status/", true},
+		{"GET", "/api/v1/system/identity", true},
+		{"PUT", "/api/v1/system/identity", true},
+		{"GET", "/api/v1/system/check", true},
+		{"GET", "/api/v1/system/runtime", true},
+		{"PUT", "/api/v1/system/runtime", true},
+		{"POST", "/api/v1/system/init", true},
+		{"POST", "/api/v1/system/images/pull", true},
+		{"POST", "/api/v1/system/images/build", true},
+		{"GET", "/api/v1/system/apple-dns", true},
+		{"POST", "/api/v1/system/apple-dns", true},
+		{"GET", "/api/v1/system/registry", true},
+		{"PUT", "/api/v1/system/registry", true},
+		{"GET", "/api/v1/system/workstation-settings", true},
+		{"PUT", "/api/v1/system/workstation-settings", true},
+		{"GET", "/api/v1/system/fs/list", true},
+		{"POST", "/api/v1/system/fs/mkdir", true},
+		{"GET", "/api/v1/system/fs/validate-path", true},
+		{"GET", "/api/v1/system/some-future-route", true},
+		{"GET", "/api/v1/system", true},
+		{"PUT", "/api/v1/%73ystem/registry", true},
+		{"PUT", "/api/v1/system/%72egistry", true},
+
+		{"GET", "/api/v1/projects", false},
+		{"HEAD", "/api/v1/projects", false},
+		{"POST", "/api/v1/projects", true},
+		{"PUT", "/api/v1/projects", true},
+		{"POST", "/api/v1/%70rojects", true},
+		{"POST", "/api/v1/projects/register", true},
+		{"GET", "/api/v1/projects/register", true},
+		{"POST", "/api/v1/projects/register/", true},
+		{"POST", "/api/v1/projects/p1/clone", true},
+		{"POST", "/api/v1/projects/uuid__slug/clone", true},
+		{"POST", "/api/v1/projects/p1/%63lone", true},
+		{"POST", "/api/v1/projects/p1/clone/", true},
+		{"GET", "/api/v1/groves", false},
+		{"POST", "/api/v1/groves", true},
+		{"POST", "/api/v1/groves/register", true},
+		{"POST", "/api/v1/groves/p1/clone", true},
+
+		{"GET", "/api/v1/projects/p1", false},
+		{"GET", "/api/v1/projects/p1/agents", false},
+		{"POST", "/api/v1/projects/p1/agents", false},
+		{"POST", "/api/v1/projects/p1/agents/a1/messages", false},
+		{"GET", "/api/v1/projects/cloned-thing/settings", false},
+		{"GET", "/api/v1/groves/p1", false},
+		{"GET", "/api/v1/systems", false},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			hub := newRecordingHub(t)
+			var lines []AuditLine
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
+				ServeHost: "mac.ts.net", Audit: func(l AuditLine) { lines = append(lines, l) }})
+			rw := httptest.NewRecorder()
+			h.ServeHTTP(rw, proxyRequest(tc.method, tc.path, nil))
+			if tc.refused {
+				if rw.Code != http.StatusForbidden || hub.hits() != 0 || len(lines) != 1 || lines[0].Decision != DecisionDenyRoute {
+					t.Fatalf("status %d, hub hits %d, audit %+v; want 403, 0, deny-route", rw.Code, hub.hits(), lines)
+				}
+				return
+			}
+			if rw.Code != 200 || hub.hits() != 1 {
+				t.Fatalf("status %d, hub hits %d; want it forwarded", rw.Code, hub.hits())
+			}
+		})
+	}
+}
+
+// TestClientIdentityHeadersStrippedFromForward: every header scion's auth
+// middleware reads as an identity or credential is the proxy's to set or no
+// one's. A client-supplied agent token, broker signature, trusted-proxy user
+// set or federation token must never reach the hub beside the session.
+func TestClientIdentityHeadersStrippedFromForward(t *testing.T) {
+	hub := newRecordingHub(t)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: "mac.ts.net"})
+	stripped := []string{
+		"X-Scion-Agent-Token", "X-Scion-Broker-ID", "X-Scion-Broker-Token", "X-Scion-Signature",
+		"X-Scion-Timestamp", "X-Scion-Nonce", "X-Scion-Signed-Headers", "X-Scion-On-Behalf-Of",
+		"X-Scion-Federation-Token", "X-Scion-Plugin-Name",
+		"X-Forwarded-User-Id", "X-Forwarded-User-Email", "X-Forwarded-User-Name", "X-Forwarded-User-Role",
+		"X-Goog-IAP-JWT-Assertion", "X-API-Key",
+	}
+	req := proxyRequest("GET", "/api/v1/agents", nil)
+	for _, k := range stripped {
+		req.Header.Set(k, "forged")
+	}
+	req.Header.Set("x-scion-agent-token", "forged-lowercase")
+	req.Header.Set("X-Preview-Token", "kept")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("status = %d, want 200", rw.Code)
+	}
+	got := hub.lastHeader()
+	for _, k := range stripped {
+		if v := got.Values(k); len(v) != 0 {
+			t.Errorf("%s reached the hub: %q", k, v)
+		}
+	}
+	if got.Get("X-Preview-Token") != "kept" {
+		t.Errorf("X-Preview-Token was stripped; it names no identity")
+	}
+}
+
+func TestClientIdentityHeader(t *testing.T) {
+	for k, want := range map[string]bool{
+		"Tailscale-User-Login": true, "X-Scion-Agent-Token": true, "x-scion-anything": true,
+		"X-Forwarded-User-Email": true, "X-Goog-Iap-Jwt-Assertion": true, "X-Api-Key": true,
+		"X-Forwarded-For": false, "X-Forwarded-Proto": false, "Accept": false, "X-Preview-Token": false,
+	} {
+		if got := clientIdentityHeader(k); got != want {
+			t.Errorf("clientIdentityHeader(%q) = %v, want %v", k, got, want)
+		}
+	}
 }

@@ -160,7 +160,7 @@ func TestStaleSessionIsRenewedAndTheRequestRetried(t *testing.T) {
 	}{
 		{"401 for a programmatic request", http.StatusUnauthorized, ""},
 		{"302 to the login page for a navigation", http.StatusFound, "/auth/login"},
-		{"302 to the SPA login route", http.StatusFound, "/login?error=session_error"},
+		{"302 to the SPA login route", http.StatusFound, "/login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := newRecordingHub(t)
@@ -466,22 +466,61 @@ func TestSignInNavigationPreservesReturnTarget(t *testing.T) {
 	}
 }
 
-// TestCallbackIsForwardedNotIntercepted: /auth/callback/ is the hub's own to
-// receive — the login driver hands the hub its callback through the ordinary
-// upstream route, and intercepting it would break that handshake.
-func TestCallbackIsForwardedNotIntercepted(t *testing.T) {
-	hub := newRecordingHub(t)
-	sess := &stubSession{cookie: "sess-value"}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", Session: sess})
-
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, proxyRequest(http.MethodGet, "/auth/callback/oidc?code=x&state=y", nil))
-	if rw.Code != http.StatusOK {
-		t.Fatalf("status = %d, want the hub's own 200", rw.Code)
+// TestCallbackIsRefused: /auth/callback/ is the hub's to receive from the
+// login driver, which dials the hub directly. A client that reaches it through
+// the proxy could only force login churn (a state_mismatch redirect), so the
+// proxy refuses it for every method.
+func TestCallbackIsRefused(t *testing.T) {
+	for _, target := range []string{"/auth/callback/oidc?code=x&state=y", "/auth/callback/x", "/auth/callback", "/auth/%63allback/oidc"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+			hub := newRecordingHub(t)
+			sess := &stubSession{cookie: "sess-value"}
+			var audited []AuditLine
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", Session: sess,
+				Audit: func(l AuditLine) { audited = append(audited, l) }})
+			rw := httptest.NewRecorder()
+			h.ServeHTTP(rw, proxyRequest(method, target, nil))
+			if rw.Code != http.StatusForbidden || len(hub.requests()) != 0 {
+				t.Fatalf("%s %s: status %d, hub saw %d; want 403 and nothing forwarded", method, target, rw.Code, len(hub.requests()))
+			}
+			if len(audited) != 1 || audited[0].Decision != DecisionDenyRoute {
+				t.Fatalf("%s %s: audit = %+v, want one deny-route line", method, target, audited)
+			}
+			if handed, invalidated, _ := sess.state(); handed != 0 || len(invalidated) != 0 {
+				t.Fatalf("%s %s: session touched (handed %d, invalidated %v)", method, target, handed, invalidated)
+			}
+		}
 	}
-	reqs := hub.requests()
-	if len(reqs) != 1 || reqs[0].URL.Path != "/auth/callback/oidc" {
-		t.Fatalf("hub saw %+v, want exactly the callback", reqs)
+}
+
+// TestLoginRedirectWithErrorIsNotASessionRejection: scion sends
+// /login?error=<reason> only from its OAuth callback. Reading one as "the hub
+// does not know this session" would let a client force a new login per
+// request, so it passes through and the session stays.
+func TestLoginRedirectWithErrorIsNotASessionRejection(t *testing.T) {
+	for _, loc := range []string{"/login?error=state_mismatch", "/login?error=session_error", "/auth/login?error=x", "https://evil.example/login", "/loginx"} {
+		hub := newRecordingHub(t)
+		var calls atomic.Int32
+		hub.answer = func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.Header().Set("Location", loc)
+			w.WriteHeader(http.StatusFound)
+		}
+		sess := &stubSession{cookie: "sess-value"}
+		h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", Session: sess})
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			rw := httptest.NewRecorder()
+			h.ServeHTTP(rw, proxyRequest(method, "/some/page", strings.NewReader("")))
+			if rw.Code != http.StatusFound || rw.Header().Get("Location") != loc {
+				t.Fatalf("%s Location %q: status %d Location %q, want the hub's redirect passed through", method, loc, rw.Code, rw.Header().Get("Location"))
+			}
+		}
+		if n := calls.Load(); n != 2 {
+			t.Fatalf("Location %q: hub saw %d requests, want 2 (no retry)", loc, n)
+		}
+		if _, invalidated, _ := sess.state(); len(invalidated) != 0 {
+			t.Fatalf("Location %q: session invalidated %v", loc, invalidated)
+		}
 	}
 }
 

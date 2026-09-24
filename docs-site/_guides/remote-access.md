@@ -288,6 +288,27 @@ before it reaches the hub (audit decision `deny-credential-mint`). That covers `
 Google token exchange, and any route a future scion adds. The web UI's token page still lists and
 revokes tokens; it cannot create one.
 
+**Some hub routes are never forwarded** (audit decision `deny-route`), whatever the hub would
+decide:
+
+- `/api/v1/system/*`, except `GET /api/v1/system/status` (the SPA reads it on load). Scion runs no
+  role check on these routes. It only requires a local, non-hosted hub and a loopback caller, and
+  the proxy reaches the hub from loopback inside the jail. Among them: the image registry, the
+  super-admin's email, harness-config reset, image pull and build, and guest directory listing and
+  creation. The web UI's onboarding and workstation-settings pages therefore do not work remotely.
+- Project creation: `POST /api/v1/projects`, `/api/v1/projects/register`,
+  `POST /api/v1/projects/<id>/clone`, and the legacy `/api/v1/groves` forms. Each one makes the
+  caller the owner of a new project. A user who signs in for the first time holds `hub-member`,
+  which includes `project.create`, until the next `lever apply` binds the ceiling. The proxy
+  refuses these routes so that this gap never matters.
+- `/auth/callback/*`. The login driver dials the hub's callback directly, never through the proxy.
+
+The proxy also accepts `Sec-Fetch-Site` only as `same-origin` or `none`: a page on a sibling
+tailnet name is `same-site` and is refused. Before it forwards a request, the proxy removes every
+client header that names an identity to the hub: `Authorization`, `Cookie`, `Tailscale-*`,
+`X-Scion-*` (the agent token and the broker signature headers among them), `X-Forwarded-User-*`,
+`X-Goog-IAP-JWT-Assertion` and `X-API-Key`.
+
 **There is no endpoint that mints a session.** This is the part to understand before enabling
 remote access, because Scion's OIDC login path validates *nothing*: it never requests or parses an
 `id_token`, never fetches JWKS, uses neither PKCE nor a nonce, needs no client secret, and does not
@@ -402,7 +423,7 @@ build entirely (and serves no web UI).
 Every request the proxy handles — allowed or denied — is appended as one JSON line to
 `.lever-state/remote-audit.jsonl`: timestamp, the Tailscale login if present, method, path, the
 decision (`allow` / `deny-host` when the `Host` header does not match `base_url` / `deny-origin` /
-`deny-user` / `deny-credential-mint` / `deny-no-session`), and the
+`deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session`), and the
 upstream status once known. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider

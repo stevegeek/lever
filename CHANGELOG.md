@@ -7,6 +7,28 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Security
+
+- **The remote proxy no longer forwards hub routes that skip RBAC or make
+  the caller an owner.** It refuses `/api/v1/system/*` except `GET
+  /api/v1/system/status`: scion runs no role check there (loopback-only
+  workstation routes, and the proxy reaches the hub from loopback), so the
+  operator's session could rewrite the image registry, reset harness
+  configs, rewrite the super-admin's email, or list and create guest
+  directories. It also refuses project create, register and clone
+  (`/api/v1/projects`, `/api/v1/groves`), which a first-time user could
+  otherwise reach before `lever apply` binds the project-create ceiling.
+  Audit decision `deny-route`.
+
+- **Remote proxy hardening.** `/auth/callback/*` is refused (the login
+  driver dials the hub directly), and a hub redirect to `/login?error=...`
+  no longer counts as a rejected session, so a client cannot force a new
+  hub login per request. `Sec-Fetch-Site: same-site` is refused (only
+  `same-origin` and `none` pass). Client `X-Scion-*`,
+  `X-Forwarded-User-*`, `X-Goog-IAP-JWT-Assertion` and `X-API-Key` headers
+  are stripped before forwarding, like `Authorization`, `Cookie` and
+  `Tailscale-*`.
+
 ### Fixed
 
 - **Agent turns no longer take minutes: sciontool telemetry is off by

@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,23 +25,31 @@ func mustURL(t *testing.T, s string) *url.URL {
 	return u
 }
 
-func TestInjectsPATStripsClientAuth(t *testing.T) {
+// TestPhoneCannotChooseItsIdentity: a phone-supplied Authorization header is
+// stripped, not forwarded — scion's sessionToBearerMiddleware lets any request
+// that carries one straight through, so forwarding it would let the phone pick
+// the hub identity the API runs as. The phone's own Cookie is replaced by the
+// operator's session, never merged with it.
+func TestPhoneCannotChooseItsIdentity(t *testing.T) {
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	req.Header.Set("Authorization", "Bearer attacker")
-	req.Header.Set("Cookie", "scion_sess=evil")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != 200 {
-		t.Fatalf("status %d", rw.Code)
-	}
-	if a := hub.lastHeader().Get("Authorization"); a != "Bearer scion_pat_x" {
-		t.Fatalf("Authorization = %q", a)
-	}
-	if c := hub.lastHeader().Get("Cookie"); c != "" {
-		t.Fatalf("Cookie leaked: %q", c)
+	for _, path := range []string{"/api/v1/agents", "/"} {
+		req := proxyRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer attacker")
+		req.Header.Add("Authorization", "Basic YTpi")
+		req.Header.Set("Cookie", "scion_sess=evil")
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		if rw.Code != 200 {
+			t.Fatalf("GET %s: status %d", path, rw.Code)
+		}
+		if a := hub.lastHeader().Values("Authorization"); len(a) != 0 {
+			t.Fatalf("GET %s: Authorization reached the hub: %q", path, a)
+		}
+		if c := hub.lastHeader().Get("Cookie"); c != sessionCookieName+"="+testCookie {
+			t.Fatalf("GET %s: Cookie = %q, want only the operator's session", path, c)
+		}
 	}
 }
 
@@ -52,7 +59,7 @@ func TestInjectsPATStripsClientAuth(t *testing.T) {
 func gateProbe(t *testing.T, serveHost string, hdr http.Header) (status, hubHits int) {
 	t.Helper()
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT, ServeHost: serveHost})
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: serveHost})
 	req := proxyRequest("GET", "/api/v1/agents", nil)
 	for k, vs := range hdr {
 		for _, v := range vs {
@@ -121,7 +128,7 @@ func TestAllowedUsersPinning(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := newRecordingHub(t)
-			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 				ServeHost: "mac.ts.net", AllowedUsers: tc.allowed})
 			req := proxyRequest("GET", "/api/v1/agents", nil)
 			if tc.loginHdr != "" {
@@ -143,31 +150,73 @@ func TestAllowedUsersPinning(t *testing.T) {
 	}
 }
 
-func TestMissingPAT503(t *testing.T) {
+// TestNoSessionSourceFailsClosed: without a login driver the proxy has no
+// identity to send, so it refuses rather than forward anonymous requests.
+func TestNoSessionSourceFailsClosed(t *testing.T) {
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return "" },
-		ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rw.Code)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net"})
+	for _, path := range []string{"/api/v1/agents", "/"} {
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, proxyRequest("GET", path, nil))
+		if rw.Code != http.StatusServiceUnavailable {
+			t.Fatalf("GET %s: status = %d, want 503", path, rw.Code)
+		}
 	}
 	if n := hub.hits(); n != 0 {
 		t.Fatalf("hub was hit %d times, want 0", n)
 	}
-	if body := rw.Body.String(); !strings.Contains(body, "lever apply") {
-		t.Fatalf("body = %q, want it to name the fix (lever apply)", body)
+}
+
+// TestCredentialMintRoutesRefused: the session the proxy injects may mint
+// hub credentials (scion lets a session credential create a UAT), and one in
+// a response body would leave the host. Those routes are refused; the SPA's
+// token page keeps listing and revoking.
+func TestCredentialMintRoutesRefused(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		refused      bool
+	}{
+		{"POST", "/api/v1/auth/tokens", true},
+		{"POST", "/api/v1/auth/tokens/", true},
+		{"POST", "/api/v1/auth/%74okens", true},
+		{"POST", "/api/v1/auth/token", true},
+		{"POST", "/api/v1/auth/refresh", true},
+		{"POST", "/api/v1/auth/login", true},
+		{"POST", "/api/v1/auth/cli/device", true},
+		{"GET", "/api/v1/auth/cli/device/token", true},
+		{"POST", "/api/v1/auth/cli/authorize", true},
+		{"GET", "/api/v1/auth/tokens", false},
+		{"DELETE", "/api/v1/auth/tokens/t1", false},
+		{"POST", "/api/v1/auth/tokens/t1/revoke", false},
+		{"GET", "/api/v1/auth/me", false},
+		{"POST", "/api/v1/agents/a1/messages", false},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			hub := newRecordingHub(t)
+			var lines []AuditLine
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
+				ServeHost: "mac.ts.net", Audit: func(l AuditLine) { lines = append(lines, l) }})
+			rw := httptest.NewRecorder()
+			h.ServeHTTP(rw, proxyRequest(tc.method, tc.path, nil))
+			if tc.refused {
+				if rw.Code != http.StatusForbidden || hub.hits() != 0 || len(lines) != 1 || lines[0].Decision != DecisionDenyMint {
+					t.Fatalf("status %d, hub hits %d, audit %+v; want 403, 0, deny-credential-mint", rw.Code, hub.hits(), lines)
+				}
+				return
+			}
+			if rw.Code != 200 || hub.hits() != 1 {
+				t.Fatalf("status %d, hub hits %d; want it forwarded", rw.Code, hub.hits())
+			}
+		})
 	}
 }
 
-func TestAuditLineNeverCarriesPAT(t *testing.T) {
-	const pat = "scion_pat_x"
+func TestAuditLineNeverCarriesTheSession(t *testing.T) {
 	hub := newRecordingHub(t)
 	var lines []AuditLine
 	h := NewHandler(Config{
 		Target:       mustURL(t, hub.URL),
-		PAT:          func() string { return pat },
+		Session:      testSession(),
 		ServeHost:    "mac.ts.net",
 		AllowedUsers: []string{"a@example.com"},
 		Audit:        func(line AuditLine) { lines = append(lines, line) },
@@ -194,15 +243,15 @@ func TestAuditLineNeverCarriesPAT(t *testing.T) {
 	for _, r := range reqs {
 		h.ServeHTTP(httptest.NewRecorder(), r)
 	}
-	// Separate handler with an empty PAT for the deny-no-pat path.
+	// Separate handler whose login fails, for the deny-no-session path.
 	var noPatLines []AuditLine
 	hNoPAT := NewHandler(Config{
 		Target:    mustURL(t, hub.URL),
-		PAT:       func() string { return "" },
+		Session:   &stubSession{err: errors.New("login down")},
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { noPatLines = append(noPatLines, line) },
 	})
-	hNoPAT.ServeHTTP(httptest.NewRecorder(), proxyRequest("GET", "/deny-no-pat", nil))
+	hNoPAT.ServeHTTP(httptest.NewRecorder(), proxyRequest("GET", "/deny-no-session", nil))
 
 	if len(lines) != 3 {
 		t.Fatalf("got %d audit lines for 3 requests, want 3 (one each)", len(lines))
@@ -216,8 +265,8 @@ func TestAuditLineNeverCarriesPAT(t *testing.T) {
 			t.Fatalf("line[%d].Decision = %q, want %q", i, l.Decision, wantDecisions[i])
 		}
 	}
-	if noPatLines[0].Decision != "deny-no-pat" {
-		t.Fatalf("Decision = %q, want deny-no-pat", noPatLines[0].Decision)
+	if noPatLines[0].Decision != DecisionDenyNoSession {
+		t.Fatalf("Decision = %q, want deny-no-session", noPatLines[0].Decision)
 	}
 
 	all := append(append([]AuditLine{}, lines...), noPatLines...)
@@ -226,15 +275,15 @@ func TestAuditLineNeverCarriesPAT(t *testing.T) {
 		if err != nil {
 			t.Fatalf("json.Marshal: %v", err)
 		}
-		if strings.Contains(string(b), pat) {
-			t.Fatalf("audit line leaked the PAT: %s", b)
+		if strings.Contains(string(b), testCookie) {
+			t.Fatalf("audit line leaked the session: %s", b)
 		}
 	}
 }
 
 func TestUpgradeRequestGetsRewrite(t *testing.T) {
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 		ServeHost: "mac.ts.net"})
 	req := proxyRequest("GET", "/events/ws", nil)
 	req.Header.Set("Origin", "https://mac.ts.net")
@@ -251,8 +300,11 @@ func TestUpgradeRequestGetsRewrite(t *testing.T) {
 	if n := hub.hits(); n != 1 {
 		t.Fatalf("hub hit count = %d, want 1", n)
 	}
-	if a := hub.lastHeader().Get("Authorization"); a != "Bearer scion_pat_x" {
-		t.Fatalf("Authorization = %q, want injected PAT", a)
+	if c := hub.lastHeader().Get("Cookie"); c != sessionCookieName+"="+testCookie {
+		t.Fatalf("Cookie = %q, want the injected session", c)
+	}
+	if a := hub.lastHeader().Get("Authorization"); a != "" {
+		t.Fatalf("Authorization = %q, want none", a)
 	}
 }
 
@@ -263,7 +315,7 @@ func TestStripsSetCookieFromHubResponse(t *testing.T) {
 	hub := newRecordingHub(t)
 	hub.answerWith(200, http.Header{"Set-Cookie": {"scion_sess=abc123; Path=/; HttpOnly"}})
 
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 		ServeHost: "mac.ts.net"})
 	req := proxyRequest("GET", "/", nil)
 	rw := httptest.NewRecorder()
@@ -284,7 +336,7 @@ func TestStripsSetCookieFromHubResponse(t *testing.T) {
 // that parses to an empty host (browsers send exactly this for sandboxed/
 // opaque origins) made url.Parse's u.Host ("") case-insensitively equal
 // cfg.ServeHost (""), so the request was WRONGLY allowed and forwarded with
-// the PAT injected. base_url is optional in config, so ServeHost=="" is a
+// the credential injected. base_url is optional in config, so ServeHost=="" is a
 // reachable misconfiguration, not a hypothetical.
 func TestOriginNullWithEmptyServeHostDenied(t *testing.T) {
 	assertGateRefuses(t, "", http.Header{"Origin": {"null"}})
@@ -319,7 +371,7 @@ func TestEmptyServeHostDeniesHeaderFreeRequestToo(t *testing.T) {
 // could forge an identity the HUB itself trusts.
 func TestInboundTailscaleHeadersStrippedFromForward(t *testing.T) {
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 		ServeHost: "mac.ts.net"})
 	req := proxyRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Tailscale-User-Login", "admin@example.com")
@@ -334,39 +386,6 @@ func TestInboundTailscaleHeadersStrippedFromForward(t *testing.T) {
 	}
 	if v := hub.lastHeader().Get("Tailscale-Foo"); v != "" {
 		t.Fatalf("Tailscale-Foo leaked to hub: %q", v)
-	}
-}
-
-// TestPATReadOnceProperty: cfg.PAT() must be read exactly once per request
-// and that single value reused for both the 503 check and the injected
-// header. Reading it twice risks a TOCTOU where the PAT is revoked/rotated
-// between the check and the injection, forwarding "Authorization: Bearer "
-// (empty) to the hub instead of failing the request with 503.
-func TestPATReadOnceProperty(t *testing.T) {
-	hub := newRecordingHub(t)
-	var calls int32
-	patFn := func() string {
-		n := atomic.AddInt32(&calls, 1)
-		if n == 1 {
-			return "secret-once"
-		}
-		// Simulates the PAT emptying out between a first and second read
-		// within the same request.
-		return ""
-	}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: patFn, ServeHost: "mac.ts.net"})
-	req := proxyRequest("GET", "/api/v1/agents", nil)
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-
-	if n := atomic.LoadInt32(&calls); n != 1 {
-		t.Fatalf("cfg.PAT() called %d times, want exactly 1", n)
-	}
-	if rw.Code != 200 {
-		t.Fatalf("status = %d, want 200", rw.Code)
-	}
-	if a := hub.lastHeader().Get("Authorization"); a != "Bearer secret-once" {
-		t.Fatalf("Authorization = %q, want %q", a, "Bearer secret-once")
 	}
 }
 
@@ -398,7 +417,7 @@ func TestMultiValueAndLowercaseSetCookieStripped(t *testing.T) {
 	hub := newRecordingHub(t)
 	hub.answerWith(200, http.Header{"Set-Cookie": {"scion_sess=abc123; Path=/", "other=xyz; Path=/"}})
 
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 		ServeHost: "mac.ts.net"})
 	req := proxyRequest("GET", "/", nil)
 	rw := httptest.NewRecorder()
@@ -446,7 +465,7 @@ func TestSecFetchSiteAllowlist(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.value, func(t *testing.T) {
 			hub := newRecordingHub(t)
-			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 				ServeHost: "mac.ts.net"})
 			req := proxyRequest("GET", "/api/v1/agents", nil)
 			req.Header.Set("Sec-Fetch-Site", tc.value)
@@ -476,7 +495,7 @@ func TestAuditLineCapturesUpstreamStatusOnAllow(t *testing.T) {
 	var lines []AuditLine
 	h := NewHandler(Config{
 		Target:    mustURL(t, hub.URL),
-		PAT:       func() string { return "scion_pat_x" },
+		Session:   testSession(),
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { lines = append(lines, line) },
 	})
@@ -508,7 +527,7 @@ func TestAuditLineEmittedOnUpstreamFailure(t *testing.T) {
 	var lines []AuditLine
 	h := NewHandler(Config{
 		Target:    unreachable,
-		PAT:       func() string { return "scion_pat_x" },
+		Session:   testSession(),
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { lines = append(lines, line) },
 	})
@@ -528,7 +547,7 @@ func TestAuditLineEmittedOnUpstreamFailure(t *testing.T) {
 }
 
 // TestCustomDialContextIsUsed proves cfg.DialContext actually carries the
-// proxied request — the jail transport's whole point — and that PAT
+// proxied request — the jail transport's whole point — and that session
 // injection and header stripping still apply on that path. The target is
 // deliberately an address nothing listens on (port 1, standing in for the
 // real 127.0.0.1:8080): only a dialer that ignores it and reaches the test
@@ -543,7 +562,7 @@ func TestCustomDialContextIsUsed(t *testing.T) {
 	var mu sync.Mutex
 	h := NewHandler(Config{
 		Target:    mustURL(t, "http://127.0.0.1:1"),
-		PAT:       func() string { return "scion_pat_x" },
+		Session:   testSession(),
 		ServeHost: "mac.ts.net",
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			mu.Lock()
@@ -570,11 +589,11 @@ func TestCustomDialContextIsUsed(t *testing.T) {
 	if len(dialed) != 1 || dialed[0] != "127.0.0.1:1" {
 		t.Fatalf("DialContext saw %v, want one dial of the Target address", dialed)
 	}
-	if a := hub.lastHeader().Get("Authorization"); a != "Bearer scion_pat_x" {
-		t.Fatalf("Authorization = %q — PAT injection must survive the custom transport", a)
+	if a := hub.lastHeader().Get("Authorization"); a != "" {
+		t.Fatalf("Authorization = %q leaked over the custom transport", a)
 	}
-	if c := hub.lastHeader().Get("Cookie"); c != "" {
-		t.Fatalf("Cookie leaked over the custom transport: %q", c)
+	if c := hub.lastHeader().Get("Cookie"); c != sessionCookieName+"="+testCookie {
+		t.Fatalf("Cookie = %q over the custom transport, want only the injected session", c)
 	}
 	if v := hub.lastHeader().Get("Tailscale-User-Login"); v != "" {
 		t.Fatalf("Tailscale-User-Login leaked over the custom transport: %q", v)
@@ -596,7 +615,7 @@ func TestTargetHostHeaderIsThePreservedHubAddress(t *testing.T) {
 
 	h := NewHandler(Config{
 		Target:    mustURL(t, "http://127.0.0.1:8080"),
-		PAT:       func() string { return "scion_pat_x" },
+		Session:   testSession(),
 		ServeHost: "mac.ts.net",
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, hubAddr)
@@ -616,7 +635,7 @@ func TestDialFailureIsAudited(t *testing.T) {
 	var lines []AuditLine
 	h := NewHandler(Config{
 		Target:    mustURL(t, "http://127.0.0.1:8080"),
-		PAT:       func() string { return "scion_pat_x" },
+		Session:   testSession(),
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { lines = append(lines, line) },
 		DialContext: func(context.Context, string, string) (net.Conn, error) {
@@ -674,7 +693,7 @@ func TestSlowHubHeadersAreBounded(t *testing.T) {
 	var lines []AuditLine
 	h := NewHandler(Config{
 		Target:    mustURL(t, "http://127.0.0.1:1"),
-		PAT:       func() string { return "scion_pat_x" },
+		Session:   testSession(),
 		ServeHost: "mac.ts.net",
 		Audit:     func(line AuditLine) { lines = append(lines, line) },
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -724,7 +743,7 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 
 	h := NewHandler(Config{
 		Target:    mustURL(t, "http://127.0.0.1:1"),
-		PAT:       func() string { return "scion_pat_x" },
+		Session:   testSession(),
 		ServeHost: "mac.ts.net",
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, hubAddr)
@@ -779,11 +798,11 @@ func proxyRequest(method, target string, body io.Reader) *http.Request {
 // independent review found and I reproduced against the live proxy: with no
 // Origin and no Sec-Fetch-Site, every other gate passes by default, so a
 // rebound page on the attacker's own name reached the hub with the injected
-// PAT's authority. The browser cannot lie here — it sends the name the victim
+// credential's authority. The browser cannot lie here — it sends the name the victim
 // navigated to.
 func TestHostGateRefusesDNSRebinding(t *testing.T) {
 	hub := newRecordingHub(t)
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
 		ServeHost: testServeHost, ListenPort: 8445})
 
 	for _, tc := range []struct {
@@ -834,18 +853,18 @@ func TestAuditFieldsAreBoundedOnEveryDecisionPath(t *testing.T) {
 		name     string
 		host     string
 		allowed  []string
-		pat      string
+		session  *stubSession
 		decision Decision
 	}{
-		{"denied before any identity check", "evil.example", nil, "scion_pat_x", "deny-host"},
-		{"denied by the allowlist", testServeHost, []string{"a@example.com"}, "scion_pat_x", "deny-user"},
-		{"denied for a missing PAT", testServeHost, nil, "", "deny-no-pat"},
-		{"allowed", testServeHost, nil, "scion_pat_x", "allow"},
+		{"denied before any identity check", "evil.example", nil, testSession(), "deny-host"},
+		{"denied by the allowlist", testServeHost, []string{"a@example.com"}, testSession(), "deny-user"},
+		{"denied for a failed login", testServeHost, nil, &stubSession{err: errors.New("down")}, "deny-no-session"},
+		{"allowed", testServeHost, nil, testSession(), "allow"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := newRecordingHub(t)
 			sink := &auditSink{}
-			h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: func() string { return tc.pat },
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: tc.session,
 				ServeHost: testServeHost, ListenPort: 8445, AllowedUsers: tc.allowed, Audit: sink.add})
 			req := httptest.NewRequest(huge, "/"+huge, nil)
 			req.Host = tc.host
@@ -888,7 +907,7 @@ func TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-1"}
 	sink := &auditSink{}
-	h := NewHandler(Config{Target: mustURL(t, hub.URL), PAT: testPAT,
+	h := NewHandler(Config{Target: mustURL(t, hub.URL),
 		ServeHost: testServeHost, AllowedUsers: []string{allowed}, Session: sess, Audit: sink.add})
 
 	req := proxyRequest("GET", "/", nil)

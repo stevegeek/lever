@@ -23,6 +23,51 @@ version bump moves the block under the new version heading.
   apply warns, and the next apply after that first sign-in binds it. `lever
   doctor` has a `remote web role` row. Removing a user from `allowed_users`
   does not remove its binding.
+- **Remote chat no longer answers 403: the web UI's API calls run as the
+  signed-in operator.** The proxy injected the remote PAT on every `/api/v1`
+  request and the hub web session only on the UI shell and `/events`, so the
+  API ran as the PAT's owner (the hub's dev super-admin user) while the SPA
+  ran as the operator's hub user. scion's conversation model keys a DM on the
+  session user, so every chat read and send was refused by the DM
+  participant check. The proxy now sends the operator's own hub session on
+  every request, API and PTY WebSocket included, and no `Authorization`
+  header at all; one the phone sends is stripped, since scion's
+  `sessionToBearerMiddleware` would otherwise let it choose the identity. The
+  narrowing now lives in the hub: the `lever-remote` project role plus the
+  ceiling below. What the web user can additionally see compared with the
+  old PAT is hub-member's hub-wide directory reads (users, groups,
+  templates, brokers, skills, role definitions, hub settings). Other
+  consequences: API GETs that meet a lapsed session are retried after a fresh
+  login like shell GETs already were; a rejected POST is not replayed, but
+  drops the session so the next request logs in again; and the login driver
+  renews a session after 12 hours, well inside scion's 24-hour cookie
+  lifetime. The proxy refuses the hub's credential-minting routes (`POST
+  /api/v1/auth/tokens`, `/api/v1/auth/cli/*`, `/api/v1/auth/token`,
+  `/refresh`, `/login`) with `deny-credential-mint`: a session may mint a
+  user access token, and one in a response body would put a hub credential on
+  the phone. The SPA's token page still lists and revokes. The remote PAT is
+  still minted, recorded and checked by `lever doctor`, but nothing sends it
+  any more; the `deny-no-pat` decision is gone (a proxy without a login
+  driver refuses with `deny-no-session`).
+- **The remote web user cannot create projects.** Every hub user holds
+  scion's `hub-member` system role through the `hub-members` group, which
+  scion re-adds on every boot, and that role carries `project.create`; a
+  project the web user created would be owned by it, outside lever's
+  controls. In the same dev-auth window `lever apply` now puts a system-scope
+  access constraint (scion's ceiling mechanism, which only ever reduces) on
+  each bound web user, named `lever-remote-ceiling:<email>`, whose maximum
+  set is hub-member's permissions as the hub lists them minus
+  `project.create`, plus the `lever-remote` permissions — constraints
+  intersect with every grant, so the role's own permissions must be inside
+  it. Created through scion's preview-then-commit flow, idempotent, replaced
+  (preview-bound delete and create) when its subject or set drifted, and
+  recorded in `remote-role.json` (`ceilings`, `ceiling_permissions`). A
+  record written before this release has neither field, so the first apply
+  after upgrading opens the window once to add the ceiling. The `remote web
+  role` doctor row names a user with no ceiling. If a scion upgrade adds a
+  hub-member permission, the ceiling withholds it until the window runs
+  again; nothing detects that on its own (delete `.lever-state/remote-role.json`
+  and run `lever apply` to recompute).
 
 ## [0.23.0] - 2026-09-14
 

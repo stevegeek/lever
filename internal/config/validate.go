@@ -454,8 +454,8 @@ func (a *App) validateRemote() error {
 		// egress ACCEPT for jail→host on exactly that number
 		// (EffectiveAllowedPorts → internal/egress), so naming the proxy's port
 		// there hands every jailed agent a direct route to the gate: it sets
-		// the header itself and receives the injected remote PAT, which
-		// carries agent:attach on every agent in the project. That is the
+		// the header itself and rides the operator's injected hub session,
+		// which carries agent.attach on every agent in the project. That is the
 		// cross-agent escalation the per-agent netns closed in v0.7.0,
 		// re-opened by one line of config.
 		//
@@ -465,7 +465,7 @@ func (a *App) validateRemote() error {
 		// nothing without an in-process call (internal/remoteproxy/oidc.go).
 		return fmt.Errorf("config: remote: manager.allow_ports lists %d, which is the remote proxy's own port — "+
 			"that grant lets any jailed agent reach the proxy directly and forge the Tailscale-User-Login header "+
-			"it trusts, receiving the remote PAT (agent:attach on every agent in the project); remove %d from "+
+			"it trusts, riding the operator's hub session (agent.attach on every agent in the project); remove %d from "+
 			"manager.allow_ports, or move the proxy with remote.port", rp, rp)
 	}
 	lp := a.EffectiveRemoteLoginPort()

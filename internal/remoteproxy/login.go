@@ -56,6 +56,17 @@ const (
 	// and a browser request is waiting on the answer.
 	loginTimeout = 30 * time.Second
 
+	// sessionMaxAge bounds how long the driver hands out one hub session.
+	// scion's cookie store stamps scion_sess and refuses a cookie older than
+	// its MaxAge, 24 hours (pkg/hub/web.go: cookieStore.MaxAge(86400)); the
+	// hub answers such a request as if it had no session. Every request
+	// rides the session, API writes included, and a POST cannot be retried
+	// once its body is spent, so the driver renews well before the hub
+	// would refuse. The access token INSIDE the cookie lapses after 15
+	// minutes, but the hub refreshes that itself on each request from the
+	// refresh token the same cookie carries (sessionToBearerMiddleware).
+	sessionMaxAge = 12 * time.Hour
+
 	// maxLoginBody caps what the driver reads from a hub response. Nothing in
 	// the handshake is carried in a body — everything is in headers and
 	// cookies — so this exists only to drain politely for keep-alive.
@@ -86,6 +97,9 @@ type LoginDriver struct {
 	provider *Provider
 	audit    func(AuditLine)
 
+	// now is the driver's clock (time.Now; tests replace it).
+	now func() time.Time
+
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 }
@@ -98,6 +112,7 @@ type sessionEntry struct {
 	done   chan struct{}
 	cookie string
 	err    error
+	at     time.Time // when the login succeeded; see sessionMaxAge
 }
 
 // NewLoginDriver builds the driver. The HTTP client is the driver's own: it
@@ -117,6 +132,7 @@ func NewLoginDriver(cfg LoginConfig) *LoginDriver {
 		client:   &http.Client{Transport: t, CheckRedirect: noRedirect},
 		provider: cfg.Provider,
 		audit:    cfg.Audit,
+		now:      time.Now,
 		sessions: map[string]*sessionEntry{},
 	}
 }
@@ -137,10 +153,11 @@ func (d *LoginDriver) hubURL(pathAndQuery string) string {
 // would each drive their own login — several hub users' worth of churn for one
 // page load. A failed attempt is NOT cached: the entry is dropped so the next
 // request retries (a hub that was still starting is the common cause). A
-// PANICKING attempt is treated as a failed one — see errLoginPanicked.
+// PANICKING attempt is treated as a failed one — see errLoginPanicked. A
+// session older than sessionMaxAge is replaced by a fresh login.
 func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) {
 	d.mu.Lock()
-	if e, ok := d.sessions[login]; ok {
+	if e, ok := d.sessions[login]; ok && !d.expired(e) {
 		d.mu.Unlock()
 		select {
 		case <-e.done:
@@ -184,8 +201,21 @@ func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) 
 	}()
 
 	e.cookie, e.err = d.login(ctx, login)
+	e.at = d.now()
 	completed = true
 	return e.cookie, e.err
+}
+
+// expired reports whether a finished, successful attempt is past
+// sessionMaxAge. An attempt still running is never expired: its waiters get
+// its result. Called with d.mu held; e.at is written before e.done closes.
+func (d *LoginDriver) expired(e *sessionEntry) bool {
+	select {
+	case <-e.done:
+		return e.err == nil && d.now().Sub(e.at) >= sessionMaxAge
+	default:
+		return false
+	}
 }
 
 // errLoginPanicked is what the waiters on a shared attempt are given when the

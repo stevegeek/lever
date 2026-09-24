@@ -341,7 +341,7 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	t.Setenv(helperAddrEnv, mustURL(t, hub.URL).Host)
 	proxy := httptest.NewServer(NewHandler(Config{
 		Target:      mustURL(t, "http://127.0.0.1:1"),
-		PAT:         func() string { return "scion_pat_ws" },
+		Session:     testSession(),
 		ServeHost:   "mac.ts.net",
 		DialContext: JailDial(staticPrefix(helperPrefix(t)...)),
 	}))
@@ -391,11 +391,11 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 		t.Fatalf("tunnelled reply = %q, want %q", echo, "echo:ping\n")
 	}
 	// The upgrade path must not become a hole in the credential rules.
-	if gotAuth != "Bearer scion_pat_ws" {
-		t.Errorf("Authorization = %q — PAT injection must apply to upgrades too", gotAuth)
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q — the client's header must not survive the upgrade path", gotAuth)
 	}
-	if gotCookie != "" {
-		t.Errorf("Cookie leaked through the upgrade path: %q", gotCookie)
+	if gotCookie != sessionCookieName+"="+testCookie {
+		t.Errorf("Cookie = %q through the upgrade path, want only the injected session", gotCookie)
 	}
 }
 

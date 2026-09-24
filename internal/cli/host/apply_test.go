@@ -871,7 +871,7 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 }
 
 // TestEnsurePATsNoWindowWhenNothingMissing: both PATs already persisted and
-// the remote web role recorded — nothing to mint or grant, so no dev-auth
+// the remote web role and its ceiling recorded — nothing to mint or grant, so no dev-auth
 // window opens at all (zero scion calls).
 func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	tree := t.TempDir()
@@ -881,7 +881,9 @@ func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	seedPAT(t, st, "remote", "pat-remote-existing")
 	// ...and the remote web role already granted to the (placeholder) user.
 	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: remoteRolePermissions(),
-		Bound: map[string]string{"lever-operator@lever.local": "user-1"}}); err != nil {
+		Bound:              map[string]string{"lever-operator@lever.local": "user-1"},
+		Ceilings:           map[string]string{"lever-operator@lever.local": "ac-1"},
+		CeilingPermissions: remoteRolePermissions()}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -17,9 +17,9 @@ import (
 //
 // scion's web layer authenticates a browser by ONE thing: the `scion_sess`
 // cookie. It never reads Authorization (pkg/hub/web.go sessionAuthMiddleware),
-// so the narrow PAT the proxy injects — enough for every /api/v1 call — cannot
-// open the UI shell. The supported way to obtain that cookie without dev-auth
-// is scion's generic OIDC login, so lever runs the smallest provider that
+// and the API turns the same cookie into a bearer (sessionToBearerMiddleware),
+// so that one cookie is what the proxy sends on every request. The supported
+// way to obtain it without dev-auth is scion's generic OIDC login, so lever runs the smallest provider that
 // login path actually consumes.
 //
 // What scion validates on that path: nothing. It requests no id_token, parses
@@ -28,7 +28,7 @@ import (
 // code at /token and reads /userinfo. The security of this therefore does NOT
 // come from OIDC. It comes from ONE property: an authorization code can only
 // be created by an in-process call to Provider.Mint, inside the host-side
-// proxy, at the same trust level as the remote PAT file sitting beside it.
+// proxy, at the same trust level as the state files sitting beside it.
 // There is no HTTP route that mints one — see handleAuthorize.
 //
 // Everything the hub reaches (discovery, /token, /userinfo) is also reachable

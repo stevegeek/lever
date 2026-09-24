@@ -27,6 +27,10 @@ import (
 // (store.RoleScopeProject).
 const RoleScopeProject = "project"
 
+// RoleScopeSystem is scion's scope type for a hub-wide role
+// (store.RoleScopeSystem), such as the seeded hub-member role.
+const RoleScopeSystem = "system"
+
 // PrincipalUser is scion's principal type for a hub user
 // (store.RoleBindingPrincipalUser).
 const PrincipalUser = "user"

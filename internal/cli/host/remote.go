@@ -126,7 +126,6 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 	handler := remoteproxy.NewHandler(remoteproxy.Config{
 		Target:      target,
 		DialContext: dial,
-		PAT:         func() string { pat, _ := st.LoadRemotePAT(); return pat },
 		ServeHost:   remoteServeHost(app.Remote.BaseURL),
 		// So the Host gate admits `lever doctor`'s loopback /healthz
 		// probe without widening the allowlist beyond this one port.

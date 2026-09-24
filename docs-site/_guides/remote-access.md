@@ -18,10 +18,9 @@ tailscale serve (host)
   │  http://127.0.0.1:<remote.port>
   ▼
 lever remote proxy (host, loopback-only)
-  │  + Authorization: Bearer <remote PAT>   (injected, every request)
-  │  + Cookie: scion_sess=…                 (injected, UI shell only)
+  │  + Cookie: scion_sess=…                 (your hub session, injected, every request)
   │  – client Authorization/Cookie headers  (stripped)
-  │  origin checks, audit log
+  │  origin checks, credential-mint refusal, audit log
   ▼
 jail hub web port (guest 127.0.0.1:8080, --enable-web)
 ```
@@ -33,15 +32,16 @@ browser is logged in](#how-the-browser-is-logged-in) before you enable this.
 ## Accepted posture — read this before enabling it
 
 Whoever can reach the proxy through your tailnet gets the same interactive power over the jail's
-agents that you have from the phone — full chat, full attach, everything the injected PAT's scopes
-allow (see [below](#the-remote-pat)). What they do **not** get is anything past the jail boundary:
+agents that you have from the phone — full chat, full attach, everything the
+[`lever-remote` role](#the-remote-web-role) allows the signed-in hub user. What they do **not** get is anything past the jail boundary:
 the blast radius of a compromised tailnet device is the jail interior (agents, the mounted project
 tree via the UI's exec-backed surfaces, LLM spend), never the host. The security invariants this
 feature does not change:
 
 - No agent gains any capability: the egress firewall, broker mTLS surfaces, and jail mounts are
   unchanged. Only a host-side inbound path for the human is added.
-- The phone never holds a hub credential; the PAT stays host-side.
+- The phone never holds a hub credential; the session stays host-side, and the proxy refuses the
+  hub routes that would put a token in a response body.
 - Directives remain the only authenticated operator override (signing key + host UDS, unreachable
   from this path).
 
@@ -65,8 +65,8 @@ remote:
 
 Validation at load: `base_url` must be an absolute `https://` URL. `port` and `login_port` may not
 equal 8443, 8444, 8446, or each other. `port` may not appear in `manager.allow_ports`: that grant
-would let a jailed agent dial the proxy, set `Tailscale-User-Login` itself, and receive the injected
-PAT.
+would let a jailed agent dial the proxy, set `Tailscale-User-Login` itself, and ride the injected
+session.
 
 **`base_url` is required whenever `enabled: true`.** The proxy matches every request's
 `Origin`/`Sec-Fetch-Site` against the host `base_url` resolves to; with `base_url` unset, that host
@@ -94,7 +94,8 @@ its endpoint on loopback, and keeps the public origin on the host side where the
 The web UI does not miss it: the Scion SPA builds every URL relative to the page it was served
 from, and `--base-url`'s only other consumers — the session cookie's `Secure` flag and the OAuth
 redirect URI — are unreachable here, since the proxy strips the hub's session cookie from every
-response and injects a PAT instead of ever running an OAuth login.
+response and runs the login itself, host-side, against the hub directly (see [how the browser is
+logged in](#how-the-browser-is-logged-in)).
 
 **Requires the `orbstack` backend.** Not because of how the proxy reaches the hub — it dials
 *through* the jail, the rule every other lever hub call follows, and that needs no guest→host
@@ -192,7 +193,8 @@ serving. If you build your own scion and want the UI, build it with its assets e
 lever apply
 ```
 
-This mints a narrow **remote PAT** (see [below](#the-remote-pat)) and starts the proxy as a
+This mints the **remote PAT** (see [below](#the-remote-pat)), grants the
+[remote web role](#the-remote-web-role) and its project-create ceiling, and starts the proxy as a
 daemonized child, the same lifecycle pattern as the broker: `apply`/`up` start it, `lever stop`
 stops it alongside the rest of the instance.
 
@@ -227,7 +229,7 @@ lever doctor
 looks unset), and whether the PAT is present — never its value. `doctor` goes further: when
 `remote.enabled`, it confirms the proxy process is alive **and** actually listening, that
 `remote.pat` exists at `0600`, does an end-to-end `GET /healthz` **through** the proxy — proving
-the loopback listener, the origin/identity gates, PAT injection, and the hub itself are all wired
+the loopback listener, the origin/identity gates, the session login, and the hub itself are all wired
 correctly, not just that a process happens to be running — and checks the login path from both
 ends: that the provider serves discovery and still answers 404 at `/authorize`, and that the HUB,
 asked from inside the jail to start a login, redirects to lever's dead authorization endpoint. That
@@ -239,9 +241,9 @@ pass; most instances never turn this on.
 
 ## How the browser is logged in
 
-The injected PAT opens the hub's **API**. It cannot open the hub's **UI shell**: Scion's web layer
-authenticates a browser by one thing only, a `scion_sess` cookie, and never reads `Authorization`.
-Without dev-auth (which lever keeps off) and without an external identity provider (which lever
+The proxy sends one credential, a hub web session, on every request. Scion's web layer
+authenticates a browser by one thing only, a `scion_sess` cookie, and never reads `Authorization`;
+its API layer turns the same cookie into a bearer token for `/api/v1`. Without dev-auth (which lever keeps off) and without an external identity provider (which lever
 deliberately does not add), a browser would sit at a 401 forever.
 
 lever closes that with a **local OIDC provider** it runs itself, and a login it performs
@@ -259,17 +261,30 @@ first UI request for an operator
   2. proxy mints an authorization code BY CALLING A FUNCTION. No HTTP, no endpoint, no redirect.
   3. proxy GETs the hub's own callback with that code, carrying the jar.
   4. the hub calls the provider's /token and /userinfo, and answers with a session cookie.
-  5. the proxy keeps that cookie host-side and injects it into UI requests from then on.
+  5. the proxy keeps that cookie host-side and injects it into every request from then on, UI
+     and API alike. It logs in again after 12 hours (scion refuses a session cookie older
+     than 24), and whenever the hub rejects the session.
 ```
 
 Two things follow, and both are load-bearing.
 
-**The session never widens what the phone can do.** The cookie is attached to UI-shell requests
-only. Everything under `/api/v1` keeps riding the narrow remote PAT — Scion's own middleware passes
-a request straight through when it carries an `Authorization` header — so the API surface stays
-exactly the four scopes [below](#the-remote-pat), whatever the session's hub user may be allowed to
-do. Nothing about this changes what the browser holds either: the cookie stays on the host, and the
-hub's `Set-Cookie` is still stripped from every response.
+**One identity, narrowed in the hub.** The UI shell, the `/events` stream, the chat and every
+`/api/v1` call — the PTY WebSocket included — run as the same hub user: yours. That is what the
+chat needs, because scion's conversation model keys a direct conversation on the session user and
+refuses anyone who is not a participant. (Until this release the proxy injected the remote PAT on
+API calls, so the API ran as the PAT's owner, a different hub user, and every chat read and send was
+a 403.) What that user may do is decided by the hub: the [`lever-remote`
+role](#the-remote-web-role) on this project, the `hub-member` directory reads every hub user holds,
+and an access constraint that takes `project.create` away. The proxy sends **no** `Authorization`
+header, and strips any the phone sends: Scion's middleware lets a request that carries one straight
+through without reading the cookie, so a forwarded header would let the phone choose who it is.
+
+**The session never reaches the phone.** The cookie stays on the host and the hub's `Set-Cookie` is
+stripped from every response. Because a session may mint a user access token, the proxy also refuses
+the hub's credential-minting routes before they reach the hub (`POST /api/v1/auth/tokens`,
+`/api/v1/auth/cli/*`, `/api/v1/auth/token`, `/refresh`, `/login`; audit decision
+`deny-credential-mint`). The web UI's token page still lists and revokes tokens; it cannot create
+one.
 
 **There is no endpoint that mints a session.** This is the part to understand before enabling
 remote access, because Scion's OIDC login path validates *nothing*: it never requests or parses an
@@ -277,7 +292,7 @@ remote access, because Scion's OIDC login path validates *nothing*: it never req
 check that the discovery document's issuer matches the one configured. Whatever the provider says
 at `/userinfo`, the hub believes. So the security of this rests on exactly one property — **an
 authorization code can only be created by an in-process call inside the host-side proxy**, at the
-same trust level as the `remote.pat` file sitting beside it — and lever holds that property by
+same trust level as the rest of `.lever-state` — and lever holds that property by
 having **no authorization endpoint at all**:
 
 - `/authorize` is a registered route that returns **404, unconditionally and permanently**, and
@@ -366,7 +381,8 @@ funnel` has the same command shape and publishes to the public internet; lever c
 funnelled request, because it arrives like any other. The proxy injects a credential on every
 forwarded request, so an unauthenticated stranger would get the same interactive power over the
 jail interior as your phone. `allowed_users` is not a backstop: it is empty by default, and a
-funnelled request carries no Tailscale login header. The host stays VM-protected either way; this
+funnelled request carries no Tailscale login header, so it rides the placeholder operator's session.
+The host stays VM-protected either way; this
 is exposure of the jail interior.
 
 ## The asset build runs on the host
@@ -384,13 +400,13 @@ build entirely (and serves no web UI).
 Every request the proxy handles — allowed or denied — is appended as one JSON line to
 `.lever-state/remote-audit.jsonl`: timestamp, the Tailscale login if present, method, path, the
 decision (`allow` / `deny-host` when the `Host` header does not match `base_url` / `deny-origin` /
-`deny-user` / `deny-no-pat` / `deny-no-session`), and the
+`deny-user` / `deny-credential-mint` / `deny-no-session`), and the
 upstream status once known. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
 refuses one, `oidc-not-found` for an unknown path), and `deny-authorize` for anything that probes `/authorize` — nothing legitimate
 ever does, so a line like that is either a misconfiguration or something in the jail looking around.
-No line ever carries a cookie, a code, a token or the PAT. A request that never got an answer from the hub also carries an `error` field naming the
+No line ever carries a cookie, a code or a token. A request that never got an answer from the hub also carries an `error` field naming the
 cause — a stopped jail, a missing `nc`, a hub refusing the connection — since a bare `502` cannot
 tell those apart. The hub does not log this traffic; check this file first if doctor's healthz probe
 fails or an agent received a message you do not recognise.
@@ -398,10 +414,13 @@ fails or an agent received a message you do not recognise.
 ## The remote PAT
 
 `apply` mints a Scion hub token scoped to exactly `agent:read`, `agent:list`, `project:read`,
-`agent:attach`, `agent:message` — enough for the full interactive surface (chat, transcript,
-attach) but nothing that creates, deletes, or reconfigures an agent, and nothing that reads a
-project secret. It's persisted host-side only, `.lever-state/remote.pat`, mode `0600`, and is a
-**different** token from the controller PAT the broker itself uses.
+`agent:attach`, `agent:message`, persisted host-side only, `.lever-state/remote.pat`, mode `0600`,
+and **different** from the controller PAT the broker itself uses.
+
+**The proxy no longer sends it.** Every request now rides your hub session instead (see [how the
+browser is logged in](#how-the-browser-is-logged-in)). `apply` still mints, records and renews the
+token and `lever doctor` still checks it, so the lifecycle below is unchanged; its scope set is also
+what the [`lever-remote` role](#the-remote-web-role) is derived from.
 
 **Expiry and scopes are recorded, not asked.** The hub will not tell a token holder anything about
 the token, so lever keeps a record beside it (`.lever-state/remote.pat.json`: scopes asked for,
@@ -409,9 +428,8 @@ scopes granted, expiry) and mints with `--expires 360d`. `lever apply` re-mints 
 throwaway dev-auth window as the controller PAT, and revokes the old token — when the record is
 missing (a token minted by an older lever, on scion's 90-day default), when the scope set differs
 from the one this lever mints, or with fewer than 30 days left; `lever doctor`'s `hub tokens` row
-reports the same. The proxy reads the token file per request, so a re-mint needs no restart. If
-remote access starts failing auth for a reason the record cannot see (a reset hub database, say),
-re-mint by deleting the file and re-applying:
+reports the same. To re-mint for a reason the record cannot see (a reset hub database, say),
+delete the file and re-apply:
 
 ```sh
 rm .lever-state/remote.pat
@@ -423,25 +441,40 @@ window, agent-free, that mints a fresh token and nothing else.
 
 ## The remote web role
 
-The browser does not run as the remote PAT. It runs as the **hub user** the sign-in created (see
+The whole web UI, API included, runs as the **hub user** the sign-in created (see
 [who the hub thinks you are](#how-the-browser-is-logged-in)), and scion gives a new user no role on
 any project. So `apply` also creates a custom project role, `lever-remote`, with the same surface as
 the remote PAT (`agent.read`, `agent.list`, `project.read`, `agent.attach`, `agent.message`) plus
 `project.list`, which only the web UI's project list needs, and binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
 unset, it binds the placeholder `lever-operator@lever.local`.
 
-Role administration is hub-admin only and scion refuses it to every token, so this happens in the
-same throwaway dev-auth window as the PAT mints. `.lever-state/remote-role.json` records the role,
-its permission set, and each user bound; a window opens only while that record does not cover every
-allowed user with the current permission set. `lever doctor`'s `remote web role` row reads the
-same record.
+**The web user cannot create projects.** Every hub user also holds scion's `hub-member` system
+role, through the `hub-members` group scion re-adds on every boot. That role is mostly directory
+reads (users, groups, templates, brokers, skills, role definitions, hub settings), which the web UI
+uses, but it also carries `project.create`, and a project the web user created would be owned by
+it, outside lever's controls. lever cannot unbind the group, so it puts a ceiling on the user
+instead: a system-scope **access constraint** named `lever-remote-ceiling:<email>`, on that one
+user, whose maximum permission set is `hub-member`'s permissions (read from the hub) minus
+`project.create`, plus the `lever-remote` permissions. A constraint only ever takes permissions
+away, and it applies to everything the user holds at every scope, which is why the role's own
+permissions are inside it. scion requires a preview before each constraint change; lever previews
+and commits in one go, and replaces a constraint whose subject or set has drifted. If a scion
+upgrade adds a `hub-member` permission, the ceiling withholds it until the window runs again;
+delete `remote-role.json` and re-apply to recompute.
+
+Role and constraint administration are hub-admin only and scion refuses them to every token, so
+this happens in the same throwaway dev-auth window as the PAT mints. `.lever-state/remote-role.json`
+records the role, its permission set, each user bound, and each user's ceiling; a window opens
+only while that record does not cover every allowed user with the current permission set and a
+ceiling. A record written before the ceiling existed has no ceilings, so the first apply after
+upgrading opens the window once. `lever doctor`'s `remote web role` row reads the same record.
 
 **A user exists only after its first sign-in.** On a fresh setup, the web UI answers 403 until the
 role is bound: sign in once from the phone, then run `lever apply`. Until then, `apply` warns and
 opens the window on every run to try again.
 
-Removing a user from `allowed_users` does **not** remove its binding. The proxy then refuses that
-login before it reaches the hub, but the hub user keeps the role.
+Removing a user from `allowed_users` does **not** remove its binding or its ceiling. The proxy then
+refuses that login before it reaches the hub, but the hub user keeps the role.
 
 ## What this does NOT do
 
@@ -450,8 +483,8 @@ login before it reaches the hub, but the hub user keeps the role.
   capability of its own.
 - **No new authority.** A remote chat message is an ordinary unauthenticated `user:` turn (see
   the accepted posture above).
-- **No credential on the phone.** The remote PAT and the UI session cookie stay on the host; the
-  hub's `Set-Cookie` is stripped from every response.
+- **No credential on the phone.** The session cookie stays on the host, the hub's `Set-Cookie` is
+  stripped from every response, and the routes that would return a token are refused.
 - **No identity provider, and no endpoint that mints sessions.** The local OIDC provider has no
   authorization endpoint at all — see [how the browser is logged
   in](#how-the-browser-is-logged-in).

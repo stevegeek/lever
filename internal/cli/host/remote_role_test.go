@@ -23,14 +23,42 @@ import (
 type fakeAdminHub struct {
 	projectID string
 	roles     []hubapi.RoleDefinition
-	users     []hubapi.User
-	bindings  []hubapi.RoleBinding
-	calls     []string // "METHOD path", in order
-	next      int
+	// systemRoles are listed with roles but are scion's seeded ones; kept
+	// apart so tests can count the roles lever created.
+	systemRoles []hubapi.RoleDefinition
+	users       []hubapi.User
+	bindings    []hubapi.RoleBinding
+	constraints []*fakeConstraint
+	// previews maps an issued preview token to what it was issued for; a
+	// commit consumes it, as scion's single-use tokens are.
+	previews map[string]fakePreview
+	// blockPreview makes every preview answer with commitBlocked.
+	blockPreview bool
+	calls        []string // "METHOD path", in order
+	next         int
 }
 
+type fakeConstraint struct {
+	hubapi.ConstraintDraft
+	id       string
+	revision int
+}
+
+type fakePreview struct {
+	op    string
+	draft string // canonical JSON of the create draft
+	id    string // the constraint a delete targets
+}
+
+// fakeHubMemberPermissions is scion's seeded hub-member set
+// (pkg/hub/seed.go hubMemberPermissionIDs), project.create included.
+var fakeHubMemberPermissions = []string{"user.read", "user.list", "group.read", "group.list",
+	"template.read", "template.list", "hub.settings.read", "role.read", "project.create"}
+
 func newFakeAdminHub(users ...string) *fakeAdminHub {
-	h := &fakeAdminHub{projectID: "proj-uuid"}
+	h := &fakeAdminHub{projectID: "proj-uuid", previews: map[string]fakePreview{},
+		systemRoles: []hubapi.RoleDefinition{{ID: "sys-hub-member", Name: "hub-member", ScopeType: "system",
+			System: true, Permissions: fakeHubMemberPermissions}}}
 	for i, e := range users {
 		h.users = append(h.users, hubapi.User{ID: fmt.Sprintf("user-%d", i+1), Email: e})
 	}
@@ -60,7 +88,8 @@ func (h *fakeAdminHub) DoBody(_ context.Context, method, path string, body []byt
 	case method == http.MethodGet && u.Path == "/api/v1/projects":
 		return reply(200, map[string]any{"projects": []map[string]string{{"id": h.projectID, "name": "lever", "slug": "lever"}}})
 	case method == http.MethodGet && u.Path == "/api/v1/admin/roles":
-		return reply(200, map[string]any{"items": h.roles, "totalCount": len(h.roles)})
+		all := append(slices.Clone(h.systemRoles), h.roles...)
+		return reply(200, map[string]any{"items": all, "totalCount": len(all)})
 	case method == http.MethodPost && u.Path == "/api/v1/admin/roles":
 		var rd hubapi.RoleDefinition
 		if err := json.Unmarshal(body, &rd); err != nil {
@@ -113,7 +142,115 @@ func (h *fakeAdminHub) DoBody(_ context.Context, method, path string, body []byt
 		h.bindings = append(h.bindings, rb)
 		return reply(201, rb)
 	}
+	if status, v, ok := h.constraintRoute(method, u, body); ok {
+		return reply(status, v)
+	}
 	return reply(404, map[string]string{"error": "no route " + method + " " + path})
+}
+
+// constraintRoute answers scion's access-constraint admin routes, with its
+// preview-bound commits: a create or delete needs an unused token issued for
+// exactly that draft or that constraint.
+func (h *fakeAdminHub) constraintRoute(method string, u *url.URL, body []byte) (int, any, bool) {
+	const base = "/api/v1/admin/access-constraints"
+	wire := func(c *fakeConstraint, detail bool) map[string]any {
+		m := map[string]any{"id": c.id, "name": c.Name, "subject": c.Subject,
+			"scope": map[string]string{"type": c.Scope.Type}, "status": "active",
+			"revision": fmt.Sprint(c.revision)}
+		if detail {
+			var perms []map[string]string
+			for _, p := range c.MaximumPermissions {
+				perms = append(perms, map[string]string{"id": p, "displayName": p})
+			}
+			m["maximumPermissions"] = perms
+		}
+		return m
+	}
+	find := func(id string) int {
+		for i, c := range h.constraints {
+			if c.id == id {
+				return i
+			}
+		}
+		return -1
+	}
+	consume := func(tok string) (fakePreview, bool) {
+		p, ok := h.previews[tok]
+		delete(h.previews, tok)
+		return p, ok
+	}
+	switch {
+	case method == http.MethodPost && u.Path == "/api/v1/admin/access-constraint-previews":
+		var req struct {
+			Operation    string                  `json:"operation"`
+			Draft        *hubapi.ConstraintDraft `json:"draft"`
+			ConstraintID string                  `json:"constraintId"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return 400, map[string]string{"error": err.Error()}, true
+		}
+		if h.blockPreview {
+			return 200, map[string]any{"previewToken": "tok-blocked",
+				"commitBlocked": map[string]string{"code": "preview_incomplete", "message": "preview is incomplete"}}, true
+		}
+		tok := h.id("tok")
+		p := fakePreview{op: req.Operation, id: req.ConstraintID}
+		if req.Draft != nil {
+			b, _ := json.Marshal(req.Draft)
+			p.draft = string(b)
+		}
+		h.previews[tok] = p
+		return 200, map[string]any{"previewToken": tok}, true
+	case method == http.MethodGet && u.Path == base:
+		var items []map[string]any
+		for _, c := range h.constraints {
+			if strings.Contains(c.Name, u.Query().Get("nameContains")) {
+				items = append(items, wire(c, false))
+			}
+		}
+		return 200, map[string]any{"items": items, "totalCount": len(items)}, true
+	case method == http.MethodPost && u.Path == base:
+		var req struct {
+			hubapi.ConstraintDraft
+			PreviewToken string `json:"previewToken"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return 400, map[string]string{"error": err.Error()}, true
+		}
+		b, _ := json.Marshal(req.ConstraintDraft)
+		if p, ok := consume(req.PreviewToken); !ok || p.op != "create" || p.draft != string(b) {
+			return 409, map[string]string{"error": "preview token invalid for this draft"}, true
+		}
+		for _, c := range h.constraints {
+			if c.Name == req.Name && c.Scope.Type == req.Scope.Type {
+				return 409, map[string]string{"error": "name already used at this scope"}, true
+			}
+		}
+		c := &fakeConstraint{ConstraintDraft: req.ConstraintDraft, id: h.id("ac"), revision: 1}
+		h.constraints = append(h.constraints, c)
+		return 201, wire(c, true), true
+	case strings.HasPrefix(u.Path, base+"/"):
+		id := strings.TrimPrefix(u.Path, base+"/")
+		i := find(id)
+		if i < 0 {
+			return 404, map[string]string{"error": "not found"}, true
+		}
+		switch method {
+		case http.MethodGet:
+			return 200, wire(h.constraints[i], true), true
+		case http.MethodDelete:
+			var req struct {
+				PreviewToken string `json:"previewToken"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if p, ok := consume(req.PreviewToken); !ok || p.op != "delete" || p.id != id {
+				return 409, map[string]string{"error": "preview token invalid for this delete"}, true
+			}
+			h.constraints = slices.Delete(h.constraints, i, i+1)
+			return 200, map[string]string{"auditId": "audit-1"}, true
+		}
+	}
+	return 0, nil, false
 }
 
 func (h *fakeAdminHub) count(prefix string) int {
@@ -186,6 +323,29 @@ func TestRemoteWebRoleFirstGrant(t *testing.T) {
 	}
 	if rec.RoleID != r.ID || rec.ProjectID != "proj-uuid" || rec.Bound["you@github"] != "user-1" || len(rec.Pending) != 0 {
 		t.Fatalf("record = %+v", rec)
+	}
+	// The ceiling: one system-scope constraint on exactly that user, holding
+	// hub-member minus project.create plus the role's permissions.
+	wantCeiling := remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions())
+	if len(hub.constraints) != 1 {
+		t.Fatalf("constraints = %+v, want one", hub.constraints)
+	}
+	c := hub.constraints[0]
+	if c.Name != remoteCeilingName("you@github") || c.Scope.Type != "system" ||
+		c.Subject != (hubapi.ConstraintSubject{Kind: "principal", PrincipalType: "user", PrincipalID: "user-1"}) ||
+		!hubapi.SamePermissions(c.MaximumPermissions, wantCeiling) {
+		t.Fatalf("constraint = %+v", c)
+	}
+	if slices.Contains(c.MaximumPermissions, "project.create") {
+		t.Fatalf("ceiling keeps project.create: %v", c.MaximumPermissions)
+	}
+	for _, p := range append(slices.Clone(remoteRolePermissions()), "user.read", "hub.settings.read") {
+		if !slices.Contains(c.MaximumPermissions, p) {
+			t.Fatalf("ceiling drops %s, which the web user holds: %v", p, c.MaximumPermissions)
+		}
+	}
+	if rec.Ceilings["you@github"] != c.id || !hubapi.SamePermissions(rec.CeilingPermissions, wantCeiling) {
+		t.Fatalf("record ceiling = %v %v, want %s %v", rec.Ceilings, rec.CeilingPermissions, c.id, wantCeiling)
 	}
 	if fi, err := os.Stat(st.RemoteRole()); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("remote-role.json: %v, %v", fi, err)
@@ -356,6 +516,150 @@ func TestRemoteWebRoleHubFailureIsAWarning(t *testing.T) {
 	}
 }
 
+// A record written before the ceiling existed re-opens the window. The role
+// and binding are reused; only the ceiling is added.
+func TestRemoteCeilingPreCeilingRecordRetriggers(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedAllPATs(t, st)
+	hub := newFakeAdminHub("you@github")
+	hub.roles = []hubapi.RoleDefinition{{ID: "role-1", Name: remoteWebRoleName, ScopeType: "project", Permissions: remoteRolePermissions()}}
+	hub.bindings = []hubapi.RoleBinding{{ID: "b-1", RoleDefinitionID: "role-1", PrincipalType: "user", PrincipalID: "user-1", ScopeType: "project", ScopeID: "proj-uuid"}}
+	// Exactly what 2b160af wrote: no ceilings, no ceiling_permissions.
+	if err := os.WriteFile(st.RemoteRole(), []byte(`{"role_id":"role-1","permissions":["agent.read","agent.list","project.read","agent.attach","agent.message","project.list"],"project_id":"proj-uuid","bound":{"you@github":"user-1"},"granted_at":"2026-09-23T20:00:00Z"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ra := remoteAccess{Enabled: true, Emails: []string{"you@github"}}
+	rec, found, err := st.LoadRemoteRoleRecord()
+	if err != nil || !found {
+		t.Fatalf("old record: found=%v err=%v", found, err)
+	}
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); !strings.Contains(reason, "ceiling") {
+		t.Fatalf("reason = %q, want the missing ceiling", reason)
+	}
+
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub}); err != nil {
+		t.Fatal(err)
+	}
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvScionServerStart) }); n != 1 {
+		t.Fatalf("server start calls = %d, want 1", n)
+	}
+	if hub.count("POST /api/v1/admin/roles") != 0 || hub.count("POST /api/v1/admin/role-bindings") != 0 {
+		t.Fatalf("the role or binding was written again: %v", hub.calls)
+	}
+	if len(hub.constraints) != 1 || hub.count("POST /api/v1/admin/access-constraints") != 1 {
+		t.Fatalf("constraints = %+v, want one created", hub.constraints)
+	}
+	rec, found, _ = st.LoadRemoteRoleRecord()
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); reason != "" {
+		t.Fatalf("reason = %q, want complete", reason)
+	}
+}
+
+// Idempotent: a matching ceiling is read and kept, never re-created, and no
+// preview is asked for.
+func TestRemoteCeilingIdempotent(t *testing.T) {
+	hub := newFakeAdminHub("you@github")
+	hc := &hubapi.Client{T: hub}
+	_, warn := collectWarnings()
+	if _, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, time.Now(), warn); err != nil {
+		t.Fatal(err)
+	}
+	first := hub.constraints[0].id
+	before := len(hub.calls)
+	rec, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, time.Now(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range hub.calls[before:] {
+		if strings.HasPrefix(c, "POST /api/v1/admin/access-constraint") || strings.HasPrefix(c, "DELETE ") {
+			t.Fatalf("second run wrote a constraint: %v", hub.calls[before:])
+		}
+	}
+	if len(hub.constraints) != 1 || rec.Ceilings["you@github"] != first {
+		t.Fatalf("constraints = %+v, record = %v; want the first one kept", hub.constraints, rec.Ceilings)
+	}
+}
+
+// A ceiling that drifted (it allows project.create, or names a re-created hub
+// user) is replaced through a preview-bound delete and create, with a warning.
+func TestRemoteCeilingDriftIsReplaced(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		subject string
+		perms   []string
+	}{
+		{"allows project.create", "user-1", append(slices.Clone(remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions())), "project.create")},
+		{"another hub user", "user-old", remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := newFakeAdminHub("you@github")
+			hub.constraints = []*fakeConstraint{{id: "ac-old", revision: 3, ConstraintDraft: hubapi.ConstraintDraft{
+				Name: remoteCeilingName("you@github"), Purpose: "x",
+				Subject:            hubapi.ConstraintSubject{Kind: "principal", PrincipalType: "user", PrincipalID: tc.subject},
+				Scope:              hubapi.ConstraintScope{Type: "system"},
+				MaximumPermissions: tc.perms,
+			}}}
+			warned, warn := collectWarnings()
+			rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, time.Now(), warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hub.count("DELETE /api/v1/admin/access-constraints/ac-old") != 1 {
+				t.Fatalf("calls = %v, want the old constraint deleted", hub.calls)
+			}
+			if len(hub.constraints) != 1 || hub.constraints[0].id == "ac-old" || hub.constraints[0].Subject.PrincipalID != "user-1" ||
+				slices.Contains(hub.constraints[0].MaximumPermissions, "project.create") {
+				t.Fatalf("constraints = %+v", hub.constraints)
+			}
+			if rec.Ceilings["you@github"] != hub.constraints[0].id {
+				t.Fatalf("record ceilings = %v", rec.Ceilings)
+			}
+			if len(*warned) != 1 || !strings.Contains((*warned)[0], "ac-old") {
+				t.Fatalf("warnings = %q", *warned)
+			}
+		})
+	}
+}
+
+// A preview the hub blocks fails the grant: no record, so the next apply
+// retries, and apply itself carries on with a warning.
+func TestRemoteCeilingBlockedPreviewLeavesNoRecord(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedAllPATs(t, st)
+	hub := newFakeAdminHub("you@github")
+	hub.blockPreview = true
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	warned, warn := collectWarnings()
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever",
+		remoteAccess{Enabled: true, Emails: []string{"you@github"}}, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
+		t.Fatalf("a blocked ceiling must not fail apply: %v", err)
+	}
+	if len(*warned) != 1 || !strings.Contains((*warned)[0], "preview is incomplete") {
+		t.Fatalf("warnings = %q", *warned)
+	}
+	if _, found, _ := st.LoadRemoteRoleRecord(); found {
+		t.Fatal("a failed ceiling must not leave a record")
+	}
+}
+
+// Without the hub-member role lever cannot compute a ceiling that keeps the
+// user's reads, so it refuses rather than guess.
+func TestRemoteCeilingNeedsTheHubMemberRole(t *testing.T) {
+	hub := newFakeAdminHub("you@github")
+	hub.systemRoles = nil
+	_, warn := collectWarnings()
+	_, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, time.Now(), warn)
+	if err == nil || !strings.Contains(err.Error(), "hub-member") {
+		t.Fatalf("err = %v, want the missing hub-member role named", err)
+	}
+	if len(hub.constraints) != 0 || len(hub.bindings) != 0 {
+		t.Fatalf("wrote %d constraints and %d bindings before failing", len(hub.constraints), len(hub.bindings))
+	}
+}
+
 type failingDoer struct{}
 
 func (failingDoer) Do(context.Context, string, string) (int, []byte, error) {
@@ -382,7 +686,12 @@ func TestRemoteWebRoleDisabledDoesNothing(t *testing.T) {
 
 func TestCheckRemoteWebRole(t *testing.T) {
 	perms := remoteRolePermissions()
-	complete := state.RemoteRoleRecord{RoleID: "r", Permissions: perms, Bound: map[string]string{"you@github": "u1"}, GrantedAt: time.Now()}
+	complete := state.RemoteRoleRecord{RoleID: "r", Permissions: perms, Bound: map[string]string{"you@github": "u1"},
+		Ceilings: map[string]string{"you@github": "ac-1"}, CeilingPermissions: perms, GrantedAt: time.Now()}
+	uncapped := complete
+	uncapped.Ceilings, uncapped.CeilingPermissions = nil, nil
+	loose := complete
+	loose.CeilingPermissions = append(slices.Clone(perms), "project.create")
 	for _, tc := range []struct {
 		name    string
 		enabled bool
@@ -398,6 +707,8 @@ func TestCheckRemoteWebRole(t *testing.T) {
 		{"new user", true, &complete, []string{"you@github", "partner@github"}, false, "partner@github", "lever apply"},
 		{"pending user", true, &state.RemoteRoleRecord{Permissions: perms, Bound: map[string]string{}, Pending: []string{"you@github"}}, []string{"you@github"}, false, "never signed in", "sign in once"},
 		{"drift", true, &state.RemoteRoleRecord{Permissions: []string{"agent.read"}, Bound: complete.Bound}, []string{"you@github"}, false, "agent.read", "lever apply"},
+		{"no ceiling (pre-ceiling record)", true, &uncapped, []string{"you@github"}, false, "can create projects: you@github", "lever apply"},
+		{"ceiling allows project.create", true, &loose, []string{"you@github"}, false, "project-create ceiling was written with", "lever apply"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := state.ForConfig(t.TempDir())

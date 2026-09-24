@@ -53,12 +53,12 @@ func startProvider(t *testing.T) (*Provider, *auditSink, *httptest.Server) {
 //     provider's /token and /userinfo back-channel itself;
 //   - a web shell that answers 401 (or a redirect to the login page) without a
 //     session, and an API that passes a request through untouched when it
-//     carries an Authorization header.
+//     carries an Authorization header and otherwise runs as the session's
+//     user (sessionToBearerMiddleware).
 type fakeScionHub struct {
 	*httptest.Server
 	issuer   string // the configured oidc_login.issuer_url
 	clientID string
-	pat      string // the narrow remote PAT the proxy injects
 
 	// baseURL is what the hub builds redirect_uri from. Deliberately not its
 	// own test address: scion defaults to http://localhost:<web-port>.
@@ -80,12 +80,11 @@ type fakeScionHub struct {
 	callbackFails    bool   // answer the callback 500, leaving the state cookie in place
 }
 
-func newFakeScionHub(t *testing.T, issuer, pat string) *fakeScionHub {
+func newFakeScionHub(t *testing.T, issuer string) *fakeScionHub {
 	t.Helper()
 	h := &fakeScionHub{
 		issuer:   issuer,
 		clientID: LoginClientID,
-		pat:      pat,
 		baseURL:  "http://localhost:8080",
 		states:   map[string]string{},
 		sessions: map[string]string{},
@@ -283,14 +282,14 @@ func (h *fakeScionHub) handleAPI(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.apiCalls = append(h.apiCalls, r.Header.Clone())
 	h.mu.Unlock()
-	if r.Header.Get("Authorization") == "Bearer "+h.pat {
-		_, _ = w.Write([]byte(`{"ok":true}`))
+	if r.Header.Get("Authorization") != "" {
+		// scion hands a request that carries its own Authorization straight
+		// to the API and never reads the cookie; no bearer is valid here.
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	if _, ok := h.sessionEmail(r); ok {
-		// A session would ALSO open the API — which is exactly why the proxy
-		// must never send one here.
-		_, _ = w.Write([]byte(`{"ok":true,"via":"session"}`))
+	if email, ok := h.sessionEmail(r); ok {
+		_, _ = fmt.Fprintf(w, `{"ok":true,"via":"session","user":%q}`, email)
 		return
 	}
 	w.WriteHeader(http.StatusUnauthorized)
@@ -307,7 +306,7 @@ func (h *fakeScionHub) counts() (logins, callbacks int) {
 func newTestDriver(t *testing.T) (*LoginDriver, *fakeScionHub, *Provider, *auditSink) {
 	t.Helper()
 	p, psink, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
+	hub := newFakeScionHub(t, p.IssuerURL())
 	sink := &auditSink{}
 	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p, Audit: sink.add})
 	return d, hub, p, psink
@@ -462,6 +461,35 @@ func TestFailedLoginIsNotCached(t *testing.T) {
 	hub.dropState = false
 	if _, err := d.Cookie(context.Background(), "op@example.test"); err != nil {
 		t.Fatalf("second attempt after a transient failure: %v", err)
+	}
+}
+
+// TestSessionIsRenewedBeforeTheHubRefusesIt: scion refuses a scion_sess
+// older than 24 hours, and a POST that meets that refusal cannot be retried,
+// so the driver logs in again once a session reaches sessionMaxAge.
+func TestSessionIsRenewedBeforeTheHubRefusesIt(t *testing.T) {
+	d, hub, _, _ := newTestDriver(t)
+	clock := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	ctx := context.Background()
+	first, err := d.Cookie(ctx, "op@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(sessionMaxAge - time.Minute)
+	if c, _ := d.Cookie(ctx, "op@example.test"); c != first {
+		t.Fatal("a session younger than sessionMaxAge was replaced")
+	}
+	clock = clock.Add(time.Minute)
+	renewed, err := d.Cookie(ctx, "op@example.test")
+	if err != nil || renewed == first {
+		t.Fatalf("at sessionMaxAge: %q/%v, want a fresh session", renewed, err)
+	}
+	if logins, _ := hub.counts(); logins != 2 {
+		t.Fatalf("hub saw %d logins, want 2", logins)
+	}
+	if sessionMaxAge >= 24*time.Hour {
+		t.Fatalf("sessionMaxAge %v must stay under scion's 24h cookie MaxAge", sessionMaxAge)
 	}
 }
 
@@ -688,7 +716,7 @@ func TestALoginNeedsANewCookieNotTheStateOne(t *testing.T) {
 // property under test is the release, not the sink.
 func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
+	hub := newFakeScionHub(t, p.IssuerURL())
 	var attempts atomic.Int32
 	d := NewLoginDriver(LoginConfig{
 		Hub:      mustURL(t, hub.URL),
@@ -741,7 +769,7 @@ func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 // leaves behind would otherwise read as a perfectly good empty session.
 func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
 	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL(), "scion_pat_x")
+	hub := newFakeScionHub(t, p.IssuerURL())
 	reached, release := make(chan struct{}), make(chan struct{})
 	hub.beforeCallback = func() { close(reached); <-release }
 	d := NewLoginDriver(LoginConfig{

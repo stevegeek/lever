@@ -304,14 +304,16 @@ func checkRemoteLoginPath(ctx context.Context, jr proc.Runner, st state.State, p
 // checkRemote verifies the remote-access proxy (`lever remote`) when
 // configured on: the recorded process is alive and actually listening on
 // EffectiveRemotePort (the same pid/dial split as checkBrokerAlive), the
-// injected PAT is present and not group/other-accessible, the login path the
-// proxy depends on is intact, and — last — an end-to-end GET /healthz THROUGH
-// the proxy returns 200, proving the whole chain (loopback listener ->
-// origin/identity gates -> hub web session -> PAT injection -> hub) actually
-// works, not just that a process happens to be running.
+// remote PAT `lever apply` mints is present and not group/other-accessible
+// (the proxy no longer sends it — every request rides the operator's hub
+// session — but apply still mints it, and a world-readable token is still a
+// leak), the login path the proxy depends on is intact, and — last — an
+// end-to-end GET /healthz THROUGH the proxy returns 200, proving the whole
+// chain (loopback listener -> origin/identity gates -> hub web session ->
+// hub) actually works, not just that a process happens to be running.
 //
-// /healthz is deliberately the LAST probe. It is not an API path, so the proxy
-// opens a hub web session before forwarding it: the probe therefore drives a
+// /healthz is deliberately the LAST probe. The proxy opens a hub web session
+// before forwarding any request: the probe therefore drives a
 // full server-side OIDC handshake, and fails 502 whenever the login path is
 // broken. Running it ahead of the login checks reported that 502 instead of
 // the specific, actionable failure. Side effect worth knowing: `lever doctor`
@@ -348,10 +350,9 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 		return checkResult{name, false, fmt.Sprintf("remote.pat has mode %04o (group/other-accessible, want 0600)", fi.Mode().Perm()), "chmod 600 " + st.RemotePAT()}
 	}
 	// The login checks run BEFORE the end-to-end /healthz probe, and that
-	// order is load-bearing. /healthz is not an API path, so the proxy opens a
-	// hub web session for it (remoteproxy.NewHandler's `cfg.Session != nil &&
-	// !isAPIPath` gate) — a broken login chain therefore makes healthz answer
-	// 502 too. Probing healthz first SHADOWED the precise diagnosis: the
+	// order is load-bearing. The proxy opens a hub web session for every
+	// request it forwards, /healthz included — a broken login chain therefore
+	// makes healthz answer 502 too. Probing healthz first SHADOWED the precise diagnosis: the
 	// operator was told "GET /healthz returned 502 — inspect remote.log" when
 	// the one actionable message ("a login port granted since the instance came
 	// up needs `lever down` + `lever up`") was the very next check.
@@ -1306,8 +1307,9 @@ func checkPATTokens(st state.State, remoteEnabled bool, now time.Time) checkResu
 }
 
 // checkRemoteWebRole reports whether the remote web UI's hub users hold the
-// lever-remote project role (see remoteWebRoleName): remote-role.json must
-// cover every allowed user with the current permission set. It reads that
+// lever-remote project role (see remoteWebRoleName) and the project-create
+// ceiling (ensureRemoteCeiling): remote-role.json must cover every allowed
+// user with the current permission set and a ceiling. It reads that
 // record only — the grant needs hub-admin, which doctor never has — so it
 // says what lever last granted, not what the hub holds now.
 func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
@@ -1322,8 +1324,11 @@ func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
 	}
 	reason := remoteRoleReason(rec, found, remote.Emails, remoteRolePermissions())
 	if reason == "" {
-		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s",
-			remoteWebRoleName, strings.Join(remote.Emails, ", ")), ""}
+		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s; %s withheld by an access constraint",
+			remoteWebRoleName, strings.Join(remote.Emails, ", "), projectCreatePermission), ""}
+	}
+	if strings.HasPrefix(reason, remoteCeilingMissing) {
+		return checkResult{name, false, reason, fix}
 	}
 	detail := "the web UI will answer 403: " + reason
 	for _, e := range remote.Emails {

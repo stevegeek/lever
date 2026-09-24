@@ -1382,7 +1382,7 @@ func TestRemotePortCollisionWithAdminPortRejected(t *testing.T) {
 // jail→host ACCEPT on each port it lists, and the proxy's gate is only sound
 // because nothing but `tailscale serve` can reach its loopback listener.
 // Granting the jail that port means an agent can forge Tailscale-User-Login
-// and be handed the remote PAT, so the pair must not load at all.
+// and ride the operator's hub session, so the pair must not load at all.
 func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 

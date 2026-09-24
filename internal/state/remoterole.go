@@ -19,13 +19,24 @@ import (
 // hub-admin only), so neither can ask the hub. Pending lists the allowed
 // users that had no hub user yet at grant time (never signed in); a record
 // with any is incomplete, and the next apply retries them.
+//
+// Ceilings and CeilingPermissions record the access constraint lever puts on
+// each bound user, so the hub-member baseline every hub user holds cannot
+// create a project (see ensureRemoteCeiling in internal/cli/host). A record
+// written before the ceiling existed has neither field; it reads as
+// incomplete, so the next apply opens the window and adds the ceiling.
 type RemoteRoleRecord struct {
 	RoleID      string            `json:"role_id"`
 	Permissions []string          `json:"permissions"`
 	ProjectID   string            `json:"project_id"`
 	Bound       map[string]string `json:"bound"` // email -> hub user id
 	Pending     []string          `json:"pending,omitempty"`
-	GrantedAt   time.Time         `json:"granted_at"`
+	// Ceilings maps each bound email to the id of its access constraint.
+	Ceilings map[string]string `json:"ceilings,omitempty"`
+	// CeilingPermissions is the maximum-permission set lever wrote into
+	// every ceiling.
+	CeilingPermissions []string  `json:"ceiling_permissions,omitempty"`
+	GrantedAt          time.Time `json:"granted_at"`
 }
 
 // RemoteRole sits beside remote.pat.json; `lever destroy` removes it with the

@@ -329,8 +329,8 @@ posture (where to keep the key, multi-key break-glass, no agent forwarding) is i
 ### `remote`
 
 Optional config for **`lever remote`**: a host-side reverse proxy that exposes the Scion hub web UI
-(chat, transcript, xterm.js attach) to a Tailscale tailnet, injecting a dedicated PAT so the client
-never holds a credential. The whole block is optional and disabled by default — see the [remote
+(chat, transcript, xterm.js attach) to a Tailscale tailnet, injecting the operator's hub web session
+host-side so the client never holds a credential. The whole block is optional and disabled by default — see the [remote
 access guide](/remote-access/) for the accepted security posture, setup steps, and repair.
 
 | Key | Type | Required | Default | Meaning |

@@ -320,8 +320,11 @@ func controllerPATScopes() []string {
 // remotePATScopes is the EXACT scope set the remote-access PAT is minted
 // with: interactive (attach + message — the same class of power, text into a
 // running agent) plus read/list — and nothing that can create, delete, or
-// reconfigure. The remote proxy injects this token; it must never carry
-// agent:manage, agent:create/delete, project:update, or any secret scope.
+// reconfigure. The remote proxy no longer sends this token (every remote
+// request rides the operator's hub session), but it is still minted, and its
+// scope set is what the lever-remote web role is derived from
+// (remoteRolePermissions); it must never carry agent:manage,
+// agent:create/delete, project:update, or any secret scope.
 func remotePATScopes() []string {
 	return []string{"agent:read", "agent:list", "project:read", "agent:attach", "agent:message"}
 }
@@ -419,11 +422,13 @@ func sameScopeSet(a, b []string) bool {
 // same throwaway dev-auth window: the controller PAT that the real hub —
 // started dev-auth-OFF by the scion-server step right after this one — is
 // driven with, and (when remote access is configured on) the narrower
-// remote-access PAT the remote proxy injects on the operator's behalf.
+// remote-access PAT (minted and recorded; the proxy itself now sends the
+// operator's hub session instead).
 //
-// The same window also grants the remote web role (ensureRemoteWebRole) when
-// remote access is on and remote-role.json does not yet cover every allowed
-// user with the current permission set: role admin is hub-admin only, so the
+// The same window also grants the remote web role and its project-create
+// ceiling (ensureRemoteWebRole) when remote access is on and remote-role.json
+// does not yet cover every allowed user with the current permission set and
+// a ceiling: role admin is hub-admin only, so the
 // dev identity here is the only principal lever has that can do it.
 //
 // Idempotent per token: a PAT already persisted in state short-circuits its

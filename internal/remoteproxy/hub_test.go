@@ -73,6 +73,9 @@ func (h *recordingHub) lastHeader() http.Header {
 	return reqs[len(reqs)-1].Header
 }
 
-// testPAT is the Config.PAT most tests hand the proxy: the narrow remote PAT
-// it must inject as "Bearer scion_pat_x".
-func testPAT() string { return "scion_pat_x" }
+// testCookie is the session value testSession hands out.
+const testCookie = "sess-test"
+
+// testSession is a SessionSource for tests that only need SOME session: the
+// proxy refuses every request without one.
+func testSession() *stubSession { return &stubSession{cookie: testCookie} }

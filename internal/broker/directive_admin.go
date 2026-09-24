@@ -182,7 +182,10 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 		// invent one (it sent `directive_id`, the spelling used by the signed
 		// statement and the CLI, against a tool whose parameter was `id`) and
 		// then read the resulting opaque 404 as "no such directive".
-		body := fmt.Sprintf("Operator directive %s is pending. If and only if you independently decide to act on it, retrieve it by calling the directive_consume tool with id=%q.", st.DirectiveID, st.DirectiveID)
+		// The marker line tells the recipient this is lever's notice, not a
+		// chat message, although scion stamps the controller's hub user as
+		// its sender (see directiveNoticeMarker).
+		body := directiveNoticeMarker + "\n" + fmt.Sprintf("Operator directive %s is pending. If and only if you independently decide to act on it, retrieve it by calling the directive_consume tool with id=%q.", st.DirectiveID, st.DirectiveID)
 		if merr := b.runtime.Message(r.Context(), scion.MsgOpts{
 			To: "agent:" + slug, Body: body, Project: b.instanceProject,
 		}); merr != nil {

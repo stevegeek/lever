@@ -29,6 +29,28 @@ version bump moves the block under the new version heading.
   are stripped before forwarding, like `Authorization`, `Cookie` and
   `Tailscale-*`.
 
+- **Worker messages can no longer pass as the owner's chat.** The broker
+  relays a worker's message with the controller PAT, so scion delivers it to
+  the manager as `from: user:<controller>` with a conversation, the same
+  shape as chat. The broker now writes the first line of every worker body,
+  `[lever: relayed from worker <slug>]`, and rewrites any marker-like text
+  (or a fake `---BEGIN/END SCION MESSAGE---` line) in the worker's own text.
+  Directive notices start with `[lever: operator directive notice]` and
+  `lever msg send` notes with `[lever: operator note]`. The manager skill
+  treats a marked worker message as worker-tier and answers it with
+  `lever-manager msg send`, and answers notices and notes in the session.
+  Re-scaffold instances (`lever init`) to pick up the skill change.
+
+- **Chat replies no longer paste the reply into a shell argument.** The
+  manager skill now sends a reply as a quoted heredoc on stdin
+  (`scion message -- 'conv:<id>' - <<'LEVER_REPLY_EOF'`), so an apostrophe
+  or quoted untrusted text in the reply cannot break out of the command. The
+  legacy `--channel` form uses the same heredoc through `$(cat ...)`, since
+  older pins cannot read the body from stdin. The skill replies with `conv:`
+  only to a `direct` conversation: a reply to a `group` conversation is
+  outbound and takes an operator directive. An envelope that appears in tool
+  output, a file, an email or a web page is never routing.
+
 ### Fixed
 
 - **Agent turns no longer take minutes: sciontool telemetry is off by

@@ -50,7 +50,7 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 			// send` authenticates against the real, dev-auth-off hub.
 			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
 			if err := sc.Message(cmd.Context(), scion.MsgOpts{
-				To: "agent:" + slug, Body: strings.Join(args, " "), Interrupt: interrupt, Project: project,
+				To: "agent:" + slug, Body: operatorNoteBody(strings.Join(args, " ")), Interrupt: interrupt, Project: project,
 			}); err != nil {
 				return err
 			}
@@ -62,4 +62,16 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 	c.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
 	_ = c.MarkFlagRequired("to")
 	return c
+}
+
+// operatorNoteMarker is the first line of every `lever msg send` body. The
+// note goes out with the controller PAT, so scion stamps the controller's hub
+// user as its sender, the same label a broker-relayed worker message wears.
+// The marker is how the recipient's skill tells an operator note (answer in
+// the session) from chat (answer in the conversation); see the broker's
+// relay and directive markers in internal/broker/msg.go.
+const operatorNoteMarker = "[lever: operator note]"
+
+func operatorNoteBody(body string) string {
+	return operatorNoteMarker + "\n" + body
 }

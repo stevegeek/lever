@@ -36,7 +36,9 @@ func TestHostMsgSendToManager(t *testing.T) {
 	// Flags first, then `--`, then the two agent-controlled positionals — see
 	// scion.Client.Message: an unterminated body of "-b" would bind to scion's
 	// broadcast flag and fan the message out past the recipient check.
-	wantArgv := []string{"scion", "message", "-g", "/lever", "--", "agent:assistant", "hello there"}
+	// The body's first line is the operator-note marker the manager skill
+	// reads (the sender label is the controller's hub user either way).
+	wantArgv := []string{"scion", "message", "-g", "/lever", "--", "agent:assistant", "[lever: operator note]\nhello there"}
 	if len(gotArgv) != len(wantArgv) {
 		t.Fatalf("argv = %v, want %v", gotArgv, wantArgv)
 	}

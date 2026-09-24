@@ -216,6 +216,9 @@ func TestDirectiveSendVerifiesStoresAndDelivers(t *testing.T) {
 	if !strings.Contains(msg.Body, id) {
 		t.Fatalf("delivered body missing directive id: %q", msg.Body)
 	}
+	if first, _, _ := strings.Cut(msg.Body, "\n"); first != directiveNoticeMarker {
+		t.Fatalf("delivered body first line = %q, want the directive notice marker", first)
+	}
 	if strings.Contains(msg.Body, "do the thing") {
 		t.Fatalf("delivered body leaked action content (must be pointer-only): %q", msg.Body)
 	}

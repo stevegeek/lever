@@ -415,3 +415,27 @@ func TestIsAgentAbsent(t *testing.T) {
 		},
 		[]error{nil, errors.New("No runtime brokers available"), errors.New("timeout")})
 }
+
+// alreadyRunningRunner answers every `scion server start` the way scion does
+// when the jail's one server pid file names a live daemon.
+type alreadyRunningRunner struct{ *proc.FakeRunner }
+
+func (r *alreadyRunningRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "start" {
+		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Code: 1, Stderr: "Error: server is already running (PID: 1731)"}, fmt.Errorf("exit status 1")
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// An exclusive start (the bootstrap throwaway) must fail on "already
+// running": that answer is about ANOTHER hub, and tolerating it made apply
+// wait on a port nothing binds and then stop the live hub on cleanup.
+func TestServerStartExclusiveRefusesAlreadyRunning(t *testing.T) {
+	r := &alreadyRunningRunner{FakeRunner: proc.NewFakeRunner()}
+	c := New(r, Options{})
+	err := c.ServerStart(context.Background(), ServerOpts{WebPort: 48080, DevAuth: true, Exclusive: true})
+	if err == nil || !AlreadyRunning(err) {
+		t.Fatalf("exclusive ServerStart err = %v, want an already-running error", err)
+	}
+}

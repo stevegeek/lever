@@ -621,13 +621,21 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	iInit := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion init") })
 	iLink := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub link") })
 	iToken := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") })
-	iStop := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server stop") })
+	// Two stops: the first clears the shared pid file (the live hub, or a
+	// throwaway a failed run left) before the start; the second stops the
+	// throwaway after the mint.
+	var stops []int
+	for i, c := range f.Calls {
+		if callHasPrefix(c, "scion server stop") {
+			stops = append(stops, i)
+		}
+	}
 	iRm := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "sh -c if") })
-	if iStart < 0 || iInit < 0 || iLink < 0 || iToken < 0 || iStop < 0 || iRm < 0 {
+	if iStart < 0 || iInit < 0 || iLink < 0 || iToken < 0 || len(stops) != 2 || iRm < 0 {
 		t.Fatalf("missing expected call(s); calls=%+v", f.Calls)
 	}
-	if !(iStart < iInit && iInit < iLink && iLink < iToken && iToken < iStop) {
-		t.Fatalf("calls out of order: start=%d init=%d link=%d token=%d stop=%d", iStart, iInit, iLink, iToken, iStop)
+	if !(stops[0] < iStart && iStart < iInit && iInit < iLink && iLink < iToken && iToken < stops[1]) {
+		t.Fatalf("calls out of order: prestop=%d start=%d init=%d link=%d token=%d stop=%d", stops[0], iStart, iInit, iLink, iToken, stops[1])
 	}
 
 	// Fixed throwaway port, distinct from the real hub's 8080; dev-auth ON.

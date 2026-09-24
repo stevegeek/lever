@@ -512,17 +512,35 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	// /home/stephen — NOT /home/scion, which is the agent-container user).
 	// Resolve that home in-jail rather than hardcode it, then remove through
 	// the guarded removeJailFile helper.
+	//
+	// scion keeps one server pid file per jail home, so the throwaway cannot
+	// run beside a live hub: its start is refused as "already running" about
+	// the live hub, and a stop would stop the live hub. So the live hub (or a
+	// throwaway a failed run left behind) is stopped first, on purpose; the
+	// scion-server step that follows this one starts the real hub again.
+	if err := tw.ServerStop(ctx); err != nil {
+		return fmt.Errorf("bootstrap-token: stopping the hub for the dev-auth window: %w", err)
+	}
+	started := false
 	defer func() {
-		_ = tw.ServerStop(ctx)
+		// Only a throwaway this call started is stopped: after a refused
+		// start the pid file names some other daemon.
+		if started {
+			_ = tw.ServerStop(ctx)
+		}
 		if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
 			if h := strings.TrimSpace(home.Stdout); h != "" {
 				_ = removeJailFile(ctx, jr, h+"/"+layout.DevTokenRel)
 			}
 		}
 	}()
-	if err := tw.ServerStart(ctx, scion.ServerOpts{WebPort: throwawayHubPort, DevAuth: true}); err != nil {
+	if err := tw.ServerStart(ctx, scion.ServerOpts{WebPort: throwawayHubPort, DevAuth: true, Exclusive: true}); err != nil {
+		// A start that did launch the daemon but timed out on readiness still
+		// owns the pid file; stop it unless scion refused outright.
+		started = !scion.AlreadyRunning(err)
 		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
 	}
+	started = true
 
 	jp := apply.JailPath(tree, tree, jailMount)
 	if err := tw.InitProject(ctx, jp); err != nil {

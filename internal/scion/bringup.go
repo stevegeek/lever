@@ -234,6 +234,14 @@ type ServerOpts struct {
 	// live — a `--port 48080` start binds :8080). So --web-port is what actually
 	// controls the Hub API port. Zero lets scion pick its default (8080).
 	WebPort int
+	// Exclusive refuses to treat an already-running daemon as success. scion
+	// keeps ONE server pid file per jail home, whatever the port, so a start
+	// beside a running hub is answered "server is already running" about THAT
+	// hub. The real hub's idempotent re-apply wants that tolerance; a throwaway
+	// on its own port must not have it: it would wait on a port nothing binds,
+	// and its cleanup stop would then stop the real hub through the shared pid
+	// file.
+	Exclusive bool
 	// DevAuth is always emitted explicitly (--dev-auth=true|false) so the real
 	// hub is never left on the (dev-auth-on) default by omission.
 	DevAuth bool
@@ -347,7 +355,7 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	// runSecret, not run: the argv carries the session secret, and run's error
 	// path renders argv verbatim (redactArgs only knows the hub-secret-set
 	// shapes). The scrub is textual, so AlreadyRunning still matches.
-	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && !AlreadyRunning(err) {
+	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && (o.Exclusive || !AlreadyRunning(err)) {
 		return err
 	}
 	return c.waitHubReady(ctx)

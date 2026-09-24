@@ -252,6 +252,13 @@ type ServerOpts struct {
 	// Bearer dev token (pkg/hub/auth.go). Set HubPort with it: the API then
 	// binds --port, not --web-port. Mutually exclusive with EnableWeb.
 	DisableWeb bool
+	// DisableRuntimeBroker passes --enable-runtime-broker=false. Workstation
+	// mode starts a co-located runtime broker by default, and a hub with a
+	// broker can create agent containers: from overdue scheduled dispatches it
+	// fires at startup, or pending dispatch rows it reconciles. A dev-auth hub
+	// mints every agent it creates a FULL-role token signed with the key the
+	// live hub also trusts, so the throwaway must not be able to create one.
+	DisableRuntimeBroker bool
 	// Exclusive refuses to treat an already-running daemon as success. scion
 	// keeps ONE server pid file per jail home, whatever the port, so a start
 	// beside a running hub is answered "server is already running" about THAT
@@ -362,6 +369,9 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	if o.DisableWeb {
 		// Equals form: a bare boolean flag cannot carry false.
 		args = append(args, "--enable-web=false")
+	}
+	if o.DisableRuntimeBroker {
+		args = append(args, "--enable-runtime-broker=false")
 	}
 	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
 	// Equals form, like --web-assets-dir below, so the argv matches scion's

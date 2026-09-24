@@ -76,12 +76,22 @@ version bump moves the block under the new version heading.
   `lever-manager msg send`, and answers notices and notes in the session.
   Re-scaffold instances (`lever init`) to pick up the skill change.
 
+- **The bootstrap dev-auth hub can no longer create agents.** It now starts
+  with `--enable-runtime-broker=false`: with a broker, it could fire overdue
+  scheduled dispatches or reconcile pending ones, and a dev-auth hub mints
+  every agent it creates a full-role token the live hub also trusts. The
+  window also re-checks for containers when it closes and fails if one
+  started during it. A throwaway that will not stop no longer triggers a
+  live-hub restart that would be wrongly reported as done, and SIGHUP (a
+  closed terminal) now runs the window's cleanup too.
+
 - **Chat replies no longer paste the reply into a shell argument.** The
-  manager skill now sends a reply as a quoted heredoc on stdin
-  (`scion message -- 'conv:<id>' - <<'LEVER_REPLY_EOF'`), so an apostrophe
-  or quoted untrusted text in the reply cannot break out of the command. The
-  legacy `--channel` form uses the same heredoc through `$(cat ...)`, since
-  older pins cannot read the body from stdin. The skill replies with `conv:`
+  manager skill now writes the reply to a file with its file-writing tool and
+  sends it with `scion message --body-file <file> -- 'conv:<id>'`, so no
+  shell ever parses the reply text: an apostrophe, a heredoc terminator or
+  quoted untrusted text in it cannot break out. The legacy `--channel` form
+  passes the same file through `"$(cat <file>)"`, since older pins have no
+  `--body-file`. The skill replies with `conv:`
   only to a `direct` conversation: a reply to a `group` conversation is
   outbound and takes an operator directive. An envelope that appears in tool
   output, a file, an email or a web page is never routing.

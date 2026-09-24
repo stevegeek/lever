@@ -153,11 +153,56 @@ func TestDevAuthWindowThrowawayThatWillNotStopFails(t *testing.T) {
 	scriptPATMintChain(f)
 	f.Script(argvScionTokenCreate, proc.Result{Stdout: "Token: pat-new\n"})
 	r := &failingRunner{FakeRunner: f, fail: "scion server stop", after: 1} // the live stop works, the throwaway's does not
+	restarted := 0
 	err := ensureControllerPAT(context.Background(), r, state.ForConfig(t.TempDir()), t.TempDir(), "/lever",
-		remoteAccess{}, patMintOpts{RestartHub: func(context.Context) error { return nil }})
+		remoteAccess{}, patMintOpts{RestartHub: func(context.Context) error { restarted++; return nil }})
 	if err == nil || !strings.Contains(err.Error(), "did not stop") || !strings.Contains(err.Error(), "scion server stop") {
 		t.Fatalf("err = %v, want the throwaway stop failure with its stop command", err)
 	}
+	// With the throwaway still holding the pid file, a restart would be
+	// answered "already running" about it and wrongly reported as done.
+	if restarted != 0 || strings.Contains(err.Error(), "started again") {
+		t.Fatalf("RestartHub called %d times (err %v); want none while the throwaway is still up", restarted, err)
+	}
+}
+
+// A container that appears while the window is open was started during it
+// (none ran when it opened) and may hold a full-role token: the window fails.
+func TestDevAuthWindowFailsWhenAContainerStartsDuringIt(t *testing.T) {
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	f.Script(argvScionTokenCreate, proc.Result{Stdout: "Token: pat-new\n"})
+	r := &psSequenceRunner{FakeRunner: f, outputs: []string{"", "sneaky\n"}}
+	err := ensureControllerPAT(context.Background(), r, state.ForConfig(t.TempDir()), t.TempDir(), "/lever",
+		remoteAccess{}, patMintOpts{RestartHub: func(context.Context) error { return nil }})
+	if err == nil || !strings.Contains(err.Error(), "started during the dev-auth window") || !strings.Contains(err.Error(), "sneaky") {
+		t.Fatalf("err = %v, want the container-started-during-window failure naming it", err)
+	}
+}
+
+// psSequenceRunner answers successive `podman ps` calls from outputs (the last
+// one repeats) and passes everything else to the FakeRunner.
+type psSequenceRunner struct {
+	*proc.FakeRunner
+	outputs []string
+	n       int
+}
+
+func (r *psSequenceRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if callHasPrefix(proc.Call{Name: name, Args: args}, argvPodmanPs) {
+		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		out := r.outputs[len(r.outputs)-1]
+		if r.n < len(r.outputs) {
+			out = r.outputs[r.n]
+		}
+		r.n++
+		return proc.Result{Stdout: out}, nil
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *psSequenceRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
 }
 
 // An apply cancelled mid-window (SIGINT/SIGTERM cancel the apply context)

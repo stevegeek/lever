@@ -639,10 +639,12 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	}
 
 	// Fixed throwaway port, distinct from the real hub's 8080; dev-auth ON;
-	// web OFF, so no dev auto-login and the API binds --port.
+	// web OFF, so no dev auto-login and the API binds --port; runtime broker
+	// OFF, so the dev-auth hub cannot create (full-role) agents.
 	startArgs := strings.Join(f.Calls[iStart].Args, " ")
-	if startArgs != "server start --port 48080 --enable-web=false --dev-auth=true" {
-		t.Fatalf("throwaway server start args = %q, want --port 48080 --enable-web=false --dev-auth=true", startArgs)
+	const wantStart = "server start --port 48080 --enable-web=false --enable-runtime-broker=false --dev-auth=true"
+	if startArgs != wantStart {
+		t.Fatalf("throwaway server start args = %q, want %q", startArgs, wantStart)
 	}
 	// The container check runs before the live hub is stopped.
 	if iPs := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvPodmanPs) }); iPs < 0 || iPs > stops[0] {

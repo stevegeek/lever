@@ -588,7 +588,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	if err := tw.ServerStop(ctx); err != nil {
 		return fmt.Errorf("bootstrap-token: stopping the hub for the dev-auth window: %w", err)
 	}
-	if err := tw.ServerStart(ctx, scion.ServerOpts{HubPort: throwawayHubPort, DisableWeb: true, DevAuth: true, Exclusive: true}); err != nil {
+	if err := tw.ServerStart(ctx, scion.ServerOpts{HubPort: throwawayHubPort, DisableWeb: true, DisableRuntimeBroker: true, DevAuth: true, Exclusive: true}); err != nil {
 		// A start that did launch the daemon but timed out on readiness still
 		// owns the pid file; stop it unless scion refused outright (then the
 		// pid file names some other daemon).
@@ -708,8 +708,17 @@ func windowBlocked(ctx context.Context, jr proc.Runner) string {
 // next dev-auth start, so a file this delete misses is also the next window's
 // token; `lever doctor` reports it (checkDevAuthWindow).
 func closeDevAuthWindow(ctx context.Context, jr proc.Runner, tw *scion.Client, started bool, err error, o patMintOpts) error {
+	stopFailed := false
 	if started {
+		// No container ran when the window opened (windowBlocked). One that
+		// runs now was started during it, possibly holding a full-role token
+		// from the dev-auth hub: fail loudly rather than carry on.
+		if b := windowBlocked(ctx, jr); b != "" {
+			err = errors.Join(err, fmt.Errorf("bootstrap-token: a container started during the dev-auth window (%s); "+
+				"it may hold a full-role agent token. Run `lever stop`, then check the hub's agents before `lever up`", b))
+		}
 		if serr := tw.ServerStop(ctx); serr != nil {
+			stopFailed = true
 			err = errors.Join(err, fmt.Errorf("bootstrap-token: the throwaway dev-auth hub on 127.0.0.1:%d did not stop: %w; "+
 				"stop it with `scion server stop` in the jail, then run `lever apply`", throwawayHubPort, serr))
 		}
@@ -722,7 +731,9 @@ func closeDevAuthWindow(ctx context.Context, jr proc.Runner, tw *scion.Client, s
 	if err == nil {
 		return nil
 	}
-	if o.RestartHub == nil {
+	if o.RestartHub == nil || stopFailed {
+		// With the throwaway still up, a restart would be answered "already
+		// running" about the throwaway and wrongly reported as done.
 		return fmt.Errorf("%w; the live hub is stopped (the dev-auth window stopped it): run `lever apply` again to start it", err)
 	}
 	if rerr := o.RestartHub(ctx); rerr != nil {
@@ -789,7 +800,7 @@ func expiryText(t time.Time) string {
 // a second Ctrl-C still kills lever at once. stop must be called; it releases
 // the signals and cancels the context.
 func applySignalContext(parent context.Context) (ctx context.Context, stop func()) {
-	ctx, stop = signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	ctx, stop = signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-ctx.Done()
 		stop()

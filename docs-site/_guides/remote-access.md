@@ -280,11 +280,13 @@ header, and strips any the phone sends: Scion's middleware lets a request that c
 through without reading the cookie, so a forwarded header would let the phone choose who it is.
 
 **The session never reaches the phone.** The cookie stays on the host and the hub's `Set-Cookie` is
-stripped from every response. Because a session may mint a user access token, the proxy also refuses
-the hub's credential-minting routes before they reach the hub (`POST /api/v1/auth/tokens`,
-`/api/v1/auth/cli/*`, `/api/v1/auth/token`, `/refresh`, `/login`; audit decision
-`deny-credential-mint`). The web UI's token page still lists and revokes tokens; it cannot create
-one.
+stripped from every response. Because a session may mint a user access token, the proxy also
+allowlists the hub's `/api/v1/auth/` routes — `me`, `admin-status`, `scopes`, `providers`,
+`logout`, and the token page's list, read, delete and revoke — and refuses everything else there
+before it reaches the hub (audit decision `deny-credential-mint`). That covers `POST
+/api/v1/auth/tokens`, the CLI device and authorize flows, `/token`, `/refresh`, `/login`, the
+Google token exchange, and any route a future scion adds. The web UI's token page still lists and
+revokes tokens; it cannot create one.
 
 **There is no endpoint that mints a session.** This is the part to understand before enabling
 remote access, because Scion's OIDC login path validates *nothing*: it never requests or parses an

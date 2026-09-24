@@ -41,11 +41,14 @@ version bump moves the block under the new version heading.
   login like shell GETs already were; a rejected POST is not replayed, but
   drops the session so the next request logs in again; and the login driver
   renews a session after 12 hours, well inside scion's 24-hour cookie
-  lifetime. The proxy refuses the hub's credential-minting routes (`POST
-  /api/v1/auth/tokens`, `/api/v1/auth/cli/*`, `/api/v1/auth/token`,
-  `/refresh`, `/login`) with `deny-credential-mint`: a session may mint a
-  user access token, and one in a response body would put a hub credential on
-  the phone. The SPA's token page still lists and revokes. The remote PAT is
+  lifetime. The proxy allowlists the hub's `/api/v1/auth/` surface and refuses
+  everything else there with `deny-credential-mint` (among them `POST
+  /api/v1/auth/tokens`, `/cli/*`, `/token`, `/refresh`, `/login`,
+  `/integrations/google/exchange`, `/test-login`, `/invite/redeem`): a
+  session may mint a user access token, and one in a response body would put
+  a hub credential on the phone. Allowed: `me`, `admin-status`, `scopes`,
+  `providers`, `logout`, and the SPA token page's list, read, delete and
+  revoke. The remote PAT is
   still minted, recorded and checked by `lever doctor`, but nothing sends it
   any more; the `deny-no-pat` decision is gone (a proxy without a login
   driver refuses with `deny-no-session`).

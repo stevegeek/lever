@@ -120,17 +120,25 @@ type SessionSource interface {
 // registers the /api/v1/auth/* routes).
 const authAPIPrefix = "/api/v1/auth/"
 
-// mintsCredential reports whether a request would have the hub hand out a
-// credential in its answer: a user access token (POST /api/v1/auth/tokens —
-// scion's handleTokenByID routes "/api/v1/auth/tokens/" to the same create),
-// a CLI token through the device or authorize flows (/api/v1/auth/cli/*), or
-// the token and refresh exchanges (/api/v1/auth/token, /refresh, /login).
-// The proxy refuses them all: the session it injects is a session
-// credential, which is exactly what scion's requireSessionCredential lets
-// mint a UAT, and a token in a response body would leave the host — breaking
-// "the phone holds no hub credential" as surely as a Set-Cookie would. The
-// SPA's own token page keeps listing and revoking (GET, DELETE, POST
-// .../revoke), which hand out nothing.
+// mintsCredential reports whether a request under the hub's /api/v1/auth/
+// surface is anything other than the few calls the web UI makes that hand out
+// nothing. It is an ALLOWLIST, and everything else under the prefix is
+// refused: that surface is where scion mints credentials, and a new minting
+// route must fail closed rather than pass until someone notices. At this pin
+// (pkg/hub/server.go, web.go) the refused routes include POST
+// /api/v1/auth/tokens (a user access token — the session the proxy injects is
+// a session credential, which requireSessionCredential lets mint one; scion's
+// handleTokenByID routes "/api/v1/auth/tokens/" to the same create), the CLI
+// device and authorize flows (/cli/*), /token, /refresh, /login,
+// /integrations/google/exchange (answers a hub access token in its body for
+// a Google token in the request, no session needed), /test-login, /validate
+// and /invite/redeem (which would change the web user's role outside lever).
+// A token in a response body would leave the host, breaking "the phone holds
+// no hub credential" as surely as a Set-Cookie would.
+//
+// Allowed: GET me, admin-status, scopes, providers; POST logout; the SPA's
+// token page listing (GET tokens), reading and deleting one (GET, DELETE
+// tokens/<id>), and revoking one (POST tokens/<id>/revoke).
 //
 // p is the DECODED path (r.URL.Path), which is what scion's http.ServeMux
 // matches on too: it unescapes a literal segment before matching, so
@@ -139,18 +147,28 @@ const authAPIPrefix = "/api/v1/auth/"
 // is answered with a redirect, not dispatched, so it cannot reach a handler
 // under a spelling this function misses.
 func mintsCredential(method, p string) bool {
+	if p == strings.TrimSuffix(authAPIPrefix, "/") {
+		return true
+	}
 	if !strings.HasPrefix(p, authAPIPrefix) {
 		return false
 	}
-	switch rest := strings.TrimPrefix(p, authAPIPrefix); {
-	case rest == "tokens" || rest == "tokens/":
-		return method == http.MethodPost
-	case rest == "token" || rest == "refresh" || rest == "login":
-		return true
-	case rest == "cli" || strings.HasPrefix(rest, "cli/"):
-		return true
+	rest := strings.TrimPrefix(p, authAPIPrefix)
+	switch rest {
+	case "me", "admin-status", "scopes", "providers":
+		return method != http.MethodGet && method != http.MethodHead
+	case "logout":
+		return method != http.MethodPost
+	case "tokens":
+		return method != http.MethodGet && method != http.MethodHead
 	}
-	return false
+	if id, ok := strings.CutPrefix(rest, "tokens/"); ok && id != "" {
+		if tok, sub, found := strings.Cut(id, "/"); found {
+			return !(tok != "" && sub == "revoke" && method == http.MethodPost)
+		}
+		return method != http.MethodGet && method != http.MethodHead && method != http.MethodDelete
+	}
+	return true
 }
 
 // loginPathPrefix is the hub's login route (it routes /auth/login/, see
@@ -587,7 +605,7 @@ func (g *gate) operatorFor(login string) string {
 
 // authorize runs every check that decides whether the request may reach the
 // hub at all — ServeHost configured, Host, Origin/Sec-Fetch-Site, the
-// identity allowlist, a login driver wired, not a credential mint — denying
+// identity allowlist, a login driver wired, not a credential route — denying
 // (and auditing) on the first failure. It reports whether the request passed.
 func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine, login string) bool {
 	cfg := g.cfg

@@ -169,8 +169,9 @@ func TestNoSessionSourceFailsClosed(t *testing.T) {
 
 // TestCredentialMintRoutesRefused: the session the proxy injects may mint
 // hub credentials (scion lets a session credential create a UAT), and one in
-// a response body would leave the host. Those routes are refused; the SPA's
-// token page keeps listing and revoking.
+// a response body would leave the host. /api/v1/auth/ is allowlisted, so an
+// unknown route there is refused too; the SPA's token page keeps listing and
+// revoking.
 func TestCredentialMintRoutesRefused(t *testing.T) {
 	for _, tc := range []struct {
 		method, path string
@@ -185,6 +186,20 @@ func TestCredentialMintRoutesRefused(t *testing.T) {
 		{"POST", "/api/v1/auth/cli/device", true},
 		{"GET", "/api/v1/auth/cli/device/token", true},
 		{"POST", "/api/v1/auth/cli/authorize", true},
+		{"POST", "/api/v1/auth/integrations/google/exchange", true},
+		{"POST", "/api/v1/auth/test-login", true},
+		{"POST", "/api/v1/auth/validate", true},
+		{"POST", "/api/v1/auth/invite/redeem", true},
+		{"POST", "/api/v1/auth/some-future-route", true},
+		{"GET", "/api/v1/auth", true},
+		{"POST", "/api/v1/auth/tokens/t1", true},
+		{"GET", "/api/v1/auth/tokens/t1/revoke", true},
+		{"GET", "/api/v1/auth/tokens/t1", false},
+		{"GET", "/api/v1/auth/admin-status", false},
+		{"GET", "/api/v1/auth/scopes", false},
+		{"GET", "/api/v1/auth/providers", false},
+		{"POST", "/api/v1/auth/logout", false},
+		{"POST", "/api/v1/authz/explain", false},
 		{"GET", "/api/v1/auth/tokens", false},
 		{"DELETE", "/api/v1/auth/tokens/t1", false},
 		{"POST", "/api/v1/auth/tokens/t1/revoke", false},

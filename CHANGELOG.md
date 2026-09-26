@@ -5,6 +5,30 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Fixed
+
+- **Lima: agents could not reach the hub (#35).** On podman 4.9 (the Lima
+  Ubuntu 24.04 guest) rootless containers default to slirp4netns and ignore
+  lever's `pasta_options`, so `host.containers.internal` resolved to the
+  guest's own address, which `LEVER_EGRESS` drops: heartbeats, `scion
+  message` from inside an agent (chat replies) and token refresh all timed
+  out. lever's drop-in now sets `default_rootless_network_cmd = "pasta"` and
+  picks the hub mapping the guest's pasta supports: `--map-host-loopback
+  169.254.1.2` on passt 2024-08 and later, or, on Ubuntu 24.04's older
+  passt (which rejects that flag, so every container would fail to start), a
+  link-local container address with `169.254.1.2` as its pasta-mapped
+  gateway plus `host_containers_internal_ip`. `lever apply` fails with a
+  clear error when the guest's pasta can do neither or is missing. OrbStack
+  guests (podman 5) keep the same mapping.
+- New `lever doctor` row **agent network**: fails on any agent container
+  not running pasta.
+
+  **Upgrade (Lima):** run `lever apply`, then `lever stop` and `lever up`.
+  scion recreates each stopped agent's container on start, so the agents
+  come back on pasta and the manager conversation is kept.
+
 ## [0.25.0] - 2026-09-26
 
 ### Added

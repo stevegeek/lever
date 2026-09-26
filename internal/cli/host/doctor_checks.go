@@ -802,6 +802,67 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 		"run `lever up --fresh` to recreate the manager on the configured image (the conversation is discarded)"}
 }
 
+// netModeLister returns the network mode of a jail container by id or name
+// (jail.ContainerNetworkMode in production); jail.ErrNoContainer when there
+// is none.
+type netModeLister func(ctx context.Context, ref string) (string, error)
+
+// checkAgentNetwork finds agent containers that do not run in their own
+// pasta netns (lever#35). On podman 4.9 (the Lima Ubuntu 24.04 guest) a
+// container created without lever's drop-in runs slirp4netns, where
+// host.containers.internal resolves to the guest's own address, which
+// LEVER_EGRESS drops: the agent cannot reach the hub (heartbeats, `scion
+// message`, token refresh all fail). The mode is fixed at create; scion
+// deletes and recreates a stopped agent's container on start, so a stop and
+// an up fix it and keep the conversation. The container is found by the id
+// scion reports or else by scion's container name, as for the ticket mounts.
+func checkAgentNetwork(ctx context.Context, project string, agents []string, list agentLister, modes netModeLister) checkResult {
+	const check = "agent network"
+	if list == nil || modes == nil {
+		return checkResult{check, true, "not checked", ""}
+	}
+	records, err := list(ctx, project)
+	if err != nil {
+		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+	}
+	var wrong, unchecked []string
+	checked := 0
+	for _, name := range agents {
+		a := scionpkg.FindAgent(records, name)
+		if a == nil {
+			continue
+		}
+		ref := a.ContainerID
+		if ref == "" {
+			ref = jail.ContainerName(hubProjectKey(project), name)
+		}
+		mode, err := modes(ctx, ref)
+		if errors.Is(err, jail.ErrNoContainer) {
+			continue
+		}
+		if err != nil {
+			unchecked = append(unchecked, name)
+			continue
+		}
+		checked++
+		if mode != "pasta" {
+			wrong = append(wrong, name+" ("+mode+")")
+		}
+	}
+	if len(wrong) > 0 {
+		return checkResult{check, false,
+			fmt.Sprintf("agent %s not in its own pasta netns: it cannot reach the hub at host.containers.internal", braceList(wrong)),
+			"run `lever apply` (writes the pasta drop-in), then `lever stop` and `lever up`: scion recreates each stopped container, and the manager conversation is kept"}
+	}
+	if len(unchecked) > 0 {
+		return checkResult{check, true, fmt.Sprintf("could not inspect %s", braceList(unchecked)), ""}
+	}
+	if checked == 0 {
+		return checkResult{check, true, "no agent containers to check", ""}
+	}
+	return checkResult{check, true, fmt.Sprintf("%d agent container(s) run pasta", checked), ""}
+}
+
 // mountLister returns the in-container mount points of a jail container by
 // id or name (jail.ContainerMountTargets in production); jail.ErrNoContainer
 // when there is none.

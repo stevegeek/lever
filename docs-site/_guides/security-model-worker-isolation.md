@@ -198,16 +198,21 @@ the manager's `127.0.0.1:8462` and be authenticated to the broker **as the manag
 credential — full cross-agent impersonation.
 
 Lever closes this by giving every agent its **own** network namespace. Agents run under rootless
-podman's default **pasta** networking (lever does not pass `--network=host`), so each container's
+podman's **pasta** networking (lever does not pass `--network=host`, and its drop-in sets
+`default_rootless_network_cmd = "pasta"`, since podman 4.9 otherwise uses slirp4netns), so each container's
 `127.0.0.1` is private to that container; one agent cannot reach another's gateway proxy at all
 (a second container's `curl` to a co-resident agent's `127.0.0.1:8462` is refused).
 
 Two properties a shared namespace would give for free are preserved without it:
 
 - **Hub reachability.** The agent's Scion runtime connects to the jail-local hub on loopback. With a
-  private netns the hub is not directly reachable, so lever stages a pasta
-  `--map-host-loopback 169.254.1.2` option (guest `containers.conf.d`), the address podman resolves
-  `host.containers.internal` to; Scion's auto-computed container hub endpoint
+  private netns the hub is not directly reachable, so lever maps `169.254.1.2` to the jail's
+  loopback in a guest `containers.conf.d` drop-in and has podman resolve `host.containers.internal`
+  to it. A pasta with `--map-host-loopback` (passt 2024-08 and later) gets that flag; an older one
+  (Ubuntu 24.04's passt, which rejects the flag) gets a link-local container address with
+  `169.254.1.2` as its gateway, which pasta maps to the host loopback (`--map-gw`). `lever apply`
+  refuses a guest whose pasta can do neither, and `lever doctor`'s **agent network** row fails on
+  any agent container not running pasta. Scion's auto-computed container hub endpoint
   (`host.containers.internal:PORT` for podman) then reaches the jail-loopback hub across the netns
   boundary. The mapping exposes the jail's loopback to each agent, minus the per-agent gateways,
   which stay private to each container. Nothing

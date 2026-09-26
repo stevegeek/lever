@@ -1732,3 +1732,50 @@ func TestCheckScionTelemetry(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckAgentNetwork(t *testing.T) {
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	modesOf := func(m map[string]string, broken ...string) netModeLister {
+		return func(_ context.Context, ref string) (string, error) {
+			if slices.Contains(broken, ref) {
+				return "", fmt.Errorf("podman exploded")
+			}
+			mode, ok := m[ref]
+			if !ok {
+				return "", fmt.Errorf("inspect %s: %w", ref, jail.ErrNoContainer)
+			}
+			return mode, nil
+		}
+	}
+	fleet := listing(
+		scion.Agent{Slug: "assistant", Phase: "running", ContainerID: "cm"},
+		scion.Agent{Slug: "w1", Phase: "running", ContainerID: "c1"},
+		scion.Agent{Slug: "w2", Phase: "running"}) // no id: found by container name
+	agents := []string{"assistant", "w1", "w2", "never-started"}
+	cases := []struct {
+		label      string
+		list       agentLister
+		modes      netModeLister
+		ok         bool
+		wantDetail string
+		wantFix    string
+	}{
+		{"all pasta", fleet, modesOf(map[string]string{"cm": "pasta", "c1": "pasta", "proj--w2": "pasta"}), true, "3 agent container(s) run pasta", ""},
+		{"slirp4netns manager (lever#35)", fleet, modesOf(map[string]string{"cm": "slirp4netns", "c1": "pasta"}), false, "assistant (slirp4netns)", "`lever stop` and `lever up`"},
+		{"host network worker by container name", fleet, modesOf(map[string]string{"cm": "pasta", "proj--w2": "host"}), false, "w2 (host)", "recreates"},
+		{"no containers", fleet, modesOf(nil), true, "no agent containers", ""},
+		{"inspect failure is not a finding", fleet, modesOf(map[string]string{"cm": "pasta"}, "c1"), true, "could not inspect w1", ""},
+		{"list failure", func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, modesOf(nil), true, "not checked (could not list agents)", ""},
+		{"no probes", nil, nil, true, "not checked", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			r := checkAgentNetwork(context.Background(), "/lever/proj", agents, c.list, c.modes)
+			if r.ok != c.ok || !strings.Contains(r.detail, c.wantDetail) || !strings.Contains(r.fix, c.wantFix) {
+				t.Fatalf("got ok=%v detail=%q fix=%q; want ok=%v detail~%q fix~%q", r.ok, r.detail, r.fix, c.ok, c.wantDetail, c.wantFix)
+			}
+		})
+	}
+}

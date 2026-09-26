@@ -74,8 +74,8 @@ directory.
 
 | Command | What it does |
 |---|---|
-| `lever remote serve [CONFIG]` | Run the proxy in the foreground. Normally `up`/`apply` daemonize this for you when `remote.enabled: true` (`lever stop` stops it alongside the rest of the instance); this is for debugging. Refuses to start with remote access disabled, or on a non-orbstack backend. |
-| `lever remote status [CONFIG]` | Proxy liveness (pid + listening), the serve URL from `base_url` (or the `tailscale serve` command to run, if `base_url` looks unset), and whether the remote PAT is present — never its value. |
+| `lever remote serve [CONFIG]` | Run the proxy in the foreground. Normally `up`/`apply` daemonize this for you when `remote.enabled: true` (`lever stop` stops it alongside the rest of the instance); this is for debugging. Refuses to start with remote access disabled. Prints the remote-settings warnings (a non-loopback `bind`, `trust_forwarded_host`) to stderr, which is `.lever-state/remote.log` when daemonized. |
+| `lever remote status [CONFIG]` | Proxy liveness (pid + listening on its bind address), the identity header, the `tailscale serve` command to run (loopback bind only), any remote-settings warnings, the serve URL from `base_url`, and whether the remote PAT is present — never its value. |
 
 ## `lever-manager` — in-jail orchestration
 

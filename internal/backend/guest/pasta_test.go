@@ -33,6 +33,11 @@ func runPastaScript(t *testing.T, help *string) (dropIn string, out string, err 
 	if lerr != nil {
 		t.Skip("bash not available")
 	}
+	// set -e is part of the contract: a failed mkdir or write must fail the
+	// apply, not leave agents on the old drop-in.
+	if !strings.HasPrefix(pastaDropInScript(), "set -e\n") {
+		t.Fatal("the drop-in script must start with set -e")
+	}
 	cmd := exec.Command(bash, "-c", pastaDropInScript())
 	cmd.Env = []string{"HOME=" + home, "PATH=" + bin}
 	b, err := cmd.CombinedOutput()
@@ -85,9 +90,18 @@ func TestPastaDropInsSelectPastaAndHubAddress(t *testing.T) {
 			t.Errorf("%s drop-in does not name %s", name, PastaHostAddr)
 		}
 	}
-	if !strings.Contains(pastaDropInGateway, `host_containers_internal_ip = "`+PastaHostAddr+`"`) ||
-		!strings.Contains(pastaDropInGateway, `"--map-gw"`) {
-		t.Error("the gateway drop-in needs both host_containers_internal_ip and --map-gw (either missing leaves the hub unreachable)")
+	for name, d := range map[string]string{"modern": pastaDropInModern, "gateway": pastaDropInGateway} {
+		if !strings.Contains(d, `host_containers_internal_ip = "`+PastaHostAddr+`"`) {
+			t.Errorf("%s drop-in does not pin host.containers.internal to %s", name, PastaHostAddr)
+		}
+	}
+	if !strings.Contains(pastaDropInGateway, `"--map-gw"`) {
+		t.Error("the gateway drop-in needs --map-gw (without it the hub is unreachable)")
+	}
+	// Without -4 pasta copies the guest's IPv6 gateway, and --map-gw maps it
+	// to the guest's ::1.
+	if !strings.Contains(pastaDropInGateway, `"-4"`) {
+		t.Error("the gateway drop-in must keep pasta IPv4-only")
 	}
 }
 

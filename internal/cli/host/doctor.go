@@ -173,7 +173,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},
 		func() checkResult {
-			return checkAgentNetwork(ctx, b.MountDest(), append([]string{app.Name}, workerNames...), listAgents, inspectNetMode)
+			return checkAgentNetwork(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), jail.ForceHostNetworkFromEnv(), listAgents, inspectNetMode)
 		},
 		func() checkResult { return checkScionProjectInJail(ctx, b) },
 	}

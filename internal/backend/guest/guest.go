@@ -95,8 +95,10 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// Debian base image today, so naming them here changes nothing on an
 	// existing guest — the guard still passes and apt still never runs. They
 	// are named so a future base image cannot drop one and break a lever
-	// feature silently.
-	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns curl netcat-openbsd iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns curl netcat-openbsd iptables podman; }`); err != nil {
+	// feature silently. passt (pasta) is only a Recommends of Ubuntu's podman,
+	// and agents need it to reach the hub (lever#35); Ubuntu 24.04 guests
+	// normally have it already, so the guard still passes there.
+	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns passt curl netcat-openbsd iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns passt curl netcat-openbsd iptables podman; }`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
 	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships

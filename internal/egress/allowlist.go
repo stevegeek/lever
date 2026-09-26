@@ -116,6 +116,25 @@ func ParseDNATTargets(out, aliasV4 string) []DNSForward {
 	return targets
 }
 
+// ParseResolverUpstreams returns udp and tcp port-53 DNSForward targets when
+// a resolv.conf listing (systemd-resolved's upstream file) names aliasV4 as a
+// nameserver. It covers a Lima guest whose resolver talks to the host alias
+// directly instead of through a LIMADNS DNAT (vmType vz, where LIMADNS is
+// empty and the upstream is <alias>:53): without it the alias DROP swallows
+// every lookup in the open posture. Anything else yields nothing.
+func ParseResolverUpstreams(resolvConf, aliasV4 string) []DNSForward {
+	if aliasV4 == "" {
+		return nil
+	}
+	for _, line := range strings.Split(resolvConf, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "nameserver" && f[1] == aliasV4 {
+			return []DNSForward{{"udp", 53}, {"tcp", 53}}
+		}
+	}
+	return nil
+}
+
 // BuildRulesDNS is BuildRules plus, in the OPEN posture only, an ACCEPT to the
 // v4 alias for each DNS forward target, placed with the per-port allows (so
 // before the alias DROP). In the closed posture dns is ignored: DNS stays

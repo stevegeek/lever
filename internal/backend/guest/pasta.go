@@ -14,9 +14,15 @@ const pastaDropInPath = "$HOME/.config/containers/containers.conf.d/10-lever-pas
 
 // pastaDropInModern is for a pasta with --map-host-loopback (passt 2024-08
 // and later; the OrbStack guest's podman 5), which maps PastaHostAddr to the
-// guest's loopback directly. podman 5 already resolves
-// host.containers.internal to it.
-const pastaDropInModern = `[network]
+// guest's loopback directly. podman 5.3+ already resolves
+// host.containers.internal to it; host_containers_internal_ip says so
+// explicitly for podman 5.0-5.2, or podman 4.9 with a newer passt, where the
+// name would otherwise resolve to the guest's own address (which
+// LEVER_EGRESS drops). The key exists since podman 4.7.
+const pastaDropInModern = `[containers]
+host_containers_internal_ip = "` + PastaHostAddr + `"
+
+[network]
 default_rootless_network_cmd = "pasta"
 pasta_options = ["--map-host-loopback", "` + PastaHostAddr + `"]
 `
@@ -28,14 +34,17 @@ pasta_options = ["--map-host-loopback", "` + PastaHostAddr + `"]
 // told otherwise), so the container gets a link-local address with
 // PastaHostAddr as its gateway, and podman is told to resolve
 // host.containers.internal to it. Verified on a Lima Ubuntu 24.04 guest: the
-// hub is reachable by name, and DNS and the internet still work; without
-// --map-gw or without host_containers_internal_ip the hub is unreachable.
+// hub is reachable by name; without --map-gw or without
+// host_containers_internal_ip it is unreachable. -4 keeps pasta IPv4-only:
+// otherwise it copies the guest's IPv6 address and gateway into the
+// container, and --map-gw maps that IPv6 gateway to the guest's ::1 — a
+// wider loopback exposure than --map-host-loopback, which is IPv4-only.
 const pastaDropInGateway = `[containers]
 host_containers_internal_ip = "` + PastaHostAddr + `"
 
 [network]
 default_rootless_network_cmd = "pasta"
-pasta_options = ["--map-gw", "--address", "169.254.1.1", "--netmask", "16", "--gateway", "` + PastaHostAddr + `"]
+pasta_options = ["-4", "--map-gw", "--address", "169.254.1.1", "--netmask", "16", "--gateway", "` + PastaHostAddr + `"]
 `
 
 // pastaDropInScript writes the podman drop-in that matches the guest's pasta

@@ -802,6 +802,12 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 		"run `lever up --fresh` to recreate the manager on the configured image (the conversation is discarded)"}
 }
 
+// networkCheckedAgents is every agent the agent-network row inspects: the
+// manager (whose scion slug is the instance name) and each declared worker.
+func networkCheckedAgents(manager string, workers []string) []string {
+	return append([]string{manager}, workers...)
+}
+
 // netModeLister returns the network mode of a jail container by id or name
 // (jail.ContainerNetworkMode in production); jail.ErrNoContainer when there
 // is none.
@@ -816,8 +822,12 @@ type netModeLister func(ctx context.Context, ref string) (string, error)
 // deletes and recreates a stopped agent's container on start, so a stop and
 // an up fix it and keep the conversation. The container is found by the id
 // scion reports or else by scion's container name, as for the ticket mounts.
-func checkAgentNetwork(ctx context.Context, project string, agents []string, list agentLister, modes netModeLister) checkResult {
+func checkAgentNetwork(ctx context.Context, project string, agents []string, forceHost bool, list agentLister, modes netModeLister) checkResult {
 	const check = "agent network"
+	if forceHost {
+		// The escape hatch runs every agent on host networking on purpose.
+		return checkResult{check, true, "not checked (" + jail.ForceHostNetworkEnv + " is set: agents share the guest's network)", ""}
+	}
 	if list == nil || modes == nil {
 		return checkResult{check, true, "not checked", ""}
 	}

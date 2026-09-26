@@ -1772,10 +1772,28 @@ func TestCheckAgentNetwork(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
-			r := checkAgentNetwork(context.Background(), "/lever/proj", agents, c.list, c.modes)
+			r := checkAgentNetwork(context.Background(), "/lever/proj", agents, false, c.list, c.modes)
 			if r.ok != c.ok || !strings.Contains(r.detail, c.wantDetail) || !strings.Contains(r.fix, c.wantFix) {
 				t.Fatalf("got ok=%v detail=%q fix=%q; want ok=%v detail~%q fix~%q", r.ok, r.detail, r.fix, c.ok, c.wantDetail, c.wantFix)
 			}
 		})
+	}
+}
+
+func TestCheckAgentNetworkForceHostNetwork(t *testing.T) {
+	list := func(context.Context, string) ([]scion.Agent, error) {
+		return []scion.Agent{{Slug: "assistant", ContainerID: "cm"}}, nil
+	}
+	modes := func(context.Context, string) (string, error) { return "host", nil }
+	r := checkAgentNetwork(context.Background(), "/lever/proj", []string{"assistant"}, true, list, modes)
+	if !r.ok || !strings.Contains(r.detail, jail.ForceHostNetworkEnv) {
+		t.Fatalf("got ok=%v detail=%q; the escape hatch is deliberate, not a finding", r.ok, r.detail)
+	}
+}
+
+func TestNetworkCheckedAgentsIncludesManager(t *testing.T) {
+	got := networkCheckedAgents("assistant", []string{"w1", "w2"})
+	if !slices.Equal(got, []string{"assistant", "w1", "w2"}) {
+		t.Fatalf("got %v; the manager must be inspected too", got)
 	}
 }

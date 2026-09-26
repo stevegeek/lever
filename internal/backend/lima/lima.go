@@ -344,12 +344,22 @@ const limaDNSChain = "LIMADNS"
 // apply time is exact. A missing chain (hostResolver disabled, or a Lima that
 // routes DNS differently) yields no targets rather than an error: the alias
 // DROP then stays as it was, and doctor's guest-DNS row reports the outcome.
+//
+// With vmType vz (lever's default on macOS) LIMADNS is empty: the guest's
+// systemd-resolved talks to <alias>:53 directly. So when the chain yields no
+// targets, the resolver's upstream file is read, and an alias nameserver
+// gives the port-53 targets (egress.ParseResolverUpstreams).
 func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error) {
-	res, err := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain)
+	if res, err := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain); err == nil {
+		if targets := egress.ParseDNATTargets(res.Stdout, aliasV4); len(targets) > 0 {
+			return targets, nil
+		}
+	}
+	res, err := l.Guest().RootRun(ctx, "cat", "/run/systemd/resolve/resolv.conf")
 	if err != nil {
 		return nil, nil
 	}
-	return egress.ParseDNATTargets(res.Stdout, aliasV4), nil
+	return egress.ParseResolverUpstreams(res.Stdout, aliasV4), nil
 }
 
 var _ backend.Backend = (*Lima)(nil)

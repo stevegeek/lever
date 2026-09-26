@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,11 +17,20 @@ import (
 
 // ServeConfig configures Serve.
 type ServeConfig struct {
-	// Port is the loopback port to bind: Serve always binds
-	// "127.0.0.1:<Port>", never an operator-supplied address, so the
-	// fail-closed loopback check below is a belt-and-braces invariant
-	// rather than a live attack surface — see the check's comment.
+	// Port is the port the proxy binds.
 	Port int
+	// Bind is the IP address the proxy binds. "" binds 127.0.0.1, the
+	// default and the posture the rest of the package assumes. A loopback
+	// address must yield a loopback listener (fail closed otherwise, see
+	// listenProxy). Anything else is refused unless AllowNonLoopback is set.
+	Bind string
+	// AllowNonLoopback acknowledges a non-loopback Bind. It exists so that a
+	// caller cannot widen the listener by passing an address alone: the one
+	// caller (`lever remote serve`) sets it from a config that
+	// config.validateRemoteBind has already restricted to an address the jail
+	// cannot reach, or to an acknowledged wildcard. The login provider's
+	// listener is never affected: it is always loopback.
+	AllowNonLoopback bool
 	// Handler is the pre-built proxy handler (NewHandler's return value).
 	// Its Audit callback, if any, must already be wired by the caller
 	// BEFORE Serve is called: Handler is an opaque http.Handler, so Serve
@@ -70,15 +80,16 @@ type ServeConfig struct {
 	Provider *Provider
 }
 
-// Serve runs the proxy until ctx is cancelled: bind 127.0.0.1:<Port> (fail
-// closed on any non-loopback listen address), bind the provider's own
+// Serve runs the proxy until ctx is cancelled: bind the proxy (127.0.0.1:<Port>
+// by default, failing closed on a non-loopback listener; see listenProxy for
+// an acknowledged non-loopback Bind), bind the provider's own
 // loopback port when one is configured, write the pid file, record what
 // this process is serving (Stamp), and serve. The audit JSONL is the
 // caller's: it opens it (OpenAudit) before building Handler. On ctx.Done it shuts both servers down
 // gracefully, removes the pid file, and returns. Mirrors brokerctl.Serve's
 // bind → pid → serve → remove-pid ordering (internal/brokerctl/serve.go).
 func Serve(ctx context.Context, cfg ServeConfig) error {
-	ln, err := listenLoopback(cfg.Port)
+	ln, err := listenProxy(cfg.Bind, cfg.Port, cfg.AllowNonLoopback)
 	if err != nil {
 		return err
 	}
@@ -163,10 +174,11 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 // listenLoopback binds 127.0.0.1:<port> and fails closed on anything but a
 // loopback address.
 //
-// The proxy's Tailscale-User-Login gate is only as strong as "nothing but
-// `tailscale serve` can reach this listener" (see proxy.go's package doc): a
-// non-loopback listener would let any LAN/tailnet peer reach it directly and
-// set that header itself, bypassing the gate. The provider's listener carries
+// The proxy's identity-header gate is only as strong as "nothing but the
+// authenticating front can reach this listener" (see proxy.go's package doc):
+// a non-loopback listener would let any LAN/tailnet peer reach it directly
+// and set that header itself, bypassing the gate — which is why a
+// non-loopback proxy bind goes through listenProxy's acknowledgement instead. The provider's listener carries
 // the same requirement for a different reason — off loopback it would be an
 // unauthenticated identity endpoint on the network.
 func listenLoopback(port int) (net.Listener, error) {
@@ -177,6 +189,40 @@ func listenLoopback(port int) (net.Listener, error) {
 	if ta, ok := ln.Addr().(*net.TCPAddr); !ok || !isLoopbackAddr(ta) {
 		_ = ln.Close()
 		return nil, fmt.Errorf("remoteproxy: listener must be loopback, got %s", ln.Addr())
+	}
+	return ln, nil
+}
+
+// listenProxy binds the proxy's own listener: loopback by default (the same
+// fail-closed listener as listenLoopback), or the configured address.
+//
+// A non-loopback address is the one case where "only the front can reach this
+// listener" stops being a property of the bind and becomes the operator's
+// firewall's job, so it needs the explicit acknowledgement, and it is
+// announced on stderr (remote.log) every time the proxy starts.
+func listenProxy(bind string, port int, allowNonLoopback bool) (net.Listener, error) {
+	if bind == "" {
+		return listenLoopback(port)
+	}
+	ip := net.ParseIP(bind)
+	if ip == nil {
+		return nil, fmt.Errorf("remoteproxy: bind %q is not an IP address", bind)
+	}
+	if !ip.IsLoopback() && !allowNonLoopback {
+		return nil, fmt.Errorf("remoteproxy: bind %s is not loopback, and non-loopback binds were not acknowledged", bind)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
+	if err != nil {
+		return nil, fmt.Errorf("remoteproxy: bind: %w", err)
+	}
+	ta, ok := ln.Addr().(*net.TCPAddr)
+	if ip.IsLoopback() && (!ok || !isLoopbackAddr(ta)) {
+		_ = ln.Close()
+		return nil, fmt.Errorf("remoteproxy: listener must be loopback, got %s", ln.Addr())
+	}
+	if !ip.IsLoopback() {
+		daemon.Warnf("remote proxy listening on %s, NOT loopback: anything that can reach it can assert any identity "+
+			"header — only the authenticating front may reach it (host firewall)", ln.Addr())
 	}
 	return ln, nil
 }

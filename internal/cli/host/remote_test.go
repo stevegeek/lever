@@ -41,25 +41,23 @@ func TestRemoteServeDisabledErrors(t *testing.T) {
 	testutil.WantErrIs(t, err, errRemoteDisabled)
 }
 
-func TestRemoteServeLimaBackendErrors(t *testing.T) {
+// Lima is no longer gated (issue #38): the login path's only guest→host hop
+// is the one every agent's broker connection makes on both backends. A lima
+// config reaches Serve exactly like an orbstack one — proven, as below, by a
+// bind error on privileged port 1 rather than a gate error.
+func TestRemoteServeLimaBackendPassesGates(t *testing.T) {
 	dir := t.TempDir()
-	p := writeInstanceInto(t, dir, "name: x\nbackend: lima\ntree: workspace\nbroker:\n  llm_auth: subscription\nremote:\n  enabled: true\n")
+	p := writeInstanceInto(t, dir, "name: x\nbackend: lima\ntree: workspace\nbroker:\n  llm_auth: subscription\n"+
+		"remote:\n  enabled: true\n  port: 1\n  base_url: \"https://vm.exe.xyz:8445\"\n")
 	t.Chdir(dir)
 
 	cmd := newRemoteServeCmd(defaultFactory)
 	_, err := clitest.Exec(t, cmd, p)
 	if err == nil {
-		t.Fatal("remote serve on the lima backend should error")
+		t.Fatal("expected a bind error on privileged port 1 (proves the gates passed and Serve was reached)")
 	}
-	if !strings.Contains(err.Error(), "orbstack") {
-		t.Errorf("error should mention orbstack, got: %v", err)
-	}
-	// The gate survives, its old reason does not: the proxy now dials through
-	// the jail, so guest→host forwarding has nothing to do with why Lima is
-	// excluded. Repeating the obsolete rationale would send an operator
-	// hunting for a forwarding problem that cannot exist.
-	if strings.Contains(err.Error(), "forwarding") {
-		t.Errorf("error must not cite guest→host forwarding as the reason, got: %v", err)
+	if errors.Is(err, errRemoteDisabled) || strings.Contains(err.Error(), "orbstack") || strings.Contains(err.Error(), "backend") {
+		t.Fatalf("a lima config must pass the gates; got a gate error instead of a bind error: %v", err)
 	}
 }
 

@@ -18,18 +18,22 @@
 // before it reaches the client, for the same reason — it would be an
 // alternate, lever-unmanaged credential if it ever left the host.
 //
-// Precondition: this handler is safe to expose ONLY behind a loopback
-// listener reached exclusively through `tailscale serve` (or equivalent) —
-// the sole trustworthy source of a Tailscale-User-Login value. Every
-// inbound Tailscale-* header is stripped before forwarding to the hub, so a
-// client can never forge identity to the HUB; but the AllowedUsers check
-// performed HERE still trusts whatever the listener's front-end set on the
-// request. A directly reachable listener (LAN, a localhost port-forward, or
-// a DNS rebind to the loopback address) lets any caller set
-// Tailscale-User-Login itself and take the header-free allow path with the
-// injected session. Enforcing the loopback bind is the caller's job (see the
-// remote-serve CLI wiring). See the 2026-08-16 remote-agent-access design
-// spec.
+// Precondition: this handler is safe to expose ONLY behind a listener that
+// nothing but the authenticating front can reach — `tailscale serve` by
+// default, or another front that sets a verified login in the configured
+// identity header (Config.IdentityHeader; exe.dev's X-ExeDev-Email, say) and
+// OVERWRITES any value the client sent. That front is the sole trustworthy
+// source of the header's value. The configured header and every inbound
+// Tailscale-* header are stripped before forwarding to the hub, so a client
+// can never forge identity to the HUB; but the AllowedUsers check performed
+// HERE still trusts whatever the front set on the request. A directly
+// reachable listener (LAN, a localhost port-forward, or a DNS rebind to the
+// listener's address) lets any caller set the header itself and take the
+// allow path with the injected session. Keeping the listener reachable only
+// by the front is the caller's job: loopback by default, and a non-loopback
+// bind only on an address the jail cannot reach, behind the operator's
+// firewall (see the remote-serve CLI wiring and config.validateRemoteBind).
+// See the 2026-08-16 remote-agent-access design spec and issue #38.
 package remoteproxy
 
 import (
@@ -72,8 +76,26 @@ type Config struct {
 	// 127.0.0.1:<port>/healthz) without widening the Host allowlist to every
 	// port. Zero admits the tailnet name only.
 	ListenPort int
-	// AllowedUsers, when non-empty, pins Tailscale-User-Login values.
+	// AllowedUsers, when non-empty, pins IdentityHeader values.
 	AllowedUsers []string
+	// IdentityHeader is the header the authenticating front puts the verified
+	// login in. "" = DefaultIdentityHeader (Tailscale-User-Login). It is read
+	// for the AllowedUsers check and for the identity asserted to the hub,
+	// and stripped from every forwarded request. The front must OVERWRITE it
+	// — a front that appends to a client-sent value would let the client
+	// choose — and a request carrying it twice, or a comma-joined value, is
+	// refused rather than resolved first-value-wins (see authorize).
+	IdentityHeader string
+	// TrustForwardedHost makes the Host check read X-Forwarded-Host, when a
+	// request carries one, instead of Host: for a front that rewrites Host
+	// and passes the browser's in X-Forwarded-Host. Off by default, because
+	// any client that reaches the listener directly can set that header —
+	// see hostToCheck.
+	TrustForwardedHost bool
+	// BindHost is the non-loopback address the listener is bound to, when it
+	// is one ("" otherwise). hostAllowed then also admits "<BindHost>:<ListenPort>",
+	// the Host a front sends when it dials that address and forwards no name.
+	BindHost string
 	// Session supplies the verified operator's hub web session, which is
 	// the ONLY credential the proxy sends, on every request. Required: nil
 	// refuses every request (503), since the proxy would otherwise forward
@@ -97,6 +119,15 @@ type Config struct {
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
 	LogPath string
+}
+
+// DefaultIdentityHeader is Config.IdentityHeader when unset: the header
+// `tailscale serve` puts the tailnet login in.
+const DefaultIdentityHeader = "Tailscale-User-Login"
+
+// identityHeader is the configured identity header in canonical form.
+func (c Config) identityHeader() string {
+	return http.CanonicalHeaderKey(cmp.Or(c.IdentityHeader, DefaultIdentityHeader))
 }
 
 // DefaultLogPath is the proxy log location named in the hub-login-failed
@@ -290,10 +321,14 @@ const (
 // AuditLine is emitted once per request, regardless of outcome. It never
 // carries the session value.
 type AuditLine struct {
-	Time    time.Time `json:"time"`
-	TSLogin string    `json:"ts_login,omitempty"`
-	Method  string    `json:"method"`
-	Path    string    `json:"path"`
+	Time time.Time `json:"time"`
+	// TSLogin is the value of the configured identity header
+	// (Config.IdentityHeader), as the front sent it. The name and the JSON key
+	// predate configurable headers and are kept so existing audit readers do
+	// not break.
+	TSLogin string `json:"ts_login,omitempty"`
+	Method  string `json:"method"`
+	Path    string `json:"path"`
 	// Decision is the outcome: one of the Decision constants. The gate emits
 	// DecisionAllow, DecisionDenyHost, DecisionDenyOrigin, DecisionDenyUser,
 	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
@@ -409,7 +444,7 @@ func NewHandler(cfg Config) http.Handler {
 // owns the Transport (jailTransport).
 func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
-		Rewrite:        rewriteUpstream(cfg.Target),
+		Rewrite:        rewriteUpstream(cfg.Target, cfg.identityHeader()),
 		ModifyResponse: completeAudit(cfg.Audit),
 		ErrorHandler:   upstreamFailed(cfg.Audit),
 	}
@@ -420,9 +455,9 @@ func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 }
 
 // rewriteUpstream is the ReverseProxy Rewrite hook: point the request at
-// target, strip every client-supplied identity, and attach the gate's
-// session as the only one.
-func rewriteUpstream(target *url.URL) func(*httputil.ProxyRequest) {
+// target, strip every client-supplied identity (the configured identity
+// header included), and attach the gate's session as the only one.
+func rewriteUpstream(target *url.URL, identityHeader string) func(*httputil.ProxyRequest) {
 	return func(pr *httputil.ProxyRequest) {
 		pr.SetURL(target)
 		// Strip any client-supplied identity — the injected session is the
@@ -431,12 +466,14 @@ func rewriteUpstream(target *url.URL) func(*httputil.ProxyRequest) {
 		// one straight through, so a phone-supplied bearer would choose
 		// the identity the API runs as. The client's own Cookie header
 		// goes too, or a client-supplied scion_sess would be honored as
-		// an alternate credential. Tailscale-* headers are stripped as
-		// well: the AllowedUsers gate trusts them (under the loopback-bind
-		// precondition documented above), but the hub must never see a
-		// client-supplied identity claim of its own.
+		// an alternate credential. The configured identity header and
+		// Tailscale-* are stripped as well: the AllowedUsers gate trusts
+		// them (under the front-only-reachability precondition documented
+		// above), but the hub must never see a client-supplied identity
+		// claim of its own.
 		pr.Out.Header.Del("Authorization")
 		pr.Out.Header.Del("Cookie")
+		pr.Out.Header.Del(identityHeader)
 		for k := range pr.Out.Header {
 			if clientIdentityHeader(k) {
 				pr.Out.Header.Del(k)
@@ -619,7 +656,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// already bounds what it writes to the same file. Deciding on the
 	// truncated value instead would make every login sharing a
 	// maxAuditFieldLen-byte prefix the same operator.
-	login := r.Header.Get("Tailscale-User-Login")
+	login := r.Header.Get(cfg.identityHeader())
 	line := AuditLine{Time: time.Now().UTC(), TSLogin: truncateAudit(login), Method: truncateAudit(r.Method), Path: truncateAudit(r.URL.Path)}
 
 	if !g.authorize(w, r, &line, login) {
@@ -670,7 +707,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // operatorFor is the identity the proxy asserts to the hub on the operator's
 // behalf: the session cache key, and the login the OIDC provider mints a code
-// for (identityFor). It is the Tailscale login ONLY when AllowedUsers pins it,
+// for (identityFor). It is the identity header's login ONLY when AllowedUsers pins it,
 // because that check is the only thing that ever verifies the header: with
 // the list empty the gate does not require the header at all, so its value
 // is a claim nobody checked and must not become a hub user row. The hub then
@@ -702,8 +739,13 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 	}
 
 	// Host first: it is the only gate a header-free request cannot walk
-	// through. See hostAllowed.
-	if !hostAllowed(r.Host, cfg.ServeHost, cfg.ListenPort) {
+	// through. See hostAllowed, and hostToCheck for which header it reads.
+	host, msg := hostToCheck(r, cfg.TrustForwardedHost)
+	if msg != "" {
+		g.deny(w, line, http.StatusForbidden, DecisionDenyHost, msg)
+		return false
+	}
+	if !hostAllowed(host, cfg.ServeHost, cfg.ListenPort, cfg.BindHost) {
 		g.deny(w, line, http.StatusForbidden, DecisionDenyHost, "unexpected Host")
 		return false
 	}
@@ -713,16 +755,26 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 		return false
 	}
 	if len(cfg.AllowedUsers) > 0 {
+		hdr := cfg.identityHeader()
 		// Duplicates are refused for the same reason Origin and
 		// Sec-Fetch-Site are: Header.Get returns only the FIRST value, so a
 		// second one is a header the gate silently ignores while something
-		// downstream might not.
-		if logins := r.Header.Values("Tailscale-User-Login"); len(logins) > 1 {
-			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "multiple Tailscale-User-Login headers refused")
+		// downstream might not. A comma-joined value is the same thing in
+		// one line — what a front that APPENDS to a client-sent header
+		// produces ("forged, real") — so it is refused too, rather than
+		// split and resolved first-value-wins, which would hand the choice
+		// to the client. config.validRemoteLogin keeps commas out of
+		// allowed_users, so no legitimate login is lost.
+		if logins := r.Header.Values(hdr); len(logins) > 1 {
+			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "multiple "+hdr+" headers refused")
+			return false
+		}
+		if strings.Contains(login, ",") {
+			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "a comma-joined "+hdr+" value refused")
 			return false
 		}
 		if !slices.Contains(cfg.AllowedUsers, login) {
-			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "tailscale identity not allowed")
+			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "identity not allowed")
 			return false
 		}
 	}
@@ -878,7 +930,7 @@ func (w *sessionRetryWriter) Unwrap() http.ResponseWriter { return w.ResponseWri
 // whose DNS flips to 127.0.0.1 is, to the browser, SAME-ORIGIN with the proxy.
 // It then sends no Origin, `Sec-Fetch-Site: same-origin`, and any header it
 // likes (same-origin requests need no preflight), which before this check meant
-// a forged Tailscale-User-Login and a reply carrying the injected credential's
+// a forged identity header and a reply carrying the injected credential's
 // authority. Verified live 2026-08-22 against the running proxy: `Host:
 // evil.example` + a forged identity returned 200 and real /auth/me data.
 //
@@ -889,11 +941,19 @@ func (w *sessionRetryWriter) Unwrap() http.ResponseWriter { return w.ResponseWri
 //   - serveHost, the tailnet name. `tailscale serve` forwards the client's Host
 //     unchanged for a TCP backend, so real phone traffic carries it verbatim.
 //   - loopback with the proxy's own port, for host-side probes: `lever doctor`
-//     dials http://127.0.0.1:<port>/healthz.
+//     dials http://127.0.0.1:<port>/healthz (and sends that Host even when the
+//     listener is bound elsewhere).
+//
+// plus, when the listener is bound to a non-loopback address (bindHost), that
+// address with the proxy's port: what a front sends when it dials the address
+// and forwards no name. An IP literal is no rebinding target — a rebind makes
+// the browser send the ATTACKER's name — and whatever can reach that address
+// can already set any header, which is the non-loopback bind's documented
+// cost, not something this check could take back.
 //
 // Nothing downstream depends on the inbound value: the outbound Host is
 // rewritten by Rewrite (see newReverseProxy).
-func hostAllowed(host, serveHost string, port int) bool {
+func hostAllowed(host, serveHost string, port int, bindHost string) bool {
 	if host == "" {
 		// HTTP/1.1 requires Host; Go rejects a request without one before
 		// this. Treat the impossible case as hostile.
@@ -910,9 +970,51 @@ func hostAllowed(host, serveHost string, port int) bool {
 	if p != strconv.Itoa(port) {
 		return false
 	}
-	switch strings.ToLower(strings.Trim(h, "[]")) {
+	h = strings.ToLower(strings.Trim(h, "[]"))
+	switch h {
 	case "127.0.0.1", "::1", "localhost":
 		return true
 	}
+	if bindHost != "" {
+		if want, got := net.ParseIP(bindHost), net.ParseIP(h); want != nil && got != nil && want.Equal(got) && !want.IsUnspecified() {
+			return true
+		}
+	}
 	return false
+}
+
+// hostToCheck picks the name hostAllowed judges: the request's Host, or —
+// only with trustForwarded set and only when the request carries one —
+// X-Forwarded-Host. It returns a denial message instead when that header is
+// ambiguous: more than one, or a comma-joined list (what a chain of appending
+// proxies produces), since picking one would let a client-sent value win.
+//
+// What trusting it costs. Host is the one rebinding defence a same-origin
+// page cannot forge, because the browser writes it from the URL. X-Forwarded-
+// Host is an ordinary header: a page rebound onto the listener's address can
+// send any value, including base_url's host. With trustForwarded on, the
+// rebinding defence therefore rests on nothing but the precondition in the
+// package doc — only the front can reach the listener — which is why it is
+// off by default, and why config.RemoteWarnings and `lever doctor` name it.
+// A request WITHOUT the header still gets the ordinary Host check (that is
+// how the loopback doctor probe passes); a request WITH it is judged on the
+// header alone, whatever its Host says.
+//
+// It is only worth turning on for a front that rewrites Host to a name the
+// default refuses. A front that rewrites Host to the address it dials
+// (127.0.0.1:<port>, or the bind address) already passes without it.
+func hostToCheck(r *http.Request, trustForwarded bool) (host, denial string) {
+	if !trustForwarded {
+		return r.Host, ""
+	}
+	xfh := r.Header.Values("X-Forwarded-Host")
+	switch {
+	case len(xfh) == 0:
+		return r.Host, ""
+	case len(xfh) > 1:
+		return "", "multiple X-Forwarded-Host headers refused"
+	case strings.Contains(xfh[0], ","):
+		return "", "a comma-joined X-Forwarded-Host value refused"
+	}
+	return strings.TrimSpace(xfh[0]), ""
 }

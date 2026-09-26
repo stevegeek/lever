@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"github.com/stevegeek/lever/internal/jail"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,7 +50,7 @@ var (
 func healthyRemoteProbes() doctorProbes {
 	return doctorProbes{
 		dial:          okDial,
-		remoteHealthz: func(int, string) (int, error) { return 200, nil },
+		remoteHealthz: func(healthzProbe) (int, error) { return 200, nil },
 		remoteLogin: func(int) (loginProbeResult, error) {
 			return loginProbeResult{discovery: 200, authorize: 404, authzURL: "https://lever.invalid/authorize"}, nil
 		},
@@ -795,7 +797,7 @@ func TestCheckRemoteHealthz500(t *testing.T) {
 	// Everything healthz depends on is green, so the 500 is the only failure
 	// left to report.
 	p := healthyRemoteProbes()
-	p.remoteHealthz = func(int, string) (int, error) { return 500, nil }
+	p.remoteHealthz = func(healthzProbe) (int, error) { return 500, nil }
 
 	r := checkRemote(context.Background(), app, st, p, nil)
 	if r.ok {
@@ -845,7 +847,7 @@ func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
 	}
 	// What the live proxy answers while the login chain is broken.
 	healthzProbed := false
-	p.remoteHealthz = func(int, string) (int, error) {
+	p.remoteHealthz = func(healthzProbe) (int, error) {
 		healthzProbed = true
 		return 502, nil
 	}
@@ -910,18 +912,91 @@ func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
-	var gotLogin string
+	var got healthzProbe
 	p := healthyRemoteProbes()
-	p.remoteHealthz = func(_ int, tsLogin string) (int, error) {
-		gotLogin = tsLogin
+	p.remoteHealthz = func(hp healthzProbe) (int, error) {
+		got = hp
 		return 200, nil
 	}
 
 	if r := checkRemote(context.Background(), app, st, p, nil); !r.ok {
 		t.Fatalf("expected pass, got %+v", r)
 	}
-	if gotLogin != "steve@example.com" {
-		t.Fatalf("probe should carry the first allowed_users entry, got %q", gotLogin)
+	if got.Login != "steve@example.com" || got.Header != "Tailscale-User-Login" {
+		t.Fatalf("probe should carry the first allowed_users entry in Tailscale-User-Login, got %+v", got)
+	}
+	if got.Addr != "127.0.0.1:8445" || got.Port != 8445 {
+		t.Fatalf("probe should dial the loopback listener, got %+v", got)
+	}
+}
+
+// With another front, the probe must speak ITS header and dial where the
+// proxy actually listens — a non-loopback bind has no 127.0.0.1 listener.
+func TestCheckRemoteHealthzProbeFollowsIdentityHeaderAndBind(t *testing.T) {
+	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://vm.exe.xyz:8445\"\n"+
+		"  identity_header: x-exedev-email\n  bind: 10.0.0.5\n  allowed_users: [\"me@example.com\"]\n")
+	st := state.ForConfig(t.TempDir())
+	writeRemotePID(t, st, os.Getpid())
+	writeRemotePAT(t, st, 0o600)
+
+	var got healthzProbe
+	var dialed string
+	p := healthyRemoteProbes()
+	p.dial = func(addr string) error { dialed = addr; return nil }
+	p.remoteHealthz = func(hp healthzProbe) (int, error) {
+		got = hp
+		return 200, nil
+	}
+	if r := checkRemote(context.Background(), app, st, p, nil); !r.ok {
+		t.Fatalf("expected pass, got %+v", r)
+	}
+	if dialed != "10.0.0.5:8445" || got.Addr != "10.0.0.5:8445" {
+		t.Fatalf("liveness dialed %q, healthz dialed %q; want the bind address", dialed, got.Addr)
+	}
+	if got.Header != "X-Exedev-Email" || got.Login != "me@example.com" {
+		t.Fatalf("probe identity = %+v, want the configured header in canonical form", got)
+	}
+}
+
+// The probe's Host is the loopback name the proxy's Host gate admits for
+// host-side probes, even when it dials a non-loopback bind address.
+func TestRemoteHealthzProbeSendsTheLoopbackHost(t *testing.T) {
+	var gotHost, gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost, gotHeader = r.Host, r.Header.Get("X-Exedev-Email")
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	status, err := remoteHealthzProbe(healthzProbe{Addr: addr, Port: 8445, Header: "X-Exedev-Email", Login: "me@example.com"})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("probe: %d, %v", status, err)
+	}
+	if gotHost != "127.0.0.1:8445" || gotHeader != "me@example.com" {
+		t.Fatalf("Host %q, header %q", gotHost, gotHeader)
+	}
+}
+
+// Each weakening setting gets a warning row — shown, with a fix, and never
+// counted as a failure — and a default remote block passes plainly.
+func TestCheckRemoteExposure(t *testing.T) {
+	base := "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+	if r := checkRemoteExposure(loadInstance(t, base)); !r.ok || r.fix != "" {
+		t.Fatalf("default remote: want a plain pass, got %+v", r)
+	}
+	if r := checkRemoteExposure(loadInstance(t, "")); !r.ok || r.fix != "" {
+		t.Fatalf("remote off: want a plain pass, got %+v", r)
+	}
+	for name, extra := range map[string]string{
+		"non-loopback bind":    "  bind: 10.0.0.5\n",
+		"wildcard bind":        "  bind: 0.0.0.0\n  allow_wildcard_bind: true\n",
+		"trust_forwarded_host": "  trust_forwarded_host: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := checkRemoteExposure(loadInstance(t, base+extra))
+			if !r.ok || r.fix == "" || r.detail == "" {
+				t.Fatalf("want a warning row (ok with a fix), got %+v", r)
+			}
+		})
 	}
 }
 

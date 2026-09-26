@@ -2,8 +2,13 @@ package config
 
 import (
 	"cmp"
+	"fmt"
+	"net"
+	"net/textproto"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stevegeek/lever/internal/opsig"
@@ -162,6 +167,79 @@ func (a *App) EffectiveAllowedPorts() []int {
 // which the container runtime mirrors onto the host at the same number.
 func (a *App) EffectiveRemoteLoginPort() int {
 	return cmp.Or(max(a.Remote.LoginPort, 0), DefaultRemoteLoginPort)
+}
+
+// DefaultRemoteIdentityHeader is remote.identity_header when unset: the
+// header `tailscale serve` puts the tailnet login in.
+const DefaultRemoteIdentityHeader = "Tailscale-User-Login"
+
+// DefaultRemoteBind is remote.bind when unset: host loopback only.
+const DefaultRemoteBind = "127.0.0.1"
+
+// EffectiveRemoteIdentityHeader is the header the proxy reads the verified
+// login from, in canonical form (the form net/http keys headers by).
+func (a *App) EffectiveRemoteIdentityHeader() string {
+	return textproto.CanonicalMIMEHeaderKey(cmp.Or(strings.TrimSpace(a.Remote.IdentityHeader), DefaultRemoteIdentityHeader))
+}
+
+// EffectiveRemoteBind is the address the proxy listens on.
+func (a *App) EffectiveRemoteBind() string {
+	return cmp.Or(strings.TrimSpace(a.Remote.Bind), DefaultRemoteBind)
+}
+
+// RemoteBindLoopback reports whether the proxy listens on loopback only — the
+// default, and the posture every other remote-access check assumes.
+func (a *App) RemoteBindLoopback() bool {
+	ip := net.ParseIP(a.EffectiveRemoteBind())
+	return ip != nil && ip.IsLoopback()
+}
+
+// RemoteBindWildcard reports whether remote.bind is 0.0.0.0 or "::".
+func (a *App) RemoteBindWildcard() bool {
+	ip := net.ParseIP(a.EffectiveRemoteBind())
+	return ip != nil && ip.IsUnspecified()
+}
+
+// RemoteListenAddr is the host:port the proxy binds.
+func (a *App) RemoteListenAddr() string {
+	return net.JoinHostPort(a.EffectiveRemoteBind(), strconv.Itoa(a.EffectiveRemotePort()))
+}
+
+// RemoteProbeAddr is the host:port a HOST-SIDE caller dials to reach the proxy
+// (`lever apply`'s bind wait, `lever doctor`, `lever remote status`): the bind
+// address itself, or the loopback of the same family for a wildcard bind,
+// which a specific address cannot be dialled as.
+func (a *App) RemoteProbeAddr() string {
+	host := a.EffectiveRemoteBind()
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "127.0.0.1"
+		if ip.To4() == nil {
+			host = "::1"
+		}
+	}
+	return net.JoinHostPort(host, strconv.Itoa(a.EffectiveRemotePort()))
+}
+
+// RemoteWarnings are the remote settings that load but weaken a default
+// protection, one sentence each. `lever apply`/`up` and `lever remote serve`
+// print them, and `lever doctor` shows each as a warning row, so an operator
+// who chose them is reminded what they rest on. Empty with remote off.
+func (a *App) RemoteWarnings() []string {
+	if !a.RemoteEnabled() {
+		return nil
+	}
+	var out []string
+	if !a.RemoteBindLoopback() {
+		out = append(out, fmt.Sprintf("remote.bind is %s, not loopback: anything that can reach %s can set %s to any login "+
+			"and ride the operator's hub session, so the host firewall must admit only the authenticating front to that port",
+			a.EffectiveRemoteBind(), a.RemoteListenAddr(), a.EffectiveRemoteIdentityHeader()))
+	}
+	if a.Remote.TrustForwardedHost {
+		out = append(out, "remote.trust_forwarded_host is on: the proxy's Host check (its DNS-rebinding defence) reads "+
+			"X-Forwarded-Host, which any client that reaches the listener directly can set, so that defence now rests on "+
+			"only the front being able to reach the listener")
+	}
+	return out
 }
 
 // EffectiveAutoReenrol is the natural-lapse healer gate: the configured value,

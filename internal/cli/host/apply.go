@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -140,8 +142,11 @@ type remoteController struct {
 	configPath string
 	selfExe    string // the binary re-exec'd as `remote serve`; see applyOpts.SelfExe
 	port       int    // app.EffectiveRemotePort()
-	version    string // this binary, for the reuse stamp
-	cfgHash    string // brokerctl.RemoteConfigHash(app), for the reuse stamp
+	// probeHost is the address the bind wait dials: host of
+	// app.RemoteProbeAddr(), "" = 127.0.0.1 (the default loopback bind).
+	probeHost string
+	version   string // this binary, for the reuse stamp
+	cfgHash   string // brokerctl.RemoteConfigHash(app), for the reuse stamp
 	// startTimeout/startInterval bound awaitListening's wait for the spawned
 	// proxy to bind; zero means remoteProxyStartTimeout/Interval. Set short by
 	// tests whose stand-in never binds.
@@ -150,7 +155,9 @@ type remoteController struct {
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
 }
 
-func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", rc.port) }
+func (rc *remoteController) addr() string {
+	return net.JoinHostPort(cmp.Or(rc.probeHost, "127.0.0.1"), strconv.Itoa(rc.port))
+}
 
 // Start spawns `lever remote serve <config>` as a daemonized child so it
 // outlives the apply invocation.
@@ -824,6 +831,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			if p, ok := registry.ProfileFor(app.Backend); ok {
 				cmd.Printf("backend: %s\n", p.Summary())
 			}
+			printRemoteWarnings(cmd, app)
 			if dryRun {
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					if s.TarPath != "" {
@@ -1137,6 +1145,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		configPath: configPath,
 		selfExe:    selfExe,
 		port:       app.EffectiveRemotePort(),
+		probeHost:  remoteProbeHost(app),
 		version:    cli.VersionString(),
 		cfgHash:    brokerctl.RemoteConfigHash(app),
 		log:        w.log,

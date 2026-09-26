@@ -19,6 +19,13 @@ type RemoteIdentity struct {
 	BaseURL      string
 	AllowedUsers []string
 	LoginPort    int
+	// The front's contract (issue #38): which header carries the login, where
+	// the proxy listens, and whether the Host check reads X-Forwarded-Host.
+	// Each is captured once, at startup, like the fields above.
+	IdentityHeader     string
+	Bind               string
+	AllowWildcardBind  bool
+	TrustForwardedHost bool
 	// Name selects the JAIL the proxy dials and Backend gates which
 	// transport it uses. Renaming the instance would otherwise leave a
 	// running proxy fronting the OLD machine's hub while apply happily

@@ -33,3 +33,25 @@ func TestPrintDoctorReportSanitizesRows(t *testing.T) {
 		t.Fatalf("output:\n%q\nwant:\n%q", got, want)
 	}
 }
+
+// TestPrintDoctorReportWarningRows: a warning row (warnResult) prints with
+// "!" and its fix, and does not count as a failure — doctor's exit status is
+// for faults, and a warning is a setting the operator chose.
+func TestPrintDoctorReportWarningRows(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	checks := []checkResult{
+		{"broker running", true, "pid 1", ""},
+		warnResult("remote exposure", "remote.bind is 10.0.0.5", "firewall it"),
+	}
+	if failed := printDoctorReport(cmd, checks); failed != 0 {
+		t.Fatalf("failed = %d, want 0: a warning is not a failure", failed)
+	}
+	want := "✓ broker running — pid 1\n" +
+		"! remote exposure — remote.bind is 10.0.0.5\n" +
+		"    fix: firewall it\n"
+	if got := out.String(); got != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", got, want)
+	}
+}

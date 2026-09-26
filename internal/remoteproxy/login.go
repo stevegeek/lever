@@ -494,7 +494,7 @@ func (d *LoginDriver) recordLogin(operator string, status int, err error) {
 
 // unnamedOperator is the identity asserted when the gate hands the driver no
 // login — which is every request while remote.allowed_users is unset: the
-// allowlist is the only check that ever verifies Tailscale-User-Login, so with
+// allowlist is the only check that ever verifies the identity header, so with
 // it empty the header is an unverified claim and the gate withholds it (see
 // gate.operatorFor). It is a placeholder identity for the hub's user row, not
 // a claim about who is connected; setting allowed_users is what makes the
@@ -504,16 +504,35 @@ const (
 	unnamedOperatorEmail = "lever-operator@lever.local"
 )
 
-// identityFor turns the tailnet login the proxy already verified into the
-// claims the hub records. The email is the login itself: scion keys its user
-// row on the email, so the hub ends up naming exactly the identity that
-// passed the allowed_users gate, and two different operators get two different
-// hub users rather than sharing one.
+// IDEmailDomain is the domain identityFor gives a login that is not an email
+// address — a front's opaque user id, such as exe.dev's X-ExeDev-UserID — so
+// that it still becomes a distinct hub email. config.validRemoteLogin keeps
+// the same domain (and the unnamed operator's address) out of allowed_users,
+// so no listed login can alias another's hub user; a test pins that the two
+// packages agree.
+const IDEmailDomain = "id.lever.local"
+
+// identityFor turns the login the proxy already verified into the claims the
+// hub records. scion keys its user row on the email, so the hub ends up
+// naming exactly the identity that passed the allowed_users gate, and two
+// different operators get two different hub users rather than sharing one.
+//
+// The email is the login itself when it contains "@" — a Tailscale login
+// ("you@github") or an email a front asserts (X-ExeDev-Email). A login
+// without one is a user id, and becomes <id>@IDEmailDomain: a hub user row
+// needs an email-shaped key, and a synthesized domain that nobody can receive
+// mail at keeps it from ever being mistaken for a real address.
+// config.validRemoteLogin restricts such ids to characters that make a plain
+// local part. The subject and display name stay the login as sent.
 func identityFor(login string) Identity {
 	if login == "" {
 		return Identity{Subject: unnamedOperator, Email: unnamedOperatorEmail, Name: "Lever operator"}
 	}
-	return Identity{Subject: "lever-remote:" + login, Email: login, Name: login}
+	email := login
+	if !strings.Contains(login, "@") {
+		email = login + "@" + IDEmailDomain
+	}
+	return Identity{Subject: "lever-remote:" + login, Email: email, Name: login}
 }
 
 // HubUserEmails is the set of hub user emails the proxy's sign-ins can

@@ -21,17 +21,29 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	}
 
 	for name, mutate := range map[string]func(*config.App){
-		"allowed_users": func(a *config.App) { a.Remote.AllowedUsers = []string{"me@example.com"} },
-		"base_url":      func(a *config.App) { a.Remote.BaseURL = "https://other.ts.net" },
-		"port":          func(a *config.App) { a.Remote.Port = 9445 },
-		"login_port":    func(a *config.App) { a.Remote.LoginPort = 8449 },
-		"enabled":       func(a *config.App) { a.Remote.Enabled = false },
+		"allowed_users":        func(a *config.App) { a.Remote.AllowedUsers = []string{"me@example.com"} },
+		"base_url":             func(a *config.App) { a.Remote.BaseURL = "https://other.ts.net" },
+		"port":                 func(a *config.App) { a.Remote.Port = 9445 },
+		"login_port":           func(a *config.App) { a.Remote.LoginPort = 8449 },
+		"enabled":              func(a *config.App) { a.Remote.Enabled = false },
+		"identity_header":      func(a *config.App) { a.Remote.IdentityHeader = "X-ExeDev-Email" },
+		"bind":                 func(a *config.App) { a.Remote.Bind = "10.0.0.5" },
+		"allow_wildcard_bind":  func(a *config.App) { a.Remote.AllowWildcardBind = true },
+		"trust_forwarded_host": func(a *config.App) { a.Remote.TrustForwardedHost = true },
 	} {
 		changed := &config.App{Remote: base.Remote}
 		mutate(changed)
 		if RemoteConfigHash(changed) == h {
 			t.Errorf("changing %s did not change the hash — the running proxy would keep the old value", name)
 		}
+	}
+
+	// Writing the default out, or the header in another case, is not a change.
+	spelled := &config.App{Remote: base.Remote}
+	spelled.Remote.IdentityHeader = "tailscale-user-login"
+	spelled.Remote.Bind = "127.0.0.1"
+	if RemoteConfigHash(spelled) != h {
+		t.Error("spelling out the default identity header or bind must not bounce the proxy")
 	}
 
 	// Broker/worker config is not the proxy's to care about.

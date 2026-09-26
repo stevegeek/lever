@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -408,68 +409,62 @@ func (a *App) validateOperator() error {
 	return nil
 }
 
-// validateRemote rejects a remote block that could not serve safely: an
-// unvalidated backend, a port colliding with the broker's listeners, a proxy
-// port the jail is allowed to dial, a missing or malformed base_url, or a
-// blank allowed_users entry (which would pin to nothing and read as "allow
-// none" while acting as "allow this header value" with an empty string).
-// Skipped entirely while disabled, so a stale port/base_url left from a
-// previous config doesn't block loading until remote is re-enabled.
+// validateRemote rejects a remote block that could not serve safely: a port
+// colliding with the broker's listeners, a proxy port the jail is allowed to
+// dial, a missing or malformed base_url, an identity header the proxy must
+// not trust, a bind address the jail could reach, or an allowed_users entry
+// that is blank or could not be a single login. Skipped entirely while
+// disabled, so a stale port/base_url left from a previous config doesn't
+// block loading until remote is re-enabled.
+//
+// Both backends are accepted. The proxy dials the hub THROUGH the jail
+// (remoteproxy.JailDial), which needs no guest→host forwarding, and the login
+// path's one guest→host hop — the forwarder's dial to the provider on
+// host loopback — is the same hop every agent's broker connection makes, over
+// the same host alias and the same LEVER_EGRESS grant, on both. What differs
+// on Lima is only that nothing is mirrored: lever's Lima template ignores
+// every guest→host port forward, so the guest issuer port never appears on
+// the host at all (see GuestLoginIssuerPort). The 8446 checks below are
+// therefore needed on OrbStack only, and harmless on Lima.
 func (a *App) validateRemote() error {
 	if !a.Remote.Enabled {
 		return nil
-	}
-	if a.Backend != BackendOrbstack {
-		// NOT a reachability limit. The proxy dials the hub THROUGH the jail
-		// (remoteproxy.JailDial), which every backend supports and which needs
-		// no guest→host forwarding at all — that was the old rationale, and it
-		// no longer describes the transport. The gate stays only because the
-		// Lima path has never been live-validated; lifting it is a live-test
-		// question, not a code one.
-		//
-		// Rejecting at load time rather than at serve time closes a trap:
-		// without this check the config loads, `apply` returns 0, and the
-		// proxy child spawned by `lever remote serve` silently dies into
-		// remote.log. newRemoteServeCmd carries the same check at runtime
-		// (internal/cli/remote.go) as belt-and-braces defense-in-depth.
-		return fmt.Errorf("config: remote: requires the orbstack backend in v1 (the Lima path is not live-validated yet)")
 	}
 	rp := a.EffectiveRemotePort()
 	if rp == a.EffectiveJailPort() || rp == a.EffectiveAdminPort() {
 		return fmt.Errorf("config: remote: port %d collides with a broker listener", rp)
 	}
 	if rp == GuestLoginIssuerPort {
-		// Same reason as login_port below: the container runtime mirrors the
-		// jail's login forwarder onto this host port, so whichever of lever's
-		// two host listeners names it cannot bind. The proxy's failure is loud
-		// now (apply waits for it to bind), but the guard belongs on both
+		// Same reason as login_port below: OrbStack mirrors the jail's login
+		// forwarder onto this host port, so whichever of lever's two host
+		// listeners names it cannot bind. The proxy's failure is loud now
+		// (apply waits for it to bind), but the guard belongs on both
 		// listeners, not just the one that met the failure first.
 		return fmt.Errorf("config: remote: port %d is the port the jail's login forwarder is mirrored onto "+
 			"by the container runtime, so the proxy cannot bind it — pick another", rp)
 	}
 	if slices.Contains(a.Manager.AllowPorts, rp) {
 		// Not a bind collision like the checks above — a trust-boundary one.
-		// The proxy's gate rests on "only `tailscale serve` reaches this
-		// loopback listener", which is what makes it safe for the proxy to
-		// believe the Tailscale-User-Login header it is handed (see
-		// listenLoopback and the package doc's stated precondition in
-		// internal/remoteproxy). A port listed in manager.allow_ports gets an
-		// egress ACCEPT for jail→host on exactly that number
-		// (EffectiveAllowedPorts → internal/egress), so naming the proxy's port
-		// there hands every jailed agent a direct route to the gate: it sets
-		// the header itself and rides the operator's injected hub session,
-		// which carries agent.attach on every agent in the project. That is the
-		// cross-agent escalation the per-agent netns closed in v0.7.0,
-		// re-opened by one line of config.
+		// The proxy's gate rests on "only the authenticating front reaches
+		// this listener", which is what makes it safe for the proxy to
+		// believe the identity header it is handed (see listenProxy and the
+		// package doc's stated precondition in internal/remoteproxy). A port
+		// listed in manager.allow_ports gets an egress ACCEPT for jail→host
+		// on exactly that number (EffectiveAllowedPorts → internal/egress),
+		// so naming the proxy's port there hands every jailed agent a direct
+		// route to the gate: it sets the header itself and rides the
+		// operator's injected hub session, which carries agent.attach on
+		// every agent in the project. That is the cross-agent escalation the
+		// per-agent netns closed in v0.7.0, re-opened by one line of config.
 		//
 		// remote.login_port is deliberately NOT rejected: the guest's login
 		// forwarder exists to reach it, EffectiveAllowedPorts grants it on
 		// purpose, and what answers there is the OIDC provider, which mints
 		// nothing without an in-process call (internal/remoteproxy/oidc.go).
 		return fmt.Errorf("config: remote: manager.allow_ports lists %d, which is the remote proxy's own port — "+
-			"that grant lets any jailed agent reach the proxy directly and forge the Tailscale-User-Login header "+
+			"that grant lets any jailed agent reach the proxy directly and forge the %s header "+
 			"it trusts, riding the operator's hub session (agent.attach on every agent in the project); remove %d from "+
-			"manager.allow_ports, or move the proxy with remote.port", rp, rp)
+			"manager.allow_ports, or move the proxy with remote.port", rp, a.EffectiveRemoteIdentityHeader(), rp)
 	}
 	lp := a.EffectiveRemoteLoginPort()
 	if lp == a.EffectiveJailPort() || lp == a.EffectiveAdminPort() {
@@ -477,8 +472,8 @@ func (a *App) validateRemote() error {
 	}
 	if lp == rp {
 		// Two listeners, deliberately: the proxy answers the operator's
-		// browser through `tailscale serve`, the provider answers the hub's
-		// back channel from inside the jail. One port cannot be both.
+		// browser through the front, the provider answers the hub's back
+		// channel from inside the jail. One port cannot be both.
 		return fmt.Errorf("config: remote: login_port %d collides with the proxy port", lp)
 	}
 	if lp == GuestLoginIssuerPort {
@@ -502,10 +497,161 @@ func (a *App) validateRemote() error {
 	if err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" {
 		return fmt.Errorf("config: remote: base_url %q must be an absolute https URL", a.Remote.BaseURL)
 	}
+	if err := validRemoteIdentityHeader(a.EffectiveRemoteIdentityHeader()); err != nil {
+		return err
+	}
+	if err := a.validateRemoteBind(); err != nil {
+		return err
+	}
 	for _, au := range a.Remote.AllowedUsers {
-		if strings.TrimSpace(au) == "" {
-			return fmt.Errorf("config: remote: allowed_users contains an empty entry")
+		if err := validRemoteLogin(au); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// validateRemoteBind accepts the proxy's listen address only where the jail
+// cannot reach it.
+//
+// The proxy believes whatever identity header arrives, so everything that
+// can open a connection to the listener is, to the proxy, the front. Two
+// audiences matter and the rules below keep both out:
+//
+//   - The jail. Loopback is reached from the jail only through the host
+//     alias, and validateRemote already refuses the proxy port in
+//     manager.allow_ports. A non-loopback address is reached directly, so it
+//     must be one the jail's egress chain DROPs in every posture
+//     (egress.DroppedForJail: RFC 1918, link-local, CGNAT/tailnet, ULA). A
+//     public address is refused: under open egress (the subscription
+//     posture) any agent could dial it and forge the header.
+//   - Everyone else. That is the operator's host firewall, which lever cannot
+//     see; RemoteWarnings and a doctor row say so.
+//
+// The wildcard listens on every host address, public ones included, so it is
+// refused unless allow_wildcard_bind acknowledges exactly that. A hostname is
+// refused: which address it names can change after the check.
+func (a *App) validateRemoteBind() error {
+	if a.Remote.AllowWildcardBind && !a.RemoteBindWildcard() {
+		return fmt.Errorf("config: remote: allow_wildcard_bind is set, but bind is %q, not 0.0.0.0 or \"::\" — drop it", a.EffectiveRemoteBind())
+	}
+	b := a.EffectiveRemoteBind()
+	ip := net.ParseIP(b)
+	switch {
+	case ip == nil:
+		return fmt.Errorf("config: remote: bind %q must be an IP address (no hostname: the address a name resolves to can change after this check)", b)
+	case ip.IsLoopback():
+		return nil
+	case ip.IsUnspecified():
+		if !a.Remote.AllowWildcardBind {
+			return fmt.Errorf("config: remote: bind %q listens on every host address, public ones included — anything that reaches "+
+				"any of them can set %s to any login, and a public address is reachable from the jail under open egress. Bind "+
+				"the one private address the front dials, or set allow_wildcard_bind: true to accept this", b, a.EffectiveRemoteIdentityHeader())
+		}
+		return nil
+	case !egress.DroppedForJail(ip):
+		return fmt.Errorf("config: remote: bind %s is not an address the jail's egress rules drop, so a jailed agent could dial "+
+			"the proxy directly and set %s to any login; bind a private (RFC 1918, CGNAT, link-local or ULA) address "+
+			"the front dials, or 127.0.0.1", b, a.EffectiveRemoteIdentityHeader())
+	}
+	return nil
+}
+
+// refusedIdentityHeaders are headers the proxy must never take a login from.
+// Each is set by the BROWSER or by any hop on the way rather than overwritten
+// by the front alone: credentials (Authorization, Cookie), routing and
+// provenance the proxy or the hub already reads (Host, Origin, Forwarded,
+// X-Forwarded-*), hop-by-hop headers, and the headers scion's own auth reads,
+// which the proxy strips before forwarding (remoteproxy.clientIdentityHeader).
+// Trusting one of those would let a browser, or a hop that appends instead of
+// overwriting, choose the identity.
+var refusedIdentityHeaders = []string{
+	"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie",
+	"Host", "Origin", "Referer", "Forwarded", "Via",
+	"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port", "X-Real-Ip",
+	"Connection", "Keep-Alive", "Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+	"Content-Length", "Content-Type", "User-Agent",
+	"X-Api-Key", "X-Goog-Iap-Jwt-Assertion",
+}
+
+// refusedIdentityHeaderPrefixes are refused header families: Sec-* (browser
+// fetch metadata the proxy reads), X-Scion-* and X-Forwarded-User-* (scion's
+// agent, broker and trusted-proxy identity headers), and Access-Control-*.
+var refusedIdentityHeaderPrefixes = []string{"Sec-", "X-Scion-", "X-Forwarded-User-", "Access-Control-"}
+
+// validRemoteIdentityHeader checks remote.identity_header (given in canonical
+// form): an HTTP token, and not a header the proxy must not trust.
+// Tailscale-* is allowed — Tailscale-User-Login is the default.
+func validRemoteIdentityHeader(h string) error {
+	if h == "" {
+		return fmt.Errorf("config: remote: identity_header is empty")
+	}
+	for i := 0; i < len(h); i++ {
+		if !isHeaderTokenChar(h[i]) {
+			return fmt.Errorf("config: remote: identity_header %q is not a valid HTTP header name", h)
+		}
+	}
+	for _, r := range refusedIdentityHeaders {
+		if strings.EqualFold(h, r) {
+			return fmt.Errorf("config: remote: identity_header %q is refused: it carries a browser credential, routing, or an "+
+				"identity the proxy strips, not a login only the front sets", h)
+		}
+	}
+	for _, p := range refusedIdentityHeaderPrefixes {
+		if len(h) >= len(p) && strings.EqualFold(h[:len(p)], p) {
+			return fmt.Errorf("config: remote: identity_header %q is refused: %s* headers are set by the browser or read by "+
+				"scion as an identity, never a login only the front sets", h, p)
+		}
+	}
+	return nil
+}
+
+// isHeaderTokenChar reports whether c is an RFC 9110 tchar.
+func isHeaderTokenChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+}
+
+// remoteIDEmailDomain is the domain remoteproxy.identityFor gives a login
+// with no "@" (a front's user id, say X-ExeDev-UserID) so that it becomes a
+// hub email; remoteproxy_test pins that the two constants agree. The unnamed
+// operator's own address is lever-operator@lever.local.
+const (
+	remoteIDEmailDomain      = "id.lever.local"
+	remoteUnnamedOperatorKey = "lever-operator@lever.local"
+)
+
+// userIDChars are what a login without "@" may carry: it becomes the local
+// part of a synthesized hub email, and must stay one without quoting.
+var userIDChars = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
+
+// validRemoteLogin checks one remote.allowed_users entry: it is compared
+// exactly with the front's header value and becomes a hub user's email, so it
+// must be ONE login. The proxy refuses a comma-joined header value outright
+// (remoteproxy.gate.authorize), and an entry with a comma, whitespace or a
+// control character could never match a value that passes that check.
+func validRemoteLogin(l string) error {
+	if strings.TrimSpace(l) == "" {
+		return fmt.Errorf("config: remote: allowed_users contains an empty entry")
+	}
+	for _, r := range l {
+		if r == ',' || r <= ' ' || r == 0x7f {
+			return fmt.Errorf("config: remote: allowed_users entry %q must be a single login: no commas, whitespace or control characters", l)
+		}
+	}
+	local, domain, hasAt := strings.Cut(l, "@")
+	switch {
+	case !hasAt && !userIDChars.MatchString(local):
+		return fmt.Errorf("config: remote: allowed_users entry %q has no \"@\", so it becomes the hub email %q; "+
+			"use only letters, digits and . _ + - in it", l, l+"@"+remoteIDEmailDomain)
+	case hasAt && (strings.EqualFold(domain, remoteIDEmailDomain) || strings.EqualFold(l, remoteUnnamedOperatorKey)):
+		// Those addresses are lever's own: a user id's synthesized email,
+		// and the unnamed operator's. Listing one would make two different
+		// logins the same hub user.
+		return fmt.Errorf("config: remote: allowed_users entry %q is an address lever synthesizes for other logins; list the login itself", l)
 	}
 	return nil
 }

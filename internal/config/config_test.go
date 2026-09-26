@@ -1505,29 +1505,24 @@ func TestRemoteExplicitPortHonoured(t *testing.T) {
 	}
 }
 
-// remote.enabled on a lima backend must fail at config load: the Lima path is
-// not live-validated, and without this check `apply` returns 0 while the proxy
-// child silently dies into remote.log — a trap this closes at the source.
-// See newRemoteServeCmd's own runtime gate (internal/cli/remote.go), kept as
-// belt-and-braces defense-in-depth alongside this load-time check.
-//
-// The rejection must not blame guest→host forwarding. The proxy dials through
-// the jail now, so a reader chasing that reason would be chasing a problem
-// that cannot exist.
-func TestRemoteRequiresOrbstackBackend(t *testing.T) {
-	_, err := LoadNoHostChecks(writeConfig(t, "name: x\nbackend: lima\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n"))
-	testutil.WantErrContaining(t, err, "orbstack")
-	if strings.Contains(err.Error(), "forwarding") {
-		t.Fatalf("error must not cite guest→host forwarding as the reason, got %v", err)
-	}
-}
-
-// The same config on the orbstack backend must still load cleanly — the new
-// backend check must not reject the backend remote access actually supports.
-func TestRemoteOrbstackBackendAccepted(t *testing.T) {
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-	if _, err := LoadNoHostChecks(writeConfig(t, body)); err != nil {
-		t.Fatalf("orbstack + remote.enabled should load cleanly: %v", err)
+// Both backends load with remote on (issue #38). The Lima rejection is gone:
+// the proxy dials the hub through the jail, and the login forwarder's dial to
+// the host is the same hop, over the same alias and egress grant, that every
+// agent's broker connection makes on Lima.
+func TestRemoteAcceptedOnBothBackends(t *testing.T) {
+	for _, backend := range KnownBackends {
+		t.Run(backend, func(t *testing.T) {
+			body := "name: x\nbackend: " + backend + "\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
+			app, err := LoadNoHostChecks(writeConfig(t, body))
+			if err != nil {
+				t.Fatalf("%s + remote.enabled should load cleanly: %v", backend, err)
+			}
+			// The login port is granted on both, or the forwarder's dial is
+			// dropped by the jail's egress chain.
+			if !slices.Contains(app.EffectiveAllowedPorts(), app.EffectiveRemoteLoginPort()) {
+				t.Fatalf("%s: the login port must be in the egress allowlist", backend)
+			}
+		})
 	}
 }
 
@@ -1629,5 +1624,151 @@ func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T
 	want := []int{on.EffectiveJailPort(), 3305, on.EffectiveRemoteLoginPort()}
 	if got := on.EffectiveAllowedPorts(); !slices.Equal(got, want) {
 		t.Fatalf("remote on: EffectiveAllowedPorts() = %v, want %v (the forwarder cannot reach the host without it)", got, want)
+	}
+}
+
+const remoteOn = "name: x\nbackend: lima\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://vm.exe.xyz:8445\"\n"
+
+// identity_header defaults to Tailscale's, and any other front's header is
+// accepted in canonical form.
+func TestRemoteIdentityHeader(t *testing.T) {
+	app, err := LoadNoHostChecks(writeConfig(t, remoteOn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.EffectiveRemoteIdentityHeader(); got != "Tailscale-User-Login" {
+		t.Fatalf("default identity header = %q", got)
+	}
+	for in, want := range map[string]string{
+		"X-ExeDev-Email":      "X-Exedev-Email",
+		"x-exedev-userid":     "X-Exedev-Userid",
+		"Tailscale-User-Name": "Tailscale-User-Name",
+		"X-Forwarded-Email":   "X-Forwarded-Email",
+	} {
+		app, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  identity_header: "+in+"\n"))
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if got := app.EffectiveRemoteIdentityHeader(); got != want {
+			t.Fatalf("%s: EffectiveRemoteIdentityHeader() = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A header the browser or any hop sets, or that scion reads as an identity,
+// must never become the login source; neither may something that is not a
+// header name at all.
+func TestRemoteIdentityHeaderRefusals(t *testing.T) {
+	for _, h := range []string{
+		"Authorization", "cookie", "Host", "Origin", "X-Forwarded-For", "X-Forwarded-Host",
+		"Forwarded", "X-Real-IP", "Sec-Fetch-Site", "X-Scion-Agent-Token", "X-Forwarded-User-Email",
+		"X-API-Key", "X-Goog-IAP-JWT-Assertion", "Proxy-Authorization", "Transfer-Encoding",
+		"\"X Email\"", "\"X-Email:\"", "\"X-Émail\"",
+	} {
+		t.Run(h, func(t *testing.T) {
+			rejectNoHost(t, remoteOn+"  identity_header: "+h+"\n", "identity_header")
+		})
+	}
+}
+
+// bind defaults to loopback; a non-loopback address must be one the jail's
+// egress rules drop, the wildcard needs its acknowledgement, and a hostname
+// is refused.
+func TestRemoteBind(t *testing.T) {
+	app, err := LoadNoHostChecks(writeConfig(t, remoteOn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !app.RemoteBindLoopback() || app.RemoteListenAddr() != "127.0.0.1:8445" || app.RemoteProbeAddr() != "127.0.0.1:8445" {
+		t.Fatalf("default bind: loopback=%v listen=%s probe=%s", app.RemoteBindLoopback(), app.RemoteListenAddr(), app.RemoteProbeAddr())
+	}
+	if len(app.RemoteWarnings()) != 0 {
+		t.Fatalf("default remote block must warn about nothing, got %v", app.RemoteWarnings())
+	}
+
+	for bind, probe := range map[string]string{
+		"10.0.0.5":     "10.0.0.5:8445",
+		"192.168.1.20": "192.168.1.20:8445",
+		"100.64.1.2":   "100.64.1.2:8445",
+		"\"fd00::5\"":  "[fd00::5]:8445",
+		"\"::1\"":      "[::1]:8445",
+	} {
+		t.Run("accepts "+bind, func(t *testing.T) {
+			app, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: "+bind+"\n"))
+			if err != nil {
+				t.Fatalf("bind %s: %v", bind, err)
+			}
+			if got := app.RemoteProbeAddr(); got != probe {
+				t.Fatalf("RemoteProbeAddr() = %q, want %q", got, probe)
+			}
+			if app.RemoteBindLoopback() == (len(app.RemoteWarnings()) > 0) {
+				t.Fatalf("a non-loopback bind must warn and a loopback one must not; loopback=%v warnings=%v", app.RemoteBindLoopback(), app.RemoteWarnings())
+			}
+		})
+	}
+
+	for bind, want := range map[string]string{
+		"203.0.113.9":     "egress rules drop",
+		"8.8.8.8":         "egress rules drop",
+		"\"2001:db8::1\"": "egress rules drop",
+		"0.0.0.0":         "allow_wildcard_bind",
+		"\"::\"":          "allow_wildcard_bind",
+		"myhost.local":    "IP address",
+		"localhost":       "IP address",
+	} {
+		t.Run("refuses "+bind, func(t *testing.T) {
+			rejectNoHost(t, remoteOn+"  bind: "+bind+"\n", "bind", want)
+		})
+	}
+
+	// The wildcard with its acknowledgement loads, warns, and is probed on
+	// loopback — nothing listens on 0.0.0.0 to dial.
+	app, err = LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: 0.0.0.0\n  allow_wildcard_bind: true\n"))
+	if err != nil {
+		t.Fatalf("acknowledged wildcard: %v", err)
+	}
+	if app.RemoteProbeAddr() != "127.0.0.1:8445" || len(app.RemoteWarnings()) == 0 || !app.RemoteBindWildcard() {
+		t.Fatalf("wildcard: probe=%s warnings=%v", app.RemoteProbeAddr(), app.RemoteWarnings())
+	}
+	// An acknowledgement with no wildcard to acknowledge is a mistake.
+	rejectNoHost(t, remoteOn+"  allow_wildcard_bind: true\n", "allow_wildcard_bind")
+}
+
+// trust_forwarded_host loads (off by default) and always warns when on.
+func TestRemoteTrustForwardedHostWarns(t *testing.T) {
+	app, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  trust_forwarded_host: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := app.RemoteWarnings()
+	if len(w) != 1 || !strings.Contains(w[0], "X-Forwarded-Host") {
+		t.Fatalf("RemoteWarnings() = %v", w)
+	}
+	off, _ := LoadNoHostChecks(writeConfig(t, strings.Replace(remoteOn, "enabled: true", "enabled: false", 1)+"  trust_forwarded_host: true\n  bind: 10.0.0.5\n"))
+	if off == nil || len(off.RemoteWarnings()) != 0 {
+		t.Fatal("remote off must warn about nothing")
+	}
+}
+
+// allowed_users entries are compared exactly with the header and become hub
+// emails, so each must be one login: no comma, whitespace or control
+// character; a user id (no "@") must make a plain local part; and lever's
+// own synthesized addresses are not listable.
+func TestRemoteAllowedUsersShape(t *testing.T) {
+	ok := []string{"you@github", "me@example.com", "usr_01HZX.a-b+c", "12345"}
+	app, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  allowed_users: [\""+strings.Join(ok, "\", \"")+"\"]\n"))
+	if err != nil {
+		t.Fatalf("well-formed logins must load: %v", err)
+	}
+	if !slices.Equal(app.Remote.AllowedUsers, ok) {
+		t.Fatalf("allowed_users = %v", app.Remote.AllowedUsers)
+	}
+	for _, bad := range []string{
+		"a@x.com, b@x.com", "a@x.com,b@x.com", "me @example.com", "tab\there", "usr/1", "usr:1",
+		"alice@id.lever.local", "lever-operator@lever.local",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users: [%q]\n", bad), "allowed_users")
+		})
 	}
 }

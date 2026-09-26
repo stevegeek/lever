@@ -24,7 +24,7 @@ import (
 )
 
 func newRemoteCmd(bf BackendFactory) *cobra.Command {
-	c := &cobra.Command{Use: "remote", Short: "Run / inspect the remote-access proxy (tailnet-facing)"}
+	c := &cobra.Command{Use: "remote", Short: "Run / inspect the remote-access proxy (behind tailscale serve or another authenticating front)"}
 	c.AddCommand(newRemoteServeCmd(bf), newRemoteStatusCmd())
 	return c
 }
@@ -57,8 +57,9 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			cmd.Printf("remote proxy %q serving on 127.0.0.1:%d (login provider on 127.0.0.1:%d, issuer %s)\n",
-				app.Name, app.EffectiveRemotePort(), provider.Port(), provider.IssuerURL())
+			printRemoteWarnings(cmd, app)
+			cmd.Printf("remote proxy %q serving on %s, identity header %s (login provider on 127.0.0.1:%d, issuer %s)\n",
+				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader(), provider.Port(), provider.IssuerURL())
 			return serveRemote(ctx, app, st, provider, handler)
 		},
 	}
@@ -78,16 +79,9 @@ func loadRemoteApp(args []string) (string, *config.App, error) {
 	if !app.RemoteEnabled() {
 		return "", nil, errRemoteDisabled
 	}
-	// Orbstack-only for now — but NOT because of how the proxy
-	// reaches the hub. It dials through the jail
-	// (remoteproxy.JailDial), which is backend-agnostic and needs no
-	// guest→host forwarding at all. The gate stays because the Lima
-	// path has never been live-validated; lifting it is a live-test
-	// question, not a code one. Same wording in config.validateRemote,
-	// which fires first for every path that loads config.
-	if app.Backend != "orbstack" {
-		return "", nil, fmt.Errorf("remote access requires the orbstack backend in v1 (the Lima path is not live-validated yet)")
-	}
+	// Both backends: the proxy dials the hub through the jail
+	// (remoteproxy.JailDial), which is backend-agnostic, and
+	// config.validateRemote says why the login path is too.
 	return path, app, nil
 }
 
@@ -129,10 +123,13 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		ServeHost:   remoteServeHost(app.Remote.BaseURL),
 		// So the Host gate admits `lever doctor`'s loopback /healthz
 		// probe without widening the allowlist beyond this one port.
-		ListenPort:   app.EffectiveRemotePort(),
-		AllowedUsers: app.Remote.AllowedUsers,
-		Session:      login,
-		Audit:        auditFn,
+		ListenPort:         app.EffectiveRemotePort(),
+		AllowedUsers:       app.Remote.AllowedUsers,
+		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
+		TrustForwardedHost: app.Remote.TrustForwardedHost,
+		BindHost:           remoteBindHost(app),
+		Session:            login,
+		Audit:              auditFn,
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
@@ -149,10 +146,15 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 // inheriting the record of an apply-started one. See ServeConfig.Stamp.
 func serveRemote(ctx context.Context, app *config.App, st state.State, provider *remoteproxy.Provider, handler http.Handler) error {
 	return remoteproxy.Serve(ctx, remoteproxy.ServeConfig{
-		Port:     app.EffectiveRemotePort(),
-		Handler:  handler,
-		PIDPath:  st.RemotePID(),
-		Provider: provider,
+		Port: app.EffectiveRemotePort(),
+		Bind: app.EffectiveRemoteBind(),
+		// config.validateRemoteBind already refused every non-loopback
+		// address the jail could reach, and the wildcard without its own
+		// acknowledgement, so a config that loaded may bind what it names.
+		AllowNonLoopback: !app.RemoteBindLoopback(),
+		Handler:          handler,
+		PIDPath:          st.RemotePID(),
+		Provider:         provider,
 		Stamp: func() error {
 			return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app))
 		},
@@ -255,6 +257,35 @@ func jailPrefixFn(bf BackendFactory, backendName, machine string, warn io.Writer
 	}
 }
 
+// remoteBindHost is the proxy's non-loopback, non-wildcard bind address, which
+// the Host gate admits as "<addr>:<port>" (remoteproxy.Config.BindHost), or ""
+// for a loopback or wildcard bind.
+func remoteBindHost(app *config.App) string {
+	if app.RemoteBindLoopback() || app.RemoteBindWildcard() {
+		return ""
+	}
+	return app.EffectiveRemoteBind()
+}
+
+// printRemoteWarnings prints config.App.RemoteWarnings on stderr, one line
+// each: the remote settings an operator chose that weaken a default
+// protection, restated on every bring-up so they are never forgotten.
+func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
+	for _, w := range app.RemoteWarnings() {
+		cmd.PrintErrf("lever: warning: %s\n", w)
+	}
+}
+
+// remoteProbeHost is the host part of app.RemoteProbeAddr(): what a host-side
+// caller dials to reach the proxy.
+func remoteProbeHost(app *config.App) string {
+	h, _, err := net.SplitHostPort(app.RemoteProbeAddr())
+	if err != nil {
+		return "127.0.0.1"
+	}
+	return h
+}
+
 // remoteServeHost derives the proxy's ServeHost from the configured
 // base_url: url.Parse(...).Host, which includes the port when base_url
 // carries one — the Handler matches a request's Origin host:port exactly,
@@ -301,7 +332,7 @@ func newRemoteStatusCmd() *cobra.Command {
 			case !alive:
 				cmd.Printf("proxy: not running (remote.pid names pid %d, but that process is gone)\n", pid)
 			default:
-				addr := fmt.Sprintf("127.0.0.1:%d", port)
+				addr := app.RemoteProbeAddr()
 				if err := tcpDial(addr); err != nil {
 					cmd.Printf("proxy: pid %d recorded but nothing is listening on %s\n", pid, addr)
 				} else {
@@ -309,7 +340,13 @@ func newRemoteStatusCmd() *cobra.Command {
 				}
 			}
 
-			cmd.Printf("tailscale command: tailscale serve --bg --https=443 http://127.0.0.1:%d\n", port)
+			cmd.Printf("identity header: %s\n", app.EffectiveRemoteIdentityHeader())
+			if app.RemoteBindLoopback() {
+				cmd.Printf("tailscale command: tailscale serve --bg --https=443 http://127.0.0.1:%d\n", port)
+			}
+			for _, w := range app.RemoteWarnings() {
+				cmd.Printf("warning: %s\n", w)
+			}
 			// The provider's port is worth printing because it is the second
 			// host listener this instance owns: a second remote-enabled
 			// instance needs its own, and config validation can only catch a
@@ -326,7 +363,7 @@ func newRemoteStatusCmd() *cobra.Command {
 				// (validateRemote), so this can no longer describe a proxy
 				// that's up and 403ing everything — remote access simply
 				// isn't turned on yet.
-				cmd.Println("base_url not set — remote access needs both `remote.enabled: true` and `remote.base_url` (the tailnet serve hostname) set in lever.yaml; set both, then `lever apply`")
+				cmd.Println("base_url not set — remote access needs both `remote.enabled: true` and `remote.base_url` (the front's public https origin) set in lever.yaml; set both, then `lever apply`")
 			}
 
 			if _, err := os.Stat(st.RemotePAT()); err == nil {

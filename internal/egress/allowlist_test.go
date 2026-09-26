@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -274,6 +275,41 @@ func TestBuildRulesDNSAcceptsForwardTargetsBeforeAliasDropOpenOnly(t *testing.T)
 	for i := range a {
 		if a[i].Family != b[i].Family || !slices.Equal(a[i].Args, b[i].Args) {
 			t.Fatalf("rule %d differs: %v vs %v", i, a[i], b[i])
+		}
+	}
+}
+
+// DroppedForJail must agree with the ranges BuildRules actually drops, in
+// both postures: config accepts a non-loopback remote.bind only on these.
+func TestDroppedForJail(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"10.1.2.3":     true,
+		"172.20.0.1":   true,
+		"192.168.64.1": true,
+		"100.101.1.2":  true, // tailnet (CGNAT)
+		"169.254.1.2":  true,
+		"fd00::1":      true,
+		"fe80::1":      true,
+		"8.8.8.8":      false,
+		"203.0.113.9":  false,
+		"2001:db8::1":  false,
+		"127.0.0.1":    false,
+		"::1":          false,
+	} {
+		if got := DroppedForJail(net.ParseIP(addr)); got != want {
+			t.Errorf("DroppedForJail(%s) = %v, want %v", addr, got, want)
+		}
+	}
+	// Every range DroppedForJail names must be emitted as a DROP in the open
+	// posture too, or the helper would promise more than the chain enforces.
+	rules := BuildRules("192.168.5.2", "", nil, false)
+	joined := ""
+	for _, r := range rules {
+		joined += r.Render() + "\n"
+	}
+	for _, c := range append(append([]string{}, privateV4...), ipv6Local...) {
+		if !strings.Contains(joined, "-d "+c+" -j DROP") {
+			t.Errorf("open posture does not DROP %s", c)
 		}
 	}
 }

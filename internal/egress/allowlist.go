@@ -220,3 +220,23 @@ func (f Family) Binary() string {
 
 // Render is a debug helper: "iptables -A OUTPUT ...".
 func (r Rule) Render() string { return r.Family.Binary() + " " + strings.Join(r.Args, " ") }
+
+// DroppedForJail reports whether ip lies in a range the jail's egress rules
+// DROP in EVERY posture (the private/special-use ranges of rule 3 in
+// BuildRulesDNS), so no jailed process can open a connection to it, whatever
+// port it listens on. It is what makes a non-loopback host listener safe from
+// the jail: config.validateRemote accepts a non-loopback remote.bind only on
+// such an address. Loopback is NOT in the set — the jail reaches host
+// loopback through the host alias, which the alias rules govern per port.
+func DroppedForJail(ip net.IP) bool {
+	ranges := privateV4
+	if ip.To4() == nil {
+		ranges = ipv6Local
+	}
+	for _, c := range ranges {
+		if _, n, err := net.ParseCIDR(c); err == nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}

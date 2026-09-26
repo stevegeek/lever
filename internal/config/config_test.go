@@ -1565,11 +1565,21 @@ func TestScionWebAssets(t *testing.T) {
 	}
 }
 
-// Remote access cross-compiles the guest's login forwarder at apply time, so
-// it needs a Go toolchain. `scion.binary:` is the mode where that is a NEW
-// requirement (the others already need Go for scion itself), and the check is
-// at config load because the apply-time failure would land after the
-// bootstrap-token step has already touched the hub.
+// withForwarderPrebuilt makes checkRemoteToolchain see a lever that does (or
+// does not) embed the prebuilt login forwarder, whatever this test binary
+// was built with.
+func withForwarderPrebuilt(t *testing.T, ok bool) {
+	t.Helper()
+	old := remoteForwarderPrebuilt
+	remoteForwarderPrebuilt = func() bool { return ok }
+	t.Cleanup(func() { remoteForwarderPrebuilt = old })
+}
+
+// A lever without the prebuilt login forwarder cross-compiles it at apply
+// time, so it needs a Go toolchain. `scion.binary:` is the mode where that
+// is the ONLY reason for one (the others already need Go for scion itself),
+// and the check is at config load because the apply-time failure would land
+// after the bootstrap-token step has already touched the hub.
 func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "scion-linux")
 	if err := os.WriteFile(bin, []byte("not really a binary"), 0o755); err != nil {
@@ -1579,8 +1589,17 @@ func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
 		"\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 
 	t.Setenv("PATH", "")
+	withForwarderPrebuilt(t, false)
 	_, err := Load(writeConfig(t, body))
-	testutil.WantErrContaining(t, err, "Go toolchain")
+	testutil.WantErrContaining(t, err, "Go toolchain", "make install")
+
+	// A lever that embeds the forwarder for every guest arch needs no Go at
+	// all: the build-free scion.binary host issue #38 asked for.
+	withForwarderPrebuilt(t, true)
+	if _, err := Load(writeConfig(t, body)); err != nil {
+		t.Fatalf("with a prebuilt forwarder embedded, no toolchain is needed: %v", err)
+	}
+	withForwarderPrebuilt(t, false)
 
 	// With remote off, the same config is fine: nothing cross-compiles.
 	off := strings.Replace(body, "enabled: true", "enabled: false", 1)

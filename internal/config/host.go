@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/provision/loginfwd"
 )
 
 // ToolSupervisorPATH is the EXACT PATH the broker supervisor spawns command
@@ -42,7 +44,8 @@ func LookPathIn(bin, pathList string) (string, error) {
 
 // CheckHost runs the probes Validate deliberately leaves out because they
 // read the host: the tree's own .git, each supervised tool's binary, the
-// api_key_file's mode, and the Go toolchain remote access needs. Load runs it
+// api_key_file's mode, and the Go toolchain remote access needs when this
+// lever carries no prebuilt login forwarder. Load runs it
 // after Validate; LoadNoHostChecks skips it for callers (tests, offline
 // inspection) that only need the shape.
 func (a *App) CheckHost() error {
@@ -108,25 +111,35 @@ func (a *App) checkNonGitTree() error {
 	return nil
 }
 
-// checkRemoteToolchain: remote access needs a Go toolchain on the host — the
-// guest-side login forwarder is cross-compiled for the guest's architecture
-// at apply time (internal/backend/guest.EnsureHubLogin).
+// remoteForwarderPrebuilt reports whether this lever carries the guest login
+// forwarder prebuilt for every guest architecture. A variable so tests can
+// answer both ways without depending on how the test binary was built.
+var remoteForwarderPrebuilt = loginfwd.PrebuiltComplete
+
+// checkRemoteToolchain: remote access needs the guest-side login forwarder, a
+// small linux binary installed into the jail at apply time
+// (internal/backend/guest.EnsureHubLogin). A release or `make install` lever
+// embeds it for every guest architecture, and then no toolchain is needed. A
+// lever built without that step (`go build`, `go install`) cross-compiles it
+// at apply time and needs Go (loginfwd.Forwarder).
 //
-// Only `scion.binary:` is checked here, because that is the mode this
-// requirement is NEW for — the other two already need Go to build scion
-// itself, and their missing-toolchain diagnosis lives in `lever doctor`
-// and in the build's own failure. Checking at config load rather than
-// during apply is deliberate: EnsureHubLogin runs in the scion-server
-// step, well after the bootstrap-token step has opened a mint window and
-// touched the hub, and "your host has no compiler" is not something to
-// discover half way through that.
+// Only `scion.binary:` is checked here, because that is the one mode that
+// needs no Go for scion itself — the other two do, and their
+// missing-toolchain diagnosis lives in `lever doctor` and in the build's own
+// failure. Checking at config load rather than during apply is deliberate:
+// EnsureHubLogin runs in the scion-server step, well after the
+// bootstrap-token step has opened a mint window and touched the hub, and
+// "your host has no compiler" is not something to discover half way through
+// that.
 func (a *App) checkRemoteToolchain() error {
-	if a.Remote.Enabled && a.Scion.Binary != "" {
-		if _, err := exec.LookPath("go"); err != nil {
-			return fmt.Errorf("config: remote: remote access needs a Go toolchain on this host — it cross-compiles the " +
-				"guest's login forwarder at apply time — but `go` is not on PATH. Install Go (or put a REAL go on PATH, " +
-				"not just an asdf/mise shim), or set remote.enabled: false")
-		}
+	if !a.Remote.Enabled || a.Scion.Binary == "" || remoteForwarderPrebuilt() {
+		return nil
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		return fmt.Errorf("config: remote: this lever carries no prebuilt guest login forwarder, so remote access " +
+			"cross-compiles it at apply time and needs a Go toolchain — but `go` is not on PATH. Use a release build of " +
+			"lever (or build it with `make install`, which embeds the forwarder), install Go (a REAL go on PATH, not just " +
+			"an asdf/mise shim), or set remote.enabled: false")
 	}
 	return nil
 }

@@ -37,7 +37,7 @@ func buildForwarderForHost(t *testing.T) string {
 	bin := filepath.Join(dir, "lever-login-forward")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", bin, ".")
+	cmd := exec.CommandContext(ctx, "go", append(append([]string{"build"}, buildFlags...), "-o", bin, ".")...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOPROXY=off")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -173,7 +173,7 @@ func TestBuildCrossCompilesWithTheResolvedGo(t *testing.T) {
 		}
 	}
 	build := f.Calls[len(f.Calls)-1]
-	if build.Name != "/opt/go/bin/go" || strings.Join(build.Args, " ") != "build -trimpath -o "+out+" ." {
+	if build.Name != "/opt/go/bin/go" || strings.Join(build.Args, " ") != "build -trimpath -ldflags=-s -w -o "+out+" ." {
 		t.Fatalf("build call = %+v", build)
 	}
 	if build.Dir != filepath.Dir(out) {

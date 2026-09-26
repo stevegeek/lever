@@ -45,15 +45,17 @@ rm -f ` + LoginForwardPath + `
 echo "FOUND 1"
 `
 
-// ensureLoginForwarder builds the forwarder for the guest's architecture,
-// installs it if the guest does not already hold those exact bytes, and makes
-// sure it is running with the arguments this spec asks for.
+// ensureLoginForwarder gets the forwarder for the guest's architecture (the
+// copy embedded in this lever, or a host-side build when there is none — see
+// loginfwd.Forwarder), installs it if the guest does not already hold those
+// exact bytes, and makes sure it is running with the arguments this spec asks
+// for.
 func (g Guest) ensureLoginForwarder(ctx context.Context, spec types.HubLogin) error {
 	arch, err := g.GOARCH(ctx)
 	if err != nil {
 		return fmt.Errorf("guest: detect guest architecture: %w", err)
 	}
-	bin, err := loginfwd.Build(ctx, g.Host, arch, g.Machine)
+	bin, _, err := loginfwd.Forwarder(ctx, g.Host, arch, g.Machine)
 	if err != nil {
 		return fmt.Errorf("guest: %w", err)
 	}

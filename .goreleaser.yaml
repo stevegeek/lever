@@ -3,6 +3,12 @@ version: 2
 before:
   hooks:
     - go mod tidy
+    # Embed the guest login forwarder (linux/amd64 + arm64) so a released
+    # lever needs no Go toolchain for remote access (issue #38). The test then
+    # fails the release if the embed is missing or stale, rather than shipping
+    # a lever that silently falls back to an apply-time cross-compile.
+    - go run ./internal/provision/loginfwd/genprebuilt
+    - sh -c "LEVER_REQUIRE_PREBUILT_LOGINFWD=1 go test -count=1 -run TestPrebuiltLoginForwarderEmbedded ./internal/provision/loginfwd"
 
 builds:
   - id: lever

@@ -30,10 +30,17 @@ import (
 // closed posture.
 type ClosedChainRunner struct {
 	*proc.FakeRunner
-	Host              string
-	Open              bool
+	Host string
+	Open bool
+	// V6Open answers the ip6tables probe with no chain even while the v4
+	// chain is closed: a closed apply interrupted between its two commits.
+	V6Open            bool
 	Flushed, Resolved bool
 }
+
+// ClosedChain6 is the `ip6tables -S LEVER_EGRESS` output of the same closed
+// posture (every closed ruleset ends each family with the catch-all DROP).
+const ClosedChain6 = "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d fd07::fe/128 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d fd07::fe/128 -j DROP\n-A LEVER_EGRESS -j DROP\n"
 
 // ClosedChain is the `iptables -S LEVER_EGRESS` output of a live closed
 // posture: loopback accepted, one allowlisted port to the alias, the alias
@@ -44,6 +51,10 @@ func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[strin
 	argv := strings.Join(args, " ")
 	if name == r.Host {
 		switch {
+		case strings.Contains(argv, "ip6tables -S LEVER_EGRESS"):
+			if !r.Open && !r.V6Open {
+				return proc.Result{Stdout: ClosedChain6}, nil
+			}
 		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
 			if !r.Open {
 				return proc.Result{Stdout: ClosedChain}, nil
@@ -284,6 +295,14 @@ func AssertEgressRules(t *testing.T, f *proc.FakeRunner, port string) {
 	}
 }
 
+// AssertAtomicCommitOrder requires exactly two commits, IPv6 then IPv4.
+func AssertAtomicCommitOrder(t *testing.T, f *proc.FakeRunner) {
+	t.Helper()
+	if bins, _ := RestoreCommits(f); len(bins) != 2 || bins[0] != "ip6tables-restore" || bins[1] != "iptables-restore" {
+		t.Fatalf("want one ip6tables-restore then one iptables-restore commit, got %v", bins)
+	}
+}
+
 // AssertAtomicCommit pins how ApplyEgress replaces the chain: never a flush,
 // the alias resolved first (under the live chain), then ONE
 // iptables-restore --noflush commit per family that declares the chain (which
@@ -294,13 +313,15 @@ func AssertAtomicCommit(t *testing.T, f *proc.FakeRunner, alias string) {
 		t.Fatalf("ApplyEgress must never flush LEVER_EGRESS (that opens egress until the rules are back): %+v", f.Calls[i])
 	}
 	getentIdx := f.CallIndex(proc.ArgvContains("getent ahosts " + alias))
-	commitIdx := f.CallIndex(proc.ArgvContains("exec iptables-restore --noflush"))
+	commitIdx := f.CallIndex(proc.ArgvContains("exec ip6tables-restore --noflush"))
 	if getentIdx < 0 || commitIdx < 0 || getentIdx > commitIdx {
 		t.Fatalf("resolve (idx %d) must precede the commit (idx %d)", getentIdx, commitIdx)
 	}
 	bins, inputs := RestoreCommits(f)
-	if len(bins) != 2 || bins[0] != "iptables-restore" || bins[1] != "ip6tables-restore" {
-		t.Fatalf("want one iptables-restore and one ip6tables-restore commit, got %v", bins)
+	// IPv6 first, IPv4 last: the v4 closed marker the I2 skip reads must
+	// only ever land after v6 is final.
+	if len(bins) != 2 || bins[0] != "ip6tables-restore" || bins[1] != "iptables-restore" {
+		t.Fatalf("want one ip6tables-restore then one iptables-restore commit, got %v", bins)
 	}
 	for i, in := range inputs {
 		if !strings.HasPrefix(in, "*filter\n:LEVER_EGRESS - [0:0]\n") || !strings.HasSuffix(in, "COMMIT\n") {

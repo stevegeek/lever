@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/daemon"
 	"github.com/stevegeek/lever/internal/egress"
 )
 
@@ -28,15 +29,18 @@ import (
 // default ACCEPT: every running agent could reach the host alias on any port
 // (the broker's unauthenticated admin port, the remote proxy) and the private
 // ranges (a private remote.bind). An apply that failed or was interrupted in
-// that window left it that way until the next good apply. Now the old chain
-// stays in force until the commit, and a failed commit leaves it in force.
+// that window left it that way until the next good apply. Now each family's
+// old chain stays in force until its commit, and a failed commit leaves it in
+// force. The two commits are ordered (IPv6, then IPv4) and the I2 skip needs
+// both families closed; see the commit site.
 //
 // That is also why the alias is resolved WITH the old chain in force. The old
 // code flushed first so that a closed chain's catch-all DROP would not block
-// the DNS lookup; here, when resolve fails, the alias is read back from the
-// live chain instead (liveAliases) — every chain lever writes names it in its
-// per-port ACCEPTs. Only when neither works does ApplyEgress fail, leaving the
-// live chain untouched: failing closed, never reopening to find out.
+// the DNS lookup; here, when resolve fails under a CLOSED live chain, the
+// alias is read back from it instead (liveAliases), with a warning — every
+// chain lever writes names it in its per-port ACCEPTs. Otherwise ApplyEgress
+// fails, leaving the live chain untouched: failing closed, never reopening
+// to find out.
 //
 // What remains: the rules are not persisted in the guest. After a guest
 // reboot there is no LEVER_EGRESS chain until the next `lever apply`/`up`
@@ -76,10 +80,19 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 	}
 	v4, v6, err = resolve(ctx)
 	if err != nil {
-		lv4, lv6 := g.liveAliases(ctx)
-		if lv4 == "" && lv6 == "" {
-			return "", "", false, fmt.Errorf("%w (and the live %s chain names no host alias to fall back to; it is left as it is)", err, egress.Chain)
+		// Fall back to the alias the live chain names ONLY when that chain is
+		// closed: its catch-all DROP is then the expected reason the lookup
+		// failed (DNS is dropped by design), and the alias it names is the
+		// one lever resolved when it wrote it. Under an open or absent chain
+		// nothing lever wrote blocks DNS, so a failed lookup is a real fault
+		// (guest DNS broken, alias gone), and papering over it with an old
+		// address would hide it — fail instead, leaving the chain alone.
+		lv4, lv6, closed := g.liveAliases(ctx)
+		if !closed || (lv4 == "" && lv6 == "") {
+			return "", "", false, fmt.Errorf("%w (the live %s chain is left as it is; the alias is read back from it only when it is closed and names one)", err, egress.Chain)
 		}
+		daemon.Warnf("egress: could not resolve the host alias (%v) — the live closed %s chain blocks DNS; "+
+			"using the alias it names instead: v4 %q, v6 %q", err, egress.Chain, lv4, lv6)
 		v4, v6 = lv4, lv6
 	}
 	var forwards []egress.DNSForward
@@ -89,10 +102,17 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 		}
 	}
 	rules := egress.BuildRulesDNS(v4, v6, allowedPorts, closedInternet, forwards)
-	for _, fam := range []egress.Family{egress.IPv4, egress.IPv6} {
-		if err := g.commitEgressChain(ctx, fam, rules); err != nil {
-			return "", "", false, err
-		}
+	// IPv6 first, IPv4 last. Each commit is atomic, but the pair is not: a
+	// failure or an interrupt between them leaves one family new and one
+	// old. The I2 skip reads the closed marker from BOTH families
+	// (existingClosedAlias), and committing v4 last means a v4 closed marker
+	// is only ever written after v6 is final — so a half-applied closed
+	// posture is never mistaken for a finished one and skipped forever.
+	if err := g.commitEgressChain(ctx, egress.IPv6, rules); err != nil {
+		return "", "", false, fmt.Errorf("%w — nothing was committed: IPv4 and IPv6 both keep their previous %s chains", err, egress.Chain)
+	}
+	if err := g.commitEgressChain(ctx, egress.IPv4, rules); err != nil {
+		return "", "", false, fmt.Errorf("%w — the new IPv6 %s chain IS committed; IPv4 keeps its previous chain until the next apply", err, egress.Chain)
 	}
 	return v4, v6, true, nil
 }
@@ -101,26 +121,32 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 // `iptables-restore --noflush` with the chain declared (which empties an
 // existing user chain in the same transaction) and every rule appended, all
 // applied or none. --noflush leaves every other chain and table as it is.
-// A failure leaves the previous chain in force.
+// A failure leaves that FAMILY's previous chain in force; the caller says
+// what happened to the other one.
 func (g Guest) commitEgressChain(ctx context.Context, fam egress.Family, rules []egress.Rule) error {
 	in := egress.RestoreInput(rules, fam)
 	if err := g.pipeInto(ctx, g.RootPrefix, strings.NewReader(in), "exec "+fam.RestoreBinary()+" --noflush"); err != nil {
-		return fmt.Errorf("egress: commit %s (%s); the previous chain stays in force: %w", egress.Chain, fam.RestoreBinary(), err)
+		return fmt.Errorf("egress: commit %s (%s) failed, so that family's previous chain stays in force: %w", egress.Chain, fam.RestoreBinary(), err)
 	}
 	return nil
 }
 
-// liveAliases reads the host-alias addresses back out of the live chain's
+// liveAliases reads the host-alias addresses back out of the live chains'
 // per-port ACCEPTs (`-d <alias>/32|/128 … --dport … -j ACCEPT`), for when
-// resolve cannot run under the live chain (a closed chain's DROP blocks DNS).
-// Empty when there is no chain or it names no alias.
-func (g Guest) liveAliases(ctx context.Context) (v4, v6 string) {
+// resolve cannot run under them, and reports whether either family's chain
+// is closed (carries the catch-all DROP). Each alias is "" when that family
+// has no chain or names none of its own family.
+func (g Guest) liveAliases(ctx context.Context) (v4, v6 string, closed bool) {
 	read := func(bin string, wantV4 bool) string {
 		res, err := g.RootRun(ctx, bin, "-S", egress.Chain)
 		if err != nil {
 			return ""
 		}
-		alias := aliasFromChain(res.Stdout + res.Stderr)
+		out := res.Stdout + res.Stderr
+		if closedChain(out) {
+			closed = true
+		}
+		alias := aliasFromChain(out)
 		// Only an address of the chain's own family: a v4 address in the
 		// ip6tables ruleset (or the reverse) would be a rule that never loads.
 		if ip := net.ParseIP(alias); ip == nil || (ip.To4() != nil) != wantV4 {
@@ -128,7 +154,15 @@ func (g Guest) liveAliases(ctx context.Context) (v4, v6 string) {
 		}
 		return alias
 	}
-	return read("iptables", true), read("ip6tables", false)
+	v4 = read("iptables", true)
+	v6 = read("ip6tables", false)
+	return v4, v6, closed
+}
+
+// closedChain reports whether an `iptables -S` listing of the chain carries
+// the closed posture's catch-all DROP.
+func closedChain(listing string) bool {
+	return strings.Contains(listing, "-A "+egress.Chain+" -j DROP")
 }
 
 // aliasFromChain returns the destination of the first per-port ACCEPT in an
@@ -151,21 +185,28 @@ func aliasFromChain(listing string) string {
 	return ""
 }
 
-// existingClosedAlias returns the v4 host alias already encoded in an ACTIVE
-// closed LEVER_EGRESS chain (i.e. the chain contains the catch-all DROP), so
-// ApplyEgress can leave it untouched (I2).
-// Returns ("", false) when the chain is absent, open (no catch-all DROP), or
-// unreadable — the caller then (re)builds the chain normally. The alias is read
-// from the per-port ACCEPT rule (`-d <ip>/32 … --dport … -j ACCEPT`), so we never
-// need DNS (which the active DROP blocks anyway).
+// existingClosedAlias returns the v4 host alias of a LEVER_EGRESS posture
+// that is closed in BOTH families (each chain carries the catch-all DROP), so
+// ApplyEgress can leave it untouched (I2). Returns ("", false) when either
+// chain is absent, open (no catch-all DROP), or unreadable — the caller then
+// (re)builds both normally. Requiring both matters: a closed apply that
+// committed one family and failed before the other must be finished by the
+// next apply, not skipped as done (ApplyEgress also commits v4 last, so v4
+// alone never looks closed first). The alias is read from the v4 per-port
+// ACCEPT rule (`-d <ip>/32 … --dport … -j ACCEPT`), so no DNS is needed
+// (which the active DROP blocks anyway).
 func (g Guest) existingClosedAlias(ctx context.Context) (string, bool) {
 	res, err := g.RootRun(ctx, "iptables", "-S", egress.Chain)
 	if err != nil {
 		return "", false // chain absent (fresh machine) or unreadable
 	}
 	out := res.Stdout + res.Stderr
-	if !strings.Contains(out, "-A "+egress.Chain+" -j DROP") {
+	if !closedChain(out) {
 		return "", false // not in the closed posture (no catch-all DROP)
+	}
+	res6, err := g.RootRun(ctx, "ip6tables", "-S", egress.Chain)
+	if err != nil || !closedChain(res6.Stdout+res6.Stderr) {
+		return "", false // IPv6 not closed (yet): rebuild both
 	}
 	if alias := aliasFromChain(out); alias != "" {
 		return alias, true

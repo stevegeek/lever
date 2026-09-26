@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -247,5 +248,150 @@ func TestApplyEgressResolverForwardErrorFails(t *testing.T) {
 	dns := func(context.Context, string) ([]egress.DNSForward, error) { return nil, errors.New("boom") }
 	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, dns, []int{8443}, false); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("expected the hook error to surface, got %v", err)
+	}
+}
+
+// listingRunner answers `iptables -S LEVER_EGRESS` and `ip6tables -S
+// LEVER_EGRESS` with fixed listings ("" = no chain), and fails the
+// ip6tables-restore commit while FailV6 is set; everything else falls
+// through to the embedded FakeRunner (scripted by scriptFirewall).
+type listingRunner struct {
+	*proc.FakeRunner
+	V4, V6 string
+	FailV6 bool
+}
+
+func (r *listingRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	argv := strings.Join(args, " ")
+	for _, c := range []struct{ probe, out string }{{"ip6tables -S LEVER_EGRESS", r.V6}, {"iptables -S LEVER_EGRESS", r.V4}} {
+		if strings.Contains(argv, c.probe) {
+			r.Calls = append(r.Calls, proc.Call{Name: name, Args: args})
+			if c.out == "" {
+				return proc.Result{Code: 1}, errors.New("no chain")
+			}
+			return proc.Result{Stdout: c.out}, nil
+		}
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *listingRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r *listingRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if r.FailV6 && strings.Contains(strings.Join(args, " "), "exec ip6tables-restore") {
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args})
+		return proc.Result{Code: 1}, errors.New("ip6tables-restore: boom")
+	}
+	return r.FakeRunner.RunStdin(ctx, stdin, env, name, args...)
+}
+
+func newListingRunner(v4, v6 string) *listingRunner {
+	r := &listingRunner{FakeRunner: proc.NewFakeRunner(), V4: v4, V6: v6}
+	scriptFirewall(r.FakeRunner)
+	return r
+}
+
+// R1: a closed posture that reached only ONE family (v4 closed, v6 open or
+// absent) is not "already closed": the next closed apply must rebuild both,
+// not take the I2 skip and leave v6 open forever.
+func TestApplyEgressDoesNotSkipAHalfClosedPosture(t *testing.T) {
+	for name, v6 := range map[string]string{"v6 chain open": "-N LEVER_EGRESS\n-A LEVER_EGRESS -d fd07::fe/128 -j DROP\n", "v6 chain absent": ""} {
+		t.Run(name, func(t *testing.T) {
+			r := newListingRunner(backendtest.ClosedChain, v6)
+			g := orbGuest(r, "lever-jail")
+			resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }
+			_, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, true)
+			if err != nil || !rebuilt {
+				t.Fatalf("rebuilt=%v err=%v; a half-closed posture must be rebuilt", rebuilt, err)
+			}
+			if bins, _ := backendtest.RestoreCommits(r.FakeRunner); len(bins) != 2 {
+				t.Fatalf("want both families committed, got %v", bins)
+			}
+		})
+	}
+}
+
+// R1: the IPv6 commit fails. Nothing is committed (v6 goes first), the
+// error says so, and a re-apply rebuilds.
+func TestApplyEgressV6CommitFailureThenReapplyRebuilds(t *testing.T) {
+	r := newListingRunner("", "")
+	r.FailV6 = true
+	g := orbGuest(r, "lever-jail")
+	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }
+	_, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, true)
+	if err == nil || rebuilt || !strings.Contains(err.Error(), "nothing was committed") {
+		t.Fatalf("rebuilt=%v err=%v; want a failure that says nothing was committed", rebuilt, err)
+	}
+	if bins, _ := backendtest.RestoreCommits(r.FakeRunner); len(bins) != 1 || bins[0] != "ip6tables-restore" {
+		t.Fatalf("only the (failed) IPv6 commit may have been attempted — the IPv4 closed marker must not land; attempts %v", bins)
+	}
+	// Even had v4 landed, v6 is not closed, so the re-apply is not skipped.
+	r.V4, r.FailV6, r.Calls = backendtest.ClosedChain, false, nil
+	if _, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, true); err != nil || !rebuilt {
+		t.Fatalf("re-apply: rebuilt=%v err=%v; want a rebuild", rebuilt, err)
+	}
+	backendtest.AssertAtomicCommitOrder(t, r.FakeRunner)
+}
+
+// R2: under an OPEN (or absent) chain nothing lever wrote blocks DNS, so a
+// failed resolve is a real fault: no fallback to the chain's old alias.
+func TestApplyEgressNoAliasFallbackUnderAnOpenChain(t *testing.T) {
+	open4 := "-N LEVER_EGRESS\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n"
+	r := newListingRunner(open4, "")
+	g := orbGuest(r, "lever-jail")
+	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns broken") }
+	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, false); err == nil || !strings.Contains(err.Error(), "dns broken") {
+		t.Fatalf("want the resolve failure, got %v", err)
+	}
+	if bins, _ := backendtest.RestoreCommits(r.FakeRunner); len(bins) != 0 {
+		t.Fatalf("nothing may be committed, got %v", bins)
+	}
+}
+
+// R4: the fallback reads each family's alias from ITS OWN chain, and only
+// an address of that family.
+func TestLiveAliasFallbackPerFamily(t *testing.T) {
+	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
+	commits := func(r *listingRunner) (v4, v6 string) {
+		bins, inputs := backendtest.RestoreCommits(r.FakeRunner)
+		for i, b := range bins {
+			if b == "iptables-restore" {
+				v4 = inputs[i]
+			} else {
+				v6 = inputs[i]
+			}
+		}
+		return v4, v6
+	}
+
+	// Both chains closed, each naming its own alias: the v6 commit carries
+	// the v6 alias from ip6tables (not dropped, not read from iptables).
+	r := newListingRunner(backendtest.ClosedChain, backendtest.ClosedChain6)
+	if _, v6, _, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, []int{8443}, false); err != nil {
+		t.Fatalf("ApplyEgress: %v", err)
+	} else if v6 != "fd07::fe" {
+		t.Fatalf("returned v6 alias %q, want fd07::fe from the ip6tables chain", v6)
+	}
+	v4in, v6in := commits(r)
+	if !strings.Contains(v6in, "-d fd07::fe -j DROP") || strings.Contains(v6in, "0.250.250.254") {
+		t.Fatalf("v6 commit must use the ip6tables alias:\n%s", v6in)
+	}
+	if !strings.Contains(v4in, "-d 0.250.250.254 -j DROP") {
+		t.Fatalf("v4 commit must use the iptables alias:\n%s", v4in)
+	}
+
+	// An ip6tables chain naming an IPv4 address (a corrupt or foreign chain)
+	// yields no v6 alias: a v4 address must never reach the v6 ruleset.
+	bad6 := "-N LEVER_EGRESS\n-A LEVER_EGRESS -d 10.9.9.9/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -j DROP\n"
+	r = newListingRunner(backendtest.ClosedChain, bad6)
+	if _, v6, _, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, []int{8443}, false); err != nil {
+		t.Fatalf("ApplyEgress: %v", err)
+	} else if v6 != "" {
+		t.Fatalf("v6 alias %q read from an ip6tables chain naming an IPv4 address", v6)
+	}
+	if _, v6in := commits(r); strings.Contains(v6in, "10.9.9.9") {
+		t.Fatalf("a v4 address reached the v6 ruleset:\n%s", v6in)
 	}
 }

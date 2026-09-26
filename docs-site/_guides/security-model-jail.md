@@ -46,11 +46,17 @@ host's. Validated behaviour and its limits:
 
 **Network egress: two postures.** All lever rules live in a dedicated **`LEVER_EGRESS`** iptables/
 ip6tables chain that `OUTPUT` jumps to (never direct `OUTPUT` rules), so re-apply replaces only that
-chain (idempotent, and it never touches non-lever rules). The replacement is **atomic**: one
-`iptables-restore --noflush` commit per address family empties the chain and loads the whole new
-ruleset in a single transaction, so the old rules stay in force until the new ones are, and a failed
-or interrupted apply leaves the old chain in place. The host alias is resolved under the old chain;
-when that chain blocks DNS, the alias is read back from its own rules. The rules are not persisted
+chain (idempotent, and it never touches non-lever rules). The replacement is **atomic per address
+family**: one `iptables-restore --noflush` commit per family empties the chain and loads the whole
+new ruleset in a single transaction, so within a family the old rules stay in force until the new
+ones are, and a failed commit leaves that family's old chain in place. The two families are
+committed one after the other, IPv6 first and IPv4 last: if the IPv6 commit fails, nothing changes;
+if the IPv4 commit fails (or the apply is interrupted between them), IPv6 has the new rules and IPv4
+the old, and the error says so. The re-apply skip for a live closed instance (below) requires
+**both** families to carry the closed catch-all DROP, so a half-applied closed posture is always
+rebuilt, never skipped. The host alias is resolved under the old chain; when that lookup fails and
+the live chain is closed (whose DROP blocks DNS by design), the alias is read back from its own
+rules, with a warning naming it. Under an open or absent chain a failed lookup fails the apply. The rules are not persisted
 in the guest: after a guest reboot there is no chain until the next `lever apply`/`up`, which applies
 egress before it starts any agent. The posture is chosen by the
 explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
@@ -74,7 +80,7 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
   validates (`internal/cap/ca/rotate.go NewServerCertSource`, which mints via `IssueServerCertSANs`;
   `internal/brokerctl/serve.go` passes the IP from `$LEVER_HOST_ALIAS_IP`, which
   `internal/cli/apply.go` sets on the broker child). Re-applying a *live* closed instance detects the active catch-all DROP
-  and leaves the chain untouched.
+  in both the IPv4 and the IPv6 chain and leaves them untouched.
 
 **Enforcement** lives in the jail's network namespace, for both postures. A **non-privileged** agent
 container is in a separate namespace from the rules and cannot flush them; reaching the rules would

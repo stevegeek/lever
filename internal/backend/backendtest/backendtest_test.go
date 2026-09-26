@@ -119,8 +119,8 @@ func TestAssertHelpers(t *testing.T) {
 	ctx := context.Background()
 	_, _ = f.Run(ctx, nil, "orb", "-m", "m", "getent", "ahosts", "host.orb.internal")
 	v4 := "*filter\n:LEVER_EGRESS - [0:0]\n-A LEVER_EGRESS -d " + HostAliasV4 + " -p tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d " + HostAliasV4 + " -j DROP\nCOMMIT\n"
-	_, _ = f.RunStdin(ctx, strings.NewReader(v4), nil, "orb", "-u", "root", "-m", "m", "bash", "-c", "exec iptables-restore --noflush")
 	_, _ = f.RunStdin(ctx, strings.NewReader("*filter\n:LEVER_EGRESS - [0:0]\nCOMMIT\n"), nil, "orb", "-u", "root", "-m", "m", "bash", "-c", "exec ip6tables-restore --noflush")
+	_, _ = f.RunStdin(ctx, strings.NewReader(v4), nil, "orb", "-u", "root", "-m", "m", "bash", "-c", "exec iptables-restore --noflush")
 	AssertNoSubcommand(t, f, "orb", "create", "start")
 	AssertEgressRules(t, f, "8443")
 	AssertAtomicCommit(t, f, "host.orb.internal")

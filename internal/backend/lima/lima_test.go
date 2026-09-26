@@ -570,11 +570,13 @@ func TestEnsureUpOpenPostureAcceptsLimaDNSForwardTargets(t *testing.T) {
 		t.Fatalf("expected `limactl shell %s sudo iptables -t nat -S LIMADNS`; calls=%+v", vm, r.Calls)
 	}
 	alias := backendtest.HostAliasV4
-	_, inputs := backendtest.RestoreCommits(r.FakeRunner)
-	if len(inputs) == 0 {
-		t.Fatal("no ruleset committed")
+	bins, inputs := backendtest.RestoreCommits(r.FakeRunner)
+	v4 := ""
+	for i, b := range bins {
+		if b == "iptables-restore" {
+			v4 = inputs[i]
+		}
 	}
-	v4 := inputs[0]
 	udp := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -p udp --dport 41234 -j ACCEPT")
 	tcp := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -p tcp --dport 41235 -j ACCEPT")
 	drop := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -j DROP")

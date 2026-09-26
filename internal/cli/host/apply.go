@@ -155,6 +155,22 @@ type remoteController struct {
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
 }
 
+// newRemoteController builds apply's remote-proxy controller for app: where
+// the spawned proxy is waited for (the address it listens on, as a host-side
+// caller dials it) and the stamp it must match.
+func newRemoteController(app *config.App, st state.State, configPath, selfExe string, log logFunc) *remoteController {
+	return &remoteController{
+		state:      st,
+		configPath: configPath,
+		selfExe:    selfExe,
+		port:       app.EffectiveRemotePort(),
+		probeHost:  remoteProbeHost(app),
+		version:    cli.VersionString(),
+		cfgHash:    brokerctl.RemoteConfigHash(app),
+		log:        log,
+	}
+}
+
 func (rc *remoteController) addr() string {
 	return net.JoinHostPort(cmp.Or(rc.probeHost, "127.0.0.1"), strconv.Itoa(rc.port))
 }
@@ -1140,16 +1156,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// — see internal/apply/plan.go) or, in the disabled direction, when
 	// Run's own converge-off reconciliation calls StopRemoteProxy — see
 	// internal/apply/run.go.
-	rc := &remoteController{
-		state:      st,
-		configPath: configPath,
-		selfExe:    selfExe,
-		port:       app.EffectiveRemotePort(),
-		probeHost:  remoteProbeHost(app),
-		version:    cli.VersionString(),
-		cfgHash:    brokerctl.RemoteConfigHash(app),
-		log:        w.log,
-	}
+	rc := newRemoteController(app, st, configPath, selfExe, w.log)
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
 	return w, nil

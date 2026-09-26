@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,44 +42,62 @@ func TestRemoteServeDisabledErrors(t *testing.T) {
 	testutil.WantErrIs(t, err, errRemoteDisabled)
 }
 
-// Lima is no longer gated (issue #38): the login path's only guest→host hop
-// is the one every agent's broker connection makes on both backends. A lima
-// config reaches Serve exactly like an orbstack one — proven, as below, by a
-// bind error on privileged port 1 rather than a gate error.
-func TestRemoteServeLimaBackendPassesGates(t *testing.T) {
-	dir := t.TempDir()
-	p := writeInstanceInto(t, dir, "name: x\nbackend: lima\ntree: workspace\nbroker:\n  llm_auth: subscription\n"+
-		"remote:\n  enabled: true\n  port: 1\n  base_url: \"https://vm.exe.xyz:8445\"\n")
-	t.Chdir(dir)
-
-	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := clitest.Exec(t, cmd, p)
-	if err == nil {
-		t.Fatal("expected a bind error on privileged port 1 (proves the gates passed and Serve was reached)")
+// heldPort binds a loopback port for the life of the test and returns it, so
+// a serve that tries it fails fast with "address already in use".
+func heldPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if errors.Is(err, errRemoteDisabled) || strings.Contains(err.Error(), "orbstack") || strings.Contains(err.Error(), "backend") {
-		t.Fatalf("a lima config must pass the gates; got a gate error instead of a bind error: %v", err)
-	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
 }
 
-func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
-	// This does not exercise the real serve loop (that needs a live jail +
-	// signal handling); it only proves the gate checks let a valid
-	// orbstack+enabled config through to the point where Serve would be
-	// invoked, by using a port that's already bound so Serve fails fast
-	// with a bind error rather than blocking forever.
-	dir := t.TempDir()
-	p := writeInstanceInto(t, dir, instanceYAML("x", "remote:\n  enabled: true\n  port: 1\n  base_url: \"https://mac.tail1234.ts.net\"\n"))
+// serveUntilBind runs `remote serve` for the instance in dir and returns its
+// error, which the callers require to be the proxy's bind failure.
+func serveUntilBind(t *testing.T, dir, p string) error {
+	t.Helper()
+	// The audit log opens before Serve binds; without the state dir the
+	// command would fail there and never reach the bind.
+	if err := os.MkdirAll(filepath.Join(dir, state.DirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(dir)
-
-	cmd := newRemoteServeCmd(defaultFactory)
-	_, err := clitest.Exec(t, cmd, p)
+	_, err := clitest.Exec(t, newRemoteServeCmd(defaultFactory), p)
 	if err == nil {
-		t.Fatal("expected a bind error on privileged port 1 (proves the gates passed and Serve was reached)")
+		t.Fatal("expected the proxy's bind to fail on a held port")
 	}
-	if errors.Is(err, errRemoteDisabled) || strings.Contains(err.Error(), "orbstack") {
-		t.Fatalf("gate checks should have passed; got a gate error instead of a bind error: %v", err)
+	if errors.Is(err, errRemoteDisabled) || strings.Contains(err.Error(), "orbstack") || strings.Contains(err.Error(), "backend") {
+		t.Fatalf("got a gate error instead of the bind error: %v", err)
 	}
+	if !strings.Contains(err.Error(), "remoteproxy: bind") || !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("want the proxy's bind failure (proves the gates passed and Serve was reached), got: %v", err)
+	}
+	return err
+}
+
+// Lima is no longer gated (issue #38): the login path's only guest→host hop
+// is the one every agent's broker connection makes on both backends. A lima
+// config reaches Serve exactly like an orbstack one: it fails at the proxy's
+// bind on a held port, not at a gate.
+func TestRemoteServeLimaBackendPassesGates(t *testing.T) {
+	dir := t.TempDir()
+	port, login := heldPort(t), freeRemotePort(t)
+	p := writeInstanceInto(t, dir, fmt.Sprintf("name: x\nbackend: lima\ntree: workspace\nbroker:\n  llm_auth: subscription\n"+
+		"remote:\n  enabled: true\n  port: %d\n  login_port: %d\n  base_url: \"https://vm.exe.xyz:8445\"\n", port, login))
+	serveUntilBind(t, dir, p)
+}
+
+// This does not exercise the real serve loop (that needs a live jail +
+// signal handling); it only proves the gate checks let a valid
+// orbstack+enabled config through to the point where Serve binds, by using
+// a port that's already held so Serve fails fast rather than blocking.
+func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
+	dir := t.TempDir()
+	port, login := heldPort(t), freeRemotePort(t)
+	p := writeInstanceInto(t, dir, instanceYAML("x", fmt.Sprintf("remote:\n  enabled: true\n  port: %d\n  login_port: %d\n  base_url: \"https://mac.tail1234.ts.net\"\n", port, login)))
+	serveUntilBind(t, dir, p)
 }
 
 // freeRemotePort claims a loopback port from the kernel and releases it, so a

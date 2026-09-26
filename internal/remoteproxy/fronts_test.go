@@ -76,12 +76,25 @@ func TestIdentityHeaderDecidesAllowedUsers(t *testing.T) {
 }
 
 // With the default header, duplicates and comma-joined values are refused
-// too — the rule is the gate's, not the front's.
+// too — the rule is the gate's, not the front's. The denial is the comma
+// check itself, not the allowlist miss that would follow it: here the first
+// value IS allowed, so only the comma rule can refuse.
 func TestDefaultHeaderRefusesCommaJoinedLogin(t *testing.T) {
-	status, _ := frontProbe(t, Config{AllowedUsers: []string{"a@github"}}, "",
-		http.Header{"Tailscale-User-Login": {"a@github,b@github"}})
-	if status != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", status)
+	for _, v := range []string{"a@github,b@github", "b@github, a@github"} {
+		var lines []AuditLine
+		hub := newRecordingHub(t)
+		h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
+			AllowedUsers: []string{"a@github", "a@github,b@github", "b@github, a@github"}, Audit: func(l AuditLine) { lines = append(lines, l) }})
+		req := proxyRequest("GET", "/api/v1/agents", nil)
+		req.Header.Set("Tailscale-User-Login", v)
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		if rw.Code != http.StatusForbidden || hub.hits() != 0 {
+			t.Fatalf("%q: status = %d, hits = %d; want 403 before the hub", v, rw.Code, hub.hits())
+		}
+		if !strings.Contains(rw.Body.String(), "comma-joined") || len(lines) != 1 || lines[0].Decision != DecisionDenyUser {
+			t.Fatalf("%q: want the comma-joined denial, got %q / %+v", v, rw.Body.String(), lines)
+		}
 	}
 }
 
@@ -129,10 +142,21 @@ func TestIdentityHeaderStrippedFromForward(t *testing.T) {
 // X-Forwarded-Host is ignored unless the operator opted in: a rebinding page
 // could otherwise name base_url's host in it.
 func TestForwardedHostIgnoredByDefault(t *testing.T) {
-	status, hub := frontProbe(t, Config{ListenPort: 8445}, "internal-name:8445",
-		http.Header{"X-Forwarded-Host": {testServeHost}})
-	if status != http.StatusForbidden || hub.hits() != 0 {
-		t.Fatalf("status = %d, hits = %d; X-Forwarded-Host must not replace Host by default", status, hub.hits())
+	for _, host := range []string{"internal-name:8445", "10.1.2.3:9000", "127.0.0.1"} {
+		// An IP-literal Host is exactly the case the opt-in would admit, so
+		// it is the one that shows the default really ignores the header.
+		status, hub := frontProbe(t, Config{ListenPort: 8445}, host,
+			http.Header{"X-Forwarded-Host": {testServeHost}})
+		if status != http.StatusForbidden || hub.hits() != 0 {
+			t.Fatalf("Host %s: status = %d, hits = %d; X-Forwarded-Host must not replace Host by default", host, status, hub.hits())
+		}
+	}
+	// And the default does not judge the header at all: repeated or
+	// comma-joined values on an otherwise good request are not refused.
+	for _, xfh := range [][]string{{"a.example", "b.example"}, {"a.example, b.example"}} {
+		if status, _ := frontProbe(t, Config{ListenPort: 8445}, "", http.Header{"X-Forwarded-Host": xfh}); status != 200 {
+			t.Fatalf("X-Forwarded-Host %q with the flag off: status %d, want 200", xfh, status)
+		}
 	}
 }
 
@@ -231,12 +255,16 @@ func TestIDEmailDomainAgreesWithConfig(t *testing.T) {
 	}
 }
 
-// Every header the proxy strips as a client identity (other than Tailscale-*,
-// whose User-Login is the default) must be refused by config as an identity
-// header — trusting one would let a browser or scion-facing caller choose.
+// Every header the proxy strips as a client identity, other than
+// Tailscale-User-Login (the default), must be refused by config as an
+// identity header — trusting one would let a browser, a scion-facing caller
+// or the user's own display settings choose.
 func TestConfigRefusesStrippedIdentityHeaders(t *testing.T) {
 	for _, h := range []string{"Authorization", "Cookie", "X-Scion-Agent-Token", "X-Scion-Broker-Signature",
-		"X-Forwarded-User-Email", "X-Goog-Iap-Jwt-Assertion", "X-Api-Key"} {
+		"X-Forwarded-User-Email", "X-Goog-Iap-Jwt-Assertion", "X-Api-Key",
+		// Tailscale-* is stripped too, and only its User-Login is a unique
+		// login; the display name and avatar must be refused.
+		"Tailscale-User-Name", "Tailscale-User-Profile-Pic"} {
 		if h != "Authorization" && h != "Cookie" && !clientIdentityHeader(h) {
 			t.Fatalf("test premise: %s is not a stripped header", h)
 		}

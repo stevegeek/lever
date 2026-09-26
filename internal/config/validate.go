@@ -503,10 +503,19 @@ func (a *App) validateRemote() error {
 	if err := a.validateRemoteBind(); err != nil {
 		return err
 	}
+	seen := map[string]string{}
 	for _, au := range a.Remote.AllowedUsers {
 		if err := validRemoteLogin(au); err != nil {
 			return err
 		}
+		// scion lowercases emails, so two entries that differ only in case
+		// would be one hub user — and one ceiling, one role binding —
+		// while the proxy treats them as two logins.
+		key := strings.ToLower(au)
+		if prev, dup := seen[key]; dup {
+			return fmt.Errorf("config: remote: allowed_users lists %q and %q, which the hub treats as the same user (it lowercases emails); keep one", prev, au)
+		}
+		seen[key] = au
 	}
 	return nil
 }
@@ -557,8 +566,35 @@ func (a *App) validateRemoteBind() error {
 		return fmt.Errorf("config: remote: bind %s is not an address the jail's egress rules drop, so a jailed agent could dial "+
 			"the proxy directly and set %s to any login; bind a private (RFC 1918, CGNAT, link-local or ULA) address "+
 			"the front dials, or 127.0.0.1", b, a.EffectiveRemoteIdentityHeader())
+	case ip.To4() == nil && ip.IsLinkLocalUnicast():
+		// fe80::/10 is only listenable with a zone ("fe80::1%eth0"), which
+		// ParseIP (and so this check) does not accept.
+		return fmt.Errorf("config: remote: bind %s is an IPv6 link-local address, which cannot be listened on without an "+
+			"interface zone; bind a ULA, RFC 1918 or CGNAT address instead", b)
+	case a.EffectiveRemoteIdentityHeader() == DefaultRemoteIdentityHeader && inTailnetRange(ip):
+		// The tailnet address itself, with Tailscale's header trusted: any
+		// tailnet peer could connect to it directly — not through
+		// `tailscale serve`, which is what sets and overwrites the header —
+		// and send Tailscale-User-Login with any login it likes.
+		return fmt.Errorf("config: remote: bind %s is a tailnet address, and identity_header is %s: any tailnet peer could connect "+
+			"to it directly and set that header to any login. Keep the default loopback bind and publish it with "+
+			"`tailscale serve`, which sets the header", b, DefaultRemoteIdentityHeader)
 	}
 	return nil
+}
+
+// tailnetRanges are the address ranges Tailscale assigns node addresses in:
+// CGNAT 100.64.0.0/10 and its IPv6 ULA prefix fd7a:115c:a1e0::/48.
+var tailnetRanges = []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"}
+
+// inTailnetRange reports whether ip is in a Tailscale node-address range.
+func inTailnetRange(ip net.IP) bool {
+	for _, c := range tailnetRanges {
+		if _, n, err := net.ParseCIDR(c); err == nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // refusedIdentityHeaders are headers the proxy must never take a login from.
@@ -570,6 +606,9 @@ func (a *App) validateRemoteBind() error {
 // Trusting one of those would let a browser, or a hop that appends instead of
 // overwriting, choose the identity.
 var refusedIdentityHeaders = []string{
+	// Tailscale's display name and avatar: set by `tailscale serve`, but
+	// chosen by the user and not unique, so never an identity.
+	"Tailscale-User-Name", "Tailscale-User-Profile-Pic",
 	"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie",
 	"Host", "Origin", "Referer", "Forwarded", "Via",
 	"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port", "X-Real-Ip",
@@ -595,10 +634,17 @@ func validRemoteIdentityHeader(h string) error {
 			return fmt.Errorf("config: remote: identity_header %q is not a valid HTTP header name", h)
 		}
 	}
+	if strings.Contains(h, "_") {
+		// Legal, but proxies disagree about it: some drop such headers,
+		// some map "_" to "-", so a client could send X_Login and have a
+		// hop deliver it as X-Login next to — or instead of — the front's.
+		return fmt.Errorf("config: remote: identity_header %q contains \"_\"; proxies drop or rewrite such headers inconsistently, "+
+			"so a client-sent variant could reach the proxy as the front's header — use \"-\"", h)
+	}
 	for _, r := range refusedIdentityHeaders {
 		if strings.EqualFold(h, r) {
-			return fmt.Errorf("config: remote: identity_header %q is refused: it carries a browser credential, routing, or an "+
-				"identity the proxy strips, not a login only the front sets", h)
+			return fmt.Errorf("config: remote: identity_header %q is refused: it carries a browser credential, routing, a "+
+				"user-chosen display value, or an identity the proxy strips — not a unique login only the front sets", h)
 		}
 	}
 	for _, p := range refusedIdentityHeaderPrefixes {

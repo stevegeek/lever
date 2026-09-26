@@ -1640,10 +1640,9 @@ func TestRemoteIdentityHeader(t *testing.T) {
 		t.Fatalf("default identity header = %q", got)
 	}
 	for in, want := range map[string]string{
-		"X-ExeDev-Email":      "X-Exedev-Email",
-		"x-exedev-userid":     "X-Exedev-Userid",
-		"Tailscale-User-Name": "Tailscale-User-Name",
-		"X-Forwarded-Email":   "X-Forwarded-Email",
+		"X-ExeDev-Email":    "X-Exedev-Email",
+		"x-exedev-userid":   "X-Exedev-Userid",
+		"X-Forwarded-Email": "X-Forwarded-Email",
 	} {
 		app, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  identity_header: "+in+"\n"))
 		if err != nil {
@@ -1689,7 +1688,6 @@ func TestRemoteBind(t *testing.T) {
 	for bind, probe := range map[string]string{
 		"10.0.0.5":     "10.0.0.5:8445",
 		"192.168.1.20": "192.168.1.20:8445",
-		"100.64.1.2":   "100.64.1.2:8445",
 		"\"fd00::5\"":  "[fd00::5]:8445",
 		"\"::1\"":      "[::1]:8445",
 	} {
@@ -1714,6 +1712,7 @@ func TestRemoteBind(t *testing.T) {
 		"0.0.0.0":         "allow_wildcard_bind",
 		"\"::\"":          "allow_wildcard_bind",
 		"myhost.local":    "IP address",
+		"\"fe80::1\"":     "link-local",
 		"localhost":       "IP address",
 	} {
 		t.Run("refuses "+bind, func(t *testing.T) {
@@ -1729,6 +1728,14 @@ func TestRemoteBind(t *testing.T) {
 	}
 	if app.RemoteProbeAddr() != "127.0.0.1:8445" || len(app.RemoteWarnings()) == 0 || !app.RemoteBindWildcard() {
 		t.Fatalf("wildcard: probe=%s warnings=%v", app.RemoteProbeAddr(), app.RemoteWarnings())
+	}
+	// The IPv6 wildcard is probed on the IPv6 loopback.
+	app, err = LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: \"::\"\n  allow_wildcard_bind: true\n"))
+	if err != nil {
+		t.Fatalf("acknowledged IPv6 wildcard: %v", err)
+	}
+	if got := app.RemoteProbeAddr(); got != "[::1]:8445" {
+		t.Fatalf("IPv6 wildcard RemoteProbeAddr() = %q, want [::1]:8445", got)
 	}
 	// An acknowledgement with no wildcard to acknowledge is a mistake.
 	rejectNoHost(t, remoteOn+"  allow_wildcard_bind: true\n", "allow_wildcard_bind")
@@ -1789,5 +1796,45 @@ func TestRemoteIdentityHeaderWithoutAllowedUsersWarns(t *testing.T) {
 	}
 	if w := app.RemoteWarnings(); len(w) != 0 {
 		t.Fatalf("pinned: RemoteWarnings() = %v", w)
+	}
+}
+
+// A tailnet address trusted with Tailscale's header lets any tailnet peer
+// connect directly and forge it; with another front's header the same
+// address is just a private address the jail cannot reach.
+func TestRemoteBindTailnetAddress(t *testing.T) {
+	for _, bind := range []string{"100.64.1.2", "100.101.102.103", "\"fd7a:115c:a1e0::5\""} {
+		t.Run(bind, func(t *testing.T) {
+			rejectNoHost(t, remoteOn+"  bind: "+bind+"\n", "tailnet", "tailscale serve")
+			rejectNoHost(t, remoteOn+"  bind: "+bind+"\n  identity_header: tailscale-user-login\n", "tailnet")
+			if _, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: "+bind+"\n  identity_header: X-ExeDev-Email\n  allowed_users: [\"me@example.com\"]\n")); err != nil {
+				t.Fatalf("with another front's header, %s is an ordinary private bind: %v", bind, err)
+			}
+		})
+	}
+	// Other ULA space is not the tailnet's.
+	if _, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: \"fd00::5\"\n")); err != nil {
+		t.Fatalf("fd00::5: %v", err)
+	}
+}
+
+// scion lowercases emails, so entries equal under case folding are one hub
+// user; refuse them rather than let the proxy treat them as two logins.
+func TestRemoteAllowedUsersCaseFoldDuplicates(t *testing.T) {
+	rejectNoHost(t, remoteOn+"  allowed_users: [\"Me@Example.com\", \"me@example.com\"]\n", "allowed_users", "same user")
+	rejectNoHost(t, remoteOn+"  allowed_users: [\"a@x.com\", \"a@x.com\"]\n", "allowed_users", "same user")
+	rejectNoHost(t, remoteOn+"  allowed_users: [\"USR_1\", \"usr_1\"]\n", "allowed_users", "same user")
+}
+
+// Tailscale's display-name and avatar headers are user-chosen and not
+// unique; a header with "_" can be delivered under another spelling by a hop.
+func TestRemoteIdentityHeaderRefusesNonIdentityTailscaleAndUnderscore(t *testing.T) {
+	for _, h := range []string{"Tailscale-User-Name", "tailscale-user-profile-pic", "X_Login", "X-Exe_Email"} {
+		t.Run(h, func(t *testing.T) {
+			rejectNoHost(t, remoteOn+"  identity_header: "+h+"\n", "identity_header")
+		})
+	}
+	if _, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  identity_header: Tailscale-User-Login\n")); err != nil {
+		t.Fatalf("the default must stay accepted: %v", err)
 	}
 }

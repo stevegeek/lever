@@ -92,8 +92,8 @@ type Config struct {
 	// any client that reaches the listener directly can set that header —
 	// see hostToCheck.
 	TrustForwardedHost bool
-	// BindHost is the non-loopback address the listener is bound to, when it
-	// is one ("" otherwise). hostAllowed then also admits "<BindHost>:<ListenPort>",
+	// BindHost is the specific address the listener is bound to ("" for a
+	// wildcard bind). hostAllowed then also admits "<BindHost>:<ListenPort>",
 	// the Host a front sends when it dials that address and forwards no name.
 	BindHost string
 	// Session supplies the verified operator's hub web session, which is
@@ -944,9 +944,10 @@ func (w *sessionRetryWriter) Unwrap() http.ResponseWriter { return w.ResponseWri
 //     dials http://127.0.0.1:<port>/healthz (and sends that Host even when the
 //     listener is bound elsewhere).
 //
-// plus, when the listener is bound to a non-loopback address (bindHost), that
-// address with the proxy's port: what a front sends when it dials the address
-// and forwards no name. An IP literal is no rebinding target — a rebind makes
+// plus, when the listener is bound to a specific address (bindHost: any
+// non-wildcard bind, loopback ones such as 127.0.0.2 included), that address
+// with the proxy's port: what a front sends when it dials the address and
+// forwards no name. A wildcard bind admits no such address. An IP literal is no rebinding target — a rebind makes
 // the browser send the ATTACKER's name — and whatever can reach that address
 // can already set any header, which is the non-loopback bind's documented
 // cost, not something this check could take back.

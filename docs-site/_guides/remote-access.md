@@ -437,7 +437,10 @@ because nothing but the front can reach its listener. So:
 The configured header is stripped before the request reaches the hub, like `Tailscale-*`.
 lever refuses to take the login from headers a browser or any hop sets, or that scion reads as an
 identity (`Authorization`, `Cookie`, `Host`, `Origin`, `X-Forwarded-*`, `Sec-*`, `X-Scion-*`, and
-others — see the [config reference](/reference/config/#remote)).
+others — see the [config reference](/reference/config/#remote)), from Tailscale's user-chosen
+`Tailscale-User-Name` and `Tailscale-User-Profile-Pic`, and from any header name with `_` (proxies
+drop or rewrite those inconsistently). `allowed_users` entries that differ only in case are refused:
+scion lowercases emails, so they would be one hub user.
 
 **Who the hub thinks you are.** An `allowed_users` entry with an `@` is the hub email as it
 stands. A front that sends an opaque user id instead (exe.dev's `X-ExeDev-UserID`) works too: an
@@ -458,7 +461,11 @@ remote:
 Anything that can reach that address can now set the identity header to any login and ride your
 hub session. The host firewall must admit only the front to `<bind>:<port>`. lever accepts only
 addresses the jail's egress rules drop in every posture, so no jailed agent can reach the proxy
-that way; a public address is refused, because under open egress the jail could dial it.
+that way; a public address is refused, because under open egress the jail could dial it. An IPv6
+link-local address is refused (it cannot be listened on without an interface zone). With the
+default `identity_header`, a tailnet address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) is refused
+too: any tailnet peer could connect to it directly, bypassing `tailscale serve`, and send
+`Tailscale-User-Login` with any login. Use `tailscale serve` in front of the loopback bind.
 The jail's egress chain is replaced atomically on every `lever apply`, so there is no window in which
 the private ranges are open. It is not persisted in the guest, though: after a guest reboot there is
 no chain until the next `lever apply`/`up`, which applies it before it starts any agent.
@@ -469,10 +476,14 @@ row. The login provider stays on loopback regardless.
 
 **`Host` vs `X-Forwarded-Host`.** The proxy's DNS-rebinding defence matches the request's
 `Host` header against `base_url`'s host (port included when `base_url` has one), and also admits
-`127.0.0.1:<port>`, `localhost:<port>` and, with a non-loopback `bind`, `<bind>:<port>`. A front
-that passes `Host` through, or rewrites it to the address it dials, works unchanged. A front that
-rewrites `Host` to some other IP address (another port, or none) gets `deny-host` in the audit log.
-If that front passes the browser's host in `X-Forwarded-Host`, set:
+`127.0.0.1:<port>`, `localhost:<port>` and, with a specific `bind` address (loopback ones such as
+`127.0.0.2` or `::1` included), `<bind>:<port>`. A front that passes `Host` through works with any
+bind. A front that rewrites `Host` to the address it dials works unchanged **only with a specific
+bind address**: with `bind: 0.0.0.0`/`::` lever does not know which of the host's addresses the
+front dialled and admits none of them, so such a front must pass `base_url`'s host through, or use
+`trust_forwarded_host` with `X-Forwarded-Host`. A front that rewrites `Host` to some other IP
+address (another port, or none) gets `deny-host` in the audit log. If that front passes the
+browser's host in `X-Forwarded-Host`, set:
 
 ```yaml
 remote:
@@ -508,9 +519,20 @@ remote:
   forwarder, so the VM needs no Go.
 - **Never make the port public** (`share set-public`). A public port has no exe.dev login in
   front of it, so no verified header either — the same rule as never using `tailscale funnel`.
+
+> **Warning: the front must forward ONLY the proxy port.** exe.dev can forward any port in
+> 3000-9999, and a front that forwards a port range to the VM's loopback also reaches lever's
+> other host listeners: the broker's admin port (`8444`, unauthenticated), its jail port
+> (`8443`) and the login provider (`8447`). Anyone the front admits could then call them
+> directly, and `allowed_users` does not apply there — it is checked only by the proxy. Grant
+> and use only `remote.port`; if your front cannot be limited to one port, move lever's other
+> listeners (`broker.jail_port`, `broker.admin_port`, `remote.login_port`) outside the range it
+> forwards.
+
 - Start with the default loopback `bind`. If exe.dev's front reaches the VM on its private
   interface rather than loopback, the proxy logs nothing for your requests; bind that private
-  address instead, and firewall the port to exe.dev's front.
+  address instead (a specific address, not `0.0.0.0`, so a Host rewritten to it is admitted),
+  and firewall the port to exe.dev's front.
 - Before relying on it, confirm the two properties above for exe.dev: that it overwrites
   `X-ExeDev-Email`, and what can reach the proxy port besides its front.
 - `lever remote status` prints the identity header, bind address and any warnings;

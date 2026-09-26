@@ -40,8 +40,23 @@ version bump moves the block under the new version heading.
   empty: everyone the front admits then rides the placeholder operator.
 - `lever doctor` warning rows: a passing row with a fix prints as `!` and does
   not fail the run.
+- Config load also refuses: a tailnet `bind` address (`100.64.0.0/10`,
+  `fd7a:115c:a1e0::/48`) while the identity header is Tailscale's; an IPv6
+  link-local `bind`; `allowed_users` entries equal under case folding (scion
+  lowercases emails); `Tailscale-User-Name`, `Tailscale-User-Profile-Pic`
+  and any header name containing `_` as `identity_header`.
 
 ### Changed
+
+- **The jail's egress chain is replaced atomically.** `lever apply` used to
+  flush `LEVER_EGRESS` and re-add its rules one call at a time, leaving
+  OUTPUT's default ACCEPT in force for seconds per apply in the open
+  posture (every host-alias port, broker admin 8444 included, and the
+  private ranges), and a partial chain after a failed apply. It now loads
+  the whole ruleset with one `iptables-restore --noflush` commit per
+  address family; a failed commit keeps the old chain. The host alias is
+  resolved under the live chain, falling back to the alias the live chain
+  names.
 
 - **Remote access no longer needs Go on the host with a release build.**
   Release archives and `make install` embed the guest login forwarder

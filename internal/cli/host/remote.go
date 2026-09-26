@@ -257,11 +257,13 @@ func jailPrefixFn(bf BackendFactory, backendName, machine string, warn io.Writer
 	}
 }
 
-// remoteBindHost is the proxy's non-loopback, non-wildcard bind address, which
-// the Host gate admits as "<addr>:<port>" (remoteproxy.Config.BindHost), or ""
-// for a loopback or wildcard bind.
+// remoteBindHost is the proxy's specific bind address — loopback included, so
+// a front that rewrites Host to 127.0.0.2:<port> or [::1]:<port> is admitted —
+// which the Host gate admits as "<addr>:<port>" (remoteproxy.Config.BindHost),
+// or "" for a wildcard bind: 0.0.0.0 is no Host, and lever does not enumerate
+// the host's interfaces to guess which address a front dialled.
 func remoteBindHost(app *config.App) string {
-	if app.RemoteBindLoopback() || app.RemoteBindWildcard() {
+	if app.RemoteBindWildcard() {
 		return ""
 	}
 	return app.EffectiveRemoteBind()
@@ -323,7 +325,6 @@ func newRemoteStatusCmd() *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
-			port := app.EffectiveRemotePort()
 
 			pid, found, alive := state.PIDStatus(st.RemotePID())
 			switch {
@@ -342,7 +343,7 @@ func newRemoteStatusCmd() *cobra.Command {
 
 			cmd.Printf("identity header: %s\n", app.EffectiveRemoteIdentityHeader())
 			if app.RemoteBindLoopback() {
-				cmd.Printf("tailscale command: tailscale serve --bg --https=443 http://127.0.0.1:%d\n", port)
+				cmd.Printf("tailscale command: tailscale serve --bg --https=443 http://%s\n", app.RemoteListenAddr())
 			}
 			for _, w := range app.RemoteWarnings() {
 				cmd.Printf("warning: %s\n", w)

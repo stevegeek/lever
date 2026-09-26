@@ -55,8 +55,8 @@ if the IPv4 commit fails (or the apply is interrupted between them), IPv6 has th
 the old, and the error says so. The re-apply skip for a live closed instance (below) requires
 **both** families to carry the closed catch-all DROP, so a half-applied closed posture is always
 rebuilt, never skipped. The host alias is resolved under the old chain; when that lookup fails and
-the live chain is closed (whose DROP blocks DNS by design), the alias is read back from its own
-rules, with a warning naming it. Under an open or absent chain a failed lookup fails the apply. The rules are not persisted
+the live IPv4 chain is closed (the guest resolves over IPv4, and that DROP blocks DNS by design),
+the aliases are read back from the live rules, each from its own family, with a warning naming them. Under an open or absent chain a failed lookup fails the apply. The rules are not persisted
 in the guest: after a guest reboot there is no chain until the next `lever apply`/`up`, which applies
 egress before it starts any agent. The posture is chosen by the
 explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:

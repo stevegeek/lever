@@ -36,8 +36,8 @@ import (
 //
 // That is also why the alias is resolved WITH the old chain in force. The old
 // code flushed first so that a closed chain's catch-all DROP would not block
-// the DNS lookup; here, when resolve fails under a CLOSED live chain, the
-// alias is read back from it instead (liveAliases), with a warning — every
+// the DNS lookup; here, when resolve fails under a CLOSED live IPv4 chain,
+// the alias is read back from the live chains instead (liveAliases), with a warning — every
 // chain lever writes names it in its per-port ACCEPTs. Otherwise ApplyEgress
 // fails, leaving the live chain untouched: failing closed, never reopening
 // to find out.
@@ -80,18 +80,21 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 	}
 	v4, v6, err = resolve(ctx)
 	if err != nil {
-		// Fall back to the alias the live chain names ONLY when that chain is
-		// closed: its catch-all DROP is then the expected reason the lookup
-		// failed (DNS is dropped by design), and the alias it names is the
-		// one lever resolved when it wrote it. Under an open or absent chain
-		// nothing lever wrote blocks DNS, so a failed lookup is a real fault
-		// (guest DNS broken, alias gone), and papering over it with an old
-		// address would hide it — fail instead, leaving the chain alone.
-		lv4, lv6, closed := g.liveAliases(ctx)
-		if !closed || (lv4 == "" && lv6 == "") {
-			return "", "", false, fmt.Errorf("%w (the live %s chain is left as it is; the alias is read back from it only when it is closed and names one)", err, egress.Chain)
+		// Fall back to the aliases the live chains name ONLY when the IPv4
+		// chain is closed: the guest resolves over IPv4, so its catch-all
+		// DROP is then the expected reason the lookup failed (DNS is dropped
+		// by design), and the aliases are the ones lever resolved when it
+		// wrote them. A closed IPv6 chain alone (a closed apply whose IPv4
+		// commit failed) blocks no IPv4 DNS, and under an open or absent
+		// chain nothing lever wrote blocks DNS: a failed lookup is then a
+		// real fault (guest DNS broken, alias gone), and papering over it
+		// with an old address would hide it — fail instead, leaving the
+		// chains alone.
+		lv4, lv6, closed4 := g.liveAliases(ctx)
+		if !closed4 || (lv4 == "" && lv6 == "") {
+			return "", "", false, fmt.Errorf("%w (the live %s chains are left as they are; the alias is read back from them only when the IPv4 chain is closed and names one)", err, egress.Chain)
 		}
-		daemon.Warnf("egress: could not resolve the host alias (%v) — the live closed %s chain blocks DNS; "+
+		daemon.Warnf("egress: could not resolve the host alias (%v) — the live closed IPv4 %s chain blocks DNS; "+
 			"using the alias it names instead: v4 %q, v6 %q", err, egress.Chain, lv4, lv6)
 		v4, v6 = lv4, lv6
 	}
@@ -133,18 +136,18 @@ func (g Guest) commitEgressChain(ctx context.Context, fam egress.Family, rules [
 
 // liveAliases reads the host-alias addresses back out of the live chains'
 // per-port ACCEPTs (`-d <alias>/32|/128 … --dport … -j ACCEPT`), for when
-// resolve cannot run under them, and reports whether either family's chain
-// is closed (carries the catch-all DROP). Each alias is "" when that family
+// resolve cannot run under them, and reports whether the IPv4 chain is
+// closed (carries the catch-all DROP). Each alias is "" when that family
 // has no chain or names none of its own family.
-func (g Guest) liveAliases(ctx context.Context) (v4, v6 string, closed bool) {
+func (g Guest) liveAliases(ctx context.Context) (v4, v6 string, closed4 bool) {
 	read := func(bin string, wantV4 bool) string {
 		res, err := g.RootRun(ctx, bin, "-S", egress.Chain)
 		if err != nil {
 			return ""
 		}
 		out := res.Stdout + res.Stderr
-		if closedChain(out) {
-			closed = true
+		if wantV4 && closedChain(out) {
+			closed4 = true
 		}
 		alias := aliasFromChain(out)
 		// Only an address of the chain's own family: a v4 address in the
@@ -156,7 +159,7 @@ func (g Guest) liveAliases(ctx context.Context) (v4, v6 string, closed bool) {
 	}
 	v4 = read("iptables", true)
 	v6 = read("ip6tables", false)
-	return v4, v6, closed
+	return v4, v6, closed4
 }
 
 // closedChain reports whether an `iptables -S` listing of the chain carries

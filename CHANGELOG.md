@@ -58,9 +58,9 @@ version bump moves the block under the new version heading.
   address family, IPv6 first and IPv4 last; a failed commit keeps that
   family's old chain, and the error says which family was committed. The
   skip for a live closed instance now requires both families closed. The
-  host alias is resolved under the live chain; only when that chain is
-  closed does a failed lookup fall back to the alias it names (with a
-  warning).
+  host alias is resolved under the live chain; only when the IPv4 chain is
+  closed does a failed lookup fall back to the aliases the live chains name
+  (with a warning).
 
 - **Remote access no longer needs Go on the host with a release build.**
   Release archives and `make install` embed the guest login forwarder

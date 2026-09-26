@@ -163,7 +163,7 @@ func TestApplyEgressFailsClosedWithoutAnyAlias(t *testing.T) {
 	scriptFirewall(f)
 	g := orbGuest(f, "lever-jail")
 	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
-	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, false); err == nil || !strings.Contains(err.Error(), "left as it is") {
+	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, false); err == nil || !strings.Contains(err.Error(), "left as they are") {
 		t.Fatalf("want a fail-closed error, got %v", err)
 	}
 	if bins, _ := backendtest.RestoreCommits(f); len(bins) != 0 {
@@ -393,5 +393,31 @@ func TestLiveAliasFallbackPerFamily(t *testing.T) {
 	}
 	if _, v6in := commits(r); strings.Contains(v6in, "10.9.9.9") {
 		t.Fatalf("a v4 address reached the v6 ruleset:\n%s", v6in)
+	}
+}
+
+// The fallback keys on the IPv4 chain being closed (the guest resolves over
+// IPv4). Both half-closed states: v4 closed + v6 open (the old stuck state,
+// or an interrupted closed->open apply) heals from the live aliases; v6
+// closed + v4 open (a closed apply whose IPv4 commit failed) blocks no IPv4
+// DNS, so a failed lookup there is a real fault and nothing is committed.
+func TestAliasFallbackHalfClosedStates(t *testing.T) {
+	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
+	open4 := "-N LEVER_EGRESS\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n"
+	open6 := "-N LEVER_EGRESS\n-A LEVER_EGRESS -d fd07::fe/128 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d fd07::fe/128 -j DROP\n"
+
+	r := newListingRunner(backendtest.ClosedChain, open6)
+	v4, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, []int{8443}, false)
+	if err != nil || !rebuilt || v4 != "0.250.250.254" {
+		t.Fatalf("v4 closed + v6 open: v4=%q rebuilt=%v err=%v; want a rebuild from the live alias", v4, rebuilt, err)
+	}
+	backendtest.AssertAtomicCommitOrder(t, r.FakeRunner)
+
+	r = newListingRunner(open4, backendtest.ClosedChain6)
+	if _, _, _, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, []int{8443}, true); err == nil || !strings.Contains(err.Error(), "dns blocked") {
+		t.Fatalf("v6 closed + v4 open: want the resolve failure, got %v", err)
+	}
+	if bins, _ := backendtest.RestoreCommits(r.FakeRunner); len(bins) != 0 {
+		t.Fatalf("v6 closed + v4 open: nothing may be committed, got %v", bins)
 	}
 }

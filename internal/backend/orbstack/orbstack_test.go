@@ -57,6 +57,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 		t.Fatalf("first ApplyEgress: %v", err)
 	}
 	r.Open, r.Flushed, r.Resolved = false, false, false
+	r.Calls = nil // only the re-apply's calls count below
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
@@ -65,14 +66,14 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	backendtest.AssertClosedChainKept(t, r, b.HostAliasV4())
 }
 
-func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
+func TestApplyEgressCommitsAtomicallyAfterResolving(t *testing.T) {
 	f := proc.NewFakeRunner()
 	orbGuest.ScriptEgress(f, backendtest.AhostsDual)
 	b := New(f, machine, common.Options{})
 	if err := b.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
-	backendtest.AssertFlushPrecedesResolve(t, f, orbGuest.Alias)
+	backendtest.AssertAtomicCommit(t, f, orbGuest.Alias)
 }
 
 // orbVersionScript scripts a successful `orb version` response for >= 2.1.1.

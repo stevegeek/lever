@@ -525,11 +525,10 @@ func (a *App) validateRemote() error {
 //     (egress.DroppedForJail: RFC 1918, link-local, CGNAT/tailnet, ULA). A
 //     public address is refused: under open egress (the subscription
 //     posture) any agent could dial it and forge the header.
-//     Known gap: in the open posture guest.ApplyEgress flushes LEVER_EGRESS
-//     and re-resolves the host alias before re-adding the rules, so for that
-//     window (one DNS lookup, on every apply) the private ranges are not
-//     dropped and a running agent could reach a private bind. Closing it
-//     needs an atomic chain swap; the guide documents it meanwhile.
+//     guest.ApplyEgress replaces the chain in one commit per family, so a
+//     re-apply opens no window. The chain is not persisted in the guest:
+//     after a guest reboot it is absent until the next apply/up, which
+//     applies egress before starting any agent (pre-existing).
 //   - Everyone else. That is the operator's host firewall, which lever cannot
 //     see; RemoteWarnings and a doctor row say so.
 //

@@ -199,6 +199,24 @@ func (g Guest) ScriptEgress(f *proc.FakeRunner, ahosts string) {
 func (g Guest) scriptFirewall(f *proc.FakeRunner) {
 	f.Script(g.Root+" iptables", proc.Result{})
 	f.Script(g.Root+" ip6tables", proc.Result{})
+	// The atomic commit: `<root> bash -c 'exec ip[6]tables-restore --noflush'`
+	// with the ruleset on stdin (guest.commitEgressChain).
+	f.Script(g.Root+" bash -c exec ip", proc.Result{})
+}
+
+// RestoreCommits returns the stdin of every iptables-restore / ip6tables-restore
+// commit ApplyEgress made, in order, keyed by the restore binary.
+func RestoreCommits(f *proc.FakeRunner) (bins []string, inputs []string) {
+	for _, c := range f.Calls {
+		argv := c.Argv()
+		for _, bin := range []string{"ip6tables-restore", "iptables-restore"} {
+			if strings.Contains(argv, "exec "+bin+" --noflush") {
+				bins, inputs = append(bins, bin), append(inputs, c.Stdin)
+				break
+			}
+		}
+	}
+	return bins, inputs
 }
 
 // ScriptProvision scripts everything EnsureUp does AFTER the machine is up:
@@ -248,29 +266,46 @@ func AssertNoSubcommand(t *testing.T, f *proc.FakeRunner, host string, subs ...s
 	}
 }
 
-// AssertEgressRules checks the iptables calls ApplyEgress issued: an ACCEPT
-// for port and the catch-all DROP to HostAliasV4.
+// AssertEgressRules checks the ruleset ApplyEgress committed (the IPv4
+// iptables-restore input): an ACCEPT for port and the DROP to HostAliasV4.
 func AssertEgressRules(t *testing.T, f *proc.FakeRunner, port string) {
 	t.Helper()
-	sawAccept := f.Called(proc.ArgvContains("iptables", "--dport "+port, "ACCEPT"))
-	sawDrop := f.Called(proc.ArgvContains("iptables", HostAliasV4+" -j DROP"))
+	bins, inputs := RestoreCommits(f)
+	v4 := ""
+	for i, b := range bins {
+		if b == "iptables-restore" {
+			v4 = inputs[i]
+		}
+	}
+	sawAccept := strings.Contains(v4, "--dport "+port+" -j ACCEPT")
+	sawDrop := strings.Contains(v4, "-d "+HostAliasV4+" -j DROP")
 	if !sawAccept || !sawDrop {
-		t.Fatalf("accept=%t drop=%t", sawAccept, sawDrop)
+		t.Fatalf("accept=%t drop=%t in the committed ruleset:\n%s", sawAccept, sawDrop, v4)
 	}
 }
 
-// AssertFlushPrecedesResolve pins the order ApplyEgress must keep: flush the
-// chain BEFORE resolving the alias. Under a prior closed posture the catch-all
-// DROP blocks DNS/53; flushing first restores it so the re-resolve succeeds.
-func AssertFlushPrecedesResolve(t *testing.T, f *proc.FakeRunner, alias string) {
+// AssertAtomicCommit pins how ApplyEgress replaces the chain: never a flush,
+// the alias resolved first (under the live chain), then ONE
+// iptables-restore --noflush commit per family that declares the chain (which
+// empties it inside the transaction) and ends with COMMIT.
+func AssertAtomicCommit(t *testing.T, f *proc.FakeRunner, alias string) {
 	t.Helper()
-	flushIdx := f.CallIndex(proc.ArgvContains("iptables -F LEVER_EGRESS"))
-	getentIdx := f.CallIndex(proc.ArgvContains("getent ahosts " + alias))
-	if flushIdx < 0 {
-		t.Fatal("ApplyEgress must flush LEVER_EGRESS (idempotent re-apply, no rule accumulation)")
+	if i := f.CallIndex(proc.ArgvContains("-F LEVER_EGRESS")); i >= 0 {
+		t.Fatalf("ApplyEgress must never flush LEVER_EGRESS (that opens egress until the rules are back): %+v", f.Calls[i])
 	}
-	if getentIdx < 0 || flushIdx > getentIdx {
-		t.Fatalf("flush (idx %d) must precede the host-alias resolve (idx %d)", flushIdx, getentIdx)
+	getentIdx := f.CallIndex(proc.ArgvContains("getent ahosts " + alias))
+	commitIdx := f.CallIndex(proc.ArgvContains("exec iptables-restore --noflush"))
+	if getentIdx < 0 || commitIdx < 0 || getentIdx > commitIdx {
+		t.Fatalf("resolve (idx %d) must precede the commit (idx %d)", getentIdx, commitIdx)
+	}
+	bins, inputs := RestoreCommits(f)
+	if len(bins) != 2 || bins[0] != "iptables-restore" || bins[1] != "ip6tables-restore" {
+		t.Fatalf("want one iptables-restore and one ip6tables-restore commit, got %v", bins)
+	}
+	for i, in := range inputs {
+		if !strings.HasPrefix(in, "*filter\n:LEVER_EGRESS - [0:0]\n") || !strings.HasSuffix(in, "COMMIT\n") {
+			t.Fatalf("%s input is not a single chain-replacing commit:\n%s", bins[i], in)
+		}
 	}
 }
 
@@ -371,6 +406,9 @@ func AssertClosedChainKept(t *testing.T, r *ClosedChainRunner, gotV4 string) {
 	}
 	if r.Resolved {
 		t.Fatal("must not re-resolve the alias (DNS) when already closed — read it from the chain")
+	}
+	if bins, _ := RestoreCommits(r.FakeRunner); len(bins) != 0 {
+		t.Fatalf("must not commit a new ruleset over an active closed chain, committed %v", bins)
 	}
 	if gotV4 != HostAliasV4 {
 		t.Fatalf("alias should be read from the existing chain, got %q", gotV4)

@@ -313,3 +313,39 @@ func TestDroppedForJail(t *testing.T) {
 		}
 	}
 }
+
+// RestoreInput is one chain-replacing iptables-restore commit per family: the
+// chain declaration (which empties it inside the transaction), that family's
+// rules in BuildRules order and nothing else, then COMMIT.
+func TestRestoreInput(t *testing.T) {
+	rules := BuildRules("192.168.5.2", "fd07::fe", []int{8443}, false)
+	v4 := RestoreInput(rules, IPv4)
+	v6 := RestoreInput(rules, IPv6)
+	for name, in := range map[string]string{"v4": v4, "v6": v6} {
+		if !strings.HasPrefix(in, "*filter\n:"+Chain+" - [0:0]\n") || !strings.HasSuffix(in, "COMMIT\n") {
+			t.Fatalf("%s: not a single chain-replacing commit:\n%s", name, in)
+		}
+	}
+	var want []string
+	for _, r := range rules {
+		if r.Family == IPv4 {
+			want = append(want, strings.Join(r.Args, " "))
+		}
+	}
+	got := strings.Split(strings.TrimSuffix(strings.TrimPrefix(v4, "*filter\n:"+Chain+" - [0:0]\n"), "COMMIT\n"), "\n")
+	got = got[:len(got)-1]
+	if !slices.Equal(got, want) {
+		t.Fatalf("v4 rules out of order or wrong:\n%v\nwant\n%v", got, want)
+	}
+	if strings.Contains(v4, "fd07::fe") || strings.Contains(v6, "192.168.5.2") {
+		t.Fatal("a family's commit carried the other family's rules")
+	}
+	// The allow precedes the private-range DROPs in the single commit, so no
+	// intermediate state exists in which one is present without the other.
+	if strings.Index(v4, "--dport 8443 -j ACCEPT") > strings.Index(v4, "-d 10.0.0.0/8 -j DROP") {
+		t.Fatal("ACCEPT must precede the DROPs")
+	}
+	if IPv4.RestoreBinary() != "iptables-restore" || IPv6.RestoreBinary() != "ip6tables-restore" {
+		t.Fatal("RestoreBinary")
+	}
+}

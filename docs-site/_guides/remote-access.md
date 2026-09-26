@@ -459,10 +459,9 @@ Anything that can reach that address can now set the identity header to any logi
 hub session. The host firewall must admit only the front to `<bind>:<port>`. lever accepts only
 addresses the jail's egress rules drop in every posture, so no jailed agent can reach the proxy
 that way; a public address is refused, because under open egress the jail could dial it.
-One known gap: in the open egress posture, every `lever apply` flushes and rebuilds the jail's
-egress chain, and for that short window (a DNS lookup of the host alias) the private ranges are not
-dropped. A running agent that dials the bind address at exactly that moment could reach the proxy.
-Prefer the loopback bind where the front allows it.
+The jail's egress chain is replaced atomically on every `lever apply`, so there is no window in which
+the private ranges are open. It is not persisted in the guest, though: after a guest reboot there is
+no chain until the next `lever apply`/`up`, which applies it before it starts any agent.
 `0.0.0.0`/`::` listens on every address, public ones included, and needs
 `allow_wildcard_bind: true` as well. A non-loopback bind prints a warning on every `lever apply`,
 `lever up` and `lever remote serve`, and `lever doctor` shows it as a `remote exposure` warning

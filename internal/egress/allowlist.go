@@ -13,9 +13,9 @@ import (
 )
 
 // Chain is the dedicated iptables chain lever's egress rules live in. OUTPUT
-// jumps to it; ApplyEgress flushes ONLY this chain before re-populating, so a
-// re-apply is idempotent (no rule accumulation) and — because flushing removes
-// the catch-all DROP — DNS works again for the host-alias re-resolve.
+// jumps to it; ApplyEgress replaces ONLY this chain, atomically (one
+// iptables-restore --noflush commit per family, see RestoreInput), so a
+// re-apply is idempotent (no rule accumulation) and never leaves it empty.
 const Chain = "LEVER_EGRESS"
 
 type Family int
@@ -216,6 +216,27 @@ func (f Family) Binary() string {
 		return "ip6tables"
 	}
 	return "iptables"
+}
+
+// RestoreBinary is the family's iptables-restore binary.
+func (f Family) RestoreBinary() string { return f.Binary() + "-restore" }
+
+// RestoreInput renders the rules of family f as `iptables-restore --noflush`
+// input that replaces Chain in one commit: the `:Chain` declaration empties an
+// existing user chain inside the same transaction, the rules are appended in
+// order, and COMMIT applies all of it or none. --noflush (the caller's flag)
+// leaves every other chain in the table alone. Rule args contain no
+// whitespace or quotes, so joining them with spaces is the exact line.
+func RestoreInput(rules []Rule, f Family) string {
+	var b strings.Builder
+	b.WriteString("*filter\n:" + Chain + " - [0:0]\n")
+	for _, r := range rules {
+		if r.Family == f {
+			b.WriteString(strings.Join(r.Args, " ") + "\n")
+		}
+	}
+	b.WriteString("COMMIT\n")
+	return b.String()
 }
 
 // Render is a debug helper: "iptables -A OUTPUT ...".

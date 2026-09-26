@@ -59,10 +59,32 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 }
 
-func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
-	f := proc.NewFakeRunner()
+// scriptFirewall answers every root iptables call and the restore commit.
+func scriptFirewall(f *proc.FakeRunner) {
 	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
 	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	f.Script("orb -u root -m lever-jail bash -c exec ip", proc.Result{})
+}
+
+// committedV4 is the IPv4 ruleset ApplyEgress committed.
+func committedV4(t *testing.T, f *proc.FakeRunner) string {
+	t.Helper()
+	bins, inputs := backendtest.RestoreCommits(f)
+	for i, b := range bins {
+		if b == "iptables-restore" {
+			return inputs[i]
+		}
+	}
+	t.Fatalf("no iptables-restore commit; calls=%+v", f.Calls)
+	return ""
+}
+
+// The chain is replaced in one commit per family AFTER the resolve, never
+// flushed: a flush would leave OUTPUT's default ACCEPT in force until the
+// rules were back.
+func TestApplyEgressCommitsAtomicallyAfterResolving(t *testing.T) {
+	f := proc.NewFakeRunner()
+	scriptFirewall(f)
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) {
@@ -74,30 +96,83 @@ func TestApplyEgressFlushesChainBeforeResolving(t *testing.T) {
 	} else if !rebuilt {
 		t.Fatal("rebuilt should be true when the chain is not already closed")
 	}
-	flushIdx, getentIdx := -1, -1
-	for i, c := range f.Calls {
-		argv := strings.Join(c.Args, " ")
-		if strings.Contains(argv, "iptables -F LEVER_EGRESS") {
-			flushIdx = i
-		}
-		if strings.Contains(argv, "getent ahosts host.orb.internal") {
-			getentIdx = i
+	backendtest.AssertAtomicCommit(t, f, "host.orb.internal")
+	// The chain and the jump are ensured without touching live rules.
+	if !f.Called(proc.ArgvContains("iptables -N LEVER_EGRESS")) || !f.Called(proc.ArgvContains("iptables -C OUTPUT -j LEVER_EGRESS")) {
+		t.Fatal("ApplyEgress must ensure the chain and the OUTPUT jump")
+	}
+	// The whole v4 ruleset, in order, is in the one commit.
+	want := egress.RestoreInput(egress.BuildRules("0.250.250.254", "fd07::fe", []int{8443}, true), egress.IPv4)
+	if got := committedV4(t, f); got != want {
+		t.Fatalf("committed v4 ruleset:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// A failed commit leaves the previous chain in force: nothing flushes it
+// first, and the error says so.
+func TestApplyEgressFailedCommitKeepsTheOldChain(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	// No script for the restore: the commit fails.
+	g := orbGuest(f, "lever-jail")
+	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "", nil }
+	_, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, false)
+	if err == nil || !strings.Contains(err.Error(), "previous chain stays in force") {
+		t.Fatalf("want the commit failure, got %v", err)
+	}
+	if rebuilt {
+		t.Fatal("rebuilt must be false when nothing was committed")
+	}
+	for _, c := range f.Calls {
+		argv := c.Argv()
+		if strings.Contains(argv, "-F LEVER_EGRESS") || strings.Contains(argv, "-X LEVER_EGRESS") || strings.Contains(argv, "-D OUTPUT") {
+			t.Fatalf("the live chain was touched before the commit: %s", argv)
 		}
 	}
-	if flushIdx < 0 {
-		t.Fatal("ApplyEgress must flush LEVER_EGRESS (idempotent re-apply, no rule accumulation)")
+}
+
+// When the resolve cannot run under the live chain (a closed chain's DROP
+// blocks DNS, e.g. switching closed -> open), the alias is read back from
+// the live chain instead of flushing it to let DNS through.
+func TestApplyEgressFallsBackToTheLiveChainAlias(t *testing.T) {
+	r := &backendtest.ClosedChainRunner{FakeRunner: proc.NewFakeRunner(), Host: "orb"}
+	scriptFirewall(r.FakeRunner)
+	g := orbGuest(r, "lever-jail")
+	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
+	v4, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, false)
+	if err != nil || !rebuilt {
+		t.Fatalf("ApplyEgress: rebuilt=%v err=%v", rebuilt, err)
 	}
-	// Flush BEFORE resolve: under a prior closed posture the catch-all DROP blocks
-	// DNS/53; flushing the chain first restores it so the re-resolve succeeds.
-	if getentIdx < 0 || flushIdx > getentIdx {
-		t.Fatalf("flush (idx %d) must precede the host-alias resolve (idx %d)", flushIdx, getentIdx)
+	if v4 != backendtest.HostAliasV4 {
+		t.Fatalf("alias = %q, want the one the live chain names", v4)
+	}
+	if r.Flushed {
+		t.Fatal("must not flush the live chain to get DNS back")
+	}
+	if !strings.Contains(committedV4(t, r.FakeRunner), "-d "+backendtest.HostAliasV4+" -j DROP") {
+		t.Fatal("the committed ruleset must use the live chain's alias")
+	}
+}
+
+// With neither a resolve nor a live alias, ApplyEgress fails and leaves the
+// chain alone rather than reopening egress to find out.
+func TestApplyEgressFailsClosedWithoutAnyAlias(t *testing.T) {
+	f := proc.NewFakeRunner()
+	scriptFirewall(f)
+	g := orbGuest(f, "lever-jail")
+	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
+	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, false); err == nil || !strings.Contains(err.Error(), "left as it is") {
+		t.Fatalf("want a fail-closed error, got %v", err)
+	}
+	if bins, _ := backendtest.RestoreCommits(f); len(bins) != 0 {
+		t.Fatalf("nothing may be committed without an alias, got %v", bins)
 	}
 }
 
 func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	f := proc.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	scriptFirewall(f)
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }
@@ -106,18 +181,9 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	} else if !rebuilt {
 		t.Fatal("rebuilt should be true on a normal (open-posture) apply")
 	}
-	var sawAccept, sawDrop bool
-	for _, c := range f.Calls {
-		j := strings.Join(append([]string{c.Name}, c.Args...), " ")
-		if strings.Contains(j, "iptables") && strings.Contains(j, "--dport 3305") && strings.Contains(j, "ACCEPT") {
-			sawAccept = true
-		}
-		if strings.Contains(j, "iptables") && strings.Contains(j, "0.250.250.254 -j DROP") {
-			sawDrop = true
-		}
-	}
-	if !sawAccept || !sawDrop {
-		t.Fatalf("accept=%t drop=%t", sawAccept, sawDrop)
+	v4 := committedV4(t, f)
+	if !strings.Contains(v4, "--dport 3305 -j ACCEPT") || !strings.Contains(v4, "-d 0.250.250.254 -j DROP") {
+		t.Fatalf("committed ruleset:\n%s", v4)
 	}
 }
 
@@ -125,8 +191,7 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 
 func TestApplyEgressAcceptsResolverForwardTargetsBeforeAliasDrop(t *testing.T) {
 	f := proc.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	scriptFirewall(f)
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "192.168.5.2", "", nil }
@@ -143,9 +208,10 @@ func TestApplyEgressAcceptsResolverForwardTargetsBeforeAliasDrop(t *testing.T) {
 	if askedFor != "192.168.5.2" {
 		t.Fatalf("dns hook must receive the resolved v4 alias, got %q", askedFor)
 	}
-	udp := f.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d 192.168.5.2 -p udp --dport 41234 -j ACCEPT"))
-	tcp := f.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d 192.168.5.2 -p tcp --dport 41235 -j ACCEPT"))
-	drop := f.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d 192.168.5.2 -j DROP"))
+	v4 := committedV4(t, f)
+	udp := strings.Index(v4, "-A LEVER_EGRESS -d 192.168.5.2 -p udp --dport 41234 -j ACCEPT")
+	tcp := strings.Index(v4, "-A LEVER_EGRESS -d 192.168.5.2 -p tcp --dport 41235 -j ACCEPT")
+	drop := strings.Index(v4, "-A LEVER_EGRESS -d 192.168.5.2 -j DROP")
 	if udp < 0 || tcp < 0 || drop < 0 {
 		t.Fatalf("expected udp/tcp forward ACCEPTs and the alias DROP: udp=%d tcp=%d drop=%d", udp, tcp, drop)
 	}
@@ -156,8 +222,7 @@ func TestApplyEgressAcceptsResolverForwardTargetsBeforeAliasDrop(t *testing.T) {
 
 func TestApplyEgressNeverAsksResolverForwardWhenClosed(t *testing.T) {
 	f := proc.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	scriptFirewall(f)
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "192.168.5.2", "", nil }
@@ -168,15 +233,14 @@ func TestApplyEgressNeverAsksResolverForwardWhenClosed(t *testing.T) {
 	if _, _, _, err := g.ApplyEgress(context.Background(), resolve, dns, []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
 	}
-	if f.Called(proc.ArgvContains("--dport 41234")) {
+	if strings.Contains(committedV4(t, f), "--dport 41234") {
 		t.Fatal("closed posture must not ACCEPT a resolver forward port")
 	}
 }
 
 func TestApplyEgressResolverForwardErrorFails(t *testing.T) {
 	f := proc.NewFakeRunner()
-	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
-	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	scriptFirewall(f)
 	g := orbGuest(f, "lever-jail")
 
 	resolve := func(context.Context) (string, string, error) { return "192.168.5.2", "", nil }

@@ -494,6 +494,7 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 		t.Fatalf("first ApplyEgress: %v", err)
 	}
 	r.Open, r.Flushed, r.Resolved = false, false, false
+	r.Calls = nil // only the re-apply's calls count below
 
 	if err := l.ApplyEgress(context.Background(), []int{8443}, true); err != nil {
 		t.Fatalf("ApplyEgress: %v", err)
@@ -569,9 +570,14 @@ func TestEnsureUpOpenPostureAcceptsLimaDNSForwardTargets(t *testing.T) {
 		t.Fatalf("expected `limactl shell %s sudo iptables -t nat -S LIMADNS`; calls=%+v", vm, r.Calls)
 	}
 	alias := backendtest.HostAliasV4
-	udp := r.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d " + alias + " -p udp --dport 41234 -j ACCEPT"))
-	tcp := r.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d " + alias + " -p tcp --dport 41235 -j ACCEPT"))
-	drop := r.CallIndex(proc.ArgvContains("iptables -A LEVER_EGRESS -d " + alias + " -j DROP"))
+	_, inputs := backendtest.RestoreCommits(r.FakeRunner)
+	if len(inputs) == 0 {
+		t.Fatal("no ruleset committed")
+	}
+	v4 := inputs[0]
+	udp := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -p udp --dport 41234 -j ACCEPT")
+	tcp := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -p tcp --dport 41235 -j ACCEPT")
+	drop := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -j DROP")
 	if udp < 0 || tcp < 0 || drop < 0 {
 		t.Fatalf("expected the DNAT-target ACCEPTs and the alias DROP: udp=%d tcp=%d drop=%d", udp, tcp, drop)
 	}
@@ -591,7 +597,11 @@ func TestEnsureUpClosedPostureLeavesLimaDNSDropped(t *testing.T) {
 	if r.Read {
 		t.Fatal("closed posture must not read LIMADNS: DNS stays dropped there by design")
 	}
-	if r.Called(proc.ArgvContains("--dport 41234")) || r.Called(proc.ArgvContains("--dport 41235")) {
+	_, inputs := backendtest.RestoreCommits(r.FakeRunner)
+	if len(inputs) == 0 {
+		t.Fatal("no ruleset committed")
+	}
+	if strings.Contains(strings.Join(inputs, ""), "--dport 41234") || strings.Contains(strings.Join(inputs, ""), "--dport 41235") {
 		t.Fatal("closed posture must not ACCEPT the resolver's DNAT targets")
 	}
 }
@@ -608,7 +618,7 @@ func TestEnsureUpWithoutLimaDNSChainAddsNoForwardRules(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	if f.Called(proc.ArgvContains("-p udp")) {
+	if _, inputs := backendtest.RestoreCommits(f); strings.Contains(strings.Join(inputs, ""), "-p udp") {
 		t.Fatalf("no DNAT targets → no udp ACCEPT; calls=%+v", f.Calls)
 	}
 	backendtest.AssertEgressRules(t, f, "3305")

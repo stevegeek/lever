@@ -63,8 +63,8 @@ func TestRemoteHandlerAdmitsTheBindAddress(t *testing.T) {
 		{"non-default loopback bind", "  bind: 127.0.0.2\n", "127.0.0.2:8445", true},
 		{"IPv6 loopback bind", "  bind: \"::1\"\n", "[::1]:8445", true},
 		{"default bind: another address is a name like any other", "", "10.0.0.5:8445", false},
-		{"wildcard bind admits no address", "  bind: 0.0.0.0\n  allow_wildcard_bind: true\n", "10.0.0.5:8445", false},
-		{"wildcard is never a Host", "  bind: 0.0.0.0\n  allow_wildcard_bind: true\n", "0.0.0.0:8445", false},
+		{"wildcard bind admits no address", "  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n", "10.0.0.5:8445", false},
+		{"wildcard is never a Host", "  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n", "0.0.0.0:8445", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := hostDecision(t, remoteBase+tc.extra, tc.host)
@@ -112,7 +112,7 @@ func TestRemoteHandlerWiresTrustForwardedHost(t *testing.T) {
 // host; without AllowNonLoopback, Serve refuses it.)
 func TestServeRemoteBindsANonLoopbackAddress(t *testing.T) {
 	port, login := freeRemotePort(t), freeRemotePort(t)
-	app := loadInstance(t, fmt.Sprintf(remoteBase+"  port: %d\n  login_port: %d\n  bind: 0.0.0.0\n  allow_wildcard_bind: true\n", port, login))
+	app := loadInstance(t, fmt.Sprintf(remoteBase+"  port: %d\n  login_port: %d\n  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n", port, login))
 	dir := t.TempDir()
 	st := state.ForConfig(dir + "/lever.yaml")
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
@@ -160,7 +160,7 @@ func TestNewRemoteControllerProbesTheBindAddress(t *testing.T) {
 		"":                   "127.0.0.1:8445",
 		"  bind: 10.0.0.5\n": "10.0.0.5:8445",
 		"  bind: \"::1\"\n":  "[::1]:8445",
-		"  bind: \"::\"\n  allow_wildcard_bind: true\n": "[::1]:8445",
+		"  bind: \"::\"\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n": "[::1]:8445",
 	} {
 		app := loadInstance(t, remoteBase+extra)
 		rc := newRemoteController(app, state.ForConfig(t.TempDir()), "/x/lever.yaml", "lever", nil)
@@ -186,6 +186,11 @@ func TestRemoteStatusTailscaleTargetIsTheListenAddress(t *testing.T) {
 		}
 		if !strings.Contains(out, "tailscale serve --bg --https=443 "+want+"\n") {
 			t.Errorf("bind %q: want target %s in:\n%s", extra, want, out)
+		}
+		// A non-default target carries the older-tailscale note; the default
+		// target does not.
+		if strings.Contains(out, "older tailscale releases refuse it") != (extra != "") {
+			t.Errorf("bind %q: note present=%v in:\n%s", extra, !(extra != ""), out)
 		}
 	}
 }

@@ -466,11 +466,12 @@ link-local address is refused (it cannot be listened on without an interface zon
 default `identity_header`, a tailnet address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) is refused
 too: any tailnet peer could connect to it directly, bypassing `tailscale serve`, and send
 `Tailscale-User-Login` with any login. Use `tailscale serve` in front of the loopback bind.
-The jail's egress chain is replaced atomically on every `lever apply`, so there is no window in which
-the private ranges are open. It is not persisted in the guest, though: after a guest reboot there is
+The jail's egress chain is replaced atomically (per address family) on every `lever apply`, so there
+is no window in which the private ranges are open. It is not persisted in the guest, though: after a guest reboot there is
 no chain until the next `lever apply`/`up`, which applies it before it starts any agent.
 `0.0.0.0`/`::` listens on every address, public ones included, and needs
-`allow_wildcard_bind: true` as well. A non-loopback bind prints a warning on every `lever apply`,
+`allow_wildcard_bind: true` as well; with the default `identity_header` it is refused outright,
+because it listens on the tailnet address too. A non-loopback bind prints a warning on every `lever apply`,
 `lever up` and `lever remote serve`, and `lever doctor` shows it as a `remote exposure` warning
 row. The login provider stays on loopback regardless.
 

@@ -1722,7 +1722,7 @@ func TestRemoteBind(t *testing.T) {
 
 	// The wildcard with its acknowledgement loads, warns, and is probed on
 	// loopback — nothing listens on 0.0.0.0 to dial.
-	app, err = LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: 0.0.0.0\n  allow_wildcard_bind: true\n"))
+	app, err = LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n"))
 	if err != nil {
 		t.Fatalf("acknowledged wildcard: %v", err)
 	}
@@ -1730,7 +1730,7 @@ func TestRemoteBind(t *testing.T) {
 		t.Fatalf("wildcard: probe=%s warnings=%v", app.RemoteProbeAddr(), app.RemoteWarnings())
 	}
 	// The IPv6 wildcard is probed on the IPv6 loopback.
-	app, err = LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: \"::\"\n  allow_wildcard_bind: true\n"))
+	app, err = LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: \"::\"\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n"))
 	if err != nil {
 		t.Fatalf("acknowledged IPv6 wildcard: %v", err)
 	}
@@ -1738,7 +1738,7 @@ func TestRemoteBind(t *testing.T) {
 		t.Fatalf("IPv6 wildcard RemoteProbeAddr() = %q, want [::1]:8445", got)
 	}
 	// An acknowledgement with no wildcard to acknowledge is a mistake.
-	rejectNoHost(t, remoteOn+"  allow_wildcard_bind: true\n", "allow_wildcard_bind")
+	rejectNoHost(t, remoteOn+"  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n", "allow_wildcard_bind")
 }
 
 // trust_forwarded_host loads (off by default) and always warns when on.
@@ -1836,5 +1836,19 @@ func TestRemoteIdentityHeaderRefusesNonIdentityTailscaleAndUnderscore(t *testing
 	}
 	if _, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  identity_header: Tailscale-User-Login\n")); err != nil {
 		t.Fatalf("the default must stay accepted: %v", err)
+	}
+}
+
+// A wildcard bind listens on the tailnet address too, so with Tailscale's
+// header it is the tailnet-bind hole by another spelling: refused even with
+// the acknowledgement.
+func TestRemoteWildcardBindRefusedWithTailscaleHeader(t *testing.T) {
+	for _, bind := range []string{"0.0.0.0", "\"::\""} {
+		for _, hdr := range []string{"", "  identity_header: tailscale-user-login\n"} {
+			rejectNoHost(t, remoteOn+"  bind: "+bind+"\n  allow_wildcard_bind: true\n"+hdr, "tailnet", "tailscale serve")
+		}
+		if _, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  bind: "+bind+"\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n")); err != nil {
+			t.Fatalf("%s with another front's header and the acknowledgement must load: %v", bind, err)
+		}
 	}
 }

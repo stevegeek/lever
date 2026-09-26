@@ -344,6 +344,13 @@ func newRemoteStatusCmd() *cobra.Command {
 			cmd.Printf("identity header: %s\n", app.EffectiveRemoteIdentityHeader())
 			if app.RemoteBindLoopback() {
 				cmd.Printf("tailscale command: tailscale serve --bg --https=443 http://%s\n", app.RemoteListenAddr())
+				if app.EffectiveRemoteBind() != config.DefaultRemoteBind {
+					// Checked against tailscale 1.102.4's ipn.ExpandProxyTargetValue:
+					// any IP with an explicit scheme is accepted. Older releases
+					// refused every target but localhost/127.0.0.1.
+					cmd.Println("  note: this target is not 127.0.0.1; older tailscale releases refuse it (\"only localhost or " +
+						"127.0.0.1 proxies are currently supported\") — use a current tailscale, or the default bind")
+				}
 			}
 			for _, w := range app.RemoteWarnings() {
 				cmd.Printf("warning: %s\n", w)

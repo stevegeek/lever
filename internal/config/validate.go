@@ -556,6 +556,15 @@ func (a *App) validateRemoteBind() error {
 	case ip.IsLoopback():
 		return nil
 	case ip.IsUnspecified():
+		if a.EffectiveRemoteIdentityHeader() == DefaultRemoteIdentityHeader {
+			// The wildcard listens on the tailnet address too, so this is
+			// the tailnet-bind refusal below, reached by another spelling —
+			// and no acknowledgement can make a forgeable
+			// Tailscale-User-Login safe.
+			return fmt.Errorf("config: remote: bind %q listens on every host address, this host's tailnet address included, and "+
+				"identity_header is %s: any tailnet peer could connect directly, bypassing `tailscale serve`, and set that header "+
+				"to any login. allow_wildcard_bind cannot accept that; keep the loopback bind and use `tailscale serve`", b, DefaultRemoteIdentityHeader)
+		}
 		if !a.Remote.AllowWildcardBind {
 			return fmt.Errorf("config: remote: bind %q listens on every host address, public ones included — anything that reaches "+
 				"any of them can set %s to any login, and a public address is reachable from the jail under open egress. Bind "+

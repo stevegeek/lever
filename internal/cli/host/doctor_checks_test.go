@@ -988,7 +988,7 @@ func TestCheckRemoteExposure(t *testing.T) {
 	}
 	for name, extra := range map[string]string{
 		"non-loopback bind":    "  bind: 10.0.0.5\n",
-		"wildcard bind":        "  bind: 0.0.0.0\n  allow_wildcard_bind: true\n",
+		"wildcard bind":        "  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n",
 		"trust_forwarded_host": "  trust_forwarded_host: true\n",
 	} {
 		t.Run(name, func(t *testing.T) {

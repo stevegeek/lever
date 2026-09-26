@@ -41,7 +41,8 @@ version bump moves the block under the new version heading.
 - `lever doctor` warning rows: a passing row with a fix prints as `!` and does
   not fail the run.
 - Config load also refuses: a tailnet `bind` address (`100.64.0.0/10`,
-  `fd7a:115c:a1e0::/48`) while the identity header is Tailscale's; an IPv6
+  `fd7a:115c:a1e0::/48`) or a wildcard `bind` (even acknowledged) while
+  the identity header is Tailscale's; an IPv6
   link-local `bind`; `allowed_users` entries equal under case folding (scion
   lowercases emails); `Tailscale-User-Name`, `Tailscale-User-Profile-Pic`
   and any header name containing `_` as `identity_header`.
@@ -54,9 +55,12 @@ version bump moves the block under the new version heading.
   posture (every host-alias port, broker admin 8444 included, and the
   private ranges), and a partial chain after a failed apply. It now loads
   the whole ruleset with one `iptables-restore --noflush` commit per
-  address family; a failed commit keeps the old chain. The host alias is
-  resolved under the live chain, falling back to the alias the live chain
-  names.
+  address family, IPv6 first and IPv4 last; a failed commit keeps that
+  family's old chain, and the error says which family was committed. The
+  skip for a live closed instance now requires both families closed. The
+  host alias is resolved under the live chain; only when that chain is
+  closed does a failed lookup fall back to the alias it names (with a
+  warning).
 
 - **Remote access no longer needs Go on the host with a release build.**
   Release archives and `make install` embed the guest login forwarder

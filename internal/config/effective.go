@@ -235,9 +235,13 @@ func (a *App) RemoteWarnings() []string {
 			a.EffectiveRemoteBind(), a.RemoteListenAddr(), a.EffectiveRemoteIdentityHeader()))
 	}
 	if a.Remote.TrustForwardedHost {
-		out = append(out, "remote.trust_forwarded_host is on: the proxy's Host check (its DNS-rebinding defence) reads "+
-			"X-Forwarded-Host, which any client that reaches the listener directly can set, so that defence now rests on "+
-			"only the front being able to reach the listener")
+		out = append(out, "remote.trust_forwarded_host is on: on a request whose Host is an IP address, the proxy's Host "+
+			"check reads X-Forwarded-Host instead, which any client that reaches the listener directly can set")
+	}
+	if len(a.Remote.AllowedUsers) == 0 && a.EffectiveRemoteIdentityHeader() != DefaultRemoteIdentityHeader {
+		out = append(out, fmt.Sprintf("remote.identity_header is %s but allowed_users is empty: the header is never checked, "+
+			"so everyone the front lets through (every user it grants access to, not only you) rides the placeholder "+
+			"operator's hub session — list your login in allowed_users", a.EffectiveRemoteIdentityHeader()))
 	}
 	return out
 }

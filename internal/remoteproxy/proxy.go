@@ -986,23 +986,28 @@ func hostAllowed(host, serveHost string, port int, bindHost string) bool {
 // hostToCheck picks the name hostAllowed judges: the request's Host, or —
 // only with trustForwarded set and only when the request carries one —
 // X-Forwarded-Host. It returns a denial message instead when that header is
-// ambiguous: more than one, or a comma-joined list (what a chain of appending
-// proxies produces), since picking one would let a client-sent value win.
+// ambiguous (more than one, or a comma-joined list, what a chain of appending
+// proxies produces: picking one would let a client-sent value win), or when
+// the request's own Host is not an IP address.
 //
-// What trusting it costs. Host is the one rebinding defence a same-origin
-// page cannot forge, because the browser writes it from the URL. X-Forwarded-
-// Host is an ordinary header: a page rebound onto the listener's address can
-// send any value, including base_url's host. With trustForwarded on, the
-// rebinding defence therefore rests on nothing but the precondition in the
-// package doc — only the front can reach the listener — which is why it is
-// off by default, and why config.RemoteWarnings and `lever doctor` name it.
-// A request WITHOUT the header still gets the ordinary Host check (that is
-// how the loopback doctor probe passes); a request WITH it is judged on the
-// header alone, whatever its Host says.
+// That last rule is what keeps the DNS-rebinding defence intact. Host is the
+// one rebinding defence a same-origin page cannot forge, because the browser
+// writes it from the URL; X-Forwarded-Host is an ordinary header that a page
+// rebound onto the listener can set to base_url's host. But a rebind always
+// makes the browser send the ATTACKER's name in Host, never an IP literal. So
+// X-Forwarded-Host is believed only on a request whose Host is an IP address
+// — the address a front dials when it rewrites Host — and a request whose
+// Host is a name is judged on that name, as without the setting. A cross-site
+// page cannot add the header to a request to an IP-literal origin either: it
+// is not CORS-safelisted, so the browser would preflight, and the proxy
+// answers no preflight.
 //
-// It is only worth turning on for a front that rewrites Host to a name the
-// default refuses. A front that rewrites Host to the address it dials
-// (127.0.0.1:<port>, or the bind address) already passes without it.
+// A request WITHOUT the header gets the ordinary Host check (that is how the
+// loopback doctor probe passes). The setting is only worth turning on for a
+// front that rewrites Host to an IP address the default refuses (another
+// port, or none); a front that rewrites Host to 127.0.0.1:<port> or
+// <bind>:<port> already passes without it, and one that rewrites Host to a
+// NAME other than base_url's host is not supported.
 func hostToCheck(r *http.Request, trustForwarded bool) (host, denial string) {
 	if !trustForwarded {
 		return r.Host, ""
@@ -1015,6 +1020,22 @@ func hostToCheck(r *http.Request, trustForwarded bool) (host, denial string) {
 		return "", "multiple X-Forwarded-Host headers refused"
 	case strings.Contains(xfh[0], ","):
 		return "", "a comma-joined X-Forwarded-Host value refused"
+	case !isIPHost(r.Host):
+		return "", "X-Forwarded-Host is trusted only on a request whose Host is an IP address"
 	}
 	return strings.TrimSpace(xfh[0]), ""
+}
+
+// isIPHost reports whether a Host header value is an IP literal, with or
+// without a port ("10.0.0.5", "10.0.0.5:8445", "[::1]:8445").
+func isIPHost(host string) bool {
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	h = strings.Trim(h, "[]")
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		return false // a zoned address is no Host a front sends
+	}
+	return net.ParseIP(h) != nil
 }

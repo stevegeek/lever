@@ -1772,3 +1772,22 @@ func TestRemoteAllowedUsersShape(t *testing.T) {
 		})
 	}
 }
+
+// Another front with no allowed_users admits everyone that front admits;
+// say so. The Tailscale default keeps its long-standing quiet default.
+func TestRemoteIdentityHeaderWithoutAllowedUsersWarns(t *testing.T) {
+	app, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  identity_header: X-ExeDev-Email\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := app.RemoteWarnings(); len(w) != 1 || !strings.Contains(w[0], "allowed_users") {
+		t.Fatalf("RemoteWarnings() = %v", w)
+	}
+	app, err = LoadNoHostChecks(writeConfig(t, remoteOn+"  identity_header: X-ExeDev-Email\n  allowed_users: [\"me@example.com\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := app.RemoteWarnings(); len(w) != 0 {
+		t.Fatalf("pinned: RemoteWarnings() = %v", w)
+	}
+}

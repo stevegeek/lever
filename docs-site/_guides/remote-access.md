@@ -459,6 +459,10 @@ Anything that can reach that address can now set the identity header to any logi
 hub session. The host firewall must admit only the front to `<bind>:<port>`. lever accepts only
 addresses the jail's egress rules drop in every posture, so no jailed agent can reach the proxy
 that way; a public address is refused, because under open egress the jail could dial it.
+One known gap: in the open egress posture, every `lever apply` flushes and rebuilds the jail's
+egress chain, and for that short window (a DNS lookup of the host alias) the private ranges are not
+dropped. A running agent that dials the bind address at exactly that moment could reach the proxy.
+Prefer the loopback bind where the front allows it.
 `0.0.0.0`/`::` listens on every address, public ones included, and needs
 `allow_wildcard_bind: true` as well. A non-loopback bind prints a warning on every `lever apply`,
 `lever up` and `lever remote serve`, and `lever doctor` shows it as a `remote exposure` warning
@@ -468,8 +472,8 @@ row. The login provider stays on loopback regardless.
 `Host` header against `base_url`'s host (port included when `base_url` has one), and also admits
 `127.0.0.1:<port>`, `localhost:<port>` and, with a non-loopback `bind`, `<bind>:<port>`. A front
 that passes `Host` through, or rewrites it to the address it dials, works unchanged. A front that
-rewrites `Host` to some other name gets `deny-host` in the audit log. If that front passes the
-browser's host in `X-Forwarded-Host`, set:
+rewrites `Host` to some other IP address (another port, or none) gets `deny-host` in the audit log.
+If that front passes the browser's host in `X-Forwarded-Host`, set:
 
 ```yaml
 remote:
@@ -477,10 +481,12 @@ remote:
 ```
 
 The proxy then judges `X-Forwarded-Host` (exactly one value; repeated or comma-joined values are
-refused) instead of `Host` whenever a request carries it. This costs the rebinding defence: a page
-rebound onto the listener's address can send any `X-Forwarded-Host` it likes, so with this on the
-defence rests only on the front being the one thing that reaches the listener. It is off by
-default, and warned about like a non-loopback `bind`.
+refused) instead of `Host`, but only on a request whose `Host` is an IP address. A DNS rebind
+always makes the browser send the attacker's *name* in `Host`, so a rebound page that adds a forged
+`X-Forwarded-Host` is still refused. A front that rewrites `Host` to a name other than `base_url`'s
+host is not supported. Anything that reaches the listener directly can still send any
+`X-Forwarded-Host` — as it can send any identity header — so this is off by default and warned
+about like a non-loopback `bind`.
 
 ### Worked example: exe.dev
 
@@ -527,6 +533,11 @@ These settings have not been live-validated behind exe.dev yet.
 - Lima mirrors nothing. lever's Lima template ignores every guest→host port forward (and lever
   verifies that on every bring-up), so the forwarder's guest port never appears on the host. The
   OrbStack mirror that forced two port numbers does not exist there.
+
+**Linux hosts are often multi-user.** Every local account on the host shares its loopback, so any
+of them can connect to `127.0.0.1:<remote.port>`, set the identity header and ride your hub session.
+That has always been true of the loopback design; on a shared Linux host it matters. Run remote
+access only on a host whose other local users you trust as much as the front's users.
 
 **Not live-validated yet.** Until it is, check the login path on a real Lima VM with `lever
 doctor`: the `remote access` row proves the hub reaches the provider through the forwarder (a 302

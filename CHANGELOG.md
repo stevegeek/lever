@@ -33,8 +33,11 @@ version bump moves the block under the new version heading.
   host firewall must admit only the front.
 - **`remote.trust_forwarded_host`** (default off) makes the proxy's Host
   check read `X-Forwarded-Host` (exactly one value) instead of `Host`, for a
-  front that rewrites `Host`. It weakens the DNS-rebinding defence, and is
-  warned about the same way.
+  front that rewrites `Host` to an IP address. It applies only when `Host`
+  is an IP literal, so a DNS rebind (which sends the attacker's name) is
+  still refused. Warned about the same way.
+- A warning when `identity_header` is not Tailscale's and `allowed_users` is
+  empty: everyone the front admits then rides the placeholder operator.
 - `lever doctor` warning rows: a passing row with a fix prints as `!` and does
   not fail the run.
 

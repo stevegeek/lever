@@ -143,11 +143,18 @@ func TestForwardedHostOptIn(t *testing.T) {
 		hdr        http.Header
 		want       int
 	}{
-		{"front rewrote Host, passes the original", "internal-name:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 200},
-		{"forwarded host is judged like Host, case-insensitively", "internal-name", http.Header{"X-Forwarded-Host": {"MAC.ts.net"}}, 200},
-		{"forwarded host names another site", testServeHost, http.Header{"X-Forwarded-Host": {"evil.example"}}, 403},
-		{"two forwarded hosts", "internal-name", http.Header{"X-Forwarded-Host": {testServeHost, "evil.example"}}, 403},
-		{"comma-joined forwarded hosts", "internal-name", http.Header{"X-Forwarded-Host": {"evil.example, " + testServeHost}}, 403},
+		{"front rewrote Host to an IP, passes the original", "10.1.2.3:9000", http.Header{"X-Forwarded-Host": {testServeHost}}, 200},
+		{"front rewrote Host to a bare IP", "127.0.0.1", http.Header{"X-Forwarded-Host": {testServeHost}}, 200},
+		{"front rewrote Host to an IPv6 literal", "[::1]:9000", http.Header{"X-Forwarded-Host": {testServeHost}}, 200},
+		{"forwarded host is judged like Host, case-insensitively", "127.0.0.1", http.Header{"X-Forwarded-Host": {"MAC.ts.net"}}, 200},
+		{"forwarded host names another site", "127.0.0.1", http.Header{"X-Forwarded-Host": {"evil.example"}}, 403},
+		{"two forwarded hosts", "127.0.0.1", http.Header{"X-Forwarded-Host": {testServeHost, "evil.example"}}, 403},
+		{"comma-joined forwarded hosts", "127.0.0.1", http.Header{"X-Forwarded-Host": {"evil.example, " + testServeHost}}, 403},
+		// The 2026-08-22 rebind, with the header added: the browser sends
+		// the attacker's NAME in Host, so the header is not believed.
+		{"rebound name with a forged forwarded host", "evil.example:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
+		{"localhost is a name, not an IP", "localhost:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
+		{"a rewritten name is not supported", "internal-name:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
 		// Without the header the ordinary Host check applies: the loopback
 		// doctor probe still passes, a rebound name still does not.
 		{"no header, loopback probe", "127.0.0.1:8445", nil, 200},

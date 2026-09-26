@@ -378,11 +378,12 @@ type Remote struct {
 	// under open egress. Refused without it.
 	AllowWildcardBind bool `yaml:"allow_wildcard_bind"`
 	// TrustForwardedHost makes the proxy's Host check (the DNS-rebinding
-	// defence, remoteproxy.hostAllowed) read X-Forwarded-Host, when present,
-	// instead of Host — for a front that rewrites Host and passes the
-	// browser's in X-Forwarded-Host. Off by default: any client that reaches
-	// the listener directly can set that header, so turning it on leaves the
-	// rebinding defence to reachability alone. RemoteWarnings names it.
+	// defence, remoteproxy.hostAllowed) read X-Forwarded-Host instead of Host
+	// on a request whose Host is an IP address — for a front that rewrites
+	// Host to an IP and passes the browser's in X-Forwarded-Host. A rebind
+	// sends a name in Host, so it stays refused (remoteproxy.hostToCheck).
+	// Off by default: anything that reaches the listener directly can set
+	// that header. RemoteWarnings names it.
 	TrustForwardedHost bool `yaml:"trust_forwarded_host"`
 	// LoginPort is the HOST loopback port the local OIDC provider binds.
 	//

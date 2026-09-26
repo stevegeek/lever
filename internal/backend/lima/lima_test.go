@@ -625,3 +625,62 @@ func TestEnsureUpWithoutLimaDNSChainAddsNoForwardRules(t *testing.T) {
 	}
 	backendtest.AssertEgressRules(t, f, "3305")
 }
+
+// resolvConfRunner is natRunner plus a guest resolver upstream file: vmType
+// vz leaves LIMADNS empty and systemd-resolved talks to <alias>:53 directly.
+type resolvConfRunner struct {
+	*backendtest.NATChainRunner
+	conf string
+}
+
+func (r *resolvConfRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "limactl" && strings.Contains(strings.Join(args, " "), "cat /run/systemd/resolve/resolv.conf") {
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Stdout: r.conf}, nil
+	}
+	return r.NATChainRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *resolvConfRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func TestEnsureUpOpenPostureAcceptsVZResolverUpstream(t *testing.T) {
+	r := &resolvConfRunner{natRunner("-N LIMADNS\n"), "nameserver " + backendtest.HostAliasV4 + "\nsearch example.net\n"}
+	l := New(r, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{
+		MachineName: vm, ProjectTree: tree, AllowedPorts: []int{3305},
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	alias := backendtest.HostAliasV4
+	bins, inputs := backendtest.RestoreCommits(r.FakeRunner)
+	v4 := ""
+	for i, b := range bins {
+		if b == "iptables-restore" {
+			v4 = inputs[i]
+		}
+	}
+	udp := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -p udp --dport 53 -j ACCEPT")
+	tcp := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -p tcp --dport 53 -j ACCEPT")
+	drop := strings.Index(v4, "-A LEVER_EGRESS -d "+alias+" -j DROP")
+	if udp < 0 || tcp < 0 || drop < 0 || udp > drop || tcp > drop {
+		t.Fatalf("want udp+tcp 53 ACCEPTs to the alias before its DROP: udp=%d tcp=%d drop=%d\n%s", udp, tcp, drop, v4)
+	}
+}
+
+func TestEnsureUpDNATTargetsWinOverResolverUpstream(t *testing.T) {
+	r := &resolvConfRunner{natRunner(backendtest.LimaDNSChain), "nameserver " + backendtest.HostAliasV4 + "\n"}
+	l := New(r, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{
+		MachineName: vm, ProjectTree: tree, AllowedPorts: []int{3305},
+	}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if r.Called(proc.ArgvPrefix("limactl", "shell", vm, "sudo", "cat")) {
+		t.Fatal("with LIMADNS DNAT targets the resolver file is not needed")
+	}
+	if _, inputs := backendtest.RestoreCommits(r.FakeRunner); strings.Contains(strings.Join(inputs, ""), "--dport 53 ") {
+		t.Fatal("qemu (DNAT) guests must not also open the alias's port 53")
+	}
+}

@@ -53,10 +53,11 @@ type Config struct {
 	// proxy (127.0.0.1:8462) from co-resident agents — under a shared
 	// --network=host netns any agent could reach another's gateway and act as
 	// it (no creds). Hub reachability across the netns boundary is restored
-	// host-side, not by host networking: the guest containers.conf sets pasta
-	// --map-host-loopback 169.254.1.2 (guest.EnsureRuntimes), and scion's
-	// auto-computed container hub endpoint (host.containers.internal →
-	// 169.254.1.2) then resolves to the VM-loopback hub. Egress containment is
+	// host-side, not by host networking: the guest's containers.conf.d
+	// drop-in maps 169.254.1.2 to the VM loopback in whichever way the
+	// guest's pasta supports, and makes host.containers.internal resolve to
+	// it (guest.PastaHostAddr, lever#35), so scion's auto-computed container
+	// hub endpoint reaches the VM-loopback hub. Egress containment is
 	// unaffected: pasta's egress re-emerges on the VM OUTPUT chain
 	// (LEVER_EGRESS), verified live. Constructors take the value from
 	// ForceHostNetworkFromEnv.

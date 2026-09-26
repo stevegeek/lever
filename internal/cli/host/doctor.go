@@ -126,6 +126,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	inspectMounts := func(ctx context.Context, containerID string) ([]string, error) {
 		return jail.ContainerMountTargets(ctx, jr, containerID)
 	}
+	// An agent container's network mode (lever#35), through the jail.
+	inspectNetMode := func(ctx context.Context, ref string) (string, error) {
+		return jail.ContainerNetworkMode(ctx, jr, ref)
+	}
 	// One variable of a container's env, filtered in the guest — see
 	// jail.ContainerEnvValue for why the rest never leaves it.
 	readContainerEnv := func(ctx context.Context, ref, key string) (string, bool, error) {
@@ -167,6 +171,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		},
 		func() checkResult {
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
+		},
+		func() checkResult {
+			return checkAgentNetwork(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), jail.ForceHostNetworkFromEnv(), listAgents, inspectNetMode)
 		},
 		func() checkResult { return checkScionProjectInJail(ctx, b) },
 	}

@@ -5,6 +5,41 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Fixed
+
+- **Lima: agents could not reach the hub (#35).** On podman 4.9 (the Lima
+  Ubuntu 24.04 guest) rootless containers default to slirp4netns and ignore
+  lever's `pasta_options`, so `host.containers.internal` resolved to the
+  guest's own address, which `LEVER_EGRESS` drops: heartbeats, `scion
+  message` from inside an agent (chat replies) and token refresh all timed
+  out. lever's drop-in now sets `default_rootless_network_cmd = "pasta"` and
+  picks the hub mapping the guest's pasta supports: `--map-host-loopback
+  169.254.1.2` on passt 2024-08 and later, or, on Ubuntu 24.04's older
+  passt (which rejects that flag, so every container would fail to start), a
+  link-local container address with `169.254.1.2` as its pasta-mapped
+  gateway plus `host_containers_internal_ip`, with pasta kept IPv4-only
+  (otherwise its IPv6 gateway would map to the guest's `::1`). Both drop-ins
+  pin `host_containers_internal_ip`, so podman 5.0-5.2 resolves the name the
+  same way. `lever apply` fails with a clear error when the guest's pasta
+  can do neither or is missing, and `passt` is now in the guest
+  prerequisites (it is only a Recommends of Ubuntu's podman). OrbStack
+  guests (podman 5) keep the same mapping.
+- **Lima on macOS (vmType vz): no DNS in the open posture.** vz guests have
+  an empty LIMADNS chain; systemd-resolved talks to the host alias on port
+  53 directly, so the lever#34 DNAT ACCEPTs found nothing and the alias DROP
+  swallowed every lookup, in the guest and in every agent. When LIMADNS has
+  no targets, lever now reads the resolver's upstream file and ACCEPTs udp
+  and tcp 53 to the alias if it is a nameserver. The closed posture still
+  drops DNS by design.
+- New `lever doctor` row **agent network**: fails on any agent container
+  not running pasta.
+
+  **Upgrade (Lima):** run `lever apply`, then `lever stop` and `lever up`.
+  scion recreates each stopped agent's container on start, so the agents
+  come back on pasta and the manager conversation is kept.
+
 ## [0.25.0] - 2026-09-26
 
 ### Added

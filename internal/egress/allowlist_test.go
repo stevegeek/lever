@@ -349,3 +349,21 @@ func TestRestoreInput(t *testing.T) {
 		t.Fatal("RestoreBinary")
 	}
 }
+
+func TestParseResolverUpstreams(t *testing.T) {
+	vz := "# generated\nnameserver 192.168.5.2\nsearch example.net\n"
+	got := ParseResolverUpstreams(vz, "192.168.5.2")
+	if len(got) != 2 || got[0] != (DNSForward{"udp", 53}) || got[1] != (DNSForward{"tcp", 53}) {
+		t.Fatalf("vz upstream on the alias: got %v, want udp+tcp 53", got)
+	}
+	for name, c := range map[string]struct{ conf, alias string }{
+		"other nameserver":      {"nameserver 1.1.1.1\n", "192.168.5.2"},
+		"alias only in search":  {"search 192.168.5.2\n", "192.168.5.2"},
+		"prefix is not a match": {"nameserver 192.168.5.20\n", "192.168.5.2"},
+		"no alias":              {vz, ""},
+	} {
+		if got := ParseResolverUpstreams(c.conf, c.alias); got != nil {
+			t.Errorf("%s: got %v, want nothing", name, got)
+		}
+	}
+}

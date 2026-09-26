@@ -25,9 +25,11 @@
 // yields anything without an authorization code, and no endpoint anywhere
 // mints one.
 //
-// Built and installed by internal/backend/guest.EnsureHubLogin, which
-// cross-compiles this file for the guest's architecture. Stdlib only, on
-// purpose: it is compiled from a copy of its own source at apply time.
+// Installed by internal/backend/guest.EnsureHubLogin: a copy prebuilt for the
+// guest's architecture and embedded in lever when there is one, else
+// cross-compiled from a copy of this file at apply time (see the loginfwd
+// package). Stdlib only, on purpose: either way it builds offline, with
+// nothing but a Go toolchain.
 package main
 
 import (

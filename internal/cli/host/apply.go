@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -140,8 +142,11 @@ type remoteController struct {
 	configPath string
 	selfExe    string // the binary re-exec'd as `remote serve`; see applyOpts.SelfExe
 	port       int    // app.EffectiveRemotePort()
-	version    string // this binary, for the reuse stamp
-	cfgHash    string // brokerctl.RemoteConfigHash(app), for the reuse stamp
+	// probeHost is the address the bind wait dials: host of
+	// app.RemoteProbeAddr(), "" = 127.0.0.1 (the default loopback bind).
+	probeHost string
+	version   string // this binary, for the reuse stamp
+	cfgHash   string // brokerctl.RemoteConfigHash(app), for the reuse stamp
 	// startTimeout/startInterval bound awaitListening's wait for the spawned
 	// proxy to bind; zero means remoteProxyStartTimeout/Interval. Set short by
 	// tests whose stand-in never binds.
@@ -150,7 +155,25 @@ type remoteController struct {
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
 }
 
-func (rc *remoteController) addr() string { return fmt.Sprintf("127.0.0.1:%d", rc.port) }
+// newRemoteController builds apply's remote-proxy controller for app: where
+// the spawned proxy is waited for (the address it listens on, as a host-side
+// caller dials it) and the stamp it must match.
+func newRemoteController(app *config.App, st state.State, configPath, selfExe string, log logFunc) *remoteController {
+	return &remoteController{
+		state:      st,
+		configPath: configPath,
+		selfExe:    selfExe,
+		port:       app.EffectiveRemotePort(),
+		probeHost:  remoteProbeHost(app),
+		version:    cli.VersionString(),
+		cfgHash:    brokerctl.RemoteConfigHash(app),
+		log:        log,
+	}
+}
+
+func (rc *remoteController) addr() string {
+	return net.JoinHostPort(cmp.Or(rc.probeHost, "127.0.0.1"), strconv.Itoa(rc.port))
+}
 
 // Start spawns `lever remote serve <config>` as a daemonized child so it
 // outlives the apply invocation.
@@ -824,6 +847,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			if p, ok := registry.ProfileFor(app.Backend); ok {
 				cmd.Printf("backend: %s\n", p.Summary())
 			}
+			printRemoteWarnings(cmd, app)
 			if dryRun {
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					if s.TarPath != "" {
@@ -1132,15 +1156,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	// — see internal/apply/plan.go) or, in the disabled direction, when
 	// Run's own converge-off reconciliation calls StopRemoteProxy — see
 	// internal/apply/run.go.
-	rc := &remoteController{
-		state:      st,
-		configPath: configPath,
-		selfExe:    selfExe,
-		port:       app.EffectiveRemotePort(),
-		version:    cli.VersionString(),
-		cfgHash:    brokerctl.RemoteConfigHash(app),
-		log:        w.log,
-	}
+	rc := newRemoteController(app, st, configPath, selfExe, w.log)
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
 	return w, nil

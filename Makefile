@@ -13,8 +13,17 @@ LEVER_INSTANCE ?= $(HOME)/lever-instance
 
 # Install the host `lever` binary (darwin/native) onto PATH — your everyday entry
 # (`lever up` from anywhere inside an instance, or `lever up path/to/lever.yaml`).
+# Cross-compile the guest's remote-access login forwarder for linux/amd64 and
+# linux/arm64 into internal/provision/loginfwd/prebuilt/, where go:embed picks
+# it up. A lever built after this needs no Go toolchain for remote access
+# (issue #38); one built without it falls back to compiling the forwarder at
+# apply time. Offline, stdlib-only. The release workflow runs the same command.
+.PHONY: loginfwd-prebuilt
+loginfwd-prebuilt:
+	go run ./internal/provision/loginfwd/genprebuilt
+
 .PHONY: install
-install:
+install: loginfwd-prebuilt
 	@mkdir -p $(PREFIX)
 	go build -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version

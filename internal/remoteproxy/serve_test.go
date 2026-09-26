@@ -249,12 +249,13 @@ func TestServeSecondOnSamePortErrors(t *testing.T) {
 }
 
 func TestServeFailsClosedOnNonLoopbackAddr(t *testing.T) {
-	// Serve always binds "127.0.0.1:<port>" itself (Port is just the port
-	// number, not a bindable address), so the fail-closed branch cannot be
-	// reached through the public Port field alone. This test exercises the
-	// loopback check directly, the same shape the broker's admin listener
-	// check uses (internal/broker/server.go), to prove the guard's logic
-	// rejects a non-loopback TCPAddr and accepts a loopback one.
+	// A loopback bind (the default, or an explicit loopback Bind) cannot
+	// yield a non-loopback listener, so the fail-closed branch cannot be
+	// reached through Serve's inputs alone; a non-loopback Bind goes through
+	// listenProxy's acknowledgement instead (TestListenProxyBind). This test
+	// exercises the loopback check directly, the same shape the broker's
+	// admin listener check uses (internal/broker/server.go), to prove the
+	// guard's logic rejects a non-loopback TCPAddr and accepts a loopback one.
 	nonLoopback := &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 12345}
 	if isLoopbackAddr(nonLoopback) {
 		t.Fatal("0.0.0.0 must not be treated as loopback")

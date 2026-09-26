@@ -332,8 +332,9 @@ type Operator struct {
 }
 
 // Remote configures the opt-in remote-access proxy (`lever remote`): a
-// host-loopback reverse proxy that injects a dedicated narrow PAT and is
-// fronted by `tailscale serve`. Disabled by default; the hub web UI is only
+// host-side reverse proxy that injects the operator's hub session and is
+// fronted by an authenticating front (`tailscale serve`, or another that sets
+// a verified identity header — see IdentityHeader). Disabled by default; the hub web UI is only
 // enabled (--enable-web) when this is on. See
 // docs/superpowers/specs/2026-08-16-remote-agent-access-design.md.
 type Remote struct {
@@ -351,9 +352,39 @@ type Remote struct {
 	// scion.ServerOpts.EnableWeb). Required while remote is enabled; must
 	// be an absolute https URL.
 	BaseURL string `yaml:"base_url"`
-	// AllowedUsers, when non-empty, pins requests to these Tailscale login
-	// names (Tailscale-User-Login header injected by `tailscale serve`).
+	// AllowedUsers, when non-empty, pins requests to these logins, matched
+	// exactly against the IdentityHeader value the front sets
+	// (Tailscale-User-Login from `tailscale serve` by default). The same list
+	// names the hub users the login path creates (remoteproxy.HubUserEmails).
 	AllowedUsers []string `yaml:"allowed_users"`
+	// IdentityHeader is the request header the authenticating front puts the
+	// verified login in. Empty = DefaultRemoteIdentityHeader
+	// (Tailscale-User-Login). Another front sets its own, e.g. exe.dev's
+	// X-ExeDev-Email. The proxy trusts it only because only the front can
+	// reach the listener, and it strips it before forwarding to the hub.
+	// Validated (validRemoteIdentityHeader): a token, and not a header that
+	// carries a browser credential, routing, or an identity scion reads.
+	IdentityHeader string `yaml:"identity_header"`
+	// Bind is the address the proxy listens on. Empty = DefaultRemoteBind
+	// (127.0.0.1). A front that dials the host's external interface rather
+	// than its loopback needs a non-loopback address; whatever can reach it
+	// can then assert any identity header, so validateRemote accepts only an
+	// address the jail's egress rules drop (egress.DroppedForJail), or the
+	// wildcard with AllowWildcardBind, and RemoteWarnings names it. The login
+	// provider always stays on loopback.
+	Bind string `yaml:"bind"`
+	// AllowWildcardBind acknowledges Bind: 0.0.0.0 or "::", which listens on
+	// every host address — any public one included, which the jail can reach
+	// under open egress. Refused without it.
+	AllowWildcardBind bool `yaml:"allow_wildcard_bind"`
+	// TrustForwardedHost makes the proxy's Host check (the DNS-rebinding
+	// defence, remoteproxy.hostAllowed) read X-Forwarded-Host instead of Host
+	// on a request whose Host is an IP address — for a front that rewrites
+	// Host to an IP and passes the browser's in X-Forwarded-Host. A rebind
+	// sends a name in Host, so it stays refused (remoteproxy.hostToCheck).
+	// Off by default: anything that reaches the listener directly can set
+	// that header. RemoteWarnings names it.
+	TrustForwardedHost bool `yaml:"trust_forwarded_host"`
 	// LoginPort is the HOST loopback port the local OIDC provider binds.
 	//
 	// It is deliberately NOT the port the hub dials. The hub dials a guest

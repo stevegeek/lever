@@ -70,6 +70,12 @@ func printDoctorReport(cmd *cobra.Command, checks []checkResult) int {
 	failed := 0
 	for _, c := range checks {
 		name, detail := termsafe.Sanitize(c.name), termsafe.Sanitize(c.detail)
+		if c.ok && c.fix != "" {
+			// A warning row (warnResult): shown with its fix, not counted.
+			cmd.Printf("! %s — %s\n", name, detail)
+			cmd.Printf("    fix: %s\n", termsafe.Sanitize(c.fix))
+			continue
+		}
 		if c.ok {
 			cmd.Printf("✓ %s — %s\n", name, detail)
 			continue
@@ -150,6 +156,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkOperatorSkills(app, state) },
 		func() checkResult { return checkDirectives(app, state) },
 		func() checkResult { return checkRemote(ctx, app, state, probes, jr) },
+		func() checkResult { return checkRemoteExposure(app) },
 		func() checkResult { return checkPATTokens(state, app.RemoteEnabled(), time.Now()) },
 		func() checkResult { return checkDevAuthWindow(ctx, jr) },
 		func() checkResult { return checkRemoteWebRole(state, remoteAccessFor(app)) },

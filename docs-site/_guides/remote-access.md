@@ -8,7 +8,9 @@ None of lever's existing operator channels work away from the host: `lever attac
 send`, and `lever directive send` all shell into the jail or use a local UDS. `lever remote`
 closes that gap by exposing the Scion hub's web UI — agent list, chat, a quick-message dialog, an
 xterm.js terminal — to your Tailscale tailnet, through a small host-side reverse proxy that injects
-credentials so the phone never has to hold one.
+credentials so the phone never has to hold one. Tailscale is the default front; any other
+authenticating HTTPS front that sets a verified identity header works too (see
+[non-Tailscale fronts](#non-tailscale-fronts), with exe.dev as the worked example).
 
 ```
 phone browser
@@ -65,8 +67,8 @@ remote:
 
 Validation at load: `base_url` must be an absolute `https://` URL. `port` and `login_port` may not
 equal 8443, 8444, 8446, or each other. `port` may not appear in `manager.allow_ports`: that grant
-would let a jailed agent dial the proxy, set `Tailscale-User-Login` itself, and ride the injected
-session.
+would let a jailed agent dial the proxy, set the identity header (`Tailscale-User-Login` by default)
+itself, and ride the injected session.
 
 **`base_url` is required whenever `enabled: true`.** The proxy matches every request's
 `Origin`/`Sec-Fetch-Site` against the host `base_url` resolves to; with `base_url` unset, that host
@@ -97,10 +99,10 @@ redirect URI — are unreachable here, since the proxy strips the hub's session 
 response and runs the login itself, host-side, against the hub directly (see [how the browser is
 logged in](#how-the-browser-is-logged-in)).
 
-**Requires the `orbstack` backend.** Not because of how the proxy reaches the hub — it dials
+**Both backends.** `remote.enabled: true` loads on `orbstack` and on `lima`. The proxy dials the hub
 *through* the jail, the rule every other lever hub call follows, and that needs no guest→host
-forwarding on any backend. The Lima path is not validated.
-`remote.enabled: true` on any other backend is rejected at config load with a clear error.
+forwarding on any backend. The Lima path is not yet live-validated; see [Lima](#lima) for what
+differs there and what to check.
 
 **How the proxy reaches the hub.** The hub binds `127.0.0.1:8080` **inside the jail**. The proxy
 runs `nc 127.0.0.1 8080` in the jail and treats that child process as the connection, so the
@@ -357,9 +359,10 @@ needed to undo the block; a stale one names a provider that no longer answers.
 
 **Two port numbers, not one.** The hub dials a GUEST loopback port — fixed at `8446`, with no
 config key — and the forwarder there carries the bytes to the provider on the host's `login_port`.
-They must differ, because the container runtime **mirrors a guest listener onto the host at the
-same number**: with one number for both halves, the guest forwarder's mirror took the host port and
-the provider could not bind it. (Worse, it was order-dependent — a provider that bound first left
+They must differ, because OrbStack **mirrors a guest listener onto the host at the same number**:
+with one number for both halves, the guest forwarder's mirror took the host port and
+the provider could not bind it. (Lima mirrors nothing — lever's Lima template ignores every
+guest→host port forward — so there the rule is harmless rather than needed.) (Worse, it was order-dependent — a provider that bound first left
 the runtime unable to mirror, and the whole thing worked by luck.) Only the host number is
 configurable, so no configuration can make the two halves of one instance collide; `lever.yaml`
 additionally rejects a `login_port` of `8446`, which is the host port that mirror occupies.
@@ -376,11 +379,16 @@ off.
 > briefly open egress under a running agent), so a newly granted port does not take effect until
 > the instance is brought up again. `lever doctor` names this when it sees it.
 
-**A Go toolchain is needed on the host** while remote access is on: the guest forwarder is
-cross-compiled for the guest's architecture at apply time. A `scion.version:`/`scion.source:`
-instance already needs one; `scion.binary:` mode is newly affected, and for that combination
-`lever.yaml` refuses to load at all when `go` is not on PATH — the apply-time failure would
-otherwise land after the bootstrap-token step had already opened a mint window against the hub.
+**No Go toolchain is needed for the forwarder with a release build.** The forwarder is a small
+linux program. Release archives, and a lever built with `make install`, embed it prebuilt for
+linux/amd64 and linux/arm64, so a build-free host (`scion.binary:` and prebuilt binaries shipped
+in) needs no compiler for remote access. A lever built with plain `go build` or `go install`
+carries no prebuilt copy and cross-compiles the forwarder at apply time instead, which needs Go;
+with `scion.binary:` (the only mode that does not already need Go for scion) `lever.yaml` then
+refuses to load when `go` is not on PATH, because the apply-time failure would land after the
+bootstrap-token step had already opened a mint window against the hub. The embedded copy is used
+only when it was built from the forwarder source in the same lever binary; a stale one is ignored
+and the forwarder is built instead.
 
 ## `allowed_users`: pinning who can connect
 
@@ -390,12 +398,173 @@ remote:
     - you@github     # your Tailscale login, exactly as it appears in the admin console
 ```
 
-When non-empty, the proxy requires the `Tailscale-User-Login` header — set by `tailscale serve`,
-never trusted from anywhere else — to match one of these entries, and refuses the request (403)
-otherwise. This is defense against other members of your tailnet, not against a compromised device
+When non-empty, the proxy requires the identity header (`remote.identity_header`,
+`Tailscale-User-Login` by default) — set by the front, never trusted from anywhere else — to match
+one of these entries exactly, and refuses the request (403) otherwise. It also refuses a request
+that carries the header twice, or a comma-joined value: that is what a front that appends to a
+client-sent header produces, and picking the first value would let the client choose. This is defense against other members of your tailnet, not against a compromised device
 of your own: if your own phone is compromised, its Tailscale identity is exactly what an attacker
 would present too. Leave it empty to allow anyone who can reach the proxy through your tailnet at
 all (the default — often fine for a single-operator tailnet).
+
+## Non-Tailscale fronts
+
+Any authenticating HTTPS front can replace `tailscale serve`, if it does three things: it
+terminates TLS on `base_url`, it admits only users you granted access, and it puts the verified
+login in a request header. Tell lever which header:
+
+```yaml
+remote:
+  enabled: true
+  base_url: "https://myvm.exe.xyz:8445"   # the front's public origin, port included
+  identity_header: X-ExeDev-Email         # the header the front sets
+  allowed_users: ["you@example.com"]       # compared exactly with that header
+```
+
+**What the trust rests on — confirm both for your provider.** The proxy believes the header
+because nothing but the front can reach its listener. So:
+
+1. **The front must OVERWRITE the header**, never append to a value the client sent. If it
+   appends, the client picks the identity. lever refuses a repeated header and a comma-joined
+   value, which covers the common append shapes, but a front that passes a client value through
+   untouched cannot be detected — only your provider's documentation or a test can tell you.
+   Test it: send a request through the front with the header already set to someone else's
+   login, and check `.lever-state/remote-audit.jsonl` shows your own.
+2. **Only the front may reach the listener.** With the default `bind: 127.0.0.1` that holds as
+   long as the front runs on the host. A front that dials the host's external interface needs
+   `bind` (below), and then the host firewall has to make it true.
+
+The configured header is stripped before the request reaches the hub, like `Tailscale-*`.
+lever refuses to take the login from headers a browser or any hop sets, or that scion reads as an
+identity (`Authorization`, `Cookie`, `Host`, `Origin`, `X-Forwarded-*`, `Sec-*`, `X-Scion-*`, and
+others — see the [config reference](/reference/config/#remote)), from Tailscale's user-chosen
+`Tailscale-User-Name` and `Tailscale-User-Profile-Pic`, and from any header name with `_` (proxies
+drop or rewrite those inconsistently). `allowed_users` entries that differ only in case are refused:
+scion lowercases emails, so they would be one hub user.
+
+**Who the hub thinks you are.** An `allowed_users` entry with an `@` is the hub email as it
+stands. A front that sends an opaque user id instead (exe.dev's `X-ExeDev-UserID`) works too: an
+entry without `@` becomes the hub user `<id>@id.lever.local`, an address nobody can receive mail
+at. Prefer the email header when the front has one; the hub's audit then names a person.
+Changing `identity_header` or the `allowed_users` form changes the hub users, and each new one
+must sign in once before `lever apply` can bind its role (see [the remote web
+role](#the-remote-web-role)).
+
+**`bind`: a front that dials the host's external interface.** Some fronts reach the machine over
+its network interface, not its loopback. Bind the one private address the front dials:
+
+```yaml
+remote:
+  bind: 10.0.0.5     # an RFC 1918 / CGNAT / link-local / ULA address on this host
+```
+
+Anything that can reach that address can now set the identity header to any login and ride your
+hub session. The host firewall must admit only the front to `<bind>:<port>`. lever accepts only
+addresses the jail's egress rules drop in every posture, so no jailed agent can reach the proxy
+that way; a public address is refused, because under open egress the jail could dial it. An IPv6
+link-local address is refused (it cannot be listened on without an interface zone). With the
+default `identity_header`, a tailnet address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) is refused
+too: any tailnet peer could connect to it directly, bypassing `tailscale serve`, and send
+`Tailscale-User-Login` with any login. Use `tailscale serve` in front of the loopback bind.
+The jail's egress chain is replaced atomically (per address family) on every `lever apply`, so there
+is no window in which the private ranges are open. It is not persisted in the guest, though: after a guest reboot there is
+no chain until the next `lever apply`/`up`, which applies it before it starts any agent.
+`0.0.0.0`/`::` listens on every address, public ones included, and needs
+`allow_wildcard_bind: true` as well; with the default `identity_header` it is refused outright,
+because it listens on the tailnet address too. A non-loopback bind prints a warning on every `lever apply`,
+`lever up` and `lever remote serve`, and `lever doctor` shows it as a `remote exposure` warning
+row. The login provider stays on loopback regardless.
+
+**`Host` vs `X-Forwarded-Host`.** The proxy's DNS-rebinding defence matches the request's
+`Host` header against `base_url`'s host (port included when `base_url` has one), and also admits
+`127.0.0.1:<port>`, `localhost:<port>` and, with a specific `bind` address (loopback ones such as
+`127.0.0.2` or `::1` included), `<bind>:<port>`. A front that passes `Host` through works with any
+bind. A front that rewrites `Host` to the address it dials works unchanged **only with a specific
+bind address**: with `bind: 0.0.0.0`/`::` lever does not know which of the host's addresses the
+front dialled and admits none of them, so such a front must pass `base_url`'s host through, or use
+`trust_forwarded_host` with `X-Forwarded-Host`. A front that rewrites `Host` to some other IP
+address (another port, or none) gets `deny-host` in the audit log. If that front passes the
+browser's host in `X-Forwarded-Host`, set:
+
+```yaml
+remote:
+  trust_forwarded_host: true
+```
+
+The proxy then judges `X-Forwarded-Host` (exactly one value; repeated or comma-joined values are
+refused) instead of `Host`, but only on a request whose `Host` is an IP address. A DNS rebind
+always makes the browser send the attacker's *name* in `Host`, so a rebound page that adds a forged
+`X-Forwarded-Host` is still refused. A front that rewrites `Host` to a name other than `base_url`'s
+host is not supported. Anything that reaches the listener directly can still send any
+`X-Forwarded-Host` — as it can send any identity header — so this is off by default and warned
+about like a non-loopback `bind`.
+
+### Worked example: exe.dev
+
+exe.dev forwards `https://<vm>.exe.xyz:<port>/` (ports 3000-9999) to the VM, requires an exe.dev
+login from a user granted access to the VM, and adds `X-ExeDev-Email` and `X-ExeDev-UserID` to
+each request it lets through.
+
+```yaml
+backend: lima
+scion:
+  binary: dist/scion-linux-amd64     # built with upstream's `make all`, so it embeds the web UI
+remote:
+  enabled: true
+  base_url: "https://myvm.exe.xyz:8445"
+  identity_header: X-ExeDev-Email
+  allowed_users: ["you@example.com"]
+```
+
+- Use a lever release archive (or `make install` on the build machine): it embeds the login
+  forwarder, so the VM needs no Go.
+- **Never make the port public** (`share set-public`). A public port has no exe.dev login in
+  front of it, so no verified header either — the same rule as never using `tailscale funnel`.
+
+> **Warning: the front must forward ONLY the proxy port.** exe.dev can forward any port in
+> 3000-9999, and a front that forwards a port range to the VM's loopback also reaches lever's
+> other host listeners: the broker's admin port (`8444`, unauthenticated), its jail port
+> (`8443`) and the login provider (`8447`). Anyone the front admits could then call them
+> directly, and `allowed_users` does not apply there — it is checked only by the proxy. Grant
+> and use only `remote.port`; if your front cannot be limited to one port, move lever's other
+> listeners (`broker.jail_port`, `broker.admin_port`, `remote.login_port`) outside the range it
+> forwards.
+
+- Start with the default loopback `bind`. If exe.dev's front reaches the VM on its private
+  interface rather than loopback, the proxy logs nothing for your requests; bind that private
+  address instead (a specific address, not `0.0.0.0`, so a Host rewritten to it is admitted),
+  and firewall the port to exe.dev's front.
+- Before relying on it, confirm the two properties above for exe.dev: that it overwrites
+  `X-ExeDev-Email`, and what can reach the proxy port besides its front.
+- `lever remote status` prints the identity header, bind address and any warnings;
+  `lever doctor` probes the proxy with the first `allowed_users` entry in that header.
+
+These settings have not been live-validated behind exe.dev yet.
+
+## Lima
+
+`remote.enabled` loads on the Lima backend, and nothing in the login path is specific to OrbStack:
+
+- The proxy reaches the hub by running `nc 127.0.0.1 8080` inside the jail
+  (`limactl shell <vm> nc …`), as on OrbStack.
+- The guest forwarder listens on the guest's `127.0.0.1:8446` and dials the provider at
+  `host.lima.internal:<login_port>`, which Lima forwards to the host's loopback. That is the same
+  route, the same alias, and the same kind of `LEVER_EGRESS` port grant every agent uses to reach
+  the broker's jail port on Lima; the login port is granted on both backends while remote access is
+  on.
+- Lima mirrors nothing. lever's Lima template ignores every guest→host port forward (and lever
+  verifies that on every bring-up), so the forwarder's guest port never appears on the host. The
+  OrbStack mirror that forced two port numbers does not exist there.
+
+**Linux hosts are often multi-user.** Every local account on the host shares its loopback, so any
+of them can connect to `127.0.0.1:<remote.port>`, set the identity header and ride your hub session.
+That has always been true of the loopback design; on a shared Linux host it matters. Run remote
+access only on a host whose other local users you trust as much as the front's users.
+
+**Not live-validated yet.** Until it is, check the login path on a real Lima VM with `lever
+doctor`: the `remote access` row proves the hub reaches the provider through the forwarder (a 302
+to lever's dead authorization endpoint), then that `/healthz` answers 200 through the proxy. On
+`egress: closed`, enable remote access with `lever destroy` + `lever up`, as on OrbStack.
 
 ## Never use `tailscale funnel`
 
@@ -416,12 +585,14 @@ and build scripts that dependency tree defines, with your filesystem access. The
 pinned: the source is the Scion commit `scion.version` names, fetched through the Go module proxy
 and checksum-verified, and `npm ci` installs from its committed lockfile. That bounds *which*
 code runs, not *what it can do*. If that is not a trade you want, `scion.binary` mode skips the
-build entirely (and serves no web UI).
+build entirely, and serves only the UI its binary embeds: build scion with upstream's `make all`
+for one (see [`scion.binary:` is exempt](#2-make-sure-the-host-has-node)).
 
 ## Audit log
 
 Every request the proxy handles — allowed or denied — is appended as one JSON line to
-`.lever-state/remote-audit.jsonl`: timestamp, the Tailscale login if present, method, path, the
+`.lever-state/remote-audit.jsonl`: timestamp, the identity header's value if present (the
+`ts_login` field, whatever the header), method, path, the
 decision (`allow` / `deny-host` when the `Host` header does not match `base_url` / `deny-origin` /
 `deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session`), and the
 upstream status once known. The login path writes there too: `oidc-session` when a session is

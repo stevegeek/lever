@@ -73,7 +73,7 @@ type doctorProbes struct {
 	claudeVersion    func(imageRef string) (string, error)
 	claudeVersionTar func(tarPath, imageRef string) (string, error)
 	// remoteHealthz issues GET /healthz through the remote-access proxy.
-	remoteHealthz func(port int, tsLogin string) (int, error)
+	remoteHealthz func(healthzProbe) (int, error)
 	// remoteLogin inspects the local OIDC provider on its loopback port.
 	remoteLogin func(port int) (loginProbeResult, error)
 	// remoteJailLogin asks the hub, from inside the jail, to start a login.
@@ -140,23 +140,40 @@ func checkBrokerAlive(st state.State, jailPort int, p doctorProbes) checkResult 
 		"run `lever apply` or `lever up`", func() (int, bool, bool) { return state.PIDStatus(st.PID()) }, fmt.Sprintf("127.0.0.1:%d", jailPort), p.dial)
 }
 
+// healthzProbe is what remoteHealthzProbe sends: where to dial, and the
+// identity to carry.
+type healthzProbe struct {
+	// Addr is the host:port to dial (config.App.RemoteProbeAddr): loopback
+	// by default, the bind address when the proxy listens elsewhere.
+	Addr string
+	// Port is the proxy's port. The request's Host is always
+	// 127.0.0.1:<Port>, whatever Addr is: that is the name the proxy's Host
+	// gate admits for host-side probes (remoteproxy.hostAllowed).
+	Port int
+	// Header and Login: when Login is non-empty it is sent in Header, the
+	// configured identity header.
+	Header, Login string
+}
+
 // remoteHealthzProbe issues GET /healthz against the local remote-access
 // proxy and returns the response status code.
 //
-// tsLogin, when non-empty, is sent as Tailscale-User-Login. The proxy's own
-// allowed_users gate (remoteproxy.Handler) trusts that header exactly as
-// `tailscale serve` would set it for a real request; doctor runs host-side,
-// already as trusted as the remote.pat file it just read, so it sets this to
-// the first configured allowed user rather than let a pinned instance 403
-// its own liveness probe. An unpinned instance (allowed_users empty) sends
-// no header at all, matching an ordinary curl/native-client request.
-func remoteHealthzProbe(port int, tsLogin string) (int, error) {
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/healthz", port), nil)
+// Login, when non-empty, is sent in the configured identity header. The
+// proxy's own allowed_users gate (remoteproxy.Handler) trusts that header
+// exactly as the front would set it for a real request; doctor runs
+// host-side, already as trusted as the remote.pat file it just read, so it
+// sets this to the first configured allowed user rather than let a pinned
+// instance 403 its own liveness probe. An unpinned instance (allowed_users
+// empty) sends no header at all, matching an ordinary curl/native-client
+// request.
+func remoteHealthzProbe(p healthzProbe) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, "http://"+p.Addr+"/healthz", nil)
 	if err != nil {
 		return 0, err
 	}
-	if tsLogin != "" {
-		req.Header.Set("Tailscale-User-Login", tsLogin)
+	req.Host = fmt.Sprintf("127.0.0.1:%d", p.Port)
+	if p.Login != "" {
+		req.Header.Set(p.Header, p.Login)
 	}
 	resp, err := doctorHTTPClient.Do(req)
 	if err != nil {
@@ -338,7 +355,7 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 	const applyFix = "run `lever apply`"
 	remoteLog := stateRel(st, st.RemoteLog())
 	port := app.EffectiveRemotePort()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := app.RemoteProbeAddr()
 	alive := checkListeningProcess(name, "remote.pid", "the proxy", remoteLog, applyFix,
 		func() (int, bool, bool) { return state.PIDStatus(st.RemotePID()) }, addr, p.dial)
 	if !alive.ok {
@@ -388,7 +405,8 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 
 	// Last, because it depends on everything above: this is the only probe
 	// that goes end to end through the proxy to the hub.
-	status, err := p.remoteHealthz(port, firstOrEmpty(app.Remote.AllowedUsers))
+	status, err := p.remoteHealthz(healthzProbe{Addr: addr, Port: port,
+		Header: app.EffectiveRemoteIdentityHeader(), Login: firstOrEmpty(app.Remote.AllowedUsers)})
 	if err != nil {
 		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect " + remoteLog + " — the hub may be down, or the proxy misconfigured"}
 	}
@@ -396,6 +414,34 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect " + remoteLog + " and " + stateRel(st, st.RemoteAudit())}
 	}
 	return checkResult{name, true, alive.detail + fmt.Sprintf(", PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", loginPort), ""}
+}
+
+// checkRemoteExposure is a warning row per remote setting that loads but
+// weakens a default protection (config.App.RemoteWarnings): a non-loopback
+// bind, and trust_forwarded_host. Neither is a fault, and lever cannot see the
+// host firewall they rest on, so the row neither passes silently nor fails
+// the run — it restates what the operator must keep true. Nothing to say is a
+// plain pass.
+func checkRemoteExposure(app *config.App) checkResult {
+	const name = "remote exposure"
+	if !app.RemoteEnabled() {
+		return checkResult{name, true, "remote access disabled", ""}
+	}
+	warnings := app.RemoteWarnings()
+	if len(warnings) == 0 {
+		return checkResult{name, true, fmt.Sprintf("loopback-only listener (%s), identity from %s", app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader()), ""}
+	}
+	return warnResult(name, strings.Join(warnings, "; "),
+		"confirm only the authenticating front can reach "+app.RemoteListenAddr()+" and that it overwrites "+
+			app.EffectiveRemoteIdentityHeader()+"; see the remote-access guide, non-Tailscale fronts")
+}
+
+// warnResult is a warning row: not a failure (doctor's exit status ignores
+// it), but printed with its fix. It is a passing checkResult that carries a
+// fix — no passing check sets one otherwise — which printDoctorReport renders
+// with "!" instead of "✓".
+func warnResult(name, detail, fix string) checkResult {
+	return checkResult{name, true, detail, fix}
 }
 
 // firstOrEmpty returns the first element of ss, or "" when ss is empty.

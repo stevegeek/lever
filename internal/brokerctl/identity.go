@@ -41,7 +41,13 @@ func RemoteConfigHash(app *config.App) string {
 		BaseURL:      app.Remote.BaseURL,
 		AllowedUsers: app.Remote.AllowedUsers,
 		LoginPort:    app.Remote.LoginPort,
-		Name:         app.Name,
-		Backend:      app.Backend,
+		// Effective values, so spelling the default out (or changing the
+		// header's case) is not a config change that bounces the proxy.
+		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
+		Bind:               app.EffectiveRemoteBind(),
+		AllowWildcardBind:  app.Remote.AllowWildcardBind,
+		TrustForwardedHost: app.Remote.TrustForwardedHost,
+		Name:               app.Name,
+		Backend:            app.Backend,
 	})
 }

@@ -24,8 +24,8 @@ import (
 //     avoided.
 //
 // So: a logic-free forwarder listens on the guest's loopback at the provider's
-// port and carries bytes to the host (internal/provision/loginfwd, which also
-// BUILDS it on the host), and the hub's oidc_login block names
+// port and carries bytes to the host (internal/provision/loginfwd, which ships
+// it prebuilt or builds it on the host), and the hub's oidc_login block names
 // http://127.0.0.1:<port> as the issuer. The hub reads that block once, at
 // startup, so EnsureHubLogin reports whether it changed and the caller
 // restarts the hub when it did.

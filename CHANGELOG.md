@@ -5,6 +5,88 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **Remote access behind a non-Tailscale front (#38).** New
+  `remote.identity_header` (default `Tailscale-User-Login`) names the header
+  an authenticating front puts the verified login in, such as exe.dev's
+  `X-ExeDev-Email`. The proxy reads `allowed_users` and the hub identity it
+  asserts from it and strips it before forwarding. A request that carries
+  the header twice, or a comma-joined value, is refused rather than resolved
+  first-value-wins. Headers a browser or any hop sets, or that scion reads as
+  an identity (`Authorization`, `Cookie`, `Host`, `X-Forwarded-*`, `Sec-*`,
+  `X-Scion-*`, ...), are rejected at config load. An `allowed_users` entry
+  without `@` (a front's user id) becomes the hub user `<id>@id.lever.local`;
+  entries with commas, whitespace or control characters are rejected. The
+  front must overwrite the header and be the only thing that reaches the
+  listener; the remote-access guide says how to confirm both, with exe.dev as
+  the worked example.
+- **`remote.bind`** (default `127.0.0.1`) for a front that dials the host's
+  external interface. A non-loopback address is accepted only if the jail's
+  egress rules drop it in every posture (RFC 1918, CGNAT, link-local, ULA),
+  so no agent can reach the proxy; `0.0.0.0`/`::` also needs
+  `remote.allow_wildcard_bind: true`. It is warned about on every `apply`,
+  `up` and `remote serve`, and in a new `lever doctor` warning row, `remote
+  exposure`: whatever reaches that address can assert any identity, so the
+  host firewall must admit only the front.
+- **`remote.trust_forwarded_host`** (default off) makes the proxy's Host
+  check read `X-Forwarded-Host` (exactly one value) instead of `Host`, for a
+  front that rewrites `Host` to an IP address. It applies only when `Host`
+  is an IP literal, so a DNS rebind (which sends the attacker's name) is
+  still refused. Warned about the same way.
+- A warning when `identity_header` is not Tailscale's and `allowed_users` is
+  empty: everyone the front admits then rides the placeholder operator.
+- `lever doctor` warning rows: a passing row with a fix prints as `!` and does
+  not fail the run.
+- Config load also refuses: a tailnet `bind` address (`100.64.0.0/10`,
+  `fd7a:115c:a1e0::/48`) or a wildcard `bind` (even acknowledged) while
+  the identity header is Tailscale's; an IPv6
+  link-local `bind`; `allowed_users` entries equal under case folding (scion
+  lowercases emails); `Tailscale-User-Name`, `Tailscale-User-Profile-Pic`
+  and any header name containing `_` as `identity_header`.
+
+### Changed
+
+- **The jail's egress chain is replaced atomically.** `lever apply` used to
+  flush `LEVER_EGRESS` and re-add its rules one call at a time, leaving
+  OUTPUT's default ACCEPT in force for seconds per apply in the open
+  posture (every host-alias port, broker admin 8444 included, and the
+  private ranges), and a partial chain after a failed apply. It now loads
+  the whole ruleset with one `iptables-restore --noflush` commit per
+  address family, IPv6 first and IPv4 last; a failed commit keeps that
+  family's old chain, and the error says which family was committed. The
+  skip for a live closed instance now requires both families closed. The
+  host alias is resolved under the live chain; only when the IPv4 chain is
+  closed does a failed lookup fall back to the aliases the live chains name
+  (with a warning).
+
+- **Remote access no longer needs Go on the host with a release build.**
+  Release archives and `make install` embed the guest login forwarder
+  prebuilt for linux/amd64 and linux/arm64 (new `make loginfwd-prebuilt`,
+  run by the goreleaser before-hook, which also fails the release if the
+  embed is missing). A lever built with plain `go build`/`go install` still
+  cross-compiles it at apply time. The embed is used only when its recorded
+  source digest matches the forwarder source in the same binary. The
+  forwarder is now built with `-ldflags=-s -w`, so the first apply after
+  upgrading reinstalls it in the guest once.
+- **`remote.enabled` is accepted on the Lima backend.** The login path uses
+  the same host-alias route and egress grant as the broker, and Lima mirrors
+  no guest ports. Not live-validated on Lima yet; the guide lists what to
+  check.
+- The remote proxy's config hash covers the new keys, so changing them
+  restarts a running proxy on the next `apply`.
+- `lever remote status` and `lever doctor` dial the proxy where it listens,
+  and the doctor probe sends the configured identity header.
+
+### Docs
+
+- Remote-access guide: non-Tailscale fronts (exe.dev worked example: never
+  make the port public), `bind`, `Host` vs `X-Forwarded-Host`, Lima, and the
+  note that `scion.binary:` serves only the web UI its binary embeds
+  (upstream's `make all`). Config reference entries for the new keys.
+
 ## [0.24.0] - 2026-09-24
 
 ### Security

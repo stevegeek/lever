@@ -1,7 +1,8 @@
 // Package skills holds the framework-authored SKILL.md files scaffolded into
 // instance trees by `lever init`. Content is embedded; the only templating is
 // the {{LEVER_VERSION}} frontmatter stamp (the version is passed IN by the
-// caller — this package must not import internal/cli).
+// caller — this package must not import internal/cli) and the operator
+// skill's {{VERIFIED_CHAT}} on/off.
 package skills
 
 import (
@@ -18,7 +19,16 @@ var operatorSrc string
 var agentSrc string
 
 // Operator returns the rendered manager skill (lever-operator).
-func Operator(version string) []byte { return render(operatorSrc, version) }
+// verifiedChat is whether the instance has verified web chat on; it fills
+// {{VERIFIED_CHAT}}, so a missing chat_verify tool is read as "not verified"
+// only where verified chat exists.
+func Operator(version string, verifiedChat bool) []byte {
+	state := "off"
+	if verifiedChat {
+		state = "on"
+	}
+	return []byte(strings.ReplaceAll(string(render(operatorSrc, version)), "{{VERIFIED_CHAT}}", state))
+}
 
 // Agent returns the rendered worker skill (lever-agent).
 func Agent(version string) []byte { return render(agentSrc, version) }

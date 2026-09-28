@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/chatledger"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/remoteproxy"
@@ -130,11 +131,24 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		BindHost:           remoteBindHost(app),
 		Session:            login,
 		Audit:              auditFn,
+		// Verified web chat. Only with allowed_users: without it no login
+		// is verified, so there is nothing to vouch for.
+		ChatLedger: remoteChatLedger(app, st),
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
 	})
 	return provider, handler, nil
+}
+
+// remoteChatLedger is the proxy's ledger writer, or nil when verified chat is
+// off. brokerctl.ChatLedgerPath makes the same decision for the broker.
+func remoteChatLedger(app *config.App, st state.State) func(chatledger.Entry) error {
+	p := brokerctl.ChatLedgerPath(app, st)
+	if p == "" {
+		return nil
+	}
+	return chatledger.NewWriter(p).Append
 }
 
 // serveRemote runs the proxy until ctx ends, stamping the config THIS process

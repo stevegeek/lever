@@ -209,6 +209,9 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 			ExpiryMax:  app.EffectiveDirectiveExpiryMax(),
 		}
 	}
+	if lp := ChatLedgerPath(app, st); lp != "" {
+		cfg.Chat = broker.ChatConfig{LedgerPath: lp, UsedPath: st.ChatVerified()}
+	}
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
 	return nil

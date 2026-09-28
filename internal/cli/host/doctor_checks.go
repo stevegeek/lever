@@ -20,6 +20,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
@@ -434,6 +435,48 @@ func checkRemoteExposure(app *config.App) checkResult {
 	return warnResult(name, strings.Join(warnings, "; "),
 		"confirm only the authenticating front can reach "+app.RemoteListenAddr()+" and that it overwrites "+
 			app.EffectiveRemoteIdentityHeader()+"; see the remote-access guide, non-Tailscale fronts")
+}
+
+// checkVerifiedChat reports whether agents can verify web chat (package
+// chatledger): the proxy records only for verified logins, and the ledger
+// proves something only while no jail can write it.
+func checkVerifiedChat(app *config.App, st state.State) checkResult {
+	const name = "verified chat"
+	switch {
+	case !app.RemoteEnabled():
+		return checkResult{name, true, "remote access disabled (no web chat)", ""}
+	case brokerctl.StateInsideTree(app, st):
+		return checkResult{name, false, "off: the state directory " + st.Dir + " is inside the tree " + app.Tree +
+			", which agents mount, so a ledger there proves nothing",
+			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	case len(app.Remote.AllowedUsers) == 0:
+		return warnResult(name, "off: remote.allowed_users is empty, so the proxy verifies no login and records no chat",
+			"list the operator's login in remote.allowed_users, then run `lever apply`")
+	}
+	p := brokerctl.ChatLedgerPath(app, st)
+	// Every allowed login speaks with operator authority once verified: say
+	// who, so a login added only to look at the web UI is not a surprise.
+	tier := "operator tier for " + strings.Join(app.Remote.AllowedUsers, ", ")
+	fi, err := os.Lstat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + ")", ""}
+	}
+	if err == nil && !fi.Mode().IsRegular() {
+		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a regular file (a symlink?), so agents get no answer",
+			"remove " + p + "; the remote proxy writes a new one"}
+	}
+	if err != nil {
+		return checkResult{name, false, "cannot read the chat ledger: " + err.Error(), "check " + stateRel(st, p)}
+	}
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		return checkResult{name, false, fmt.Sprintf("the chat ledger %s is %v: another user can add a line, so agents get no answer", stateRel(st, p), perm),
+			"chmod 600 " + p}
+	}
+	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
+		return checkResult{name, false, fmt.Sprintf("the chat ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()),
+			"remove " + p + "; the remote proxy writes a new one"}
+	}
+	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s (%d bytes, 0600)", tier, stateRel(st, p), fi.Size()), ""}
 }
 
 // warnResult is a warning row: not a failure (doctor's exit status ignores

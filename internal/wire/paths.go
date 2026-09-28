@@ -19,6 +19,7 @@ const (
 	PathMsgList          = "/msg/list"
 	PathDirectiveConsume = "/directive/consume"
 	PathDirectiveCheck   = "/directive/check"
+	PathChatVerify       = "/chat/verify"
 )
 
 // Admin (loopback) listener routes.

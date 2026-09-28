@@ -130,6 +130,41 @@ type DirectiveCheckResponse struct {
 	State string `json:"state"`
 }
 
+// ---- verified web chat ----
+
+// ChatVerifyRequest is the body of POST /chat/verify: two fields copied from
+// the envelope of the message the agent received.
+type ChatVerifyRequest struct {
+	Timestamp string `json:"timestamp"`
+	From      string `json:"from"`
+}
+
+// ChatVerifyResponse is the reply of POST /chat/verify. Enabled is false when
+// the instance has verified chat off; Verified is true only when Messages is
+// not empty. Messages holds every recorded post that matches — normally one.
+type ChatVerifyResponse struct {
+	Enabled  bool              `json:"enabled"`
+	Verified bool              `json:"verified"`
+	Messages []VerifiedMessage `json:"messages,omitempty"`
+	Note     string            `json:"note,omitempty"`
+}
+
+// VerifiedMessage is one chat post the remote proxy recorded. Text is the
+// message as the operator sent it: the agent acts on this, not on its pane.
+type VerifiedMessage struct {
+	Login     string `json:"login"`
+	Tier      string `json:"tier"`
+	From      string `json:"from"`
+	Timestamp string `json:"timestamp"`
+	MessageID string `json:"message_id"`
+	Text      string `json:"text"`
+	// Repeat marks a message this agent already verified, within the grace
+	// period, at FirstVerified. The agent acts on it only if it has not acted
+	// on that message yet.
+	Repeat        bool   `json:"repeat,omitempty"`
+	FirstVerified string `json:"first_verified,omitempty"`
+}
+
 // ---- operator directives: admin side (UDS channel) ----
 
 // DirectiveSubmitRequest is the {statement,signature} envelope of

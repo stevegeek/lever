@@ -37,6 +37,14 @@ func (s State) RemotePID() string     { return filepath.Join(s.Dir, "remote.pid"
 func (s State) RemoteLog() string     { return filepath.Join(s.Dir, "remote.log") }
 func (s State) RemoteAudit() string   { return filepath.Join(s.Dir, "remote-audit.jsonl") }
 
+// ChatLedger is the remote proxy's record of verified web chat posts (package
+// chatledger): written by the proxy only, read by the broker only.
+func (s State) ChatLedger() string { return filepath.Join(s.Dir, "chat-ledger.jsonl") }
+
+// ChatVerified is the broker's record of chat messages already verified (one
+// use each), kept across broker restarts.
+func (s State) ChatVerified() string { return filepath.Join(s.Dir, "chat-verified.jsonl") }
+
 // DirectiveAudit is the broker's operator-directive audit log.
 func (s State) DirectiveAudit() string { return filepath.Join(s.Dir, "directives.log") }
 

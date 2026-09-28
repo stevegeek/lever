@@ -60,6 +60,7 @@ type Config struct {
 	LLM         LLMConfig
 	Dispatch    DispatchConfig
 	Directives  DirectiveConfig
+	Chat        ChatConfig
 	Timeouts    TimeoutConfig
 
 	// Log receives the audit decisions; nil ⇒ a discard logger.
@@ -295,6 +296,10 @@ type Broker struct {
 	directiveExpiryMax time.Duration
 	dirRate            *rateWindow
 
+	chatLedger string // ChatConfig.LedgerPath; "" = verified chat off
+	chatRate   *rateWindow
+	chatUses   *chatUses
+
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
 	toolSecret string // presented to first-party tools (see Config.ToolSecret)
@@ -356,6 +361,8 @@ func New(c Config) *Broker {
 		directiveVerifier: dir.Verifier, instanceID: dir.InstanceID,
 		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
 		dirRate: newRateWindow(),
+		// verified web chat
+		chatLedger: c.Chat.LedgerPath, chatRate: newRateWindow(), chatUses: newChatUses(c.Chat.UsedPath, time.Now()),
 	}
 }
 

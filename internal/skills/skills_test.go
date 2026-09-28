@@ -6,7 +6,7 @@ import (
 )
 
 func TestRenderSubstitutesVersionAndFrontmatter(t *testing.T) {
-	for name, fn := range map[string]func(string) []byte{"operator": Operator, "agent": Agent} {
+	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": Agent} {
 		got := string(fn("9.9.9"))
 		if strings.Contains(got, "{{LEVER_VERSION}}") {
 			t.Fatalf("%s: placeholder not substituted", name)
@@ -21,7 +21,7 @@ func TestRenderSubstitutesVersionAndFrontmatter(t *testing.T) {
 }
 
 func TestOperatorAndAgentCoverCapabilityFlow(t *testing.T) {
-	for name, fn := range map[string]func(string) []byte{"operator": Operator, "agent": Agent} {
+	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": Agent} {
 		got := string(fn("0.2.0"))
 		for _, want := range []string{"lever-capability", "_capability", "missing capability"} {
 			if !strings.Contains(got, want) {
@@ -32,11 +32,11 @@ func TestOperatorAndAgentCoverCapabilityFlow(t *testing.T) {
 }
 
 func TestHashStableAndDistinct(t *testing.T) {
-	a1, a2 := Hash(Operator("0.2.0")), Hash(Operator("0.2.0"))
+	a1, a2 := Hash(Operator("0.2.0", false)), Hash(Operator("0.2.0", false))
 	if a1 != a2 {
 		t.Fatal("hash not deterministic")
 	}
-	if Hash(Operator("0.2.0")) == Hash(Operator("0.3.0")) {
+	if Hash(Operator("0.2.0", false)) == Hash(Operator("0.3.0", false)) {
 		t.Fatal("version change must change the hash")
 	}
 	if len(a1) != 64 {
@@ -46,7 +46,7 @@ func TestHashStableAndDistinct(t *testing.T) {
 
 func TestLeverVersion(t *testing.T) {
 	cases := []struct{ name, in, want string }{
-		{"rendered scaffold", string(Operator("9.9.9")), "9.9.9"},
+		{"rendered scaffold", string(Operator("9.9.9", false)), "9.9.9"},
 		{"custom frontmatter", "---\nname: custom\nlever-version: 0.3.1\n---\nbody\n", "0.3.1"},
 		{"no frontmatter", "just a file\n", ""},
 		{"frontmatter without stamp", "---\nname: x\n---\nbody\n", ""},
@@ -56,6 +56,15 @@ func TestLeverVersion(t *testing.T) {
 	for _, c := range cases {
 		if got := LeverVersion([]byte(c.in)); got != c.want {
 			t.Errorf("%s: LeverVersion=%q want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestOperatorStatesVerifiedChat(t *testing.T) {
+	for on, want := range map[bool]string{true: "**on**", false: "**off**"} {
+		got := string(Operator("1", on))
+		if strings.Contains(got, "{{VERIFIED_CHAT}}") || !strings.Contains(got, "verified web chat is\n"+want) {
+			t.Fatalf("on=%v: skill does not state %s", on, want)
 		}
 	}
 }

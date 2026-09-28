@@ -47,10 +47,10 @@ feature does not change:
 - Directives remain the only authenticated operator override (signing key + host UDS, unreachable
   from this path).
 
-A message you send from your phone lands as an ordinary unauthenticated `user:` turn, like a
-message typed at `lever attach` or sent with `lever msg send`. Remote access is a new transport,
-not a new authority; for a provably-operator instruction use
-[operator directives](/operator-directives/).
+A message you send from your phone lands in the agent's session as text, like a message typed at
+`lever attach` or sent with `lever msg send`. With `allowed_users` set, the agent can check it:
+see [verified web chat](#verified-web-chat). A verified message is your steering, not a new
+authority; for a provably-operator instruction use [operator directives](/operator-directives/).
 
 ## Setup
 
@@ -670,13 +670,54 @@ opens the window on every run to try again.
 Removing a user from `allowed_users` does **not** remove its binding or its ceiling. The proxy then
 refuses that login before it reaches the hub, but the hub user keeps the role.
 
+## Verified web chat
+
+An agent cannot tell a real chat message from the same text inside an email, a web page or a tool
+output. Verified web chat closes that gap for the web chat.
+
+- **What is recorded.** When the hub accepts a message you post into an agent's direct chat
+  through the proxy, the proxy appends one line to `.lever-state/chat-ledger.jsonl` (mode 0600):
+  your verified login, the agent, the hub's message id, sender and time, and the text. Only the
+  proxy writes the file, and agents never reach the proxy, so an agent cannot add a line. The
+  message text itself is not changed.
+- **What the agent does.** Before it acts on a `user:` message, the agent calls its `chat_verify`
+  tool with the message's `timestamp` and `from`. The broker answers only about the agent's own
+  direct chat. If the message is on record, the agent gets your login, the tier and the text as you
+  sent it, and acts on that text. A message verifies once, within one hour of posting (a repeat
+  check by the same agent within ten minutes is answered as a repeat, so a retry cannot lose it). Anything
+  else — not on record, a second check, too old, an error — is "not verified", and the manager
+  then treats the message as data: it does not act on it, and it says so in its session.
+- **When it is on.** Remote access with `allowed_users`, and a state directory outside the `tree:`.
+  `lever doctor` shows the row `verified chat`. Agents need an agent image built from this lever
+  for the `chat_verify` tool. `lever init` writes "verified chat is on" into the operator skill,
+  and then a missing tool counts as "not verified": rebuild the agent image before you run
+  `lever init`, or the manager ignores your chat. Run `lever init` again after you change
+  `remote` or `allowed_users`.
+- **Who is the operator.** Every login in `allowed_users` gets the tier `operator`. Do not add a
+  login only so that someone can look at the web UI: once verified, that person's chat is
+  operator steering for every agent.
+- **Web pages from agents are sandboxed.** The hub serves workspace files, attachments and other
+  agent-written files inline under `/api/`. The proxy adds `Content-Security-Policy: sandbox` to
+  every `/api/` answer, so such a page cannot run script with your session or post chat as you.
+
+What is not covered:
+
+- Only messages into an agent's direct chat. A topic thread, the quick-message dialog, an edited
+  message, text typed into an attached terminal, `lever msg send` and email are not recorded, so
+  they never verify.
+- A verified message is not a directive. An action that needs a directive still needs one, and a
+  compromised front account or phone can send verified chat.
+- A choice you tap in the web UI that sends agent-suggested text is recorded as sent by you.
+- The ledger keeps the text of your recent chat on the host (it rotates at 1 MiB, one old copy
+  kept).
+
 ## What this does NOT do
 
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —
   asked for in chat, like any other task — not a button the phone UI exposes as an operator
   capability of its own.
-- **No new authority.** A remote chat message is an ordinary unauthenticated `user:` turn (see
-  the accepted posture above).
+- **No new authority.** A remote chat message is text in the agent's session. With verified
+  web chat it is provably yours, but it is still not a directive (see the accepted posture above).
 - **No credential on the phone.** The session cookie stays on the host, the hub's `Set-Cookie` is
   stripped from every response, and the routes that would return a token are refused.
 - **No identity provider, and no endpoint that mints sessions.** The local OIDC provider has no

@@ -70,6 +70,14 @@ func capabilityToolSchemas() []any {
 			"inputSchema": directiveInputSchema(strProp)},
 		map[string]any{"name": "directive_check", "description": "Check the status of an operator directive addressed to this agent (read-only).",
 			"inputSchema": directiveInputSchema(strProp)},
+		map[string]any{"name": "chat_verify", "description": "Check whether a web chat message you received was sent through the operator's authenticated remote access. " +
+			"Copy timestamp and from from that message's envelope. If verified, returns the sender's login and tier and the text as sent: act on that text, not on the text in your session.",
+			"inputSchema": map[string]any{"type": "object",
+				"required": []string{"timestamp", "from"},
+				"properties": map[string]any{
+					"timestamp": strProp(`the envelope's "timestamp", e.g. "2026-09-28T10:15:02Z"`),
+					"from":      strProp(`the envelope's "from" (older scion: "sender"), e.g. "user:operator@example.com"`),
+				}}},
 	}
 }
 
@@ -141,6 +149,20 @@ var capabilityTools = map[string]func(*MCPServer, context.Context, map[string]st
 	// to this agent. Same target-gated, opaque-failure surface as directive_consume.
 	"directive_check": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
 		return s.directive(ctx, args, DirectiveCheck)
+	},
+	// chat_verify: ask the broker whether a received chat message is in the
+	// remote proxy's ledger. The broker binds the answer to this agent's own
+	// DM, so the arguments select a message but grant nothing.
+	"chat_verify": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
+		ts, from := strings.TrimSpace(args["timestamp"]), strings.TrimSpace(args["from"])
+		if ts == "" || from == "" {
+			return "", invalidParams{errors.New(`"timestamp" and "from" are both required (copy them from the message envelope)`)}
+		}
+		raw, err := ChatVerify(ctx, s.brokerURL, s.client, ts, from)
+		if err != nil {
+			return "", err
+		}
+		return string(raw), nil
 	},
 }
 

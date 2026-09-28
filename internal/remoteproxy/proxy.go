@@ -48,6 +48,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/chatledger"
 	"github.com/stevegeek/lever/internal/daemon"
 )
 
@@ -115,6 +116,11 @@ type Config struct {
 	Session SessionSource
 	// Audit receives one line per decision; nil disables (tests).
 	Audit func(line AuditLine)
+	// ChatLedger, when non-nil, receives one entry per web chat post the
+	// hub accepted from a verified login (see recordChat and package
+	// chatledger). Nil records nothing, and so nothing verifies. It is
+	// never called when AllowedUsers is empty: then no login is verified.
+	ChatLedger func(chatledger.Entry) error
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -419,6 +425,9 @@ type ctxState struct {
 	// retried marks the second attempt of a retried request, whose
 	// rejection stands: a session the login just minted is not stale.
 	retried bool
+	// login is the verified login this request runs as ("" when
+	// AllowedUsers is empty and nothing verified it). recordChat reads it.
+	login string
 }
 
 type ctxStateKey struct{}
@@ -445,7 +454,7 @@ func NewHandler(cfg Config) http.Handler {
 func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
 		Rewrite:        rewriteUpstream(cfg.Target, cfg.identityHeader()),
-		ModifyResponse: completeAudit(cfg.Audit),
+		ModifyResponse: completeAudit(cfg.Audit, cfg.ChatLedger),
 		ErrorHandler:   upstreamFailed(cfg.Audit),
 	}
 	if cfg.DialContext != nil {
@@ -511,7 +520,7 @@ func clientIdentityHeader(k string) bool {
 // completeAudit is the ReverseProxy ModifyResponse hook: strip the hub's
 // session cookie, flag a rejected session for the gate's one retry, and
 // otherwise complete the audit line with the real upstream status.
-func completeAudit(audit func(AuditLine)) func(*http.Response) error {
+func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		// The hub mints a fresh session cookie on every cookie-less
 		// request. The client must never hold a hub credential, cookie
@@ -519,6 +528,7 @@ func completeAudit(audit func(AuditLine)) func(*http.Response) error {
 		// this removes every Set-Cookie value regardless of how many
 		// the hub sent or what case it used.
 		resp.Header.Del("Set-Cookie")
+		sandboxAPIDocument(resp)
 		if s := stateFrom(resp.Request); s != nil {
 			if s.retryable && sessionRejected(resp) {
 				// The hub does not know this session (it restarted, or the
@@ -535,6 +545,7 @@ func completeAudit(audit func(AuditLine)) func(*http.Response) error {
 				// session so the next request heals it.
 				s.stale = true
 			}
+			recordChat(resp, s.login, ledger, func(err error) { daemon.Warnf("remote proxy: %v", err) })
 			if s.line != nil && audit != nil {
 				s.line.Status = resp.StatusCode
 				audit(*s.line)
@@ -542,6 +553,28 @@ func completeAudit(audit func(AuditLine)) func(*http.Response) error {
 		}
 		return nil
 	}
+}
+
+// sandboxAPIDocument puts every /api/ response in a CSP sandbox.
+//
+// The hub serves agent-written files under /api/ inline, with a type taken
+// from the file name (workspace files with ?view=true, WebDAV, template and
+// skill files, chat attachments), and its CSP allows inline script. Opened
+// as a page through this proxy, such a file would run on the SPA's own
+// origin with the operator's injected session: an agent could write
+// report.html, send the operator a link, and act as them — attach to any
+// agent, or post chat that verifies as the operator's own (package
+// chatledger). A sandboxed document has an opaque origin, so its requests
+// carry "Origin: null", which checkOrigin refuses, and it may not run script
+// or submit forms at all. The SPA reads /api/ with fetch, where a response's
+// CSP has no effect, so the app itself is unchanged. nosniff keeps a browser
+// from reading a JSON or text answer as HTML.
+func sandboxAPIDocument(resp *http.Response) {
+	if resp.Request == nil || !strings.HasPrefix(resp.Request.URL.Path, "/api/") {
+		return
+	}
+	resp.Header.Add("Content-Security-Policy", "sandbox")
+	resp.Header.Set("X-Content-Type-Options", "nosniff")
 }
 
 // upstreamFailed is the ReverseProxy ErrorHandler: the upstream round trip
@@ -670,7 +703,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// upstream round trip completes; the audit call happens there too,
 	// not here, so the line carries the real status instead of the
 	// zero value.
-	state := &ctxState{line: &line}
+	state := &ctxState{line: &line, login: operator}
 
 	// A browser navigation to the hub's login route is answered HERE,
 	// never forwarded: the hub would 302 it to the OIDC authorization
@@ -842,7 +875,7 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 	}
 	// retryable is deliberately not set: one retry, then the hub's answer
 	// stands whatever it is.
-	again := &ctxState{line: state.line, cookie: cookie, retried: true}
+	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }
 

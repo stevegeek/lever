@@ -37,6 +37,7 @@ type fakeRuntime struct {
 	envSets        []string
 	envSetProj     []string
 	startErr       error
+	listErr        error // every List fails with it
 	listCalls      int      // total List invocations, to assert the fan-out is collapsed
 	listProjects   []string // project arg of every List call
 	// staticPhases disables the acted->running modelling below: List always
@@ -89,6 +90,9 @@ func (f *fakeRuntime) lastStaged(t *testing.T, worker string) wire.Bootstrap {
 func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
 	f.listCalls++
 	f.listProjects = append(f.listProjects, project)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	// After a Start/Resume, model scion bringing the worker up: the record shows
 	// running + a live container, so the post-start liveness poll succeeds. This
 	// mirrors the real runtime — the pre-action `agents` map is the observe-first
@@ -975,7 +979,12 @@ func TestWorkerResumeWithoutRecordIsNotFound(t *testing.T) {
 		testInstanceProject: {{Slug: "other", Phase: "stopped"}},
 	}}
 	b := newTestBroker(t, rt, spec)
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
 	rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if !strings.Contains(buf.String(), "decision=deny") || !strings.Contains(buf.String(), "no record") {
+		t.Fatalf("a recordless resume must audit as deny:\n%s", buf.String())
+	}
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d (%s), want 404", rec.Code, rec.Body.String())
 	}
@@ -987,5 +996,22 @@ func TestWorkerResumeWithoutRecordIsNotFound(t *testing.T) {
 	}
 	if len(rt.staged) != 0 {
 		t.Fatalf("no ticket may be staged for a worker that is not resumed")
+	}
+}
+
+// A failed listing is a runtime error, never "no record": telling the
+// manager to start a worker that may exist would be wrong.
+func TestWorkerResumeListErrorIsRuntimeError(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "stopped"}},
+	}, listErr: errors.New("hub not responding")}
+	b := newTestBroker(t, rt, spec)
+	rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "no record") {
+		t.Fatalf("status = %d (%s), want 502 runtime error", rec.Code, rec.Body.String())
+	}
+	if len(rt.resumed) != 0 || len(rt.staged) != 0 {
+		t.Fatalf("a failed listing must neither stage nor resume: resumed=%d staged=%d", len(rt.resumed), len(rt.staged))
 	}
 }

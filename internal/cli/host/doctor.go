@@ -161,6 +161,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkDirectives(app, state) },
 		func() checkResult { return checkRemote(ctx, app, state, probes, jr) },
 		func() checkResult { return checkRemoteExposure(app) },
+		func() checkResult { return checkVerifiedChat(app, state) },
 		func() checkResult {
 			return checkPATTokens(ctx, state, app.RemoteEnabled(), jailScion.KnowsUATScope, time.Now())
 		},

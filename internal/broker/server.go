@@ -50,6 +50,7 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathMsgList, control(b.handleMsgList))
 	mux.Handle("POST "+wire.PathDirectiveConsume, control(b.handleDirectiveConsume))
 	mux.Handle("POST "+wire.PathDirectiveCheck, control(b.handleDirectiveCheck))
+	mux.Handle("POST "+wire.PathChatVerify, control(b.handleChatVerify))
 	mux.Handle("POST "+wire.PathEnrol, control(b.handleEnrol))
 	mux.Handle("POST "+wire.PathRenew, control(b.handleRenew))
 	mux.Handle("POST "+wire.PathRequest, control(b.handleRequest))

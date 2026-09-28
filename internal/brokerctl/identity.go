@@ -23,11 +23,17 @@ func ConfigHash(app *config.App) string {
 	// Marshal of plain config structs cannot fail in practice; an empty hash
 	// (HashJSON's failure value) makes the comparison a guaranteed mismatch
 	// (restart), which fails toward the safe side.
+	//
+	// VerifiedChat is whether verified web chat is configured
+	// (chatConfigured): it derives from the remote block, which the broker
+	// otherwise ignores, so turning allowed_users on or off must bounce the
+	// broker too.
 	return state.HashJSON(struct {
-		Broker  config.Broker
-		Workers []config.Worker
-		Scion   config.ScionConfig
-	}{app.Broker, app.Workers, app.Scion})
+		Broker       config.Broker
+		Workers      []config.Worker
+		Scion        config.ScionConfig
+		VerifiedChat bool
+	}{app.Broker, app.Workers, app.Scion, chatConfigured(app)})
 }
 
 // RemoteConfigHash digests the config a `lever remote serve` process captures

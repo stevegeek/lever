@@ -115,16 +115,31 @@ const (
 // and hits the hub without resolving a current project — unlike `list --global`,
 // which forces project resolution and fails with "no git origin remote found"
 // when run (as here) before any project is registered (verified live 2026-06-17).
+//
+// An authentication failure also counts as ready: the hub answered, it only
+// refused the credential. That is the case whenever lever holds no working
+// token for it yet, e.g. the live hub restarted after a dev-auth window whose
+// first mint failed; treating it as "not ready" reported a running hub as
+// down (seen on scion f7155ecb+, where the mint failed with
+// scope_violation). Whoever needs the credential fails on it next, with the
+// real error.
 func (c *Client) waitHubReady(ctx context.Context) error {
 	var lastErr error
 	err := retry.Until(ctx, c.hubReadyAttempts, c.hubReadyInterval, func() (bool, error) {
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json")
-		return lastErr == nil, nil
+		return lastErr == nil || isHubAuthRefusal(lastErr), nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
 		return fmt.Errorf("%w after %d attempts: %w", ErrHubNotReady, c.hubReadyAttempts, lastErr)
 	}
 	return err
+}
+
+// isHubAuthRefusal reports whether a scion CLI error is the hub refusing the
+// credential (HTTP 401; scion cmd/common.go maps it to this message), which
+// proves the hub is up and answering.
+func isHubAuthRefusal(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "authentication failed, login to hub")
 }
 
 // ErrHubNotReady is wrapped by waitHubReady when the hub never answers within

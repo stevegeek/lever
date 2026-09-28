@@ -3,6 +3,7 @@ package scion
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -90,5 +91,49 @@ func TestWaitRuntimeBrokerReadyCtxCancel(t *testing.T) {
 	cancel()
 	if err := c.WaitRuntimeBrokerReady(ctx, "/lever"); err == nil {
 		t.Fatal("a cancelled context must return an error, not fail-soft nil")
+	}
+}
+
+// refusingRunner answers every command like a scion CLI whose hub is up but
+// refuses the credential (HTTP 401).
+type refusingRunner struct {
+	stderr string
+	calls  int
+}
+
+func (r *refusingRunner) RunIn(context.Context, string, map[string]string, string, ...string) (proc.Result, error) {
+	r.calls++
+	return proc.Result{Code: 1, Stderr: r.stderr}, errors.New("exit status 1")
+}
+
+func (r *refusingRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r *refusingRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// A hub that answers 401 is up: lever may hold no working token for it yet
+// (a first mint that failed). It must not be reported as not ready.
+func TestWaitHubReadyAcceptsAuthRefusal(t *testing.T) {
+	r := &refusingRunner{stderr: "Error: authentication failed, login to hub with 'scion hub auth login'\n"}
+	c := New(r, Options{})
+	c.hubReadyAttempts, c.hubReadyInterval = 5, 0
+	if err := c.waitHubReady(context.Background()); err != nil {
+		t.Fatalf("a hub refusing the credential is up; got %v", err)
+	}
+	if r.calls != 1 {
+		t.Fatalf("probe calls = %d, want 1", r.calls)
+	}
+}
+
+// Anything else still counts as not ready.
+func TestWaitHubReadyOtherErrorsNotReady(t *testing.T) {
+	r := &refusingRunner{stderr: "Error: hub at http://127.0.0.1:8080 is not responding\n"}
+	c := New(r, Options{})
+	c.hubReadyAttempts, c.hubReadyInterval = 2, 0
+	if err := c.waitHubReady(context.Background()); !errors.Is(err, ErrHubNotReady) {
+		t.Fatalf("want ErrHubNotReady, got %v", err)
 	}
 }

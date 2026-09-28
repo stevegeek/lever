@@ -401,6 +401,10 @@ type patMintOpts struct {
 	// fails calls this to bring the live hub back. nil: the error says the
 	// hub is down and how to recover.
 	RestartHub func(ctx context.Context) error
+	// ScopeKnown asks the jail's scion whether it knows a UAT scope; the
+	// remote role uses it for agent.lifecycle. nil: the recorded variant
+	// is kept.
+	ScopeKnown scopeKnownFunc
 }
 
 func (o patMintOpts) now() time.Time {
@@ -565,6 +569,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	remoteReason := ""
 	var rrec state.PATRecord
 	roleReason := ""
+	lifecycle := false
 	if remote.Enabled {
 		rtok, _ := st.LoadRemotePAT()
 		var rfound bool
@@ -577,7 +582,11 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		if err != nil {
 			return fmt.Errorf("bootstrap-token: %w", err)
 		}
-		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remoteRolePermissions())
+		// The jail's scion binary says whether agent.lifecycle exists; it
+		// answers with the hub down, so a pin upgrade followed by `lever
+		// up` re-grants the role while no container runs.
+		lifecycle = remoteRoleLifecycle(ctx, o.ScopeKnown, rolerec)
+		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remoteRolePermissions(lifecycle))
 	}
 	if controllerReason == "" && remoteReason == "" && roleReason == "" {
 		return nil // nothing to mint or grant; no dev-auth window
@@ -667,6 +676,9 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		}
 		return nil
 	}
+	if controllerReason != "" || remoteReason != "" {
+		grantControllerRole(ctx, jr, filepath.Base(jp), o)
+	}
 	if controllerReason != "" {
 		if err := mint("lever-controller", controllerPATScopes(), crec, controllerReason,
 			st.SaveControllerPAT, st.SaveControllerPATRecord); err != nil {
@@ -680,7 +692,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		}
 	}
 	if remote.Enabled {
-		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote.Emails, now, o); err != nil {
+		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote.Emails, lifecycle, now, o); err != nil {
 			return err
 		}
 	}
@@ -773,24 +785,16 @@ func closeDevAuthWindow(ctx context.Context, jr proc.Runner, tw *scion.Client, s
 // The exception is errCeilingRemoved: the grant deleted a user's ceiling and
 // could not write the new one, so that user can create projects until the next
 // apply — that fails the apply.
-func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, emails []string, now time.Time, o patMintOpts) error {
+func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, emails []string, lifecycle bool, now time.Time, o patMintOpts) error {
 	fail := func(err error) {
 		o.warn("bootstrap-token: remote web role not granted, so the web UI may answer 403; the next `lever apply` retries: %v", err)
 	}
-	hub := o.AdminHub
-	if hub == nil {
-		tok, err := readDevToken(ctx, jr)
-		if err != nil {
-			fail(err)
-			return nil
-		}
-		hub = &hubapi.JailCurl{
-			Runner:  jr,
-			BaseURL: throwawayHubURL,
-			Token:   func() string { return tok },
-		}
+	hub, err := windowAdminHub(ctx, jr, o)
+	if err != nil {
+		fail(err)
+		return nil
 	}
-	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, emails, now, o.warn)
+	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, emails, lifecycle, now, o.warn)
 	if errors.Is(err, errCeilingRemoved) {
 		return fmt.Errorf("bootstrap-token: remote web role: %w", err)
 	}
@@ -1301,6 +1305,7 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 		RestartHub: func(ctx context.Context) error {
 			return w.sc.ServerStart(ctx, apply.HubServerOpts(w.app, w.deps.HubSessionSecret))
 		},
+		ScopeKnown: w.sc.KnowsUATScope,
 	})
 }
 

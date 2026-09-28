@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -249,5 +250,83 @@ func TestEnsureAgentRoleCeilingIsGatedOnTheRolesProbe(t *testing.T) {
 	err := ensureAgentRoleCeiling(context.Background(), yes, &hubapi.Client{T: h}, "lever", "baseline")
 	if err == nil || !h.asked {
 		t.Fatalf("roles-aware scion: the hub must be asked and its failure surfaced; err=%v asked=%v", err, h.asked)
+	}
+}
+
+// A first mint grants the controller role in the same window, so the
+// issuer holds agent.attach on the project before hub token create runs
+// (scion f7155ecb and later refuse the mint otherwise).
+func TestEnsurePATsGrantsControllerRoleBeforeMint(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	scriptTokenCreate(f, "lever-controller", "pat-controller-new")
+	hub := newFakeAdminHub()
+	hub.me = "dev-user"
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{AdminHub: hub}); err != nil {
+		t.Fatal(err)
+	}
+	if ctok, _ := st.LoadControllerPAT(); ctok != "pat-controller-new" {
+		t.Fatalf("controller PAT = %q", ctok)
+	}
+	if len(hub.bindings) != 1 || hub.bindings[0].PrincipalID != "dev-user" {
+		t.Fatalf("want the issuer bound to %s, got %+v", controllerRoleName, hub.bindings)
+	}
+}
+
+// A scion upgrade to one with agent.lifecycle re-grants the remote role in
+// the next window, because the jail's scion (not the hub, which may be down
+// on `lever up`) is asked. Without the probe the recorded grant stands.
+func TestEnsurePATsRegrantsRemoteRoleAfterScionUpgrade(t *testing.T) {
+	for _, probe := range []bool{false, true} {
+		st := state.ForConfig(t.TempDir())
+		seedPAT(t, st, "controller", "pat-c")
+		seedPAT(t, st, "remote", "pat-r")
+		old := remoteRolePermissions(false)
+		if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: old,
+			Bound: map[string]string{"op@github": "user-1"}, Ceilings: map[string]string{"op@github": "c1"},
+			CeilingPermissions: old}); err != nil {
+			t.Fatal(err)
+		}
+		f := proc.NewFakeRunner()
+		scriptPATMintChain(f)
+		hub := newFakeAdminHub("op@github")
+		o := patMintOpts{AdminHub: hub}
+		if probe {
+			o.ScopeKnown = func(_ context.Context, scope string) (bool, error) { return scope == lifecycleScope, nil }
+		}
+		if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever",
+			remoteAccess{Enabled: true, Emails: []string{"op@github"}}, o); err != nil {
+			t.Fatal(err)
+		}
+		opened := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }) > 0
+		if opened != probe {
+			t.Fatalf("probe=%v: window opened=%v", probe, opened)
+		}
+		rec, _, _ := st.LoadRemoteRoleRecord()
+		if got := slices.Contains(rec.Permissions, lifecyclePermission); got != probe {
+			t.Fatalf("probe=%v: recorded role permissions %v", probe, rec.Permissions)
+		}
+	}
+}
+
+// A window that re-mints only the remote PAT still grants the controller
+// role first: the remote PAT asks for agent:attach too.
+func TestEnsurePATsGrantsControllerRoleForRemoteOnlyMint(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "pat-c")
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	scriptTokenCreate(f, "lever-remote", "pat-remote-new")
+	hub := newFakeAdminHub()
+	hub.me = "dev-user"
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{Enabled: true}, patMintOpts{AdminHub: hub}); err != nil {
+		t.Fatal(err)
+	}
+	if rtok, _ := st.LoadRemotePAT(); rtok != "pat-remote-new" {
+		t.Fatalf("remote PAT = %q", rtok)
+	}
+	if len(hub.bindings) == 0 || !slices.ContainsFunc(hub.bindings, func(b hubapi.RoleBinding) bool { return b.PrincipalID == "dev-user" }) {
+		t.Fatalf("want the issuer bound to %s, got %+v", controllerRoleName, hub.bindings)
 	}
 }

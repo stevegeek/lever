@@ -5,6 +5,48 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Fixed
+
+- **Runs on scion main (tested at 63d5d65d, 2026-09-27).** scion f7155ecb
+  (#1838) took `agent.attach` away from the project owner and admin roles,
+  and a token may only carry scopes its issuer holds through a project-scope
+  binding. So `lever apply` failed on a new or re-minting instance:
+  `hub token create lever-controller ... scope_violation: requested scopes
+  exceed issuer authority (403)`. In the dev-auth window lever now keeps a
+  project role `lever-controller` holding only `agent.attach` and binds the
+  token issuer to it on the instance project, before any mint. `lever
+  attach` and `lever up` (which run `scion attach` with the controller PAT)
+  keep working. The requested scope sets are unchanged, so existing
+  instances are not forced to re-mint; on older scion the role changes
+  nothing.
+- **A failed dev-auth window no longer reports a running hub as down.**
+  After the window lever restarts the live hub and waits for it with an
+  authenticated call; when lever held no working token yet (a first mint
+  that failed) every probe got "authentication failed" and apply said
+  "restarting it failed: hub not ready". An authentication refusal now
+  counts as the hub being up.
+- **Remote web UI keeps start/stop on scion main.** The `lever-remote` role
+  gets `agent.lifecycle` when the hub knows it (scion f7155ecb split start,
+  stop, suspend, restart and restore out of `agent.attach`); on an older hub
+  it is left out, since that hub rejects the unknown permission. lever asks
+  the jail's scion binary (`scion hub token create --help`), which answers
+  with the hub down, so after a pin upgrade the `lever stop` + `lever up`
+  grants it; `lever doctor` flags a grant that lacks it.
+
+### Changed
+
+- The examples and docs pin scion `63d5d65d`. lever still runs on
+  6aa366e6.
+- The operations guide notes scion's new cap of 12 running agents per
+  runtime broker (scion cf16e4b0).
+- scion main logs "settings file contains unrecognized keys (these will be
+  ignored)" for keys lever writes (`server`, `schema_version`,
+  `runtimes[*].type`, ...). The warning comes from scion's legacy-format
+  probe; scion's versioned settings loader reads those keys (verified: the
+  telemetry setting reaches agents). It is not a lever misconfiguration.
+
 ## [0.25.1] - 2026-09-26
 
 ### Fixed

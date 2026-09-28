@@ -1431,7 +1431,7 @@ func checkPATTokens(st state.State, remoteEnabled bool, now time.Time) checkResu
 // user with the current permission set and a ceiling. It reads that
 // record only — the grant needs hub-admin, which doctor never has — so it
 // says what lever last granted, not what the hub holds now.
-func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
+func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess, known scopeKnownFunc) checkResult {
 	const name = "remote web role"
 	if !remote.Enabled {
 		return checkResult{name, true, "disabled", ""}
@@ -1441,7 +1441,8 @@ func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
 	if err != nil {
 		return checkResult{name, false, err.Error(), fix}
 	}
-	reason := remoteRoleReason(rec, found, remote.Emails, remoteRolePermissions())
+	perms := remoteRolePermissions(remoteRoleLifecycle(ctx, known, rec))
+	reason := remoteRoleReason(rec, found, remote.Emails, perms)
 	if reason == "" {
 		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s; %s withheld by an access constraint",
 			remoteWebRoleName, strings.Join(remote.Emails, ", "), projectCreatePermission), ""}
@@ -1455,7 +1456,7 @@ func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
 			return checkResult{name, false, detail, fix}
 		}
 	}
-	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, remoteRolePermissions()) {
+	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, perms) {
 		return checkResult{name, false, detail, remoteRoleFix}
 	}
 	return checkResult{name, false, detail, fix}

@@ -163,7 +163,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkRemoteExposure(app) },
 		func() checkResult { return checkPATTokens(state, app.RemoteEnabled(), time.Now()) },
 		func() checkResult { return checkDevAuthWindow(ctx, jr) },
-		func() checkResult { return checkRemoteWebRole(state, remoteAccessFor(app)) },
+		func() checkResult {
+			return checkRemoteWebRole(ctx, state, remoteAccessFor(app), jailScion.KnowsUATScope)
+		},
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },
 		func() checkResult {

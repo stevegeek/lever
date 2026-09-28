@@ -1,0 +1,19 @@
+package hubapi
+
+import (
+	"context"
+	"errors"
+)
+
+// Me returns the hub user the client's token belongs to
+// (GET /api/v1/auth/me).
+func (c *Client) Me(ctx context.Context) (User, error) {
+	var u User
+	if err := c.get(ctx, "/api/v1/auth/me", &u); err != nil {
+		return User{}, err
+	}
+	if u.ID == "" {
+		return User{}, errors.New("GET /api/v1/auth/me returned no user id")
+	}
+	return u, nil
+}

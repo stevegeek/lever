@@ -604,6 +604,25 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	// Resume only a worker the hub has a record for. scion's resume of a
+	// missing record does not fail: the hub CREATES the agent, from the
+	// project template and scion's default harness (antigravity), not the
+	// worker's configured harness, image, model or role — so the create
+	// fails on an image nobody built, or starts the wrong agent. lever passes
+	// those only on start, so a worker with no record (never started, purged,
+	// or a new jail) is refused here with the verb to use instead.
+	phase, err := b.phaseOf(ctx, spec)
+	if err != nil {
+		b.audit("worker", b.manager, "error", "resume "+spec.Name+": phase: "+err.Error())
+		http.Error(w, "runtime error", http.StatusBadGateway)
+		return
+	}
+	if phase == "" {
+		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": no record")
+		http.Error(w, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); "+
+			"start it instead: `lever-manager agent start "+spec.Name+" --task \"…\"`", http.StatusNotFound)
+		return
+	}
 	// Stage a fresh one-use ticket BEFORE resuming, as resumeExistingWorker
 	// does (lever#36): the record's ticket volume is a tmpfs directory under
 	// the run user's XDG_RUNTIME_DIR, so a jail machine restart empties it

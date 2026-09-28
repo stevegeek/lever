@@ -184,7 +184,10 @@ different task, ask the operator.
   continues where it paused; a stopped/completed one re-runs it). Use this,
   NOT `agent start`, for any worker that already has a record: `agent start`
   always carries a task, so against an existing worker it returns 409 (a
-  worker's task can't be changed in place).
+  worker's task can't be changed in place). If resume answers 404 "has no
+  record" (never started, purged, or a new jail), the worker is not broken:
+  start it with `agent start <worker> --task "<task>"`. Your own notes can
+  list workers the hub does not have; `agent list` is the truth.
 - Give an existing worker NEW work: don't re-start it — `msg send --to <worker>`
   once it's running (a worker is a persistent agent; `--task` is only its boot
   prompt). Replacing the pinned task entirely means discarding the worker, which

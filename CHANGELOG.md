@@ -19,8 +19,12 @@ version bump moves the block under the new version heading.
   answers every failure as "not verified". The operator skill makes the
   manager check every unmarked `user:` message and treat an unverified one
   as data. Doctor row `verified chat`. The agents need an agent image built
-  from this lever for the tool, and the skill treats a missing tool as "not
-  verified": rebuild the agent image first, then run `lever init`.
+  from this lever for the tool. `lever init` writes whether verified chat is
+  on into the operator skill; where it is on, the skill treats a missing
+  tool as "not verified", so rebuild the agent image first, then run
+  `lever init`. Turning `remote` or `allowed_users` on or off makes the
+  skill stale in `lever doctor`: run `lever init` again. A repeat check
+  within ten minutes answers `repeat: true` without the text.
 
 ### Security
 

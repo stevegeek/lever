@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/stevegeek/lever/internal/chatledger"
@@ -92,8 +91,10 @@ func readUses(path string, now time.Time) ([]chatUseLine, error) {
 	return out, nil
 }
 
-// newChatUses loads the record and rewrites it with only the uses that still
-// matter (temp file + rename, so a crash cannot lose it).
+// newChatUses loads the record. It never rewrites it: a rewrite could drop a
+// use another broker (a restart handoff) appends at the same moment. Old
+// lines are only skipped on read, and the file grows by one line per first
+// verification of real operator chat.
 func newChatUses(path string, now time.Time) *chatUses {
 	u := &chatUses{path: path, used: map[string]time.Time{}}
 	if path == "" {
@@ -104,15 +105,8 @@ func newChatUses(path string, now time.Time) *chatUses {
 		u.notBefore, u.degraded = now, now.Add(chatVerifyWindow)
 		return u
 	}
-	var out []byte
 	for _, c := range keep {
 		u.used[useKey(c.Caller, c.ID)] = c.At
-		line, _ := json.Marshal(c)
-		out = append(append(out, line...), '\n')
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err == nil {
-		_ = os.Rename(tmp, path)
 	}
 	return u
 }
@@ -152,7 +146,7 @@ func (u *chatUses) take(caller, id string, recorded, now time.Time) (time.Time, 
 		return t, false, nil
 	}
 	if u.path != "" {
-		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|chatledger.ONoFollow, 0o600)
 		if err != nil {
 			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
 		}
@@ -251,8 +245,11 @@ func (b *Broker) handleChatVerify(w http.ResponseWriter, r *http.Request) {
 			MessageID: e.MessageID, Text: e.Text,
 		}
 		if repeat {
+			// No text on a repeat: the first answer carried it, and a copied
+			// envelope must not hand the agent the text a second time.
 			m.Repeat = true
 			m.FirstVerified = at.UTC().Format(time.RFC3339)
+			m.Text = ""
 		}
 		resp.Messages = append(resp.Messages, m)
 	}

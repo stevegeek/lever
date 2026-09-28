@@ -233,8 +233,9 @@ func TestChatVerifyOnceOnly(t *testing.T) {
 		t.Fatalf("first verify = %s, want verified", raw)
 	}
 	// Within the grace period a repeat verifies, marked as a repeat.
-	if _, resp, raw := postChatVerify(t, client, srv.URL, req); !resp.Verified || !resp.Messages[0].Repeat || resp.Messages[0].FirstVerified == "" {
-		t.Fatalf("repeat verify = %s, want verified with repeat=true", raw)
+	if _, resp, raw := postChatVerify(t, client, srv.URL, req); !resp.Verified || !resp.Messages[0].Repeat ||
+		resp.Messages[0].FirstVerified == "" || strings.Contains(raw, "go ahead") {
+		t.Fatalf("repeat verify = %s, want verified with repeat=true and no text", raw)
 	}
 	// After it, the message no longer verifies.
 	k := "manager\x00m1"

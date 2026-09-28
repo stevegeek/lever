@@ -6,4 +6,4 @@ import "io/fs"
 
 func fileOwner(fs.FileInfo) (int, bool) { return 0, false }
 
-const oNoFollow = 0
+const ONoFollow = 0

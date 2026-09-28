@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
@@ -56,7 +57,7 @@ type skillTarget struct {
 }
 
 func skillTargets(app *config.App) []skillTarget {
-	ts := []skillTarget{{relPath: ".claude/skills/lever-operator/SKILL.md", content: skills.Operator(cli.Version)}}
+	ts := []skillTarget{{relPath: ".claude/skills/lever-operator/SKILL.md", content: skills.Operator(cli.Version, brokerctl.ChatConfigured(app))}}
 	for _, g := range app.Workers {
 		rel := filepath.ToSlash(filepath.Join(g.Dir, ".claude", "skills", "lever-agent", "SKILL.md"))
 		ts = append(ts, skillTarget{relPath: rel, content: skills.Agent(cli.Version)})

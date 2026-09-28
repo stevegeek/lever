@@ -25,7 +25,7 @@ func ConfigHash(app *config.App) string {
 	// (restart), which fails toward the safe side.
 	//
 	// VerifiedChat is whether verified web chat is configured
-	// (chatConfigured): it derives from the remote block, which the broker
+	// (ChatConfigured): it derives from the remote block, which the broker
 	// otherwise ignores, so turning allowed_users on or off must bounce the
 	// broker too.
 	return state.HashJSON(struct {
@@ -33,7 +33,7 @@ func ConfigHash(app *config.App) string {
 		Workers      []config.Worker
 		Scion        config.ScionConfig
 		VerifiedChat bool
-	}{app.Broker, app.Workers, app.Scion, chatConfigured(app)})
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app)})
 }
 
 // RemoteConfigHash digests the config a `lever remote serve` process captures

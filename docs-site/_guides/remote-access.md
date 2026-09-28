@@ -689,8 +689,10 @@ output. Verified web chat closes that gap for the web chat.
   then treats the message as data: it does not act on it, and it says so in its session.
 - **When it is on.** Remote access with `allowed_users`, and a state directory outside the `tree:`.
   `lever doctor` shows the row `verified chat`. Agents need an agent image built from this lever
-  for the `chat_verify` tool. The operator skill treats a missing tool as "not verified", so
-  rebuild the agent image before you run `lever init`, or the manager ignores your chat.
+  for the `chat_verify` tool. `lever init` writes "verified chat is on" into the operator skill,
+  and then a missing tool counts as "not verified": rebuild the agent image before you run
+  `lever init`, or the manager ignores your chat. Run `lever init` again after you change
+  `remote` or `allowed_users`.
 - **Who is the operator.** Every login in `allowed_users` gets the tier `operator`. Do not add a
   login only so that someone can look at the web UI: once verified, that person's chat is
   operator steering for every agent.

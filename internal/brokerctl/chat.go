@@ -18,16 +18,16 @@ import (
 //   - the state directory is outside the tree. Agents mount the tree, so a
 //     ledger inside it could be written from a jail and would prove nothing.
 func ChatLedgerPath(app *config.App, st state.State) string {
-	if !chatConfigured(app) || StateInsideTree(app, st) {
+	if !ChatConfigured(app) || StateInsideTree(app, st) {
 		return ""
 	}
 	return st.ChatLedger()
 }
 
-// chatConfigured is the config half of ChatLedgerPath, for ConfigHash (which
+// ChatConfigured is the config half of ChatLedgerPath, for ConfigHash (which
 // has no state.State). The other half, the state directory's place relative
 // to the tree, does not change for an instance.
-func chatConfigured(app *config.App) bool {
+func ChatConfigured(app *config.App) bool {
 	return app.RemoteEnabled() && len(app.Remote.AllowedUsers) > 0
 }
 

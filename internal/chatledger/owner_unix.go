@@ -15,4 +15,5 @@ func fileOwner(fi fs.FileInfo) (int, bool) {
 	return int(st.Uid), true
 }
 
-const oNoFollow = syscall.O_NOFOLLOW
+// ONoFollow is O_NOFOLLOW where the platform has it.
+const ONoFollow = syscall.O_NOFOLLOW

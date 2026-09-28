@@ -93,7 +93,7 @@ func (w *Writer) Append(e Entry) error {
 	}
 	// O_NOFOLLOW: never append to (or chmod) whatever a symlink here points
 	// at; Lookup refuses a symlinked ledger anyway.
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|oNoFollow, 0o600)
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|ONoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("chat ledger: %w", err)
 	}

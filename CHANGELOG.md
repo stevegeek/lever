@@ -5,6 +5,28 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.26.2] - 2026-09-28
+
+### Fixed
+
+- **`lever up` no longer deletes the manager on scion main.** Since scion
+  f7155ecb a user token needs `agent:lifecycle` to start, stop, suspend or
+  resume an existing agent, and a resume without it answers 409 "agent
+  already exists in this project". lever took that as an unresumable record
+  and deleted the manager and its conversation. It also made `lever stop`'s
+  suspend fail (403), and the broker's worker stop, suspend and resume.
+  - The controller PAT now carries `agent:lifecycle`, and the
+    `lever-controller` role gives the token issuer `agent.lifecycle`, when the
+    jail's scion knows the scope (the same `--help` probe as the remote role).
+    On such a scion the next `lever up` re-mints the controller PAT; the
+    dev-auth window needs no running agents, so run `lever stop`, then
+    `lever up`. Older scion keeps the old scope set and does not re-mint.
+  - A resume the hub refuses (a 409 "already exists", or a 403) now stops
+    apply with an error and keeps the manager. Only a resume that fails for
+    another reason still takes the delete-and-start-fresh recovery.
+  - Doctor's `hub tokens` row reports a controller token without
+    `agent:lifecycle` on a scion that has it.
+
 ## [0.26.1] - 2026-09-28
 
 ### Fixed

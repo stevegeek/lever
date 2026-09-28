@@ -24,7 +24,7 @@ func seedPAT(t *testing.T, st state.State, which, token string) {
 		if err := st.SaveControllerPAT(token); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-" + token, Requested: controllerPATScopes(), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
+		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-" + token, Requested: controllerPATScopes(false), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
 			t.Fatal(err)
 		}
 	case "remote":
@@ -91,8 +91,8 @@ func TestEnsureControllerPATWritesTheRecord(t *testing.T) {
 	if rec.ID != "a8bf56c4-383e-4e6a-ac2c-db7fe509c688" {
 		t.Errorf("record id = %q", rec.ID)
 	}
-	if strings.Join(rec.Requested, ",") != strings.Join(controllerPATScopes(), ",") {
-		t.Errorf("requested = %v, want %v", rec.Requested, controllerPATScopes())
+	if strings.Join(rec.Requested, ",") != strings.Join(controllerPATScopes(false), ",") {
+		t.Errorf("requested = %v, want %v", rec.Requested, controllerPATScopes(false))
 	}
 	if strings.Join(rec.Granted, ",") != "agent:create,agent:attach,project:read" {
 		t.Errorf("granted = %v", rec.Granted)
@@ -155,7 +155,7 @@ func TestEnsureControllerPATRemintsNearExpiry(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "pat-old")
 	now := time.Now()
-	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(), ExpiresAt: now.Add(5 * 24 * time.Hour)}); err != nil {
+	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false), ExpiresAt: now.Add(5 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	f := patMintRunner("pat-new")
@@ -281,6 +281,12 @@ func TestEnsurePATsRegrantsRemoteRoleAfterScionUpgrade(t *testing.T) {
 	for _, probe := range []bool{false, true} {
 		st := state.ForConfig(t.TempDir())
 		seedPAT(t, st, "controller", "pat-c")
+		// The controller token already carries what this probe asks for, so
+		// only the remote role is stale here.
+		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-pat-c", Requested: controllerPATScopes(probe),
+			MintedAt: time.Now(), ExpiresAt: time.Now().Add(300 * 24 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
 		seedPAT(t, st, "remote", "pat-r")
 		old := remoteRolePermissions(false)
 		if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: old,
@@ -328,5 +334,64 @@ func TestEnsurePATsGrantsControllerRoleForRemoteOnlyMint(t *testing.T) {
 	}
 	if len(hub.bindings) == 0 || !slices.ContainsFunc(hub.bindings, func(b hubapi.RoleBinding) bool { return b.PrincipalID == "dev-user" }) {
 		t.Fatalf("want the issuer bound to %s, got %+v", controllerRoleName, hub.bindings)
+	}
+}
+
+// On a scion with agent.lifecycle (f7155ecb) a controller token without
+// agent:lifecycle cannot resume the manager: the hub answers 409 "already
+// exists". The next apply re-mints it with the scope, after granting the
+// issuer agent.lifecycle through the controller role (the mint ceiling).
+func TestEnsurePATsRemintsControllerWithLifecycle(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "pat-c")
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	scriptTokenCreate(f, "lever-controller", "pat-controller-new")
+	hub := newFakeAdminHub()
+	hub.me = "dev-user"
+	o := patMintOpts{AdminHub: hub, ScopeKnown: func(_ context.Context, scope string) (bool, error) { return scope == lifecycleScope, nil }}
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, o); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ := st.LoadControllerPATRecord()
+	if !slices.Contains(rec.Requested, lifecycleScope) {
+		t.Fatalf("re-minted controller scopes %v, want %s", rec.Requested, lifecycleScope)
+	}
+	var role *hubapi.RoleDefinition
+	for i := range hub.roles {
+		if hub.roles[i].Name == controllerRoleName {
+			role = &hub.roles[i]
+		}
+	}
+	if role == nil || !slices.Contains(role.Permissions, lifecyclePermission) {
+		t.Fatalf("controller role %+v, want it to hold %s", role, lifecyclePermission)
+	}
+}
+
+// A scion without agent:lifecycle keeps the old scope set: no re-mint.
+func TestEnsurePATsKeepsControllerWithoutLifecycle(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "pat-c")
+	f := proc.NewFakeRunner()
+	o := patMintOpts{ScopeKnown: func(context.Context, string) (bool, error) { return false, nil }}
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, o); err != nil {
+		t.Fatal(err)
+	}
+	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }); n != 0 {
+		t.Fatalf("the window opened %d time(s) for a token that needs nothing", n)
+	}
+}
+
+// With the probe unanswered, the token on disk decides: one minted with
+// agent:lifecycle is not re-minted without it, nor the reverse.
+func TestControllerLifecycleFallsBackToTheRecord(t *testing.T) {
+	failing := func(context.Context, string) (bool, error) { return false, errors.New("no scion") }
+	with := state.PATRecord{Requested: controllerPATScopes(true)}
+	without := state.PATRecord{Requested: controllerPATScopes(false)}
+	if !controllerLifecycle(context.Background(), failing, with) || controllerLifecycle(context.Background(), failing, without) {
+		t.Fatal("controllerLifecycle ignores the record when the probe fails")
+	}
+	if !controllerLifecycle(context.Background(), nil, with) {
+		t.Fatal("controllerLifecycle ignores the record with no probe")
 	}
 }

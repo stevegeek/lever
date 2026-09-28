@@ -1389,7 +1389,7 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 // is a finding: it was minted by a lever that recorded nothing, which also
 // means scion's 90-day default expiry and no agent:message. The fix is always
 // the same re-apply, which re-mints inside the throwaway dev-auth window.
-func checkPATTokens(st state.State, remoteEnabled bool, now time.Time) checkResult {
+func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, known scopeKnownFunc, now time.Time) checkResult {
 	const name = "hub tokens"
 	const fix = "run `lever apply` (it re-mints the token in the bootstrap dev-auth window and revokes the old one)"
 	type tokenCheck struct {
@@ -1398,7 +1398,9 @@ func checkPATTokens(st state.State, remoteEnabled bool, now time.Time) checkResu
 		rec   func() (state.PATRecord, bool, error)
 		want  []string
 	}
-	checks := []tokenCheck{{"controller", st.LoadControllerPAT, st.LoadControllerPATRecord, controllerPATScopes()}}
+	crec, _, _ := st.LoadControllerPATRecord()
+	checks := []tokenCheck{{"controller", st.LoadControllerPAT, st.LoadControllerPATRecord,
+		controllerPATScopes(controllerLifecycle(ctx, known, crec))}}
 	if remoteEnabled {
 		checks = append(checks, tokenCheck{"remote", st.LoadRemotePAT, st.LoadRemotePATRecord, remotePATScopes()})
 	}

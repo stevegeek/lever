@@ -1532,7 +1532,7 @@ func TestCheckPATTokensPassesOnACurrentRecord(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	now := time.Now()
 	seedPAT(t, st, "controller", "tok")
-	r := checkPATTokens(st, false, now)
+	r := checkPATTokens(context.Background(), st, false, nil, now)
 	if !r.ok {
 		t.Fatalf("a current record must pass; got %+v", r)
 	}
@@ -1548,7 +1548,7 @@ func TestCheckPATTokensFailsWithoutARecord(t *testing.T) {
 	if err := st.SaveControllerPAT("tok"); err != nil {
 		t.Fatal(err)
 	}
-	r := checkPATTokens(st, false, time.Now())
+	r := checkPATTokens(context.Background(), st, false, nil, time.Now())
 	if r.ok {
 		t.Fatalf("a token without a record must fail; got %+v", r)
 	}
@@ -1563,7 +1563,7 @@ func TestCheckPATTokensFailsOnScopeDrift(t *testing.T) {
 	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: []string{"agent:manage"}, ExpiresAt: time.Now().Add(200 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	r := checkPATTokens(st, false, time.Now())
+	r := checkPATTokens(context.Background(), st, false, nil, time.Now())
 	if r.ok || !strings.Contains(r.detail, "scopes") {
 		t.Fatalf("drifted scopes must fail and say so; got %+v", r)
 	}
@@ -1573,17 +1573,17 @@ func TestCheckPATTokensFailsNearExpiry(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "tok")
 	now := time.Now()
-	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(), ExpiresAt: now.Add(3 * 24 * time.Hour)}); err != nil {
+	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false), ExpiresAt: now.Add(3 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	r := checkPATTokens(st, false, now)
+	r := checkPATTokens(context.Background(), st, false, nil, now)
 	if r.ok || !strings.Contains(r.detail, "expire") {
 		t.Fatalf("a token inside the renew window must fail; got %+v", r)
 	}
 }
 
 func TestCheckPATTokensFailsWhenNoTokenExists(t *testing.T) {
-	r := checkPATTokens(state.ForConfig(t.TempDir()), false, time.Now())
+	r := checkPATTokens(context.Background(), state.ForConfig(t.TempDir()), false, nil, time.Now())
 	if r.ok {
 		t.Fatalf("no controller PAT at all must fail; got %+v", r)
 	}
@@ -1595,11 +1595,11 @@ func TestCheckPATTokensCoversTheRemoteTokenWhenEnabled(t *testing.T) {
 	if err := st.SaveRemotePAT("rtok"); err != nil {
 		t.Fatal(err)
 	}
-	r := checkPATTokens(st, true, time.Now())
+	r := checkPATTokens(context.Background(), st, true, nil, time.Now())
 	if r.ok || !strings.Contains(r.detail, "remote") {
 		t.Fatalf("a remote token without a record must fail and name the remote token; got %+v", r)
 	}
-	if r := checkPATTokens(st, false, time.Now()); !r.ok {
+	if r := checkPATTokens(context.Background(), st, false, nil, time.Now()); !r.ok {
 		t.Fatalf("with remote disabled the remote token is nobody's business; got %+v", r)
 	}
 }

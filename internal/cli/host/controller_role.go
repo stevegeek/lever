@@ -24,10 +24,19 @@ import (
 // controller identity, so attach reaches no other user's agents.
 const controllerRoleName = "lever-controller"
 
-const controllerRoleDescription = "Managed by lever: lets the instance's controller token attach to agent sessions (lever attach, lever up)."
+const controllerRoleDescription = "Managed by lever: lets the instance's controller token attach to agent sessions (lever attach, lever up) and start, stop and resume agents."
 
 // controllerRolePermissions is the controller role's permission set.
-func controllerRolePermissions() []string { return []string{"agent.attach"} }
+// lifecycle adds agent.lifecycle, for a hub that has it: the mint ceiling
+// counts only project-scope bindings, so the controller PAT can carry
+// agent:lifecycle (controllerPATScopes) only when the issuer holds it here.
+// An older hub rejects the unknown permission.
+func controllerRolePermissions(lifecycle bool) []string {
+	if lifecycle {
+		return []string{"agent.attach", lifecyclePermission}
+	}
+	return []string{"agent.attach"}
+}
 
 // windowAdminHub is the transport for admin calls in the dev-auth window:
 // curl in the jail against the throwaway hub with its dev token, or
@@ -46,7 +55,7 @@ func windowAdminHub(ctx context.Context, jr proc.Runner, o patMintOpts) (hubapi.
 // ensureControllerRole makes the hub hold the controller role and binds the
 // calling identity (the dev user of the throwaway hub) to it on the
 // instance project. Idempotent.
-func ensureControllerRole(ctx context.Context, hc *hubapi.Client, projectKey string, warn func(string, ...any)) error {
+func ensureControllerRole(ctx context.Context, hc *hubapi.Client, projectKey string, lifecycle bool, warn func(string, ...any)) error {
 	me, err := hc.Me(ctx)
 	if err != nil {
 		return fmt.Errorf("resolving the token issuer: %w", err)
@@ -59,7 +68,7 @@ func ensureControllerRole(ctx context.Context, hc *hubapi.Client, projectKey str
 	if err != nil {
 		return err
 	}
-	role, err := ensureProjectRole(ctx, hc, defs, controllerRoleName, controllerRoleDescription, controllerRolePermissions(), warn)
+	role, err := ensureProjectRole(ctx, hc, defs, controllerRoleName, controllerRoleDescription, controllerRolePermissions(lifecycle), warn)
 	if err != nil {
 		return err
 	}
@@ -73,10 +82,10 @@ func ensureControllerRole(ctx context.Context, hc *hubapi.Client, projectKey str
 // PAT is minted. A failure is a warning, not an error: on a scion before
 // f7155ecb the mint does not need the role, and on a later one the mint
 // then fails with scope_violation, which this warning explains.
-func grantControllerRole(ctx context.Context, jr proc.Runner, projectKey string, o patMintOpts) {
+func grantControllerRole(ctx context.Context, jr proc.Runner, projectKey string, lifecycle bool, o patMintOpts) {
 	hub, err := windowAdminHub(ctx, jr, o)
 	if err == nil {
-		err = ensureControllerRole(ctx, &hubapi.Client{T: hub}, projectKey, o.warn)
+		err = ensureControllerRole(ctx, &hubapi.Client{T: hub}, projectKey, lifecycle, o.warn)
 	}
 	if err != nil {
 		o.warn("bootstrap-token: could not grant the %s role (agent.attach for the token issuer); "+

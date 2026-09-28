@@ -74,6 +74,26 @@ func IsBrokerUnavailable(err error) bool {
 		strings.Contains(s, "deadline exceeded")
 }
 
+// IsRefusedByHub reports whether err from a scion agent verb is the hub
+// REFUSING the caller, as opposed to the agent being broken. A resume that
+// fails this way says nothing about the agent's state, so it must never be
+// "repaired" by deleting the agent. It matches, case-insensitively:
+//   - "already exists in this project": since scion f7155ecb a user token
+//     without agent:lifecycle that resumes an existing agent gets this 409
+//     (handleExistingAgent folds the lifecycle denial into a name conflict);
+//   - "(status: 403)", "missing required scope", "token does not have
+//     scope": a plain authorization denial.
+func IsRefusedByHub(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already exists in this project") ||
+		strings.Contains(msg, "(status: 403)") ||
+		strings.Contains(msg, "missing required scope") ||
+		strings.Contains(msg, "token does not have scope")
+}
+
 // IsAgentAbsent reports whether err from a scion agent verb (`list`, `status`,
 // `resume`…) DEFINITIVELY means the named agent cannot be running — as opposed
 // to an unknown failure a caller must not paper over. It matches, case-

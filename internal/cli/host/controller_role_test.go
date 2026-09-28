@@ -20,7 +20,7 @@ func TestEnsureControllerRoleBindsIssuer(t *testing.T) {
 	h.me = "dev-user"
 	hc := &hubapi.Client{T: h}
 	for run := 0; run < 2; run++ {
-		if err := ensureControllerRole(context.Background(), hc, "lever", t.Logf); err != nil {
+		if err := ensureControllerRole(context.Background(), hc, "lever", false, t.Logf); err != nil {
 			t.Fatalf("run %d: %v", run, err)
 		}
 	}
@@ -41,7 +41,7 @@ func TestEnsureControllerRoleBindsIssuer(t *testing.T) {
 // window turns into a warning.
 func TestEnsureControllerRoleNeedsIssuer(t *testing.T) {
 	h := newFakeAdminHub()
-	if err := ensureControllerRole(context.Background(), &hubapi.Client{T: h}, "lever", t.Logf); err == nil {
+	if err := ensureControllerRole(context.Background(), &hubapi.Client{T: h}, "lever", false, t.Logf); err == nil {
 		t.Fatal("want an error when the hub does not say who the caller is")
 	}
 	if len(h.bindings) != 0 {

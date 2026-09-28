@@ -607,6 +607,41 @@ func TestStartManagerResumeFailsRecoversFresh(t *testing.T) {
 	}
 }
 
+// TestStartManagerResumeRefusedByHubKeepsTheManager: a resume the hub REFUSES
+// (scion f7155ecb answers 409 "already exists" to a user token without
+// agent:lifecycle; a 403 is the same class) says nothing about the manager's
+// state, so start-manager fails without deleting it — the conversation is
+// kept — and names the fix.
+func TestStartManagerResumeRefusedByHubKeepsTheManager(t *testing.T) {
+	for _, refusal := range []string{
+		`failed to start agent via Hub: conflict: agent "hello" already exists in this project (status: 409)`,
+		`failed to start agent via Hub: forbidden: Missing required scope: agent:lifecycle (status: 403)`,
+	} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{
+			FakeRunner: f, slug: "hello",
+			initPhase: "stopped", initContainerStatus: "stopped",
+			resumeErr: errors.New(refusal),
+		}
+		var logged logSink
+		err := runApply(app, Deps{Scion: scion.New(r, scion.Options{}), Log: logged.logf})
+		if err == nil {
+			t.Fatalf("%s: apply succeeded, want it to stop", refusal)
+		}
+		if r.deleteCalls != 0 || r.startCalls != 0 {
+			t.Fatalf("%s: deleteCalls=%d startCalls=%d, want 0 (the manager must be kept)", refusal, r.deleteCalls, r.startCalls)
+		}
+		if !strings.Contains(err.Error(), "did NOT delete") || !strings.Contains(err.Error(), "agent:lifecycle") {
+			t.Fatalf("error %q does not say the manager was kept and why", err)
+		}
+		for _, l := range logged.lines {
+			if strings.Contains(l, "FRESH") {
+				t.Fatalf("logged a fresh start: %q", l)
+			}
+		}
+	}
+}
+
 // TestStartManagerResumeFailsAndDeleteFailsReturnsError: if the record can be
 // neither resumed NOR deleted, start-manager must surface a hard error naming
 // BOTH failures — there is no safe fallback (a fresh Start over an

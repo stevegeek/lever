@@ -17,7 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-const Version = "0.26.1"
+const Version = "0.26.2"
 
 // VersionCmd returns the `version` command both binaries register.
 func VersionCmd() *cobra.Command {

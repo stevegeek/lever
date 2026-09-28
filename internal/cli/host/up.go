@@ -151,6 +151,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 					return err
 				}
 				if err := sc.Resume(ctx, app.Name, project); err != nil {
+					if scion.IsRefusedByHub(err) {
+						return fmt.Errorf("the hub refused to resume the manager (%w); nothing was deleted. %s", err, scion.RefusalHint)
+					}
 					return err
 				}
 			case upNone:

@@ -47,7 +47,7 @@ func TestDevAuthWindowSkipsOptionalWorkBesideRunningContainers(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
 	now := time.Now()
-	if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old", Requested: controllerPATScopes(), MintedAt: now, ExpiresAt: now.Add(5 * 24 * time.Hour)}); err != nil {
+	if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old", Requested: controllerPATScopes(false), MintedAt: now, ExpiresAt: now.Add(5 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	f := patMintRunner("pat-new")
@@ -71,7 +71,7 @@ func TestDevAuthWindowSkipsOptionalWorkBesideRunningContainers(t *testing.T) {
 
 func TestPatUrgent(t *testing.T) {
 	now := time.Now()
-	want := controllerPATScopes()
+	want := controllerPATScopes(false)
 	rec := func(scopes []string, exp time.Time) state.PATRecord {
 		return state.PATRecord{Requested: scopes, ExpiresAt: exp}
 	}

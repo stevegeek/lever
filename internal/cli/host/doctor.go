@@ -161,7 +161,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkDirectives(app, state) },
 		func() checkResult { return checkRemote(ctx, app, state, probes, jr) },
 		func() checkResult { return checkRemoteExposure(app) },
-		func() checkResult { return checkPATTokens(state, app.RemoteEnabled(), time.Now()) },
+		func() checkResult {
+			return checkPATTokens(ctx, state, app.RemoteEnabled(), jailScion.KnowsUATScope, time.Now())
+		},
 		func() checkResult { return checkDevAuthWindow(ctx, jr) },
 		func() checkResult {
 			return checkRemoteWebRole(ctx, state, remoteAccessFor(app), jailScion.KnowsUATScope)

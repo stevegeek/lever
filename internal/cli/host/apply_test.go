@@ -1042,9 +1042,14 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	if err := deps2.EnsureControllerPAT(ctx); err != nil {
 		t.Fatalf("bootstrap-token step (2nd apply): %v", err)
 	}
-	if len(f.Calls) != callsAfterFirst {
-		t.Fatalf("2nd apply's bootstrap-token made %d new runner call(s), want 0 (must be a no-op): %+v",
-			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
+	// The one call allowed is the read-only scope probe (`scion hub token
+	// create --help`, controllerLifecycle): it decides whether a re-mint is
+	// due, and it opens no window.
+	for _, c := range f.Calls[callsAfterFirst:] {
+		if !callHasPrefix(c, "scion hub token create --help") {
+			t.Fatalf("2nd apply's bootstrap-token made runner call %+v, want only the scope probe (must be a no-op): %+v",
+				c, f.Calls[callsAfterFirst:])
+		}
 	}
 
 	// scion-server still runs on every apply (locking the hub is not itself

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -360,8 +361,42 @@ const windowCleanupTimeout = 2 * time.Minute
 // expand to project:update) and for the agent-role ceiling on the project
 // settings route. Changing this set makes the next apply re-mint (see
 // patMintReason) — that is the point of recording what was requested.
-func controllerPATScopes() []string {
-	return []string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update"}
+//
+// lifecycle adds agent:lifecycle, for a hub that has it (scion f7155ecb,
+// #1838). There it gates start, stop, suspend and resume of an EXISTING agent
+// for a user token (pkg/hub/authz.go enforceUATConstraints), and a resume the
+// gate refuses answers 409 "already exists" (handleExistingAgent folds the
+// denial into a name conflict). Without it `lever up` could not resume the
+// manager, and the broker could not stop, suspend or resume a worker. An
+// older hub rejects the unknown scope, so lever adds it only when the jail's
+// scion knows it (controllerLifecycle).
+func controllerPATScopes(lifecycle bool) []string {
+	s := []string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update"}
+	if lifecycle {
+		s = append(s, lifecycleScope)
+	}
+	return s
+}
+
+// controllerLifecycle decides whether the controller PAT carries
+// agent:lifecycle: what the jail's scion says, or, when it cannot be asked,
+// what the token on disk was minted with (so an unanswered probe never forces
+// a re-mint).
+//
+// A token that already holds agent:lifecycle needs no re-mint to get it: on
+// scion main agent:manage expands at mint to every agent scope, lifecycle
+// included, and the hub's answer is recorded in Granted. So a token whose
+// Granted set has it keeps the scope set it was requested with.
+func controllerLifecycle(ctx context.Context, known scopeKnownFunc, rec state.PATRecord) bool {
+	if slices.Contains(rec.Granted, lifecycleScope) && !slices.Contains(rec.Requested, lifecycleScope) {
+		return false
+	}
+	if known != nil {
+		if has, err := known(ctx, lifecycleScope); err == nil {
+			return has
+		}
+	}
+	return slices.Contains(rec.Requested, lifecycleScope)
 }
 
 // remotePATScopes is the EXACT scope set the remote-access PAT is minted
@@ -564,8 +599,13 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	if err != nil {
 		return fmt.Errorf("bootstrap-token: %w", err)
 	}
-	controllerReason := patMintReason(ctok, crec, cfound, controllerPATScopes(), now)
-	urgent := patUrgent(ctok, crec, cfound, controllerPATScopes(), now)
+	// The jail's scion binary says whether agent:lifecycle exists; it answers
+	// with the hub down, so a pin upgrade followed by `lever up` re-mints
+	// while no container runs.
+	clifecycle := controllerLifecycle(ctx, o.ScopeKnown, crec)
+	controllerScopes := controllerPATScopes(clifecycle)
+	controllerReason := patMintReason(ctok, crec, cfound, controllerScopes, now)
+	urgent := patUrgent(ctok, crec, cfound, controllerScopes, now)
 	remoteReason := ""
 	var rrec state.PATRecord
 	roleReason := ""
@@ -677,10 +717,10 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		return nil
 	}
 	if controllerReason != "" || remoteReason != "" {
-		grantControllerRole(ctx, jr, filepath.Base(jp), o)
+		grantControllerRole(ctx, jr, filepath.Base(jp), clifecycle, o)
 	}
 	if controllerReason != "" {
-		if err := mint("lever-controller", controllerPATScopes(), crec, controllerReason,
+		if err := mint("lever-controller", controllerScopes, crec, controllerReason,
 			st.SaveControllerPAT, st.SaveControllerPATRecord); err != nil {
 			return err
 		}

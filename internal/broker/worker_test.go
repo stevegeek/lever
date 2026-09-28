@@ -37,7 +37,7 @@ type fakeRuntime struct {
 	envSets        []string
 	envSetProj     []string
 	startErr       error
-	listErr        error // every List fails with it
+	listErr        error    // every List fails with it
 	listCalls      int      // total List invocations, to assert the fan-out is collapsed
 	listProjects   []string // project arg of every List call
 	// staticPhases disables the acted->running modelling below: List always

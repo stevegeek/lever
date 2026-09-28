@@ -158,6 +158,11 @@ type VerifiedMessage struct {
 	Timestamp string `json:"timestamp"`
 	MessageID string `json:"message_id"`
 	Text      string `json:"text"`
+	// Repeat marks a message this agent already verified, within the grace
+	// period, at FirstVerified. The agent acts on it only if it has not acted
+	// on that message yet.
+	Repeat        bool   `json:"repeat,omitempty"`
+	FirstVerified string `json:"first_verified,omitempty"`
 }
 
 // ---- operator directives: admin side (UDS channel) ----

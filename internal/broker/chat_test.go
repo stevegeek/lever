@@ -232,10 +232,19 @@ func TestChatVerifyOnceOnly(t *testing.T) {
 	if _, resp, raw := postChatVerify(t, client, srv.URL, req); !resp.Verified {
 		t.Fatalf("first verify = %s, want verified", raw)
 	}
+	// Within the grace period a repeat verifies, marked as a repeat.
+	if _, resp, raw := postChatVerify(t, client, srv.URL, req); !resp.Verified || !resp.Messages[0].Repeat || resp.Messages[0].FirstVerified == "" {
+		t.Fatalf("repeat verify = %s, want verified with repeat=true", raw)
+	}
+	// After it, the message no longer verifies.
+	k := "manager\x00m1"
+	b.chatUses.mu.Lock()
+	b.chatUses.used[k] = time.Now().Add(-chatRepeatGrace - time.Minute)
+	b.chatUses.mu.Unlock()
 	status, resp, raw := postChatVerify(t, client, srv.URL, req)
-	assertUnverified(t, "second verify", status, resp, raw)
+	assertUnverified(t, "late second verify", status, resp, raw)
 	if !strings.Contains(resp.Note, "already verified") || strings.Contains(raw, "go ahead") {
-		t.Fatalf("second verify = %s, want 'already verified' and no text", raw)
+		t.Fatalf("late verify = %s, want 'already verified' and no text", raw)
 	}
 	if !strings.Contains(audit.String(), "already verified") {
 		t.Fatalf("audit does not record the replay: %s", audit)

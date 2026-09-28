@@ -225,3 +225,18 @@ func TestASandboxedDocumentCannotPost(t *testing.T) {
 		t.Fatalf("status %d, entries %d; want 403 and nothing recorded", rw.Code, len(spy.all()))
 	}
 }
+
+// TestCrossSiteNavigationRefused: a navigation from a sandboxed document
+// (opaque origin) carries Sec-Fetch-Site: cross-site and is refused, so a
+// sandboxed page cannot even load the app with the operator's session.
+func TestCrossSiteNavigationRefused(t *testing.T) {
+	hub := chatHub(t, http.StatusOK, "<html>")
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost})
+	req := proxyRequest("GET", "/", nil)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", rw.Code)
+	}
+}

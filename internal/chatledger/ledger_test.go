@@ -172,3 +172,21 @@ func TestLookupSkipsAnOversizedLine(t *testing.T) {
 		t.Fatalf("got %+v, %v; want the entry after the long line", got, err)
 	}
 }
+
+func TestAppendDoesNotFollowASymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.WriteFile(target, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "chat-ledger.jsonl")
+	if err := os.Symlink(target, p); err != nil {
+		t.Skip(err)
+	}
+	if err := NewWriter(p).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err == nil {
+		t.Fatal("Append wrote through a symlink")
+	}
+	if fi, _ := os.Stat(target); fi.Size() != 0 || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("symlink target changed: %v", fi)
+	}
+}

@@ -14,3 +14,5 @@ func fileOwner(fi fs.FileInfo) (int, bool) {
 	}
 	return int(st.Uid), true
 }
+
+const oNoFollow = syscall.O_NOFOLLOW

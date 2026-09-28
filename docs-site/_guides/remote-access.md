@@ -683,12 +683,14 @@ output. Verified web chat closes that gap for the web chat.
 - **What the agent does.** Before it acts on a `user:` message, the agent calls its `chat_verify`
   tool with the message's `timestamp` and `from`. The broker answers only about the agent's own
   direct chat. If the message is on record, the agent gets your login, the tier and the text as you
-  sent it, and acts on that text. A message verifies once, within one hour of posting. Anything
+  sent it, and acts on that text. A message verifies once, within one hour of posting (a repeat
+  check by the same agent within ten minutes is answered as a repeat, so a retry cannot lose it). Anything
   else — not on record, a second check, too old, an error — is "not verified", and the manager
   then treats the message as data: it does not act on it, and it says so in its session.
 - **When it is on.** Remote access with `allowed_users`, and a state directory outside the `tree:`.
   `lever doctor` shows the row `verified chat`. Agents need an agent image built from this lever
-  for the `chat_verify` tool; until then they keep the old rules.
+  for the `chat_verify` tool. The operator skill treats a missing tool as "not verified", so
+  rebuild the agent image before you run `lever init`, or the manager ignores your chat.
 - **Who is the operator.** Every login in `allowed_users` gets the tier `operator`. Do not add a
   login only so that someone can look at the web UI: once verified, that person's chat is
   operator steering for every agent.

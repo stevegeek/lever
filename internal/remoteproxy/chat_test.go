@@ -173,3 +173,55 @@ func TestChatPostWithAnEncodedKeyIsRecorded(t *testing.T) {
 		t.Fatalf("entries %+v, want one for %s", got, chatAgentID)
 	}
 }
+
+// TestAPIResponsesAreSandboxed: an agent-written HTML file the hub serves
+// inline under /api/ must not run on the proxy's origin with the operator's
+// session (it could post chat that verifies as the operator). Every /api/
+// answer carries a CSP sandbox; the SPA shell does not.
+func TestAPIResponsesAreSandboxed(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Security-Policy", "script-src 'self' 'unsafe-inline'")
+		_, _ = io.WriteString(w, "<script>fetch('/api/v1/auth/me')</script>")
+	}))
+	t.Cleanup(hub.Close)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost})
+	for path, want := range map[string]bool{
+		"/api/v1/projects/p/workspace/files/report.html": true,
+		"/api/v1/projects/p/dav/report.svg":              true,
+		"/":                                              false,
+		"/assets/app.js":                                 false,
+	} {
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, proxyRequest("GET", path, nil))
+		got := false
+		for _, v := range rw.Header().Values("Content-Security-Policy") {
+			if v == "sandbox" {
+				got = true
+			}
+		}
+		if got != want {
+			t.Errorf("%s: sandbox CSP = %v, want %v (headers %v)", path, got, want, rw.Header())
+		}
+		if want && rw.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s: no nosniff", path)
+		}
+	}
+}
+
+// TestASandboxedDocumentCannotPost: a request from a sandboxed document
+// carries Origin: null, which the gate refuses before the hub sees it.
+func TestASandboxedDocumentCannotPost(t *testing.T) {
+	spy := &ledgerSpy{}
+	hub := chatHub(t, http.StatusCreated, chatAnswer)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
+		AllowedUsers: []string{"op@example.com"}, ChatLedger: spy.append})
+	req := proxyRequest("POST", chatDMPath, strings.NewReader(`{"content":"x"}`))
+	req.Header.Set("Tailscale-User-Login", "op@example.com")
+	req.Header.Set("Origin", "null")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusForbidden || len(spy.all()) != 0 {
+		t.Fatalf("status %d, entries %d; want 403 and nothing recorded", rw.Code, len(spy.all()))
+	}
+}

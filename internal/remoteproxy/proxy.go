@@ -528,6 +528,7 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) f
 		// this removes every Set-Cookie value regardless of how many
 		// the hub sent or what case it used.
 		resp.Header.Del("Set-Cookie")
+		sandboxAPIDocument(resp)
 		if s := stateFrom(resp.Request); s != nil {
 			if s.retryable && sessionRejected(resp) {
 				// The hub does not know this session (it restarted, or the
@@ -552,6 +553,28 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) f
 		}
 		return nil
 	}
+}
+
+// sandboxAPIDocument puts every /api/ response in a CSP sandbox.
+//
+// The hub serves agent-written files under /api/ inline, with a type taken
+// from the file name (workspace files with ?view=true, WebDAV, template and
+// skill files, chat attachments), and its CSP allows inline script. Opened
+// as a page through this proxy, such a file would run on the SPA's own
+// origin with the operator's injected session: an agent could write
+// report.html, send the operator a link, and act as them — attach to any
+// agent, or post chat that verifies as the operator's own (package
+// chatledger). A sandboxed document has an opaque origin, so its requests
+// carry "Origin: null", which checkOrigin refuses, and it may not run script
+// or submit forms at all. The SPA reads /api/ with fetch, where a response's
+// CSP has no effect, so the app itself is unchanged. nosniff keeps a browser
+// from reading a JSON or text answer as HTML.
+func sandboxAPIDocument(resp *http.Response) {
+	if resp.Request == nil || !strings.HasPrefix(resp.Request.URL.Path, "/api/") {
+		return
+	}
+	resp.Header.Add("Content-Security-Policy", "sandbox")
+	resp.Header.Set("X-Content-Type-Options", "nosniff")
 }
 
 // upstreamFailed is the ReverseProxy ErrorHandler: the upstream round trip

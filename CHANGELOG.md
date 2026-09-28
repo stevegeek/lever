@@ -5,6 +5,33 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **Verified web chat.** With remote access and `allowed_users`, the remote
+  proxy records each message you post into an agent's direct chat in a
+  host-side ledger (`.lever-state/chat-ledger.jsonl`, 0600), and agents
+  check a message with the new `chat_verify` capability tool before acting
+  on it. The broker answers only about the caller's own direct chat,
+  returns the login, tier (`operator` for every allowed login) and the text
+  as posted, verifies each message once and only within one hour, and
+  answers every failure as "not verified". The operator skill makes the
+  manager check every unmarked `user:` message and treat an unverified one
+  as data. Doctor row `verified chat`. The agents need an agent image built
+  from this lever for the tool; run `lever init` to refresh the skills.
+
+### Security
+
+- **The remote proxy sandboxes every `/api/` answer**
+  (`Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`).
+  The hub serves agent-written files (workspace files with `?view=true`,
+  WebDAV, attachments, template and skill files) inline, and its CSP allows
+  inline script. A page an agent wrote could run on the proxy's origin with
+  the operator's session: attach to any agent, or post chat as the
+  operator. A sandboxed page has an opaque origin, and the proxy refuses
+  its requests.
+
 ## [0.26.2] - 2026-09-28
 
 ### Fixed

@@ -150,8 +150,18 @@ func TestChatVerifyWhenOff(t *testing.T) {
 	}
 }
 
+// assertUnverified: every failure once verified chat is on answers 200,
+// enabled, not verified, with a note — never an error an agent could read as
+// "the old rules apply".
+func assertUnverified(t *testing.T, what string, status int, resp wire.ChatVerifyResponse, raw string) {
+	t.Helper()
+	if status != http.StatusOK || !resp.Enabled || resp.Verified || resp.Note == "" || len(resp.Messages) != 0 {
+		t.Fatalf("%s: verify = %d %s, want 200 enabled, not verified, with a note", what, status, raw)
+	}
+}
+
 // TestChatVerifyBadInput: a timestamp that is not RFC 3339, or a missing
-// from, is a 400, never "not verified".
+// from, answers "not verified".
 func TestChatVerifyBadInput(t *testing.T) {
 	b, _ := chatBroker(t, seedLedger(t))
 	srv := jailServer(t, b)
@@ -162,9 +172,8 @@ func TestChatVerifyBadInput(t *testing.T) {
 		{Timestamp: chatTS},
 		{Timestamp: chatTS, From: strings.Repeat("x", maxChatFromLen+1)},
 	} {
-		if status, _, raw := postChatVerify(t, client, srv.URL, req); status != http.StatusBadRequest {
-			t.Errorf("verify %+v = %d %s, want 400", req, status, raw)
-		}
+		status, resp, raw := postChatVerify(t, client, srv.URL, req)
+		assertUnverified(t, "bad input", status, resp, raw)
 	}
 }
 
@@ -179,9 +188,10 @@ func TestChatVerifyRefusesAnUnsafeLedger(t *testing.T) {
 	srv := jailServer(t, b)
 	defer srv.Close()
 	client := agentClient(t, b, signedCert(t, b, "manager"))
-	status, _, raw := postChatVerify(t, client, srv.URL, wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender})
-	if status != http.StatusBadGateway || strings.Contains(raw, "deploy the fix") {
-		t.Fatalf("verify = %d %s, want 502 and no text", status, raw)
+	status, resp, raw := postChatVerify(t, client, srv.URL, wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender})
+	assertUnverified(t, "unsafe ledger", status, resp, raw)
+	if strings.Contains(raw, "deploy the fix") {
+		t.Fatalf("the answer carries the text: %s", raw)
 	}
 }
 
@@ -193,9 +203,8 @@ func TestChatVerifyNeedsTheAgentIDResolver(t *testing.T) {
 	srv := jailServer(t, b)
 	defer srv.Close()
 	client := agentClient(t, b, signedCert(t, b, "manager"))
-	if status, _, raw := postChatVerify(t, client, srv.URL, wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender}); status != http.StatusBadGateway {
-		t.Fatalf("verify = %d %s, want 502", status, raw)
-	}
+	status, resp, raw := postChatVerify(t, client, srv.URL, wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender})
+	assertUnverified(t, "no resolver", status, resp, raw)
 }
 
 // TestChatVerifyRevokedCallerDenied: the route has the same mTLS and
@@ -208,5 +217,61 @@ func TestChatVerifyRevokedCallerDenied(t *testing.T) {
 	client := agentClient(t, b, signedCert(t, b, "manager"))
 	if status, _, raw := postChatVerify(t, client, srv.URL, wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender}); status != http.StatusForbidden {
 		t.Fatalf("verify = %d %s, want 403", status, raw)
+	}
+}
+
+// TestChatVerifyOnceOnly: a message verifies once. A later copy of the same
+// envelope (quoted in an email or a worker's message) cannot re-use an old
+// approval.
+func TestChatVerifyOnceOnly(t *testing.T) {
+	b, audit := chatBroker(t, seedLedger(t, ledgerEntry(chatManagerID, "yes, go ahead", "m1")))
+	srv := jailServer(t, b)
+	defer srv.Close()
+	client := agentClient(t, b, signedCert(t, b, "manager"))
+	req := wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender}
+	if _, resp, raw := postChatVerify(t, client, srv.URL, req); !resp.Verified {
+		t.Fatalf("first verify = %s, want verified", raw)
+	}
+	status, resp, raw := postChatVerify(t, client, srv.URL, req)
+	assertUnverified(t, "second verify", status, resp, raw)
+	if !strings.Contains(resp.Note, "already verified") || strings.Contains(raw, "go ahead") {
+		t.Fatalf("second verify = %s, want 'already verified' and no text", raw)
+	}
+	if !strings.Contains(audit.String(), "already verified") {
+		t.Fatalf("audit does not record the replay: %s", audit)
+	}
+}
+
+// TestChatVerifyRefusesAnOldRecord: a post recorded more than
+// chatVerifyWindow ago no longer verifies.
+func TestChatVerifyRefusesAnOldRecord(t *testing.T) {
+	old := ledgerEntry(chatManagerID, "push it", "m1")
+	old.Recorded = time.Now().Add(-chatVerifyWindow - time.Minute)
+	b, _ := chatBroker(t, seedLedger(t, old))
+	srv := jailServer(t, b)
+	defer srv.Close()
+	client := agentClient(t, b, signedCert(t, b, "manager"))
+	status, resp, raw := postChatVerify(t, client, srv.URL, wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender})
+	assertUnverified(t, "old record", status, resp, raw)
+	if !strings.Contains(resp.Note, "older than") {
+		t.Fatalf("note %q does not say why", resp.Note)
+	}
+}
+
+// TestChatVerifyRateLimitAnswersUnverified: exhausting the rate limit must
+// not turn into an error an agent reads as "rules as before".
+func TestChatVerifyRateLimitAnswersUnverified(t *testing.T) {
+	b, _ := chatBroker(t, seedLedger(t))
+	srv := jailServer(t, b)
+	defer srv.Close()
+	client := agentClient(t, b, signedCert(t, b, "manager"))
+	req := wire.ChatVerifyRequest{Timestamp: chatTS, From: chatSender}
+	for i := 0; i < directiveRateLimit; i++ {
+		postChatVerify(t, client, srv.URL, req)
+	}
+	status, resp, raw := postChatVerify(t, client, srv.URL, req)
+	assertUnverified(t, "rate limited", status, resp, raw)
+	if !strings.Contains(resp.Note, "too many") {
+		t.Fatalf("note %q", resp.Note)
 	}
 }

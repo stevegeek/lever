@@ -298,6 +298,7 @@ type Broker struct {
 
 	chatLedger string // ChatConfig.LedgerPath; "" = verified chat off
 	chatRate   *rateWindow
+	chatUses   *chatUses
 
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
@@ -361,7 +362,7 @@ func New(c Config) *Broker {
 		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
 		dirRate: newRateWindow(),
 		// verified web chat
-		chatLedger: c.Chat.LedgerPath, chatRate: newRateWindow(),
+		chatLedger: c.Chat.LedgerPath, chatRate: newRateWindow(), chatUses: newChatUses(),
 	}
 }
 

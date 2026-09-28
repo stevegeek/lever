@@ -454,9 +454,16 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 			"list the operator's login in remote.allowed_users, then run `lever apply`")
 	}
 	p := brokerctl.ChatLedgerPath(app, st)
-	fi, err := os.Stat(p)
+	// Every allowed login speaks with operator authority once verified: say
+	// who, so a login added only to look at the web UI is not a surprise.
+	tier := "operator tier for " + strings.Join(app.Remote.AllowedUsers, ", ")
+	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		return checkResult{name, true, "on; no chat post recorded yet (" + stateRel(st, p) + ")", ""}
+		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + ")", ""}
+	}
+	if err == nil && !fi.Mode().IsRegular() {
+		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a regular file (a symlink?), so agents get no answer",
+			"remove " + p + "; the remote proxy writes a new one"}
 	}
 	if err != nil {
 		return checkResult{name, false, "cannot read the chat ledger: " + err.Error(), "check " + stateRel(st, p)}
@@ -469,7 +476,7 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 		return checkResult{name, false, fmt.Sprintf("the chat ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()),
 			"remove " + p + "; the remote proxy writes a new one"}
 	}
-	return checkResult{name, true, fmt.Sprintf("on; ledger %s (%d bytes, 0600)", stateRel(st, p), fi.Size()), ""}
+	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s (%d bytes, 0600)", tier, stateRel(st, p), fi.Size()), ""}
 }
 
 // warnResult is a warning row: not a failure (doctor's exit status ignores

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"sync"
@@ -32,8 +33,10 @@ const TierOperator = "operator"
 
 // RotateCap is the size at which the ledger is moved to <path>.1 (replacing
 // any previous .1) before the next append. Lookup reads both files, so a
-// message stays verifiable for at least RotateCap of later chat.
-const RotateCap = 8 << 20
+// message stays verifiable for at least RotateCap of later chat — far more
+// than the broker's one-hour verification window needs — and the text of
+// older chat does not pile up on the host.
+const RotateCap = 1 << 20
 
 // TimeLayout is the second-resolution UTC form both scion's delivery
 // envelope ("timestamp") and the ledger's CreatedAt use.
@@ -140,10 +143,19 @@ func Lookup(path, agentID, sender, createdAt string) ([]Entry, error) {
 const maxLine = 1 << 20
 
 func readFile(p string) ([]Entry, error) {
-	f, err := os.Open(p)
+	// Lstat first: a symlink could point at a file some other process can
+	// write, whatever its own mode says.
+	li, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("chat ledger: %w", err)
+	}
+	if li.Mode()&fs.ModeSymlink != 0 || !li.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrUnsafe, p)
+	}
+	f, err := os.Open(p)
 	if err != nil {
 		return nil, fmt.Errorf("chat ledger: %w", err)
 	}
@@ -152,29 +164,58 @@ func readFile(p string) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("chat ledger: %w", err)
 	}
+	if !os.SameFile(li, fi) {
+		return nil, fmt.Errorf("%w: %s changed while it was opened", ErrUnsafe, p)
+	}
 	if fi.Mode().Perm()&0o022 != 0 {
 		return nil, fmt.Errorf("%w: %s is %v", ErrUnsafe, p, fi.Mode().Perm())
 	}
+	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
+		return nil, fmt.Errorf("%w: %s belongs to uid %d", ErrUnsafe, p, owner)
+	}
 	var out []Entry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64<<10), maxLine)
-	for sc.Scan() {
-		b := bytes.TrimSpace(sc.Bytes())
-		if len(b) == 0 {
+	rd := bufio.NewReaderSize(f, 64<<10)
+	for {
+		line, err := readLine(rd)
+		if len(line) > 0 {
+			var e Entry
+			// A torn line (a crash mid-write) or an oversized one is skipped,
+			// not fatal: every other entry is still good.
+			if json.Unmarshal(line, &e) == nil {
+				out = append(out, e)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("chat ledger: %w", err)
+		}
+	}
+}
+
+// readLine returns the next line without its newline, or nil when the line
+// is longer than maxLine (the rest of it is consumed and dropped).
+func readLine(rd *bufio.Reader) ([]byte, error) {
+	var buf []byte
+	tooLong := false
+	for {
+		chunk, err := rd.ReadSlice('\n')
+		if !tooLong {
+			if len(buf)+len(chunk) > maxLine {
+				tooLong, buf = true, nil
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
-		var e Entry
-		if json.Unmarshal(b, &e) != nil {
-			// A torn last line (a crash mid-write) is skipped, not fatal:
-			// every other entry is still good.
-			continue
+		if tooLong {
+			return nil, err
 		}
-		out = append(out, e)
+		return bytes.TrimSpace(buf), err
 	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("chat ledger: %w", err)
-	}
-	return out, nil
 }
 
 // NormalizeTimestamp parses an envelope timestamp (RFC 3339) and returns it

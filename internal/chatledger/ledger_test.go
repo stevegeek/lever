@@ -143,3 +143,32 @@ func TestNormalizeTimestamp(t *testing.T) {
 		t.Error("NormalizeTimestamp accepted a non-RFC 3339 value")
 	}
 }
+
+func TestLookupRefusesASymlinkedLedger(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere.jsonl")
+	if err := NewWriter(target).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "chat-ledger.jsonl")
+	if err := os.Symlink(target, p); err != nil {
+		t.Skip(err)
+	}
+	if _, err := Lookup(p, "a1", "user:op", "2026-09-28T10:00:00Z"); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("err = %v, want ErrUnsafe for a symlink", err)
+	}
+}
+
+func TestLookupSkipsAnOversizedLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "chat-ledger.jsonl")
+	if err := os.WriteFile(p, append([]byte(strings.Repeat("x", maxLine+10)), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewWriter(p).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "after", "m1")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Lookup(p, "a1", "user:op", "2026-09-28T10:00:00Z")
+	if err != nil || len(got) != 1 || got[0].Text != "after" {
+		t.Fatalf("got %+v, %v; want the entry after the long line", got, err)
+	}
+}

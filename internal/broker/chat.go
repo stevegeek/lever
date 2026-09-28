@@ -3,10 +3,14 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/stevegeek/lever/internal/chatledger"
@@ -44,12 +48,20 @@ const chatRepeatGrace = 10 * time.Minute
 
 // chatUses records which recorded messages each agent has verified, so each
 // verifies once (like a directive is consumed once). It is written through
-// to path (one JSON line per use, 0600) and read back at start, so a broker
-// restart does not re-open a message inside its window.
+// to path (one JSON line per use, 0600), read back at start and again before
+// each use, so neither a broker restart nor a second broker running for a
+// moment re-opens a message inside its window.
+//
+// Every persistence failure fails closed. A use that cannot be written is
+// not granted. A record that cannot be read at start is left alone, and
+// until chatVerifyWindow has passed the broker refuses every entry recorded
+// before it started (notBefore): it cannot know which of those were used.
 type chatUses struct {
-	mu   sync.Mutex
-	path string
-	used map[string]time.Time // caller + "\x00" + message id → when verified
+	mu        sync.Mutex
+	path      string
+	used      map[string]time.Time // caller + "\x00" + message id → when verified
+	notBefore time.Time            // zero unless the record could not be read at start
+	degraded  time.Time            // until when notBefore applies
 }
 
 type chatUseLine struct {
@@ -58,58 +70,101 @@ type chatUseLine struct {
 	At     time.Time `json:"at"`
 }
 
-// newChatUses loads the uses recorded at path that can still matter (inside
-// twice the window) and rewrites the file with only those, which also keeps
-// it small. A missing or unreadable file starts empty.
+func useKey(caller, id string) string { return caller + "\x00" + id }
+
+// readUses returns the uses recorded at path that can still matter (inside
+// twice the window). A missing file is none.
+func readUses(path string, now time.Time) ([]chatUseLine, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []chatUseLine
+	for _, l := range bytes.Split(b, []byte("\n")) {
+		var c chatUseLine
+		if json.Unmarshal(l, &c) == nil && c.ID != "" && now.Sub(c.At) <= 2*chatVerifyWindow {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// newChatUses loads the record and rewrites it with only the uses that still
+// matter (temp file + rename, so a crash cannot lose it).
 func newChatUses(path string, now time.Time) *chatUses {
 	u := &chatUses{path: path, used: map[string]time.Time{}}
 	if path == "" {
 		return u
 	}
-	var keep []chatUseLine
-	if b, err := os.ReadFile(path); err == nil {
-		for _, l := range bytes.Split(b, []byte("\n")) {
-			var c chatUseLine
-			if json.Unmarshal(l, &c) == nil && c.ID != "" && now.Sub(c.At) <= 2*chatVerifyWindow {
-				u.used[c.Caller+"\x00"+c.ID] = c.At
-				keep = append(keep, c)
-			}
-		}
+	keep, err := readUses(path, now)
+	if err != nil {
+		u.notBefore, u.degraded = now, now.Add(chatVerifyWindow)
+		return u
 	}
 	var out []byte
 	for _, c := range keep {
+		u.used[useKey(c.Caller, c.ID)] = c.At
 		line, _ := json.Marshal(c)
 		out = append(append(out, line...), '\n')
 	}
-	_ = os.WriteFile(path, out, 0o600)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err == nil {
+		_ = os.Rename(tmp, path)
+	}
 	return u
 }
 
-// take marks id used by caller and reports whether it was unused. It also
-// drops marks older than chatVerifyWindow, which can no longer verify anyway.
-func (u *chatUses) take(caller, id string, now time.Time) (time.Time, bool) {
+// errUseNotRecorded means a use could not be written, so it is not granted.
+var errUseNotRecorded = errors.New("cannot record the verification")
+
+// take marks id used by caller. It returns when the message was first
+// verified and whether this is that first time, or an error when the use
+// could not be recorded (then nothing is granted).
+func (u *chatUses) take(caller, id string, recorded, now time.Time) (time.Time, bool, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if !u.notBefore.IsZero() && now.Before(u.degraded) && recorded.Before(u.notBefore) {
+		return time.Time{}, false, errors.New("the record of verified messages could not be read at broker start")
+	}
 	for k, t := range u.used {
 		if now.Sub(t) > 2*chatVerifyWindow {
 			delete(u.used, k)
 		}
 	}
-	k := caller + "\x00" + id
-	if t, ok := u.used[k]; ok {
-		return t, false
-	}
-	u.used[k] = now
+	k := useKey(caller, id)
 	if u.path != "" {
-		// Best effort: a failed write only weakens the restart case, which
-		// chatVerifyWindow still bounds.
-		if f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-			line, _ := json.Marshal(chatUseLine{Caller: caller, ID: id, At: now})
-			_, _ = f.Write(append(line, '\n'))
-			_ = f.Close()
+		// Another broker (a restart handoff) may have recorded a use since
+		// this one started: read the record again.
+		lines, err := readUses(u.path, now)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+		}
+		for _, c := range lines {
+			if t, ok := u.used[useKey(c.Caller, c.ID)]; !ok || c.At.Before(t) {
+				u.used[useKey(c.Caller, c.ID)] = c.At
+			}
 		}
 	}
-	return now, true
+	if t, ok := u.used[k]; ok {
+		return t, false, nil
+	}
+	if u.path != "" {
+		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+		}
+		line, _ := json.Marshal(chatUseLine{Caller: caller, ID: id, At: now})
+		_, werr := f.Write(append(line, '\n'))
+		cerr := f.Chmod(0o600)
+		if err := errors.Join(werr, cerr, f.Close()); err != nil {
+			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+		}
+	}
+	u.used[k] = now
+	return now, true, nil
 }
 
 // chatUnverified answers "not verified" with a reason. Every failure after
@@ -180,7 +235,11 @@ func (b *Broker) handleChatVerify(w http.ResponseWriter, r *http.Request) {
 			refused = append(refused, e.MessageID+" (older than "+chatVerifyWindow.String()+")")
 			continue
 		}
-		at, fresh := b.chatUses.take(caller, e.MessageID, now)
+		at, fresh, err := b.chatUses.take(caller, e.MessageID, e.Recorded, now)
+		if err != nil {
+			b.chatUnverified(w, caller, err.Error(), "verification is unavailable")
+			return
+		}
 		repeat := !fresh
 		if repeat && now.Sub(at) > chatRepeatGrace {
 			refused = append(refused, e.MessageID+" (already verified at "+at.UTC().Format(time.RFC3339)+")")

@@ -291,14 +291,14 @@ func TestChatUsesSurviveARestart(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "chat-verified.jsonl")
 	now := time.Now()
 	u := newChatUses(p, now)
-	if _, fresh := u.take("manager", "m1", now); !fresh {
-		t.Fatal("first take refused")
+	if _, fresh, err := u.take("manager", "m1", now, now); !fresh || err != nil {
+		t.Fatalf("first take refused: %v", err)
 	}
 	u2 := newChatUses(p, now.Add(time.Minute))
-	if _, fresh := u2.take("manager", "m1", now.Add(time.Minute)); fresh {
+	if _, fresh, _ := u2.take("manager", "m1", now, now.Add(time.Minute)); fresh {
 		t.Fatal("a restarted broker verified m1 again")
 	}
-	if _, fresh := u2.take("scratch", "m1", now.Add(time.Minute)); !fresh {
+	if _, fresh, _ := u2.take("scratch", "m1", now, now.Add(time.Minute)); !fresh {
 		t.Fatal("uses are per caller")
 	}
 	// Uses older than twice the window are dropped at load.
@@ -308,5 +308,50 @@ func TestChatUsesSurviveARestart(t *testing.T) {
 	}
 	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("uses file: %v, %v", fi, err)
+	}
+}
+
+// TestChatUsesSeeAnotherBroker: a use recorded by a second broker process
+// after this one started still counts.
+func TestChatUsesSeeAnotherBroker(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "chat-verified.jsonl")
+	now := time.Now()
+	a, b := newChatUses(p, now), newChatUses(p, now)
+	if _, fresh, err := a.take("manager", "m1", now, now); !fresh || err != nil {
+		t.Fatal("first take refused")
+	}
+	if _, fresh, _ := b.take("manager", "m1", now, now); fresh {
+		t.Fatal("the second broker verified m1 again")
+	}
+}
+
+// TestChatUsesFailClosed: a use that cannot be written is not granted, and
+// an unreadable record is neither truncated nor trusted.
+func TestChatUsesFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "chat-verified.jsonl")
+	now := time.Now()
+	if err := os.WriteFile(p, []byte(`{"caller":"manager","id":"m1","at":"`+now.Format(time.RFC3339Nano)+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root reads a 0000 file")
+	}
+	u := newChatUses(p, now)
+	_ = os.Chmod(p, 0o600)
+	if b, _ := os.ReadFile(p); len(b) == 0 {
+		t.Fatal("an unreadable record was truncated")
+	}
+	// Entries recorded before the start are refused while degraded.
+	if _, _, err := u.take("manager", "m2", now.Add(-time.Minute), now); err == nil {
+		t.Fatal("a degraded broker verified an entry recorded before it started")
+	}
+	// A write failure refuses the use.
+	w := newChatUses(filepath.Join(dir, "missing-dir", "chat-verified.jsonl"), now)
+	if _, fresh, err := w.take("manager", "m3", now, now); fresh || !errors.Is(err, errUseNotRecorded) {
+		t.Fatalf("fresh=%v err=%v, want the use refused", fresh, err)
 	}
 }

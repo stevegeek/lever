@@ -88,7 +88,7 @@ func grantControllerRole(ctx context.Context, jr proc.Runner, projectKey string,
 		err = ensureControllerRole(ctx, &hubapi.Client{T: hub}, projectKey, lifecycle, o.warn)
 	}
 	if err != nil {
-		o.warn("bootstrap-token: could not grant the %s role (agent.attach for the token issuer); "+
+		o.warn("bootstrap-token: could not grant the %s role (agent.attach and, on scion f7155ecb or later, agent.lifecycle for the token issuer); "+
 			"on scion f7155ecb or later the token mint then fails with scope_violation: %v", controllerRoleName, err)
 	}
 }

@@ -382,7 +382,15 @@ func controllerPATScopes(lifecycle bool) []string {
 // agent:lifecycle: what the jail's scion says, or, when it cannot be asked,
 // what the token on disk was minted with (so an unanswered probe never forces
 // a re-mint).
+//
+// A token that already holds agent:lifecycle needs no re-mint to get it: on
+// scion main agent:manage expands at mint to every agent scope, lifecycle
+// included, and the hub's answer is recorded in Granted. So a token whose
+// Granted set has it keeps the scope set it was requested with.
 func controllerLifecycle(ctx context.Context, known scopeKnownFunc, rec state.PATRecord) bool {
+	if slices.Contains(rec.Granted, lifecycleScope) && !slices.Contains(rec.Requested, lifecycleScope) {
+		return false
+	}
 	if known != nil {
 		if has, err := known(ctx, lifecycleScope); err == nil {
 			return has

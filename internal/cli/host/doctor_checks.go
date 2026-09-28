@@ -1391,7 +1391,8 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 // the same re-apply, which re-mints inside the throwaway dev-auth window.
 func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, known scopeKnownFunc, now time.Time) checkResult {
 	const name = "hub tokens"
-	const fix = "run `lever apply` (it re-mints the token in the bootstrap dev-auth window and revokes the old one)"
+	const fix = "run `lever apply` (it re-mints the token in the bootstrap dev-auth window and revokes the old one); " +
+		"when agents are running and the scope set changed, apply cannot open that window: run `lever stop`, then `lever up`"
 	type tokenCheck struct {
 		label string
 		load  func() (string, error)

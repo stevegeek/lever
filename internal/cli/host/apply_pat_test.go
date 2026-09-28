@@ -395,3 +395,16 @@ func TestControllerLifecycleFallsBackToTheRecord(t *testing.T) {
 		t.Fatal("controllerLifecycle ignores the record with no probe")
 	}
 }
+
+// A token whose hub-granted set already holds agent:lifecycle (agent:manage
+// expands to it on scion main) is not re-minted to request it by name.
+func TestControllerLifecycleHonorsTheGrantedSet(t *testing.T) {
+	known := func(context.Context, string) (bool, error) { return true, nil }
+	rec := state.PATRecord{Requested: controllerPATScopes(false), Granted: []string{"agent:attach", lifecycleScope}}
+	if controllerLifecycle(context.Background(), known, rec) {
+		t.Fatal("controllerLifecycle asks for agent:lifecycle although the token was granted it")
+	}
+	if patMintReason("tok", rec, true, controllerPATScopes(controllerLifecycle(context.Background(), known, rec)), time.Now()) != "" {
+		t.Fatal("a token granted agent:lifecycle is re-minted")
+	}
+}

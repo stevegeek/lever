@@ -1233,9 +1233,7 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, opts scion.StartOp
 	// would discard a conversation for nothing. Stop here instead.
 	if scion.IsRefusedByHub(rerr) {
 		return fmt.Errorf("start-manager: the hub refused %s of the manager (%v). lever did NOT delete the manager, "+
-			"so its conversation is kept. On scion f7155ecb or later this is a controller token without agent:lifecycle: "+
-			"run `lever stop`, then `lever up` (lever re-mints the token). "+
-			"To discard the session instead, run `lever up --fresh`", v.label, rerr)
+			"so its conversation is kept. %s", v.label, rerr, scion.RefusalHint)
 	}
 	// LOUD recovery: the conversation could not be restored. This MUST reach
 	// the user — resume failing means the durable session (the whole point of

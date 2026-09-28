@@ -555,3 +555,28 @@ func TestServerStartExclusiveRefusesAlreadyRunning(t *testing.T) {
 		t.Fatalf("exclusive ServerStart err = %v, want an already-running error", err)
 	}
 }
+
+func TestIsRefusedByHub(t *testing.T) {
+	for _, s := range []string{
+		`failed to start agent via Hub: conflict: agent "m" already exists in this project (status: 409)`,
+		`failed to suspend agent via Hub: forbidden: Insufficient permissions (status: 403)`,
+		`Missing required scope: agent:lifecycle`,
+	} {
+		if !IsRefusedByHub(errors.New(s)) {
+			t.Errorf("IsRefusedByHub(%q) = false", s)
+		}
+	}
+	for _, s := range []string{
+		`conflict: Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name. (status: 409)`,
+		`Failed to resume agent: container state corrupt`,
+		`authentication failed, login to hub`,
+		`cannot resume agent 'm': agent does not exist`,
+	} {
+		if IsRefusedByHub(errors.New(s)) {
+			t.Errorf("IsRefusedByHub(%q) = true; it must still take the recovery path", s)
+		}
+	}
+	if IsRefusedByHub(nil) {
+		t.Error("IsRefusedByHub(nil) = true")
+	}
+}

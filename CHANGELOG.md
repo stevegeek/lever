@@ -21,11 +21,17 @@ version bump moves the block under the new version heading.
     On such a scion the next `lever up` re-mints the controller PAT; the
     dev-auth window needs no running agents, so run `lever stop`, then
     `lever up`. Older scion keeps the old scope set and does not re-mint.
+  - Only a resume that fails for a reason other than a hub refusal still
+    takes the delete-and-start-fresh recovery.
+  - A token the hub already granted `agent:lifecycle` (scion main expands
+    `agent:manage` to it at mint) is not re-minted.
   - A resume the hub refuses (a 409 "already exists", or a 403) now stops
-    apply with an error and keeps the manager. Only a resume that fails for
-    another reason still takes the delete-and-start-fresh recovery.
+    `lever apply` and `lever up` with an error that names both possible
+    causes (the missing scope, or a manager in a phase that cannot be
+    resumed now) and keeps the manager.
   - Doctor's `hub tokens` row reports a controller token without
-    `agent:lifecycle` on a scion that has it.
+    `agent:lifecycle` on a scion that has it, and says to `lever stop`, then
+    `lever up` when agents are running.
 
 ## [0.26.1] - 2026-09-28
 

@@ -94,6 +94,14 @@ func IsRefusedByHub(err error) bool {
 		strings.Contains(msg, "token does not have scope")
 }
 
+// RefusalHint is what to do after IsRefusedByHub. It names both causes: the
+// same 409 also answers a resume of a record in the wrong phase (running,
+// starting, stopping, error), so the missing scope is not certain.
+const RefusalHint = "Two causes are possible. (1) On scion f7155ecb or later, a controller token without " +
+	"agent:lifecycle: run `lever stop`, then `lever up` (lever re-mints the token). (2) The manager is in a phase " +
+	"that cannot be resumed now (running, starting, stopping or error): wait, check `lever doctor`, then run `lever up` again. " +
+	"To discard the session instead, run `lever up --fresh`"
+
 // IsAgentAbsent reports whether err from a scion agent verb (`list`, `status`,
 // `resume`…) DEFINITIVELY means the named agent cannot be running — as opposed
 // to an unknown failure a caller must not paper over. It matches, case-

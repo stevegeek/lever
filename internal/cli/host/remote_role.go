@@ -38,7 +38,12 @@ const remoteWebRoleDescription = "Managed by lever: the remote web UI's read, at
 // inject), derived from remotePATScopes so the two cannot drift. scion's registry names each permission as its UAT scope with
 // a dot for the colon (pkg/hub/permissions/registry.go, UATScope), so the
 // mapping is mechanical.
-func remoteRolePermissions() []string {
+//
+// lifecycle adds agent.lifecycle, for a hub that has it (scion f7155ecb,
+// #1838, split start/stop/suspend/restart/restore out of agent.attach and the
+// web UI gates those controls on it). An older hub rejects the unknown
+// permission, so lever adds it only when the hub lists agent:lifecycle.
+func remoteRolePermissions(lifecycle bool) []string {
 	scopes := remotePATScopes()
 	out := make([]string, len(scopes))
 	for i, s := range scopes {
@@ -47,7 +52,36 @@ func remoteRolePermissions() []string {
 	// project.list is web-only and read-only: without it the SPA's project
 	// list (GET /api/v1/projects, ResolveListScopes "project.list") comes back
 	// empty. The remote PAT does not need it, so it is not a PAT scope.
-	return append(out, "project.list")
+	out = append(out, "project.list")
+	if lifecycle {
+		out = append(out, lifecyclePermission)
+	}
+	return out
+}
+
+// lifecyclePermission is scion's agent.lifecycle permission (f7155ecb) and
+// lifecycleScope its UAT scope, which /api/v1/auth/scopes lists on a hub
+// that has it.
+const (
+	lifecyclePermission = "agent.lifecycle"
+	lifecycleScope      = "agent:lifecycle"
+)
+
+// recordedLifecycle reports whether a remote role record was granted with
+// agent.lifecycle: the variant to compare against when lever cannot ask the
+// hub.
+func recordedLifecycle(rec state.RemoteRoleRecord) bool {
+	return slices.Contains(rec.Permissions, lifecyclePermission)
+}
+
+// hubHasLifecycle asks the hub whether it knows agent:lifecycle. ok is false
+// when the hub could not be asked.
+func hubHasLifecycle(ctx context.Context, hc *hubapi.Client) (has, ok bool) {
+	scopes, err := hc.UATScopes(ctx)
+	if err != nil {
+		return false, false
+	}
+	return slices.Contains(scopes, lifecycleScope), true
 }
 
 // projectCreatePermission is the one hub-member permission the remote web
@@ -206,7 +240,8 @@ func readDevToken(ctx context.Context, jr proc.Runner) (string, error) {
 // Bindings and ceilings for a user REMOVED from allowed_users are left in
 // place: lever does not revoke here (see the remote-access guide).
 func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey string, emails []string, now time.Time, warn func(string, ...any)) (state.RemoteRoleRecord, error) {
-	perms := remoteRolePermissions()
+	lifecycle, _ := hubHasLifecycle(ctx, hc)
+	perms := remoteRolePermissions(lifecycle)
 	projectID, err := hc.ProjectID(ctx, projectKey, throwawayHubURL)
 	if err != nil {
 		return state.RemoteRoleRecord{}, err
@@ -216,7 +251,7 @@ func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey stri
 	if err != nil {
 		return state.RemoteRoleRecord{}, err
 	}
-	role, err := ensureRemoteRoleDefinition(ctx, hc, defs, perms, warn)
+	role, err := ensureProjectRole(ctx, hc, defs, remoteWebRoleName, remoteWebRoleDescription, perms, warn)
 	if err != nil {
 		return state.RemoteRoleRecord{}, err
 	}
@@ -240,7 +275,7 @@ func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey stri
 			rec.Pending = append(rec.Pending, email)
 			continue
 		}
-		if err := ensureRemoteRoleBinding(ctx, hc, role.ID, u.ID, projectID); err != nil {
+		if err := ensureProjectRoleBinding(ctx, hc, role.ID, u.ID, projectID); err != nil {
 			return state.RemoteRoleRecord{}, fmt.Errorf("binding hub user %s to role %s: %w", email, remoteWebRoleName, err)
 		}
 		rec.Bound[email] = u.ID
@@ -257,48 +292,49 @@ func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey stri
 	return rec, nil
 }
 
-// ensureRemoteRoleDefinition finds the lever role (by name, project scope)
-// or creates it, and converges its permission set on perms. The hub's answer
-// is checked, so a write the hub did not keep fails rather than records.
-func ensureRemoteRoleDefinition(ctx context.Context, hc *hubapi.Client, defs []hubapi.RoleDefinition, perms []string, warn func(string, ...any)) (hubapi.RoleDefinition, error) {
+// ensureProjectRole finds a lever-managed role (by name, project scope) or
+// creates it, and converges its permission set on perms. The hub's answer is
+// checked, so a write the hub did not keep fails rather than records. A scion
+// system role of the same name is never modified.
+func ensureProjectRole(ctx context.Context, hc *hubapi.Client, defs []hubapi.RoleDefinition, name, description string, perms []string, warn func(string, ...any)) (hubapi.RoleDefinition, error) {
 	var err error
 	var role hubapi.RoleDefinition
 	for _, d := range defs {
-		if d.Name == remoteWebRoleName && d.ScopeType == hubapi.RoleScopeProject {
+		if d.Name == name && d.ScopeType == hubapi.RoleScopeProject {
 			role = d
 			break
 		}
 	}
 	want := hubapi.RoleDefinition{
-		ID: role.ID, Name: remoteWebRoleName, Description: remoteWebRoleDescription,
+		ID: role.ID, Name: name, Description: description,
 		ScopeType: hubapi.RoleScopeProject, Permissions: perms,
 	}
 	switch {
 	case role.ID == "":
 		if role, err = hc.CreateRoleDefinition(ctx, want); err != nil {
-			return hubapi.RoleDefinition{}, fmt.Errorf("creating role %s: %w", remoteWebRoleName, err)
+			return hubapi.RoleDefinition{}, fmt.Errorf("creating role %s: %w", name, err)
 		}
 	case role.System:
-		return hubapi.RoleDefinition{}, fmt.Errorf("role %s is a scion system role; lever will not modify it", remoteWebRoleName)
+		return hubapi.RoleDefinition{}, fmt.Errorf("role %s is a scion system role; lever will not modify it", name)
 	case !hubapi.SamePermissions(role.Permissions, perms):
-		warn("remote web role: role %s has permissions %s; rewriting them to %s",
-			remoteWebRoleName, strings.Join(role.Permissions, ","), strings.Join(perms, ","))
+		warn("role %s has permissions %s; rewriting them to %s",
+			name, strings.Join(role.Permissions, ","), strings.Join(perms, ","))
 		if role, err = hc.UpdateRoleDefinition(ctx, want); err != nil {
-			return hubapi.RoleDefinition{}, fmt.Errorf("updating role %s: %w", remoteWebRoleName, err)
+			return hubapi.RoleDefinition{}, fmt.Errorf("updating role %s: %w", name, err)
 		}
 	default:
 		return role, nil
 	}
 	if role.ID == "" || !hubapi.SamePermissions(role.Permissions, perms) {
 		return hubapi.RoleDefinition{}, fmt.Errorf("role %s after the write: id %q, permissions %s; want %s (the hub did not keep it)",
-			remoteWebRoleName, role.ID, strings.Join(role.Permissions, ","), strings.Join(perms, ","))
+			name, role.ID, strings.Join(role.Permissions, ","), strings.Join(perms, ","))
 	}
 	return role, nil
 }
 
-// ensureRemoteRoleBinding binds userID to roleID on projectID unless the user
+// ensureProjectRoleBinding binds userID to roleID on projectID unless the user
 // already holds that exact binding directly.
-func ensureRemoteRoleBinding(ctx context.Context, hc *hubapi.Client, roleID, userID, projectID string) error {
+func ensureProjectRoleBinding(ctx context.Context, hc *hubapi.Client, roleID, userID, projectID string) error {
 	have, err := hc.UserRoleBindings(ctx, userID)
 	if err != nil {
 		return err

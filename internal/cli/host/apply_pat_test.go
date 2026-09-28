@@ -251,3 +251,24 @@ func TestEnsureAgentRoleCeilingIsGatedOnTheRolesProbe(t *testing.T) {
 		t.Fatalf("roles-aware scion: the hub must be asked and its failure surfaced; err=%v asked=%v", err, h.asked)
 	}
 }
+
+// A first mint grants the controller role in the same window, so the
+// issuer holds agent.attach on the project before hub token create runs
+// (scion f7155ecb and later refuse the mint otherwise).
+func TestEnsurePATsGrantsControllerRoleBeforeMint(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	scriptTokenCreate(f, "lever-controller", "pat-controller-new")
+	hub := newFakeAdminHub()
+	hub.me = "dev-user"
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{AdminHub: hub}); err != nil {
+		t.Fatal(err)
+	}
+	if ctok, _ := st.LoadControllerPAT(); ctok != "pat-controller-new" {
+		t.Fatalf("controller PAT = %q", ctok)
+	}
+	if len(hub.bindings) != 1 || hub.bindings[0].PrincipalID != "dev-user" {
+		t.Fatalf("want the issuer bound to %s, got %+v", controllerRoleName, hub.bindings)
+	}
+}

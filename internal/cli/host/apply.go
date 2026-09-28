@@ -401,6 +401,10 @@ type patMintOpts struct {
 	// fails calls this to bring the live hub back. nil: the error says the
 	// hub is down and how to recover.
 	RestartHub func(ctx context.Context) error
+	// LiveHub, when set, reaches the running hub with the controller PAT;
+	// the remote role check asks it which permissions the hub knows. nil,
+	// or a hub that does not answer: the recorded variant is kept.
+	LiveHub hubapi.Doer
 }
 
 func (o patMintOpts) now() time.Time {
@@ -577,7 +581,16 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		if err != nil {
 			return fmt.Errorf("bootstrap-token: %w", err)
 		}
-		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remoteRolePermissions())
+		// Compare with the variant the record holds, unless the live hub
+		// says which one it needs: after a scion upgrade to a hub with
+		// agent.lifecycle, the role is granted again with it.
+		lifecycle := recordedLifecycle(rolerec)
+		if o.LiveHub != nil {
+			if has, ok := hubHasLifecycle(ctx, &hubapi.Client{T: o.LiveHub}); ok {
+				lifecycle = has
+			}
+		}
+		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remoteRolePermissions(lifecycle))
 	}
 	if controllerReason == "" && remoteReason == "" && roleReason == "" {
 		return nil // nothing to mint or grant; no dev-auth window
@@ -666,6 +679,9 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 			}
 		}
 		return nil
+	}
+	if controllerReason != "" || remoteReason != "" {
+		grantControllerRole(ctx, jr, filepath.Base(jp), o)
 	}
 	if controllerReason != "" {
 		if err := mint("lever-controller", controllerPATScopes(), crec, controllerReason,
@@ -777,18 +793,10 @@ func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, pro
 	fail := func(err error) {
 		o.warn("bootstrap-token: remote web role not granted, so the web UI may answer 403; the next `lever apply` retries: %v", err)
 	}
-	hub := o.AdminHub
-	if hub == nil {
-		tok, err := readDevToken(ctx, jr)
-		if err != nil {
-			fail(err)
-			return nil
-		}
-		hub = &hubapi.JailCurl{
-			Runner:  jr,
-			BaseURL: throwawayHubURL,
-			Token:   func() string { return tok },
-		}
+	hub, err := windowAdminHub(ctx, jr, o)
+	if err != nil {
+		fail(err)
+		return nil
 	}
 	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, emails, now, o.warn)
 	if errors.Is(err, errCeilingRemoved) {
@@ -1301,6 +1309,7 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 		RestartHub: func(ctx context.Context) error {
 			return w.sc.ServerStart(ctx, apply.HubServerOpts(w.app, w.deps.HubSessionSecret))
 		},
+		LiveHub: hubJailTransport(w.jr, w.state),
 	})
 }
 

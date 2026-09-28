@@ -60,6 +60,11 @@ edited worker list.
    (`lever-manager agent start newworker --task "…"`) or message it from the host
    (`lever msg send "…" --to newworker`).
 
+scion caps how many agents run at once on one runtime broker (a lever instance has one): **12**,
+the manager included, on scion `cf16e4b0` (2026-09) and later. A start beyond the cap is refused.
+Stop idle workers (`lever-manager agent stop <name>`) rather than keeping many running; the cap
+itself is a hub limit only a hub admin can raise.
+
 ## Where the logs are
 
 All host-side state lives in `.lever-state/` at the instance root:

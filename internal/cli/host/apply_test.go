@@ -886,10 +886,10 @@ func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	seedPAT(t, st, "controller", "pat-controller-existing")
 	seedPAT(t, st, "remote", "pat-remote-existing")
 	// ...and the remote web role already granted to the (placeholder) user.
-	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: remoteRolePermissions(),
+	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: remoteRolePermissions(false),
 		Bound:              map[string]string{"lever-operator@lever.local": "user-1"},
 		Ceilings:           map[string]string{"lever-operator@lever.local": "ac-1"},
-		CeilingPermissions: remoteRolePermissions()}); err != nil {
+		CeilingPermissions: remoteRolePermissions(false)}); err != nil {
 		t.Fatal(err)
 	}
 

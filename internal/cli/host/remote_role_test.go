@@ -38,6 +38,10 @@ type fakeAdminHub struct {
 	failCreateConstraint bool
 	calls                []string // "METHOD path", in order
 	next                 int
+	// me is the user id GET /api/v1/auth/me answers (the dev user); scopes
+	// is what GET /api/v1/auth/scopes lists.
+	me     string
+	scopes []string
 }
 
 type fakeConstraint struct {
@@ -87,6 +91,17 @@ func (h *fakeAdminHub) DoBody(_ context.Context, method, path string, body []byt
 		return status, b, nil
 	}
 	switch {
+	case method == http.MethodGet && u.Path == "/api/v1/auth/me":
+		if h.me == "" {
+			return reply(401, map[string]string{"error": "unauthenticated"})
+		}
+		return reply(200, map[string]string{"id": h.me, "email": "dev@localhost"})
+	case method == http.MethodGet && u.Path == "/api/v1/auth/scopes":
+		var out []map[string]string
+		for _, sc := range h.scopes {
+			out = append(out, map[string]string{"id": sc})
+		}
+		return reply(200, map[string]any{"scopes": out})
 	case method == http.MethodGet && u.Path == "/api/v1/projects":
 		return reply(200, map[string]any{"projects": []map[string]string{{"id": h.projectID, "name": "lever", "slug": "lever"}}})
 	case method == http.MethodGet && u.Path == "/api/v1/admin/roles":
@@ -284,7 +299,7 @@ func collectWarnings() (*[]string, func(string, ...any)) {
 // which only the SPA's project list needs.
 func TestRemoteRolePermissionsMirrorTheRemotePAT(t *testing.T) {
 	want := []string{"agent.read", "agent.list", "project.read", "agent.attach", "agent.message", "project.list"}
-	if got := remoteRolePermissions(); !slices.Equal(got, want) {
+	if got := remoteRolePermissions(false); !slices.Equal(got, want) {
 		t.Fatalf("remoteRolePermissions = %v, want %v", got, want)
 	}
 }
@@ -314,7 +329,7 @@ func TestRemoteWebRoleFirstGrant(t *testing.T) {
 		t.Fatalf("roles = %+v, want one", hub.roles)
 	}
 	r := hub.roles[0]
-	if r.Name != remoteWebRoleName || r.ScopeType != "project" || !slices.Equal(r.Permissions, remoteRolePermissions()) {
+	if r.Name != remoteWebRoleName || r.ScopeType != "project" || !slices.Equal(r.Permissions, remoteRolePermissions(false)) {
 		t.Fatalf("role = %+v", r)
 	}
 	want := hubapi.RoleBinding{ID: "binding-2", RoleDefinitionID: r.ID, PrincipalType: "user", PrincipalID: "user-1", ScopeType: "project", ScopeID: "proj-uuid"}
@@ -330,7 +345,7 @@ func TestRemoteWebRoleFirstGrant(t *testing.T) {
 	}
 	// The ceiling: one system-scope constraint on exactly that user, holding
 	// hub-member minus project.create plus the role's permissions.
-	wantCeiling := remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions())
+	wantCeiling := remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))
 	if len(hub.constraints) != 1 {
 		t.Fatalf("constraints = %+v, want one", hub.constraints)
 	}
@@ -343,7 +358,7 @@ func TestRemoteWebRoleFirstGrant(t *testing.T) {
 	if slices.Contains(c.MaximumPermissions, "project.create") {
 		t.Fatalf("ceiling keeps project.create: %v", c.MaximumPermissions)
 	}
-	for _, p := range append(slices.Clone(remoteRolePermissions()), "user.read", "hub.settings.read") {
+	for _, p := range append(slices.Clone(remoteRolePermissions(false)), "user.read", "hub.settings.read") {
 		if !slices.Contains(c.MaximumPermissions, p) {
 			t.Fatalf("ceiling drops %s, which the web user holds: %v", p, c.MaximumPermissions)
 		}
@@ -404,7 +419,7 @@ func TestRemoteWebRoleMissingUserWarnsAndStaysPending(t *testing.T) {
 	if !found || !slices.Equal(rec.Pending, []string{"partner@github"}) || rec.Bound["you@github"] == "" {
 		t.Fatalf("record = %+v", rec)
 	}
-	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); !strings.Contains(reason, "partner@github") {
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions(false)); !strings.Contains(reason, "partner@github") {
 		t.Fatalf("reason = %q, want the record incomplete for partner@github", reason)
 	}
 
@@ -420,7 +435,7 @@ func TestRemoteWebRoleMissingUserWarnsAndStaysPending(t *testing.T) {
 		t.Fatalf("bindings = %+v (posts %d), want one per user", hub.bindings, hub.count("POST /api/v1/admin/role-bindings"))
 	}
 	rec, found, _ = st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); reason != "" {
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions(false)); reason != "" {
 		t.Fatalf("reason = %q, want complete", reason)
 	}
 }
@@ -454,7 +469,7 @@ func TestRemoteWebRoleAllowedUsersChangeRetriggers(t *testing.T) {
 		t.Fatalf("bindings = %+v, want one per user and no duplicate post", hub.bindings)
 	}
 	rec, found, _ := st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); reason != "" {
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions(false)); reason != "" {
 		t.Fatalf("reason = %q, want complete", reason)
 	}
 }
@@ -484,8 +499,8 @@ func TestRemoteWebRolePermissionDriftConverges(t *testing.T) {
 	if hub.count("PUT /api/v1/admin/roles/role-old") != 1 || hub.count("POST /api/v1/admin/roles") != 0 {
 		t.Fatalf("calls = %v, want one PUT of role-old and no create", hub.calls)
 	}
-	if !hubapi.SamePermissions(hub.roles[0].Permissions, remoteRolePermissions()) {
-		t.Fatalf("role permissions = %v, want %v", hub.roles[0].Permissions, remoteRolePermissions())
+	if !hubapi.SamePermissions(hub.roles[0].Permissions, remoteRolePermissions(false)) {
+		t.Fatalf("role permissions = %v, want %v", hub.roles[0].Permissions, remoteRolePermissions(false))
 	}
 	if hub.count("POST /api/v1/admin/role-bindings") != 0 {
 		t.Fatalf("the existing binding was posted again: %v", hub.calls)
@@ -494,7 +509,7 @@ func TestRemoteWebRolePermissionDriftConverges(t *testing.T) {
 		t.Fatalf("warnings = %q, want one naming the drifted set", *warned)
 	}
 	rec, found, _ := st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); reason != "" {
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions(false)); reason != "" {
 		t.Fatalf("reason = %q, want complete", reason)
 	}
 }
@@ -526,7 +541,7 @@ func TestRemoteCeilingPreCeilingRecordRetriggers(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
 	hub := newFakeAdminHub("you@github")
-	hub.roles = []hubapi.RoleDefinition{{ID: "role-1", Name: remoteWebRoleName, ScopeType: "project", Permissions: remoteRolePermissions()}}
+	hub.roles = []hubapi.RoleDefinition{{ID: "role-1", Name: remoteWebRoleName, ScopeType: "project", Permissions: remoteRolePermissions(false)}}
 	hub.bindings = []hubapi.RoleBinding{{ID: "b-1", RoleDefinitionID: "role-1", PrincipalType: "user", PrincipalID: "user-1", ScopeType: "project", ScopeID: "proj-uuid"}}
 	// Exactly what 2b160af wrote: no ceilings, no ceiling_permissions.
 	if err := os.WriteFile(st.RemoteRole(), []byte(`{"role_id":"role-1","permissions":["agent.read","agent.list","project.read","agent.attach","agent.message","project.list"],"project_id":"proj-uuid","bound":{"you@github":"user-1"},"granted_at":"2026-09-23T20:00:00Z"}`), 0o600); err != nil {
@@ -537,7 +552,7 @@ func TestRemoteCeilingPreCeilingRecordRetriggers(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("old record: found=%v err=%v", found, err)
 	}
-	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); !strings.Contains(reason, "ceiling") {
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions(false)); !strings.Contains(reason, "ceiling") {
 		t.Fatalf("reason = %q, want the missing ceiling", reason)
 	}
 
@@ -556,7 +571,7 @@ func TestRemoteCeilingPreCeilingRecordRetriggers(t *testing.T) {
 		t.Fatalf("constraints = %+v, want one created", hub.constraints)
 	}
 	rec, found, _ = st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()); reason != "" {
+	if reason := remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions(false)); reason != "" {
 		t.Fatalf("reason = %q, want complete", reason)
 	}
 }
@@ -594,8 +609,8 @@ func TestRemoteCeilingDriftIsReplaced(t *testing.T) {
 		subject string
 		perms   []string
 	}{
-		{"allows project.create", "user-1", append(slices.Clone(remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions())), "project.create")},
-		{"another hub user", "user-old", remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions())},
+		{"allows project.create", "user-1", append(slices.Clone(remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))), "project.create")},
+		{"another hub user", "user-old", remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := newFakeAdminHub("you@github")
@@ -689,7 +704,7 @@ func TestRemoteWebRoleDisabledDoesNothing(t *testing.T) {
 }
 
 func TestCheckRemoteWebRole(t *testing.T) {
-	perms := remoteRolePermissions()
+	perms := remoteRolePermissions(false)
 	complete := state.RemoteRoleRecord{RoleID: "r", Permissions: perms, Bound: map[string]string{"you@github": "u1"},
 		Ceilings: map[string]string{"you@github": "ac-1"}, CeilingPermissions: perms, GrantedAt: time.Now()}
 	uncapped := complete

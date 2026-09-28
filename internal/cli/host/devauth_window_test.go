@@ -246,7 +246,7 @@ func TestDevAuthWindowAlwaysRunsTheRoleGrant(t *testing.T) {
 		patMintOpts{AdminHub: newFakeAdminHub("you@github")}); err != nil {
 		t.Fatal(err)
 	}
-	if rec, found, _ := st.LoadRemoteRoleRecord(); !found || remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions()) != "" {
+	if rec, found, _ := st.LoadRemoteRoleRecord(); !found || remoteRoleReason(rec, found, ra.Emails, remoteRolePermissions(false)) != "" {
 		t.Fatal("setup: want a complete grant record")
 	}
 	// The hub database is reset (a fresh hub), and the controller token has

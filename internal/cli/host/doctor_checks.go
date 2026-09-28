@@ -1441,7 +1441,7 @@ func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
 	if err != nil {
 		return checkResult{name, false, err.Error(), fix}
 	}
-	reason := remoteRoleReason(rec, found, remote.Emails, remoteRolePermissions())
+	reason := remoteRoleReason(rec, found, remote.Emails, remoteRolePermissions(recordedLifecycle(rec)))
 	if reason == "" {
 		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s; %s withheld by an access constraint",
 			remoteWebRoleName, strings.Join(remote.Emails, ", "), projectCreatePermission), ""}
@@ -1455,7 +1455,7 @@ func checkRemoteWebRole(st state.State, remote remoteAccess) checkResult {
 			return checkResult{name, false, detail, fix}
 		}
 	}
-	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, remoteRolePermissions()) {
+	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, remoteRolePermissions(recordedLifecycle(rec))) {
 		return checkResult{name, false, detail, remoteRoleFix}
 	}
 	return checkResult{name, false, detail, fix}

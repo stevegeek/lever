@@ -5,6 +5,22 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Fixed
+
+- **Resuming a worker with no hub record no longer creates the wrong
+  agent.** scion's resume of a missing record does not fail: the hub
+  creates the agent from the project template and scion's default harness
+  (antigravity), not the worker's configured harness and image, so the
+  create failed pulling `scionlocal/scion-antigravity` (or would start the
+  wrong agent). This is scion behaviour on 6aa366e6 and main alike. The
+  broker's `/worker/resume` now answers 404 "has no record … start it
+  instead" for such a worker, without calling scion or staging a ticket, and
+  the operator skill tells the manager to `agent start` it. Seen after a new
+  jail, where the manager's own notes listed workers the hub never had.
+  Run `lever init` after upgrading to refresh the skill.
+
 ## [0.26.0] - 2026-09-28
 
 ### Fixed

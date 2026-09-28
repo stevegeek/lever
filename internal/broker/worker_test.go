@@ -608,7 +608,10 @@ func assertNilRuntimeVerbs(t *testing.T, cn string, want int) {
 
 func TestWorkerLifecycleVerbs(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
-	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+	// A record exists: resume refuses a worker the hub has none for.
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "stopped"}},
+	}}
 	b := newTestBroker(t, rt, spec)
 
 	for _, tc := range []struct {
@@ -958,5 +961,31 @@ func TestWorkerVerbAuditNeverCarriesRuntimeSecrets(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), token) {
 		t.Fatalf("HTTP body carries the token: %s", rec.Body.String())
+	}
+}
+
+// Resuming a worker the hub has no record for would make scion CREATE it
+// from the template and its default harness (antigravity on scion 63d5d65d
+// and 6aa366e6), not the worker's configured harness and image. The broker
+// refuses it as not found, points at start, and never reaches scion or
+// stages a ticket.
+func TestWorkerResumeWithoutRecordIsNotFound(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "other", Phase: "stopped"}},
+	}}
+	b := newTestBroker(t, rt, spec)
+	rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d (%s), want 404", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "agent start worker") {
+		t.Fatalf("the refusal must name the verb to use: %q", rec.Body.String())
+	}
+	if len(rt.resumed) != 0 || len(rt.started) != 0 {
+		t.Fatalf("scion must not be called: resumed=%v started=%d", rt.resumed, len(rt.started))
+	}
+	if len(rt.staged) != 0 {
+		t.Fatalf("no ticket may be staged for a worker that is not resumed")
 	}
 }

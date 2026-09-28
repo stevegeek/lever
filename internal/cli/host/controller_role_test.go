@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -48,26 +49,24 @@ func TestEnsureControllerRoleNeedsIssuer(t *testing.T) {
 	}
 }
 
-// The remote role carries agent.lifecycle exactly when the hub lists
-// agent:lifecycle; an older hub would reject the unknown permission.
-func TestRemoteRoleLifecycleFollowsHub(t *testing.T) {
+// The remote role carries agent.lifecycle exactly when asked to.
+func TestRemoteRoleLifecycleParameter(t *testing.T) {
 	for _, has := range []bool{false, true} {
 		h := newFakeAdminHub("op@github")
-		h.scopes = []string{"agent:read", "agent:attach"}
-		if has {
-			h.scopes = append(h.scopes, lifecycleScope)
-		}
-		rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: h}, "lever", []string{"op@github"}, time.Now(), t.Logf)
+		rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: h}, "lever", []string{"op@github"}, has, time.Now(), t.Logf)
 		if err != nil {
 			t.Fatalf("has=%v: %v", has, err)
 		}
 		if got := slices.Contains(rec.Permissions, lifecyclePermission); got != has {
 			t.Fatalf("has=%v: role permissions %v", has, rec.Permissions)
 		}
+		if !ceilingPermissionsFit(rec.CeilingPermissions, rec.Permissions) {
+			t.Fatalf("has=%v: ceiling %v does not hold the role %v", has, rec.CeilingPermissions, rec.Permissions)
+		}
 	}
 }
 
-// After a scion upgrade to a hub with agent.lifecycle, a grant recorded
+// After a scion upgrade to one with agent.lifecycle, a grant recorded
 // without it must run again; the recorded variant alone is accepted.
 func TestRemoteRoleReasonAfterScionUpgrade(t *testing.T) {
 	rec := state.RemoteRoleRecord{
@@ -78,18 +77,59 @@ func TestRemoteRoleReasonAfterScionUpgrade(t *testing.T) {
 		t.Fatalf("the recorded variant must fit: %q", r)
 	}
 	if r := remoteRoleReason(rec, true, []string{"op@github"}, remoteRolePermissions(true)); !strings.Contains(r, "agent.lifecycle") {
-		t.Fatalf("a hub with agent.lifecycle must re-grant: %q", r)
+		t.Fatalf("a scion with agent.lifecycle must re-grant: %q", r)
 	}
 }
 
-func TestHubHasLifecycle(t *testing.T) {
-	h := newFakeAdminHub()
-	h.scopes = []string{"agent:attach", lifecycleScope}
-	if has, ok := hubHasLifecycle(context.Background(), &hubapi.Client{T: h}); !has || !ok {
-		t.Fatalf("has=%v ok=%v", has, ok)
+func TestRemoteRoleLifecycleDecision(t *testing.T) {
+	ctx := context.Background()
+	with := state.RemoteRoleRecord{Permissions: remoteRolePermissions(true)}
+	without := state.RemoteRoleRecord{Permissions: remoteRolePermissions(false)}
+	yes := func(context.Context, string) (bool, error) { return true, nil }
+	no := func(context.Context, string) (bool, error) { return false, nil }
+	broken := func(context.Context, string) (bool, error) { return false, errors.New("scion not installed") }
+	cases := []struct {
+		name  string
+		known scopeKnownFunc
+		rec   state.RemoteRoleRecord
+		want  bool
+	}{
+		{"scion knows it", yes, without, true},
+		{"scion does not", no, with, false},
+		{"cannot ask: keep the recorded variant (with)", broken, with, true},
+		{"cannot ask: keep the recorded variant (without)", broken, without, false},
+		{"no probe: keep the recorded variant", nil, with, true},
 	}
-	h.scopes = []string{"agent:attach"}
-	if has, ok := hubHasLifecycle(context.Background(), &hubapi.Client{T: h}); has || !ok {
-		t.Fatalf("old hub: has=%v ok=%v", has, ok)
+	for _, c := range cases {
+		if got := remoteRoleLifecycle(ctx, c.known, c.rec); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Doctor judges the remote role against what the jail's scion supports, or
+// the recorded variant when it cannot ask.
+func TestCheckRemoteWebRoleLifecycle(t *testing.T) {
+	ctx := context.Background()
+	ra := remoteAccess{Enabled: true, Emails: []string{"op@github"}}
+	seed := func(lifecycle bool) state.State {
+		st := state.ForConfig(t.TempDir())
+		p := remoteRolePermissions(lifecycle)
+		if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: p,
+			Bound: map[string]string{"op@github": "u1"}, Ceilings: map[string]string{"op@github": "c1"},
+			CeilingPermissions: p}); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	yes := func(context.Context, string) (bool, error) { return true, nil }
+	if r := checkRemoteWebRole(ctx, seed(true), ra, nil); !r.ok {
+		t.Fatalf("a lifecycle grant with no probe must be green: %+v", r)
+	}
+	if r := checkRemoteWebRole(ctx, seed(true), ra, yes); !r.ok {
+		t.Fatalf("a lifecycle grant on a scion with lifecycle must be green: %+v", r)
+	}
+	if r := checkRemoteWebRole(ctx, seed(false), ra, yes); r.ok || !strings.Contains(r.detail, "agent.lifecycle") {
+		t.Fatalf("an upgraded scion must flag the missing agent.lifecycle: %+v", r)
 	}
 }

@@ -74,14 +74,21 @@ func recordedLifecycle(rec state.RemoteRoleRecord) bool {
 	return slices.Contains(rec.Permissions, lifecyclePermission)
 }
 
-// hubHasLifecycle asks the hub whether it knows agent:lifecycle. ok is false
-// when the hub could not be asked.
-func hubHasLifecycle(ctx context.Context, hc *hubapi.Client) (has, ok bool) {
-	scopes, err := hc.UATScopes(ctx)
-	if err != nil {
-		return false, false
+// scopeKnownFunc asks the jail's scion whether it knows a UAT scope
+// (scion.Client.KnowsUATScope). nil means lever cannot ask.
+type scopeKnownFunc func(ctx context.Context, scope string) (bool, error)
+
+// remoteRoleLifecycle decides whether the remote role carries
+// agent.lifecycle: what the jail's scion says, or, when it cannot be asked,
+// the variant the record was granted with (so an unanswered probe never
+// churns the grant).
+func remoteRoleLifecycle(ctx context.Context, known scopeKnownFunc, rec state.RemoteRoleRecord) bool {
+	if known != nil {
+		if has, err := known(ctx, lifecycleScope); err == nil {
+			return has
+		}
 	}
-	return slices.Contains(scopes, lifecycleScope), true
+	return recordedLifecycle(rec)
 }
 
 // projectCreatePermission is the one hub-member permission the remote web
@@ -239,8 +246,7 @@ func readDevToken(ctx context.Context, jr proc.Runner) (string, error) {
 //
 // Bindings and ceilings for a user REMOVED from allowed_users are left in
 // place: lever does not revoke here (see the remote-access guide).
-func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey string, emails []string, now time.Time, warn func(string, ...any)) (state.RemoteRoleRecord, error) {
-	lifecycle, _ := hubHasLifecycle(ctx, hc)
+func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey string, emails []string, lifecycle bool, now time.Time, warn func(string, ...any)) (state.RemoteRoleRecord, error) {
 	perms := remoteRolePermissions(lifecycle)
 	projectID, err := hc.ProjectID(ctx, projectKey, throwawayHubURL)
 	if err != nil {

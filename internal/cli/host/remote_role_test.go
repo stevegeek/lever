@@ -582,12 +582,12 @@ func TestRemoteCeilingIdempotent(t *testing.T) {
 	hub := newFakeAdminHub("you@github")
 	hc := &hubapi.Client{T: hub}
 	_, warn := collectWarnings()
-	if _, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, time.Now(), warn); err != nil {
+	if _, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, false, time.Now(), warn); err != nil {
 		t.Fatal(err)
 	}
 	first := hub.constraints[0].id
 	before := len(hub.calls)
-	rec, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, time.Now(), warn)
+	rec, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, false, time.Now(), warn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +621,7 @@ func TestRemoteCeilingDriftIsReplaced(t *testing.T) {
 				MaximumPermissions: tc.perms,
 			}}}
 			warned, warn := collectWarnings()
-			rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, time.Now(), warn)
+			rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, false, time.Now(), warn)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -670,7 +670,7 @@ func TestRemoteCeilingNeedsTheHubMemberRole(t *testing.T) {
 	hub := newFakeAdminHub("you@github")
 	hub.systemRoles = nil
 	_, warn := collectWarnings()
-	_, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, time.Now(), warn)
+	_, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, false, time.Now(), warn)
 	if err == nil || !strings.Contains(err.Error(), "hub-member") {
 		t.Fatalf("err = %v, want the missing hub-member role named", err)
 	}
@@ -736,7 +736,7 @@ func TestCheckRemoteWebRole(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got := checkRemoteWebRole(st, remoteAccess{Enabled: tc.enabled, Emails: tc.emails})
+			got := checkRemoteWebRole(context.Background(), st, remoteAccess{Enabled: tc.enabled, Emails: tc.emails}, nil)
 			if got.ok != tc.ok || !strings.Contains(got.detail, tc.detail) || !strings.Contains(got.fix, tc.fix) {
 				t.Fatalf("got %+v, want ok=%v detail~%q fix~%q", got, tc.ok, tc.detail, tc.fix)
 			}

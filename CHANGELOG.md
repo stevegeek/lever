@@ -30,8 +30,10 @@ version bump moves the block under the new version heading.
 - **Remote web UI keeps start/stop on scion main.** The `lever-remote` role
   gets `agent.lifecycle` when the hub knows it (scion f7155ecb split start,
   stop, suspend, restart and restore out of `agent.attach`); on an older hub
-  it is left out, since that hub rejects the unknown permission. After a
-  scion upgrade the next `lever apply` grants it.
+  it is left out, since that hub rejects the unknown permission. lever asks
+  the jail's scion binary (`scion hub token create --help`), which answers
+  with the hub down, so after a pin upgrade the `lever stop` + `lever up`
+  grants it; `lever doctor` flags a grant that lacks it.
 
 ### Changed
 
@@ -41,9 +43,9 @@ version bump moves the block under the new version heading.
   runtime broker (scion cf16e4b0).
 - scion main logs "settings file contains unrecognized keys (these will be
   ignored)" for keys lever writes (`server`, `schema_version`,
-  `runtimes[*].type`, ...). It is a warning from scion's legacy-format
-  check; the values are applied (the telemetry setting, for one, reaches
-  agents).
+  `runtimes[*].type`, ...). The warning comes from scion's legacy-format
+  probe; scion's versioned settings loader reads those keys (verified: the
+  telemetry setting reaches agents). It is not a lever misconfiguration.
 
 ## [0.25.1] - 2026-09-26
 

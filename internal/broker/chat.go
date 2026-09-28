@@ -1,7 +1,10 @@
 package broker
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +18,9 @@ type ChatConfig struct {
 	// LedgerPath is the remote proxy's chat ledger. "" means verified chat
 	// is off: /chat/verify answers enabled=false.
 	LedgerPath string
+	// UsedPath records which messages have been verified, so the one-use
+	// rule survives a broker restart. "" keeps it in memory only (tests).
+	UsedPath string
 }
 
 // maxChatFromLen bounds the "from" an agent may send: a sender reference is
@@ -29,14 +35,47 @@ const maxChatFromLen = 320
 const chatVerifyWindow = time.Hour
 
 // chatUses records which recorded messages each agent has verified, so each
-// verifies once (like a directive is consumed once). In memory only: a
-// broker restart forgets it, and chatVerifyWindow still bounds a replay.
+// verifies once (like a directive is consumed once). It is written through
+// to path (one JSON line per use, 0600) and read back at start, so a broker
+// restart does not re-open a message inside its window.
 type chatUses struct {
 	mu   sync.Mutex
+	path string
 	used map[string]time.Time // caller + "\x00" + message id → when verified
 }
 
-func newChatUses() *chatUses { return &chatUses{used: map[string]time.Time{}} }
+type chatUseLine struct {
+	Caller string    `json:"caller"`
+	ID     string    `json:"id"`
+	At     time.Time `json:"at"`
+}
+
+// newChatUses loads the uses recorded at path that can still matter (inside
+// twice the window) and rewrites the file with only those, which also keeps
+// it small. A missing or unreadable file starts empty.
+func newChatUses(path string, now time.Time) *chatUses {
+	u := &chatUses{path: path, used: map[string]time.Time{}}
+	if path == "" {
+		return u
+	}
+	var keep []chatUseLine
+	if b, err := os.ReadFile(path); err == nil {
+		for _, l := range bytes.Split(b, []byte("\n")) {
+			var c chatUseLine
+			if json.Unmarshal(l, &c) == nil && c.ID != "" && now.Sub(c.At) <= 2*chatVerifyWindow {
+				u.used[c.Caller+"\x00"+c.ID] = c.At
+				keep = append(keep, c)
+			}
+		}
+	}
+	var out []byte
+	for _, c := range keep {
+		line, _ := json.Marshal(c)
+		out = append(append(out, line...), '\n')
+	}
+	_ = os.WriteFile(path, out, 0o600)
+	return u
+}
 
 // take marks id used by caller and reports whether it was unused. It also
 // drops marks older than chatVerifyWindow, which can no longer verify anyway.
@@ -53,6 +92,15 @@ func (u *chatUses) take(caller, id string, now time.Time) (time.Time, bool) {
 		return t, false
 	}
 	u.used[k] = now
+	if u.path != "" {
+		// Best effort: a failed write only weakens the restart case, which
+		// chatVerifyWindow still bounds.
+		if f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			line, _ := json.Marshal(chatUseLine{Caller: caller, ID: id, At: now})
+			_, _ = f.Write(append(line, '\n'))
+			_ = f.Close()
+		}
+	}
 	return now, true
 }
 

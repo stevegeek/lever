@@ -362,7 +362,7 @@ func New(c Config) *Broker {
 		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
 		dirRate: newRateWindow(),
 		// verified web chat
-		chatLedger: c.Chat.LedgerPath, chatRate: newRateWindow(), chatUses: newChatUses(),
+		chatLedger: c.Chat.LedgerPath, chatRate: newRateWindow(), chatUses: newChatUses(c.Chat.UsedPath, time.Now()),
 	}
 }
 

@@ -275,3 +275,29 @@ func TestChatVerifyRateLimitAnswersUnverified(t *testing.T) {
 		t.Fatalf("note %q", resp.Note)
 	}
 }
+
+// TestChatUsesSurviveARestart: a broker restart must not re-open a message
+// that was verified inside its window.
+func TestChatUsesSurviveARestart(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "chat-verified.jsonl")
+	now := time.Now()
+	u := newChatUses(p, now)
+	if _, fresh := u.take("manager", "m1", now); !fresh {
+		t.Fatal("first take refused")
+	}
+	u2 := newChatUses(p, now.Add(time.Minute))
+	if _, fresh := u2.take("manager", "m1", now.Add(time.Minute)); fresh {
+		t.Fatal("a restarted broker verified m1 again")
+	}
+	if _, fresh := u2.take("scratch", "m1", now.Add(time.Minute)); !fresh {
+		t.Fatal("uses are per caller")
+	}
+	// Uses older than twice the window are dropped at load.
+	u3 := newChatUses(p, now.Add(3*chatVerifyWindow))
+	if len(u3.used) != 0 {
+		t.Fatalf("stale uses kept: %v", u3.used)
+	}
+	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("uses file: %v, %v", fi, err)
+	}
+}

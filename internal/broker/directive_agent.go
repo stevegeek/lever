@@ -56,6 +56,15 @@ func (rw *rateWindow) take(cn string, now time.Time) (bool, time.Duration) {
 	return false, w.start.Add(time.Minute).Sub(now)
 }
 
+// refund gives back one call counted by take in cn's current window.
+func (rw *rateWindow) refund(cn string) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if w := rw.win[cn]; w != nil && w.n > 0 {
+		w.n--
+	}
+}
+
 // opaque404 is the single indistinguishable failure response for every
 // consume/check miss — no existence, target, or state oracle.
 func opaque404(w http.ResponseWriter) {

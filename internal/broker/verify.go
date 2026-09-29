@@ -42,8 +42,9 @@ const verifyRateLimit = 600
 
 // verifyMissLimit bounds the verify calls per CN per minute that match no
 // record. Injected text can make an agent verify many envelopes that name
-// nothing; counting those apart keeps them from spending the budget genuine
-// messages need, since a genuine message is a match.
+// nothing; those count here only (serveVerify gives their verifyRateLimit
+// call back), so they never spend the budget genuine messages need, since a
+// genuine message is a match.
 const verifyMissLimit = 60
 
 // defaultRetryAfter is the retry hint when the broker cannot say better.
@@ -163,9 +164,11 @@ func (b *Broker) serveVerify(w http.ResponseWriter, r *http.Request, legacy bool
 		a = b.verifyUnavailable("", reasonRateLimited, retrySeconds(wait), "too many verifications this minute", "rate limited")
 	} else {
 		a = b.verify(w, r, caller, now, legacy)
-		// A miss counts against its own, smaller budget; a message on record
-		// never does, so misses cannot crowd out genuine messages.
+		// A miss counts against its own, smaller budget and not against the
+		// overall one (its call is given back), so a flood of misses cannot
+		// crowd out genuine messages, which are matches.
 		if a.resp.Result == wire.VerifyNone || a.resp.Result == wire.VerifyAlreadyVerified {
+			b.verifyRate.refund(caller)
 			if ok, wait := b.verifyMissRate.take(caller, now); !ok {
 				a = b.verifyUnavailable(a.branch, reasonRateLimited, retrySeconds(wait),
 					"too many verifications that matched no message this minute", "miss rate limited ("+a.audit+")")

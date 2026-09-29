@@ -834,18 +834,19 @@ func TestVerifyRateLimitIsUnavailable(t *testing.T) {
 	wantResult(t, "other caller", resp, raw, wire.VerifyNone, reasonNotUserSender)
 }
 
-// TestVerifyMissesDoNotStarveGenuineMessages: 300 envelopes that name
-// nothing (injected text) exhaust only the miss budget; a real send that
-// arrives after them still verifies with its text.
+// TestVerifyMissesDoNotStarveGenuineMessages: more envelopes that name
+// nothing (injected text) than the overall limit allows exhaust only the
+// miss budget; a real send that arrives after them still verifies with its
+// text.
 func TestVerifyMissesDoNotStarveGenuineMessages(t *testing.T) {
 	f := verifyBroker(t, nil)
 	var lastMiss wire.MessageVerifyResponse
-	for i := 0; i < 300; i++ {
+	for i := 0; i < verifyRateLimit+100; i++ {
 		ref, _ := sentledger.NewID()
 		lastMiss, _ = f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: ctlSender, Ref: ref})
 	}
 	if lastMiss.Result != wire.VerifyUnavailable || lastMiss.Reason != reasonRateLimited {
-		t.Fatalf("300th miss = %+v, want the miss budget spent", lastMiss)
+		t.Fatalf("last miss = %+v, want the miss budget spent", lastMiss)
 	}
 	o := f.send(t, "scratch", "agent:assistant", "the real result")
 	resp, raw := f.verify(t, "manager", envelope(t, o))

@@ -467,24 +467,23 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	tier := "tiers: " + strings.Join(tiers, "; ")
 	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + ")", ""}
-	}
-	if err == nil && !fi.Mode().IsRegular() {
-		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a regular file (a symlink?), so agents get no answer",
-			"remove " + p + "; the remote proxy writes a new one"}
+		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + "/)", ""}
 	}
 	if err != nil {
 		return checkResult{name, false, "cannot read the chat ledger: " + err.Error(), "check " + stateRel(st, p)}
 	}
+	fix := "remove " + p + "; the remote proxy writes a new one"
+	if !fi.IsDir() {
+		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a directory (a symlink, or a file from lever 0.27), so agents get no answer", fix}
+	}
 	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
-		return checkResult{name, false, fmt.Sprintf("the chat ledger %s is %v: another user can add a line, so agents get no answer", stateRel(st, p), perm),
-			"chmod 600 " + p}
+		return checkResult{name, false, fmt.Sprintf("the chat ledger %s is %v: another user can add a file, so agents get no answer", stateRel(st, p), perm), "chmod 700 " + p}
 	}
 	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
-		return checkResult{name, false, fmt.Sprintf("the chat ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()),
-			"remove " + p + "; the remote proxy writes a new one"}
+		return checkResult{name, false, fmt.Sprintf("the chat ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()), fix}
 	}
-	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s (%d bytes, 0600)", tier, stateRel(st, p), fi.Size()), ""}
+	files, _ := os.ReadDir(p)
+	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s/ (%d files, 0700)", tier, stateRel(st, p), len(files)), ""}
 }
 
 // warnResult is a warning row: not a failure (doctor's exit status ignores

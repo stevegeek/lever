@@ -17,7 +17,7 @@ func entry(agent, sender, created, text, id string) Entry {
 
 func TestAppendLookupMatchesAgentSenderAndSecond(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "chat-ledger.jsonl")
-	w := NewWriter(p)
+	w := (&fileWriter{path: p})
 	for _, e := range []Entry{
 		entry("a1", "user:op@example.com", "2026-09-28T10:00:00Z", "hello", "m1"),
 		entry("a2", "user:op@example.com", "2026-09-28T10:00:00Z", "other agent", "m2"),
@@ -28,7 +28,7 @@ func TestAppendLookupMatchesAgentSenderAndSecond(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := Lookup(p, "a1", "user:op@example.com", "2026-09-28T10:00:00Z")
+	got, err := lookupFile(p, "a1", "user:op@example.com", "2026-09-28T10:00:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,13 +53,13 @@ func TestLookupMissingFileIsEmpty(t *testing.T) {
 
 func TestLookupRefusesAWritableLedger(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "chat-ledger.jsonl")
-	if err := NewWriter(p).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
+	if err := (&fileWriter{path: p}).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(p, 0o666); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Lookup(p, "a1", "user:op", "2026-09-28T10:00:00Z"); !errors.Is(err, ErrUnsafe) {
+	if _, err := lookupFile(p, "a1", "user:op", "2026-09-28T10:00:00Z"); !errors.Is(err, ErrUnsafe) {
 		t.Fatalf("err = %v, want ErrUnsafe", err)
 	}
 }
@@ -72,7 +72,7 @@ func TestAppendResetsModeOfAnExistingFile(t *testing.T) {
 	if err := os.Chmod(p, 0o666); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewWriter(p).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
+	if err := (&fileWriter{path: p}).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(p)
@@ -83,7 +83,7 @@ func TestAppendResetsModeOfAnExistingFile(t *testing.T) {
 
 func TestLookupReadsTheRotatedFileAndSkipsTornLines(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "chat-ledger.jsonl")
-	w := NewWriter(p)
+	w := (&fileWriter{path: p})
 	if err := w.Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "old", "m1")); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestLookupReadsTheRotatedFileAndSkipsTornLines(t *testing.T) {
 	}
 	_, _ = f.WriteString(`{"agent_id":"a1","sender":"user:op","created_at":"2026-09-28T10:0`)
 	_ = f.Close()
-	got, err := Lookup(p, "a1", "user:op", "2026-09-28T10:00:00Z")
+	got, err := lookupFile(p, "a1", "user:op", "2026-09-28T10:00:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestAppendRotatesPastTheCap(t *testing.T) {
 	if err := os.WriteFile(p, make([]byte, RotateCap+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewWriter(p).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
+	if err := (&fileWriter{path: p}).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Stat(p + ".1"); err != nil || fi.Size() != RotateCap+1 {
@@ -147,14 +147,14 @@ func TestNormalizeTimestamp(t *testing.T) {
 func TestLookupRefusesASymlinkedLedger(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "elsewhere.jsonl")
-	if err := NewWriter(target).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
+	if err := (&fileWriter{path: target}).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
 		t.Fatal(err)
 	}
 	p := filepath.Join(dir, "chat-ledger.jsonl")
 	if err := os.Symlink(target, p); err != nil {
 		t.Skip(err)
 	}
-	if _, err := Lookup(p, "a1", "user:op", "2026-09-28T10:00:00Z"); !errors.Is(err, ErrUnsafe) {
+	if _, err := lookupFile(p, "a1", "user:op", "2026-09-28T10:00:00Z"); !errors.Is(err, ErrUnsafe) {
 		t.Fatalf("err = %v, want ErrUnsafe for a symlink", err)
 	}
 }
@@ -164,10 +164,10 @@ func TestLookupSkipsAnOversizedLine(t *testing.T) {
 	if err := os.WriteFile(p, append([]byte(strings.Repeat("x", maxLine+10)), '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewWriter(p).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "after", "m1")); err != nil {
+	if err := (&fileWriter{path: p}).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "after", "m1")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Lookup(p, "a1", "user:op", "2026-09-28T10:00:00Z")
+	got, err := lookupFile(p, "a1", "user:op", "2026-09-28T10:00:00Z")
 	if err != nil || len(got) != 1 || got[0].Text != "after" {
 		t.Fatalf("got %+v, %v; want the entry after the long line", got, err)
 	}
@@ -183,10 +183,64 @@ func TestAppendDoesNotFollowASymlink(t *testing.T) {
 	if err := os.Symlink(target, p); err != nil {
 		t.Skip(err)
 	}
-	if err := NewWriter(p).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err == nil {
+	if err := (&fileWriter{path: p}).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err == nil {
 		t.Fatal("Append wrote through a symlink")
 	}
 	if fi, _ := os.Stat(target); fi.Size() != 0 || fi.Mode().Perm() != 0o644 {
 		t.Fatalf("symlink target changed: %v", fi)
+	}
+}
+
+// TestDirKeepsLoginsApart: each login writes its own file, so one login's
+// rotation never drops another's entries, and Lookup reads them all.
+func TestDirKeepsLoginsApart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chat-ledger")
+	w := NewWriter(dir)
+	op := entry("a1", "user:op", "2026-09-28T10:00:00Z", "operator", "m1")
+	c := entry("a1", "user:op", "2026-09-28T10:00:00Z", "contact", "m2")
+	c.Login = "c@example.com"
+	for _, e := range []Entry{op, c} {
+		if err := w.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The contact floods its own file past two rotations.
+	big := entry("a9", "user:c", "2026-09-28T11:00:00Z", strings.Repeat("<", 16000), "")
+	big.Login = "c@example.com"
+	for i := 0; i < 2*RotateCap/90000+4; i++ {
+		if err := w.Append(big); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := Lookup(dir, "a1", "user:op", "2026-09-28T10:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Text != "operator" {
+		t.Fatalf("got %+v, want the operator's entry to survive the contact's flood", got)
+	}
+	if fi, _ := os.Lstat(dir); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode %v", fi.Mode().Perm())
+	}
+}
+
+func TestLookupRefusesAnUnsafeDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chat-ledger")
+	if err := NewWriter(dir).Append(entry("a1", "user:op", "2026-09-28T10:00:00Z", "hi", "m1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Lookup(dir, "a1", "user:op", "2026-09-28T10:00:00Z"); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("err = %v, want ErrUnsafe", err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	_ = os.Chmod(dir, 0o700)
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skip(err)
+	}
+	if _, err := Lookup(link, "a1", "user:op", "2026-09-28T10:00:00Z"); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("symlinked dir: err = %v, want ErrUnsafe", err)
 	}
 }

@@ -181,7 +181,7 @@ func TestChatVerifyBadInput(t *testing.T) {
 // proves nothing, so the broker answers an error, not "verified".
 func TestChatVerifyRefusesAnUnsafeLedger(t *testing.T) {
 	ledger := seedLedger(t, ledgerEntry(chatManagerID, "deploy the fix", "m1"))
-	if err := os.Chmod(ledger, 0o666); err != nil {
+	if err := os.Chmod(ledger, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := chatBroker(t, ledger)

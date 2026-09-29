@@ -50,9 +50,9 @@ func TestCheckVerifiedChat(t *testing.T) {
 			t.Fatalf("row = %+v", r)
 		}
 	})
-	t.Run("on, ledger 0600", func(t *testing.T) {
+	t.Run("on, ledger 0700", func(t *testing.T) {
 		app, st := verifiedChatFixture(t, "op@example.com")
-		if err := os.WriteFile(st.ChatLedger(), []byte("{}\n"), 0o600); err != nil {
+		if err := os.Mkdir(st.ChatLedger(), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if r := checkVerifiedChat(app, st); !r.ok || r.fix != "" {
@@ -61,10 +61,10 @@ func TestCheckVerifiedChat(t *testing.T) {
 	})
 	t.Run("writable ledger fails", func(t *testing.T) {
 		app, st := verifiedChatFixture(t, "op@example.com")
-		if err := os.WriteFile(st.ChatLedger(), []byte("{}\n"), 0o600); err != nil {
+		if err := os.Mkdir(st.ChatLedger(), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(st.ChatLedger(), 0o666); err != nil {
+		if err := os.Chmod(st.ChatLedger(), 0o777); err != nil {
 			t.Fatal(err)
 		}
 		if r := checkVerifiedChat(app, st); r.ok {

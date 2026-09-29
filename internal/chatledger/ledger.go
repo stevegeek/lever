@@ -17,12 +17,16 @@ package chatledger
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 )
@@ -71,19 +75,16 @@ type Entry struct {
 	Text string `json:"text"`
 }
 
-// Writer appends entries. Safe for concurrent use by one process.
-type Writer struct {
+// fileWriter appends entries to one login's file.
+type fileWriter struct {
 	path string
 	mu   sync.Mutex
 }
 
-// NewWriter returns a Writer for path.
-func NewWriter(path string) *Writer { return &Writer{path: path} }
-
 // Append writes e as one JSON line, rotating first when the file has grown
 // past RotateCap. The file is created 0600, and an existing file is set back
 // to 0600, so no other user can add a line.
-func (w *Writer) Append(e Entry) error {
+func (w *fileWriter) Append(e Entry) error {
 	line, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -117,11 +118,11 @@ func (w *Writer) Append(e Entry) error {
 // entries prove nothing.
 var ErrUnsafe = errors.New("chat ledger is writable by another user")
 
-// Lookup returns the entries for agentID whose Sender is sender and whose
+// lookupFile returns the entries for agentID whose Sender is sender and whose
 // CreatedAt is createdAt, from path and its rotated copy. A missing file is
 // no entries, not an error. A file with group or other write permission is
 // ErrUnsafe: its lines could come from anyone.
-func Lookup(path, agentID, sender, createdAt string) ([]Entry, error) {
+func lookupFile(path, agentID, sender, createdAt string) ([]Entry, error) {
 	var out []Entry
 	seen := map[string]bool{}
 	for _, p := range []string{path + ".1", path} {
@@ -239,4 +240,100 @@ func NormalizeTimestamp(s string) (string, error) {
 // renders a message's creation time in the delivery envelope.
 func FormatTime(t time.Time) string {
 	return t.UTC().Truncate(time.Second).Format(TimeLayout)
+}
+
+// The ledger is a directory with one file per login (FileFor), so the size
+// rotation of one login's file never drops another login's entries: a
+// contact who floods the chat can push out only their own.
+
+var ledgerFile = regexp.MustCompile(`^l-[0-9a-f]{24}\.jsonl$`)
+
+// FileFor is the ledger file name for a login.
+func FileFor(login string) string {
+	h := sha256.Sum256([]byte(login))
+	return "l-" + hex.EncodeToString(h[:12]) + ".jsonl"
+}
+
+// Writer appends entries to the ledger directory. Safe for concurrent use by
+// one process.
+type Writer struct {
+	dir   string
+	mu    sync.Mutex
+	files map[string]*fileWriter
+}
+
+// NewWriter returns a Writer for the ledger directory dir.
+func NewWriter(dir string) *Writer { return &Writer{dir: dir, files: map[string]*fileWriter{}} }
+
+// Append writes e to its login's file, creating the directory (0700) first.
+func (w *Writer) Append(e Entry) error {
+	if err := os.MkdirAll(w.dir, 0o700); err != nil {
+		return fmt.Errorf("chat ledger: %w", err)
+	}
+	if err := checkDir(w.dir); err != nil {
+		return err
+	}
+	name := FileFor(e.Login)
+	w.mu.Lock()
+	fw := w.files[name]
+	if fw == nil {
+		fw = &fileWriter{path: filepath.Join(w.dir, name)}
+		w.files[name] = fw
+	}
+	w.mu.Unlock()
+	return fw.Append(e)
+}
+
+// checkDir refuses a ledger directory that is a symlink, not a directory,
+// writable by others, or owned by another user.
+func checkDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("chat ledger: %w", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%w: %s is not a directory", ErrUnsafe, dir)
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w: %s is %v", ErrUnsafe, dir, fi.Mode().Perm())
+	}
+	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
+		return fmt.Errorf("%w: %s belongs to uid %d", ErrUnsafe, dir, owner)
+	}
+	return nil
+}
+
+// Lookup returns the entries for agentID whose Sender is sender and whose
+// CreatedAt is createdAt, from every login's file (and its rotated copy) in
+// the ledger directory. A missing directory is no entries.
+func Lookup(dir, agentID, sender, createdAt string) ([]Entry, error) {
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err := checkDir(dir); err != nil {
+		return nil, err
+	}
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("chat ledger: %w", err)
+	}
+	var out []Entry
+	seen := map[string]bool{}
+	for _, n := range names {
+		if !ledgerFile.MatchString(n.Name()) {
+			continue
+		}
+		got, err := lookupFile(filepath.Join(dir, n.Name()), agentID, sender, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range got {
+			if e.MessageID != "" && seen[e.MessageID] {
+				continue
+			}
+			seen[e.MessageID] = true
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }

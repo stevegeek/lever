@@ -140,7 +140,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		ChatLedger: remoteChatLedger(app, st),
 		// Contacts: chat only, and only with their agents (see
 		// remoteproxy/contact.go). Agent names resolve to hub ids with the
-		// remote PAT, which can read and list agents and nothing more.
+		// remote PAT, used only for GET agent lists.
 		Contacts:      remoteContacts(app),
 		ResolveAgents: remoteAgentResolver(app, st, target, dial),
 		// The proxy's own log, named the way doctor names it (relative to

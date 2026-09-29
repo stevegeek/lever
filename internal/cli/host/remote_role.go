@@ -259,6 +259,9 @@ const remoteCeilingMissing = "no project-create ceiling yet, so the web UI can c
 // permissions and withholds project.create. The rest of the set comes from
 // the hub's hub-member role, which the record-only readers cannot see.
 func ceilingPermissionsFit(ceiling, role []string) bool {
+	if len(ceiling) == 0 {
+		return false
+	}
 	if slices.Contains(ceiling, projectCreatePermission) {
 		return false
 	}
@@ -333,7 +336,11 @@ func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey stri
 		if contactRole, err = ensureProjectRole(ctx, hc, defs, contactRoleName, contactRoleDescription, cperms, warn); err != nil {
 			return state.RemoteRoleRecord{}, err
 		}
-		contactCeiling = remoteCeilingPermissions(hubMember.Permissions, cperms)
+		// A contact's ceiling is its role and nothing more: the fenced chat,
+		// its DM list and its own event subjects need only identity and
+		// agent.message, so hub-member's user, group, template and other
+		// reads are withheld too (defence behind the proxy fence).
+		contactCeiling = slices.Clone(cperms)
 		rec.ContactRoleID, rec.ContactPermissions, rec.ContactCeilingPermissions = contactRole.ID, cperms, contactCeiling
 	} else if r, ok := projectRoleNamed(defs, contactRoleName); ok {
 		// No contacts now, but an earlier grant may have made some: moving
@@ -357,6 +364,11 @@ func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey stri
 		// The other tier's binding goes first: a login moved from operator
 		// to contact must lose the terminal and lifecycle it had.
 		if err := dropProjectRoleBinding(ctx, hc, drop, u.ID, projectID); err != nil {
+			if isContact {
+				// A contact that keeps the web role keeps terminal and
+				// start/stop: fail the apply rather than warn.
+				return state.RemoteRoleRecord{}, fmt.Errorf("%w: removing contact %s from role %s: %w", errCeilingRemoved, email, remoteWebRoleName, err)
+			}
 			return state.RemoteRoleRecord{}, fmt.Errorf("removing hub user %s from its previous role: %w", email, err)
 		}
 		if err := ensureProjectRoleBinding(ctx, hc, grant, u.ID, projectID); err != nil {
@@ -549,8 +561,9 @@ func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID s
 // errCeilingRemoved marks a ceiling replacement that deleted the old
 // constraint and then failed: the user now has no project-create ceiling.
 // grantRemoteWebRole fails the apply on it rather than warning.
-var errCeilingRemoved = errors.New("the old project-create ceiling was deleted and the new one was not written, " +
-	"so this user can create projects until a `lever apply` completes the grant")
+var errCeilingRemoved = errors.New("the grant left a remote user with more authority than its tier allows " +
+	"(an old project-create ceiling deleted and the new one not written, or a contact still bound to the web role) " +
+	"until a `lever apply` completes it")
 
 // ceilingRemovedIf marks err with errCeilingRemoved when a delete already
 // succeeded.

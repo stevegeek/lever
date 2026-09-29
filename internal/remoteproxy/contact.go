@@ -386,8 +386,9 @@ func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, err
 }
 
 // HubDoer is a hubapi.Doer over the proxy's own route to the hub, with a
-// bearer token (the remote PAT, read-only: agent read and list). The contact
-// fence resolves agent names with it.
+// bearer token: the remote PAT, which can also attach and message, so the
+// fence only ever sends GET with it (Do has no body). The contact fence
+// resolves agent names with it.
 type HubDoer struct {
 	Target      *url.URL
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)

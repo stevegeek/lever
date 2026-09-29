@@ -11,8 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -159,12 +159,12 @@ var contactCanned = map[string]string{
 // contactForwardGET are the other GET routes a contact may use as they are.
 var contactForwardGET = []string{
 	"/api/v1/auth/me", "/auth/me", "/api/v1/auth/admin-status", "/api/v1/settings/public",
-	"/api/v1/system/status", "/api/v1/chat/dms", "/api/v1/chat/user-prefs", "/auth/logout",
+	"/api/v1/system/status", "/api/v1/chat/dms", "/api/v1/chat/user-prefs",
 }
 
 // fenceContact decides one request from a contact. It returns the request to
 // forward (possibly rewritten), or nil when it answered the request itself.
-func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditLine, login string, names []string, cookie string) *http.Request {
+func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditLine, login string, names []string, cookie *string) *http.Request {
 	deny := func(msg string) *http.Request {
 		g.deny(w, line, http.StatusForbidden, DecisionDenyContact, msg)
 		return nil
@@ -177,7 +177,16 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 	if f == nil {
 		return deny("contact access is not configured")
 	}
-	uid, err := f.userID(r.Context(), login, cookie)
+	uid, err := f.userID(r.Context(), login, *cookie)
+	if errors.Is(err, errSessionUnknown) {
+		// The hub no longer knows this session (it restarted, or the
+		// session lapsed): replace it once, as forward does for a GET.
+		g.cfg.Session.Invalidate(login, *cookie)
+		if fresh, cerr := g.cfg.Session.Cookie(r.Context(), login); cerr == nil {
+			*cookie = fresh
+			uid, err = f.userID(r.Context(), login, fresh)
+		}
+	}
 	if err != nil || uid == "" {
 		g.deny(w, line, http.StatusBadGateway, DecisionDenyContact, "cannot resolve your hub user")
 		return nil
@@ -234,8 +243,6 @@ func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *A
 		return r
 	case sub == "messages" && m == http.MethodPost:
 		return g.checkContactMessage(w, r, line, deny)
-	case strings.HasPrefix(sub, "messages/") && !strings.Contains(strings.TrimPrefix(sub, "messages/"), "/") && m == http.MethodGet:
-		return r
 	case sub == "read" && (m == http.MethodGet || m == http.MethodPost):
 		return r
 	case sub == "typing" && m == http.MethodPost:
@@ -254,19 +261,26 @@ func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line 
 	if err != nil || len(body) > maxContactMessage {
 		return deny("message too large or unreadable")
 	}
+	// Only content and idempotency_key: every other field the hub reads
+	// changes routing or what the agent sees beside the verified text
+	// (attachments, reply_to_id, metadata such as RE-to, which the agent's
+	// envelope shows as reply_context).
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return deny("message is not valid JSON")
+	}
+	for k := range fields {
+		if k != "content" && k != "idempotency_key" {
+			return deny("a contact's message may carry only content (field " + strconv.Quote(k) + " refused)")
+		}
+	}
 	var msg struct {
-		Content     string   `json:"content"`
-		Attachments []string `json:"attachments"`
-		ReplyToID   string   `json:"reply_to_id"`
+		Content string `json:"content"`
 	}
 	if err := json.Unmarshal(body, &msg); err != nil {
 		return deny("message is not valid JSON")
 	}
 	switch {
-	case len(msg.Attachments) > 0:
-		return deny("a contact may not send attachments")
-	case msg.ReplyToID != "":
-		return deny("a contact may not reply to a message by id; write the answer as a new message")
 	case hasMention(msg.Content):
 		return deny(`a contact's message may not contain a word starting with "@" (it would route to another agent); write "at" or leave it out`)
 	}
@@ -287,13 +301,14 @@ func hasMention(s string) bool {
 	return false
 }
 
+// contactRootFiles are the web UI's own files at the root (scion
+// web/public). Any other root path would get the SPA shell.
+var contactRootFiles = []string{"/favicon.svg", "/scion-notification-icon.png"}
+
 // isStaticAsset reports whether p is one of the web UI's own static files,
-// which carry no data: its asset directories, or a file at the root.
+// which carry no data.
 func isStaticAsset(p string) bool {
-	if strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/shoelace/") {
-		return true
-	}
-	return strings.Count(p, "/") == 1 && path.Ext(p) != "" && !strings.HasPrefix(p, "/api")
+	return strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/shoelace/") || slices.Contains(contactRootFiles, p)
 }
 
 // answerContact writes a fixed answer and audits it as allowed.
@@ -331,6 +346,9 @@ func contactLanding(s contactScope) string {
 // errNoUserID means the hub's /auth/me answer carried no id.
 var errNoUserID = errors.New("the hub named no user id")
 
+// errSessionUnknown means the hub answered 401 to the login's session.
+var errSessionUnknown = errors.New("the hub does not know this session")
+
 // hubWhoAmI asks the hub, with a login's own session, for its user id.
 func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -348,6 +366,9 @@ func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, err
 			return "", err
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized {
+			return "", errSessionUnknown
+		}
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("hub /api/v1/auth/me: HTTP %d", resp.StatusCode)
 		}

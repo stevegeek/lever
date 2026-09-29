@@ -747,9 +747,10 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	state.cookie = cookie
 	if names, isContact := cfg.Contacts[operator]; isContact && operator != "" {
-		if r = g.fenceContact(w, r, &line, operator, names, cookie); r == nil {
+		if r = g.fenceContact(w, r, &line, operator, names, &cookie); r == nil {
 			return
 		}
+		state.cookie = cookie
 	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.

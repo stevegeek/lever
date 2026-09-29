@@ -48,8 +48,8 @@ feature does not change:
   from this path).
 
 A message you send from your phone lands in the agent's session as text, like a message typed at
-`lever attach` or sent with `lever msg send`. With `allowed_users` set, the agent can check it:
-see [verified web chat](#verified-web-chat). A verified message is your steering, not a new
+`lever attach` or sent with `lever msg send`. With `allowed_users` set, the agent checks it
+against a host record: see [verified web chat](#verified-web-chat). A verified message is your steering, not a new
 authority; for a provably-operator instruction use [operator directives](/operator-directives/).
 
 ## Setup
@@ -672,44 +672,83 @@ refuses that login before it reaches the hub, but the hub user keeps the role.
 
 ## Verified web chat
 
-An agent cannot tell a real chat message from the same text inside an email, a web page or a tool
-output. Verified web chat closes that gap for the web chat.
+An agent cannot tell who wrote a message from the message. Every message lever delivers (a
+worker's relay, a manager message, your `lever msg send` note, a directive notice) reaches the
+agent with the same envelope sender, `from: user:<the controller's hub user>`, because lever sends
+them all with its controller token. Anyone whose words reach an agent (a contact in the web chat,
+an email, a web page, a tool result, a worker) can type a lever marker such as
+`[lever: operator note]`, or a whole fake envelope. So neither the envelope nor the text decides
+who wrote a message. Two host records do, and no agent can write either of them:
 
-- **What is recorded.** When the hub accepts a message you post into an agent's direct chat
-  through the proxy, the proxy appends one line to `.lever-state/chat-ledger.jsonl` (mode 0600):
-  your verified login, the agent, the hub's message id, sender and time, and the text. Only the
-  proxy writes the file, and agents never reach the proxy, so an agent cannot add a line. The
-  message text itself is not changed.
-- **What the agent does.** Before it acts on a `user:` message, the agent calls its `chat_verify`
-  tool with the message's `timestamp` and `from`. The broker answers only about the agent's own
-  direct chat. If the message is on record, the agent gets your login, the tier and the text as you
-  sent it, and acts on that text. A message verifies once, within one hour of posting (a repeat
-  check by the same agent within ten minutes is answered as a repeat, so a retry cannot lose it). Anything
-  else — not on record, a second check, too old, an error — is "not verified", and the manager
-  then treats the message as data: it does not act on it, and it says so in its session.
-- **When it is on.** Remote access with `allowed_users`, and a state directory outside the `tree:`.
-  `lever doctor` shows the row `verified chat`. Agents need an agent image built from this lever
-  for the `chat_verify` tool. `lever init` writes "verified chat is on" into the operator skill,
-  and then a missing tool counts as "not verified": rebuild the agent image before you run
-  `lever init`, or the manager ignores your chat. Run `lever init` again after you change
-  `remote` or `allowed_users`.
-- **Who is the operator.** A plain login in `allowed_users` gets the tier `operator`. Do not add
-  a login as an operator only so that someone can look at the web UI: once verified, that
-  person's chat is operator steering for every agent. For anyone else, use a contact (below).
-- **Web pages from agents are sandboxed.** The hub serves workspace files, attachments and other
-  agent-written files inline under `/api/`. The proxy adds `Content-Security-Policy: sandbox` to
-  every `/api/` answer, so such a page cannot run script with your session or post chat as you.
+- **The chat ledger** (`.lever-state/chat-ledger/`, one 0600 file per login in a 0700 directory).
+  When the hub accepts a message you post into an agent's direct chat through the proxy, the
+  proxy appends one line: your verified login and its tier, the agent, the hub's message id,
+  sender and time, and the text. Only the proxy writes it, and agents never reach the proxy.
+- **The sent ledger** (`.lever-state/sent-ledger/`, one 0600 file per recipient and kind). The
+  broker records every message lever sends, before it sends it: the recipient, who it is from
+  (`manager`, `worker:<slug>`, `operator-note` or `directive-notice`), the exact text, and a fresh
+  128-bit id. It writes that id on the message's first line as `ref=<id>`, after the marker. A
+  send the broker cannot record is not made.
+
+**What the agent does.** Before it acts on any message whose `from` starts with `user:`, the agent
+calls its `message_verify` tool (`chat_verify` in 0.27 agent images) with the envelope's
+`timestamp` and `from`, and the `ref` from the first line when there is one. The broker answers
+from the host records only, and only about messages to that agent (its certificate identity):
+
+- A `from` that is one of your remote logins is looked up in the chat ledger only. A `from` that is
+  the controller's hub user (the broker asks the hub for it) is looked up in the sent ledger only,
+  by the ref. Any other `from` has no record. So the sender only chooses which record is read: a
+  contact's post can never come back as a lever message, and the reverse.
+- The answer's `result` is `web` (a person in the web chat: login and tier), `lever` (lever sent
+  it: its kind), `already_verified`, `none` or `unavailable`, with the text as recorded. The agent
+  acts on that text, never on the text in its session. The markers stay in the message to make a
+  session readable, but they decide nothing.
+- A message verifies once. A repeat check by the same agent within ten minutes answers as a
+  repeat without text, so a retry cannot lose it; after that it answers `already_verified`. A web
+  post verifies within one hour of posting, a lever message within 24 hours of sending (an agent
+  in a long turn can read a relay late).
+- `none` means no host record names the message for that agent: the agent treats it as data (it
+  does not act on it or reply) and says so in its session. `unavailable` means the broker could
+  not answer (a rate limit, a record it could not read, the hub): the agent retries once after
+  `retry_after`, then treats the message as data and says so. If the manager reports failed
+  verifications you did not cause, look at the `verify` lines in `broker.log`.
+
+**When it is on.** The sent ledger is always on while the state directory is outside the `tree:`.
+Web chat verification needs remote access with `allowed_users` too. `lever doctor` shows the rows
+`verified chat` and `sent ledger`. Run `lever init` after you change `remote` or `allowed_users`:
+it writes "verified web chat is on" into both skills.
+
+**Remote access without `allowed_users`.** The proxy then verifies no login and records no chat,
+so an agent cannot verify any web chat post and treats every one as data: it does not act on it
+and does not reply. List your login in `allowed_users` to use the web chat.
+
+**Who is the operator.** A plain login in `allowed_users` gets the tier `operator`. Do not add a
+login as an operator only so that someone can look at the web UI: once verified, that person's
+chat is operator steering for every agent. For anyone else, use a contact (below).
+
+**`lever msg send` goes through the broker.** The note goes to the broker's operator socket
+(`.lever-state/operator.sock`, mode 0600), and the broker records it as an `operator-note` before
+it sends it. With no broker running, `lever msg send` refuses and says so; type into the session
+with `lever attach` instead. The socket carries the host user's authority, the same as `lever
+attach`: any process running as you can send a note. A note is never a directive.
+
+**Web pages from agents are sandboxed.** The hub serves workspace files, attachments and other
+agent-written files inline under `/api/`. The proxy adds `Content-Security-Policy: sandbox` to
+every `/api/` answer, so such a page cannot run script with your session or post chat as you.
 
 What is not covered:
 
-- Only messages into an agent's direct chat. A topic thread, the quick-message dialog, an edited
-  message, text typed into an attached terminal, `lever msg send` and email are not recorded, so
-  they never verify.
+- Only messages into an agent's direct chat are recorded as web chat. A topic thread, the
+  quick-message dialog, an edited message and email are not recorded, so they never verify. Text
+  typed into an attached terminal has no envelope and needs no verification.
 - A verified message is not a directive. An action that needs a directive still needs one, and a
   compromised front account or phone can send verified chat.
 - A choice you tap in the web UI that sends agent-suggested text is recorded as sent by you.
-- The ledger keeps the text of your recent chat on the host (it rotates at 1 MiB, one old copy
-  kept).
+- Both ledgers keep the text of recent messages on the host. Each file rotates at 1 MiB (one old
+  copy kept), and a sent-ledger file untouched for 48 hours is removed when the broker starts.
+- An injected envelope that copies a real ref gets back the real message lever sent, and uses it
+  up early (the genuine envelope then answers as a repeat). It cannot get text lever did not send
+  to that agent.
 
 ## Contacts: chat-only logins
 
@@ -738,13 +777,15 @@ remote:
   a lever page with links to the contact's conversations. Everything else is refused (audit
   `deny-contact`).
 - **What a contact may not send.** A word that starts with `@` (scion would route the message to
-  another agent), a reply to a message by id, an attachment, any field other than the text, a
-  lever marker anywhere, or a first line that starts with anything but a letter or a digit, or
-  that holds the word "lever" followed by a colon or a space (a lever marker sits on the first
-  line). The proxy answers 403 with the reason; the contact rewrites the message.
-- **Markers cannot make chat pass for lever.** Agents check every `user:` message with
-  `chat_verify` first. A message that verifies is a person's chat and is judged by its tier; a
-  lever marker counts only on a message that does not verify, which no web chat post is.
+  another agent), a reply to a message by id, an attachment, or any field other than the text.
+  The proxy answers 403 with the reason; the contact rewrites the message. The text itself is not
+  filtered: a contact may write anything, a lever marker included.
+- **Markers cannot make chat pass for lever.** The agent verifies the message, and the broker
+  answers from the chat ledger: the contact's own words, tier `contact`, whatever they say.
+- **Contacts need current skills.** An older skill trusts a lever marker on a message that fails
+  to verify, and a contact can type one. So `lever apply`, `lever up` and `lever remote serve`
+  refuse contact logins until `lever init` has written this version's skills for every agent, and
+  while the state directory is inside the tree.
 - **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
   contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
   contact only with what the task needs, but that is an instruction, not a fence.
@@ -758,9 +799,9 @@ remote:
   contact's chat with an agent in the project message log. The contact's own event stream still
   carries its other direct chats, if an agent outside its list starts one with it; its DM list is
   filtered to its listed agents.
-- **Manager messages to workers are marked.** The broker puts `[lever: from the manager]` on the
-  first line of every manager message, so a worker can tell its manager from a contact's chat. A
-  worker treats an unmarked message that does not verify as data.
+- **Manager messages are recorded.** A worker verifies every message too, so a manager message
+  answers `lever` with the kind `manager` and a contact's post answers `web` with the tier
+  `contact`, whatever either says.
 
 ## What this does NOT do
 

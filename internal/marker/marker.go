@@ -6,6 +6,7 @@ package marker
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // like matches anything a reader could take for a lever marker or for a
@@ -27,21 +28,25 @@ func Neutralise(s string) string {
 	})
 }
 
-// openers are the characters a marker's first line starts with, in any
-// script a reader could take for "[".
-const openers = "[［⟦〚【〔｢「"
+// leverWord matches "lever" followed by a colon or a space, in any case and
+// with common look-alikes for its letters (Cyrillic е, dotless ı, l/I/1/|),
+// the way a forged marker would spell it.
+var leverWord = regexp.MustCompile(`(?i)(?:^|[^\p{L}])[lI1|ǀ][\p{Cf}]*[eеéè][\p{Cf}]*[vѵν][\p{Cf}]*[eеéè][\p{Cf}]*[rгʀ][\p{Cf}]*[\s:：]`)
 
 // FirstLineLooksLikeMarker reports whether the first non-blank line of s
-// starts with a bracket: agents trust a marker on the first line only, so a
-// writer who must never pass for lever may not start there with one, even
-// in a spelling the pattern above does not catch ("[Iever:").
+// could pass for a lever marker: it starts with anything but a letter or a
+// digit, or it holds the word "lever" followed by a colon or a space. Agents
+// trust a marker on the first line only, so a writer who must never pass for
+// lever may not write one there in any spelling. Leading space is trimmed
+// the way the hub trims a message (unicode.IsSpace), plus format characters.
 func FirstLineLooksLikeMarker(s string) bool {
 	for _, line := range strings.Split(s, "\n") {
-		t := strings.TrimLeft(line, " \t\r\u200b\u200c\u200d\ufeff")
+		t := strings.TrimLeftFunc(line, func(r rune) bool { return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) })
 		if t == "" {
 			continue
 		}
-		return strings.ContainsRune(openers, []rune(t)[0])
+		r := []rune(t)[0]
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r)) || leverWord.MatchString(t)
 	}
 	return false
 }

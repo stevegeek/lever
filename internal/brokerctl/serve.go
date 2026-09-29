@@ -319,14 +319,24 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// sender; /message/verify learns that label from the hub, the way the hub
 	// stamps it (the email, else the user id), rather than assuming the dev
 	// user's default address.
-	d.ResolveControllerSender = func(ctx context.Context) (string, error) {
+	d.ResolveControllerSender = controllerSenderFrom(hc)
+	return d, nil
+}
+
+// controllerSenderFrom resolves the envelope sender of the controller PAT's
+// hub user from auth/me: "user:" + the email, else "user:" + the user id,
+// the way scion stamps a user's sends (handlers_agent_messaging.go).
+func controllerSenderFrom(hc *hubapi.Client) func(ctx context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
 		u, err := hc.Me(ctx)
 		if err != nil {
 			return "", err
 		}
-		return cmp.Or("user:"+u.Email, "user:"+u.ID), nil
+		if u.Email != "" {
+			return "user:" + u.Email, nil
+		}
+		return "user:" + u.ID, nil
 	}
-	return d, nil
 }
 
 // bindListeners pre-binds the broker's loopback listeners so Serve learns the

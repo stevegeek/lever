@@ -63,6 +63,7 @@ const maxContactMessage = 1 << 20
 type contactFence struct {
 	resolve func(ctx context.Context) (map[string]string, error) // agent name → hub id
 	whoAmI  func(ctx context.Context, cookie string) (string, error)
+	session func(agent string) error // Config.ContactSession
 
 	mu    sync.Mutex
 	ids   map[string]string // name → hub id
@@ -146,6 +147,23 @@ func (s contactScope) allows(key string) bool {
 	}
 	_, ok := s.agents[parts[2]]
 	return ok && parts[4] == s.userID && s.userID != ""
+}
+
+// errNoSessionCheck means the proxy was built without Config.ContactSession.
+var errNoSessionCheck = errors.New("its session cannot be checked")
+
+// sessionAllows asks Config.ContactSession about the agent of the DM key
+// (one scope.allows already accepted). A contact's words reach an agent only
+// through a post, so only a post is refused: a session that may follow an
+// older skill (resumed, not started fresh since the skill changed) could
+// trust a lever marker the contact types.
+func (f *contactFence) sessionAllows(scope contactScope, key string) error {
+	parts := strings.Split(key, ":")
+	name := scope.agents[parts[2]]
+	if f.session == nil {
+		return errNoSessionCheck
+	}
+	return f.session(name)
 }
 
 // contactCanned is the fixed answer for a list the web UI loads at start.
@@ -246,7 +264,14 @@ func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *A
 	case sub == "messages" && m == http.MethodGet:
 		return r
 	case sub == "messages" && m == http.MethodPost:
-		return g.checkContactMessage(w, r, line, deny)
+		r2 := g.checkContactMessage(w, r, line, deny)
+		if r2 == nil {
+			return nil
+		}
+		if err := g.contacts.sessionAllows(scope, key); err != nil {
+			return deny("this agent cannot take your messages yet (" + err.Error() + "); ask the operator to start it fresh")
+		}
+		return r2
 	case sub == "read" && (m == http.MethodGet || m == http.MethodPost):
 		return r
 	case sub == "typing" && m == http.MethodPost:

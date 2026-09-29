@@ -786,10 +786,17 @@ remote:
   filtered: a contact may write anything, a lever marker included.
 - **Markers cannot make chat pass for lever.** The agent verifies the message, and the broker
   answers from the chat ledger: the contact's own words, tier `contact`, whatever they say.
-- **Contacts need current skills.** An older skill trusts a lever marker on a message that fails
-  to verify, and a contact can type one. So `lever apply`, `lever up` and `lever remote serve`
+- **Contacts need current skills, in the running sessions too.** An older skill trusts a lever
+  marker, and a contact can type one. So `lever apply`, `lever up` and `lever remote serve`
   refuse contact logins until `lever init` has written this version's skills for every agent, and
-  while the state directory is inside the tree.
+  while the state directory is inside the tree. The disk is not enough: a resumed session keeps
+  the skill text it read before. Lever records each fresh session start (a manager created by
+  apply, a worker created by the broker; never a resume) with the skill on disk then, in
+  `.lever-state/sessions.jsonl` (0600, a host record like the ledgers). The proxy lets a contact
+  post to an agent only while that agent's last fresh start saw the skill that is on disk now;
+  otherwise it answers 403 "this agent cannot take your messages yet". Every bring-up warns about
+  each such agent. For the manager, run `lever up --fresh` after you back up its conversation; a
+  worker takes contact messages once the broker next creates it fresh.
 - **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
   contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
   contact only with what the task needs, but that is an instruction, not a fence.

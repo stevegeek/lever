@@ -130,6 +130,12 @@ type Config struct {
 	// Required when Contacts is set: without it every contact request is
 	// refused.
 	ResolveAgents func(ctx context.Context) (map[string]string, error)
+	// ContactSession reports why a contact may not post to the named agent
+	// now, or nil when it may: the agent's session must have started fresh
+	// with the lever skill that is on disk now (package sessionrec), since a
+	// resumed session may still follow an older skill that trusts a marker a
+	// contact can type. Nil refuses every contact post.
+	ContactSession func(agent string) error
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -457,7 +463,7 @@ func stateFrom(r *http.Request) *ctxState {
 func NewHandler(cfg Config) http.Handler {
 	g := &gate{cfg: cfg, rp: newReverseProxy(cfg)}
 	if len(cfg.Contacts) > 0 && cfg.ResolveAgents != nil {
-		g.contacts = &contactFence{resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg)}
+		g.contacts = &contactFence{resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), session: cfg.ContactSession}
 	}
 	return g
 }

@@ -218,6 +218,7 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 		cfg.Chat.UsedPath = st.ChatVerified()
 		cfg.Chat.SentLedgerDir = st.SentLedger()
 	}
+	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
 	return nil

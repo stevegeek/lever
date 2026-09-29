@@ -3852,3 +3852,77 @@ func TestRegisterFailsWhenTheCeilingFails(t *testing.T) {
 	}
 	testutil.WantErrIs(t, runApply(app, deps), errForbidden)
 }
+
+// sessionSpy records BeginSession calls and the commits that ran.
+type sessionSpy struct{ begun, committed []string }
+
+func (s *sessionSpy) begin(agent string) func() error {
+	s.begun = append(s.begun, agent)
+	return func() error { s.committed = append(s.committed, agent); return nil }
+}
+
+// TestStartManagerRecordsOnlyFreshSessions: a create (absent record, --fresh,
+// a failed resume's recovery) records the manager's fresh session; a resume
+// or a no-op never does, so a resumed conversation is never taken for one
+// that loaded the current skill.
+func TestStartManagerRecordsOnlyFreshSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		r          func(f *proc.FakeRunner) *agentLifecycleRunner
+		fresh      bool
+		wantCommit bool
+	}{
+		{"absent", func(f *proc.FakeRunner) *agentLifecycleRunner {
+			return &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+		}, false, true},
+		{"suspended", func(f *proc.FakeRunner) *agentLifecycleRunner {
+			return &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+		}, false, false},
+		{"running", func(f *proc.FakeRunner) *agentLifecycleRunner {
+			return &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 6 seconds"}
+		}, false, false},
+		{"fresh over suspended", func(f *proc.FakeRunner) *agentLifecycleRunner {
+			return &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+		}, true, true},
+		{"failed resume recovered", func(f *proc.FakeRunner) *agentLifecycleRunner {
+			return &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped",
+				resumeErr: fmt.Errorf("cannot resume agent 'hello': agent does not exist")}
+		}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			spy := &sessionSpy{}
+			deps := Deps{Scion: scion.New(tc.r(f), scion.Options{}), BeginSession: spy.begin, Log: func(string, ...any) {}}
+			run := runApply
+			if tc.fresh {
+				run = runApplyFresh
+			}
+			if err := run(app, deps); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got := len(spy.committed) == 1 && spy.committed[0] == "hello"; got != tc.wantCommit {
+				t.Fatalf("begun %v committed %v, want a commit: %v", spy.begun, spy.committed, tc.wantCommit)
+			}
+			if !tc.wantCommit && len(spy.begun) != 0 {
+				t.Fatalf("a resume or no-op began a session record: %v", spy.begun)
+			}
+		})
+	}
+}
+
+// TestStartManagerCreateRaceIsNotRecorded: when scion answers the create
+// with "already exists" (a record the observe step missed), the existing
+// session is not recorded as fresh.
+func TestStartManagerCreateRaceIsNotRecorded(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	spy := &sessionSpy{}
+	lr := &agentLifecycleRunner{FakeRunner: f, slug: "hello", startErr: errors.New("agent 'hello' already exists")}
+	r := &run{app: app, d: fillDeps(Deps{Scion: scion.New(lr, scion.Options{}), BeginSession: spy.begin}),
+		brokerStart: RetryBudget{Attempts: 1, Interval: time.Millisecond}, minted: true}
+	if err := r.startManagerCreate(context.Background(), scion.StartOpts{Worker: "hello"}); err != nil {
+		t.Fatalf("create race: %v", err)
+	}
+	if len(spy.committed) != 0 {
+		t.Fatalf("an existing session was recorded as fresh: %v", spy.committed)
+	}
+}

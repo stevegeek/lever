@@ -13,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -56,10 +57,13 @@ type skillTarget struct {
 	content []byte // rendered
 }
 
+// skillTargets is the lever skill of every agent, at the path
+// sessionrec.SkillRel names for it (the session record hashes the same file).
 func skillTargets(app *config.App) []skillTarget {
-	ts := []skillTarget{{relPath: ".claude/skills/lever-operator/SKILL.md", content: skills.Operator(cli.Version, brokerctl.ChatConfigured(app))}}
+	rel, _ := sessionrec.SkillRel(app, app.Name)
+	ts := []skillTarget{{relPath: rel, content: skills.Operator(cli.Version, brokerctl.ChatConfigured(app))}}
 	for _, g := range app.Workers {
-		rel := filepath.ToSlash(filepath.Join(g.Dir, ".claude", "skills", "lever-agent", "SKILL.md"))
+		rel, _ := sessionrec.SkillRel(app, g.Name)
 		ts = append(ts, skillTarget{relPath: rel, content: skills.Agent(cli.Version, brokerctl.ChatConfigured(app))})
 	}
 	return ts

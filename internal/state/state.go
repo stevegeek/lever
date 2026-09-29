@@ -51,6 +51,12 @@ func (s State) ChatVerified() string { return filepath.Join(s.Dir, "chat-verifie
 // written and read by the broker only.
 func (s State) SentLedger() string { return filepath.Join(s.Dir, "sent-ledger") }
 
+// Sessions is the record of each agent's last fresh session start and the
+// skill text on disk for it then (package sessionrec): written by apply (the
+// manager) and the broker (workers), read by the remote proxy before it lets
+// a contact post to an agent.
+func (s State) Sessions() string { return filepath.Join(s.Dir, "sessions.jsonl") }
+
 // OperatorSock is the broker's UNIX socket for `lever msg send` (0600,
 // bound only when the state directory is outside the tree).
 func (s State) OperatorSock() string { return filepath.Join(s.Dir, "operator.sock") }

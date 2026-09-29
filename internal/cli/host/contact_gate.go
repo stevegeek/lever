@@ -1,12 +1,20 @@
 package host
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/sessionrec"
+	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -27,6 +35,11 @@ import (
 //
 // An adopted (owner-customized) skill counts as current only when it was
 // adopted at this version.
+//
+// The disk is not the whole story: a resumed session keeps the skill text it
+// loaded before. That part is checked per agent, per post, by the remote
+// proxy (contactSession), because only then is it known which agents exist
+// and whether this bring-up started them fresh.
 func checkContactGate(app *config.App, st state.State) error {
 	if !app.RemoteEnabled() || len(app.Remote.LoginsWithTier(config.TierContact)) == 0 {
 		return nil
@@ -54,4 +67,96 @@ func checkContactGate(app *config.App, st state.State) error {
 			cli.Version, strings.Join(stale, ", "))
 	}
 	return nil
+}
+
+// contactSession is the remote proxy's check before a contact's post reaches
+// agent (remoteproxy.Config.ContactSession). It allows the post only when
+// all of these hold:
+//
+//   - the state directory is outside the tree (the session record is a host
+//     record agents cannot write);
+//   - agent's lever skill on disk is this version's (or adopted at this
+//     version), the same test as checkContactGate;
+//   - the record of agent's last fresh session start (package sessionrec)
+//     names that same skill text.
+//
+// The last is what checkContactGate cannot see from the disk: a resumed
+// session keeps the skill text it loaded before, and an older skill trusts a
+// lever marker a contact can type. A session that started before the skill
+// changed, or one lever has no record of starting (created by an older
+// lever), is refused until it starts fresh.
+func contactSession(app *config.App, st state.State, agent string) error {
+	if brokerctl.StateInsideTree(app, st) {
+		return errors.New("the state directory is inside the tree")
+	}
+	rel, ok := sessionrec.SkillRel(app, agent)
+	if !ok {
+		return fmt.Errorf("%q is not an agent of this instance", agent)
+	}
+	var want []byte
+	for _, t := range skillTargets(app) {
+		if t.relPath == rel {
+			want = t.content
+		}
+	}
+	onDisk, err := fsutil.ReadInTree(app.Tree, rel)
+	if err != nil {
+		return errors.New("its lever skill cannot be read")
+	}
+	hash := skills.Hash(onDisk)
+	if hash != skills.Hash(want) {
+		adopted, err := loadAdoptedState(st)
+		if err != nil || adopted[rel] != hash || skills.LeverVersion(onDisk) != cli.Version {
+			return fmt.Errorf("its lever skill is not lever %s's", cli.Version)
+		}
+	}
+	recs, err := sessionrec.Latest(st.Sessions())
+	if err != nil {
+		return errors.New("the session record cannot be read")
+	}
+	r, ok := recs[agent]
+	switch {
+	case !ok:
+		return errors.New("lever has no record of its session starting fresh")
+	case r.SkillHash != hash:
+		return fmt.Errorf("its session started before its current skill was written (at %s, lever %s)",
+			r.Started.UTC().Format(time.RFC3339), r.Version)
+	}
+	return nil
+}
+
+// contactAgents is every agent some contact login lists, in config order.
+func contactAgents(app *config.App) []string {
+	var out []string
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() != config.TierContact {
+			continue
+		}
+		for _, a := range u.Agents {
+			if !slices.Contains(out, a) {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// printContactSessionWarnings names, at every bring-up, each agent a contact
+// lists whose session contactSession would refuse, and how to fix it. It is
+// a warning, not a refusal: an agent that does not exist yet (a worker not
+// dispatched, a manager this bring-up creates) has no record either, and
+// the proxy refuses the posts anyway.
+func printContactSessionWarnings(cmd *cobra.Command, app *config.App, st state.State) {
+	if !app.RemoteEnabled() {
+		return
+	}
+	for _, a := range contactAgents(app) {
+		if err := contactSession(app, st, a); err != nil {
+			how := "it takes contact messages once the broker next creates it fresh"
+			if a == app.Name {
+				how = "run `lever up --fresh` (back up the manager's conversation first), or let this bring-up create it"
+			}
+			cmd.PrintErrf("lever: warning: remote: contacts cannot post to %s until its session starts fresh: %v; %s\n", a, err, how)
+		}
+	}
 }

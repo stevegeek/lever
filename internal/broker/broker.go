@@ -170,6 +170,12 @@ type DispatchConfig struct {
 	// PAT belongs to. /message/verify looks a message from this sender up in
 	// the sent ledger only. nil ⇒ such a message answers unavailable.
 	ResolveControllerSender func(ctx context.Context) (string, error)
+	// BeginSession is called just before a worker is created fresh and
+	// returns what records that fresh start (brokerctl.BeginSession, package
+	// sessionrec) once scion created it. A resume records nothing: the
+	// remote proxy lets a contact post to an agent only while its last fresh
+	// start saw the skill on disk now. nil ⇒ nothing is recorded (tests).
+	BeginSession func(agent string) (commit func() error)
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
@@ -261,6 +267,7 @@ type Broker struct {
 	runtime        WorkerRuntime
 	verifyRole     func(ctx context.Context, agent string) error
 	resolveAgentID func(ctx context.Context, agentSlug string) (string, error)
+	beginSession   func(agent string) (commit func() error)
 	tree           string
 	workers        map[string]WorkerSpec
 	brokerCAPEM    string
@@ -359,7 +366,7 @@ func New(c Config) *Broker {
 		// worker dispatch and messaging
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
-		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, tree: d.Tree,
+		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,

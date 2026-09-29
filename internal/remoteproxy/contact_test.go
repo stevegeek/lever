@@ -52,13 +52,19 @@ func (h *contactHub) reached() []string {
 
 func contactHandler(t *testing.T, hub *contactHub, resolve func(context.Context) (map[string]string, error)) http.Handler {
 	t.Helper()
+	return contactHandlerWith(t, hub, resolve, func(string) error { return nil })
+}
+
+func contactHandlerWith(t *testing.T, hub *contactHub, resolve func(context.Context) (map[string]string, error), session func(string) error) http.Handler {
+	t.Helper()
 	if resolve == nil {
 		resolve = func(context.Context) (map[string]string, error) {
 			return map[string]string{"w1": agentW1, "w2": agentW2, "boss": agentMgr}, nil
 		}
 	}
 	return NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
-		AllowedUsers: []string{"op@x", "c@x"}, Contacts: map[string][]string{"c@x": {"w1"}}, ResolveAgents: resolve})
+		AllowedUsers: []string{"op@x", "c@x"}, Contacts: map[string][]string{"c@x": {"w1"}}, ResolveAgents: resolve,
+		ContactSession: session})
 }
 
 func contactDo(h http.Handler, login, method, target, body string) *httptest.ResponseRecorder {
@@ -339,5 +345,43 @@ func TestContactDMListIsFilteredOnTheRetry(t *testing.T) {
 	rw := contactDo(h, "c@x", "GET", "/api/v1/chat/dms", "")
 	if rw.Code != 200 || strings.Contains(rw.Body.String(), "secret") || !strings.Contains(rw.Body.String(), own) {
 		t.Fatalf("dms after the session retry = %d %s", rw.Code, rw.Body)
+	}
+}
+
+// TestContactPostNeedsAFreshSession: a contact's post reaches an agent only
+// when ContactSession says that agent's session started fresh with the
+// current skill; a stale session (or no check at all) refuses the post
+// before the hub sees it, and reading the chat still works.
+func TestContactPostNeedsAFreshSession(t *testing.T) {
+	post := dmPath(agentW1, contactUID, "/messages")
+	for name, session := range map[string]func(string) error{
+		"stale": func(agent string) error {
+			if agent != "w1" {
+				t.Errorf("session asked about %q, want w1", agent)
+			}
+			return errors.New("its session started with an older skill")
+		},
+		"no check": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			hub := newContactHub(t)
+			h := contactHandlerWith(t, hub, nil, session)
+			rw := contactDo(h, "c@x", "POST", post, `{"content":"hello"}`)
+			if rw.Code != http.StatusForbidden || !strings.Contains(rw.Body.String(), "start it fresh") {
+				t.Fatalf("post = %d %s, want 403 start it fresh", rw.Code, rw.Body)
+			}
+			for _, p := range hub.reached() {
+				if strings.HasPrefix(p, "POST ") {
+					t.Fatalf("the hub saw the refused post: %v", hub.reached())
+				}
+			}
+			if rw := contactDo(h, "c@x", "GET", post, ""); rw.Code != http.StatusOK {
+				t.Fatalf("reading the chat = %d, want 200", rw.Code)
+			}
+		})
+	}
+	hub := newContactHub(t)
+	if rw := contactDo(contactHandler(t, hub, nil), "c@x", "POST", post, `{"content":"hello"}`); rw.Code != http.StatusOK && rw.Code != http.StatusCreated {
+		t.Fatalf("a post to a fresh session = %d %s", rw.Code, rw.Body)
 	}
 }

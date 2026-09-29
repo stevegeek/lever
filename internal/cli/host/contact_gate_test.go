@@ -1,11 +1,16 @@
 package host
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/state"
@@ -75,5 +80,101 @@ func TestContactGateIgnoresInstancesWithoutContacts(t *testing.T) {
 	app.Remote = config.Remote{Enabled: true, AllowedUsers: []config.RemoteUser{{Login: "op@example.com"}}}
 	if err := checkContactGate(app, st); err != nil {
 		t.Fatalf("operators only: %v", err)
+	}
+}
+
+// TestContactSessionNeedsAFreshStartWithTheCurrentSkill: the proxy lets a
+// contact post to an agent only when lever recorded a fresh start of that
+// agent's session with the skill that is on disk now, and that skill is this
+// version's. A session lever never recorded (an older lever created it), one
+// that started before `lever init` rewrote the skill (a resumed 0.27
+// conversation), and a stale skill on disk are all refused.
+func TestContactSessionNeedsAFreshStartWithTheCurrentSkill(t *testing.T) {
+	app, tree, st := scaffoldFixture(t)
+	app.Name = "hello"
+	withContact(app)
+	rel := "workers/scratch/.claude/skills/lever-agent/SKILL.md"
+	// A 0.27 skill on disk, and the worker's session started with it.
+	old := []byte("---\nname: lever-agent\nlever-version: 0.27.0\n---\nOnly the FIRST line counts.\n")
+	if err := fsutil.WriteInTree(tree, rel, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "not lever") {
+		t.Fatalf("stale skill on disk: %v", err)
+	}
+	if err := brokerctl.BeginSession(app, st, "0.27.0", "scratch")(); err != nil {
+		t.Fatal(err)
+	}
+	// The operator upgrades and runs lever init: the disk is current, the
+	// resumed session still holds the old text.
+	if _, err := syncSkills(app, st, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkContactGate(app, st); err != nil {
+		t.Fatalf("the disk gate: %v", err)
+	}
+	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "started before its current skill") {
+		t.Fatalf("resumed old session: %v", err)
+	}
+	// An agent lever has no record of starting (the manager here).
+	if err := contactSession(app, st, "hello"); err == nil || !strings.Contains(err.Error(), "no record") {
+		t.Fatalf("unrecorded session: %v", err)
+	}
+	// A fresh start with the current skill is allowed.
+	if err := brokerctl.BeginSession(app, st, cli.VersionString(), "scratch")(); err != nil {
+		t.Fatal(err)
+	}
+	if err := contactSession(app, st, "scratch"); err != nil {
+		t.Fatalf("fresh session refused: %v", err)
+	}
+	// An agent the instance does not have is refused.
+	if err := contactSession(app, st, "nobody"); err == nil {
+		t.Fatal("an unknown agent was allowed")
+	}
+}
+
+// TestContactSessionRefusesInTreeState: with the state directory inside the
+// tree the session record is agent-writable, so every post is refused.
+func TestContactSessionRefusesInTreeState(t *testing.T) {
+	root := t.TempDir()
+	st := state.ForConfig(root)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	app := withContact(&config.App{Name: "hello", Tree: root, Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}})
+	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "inside the tree") {
+		t.Fatalf("err = %v, want the in-tree refusal", err)
+	}
+	if err := brokerctl.BeginSession(app, st, "x", "scratch")(); err == nil {
+		t.Fatal("a session was recorded inside the tree")
+	}
+}
+
+// TestContactSessionWarningsNameTheAgentAndTheFix: a bring-up warns about
+// each contact-listed agent whose session would be refused, with its fix.
+func TestContactSessionWarningsNameTheAgentAndTheFix(t *testing.T) {
+	app, _, st := scaffoldFixture(t)
+	app.Name = "hello"
+	withContact(app)
+	app.Remote.AllowedUsers[1].Agents = []string{"scratch", "hello"}
+	if _, err := syncSkills(app, st, false, false); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetErr(&out)
+	printContactSessionWarnings(cmd, app, st)
+	for _, want := range []string{"contacts cannot post to scratch", "contacts cannot post to hello", "lever up --fresh"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("warnings %q, want %q", out.String(), want)
+		}
+	}
+	if err := brokerctl.BeginSession(app, st, cli.VersionString(), "scratch")(); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	printContactSessionWarnings(cmd, app, st)
+	if strings.Contains(out.String(), "scratch") {
+		t.Fatalf("a fresh session still warned: %q", out.String())
 	}
 }

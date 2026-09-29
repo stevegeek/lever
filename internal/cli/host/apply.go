@@ -895,6 +895,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
 			}
+			printContactSessionWarnings(cmd, app, stateFor(path))
 			if dryRun {
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					if s.TarPath != "" {
@@ -1321,6 +1322,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// state of its own (unlike Start's reuse probe).
 		StartRemoteProxy: rc.Start,
 		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
+		// BeginSession records the manager's fresh starts for the contact
+		// gate (see sessionrec and remoteContactSession).
+		BeginSession: func(agent string) func() error {
+			return brokerctl.BeginSession(w.app, st, cli.VersionString(), agent)
+		},
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is

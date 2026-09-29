@@ -49,6 +49,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			if err := checkContactGate(app, st); err != nil {
 				return err
 			}
+			printContactSessionWarnings(cmd, app, st)
 			auditFn, auditCloser, err := remoteproxy.OpenAudit(st.RemoteAudit())
 			if err != nil {
 				return err
@@ -147,6 +148,9 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// remote PAT, used only for GET agent lists.
 		Contacts:      remoteContacts(app),
 		ResolveAgents: remoteAgentResolver(app, st, target, dial),
+		// A contact's post reaches an agent only while that agent's session
+		// started fresh with the skill on disk now (contactSession).
+		ContactSession: func(agent string) error { return contactSession(app, st, agent) },
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),

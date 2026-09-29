@@ -72,7 +72,13 @@ version bump moves the block under the new version heading.
 - **Contacts need current skills.** `lever apply`, `lever up` and
   `lever remote serve` refuse contact logins until `lever init` has
   written this version's skills for every agent, and while the state
-  directory is inside the tree.
+  directory is inside the tree. A resumed session keeps the skill text it
+  read before, so lever also records each fresh session start with the
+  skill on disk then (`.lever-state/sessions.jsonl`; apply for the
+  manager, the broker for a worker, never a resume), and the remote proxy
+  refuses a contact's post to an agent whose last fresh start saw another
+  skill text, or that lever has no record of starting. Bring-ups warn about
+  each such agent.
 - **The 0.27 `verified` field is true only for an operator's web post.** A
   contact's post and a lever message answer `verified: false`, so a 0.27
   skill never takes either for the operator's chat.
@@ -92,6 +98,10 @@ version bump moves the block under the new version heading.
 - Run `lever apply` (it restarts the broker), then `lever init` to refresh
   both skills; with contact logins, run `lever init` first, since apply
   refuses contacts while any skill is stale.
+- Contacts can post to an agent only once its session starts fresh on
+  this version: for the manager, `lever up --fresh` (back up the
+  conversation first, see the upgrade notes on `--fresh`); a worker once
+  the broker creates it again.
 - Rebuild the agent image to get `message_verify` with its `ref`. Until
   then, `chat_verify` works: a lever message is matched by its timestamp,
   which needs the guest clock within 5 seconds of the host (doctor row

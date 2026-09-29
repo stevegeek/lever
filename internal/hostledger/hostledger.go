@@ -76,13 +76,21 @@ func (w *File) Append(v any) error {
 	}
 	// O_NOFOLLOW: never append to (or chmod) whatever a symlink here points
 	// at; ReadFile refuses a symlinked file anyway.
-	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|ONoFollow, 0o600)
+	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_RDWR|os.O_APPEND|ONoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("%s: %w", w.Label, err)
 	}
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("%s: %w", w.Label, err)
+	}
+	// A crash mid-write leaves a torn last line with no newline. Start on a
+	// new line, so the torn one is skipped on read and this one is kept.
+	if fi, err := f.Stat(); err == nil && fi.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := f.ReadAt(last, fi.Size()-1); err == nil && last[0] != '\n' {
+			line = append([]byte{'\n'}, line...)
+		}
 	}
 	if _, err := f.Write(line); err != nil {
 		_ = f.Close()

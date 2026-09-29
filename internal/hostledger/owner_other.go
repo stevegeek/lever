@@ -8,3 +8,6 @@ import "io/fs"
 func FileOwner(fs.FileInfo) (int, bool) { return 0, false }
 
 const ONoFollow = 0
+
+// FileID is fi's inode number, where the platform reports one.
+func FileID(fs.FileInfo) uint64 { return 0 }

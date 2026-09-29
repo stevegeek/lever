@@ -834,3 +834,19 @@ func TestEnsureRemoteWebRoleTierMove(t *testing.T) {
 		t.Fatalf("after the move back to operator, bound to %v", got)
 	}
 }
+
+// A contact ceiling wider than the contact role (an earlier lever wrote
+// hub-member's reads into it) is a reason to grant again.
+func TestContactCeilingMustBeExact(t *testing.T) {
+	rec := state.RemoteRoleRecord{Permissions: remoteRolePermissions(true), Bound: map[string]string{"c@x": "u1"},
+		Ceilings: map[string]string{"c@x": "k1"}, CeilingPermissions: remoteCeilingPermissions(nil, remoteRolePermissions(true)),
+		Contacts: []string{"c@x"}, ContactPermissions: contactRolePermissions(),
+		ContactCeilingPermissions: []string{"agent.message", "user.list"}}
+	if r := remoteRoleReason(rec, true, []string{"c@x"}, []string{"c@x"}, remoteRolePermissions(true)); !strings.Contains(r, "ceiling") {
+		t.Fatalf("reason %q, want the wide contact ceiling reported", r)
+	}
+	rec.ContactCeilingPermissions = contactRolePermissions()
+	if r := remoteRoleReason(rec, true, []string{"c@x"}, []string{"c@x"}, remoteRolePermissions(true)); r != "" {
+		t.Fatalf("reason %q for an exact ceiling", r)
+	}
+}

@@ -244,8 +244,9 @@ func contactRoleReason(rec state.RemoteRoleRecord, emails, contacts []string) st
 		return fmt.Sprintf("the contact role was granted with %s; this lever needs %s",
 			strings.Join(rec.ContactPermissions, ","), strings.Join(perms, ","))
 	}
-	if len(rec.Contacts) > 0 && !ceilingPermissionsFit(rec.ContactCeilingPermissions, perms) {
-		return "the contacts' project-create ceiling does not fit the contact role"
+	if len(rec.Contacts) > 0 && !hubapi.SamePermissions(rec.ContactCeilingPermissions, perms) {
+		return fmt.Sprintf("the contacts' ceiling was written with %s; it must be exactly %s",
+			strings.Join(rec.ContactCeilingPermissions, ","), strings.Join(perms, ","))
 	}
 	return ""
 }

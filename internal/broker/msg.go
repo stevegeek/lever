@@ -42,6 +42,11 @@ const (
 	relayMarkerFormat = "[lever: relayed from worker %s]"
 	// directiveNoticeMarker is the first line of a directive notification.
 	directiveNoticeMarker = "[lever: operator directive notice]"
+	// managerMarker is the first line of every body the manager sends. A
+	// worker's chat also carries a conversation and a user: sender, and a
+	// contact (a remote login with tier contact) can post into a worker's
+	// chat; the marker is what tells a worker its manager wrote the text.
+	managerMarker = "[lever: from the manager]"
 )
 
 // markerLike matches anything a reader could take for a lever marker or for a
@@ -197,6 +202,8 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	body := req.Body
 	if tgt.relayFrom != "" {
 		body = relayedWorkerBody(tgt.relayFrom, body)
+	} else {
+		body = managerMarker + "\n" + neutraliseMarkers(body)
 	}
 	if err := b.runtime.Message(r.Context(), scion.MsgOpts{
 		To: tgt.scionTo, Body: body, Interrupt: req.Interrupt, Project: tgt.project,

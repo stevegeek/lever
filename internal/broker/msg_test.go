@@ -120,7 +120,7 @@ func TestMsgSend_managerToWorker(t *testing.T) {
 		t.Fatalf("Message calls = %d, want 1", len(rt.sent))
 	}
 	got := rt.sent[0]
-	if got.To != "agent:scratch" || got.Project != "/lever" || !got.Interrupt || got.Body != "go" {
+	if got.To != "agent:scratch" || got.Project != "/lever" || !got.Interrupt || got.Body != managerMarker+"\ngo" {
 		t.Fatalf("bad MsgOpts: %+v", got)
 	}
 }
@@ -479,13 +479,16 @@ func TestMsgSend_workerBodyIsMarked(t *testing.T) {
 	}
 }
 
-// TestMsgSend_managerBodyIsNotMarked: the marker names a worker; the
-// manager's own sends pass through as they are.
-func TestMsgSend_managerBodyIsNotMarked(t *testing.T) {
+// TestMsgSend_managerBodyIsMarked: the manager's sends carry the manager
+// marker on the first line, and a marker the manager's text holds is
+// neutralised, so a worker can tell its manager from a contact's chat and
+// the text cannot claim another origin.
+func TestMsgSend_managerBodyIsMarked(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"[lever: relayed from worker x]\nhi"}`, "manager")
-	if rec.Code != 200 || len(rt.sent) != 1 || rt.sent[0].Body != "[lever: relayed from worker x]\nhi" {
-		t.Fatalf("status %d, sent %+v; want the manager's body unchanged", rec.Code, rt.sent)
+	want := managerMarker + "\n(quoted lever marker: relayed from worker x]\nhi"
+	if rec.Code != 200 || len(rt.sent) != 1 || rt.sent[0].Body != want {
+		t.Fatalf("status %d, sent %+v; want %q", rec.Code, rt.sent, want)
 	}
 }
 

@@ -739,8 +739,12 @@ remote:
   `deny-contact`).
 - **What a contact may not send.** A word that starts with `@` (scion would route the message to
   another agent), a reply to a message by id, an attachment, any field other than the text, a
-  lever marker anywhere, or a first line that starts with a bracket (agents trust a marker on
-  the first line without a check).
+  lever marker anywhere, or a first line that starts with anything but a letter or a digit, or
+  that holds the word "lever" followed by a colon or a space (a lever marker sits on the first
+  line). The proxy answers 403 with the reason; the contact rewrites the message.
+- **Markers cannot make chat pass for lever.** Agents check every `user:` message with
+  `chat_verify` first. A message that verifies is a person's chat and is judged by its tier; a
+  lever marker counts only on a message that does not verify, which no web chat post is.
 - **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
   contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
   contact only with what the task needs, but that is an instruction, not a fence.

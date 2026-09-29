@@ -450,8 +450,9 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 			", which agents mount, so a ledger there proves nothing",
 			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
 	case len(app.Remote.AllowedUsers) == 0:
-		return warnResult(name, "off: remote.allowed_users is empty, so the proxy verifies no login and records no chat",
-			"list the operator's login in remote.allowed_users, then run `lever apply`")
+		return warnResult(name, "off: remote.allowed_users is empty, so the proxy verifies no login and records no chat; "+
+			"agents cannot verify a web chat post and treat every one as data (they do not act on it or reply)",
+			"list the operator's login in remote.allowed_users, then run `lever apply` and `lever init`")
 	}
 	p := brokerctl.ChatLedgerPath(app, st)
 	// Every allowed login speaks with operator authority once verified: say

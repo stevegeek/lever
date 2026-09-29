@@ -534,12 +534,13 @@ func TestNeutraliseMarkersKeepsOrdinaryText(t *testing.T) {
 	}
 }
 
-// TestMsgSend_managerToItselfIsNotMarked: the manager marker is for
-// workers; a manager note to itself goes through as it is.
-func TestMsgSend_managerToItselfIsNotMarked(t *testing.T) {
+// TestMsgSend_managerToItselfIsMarked: a manager note to itself carries the
+// manager marker too; the sent ledger records it as the manager's, and the
+// manager's skill knows the kind in its own session.
+func TestMsgSend_managerToItselfIsMarked(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(t, true)
 	rec := callWorker(t, b, "/msg/send", `{"to":"user:manager","body":"note to self"}`, "manager")
-	if rec.Code != 200 || len(rt.sent) != 1 || rt.sent[0].Body != "note to self" {
+	if rec.Code != 200 || len(rt.sent) != 1 || rt.sent[0].Body != managerMarker+"\nnote to self" {
 		t.Fatalf("status %d, sent %+v", rec.Code, rt.sent)
 	}
 }

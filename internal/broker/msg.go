@@ -8,6 +8,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/marker"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/sentledger"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -22,6 +23,9 @@ var errUnknownRecipient = errors.New("unknown recipient")
 type msgTarget struct {
 	scionTo string
 	project string
+	// recipientCN is the recipient's cert CN: whom the sent ledger records
+	// the message for, and who alone can verify it.
+	recipientCN string
 	// relayFrom is the sending worker's slug when the caller is a worker, and
 	// "" when it is the manager. A non-empty value makes handleMsgSend mark the
 	// body (see relayedWorkerBody).
@@ -31,34 +35,43 @@ type msgTarget struct {
 // Lever's own message markers. The broker sends every message through the
 // host-side scion CLI with the controller PAT, so the recipient's envelope
 // names the controller's hub user as the sender (`from: user:<controller>`)
-// and carries a conversation, whoever wrote the text. Without a marker a
-// worker's message would look like the owner chatting, and the manager would
-// answer into a DM that nobody reads and give worker text owner-tier trust.
-// The first line of the body is therefore lever's to write: the manager's
-// skill (lever-operator SKILL.md) treats a body whose first line is one of
-// these markers as lever-delivered, never as chat.
+// and carries a conversation, whoever wrote the text.
+//
+// The markers are readable hints, never evidence: anyone whose text reaches
+// an agent can type one. Who wrote a message is decided by the sent ledger
+// (sent.go): the first line also carries the send's ref, and the recipient's
+// message_verify call gets the recorded kind and text back from the host
+// record. The broker still writes the marker first, and still rewrites
+// marker-like text in a worker's or the manager's body, so a session stays
+// readable.
 const (
-	// relayMarkerFormat is the first line of every body a worker sends.
+	// relayMarkerFormat starts the first line of every body a worker sends.
 	relayMarkerFormat = "[lever: relayed from worker %s]"
-	// directiveNoticeMarker is the first line of a directive notification.
+	// directiveNoticeMarker starts the first line of a directive notice.
 	directiveNoticeMarker = "[lever: operator directive notice]"
-	// managerMarker is the first line of every body the manager sends. A
-	// worker's chat also carries a conversation and a user: sender, and a
-	// contact (a remote login with tier contact) can post into a worker's
-	// chat; the marker is what tells a worker its manager wrote the text.
+	// managerMarker starts the first line of every body the manager sends.
 	managerMarker = "[lever: from the manager]"
+	// operatorNoteMarker starts the first line of every `lever msg send`
+	// note (handleOperatorNote).
+	operatorNoteMarker = "[lever: operator note]"
 )
 
 // neutraliseMarkers rewrites every marker-like sequence in text a worker or
 // the manager wrote (see package marker).
 func neutraliseMarkers(body string) string { return marker.Neutralise(body) }
 
+// markedBody is the body the broker sends for text someone else wrote: the
+// marker and the send's ref on the first line (refLine), then the text with
+// every marker-like sequence neutralised.
+func markedBody(marker, ref, text string) string {
+	return refLine(marker, ref) + "\n" + neutraliseMarkers(text)
+}
+
 // relayedWorkerBody is the body the broker sends for a worker: the relay
 // marker naming the worker (a slug from the operator's config, never from
-// the request) on the first line, then the worker's own text with every
-// marker-like sequence neutralised.
-func relayedWorkerBody(slug, body string) string {
-	return fmt.Sprintf(relayMarkerFormat, slug) + "\n" + neutraliseMarkers(body)
+// the request), the ref, then the worker's own text.
+func relayedWorkerBody(slug, ref, body string) string {
+	return markedBody(fmt.Sprintf(relayMarkerFormat, slug), ref, body)
 }
 
 // resolveMsgTarget applies the messaging policy and resolves `to` for caller.
@@ -78,7 +91,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if !isManager {
 		relayFrom = callerSlug
 	}
-	managerTarget := msgTarget{scionTo: "agent:" + b.managerSlug, project: b.instanceProject, relayFrom: relayFrom}
+	managerTarget := msgTarget{scionTo: "agent:" + b.managerSlug, project: b.instanceProject, relayFrom: relayFrom, recipientCN: b.manager}
 	// user:* is a legacy-shaped alias, not a real inbox: scion refuses
 	// user-addressed sends from outside an agent container ("SCION_AGENT_NAME
 	// not set"), and the broker's runtime scion always runs jail-side. In the
@@ -98,7 +111,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	if rest, ok := strings.CutPrefix(to, "agent:"); ok && rest != "" {
 		name = rest
 	}
-	_, slug, toManager, known := b.identity(name)
+	cn, slug, toManager, known := b.identity(name)
 	switch {
 	case !known:
 		return msgTarget{}, fmt.Errorf("%w %q", errUnknownRecipient, to)
@@ -107,7 +120,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	case !isManager && caller != name && !b.workerToWorker:
 		return msgTarget{}, fmt.Errorf("worker→worker messaging is disabled")
 	}
-	return msgTarget{scionTo: "agent:" + slug, project: b.instanceProject, relayFrom: relayFrom}, nil
+	return msgTarget{scionTo: "agent:" + slug, project: b.instanceProject, relayFrom: relayFrom, recipientCN: cn}, nil
 }
 
 // resolveListSubject resolves WHOSE inbox caller may read, as an agent slug.
@@ -185,25 +198,30 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	if !b.runtimeReady(w) {
 		return
 	}
-	body := req.Body
+	// The kind comes from the caller's identity, never from the request: a
+	// worker's message is recorded as that worker's, and anything the
+	// manager sends (a note to itself included) as the manager's.
+	kind, compose := sentledger.KindManager, func(ref string) string { return markedBody(managerMarker, ref, req.Body) }
 	if tgt.relayFrom != "" {
-		body = relayedWorkerBody(tgt.relayFrom, body)
-	} else if tgt.scionTo != "agent:"+b.managerSlug {
-		// A manager note to itself stays as it is: its skill knows no
-		// manager marker, and no one else can be taken for it there.
-		body = managerMarker + "\n" + neutraliseMarkers(body)
+		kind = sentledger.WorkerKind(tgt.relayFrom)
+		compose = func(ref string) string { return relayedWorkerBody(tgt.relayFrom, ref, req.Body) }
 	}
-	if err := b.runtime.Message(r.Context(), scion.MsgOpts{
-		To: tgt.scionTo, Body: body, Interrupt: req.Interrupt, Project: tgt.project,
-	}); err != nil {
-		b.audit("msg", caller, "error", "send->"+req.To+": "+err.Error())
+	ref, err := b.sendRecorded(r.Context(), tgt.recipientCN, strings.TrimPrefix(tgt.scionTo, "agent:"), kind, compose, scion.MsgOpts{
+		To: tgt.scionTo, Interrupt: req.Interrupt, Project: tgt.project,
+	})
+	if errors.Is(err, errNotRecorded) {
+		http.Error(w, "message not sent: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if err != nil {
+		b.audit("msg", caller, "error", "send->"+req.To+" "+ref+": "+err.Error())
 		// Generic wire body (package convention, see worker.go): the scion CLI
 		// error text can echo argv (recipient/message body) — detail stays in
 		// the audit log only.
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	b.audit("msg", caller, "allow", "send->"+tgt.scionTo)
+	b.audit("msg", caller, "allow", "send->"+tgt.scionTo, "kind", kind, "ref", ref)
 	writeJSON(w, wire.MsgSendResponse{OK: true})
 }
 

@@ -25,6 +25,11 @@ type ChatConfig struct {
 	// UsedPath records which messages have been verified, so the one-use
 	// rule survives a broker restart. "" keeps it in memory only (tests).
 	UsedPath string
+	// SentLedgerDir is the sent ledger (package sentledger): the record of
+	// every message the broker sends to an agent. "" means the state
+	// directory is inside the tree: sends go out unrecorded and no lever
+	// message can be verified.
+	SentLedgerDir string
 }
 
 // maxChatFromLen bounds the "from" an agent may send: a sender reference is

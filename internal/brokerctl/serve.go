@@ -209,8 +209,14 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 			ExpiryMax:  app.EffectiveDirectiveExpiryMax(),
 		}
 	}
-	if lp := ChatLedgerPath(app, st); lp != "" {
-		cfg.Chat = broker.ChatConfig{LedgerPath: lp, UsedPath: st.ChatVerified()}
+	// The host records agents verify their messages against: the chat
+	// ledger (web posts, only with verified chat on) and the sent ledger
+	// (lever's own sends), plus the record of which were verified. None of
+	// them is kept inside the tree, where an agent could write it.
+	cfg.Chat = broker.ChatConfig{LedgerPath: ChatLedgerPath(app, st)}
+	if !StateInsideTree(app, st) {
+		cfg.Chat.UsedPath = st.ChatVerified()
+		cfg.Chat.SentLedgerDir = st.SentLedger()
 	}
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)

@@ -46,6 +46,15 @@ func (s State) ChatLedger() string { return filepath.Join(s.Dir, "chat-ledger") 
 // use each), kept across broker restarts.
 func (s State) ChatVerified() string { return filepath.Join(s.Dir, "chat-verified.jsonl") }
 
+// SentLedger is the broker's record of every message lever sends to an agent
+// (package sentledger), a directory with one file per recipient and kind:
+// written and read by the broker only.
+func (s State) SentLedger() string { return filepath.Join(s.Dir, "sent-ledger") }
+
+// OperatorSock is the broker's UNIX socket for `lever msg send` (0600,
+// bound only when the state directory is outside the tree).
+func (s State) OperatorSock() string { return filepath.Join(s.Dir, "operator.sock") }
+
 // DirectiveAudit is the broker's operator-directive audit log.
 func (s State) DirectiveAudit() string { return filepath.Join(s.Dir, "directives.log") }
 

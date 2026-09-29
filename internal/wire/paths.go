@@ -19,7 +19,10 @@ const (
 	PathMsgList          = "/msg/list"
 	PathDirectiveConsume = "/directive/consume"
 	PathDirectiveCheck   = "/directive/check"
-	PathChatVerify       = "/chat/verify"
+	PathMessageVerify    = "/message/verify"
+	// PathChatVerify is the 0.27 route agent images of that release post
+	// to; it answers like PathMessageVerify.
+	PathChatVerify = "/chat/verify"
 )
 
 // Admin (loopback) listener routes.
@@ -33,6 +36,9 @@ const (
 	// the broker's guest channel (the acceptance harness's host-side mint).
 	PathWorkerTicket = "/worker-ticket"
 )
+
+// Operator note (UDS) channel route: `lever msg send`.
+const PathOperatorNote = "/operator/note"
 
 // Operator-directive (UDS) admin channel routes.
 const (

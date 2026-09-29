@@ -1767,16 +1767,30 @@ func TestRemoteAllowedUsersShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("well-formed logins must load: %v", err)
 	}
-	if !slices.Equal(app.Remote.AllowedUsers, ok) {
+	if !slices.Equal(app.Remote.Logins(), ok) {
 		t.Fatalf("allowed_users = %v", app.Remote.AllowedUsers)
 	}
 	for _, bad := range []string{
 		"a@x.com, b@x.com", "a@x.com,b@x.com", "me @example.com", "tab\there", "usr/1", "usr:1",
 		"alice@id.lever.local", "lever-operator@lever.local",
+		// The hub user lever sends every message as.
+		"dev@localhost", "Dev@LocalHost",
 	} {
 		t.Run(bad, func(t *testing.T) {
 			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users: [%q]\n", bad), "allowed_users")
 		})
+	}
+}
+
+// TestRemoteWebSenders: each sign-in's envelope sender, lowercased the way
+// the hub stores emails; the unnamed operator when allowed_users is empty.
+func TestRemoteWebSenders(t *testing.T) {
+	r := Remote{AllowedUsers: []RemoteUser{{Login: "Me@Example.com"}, {Login: "usr_1"}, {Login: "c@x.org", Tier: TierContact}}}
+	if got := r.WebSenders(); !slices.Equal(got, []string{"user:c@x.org", "user:me@example.com", "user:usr_1@id.lever.local"}) {
+		t.Fatalf("WebSenders = %v", got)
+	}
+	if got := (Remote{}).WebSenders(); !slices.Equal(got, []string{"user:lever-operator@lever.local"}) {
+		t.Fatalf("empty WebSenders = %v", got)
 	}
 }
 

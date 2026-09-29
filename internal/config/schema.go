@@ -356,7 +356,10 @@ type Remote struct {
 	// exactly against the IdentityHeader value the front sets
 	// (Tailscale-User-Login from `tailscale serve` by default). The same list
 	// names the hub users the login path creates (remoteproxy.HubUserEmails).
-	AllowedUsers []string `yaml:"allowed_users"`
+	//
+	// Each entry is a login (tier operator) or a {login, tier, agents} map:
+	// see RemoteUser. Logins() lists the logins alone.
+	AllowedUsers []RemoteUser `yaml:"allowed_users"`
 	// IdentityHeader is the request header the authenticating front puts the
 	// verified login in. Empty = DefaultRemoteIdentityHeader
 	// (Tailscale-User-Login). Another front sets its own, e.g. exe.dev's

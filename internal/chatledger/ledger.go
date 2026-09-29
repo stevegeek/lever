@@ -5,7 +5,7 @@
 // came through the authenticating front from an allowed login, the proxy
 // appends one Entry. The broker is the only reader: an agent asks it, over
 // its own mTLS channel, whether a message it received is in the ledger
-// (`chat_verify`), and acts only on the text the broker returns.
+// (`message_verify`), and acts only on the text the broker returns.
 //
 // Why an agent cannot forge an entry: the file lives in the host state
 // directory, outside every jail mount; agents reach the hub directly, never
@@ -15,21 +15,29 @@
 package chatledger
 
 import (
-	"bufio"
-	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
+
+	"github.com/stevegeek/lever/internal/hostledger"
 )
 
-// TierOperator is the tier of every allowed login in this version: the
-// login is the operator's own.
-const TierOperator = "operator"
+// The tiers a ledger entry can carry (config.TierOperator/TierContact): what
+// the verified message counts as.
+const (
+	// TierOperator: the operator's own steering.
+	TierOperator = "operator"
+	// TierContact: an external contact's words for the task.
+	TierContact = "contact"
+)
 
 // RotateCap is the size at which the ledger is moved to <path>.1 (replacing
 // any previous .1) before the next append. Lookup reads both files, so a
@@ -66,57 +74,32 @@ type Entry struct {
 	Text string `json:"text"`
 }
 
-// Writer appends entries. Safe for concurrent use by one process.
-type Writer struct {
+// fileWriter appends entries to one login's file.
+type fileWriter struct {
 	path string
-	mu   sync.Mutex
+	once sync.Once
+	f    *hostledger.File
 }
-
-// NewWriter returns a Writer for path.
-func NewWriter(path string) *Writer { return &Writer{path: path} }
 
 // Append writes e as one JSON line, rotating first when the file has grown
-// past RotateCap. The file is created 0600, and an existing file is set back
-// to 0600, so no other user can add a line.
-func (w *Writer) Append(e Entry) error {
-	line, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	line = append(line, '\n')
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if fi, err := os.Stat(w.path); err == nil && fi.Size() > RotateCap {
-		if err := os.Rename(w.path, w.path+".1"); err != nil {
-			return fmt.Errorf("chat ledger: rotate: %w", err)
-		}
-	}
-	// O_NOFOLLOW: never append to (or chmod) whatever a symlink here points
-	// at; Lookup refuses a symlinked ledger anyway.
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|ONoFollow, 0o600)
-	if err != nil {
-		return fmt.Errorf("chat ledger: %w", err)
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("chat ledger: %w", err)
-	}
-	if _, err := f.Write(line); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("chat ledger: %w", err)
-	}
-	return f.Close()
+// past RotateCap (hostledger.File.Append: 0600, O_NOFOLLOW).
+func (w *fileWriter) Append(e Entry) error {
+	w.once.Do(func() { w.f = &hostledger.File{Path: w.path, Label: label, Cap: RotateCap} })
+	return w.f.Append(e)
 }
 
-// ErrUnsafe means a ledger file can be written by another user, so its
-// entries prove nothing.
-var ErrUnsafe = errors.New("chat ledger is writable by another user")
+// label prefixes the ledger's errors.
+const label = "chat ledger"
 
-// Lookup returns the entries for agentID whose Sender is sender and whose
+// ErrUnsafe means a ledger file can be written by another user, so its
+// entries prove nothing (hostledger.ErrUnsafe).
+var ErrUnsafe = hostledger.ErrUnsafe
+
+// lookupFile returns the entries for agentID whose Sender is sender and whose
 // CreatedAt is createdAt, from path and its rotated copy. A missing file is
 // no entries, not an error. A file with group or other write permission is
 // ErrUnsafe: its lines could come from anyone.
-func Lookup(path, agentID, sender, createdAt string) ([]Entry, error) {
+func lookupFile(path, agentID, sender, createdAt string) ([]Entry, error) {
 	var out []Entry
 	seen := map[string]bool{}
 	for _, p := range []string{path + ".1", path} {
@@ -140,84 +123,23 @@ func Lookup(path, agentID, sender, createdAt string) ([]Entry, error) {
 	return out, nil
 }
 
-// maxLine bounds one ledger line: a message is at most 16000 characters
-// (scion's messages.MaxMessageLength), so this leaves room for JSON escaping.
-const maxLine = 1 << 20
+// maxLine bounds one ledger line (hostledger.MaxLine).
+const maxLine = hostledger.MaxLine
 
 func readFile(p string) ([]Entry, error) {
-	// Lstat first: a symlink could point at a file some other process can
-	// write, whatever its own mode says.
-	li, err := os.Lstat(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("chat ledger: %w", err)
-	}
-	if li.Mode()&fs.ModeSymlink != 0 || !li.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s is not a regular file", ErrUnsafe, p)
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, fmt.Errorf("chat ledger: %w", err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("chat ledger: %w", err)
-	}
-	if !os.SameFile(li, fi) {
-		return nil, fmt.Errorf("%w: %s changed while it was opened", ErrUnsafe, p)
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("%w: %s is %v", ErrUnsafe, p, fi.Mode().Perm())
-	}
-	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
-		return nil, fmt.Errorf("%w: %s belongs to uid %d", ErrUnsafe, p, owner)
-	}
 	var out []Entry
-	rd := bufio.NewReaderSize(f, 64<<10)
-	for {
-		line, err := readLine(rd)
-		if len(line) > 0 {
-			var e Entry
-			// A torn line (a crash mid-write) or an oversized one is skipped,
-			// not fatal: every other entry is still good.
-			if json.Unmarshal(line, &e) == nil {
-				out = append(out, e)
-			}
+	err := hostledger.ReadFile(p, label, func(line []byte) {
+		var e Entry
+		// A torn line (a crash mid-write) or an oversized one is skipped,
+		// not fatal: every other entry is still good.
+		if json.Unmarshal(line, &e) == nil {
+			out = append(out, e)
 		}
-		if errors.Is(err, io.EOF) {
-			return out, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("chat ledger: %w", err)
-		}
+	})
+	if err != nil {
+		return nil, err
 	}
-}
-
-// readLine returns the next line without its newline, or nil when the line
-// is longer than maxLine (the rest of it is consumed and dropped).
-func readLine(rd *bufio.Reader) ([]byte, error) {
-	var buf []byte
-	tooLong := false
-	for {
-		chunk, err := rd.ReadSlice('\n')
-		if !tooLong {
-			if len(buf)+len(chunk) > maxLine {
-				tooLong, buf = true, nil
-			} else {
-				buf = append(buf, chunk...)
-			}
-		}
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
-		}
-		if tooLong {
-			return nil, err
-		}
-		return bytes.TrimSpace(buf), err
-	}
+	return out, nil
 }
 
 // NormalizeTimestamp parses an envelope timestamp (RFC 3339) and returns it
@@ -234,4 +156,85 @@ func NormalizeTimestamp(s string) (string, error) {
 // renders a message's creation time in the delivery envelope.
 func FormatTime(t time.Time) string {
 	return t.UTC().Truncate(time.Second).Format(TimeLayout)
+}
+
+// The ledger is a directory with one file per login (FileFor), so the size
+// rotation of one login's file never drops another login's entries: a
+// contact who floods the chat can push out only their own.
+
+var ledgerFile = regexp.MustCompile(`^l-[0-9a-f]{24}\.jsonl$`)
+
+// FileFor is the ledger file name for a login.
+func FileFor(login string) string {
+	h := sha256.Sum256([]byte(login))
+	return "l-" + hex.EncodeToString(h[:12]) + ".jsonl"
+}
+
+// Writer appends entries to the ledger directory. Safe for concurrent use by
+// one process.
+type Writer struct {
+	dir   string
+	mu    sync.Mutex
+	files map[string]*fileWriter
+}
+
+// NewWriter returns a Writer for the ledger directory dir.
+func NewWriter(dir string) *Writer { return &Writer{dir: dir, files: map[string]*fileWriter{}} }
+
+// Append writes e to its login's file, creating the directory (0700) first.
+func (w *Writer) Append(e Entry) error {
+	if err := os.MkdirAll(w.dir, 0o700); err != nil {
+		return fmt.Errorf("chat ledger: %w", err)
+	}
+	if err := checkDir(w.dir); err != nil {
+		return err
+	}
+	name := FileFor(e.Login)
+	w.mu.Lock()
+	fw := w.files[name]
+	if fw == nil {
+		fw = &fileWriter{path: filepath.Join(w.dir, name)}
+		w.files[name] = fw
+	}
+	w.mu.Unlock()
+	return fw.Append(e)
+}
+
+// checkDir refuses a ledger directory that is a symlink, not a directory,
+// writable by others, or owned by another user.
+func checkDir(dir string) error { return hostledger.CheckDir(dir, label) }
+
+// Lookup returns the entries for agentID whose Sender is sender and whose
+// CreatedAt is createdAt, from every login's file (and its rotated copy) in
+// the ledger directory. A missing directory is no entries.
+func Lookup(dir, agentID, sender, createdAt string) ([]Entry, error) {
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err := checkDir(dir); err != nil {
+		return nil, err
+	}
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("chat ledger: %w", err)
+	}
+	var out []Entry
+	seen := map[string]bool{}
+	for _, n := range names {
+		if !ledgerFile.MatchString(n.Name()) {
+			continue
+		}
+		got, err := lookupFile(filepath.Join(dir, n.Name()), agentID, sender, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range got {
+			if e.MessageID != "" && seen[e.MessageID] {
+				continue
+			}
+			seen[e.MessageID] = true
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }

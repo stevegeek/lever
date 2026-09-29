@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,16 +10,19 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/chatledger"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -41,6 +45,11 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
+			// The proxy is what lets a contact in: the same gate as apply.
+			if err := checkContactGate(app, st); err != nil {
+				return err
+			}
+			printContactSessionWarnings(cmd, app, st)
 			auditFn, auditCloser, err := remoteproxy.OpenAudit(st.RemoteAudit())
 			if err != nil {
 				return err
@@ -125,7 +134,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// So the Host gate admits `lever doctor`'s loopback /healthz
 		// probe without widening the allowlist beyond this one port.
 		ListenPort:         app.EffectiveRemotePort(),
-		AllowedUsers:       app.Remote.AllowedUsers,
+		AllowedUsers:       app.Remote.Logins(),
 		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
 		TrustForwardedHost: app.Remote.TrustForwardedHost,
 		BindHost:           remoteBindHost(app),
@@ -134,11 +143,55 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// Verified web chat. Only with allowed_users: without it no login
 		// is verified, so there is nothing to vouch for.
 		ChatLedger: remoteChatLedger(app, st),
+		// Contacts: chat only, and only with their agents (see
+		// remoteproxy/contact.go). Agent names resolve to hub ids with the
+		// remote PAT, used only for GET agent lists.
+		Contacts:      remoteContacts(app),
+		ResolveAgents: remoteAgentResolver(app, st, target, dial),
+		// A contact's post reaches an agent only while that agent's session
+		// started fresh with the skill on disk now (contactSession).
+		ContactSession: func(agent string) error { return contactSession(app, st, agent) },
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
 	})
 	return provider, handler, nil
+}
+
+// remoteContacts maps each contact-tier login to the agents it may chat with.
+func remoteContacts(app *config.App) map[string][]string {
+	out := map[string][]string{}
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			out[u.Login] = u.Agents
+		}
+	}
+	return out
+}
+
+// remoteAgentResolver lists the instance project's agents, name → hub id,
+// for the contact fence.
+func remoteAgentResolver(app *config.App, st state.State, target *url.URL, dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(context.Context) (map[string]string, error) {
+	hc := &hubapi.Client{T: &remoteproxy.HubDoer{Target: target, DialContext: dial, Token: func() (string, error) {
+		tok, err := st.LoadRemotePAT()
+		if err == nil && tok == "" {
+			err = errors.New("no remote PAT on disk; run `lever apply`")
+		}
+		return tok, err
+	}}}
+	return func(ctx context.Context) (map[string]string, error) {
+		agents, err := hc.Agents(ctx, filepath.Base(common.MountDest), scion.DefaultHubEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for _, a := range agents {
+			if a.Slug != "" && a.ID != "" {
+				out[a.Slug] = a.ID
+			}
+		}
+		return out, nil
+	}
 }
 
 // remoteChatLedger is the proxy's ledger writer, or nil when verified chat is
@@ -148,7 +201,20 @@ func remoteChatLedger(app *config.App, st state.State) func(chatledger.Entry) er
 	if p == "" {
 		return nil
 	}
+	removeOldChatLedger(st)
 	return chatledger.NewWriter(p).Append
+}
+
+// removeOldChatLedger deletes lever 0.27's single-file ledger (and its
+// rotated copy): 0.28 keeps one file per login in a directory, and the old
+// file only holds old chat text.
+func removeOldChatLedger(st state.State) {
+	for _, name := range []string{"chat-ledger.jsonl", "chat-ledger.jsonl.1"} {
+		p := filepath.Join(st.Dir, name)
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(p)
+		}
+	}
 }
 
 // serveRemote runs the proxy until ctx ends, stamping the config THIS process
@@ -286,9 +352,18 @@ func remoteBindHost(app *config.App) string {
 // printRemoteWarnings prints config.App.RemoteWarnings on stderr, one line
 // each: the remote settings an operator chose that weaken a default
 // protection, restated on every bring-up so they are never forgotten.
+//
+// It also says, on every bring-up, when web chat cannot be verified (remote
+// access with no allowed_users): agents then treat every web chat post as
+// data and do not answer it, which would otherwise look like agents ignoring
+// the operator.
 func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
 	for _, w := range app.RemoteWarnings() {
 		cmd.PrintErrf("lever: warning: %s\n", w)
+	}
+	if app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {
+		cmd.PrintErrf("lever: warning: remote.allowed_users is empty, so no web chat post can be verified: " +
+			"agents treat every web chat message as data and do not reply; list your login in allowed_users\n")
 	}
 }
 

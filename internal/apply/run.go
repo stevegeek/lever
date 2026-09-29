@@ -270,6 +270,16 @@ type Deps struct {
 	// agents created from now on; an agent that already exists keeps whatever
 	// it was provisioned with until its staged input is changed in place.
 	EnsureAgentTemplate func(ctx context.Context, projectDir string) (bool, error)
+	// BeginSession, when set, is called before the manager is created and
+	// returns what records that session's fresh start (package sessionrec):
+	// it notes the skill on disk now, and the returned commit writes the
+	// record once scion created the agent. It is never called on a resume,
+	// and commit never runs when scion reports the agent already existed, so
+	// a resumed conversation is never recorded as fresh. The remote proxy
+	// lets a contact post to an agent only after such a record. A commit
+	// error is logged, not fatal: the manager is up, and without the record
+	// contacts are refused (fail closed). Nil records nothing.
+	BeginSession func(agent string) (commit func() error)
 	// StartRemoteProxy backs the remote-proxy step (present only when
 	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
 	// the daemonized `lever remote serve` proxy (a config with remote disabled
@@ -1341,15 +1351,28 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) erro
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
-	return r.retryOnBrokerUnavailable(ctx, func() error {
+	var commit func() error
+	if r.d.BeginSession != nil {
+		commit = r.d.BeginSession(r.app.Name)
+	}
+	created := false
+	err := r.retryOnBrokerUnavailable(ctx, func() error {
 		startErr := r.d.Scion.Start(ctx, opts)
 		// Idempotent: a manager already running/existing (re-apply, or a
-		// create-race the observe step missed) is success, not error.
+		// create-race the observe step missed) is success, not error. It is
+		// not a fresh session, so it is not recorded as one.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
 			return nil
 		}
+		created = startErr == nil
 		return startErr
 	})
+	if err == nil && created && commit != nil {
+		if cerr := commit(); cerr != nil {
+			r.d.Log("start-manager: could not record the manager's fresh session (%v); contacts cannot post to it until the next fresh start", cerr)
+		}
+	}
+	return err
 }
 
 // recoverDeleteAndCreate performs the LOUD delete+fresh recovery shared by

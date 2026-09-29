@@ -163,7 +163,9 @@ list`/`watch` are thin mTLS clients of the broker's `/msg/send` and `/msg/list`,
 directly. An in-container `scion` CLI call has no hub credential to authenticate with — the hub
 runs with dev-auth off, and only the host-side broker holds the controller PAT (see
 [security-model.md §4](/security-model/worker-isolation/)) — so only the broker can address an arbitrary agent's
-inbox.
+inbox. Because every broker send wears the controller's hub user as its sender, the broker records
+each one in a host-side sent ledger first, and a recipient learns who wrote a message only by
+asking the broker (`message_verify`); see [verified web chat](/remote-access/#verified-web-chat).
 
 **The task ↔ agent contract.** The core knows nothing about an instance's task records and carries
 no correlation id. The bridge relays agent messages verbatim; an instance that needs correlation

@@ -121,6 +121,21 @@ type Config struct {
 	// chatledger). Nil records nothing, and so nothing verifies. It is
 	// never called when AllowedUsers is empty: then no login is verified.
 	ChatLedger func(chatledger.Entry) error
+	// Contacts maps each contact-tier login to the names of the agents it
+	// may chat with (see contact.go). A login not in the map is an operator.
+	// The ledger records the tier, so message_verify reports a contact's
+	// message as a contact's.
+	Contacts map[string][]string
+	// ResolveAgents maps agent names to hub agent ids for the contact fence.
+	// Required when Contacts is set: without it every contact request is
+	// refused.
+	ResolveAgents func(ctx context.Context) (map[string]string, error)
+	// ContactSession reports why a contact may not post to the named agent
+	// now, or nil when it may: the agent's session must have started fresh
+	// with the lever skill that is on disk now (package sessionrec), since a
+	// resumed session may still follow an older skill that trusts a marker a
+	// contact can type. Nil refuses every contact post.
+	ContactSession func(agent string) error
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -428,6 +443,9 @@ type ctxState struct {
 	// login is the verified login this request runs as ("" when
 	// AllowedUsers is empty and nothing verified it). recordChat reads it.
 	login string
+	// keepDM, when set, filters the hub's /api/v1/chat/dms answer to the
+	// conversations it allows (the contact fence).
+	keepDM func(key string) bool
 }
 
 type ctxStateKey struct{}
@@ -443,7 +461,11 @@ func stateFrom(r *http.Request) *ctxState {
 // host, identity and path checks, session injection and one session retry)
 // in front of the reverse proxy newReverseProxy builds.
 func NewHandler(cfg Config) http.Handler {
-	return &gate{cfg: cfg, rp: newReverseProxy(cfg)}
+	g := &gate{cfg: cfg, rp: newReverseProxy(cfg)}
+	if len(cfg.Contacts) > 0 && cfg.ResolveAgents != nil {
+		g.contacts = &contactFence{resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), session: cfg.ContactSession}
+	}
+	return g
 }
 
 // newReverseProxy builds the upstream half: rewriteUpstream injects the
@@ -454,7 +476,7 @@ func NewHandler(cfg Config) http.Handler {
 func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
 		Rewrite:        rewriteUpstream(cfg.Target, cfg.identityHeader()),
-		ModifyResponse: completeAudit(cfg.Audit, cfg.ChatLedger),
+		ModifyResponse: completeAudit(cfg.Audit, cfg.ChatLedger, cfg.Contacts),
 		ErrorHandler:   upstreamFailed(cfg.Audit),
 	}
 	if cfg.DialContext != nil {
@@ -520,7 +542,7 @@ func clientIdentityHeader(k string) bool {
 // completeAudit is the ReverseProxy ModifyResponse hook: strip the hub's
 // session cookie, flag a rejected session for the gate's one retry, and
 // otherwise complete the audit line with the real upstream status.
-func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) func(*http.Response) error {
+func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, contacts map[string][]string) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		// The hub mints a fresh session cookie on every cookie-less
 		// request. The client must never hold a hub credential, cookie
@@ -529,6 +551,9 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) f
 		// the hub sent or what case it used.
 		resp.Header.Del("Set-Cookie")
 		sandboxAPIDocument(resp)
+		if s := stateFrom(resp.Request); s != nil && s.keepDM != nil {
+			filterDMList(resp, s.keepDM)
+		}
 		if s := stateFrom(resp.Request); s != nil {
 			if s.retryable && sessionRejected(resp) {
 				// The hub does not know this session (it restarted, or the
@@ -545,7 +570,7 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) f
 				// session so the next request heals it.
 				s.stale = true
 			}
-			recordChat(resp, s.login, ledger, func(err error) { daemon.Warnf("remote proxy: %v", err) })
+			recordChat(resp, s.login, tierOf(contacts, s.login), ledger, func(err error) { daemon.Warnf("remote proxy: %v", err) })
 			if s.line != nil && audit != nil {
 				s.line.Status = resp.StatusCode
 				audit(*s.line)
@@ -653,8 +678,9 @@ func checkOrigin(r *http.Request, serveHost string) (Decision, string) {
 // gate is the request-side half of the handler: every check that decides
 // whether a request reaches the hub, and the session plumbing around it.
 type gate struct {
-	cfg Config
-	rp  *httputil.ReverseProxy
+	cfg      Config
+	rp       *httputil.ReverseProxy
+	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
 }
 
 func (g *gate) audit(line AuditLine) {
@@ -732,6 +758,13 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state.cookie = cookie
+	if names, isContact := cfg.Contacts[operator]; isContact && operator != "" {
+		if r = g.fenceContact(w, r, &line, operator, names, &cookie); r == nil {
+			return
+		}
+		state.cookie = cookie
+		state.keepDM = contactKeepDM(r)
+	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.
 	state.retryable = r.Method == http.MethodGet || r.Method == http.MethodHead
@@ -875,7 +908,7 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 	}
 	// retryable is deliberately not set: one retry, then the hub's answer
 	// stands whatever it is.
-	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login}
+	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }
 
@@ -1072,4 +1105,13 @@ func isIPHost(host string) bool {
 		return false // a zoned address is no Host a front sends
 	}
 	return net.ParseIP(h) != nil
+}
+
+// tierOf is the chat tier of a verified login: contact when Contacts names
+// it, operator otherwise.
+func tierOf(contacts map[string][]string, login string) string {
+	if _, ok := contacts[login]; ok {
+		return chatledger.TierContact
+	}
+	return chatledger.TierOperator
 }

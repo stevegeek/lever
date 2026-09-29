@@ -53,7 +53,7 @@ func TestEnsureControllerRoleNeedsIssuer(t *testing.T) {
 func TestRemoteRoleLifecycleParameter(t *testing.T) {
 	for _, has := range []bool{false, true} {
 		h := newFakeAdminHub("op@github")
-		rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: h}, "lever", []string{"op@github"}, has, time.Now(), t.Logf)
+		rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: h}, "lever", []string{"op@github"}, nil, has, time.Now(), t.Logf)
 		if err != nil {
 			t.Fatalf("has=%v: %v", has, err)
 		}
@@ -73,10 +73,10 @@ func TestRemoteRoleReasonAfterScionUpgrade(t *testing.T) {
 		Permissions: remoteRolePermissions(false), Bound: map[string]string{"op@github": "u1"},
 		Ceilings: map[string]string{"op@github": "c1"}, CeilingPermissions: remoteRolePermissions(false),
 	}
-	if r := remoteRoleReason(rec, true, []string{"op@github"}, remoteRolePermissions(recordedLifecycle(rec))); r != "" {
+	if r := remoteRoleReason(rec, true, []string{"op@github"}, nil, remoteRolePermissions(recordedLifecycle(rec))); r != "" {
 		t.Fatalf("the recorded variant must fit: %q", r)
 	}
-	if r := remoteRoleReason(rec, true, []string{"op@github"}, remoteRolePermissions(true)); !strings.Contains(r, "agent.lifecycle") {
+	if r := remoteRoleReason(rec, true, []string{"op@github"}, nil, remoteRolePermissions(true)); !strings.Contains(r, "agent.lifecycle") {
 		t.Fatalf("a scion with agent.lifecycle must re-grant: %q", r)
 	}
 }

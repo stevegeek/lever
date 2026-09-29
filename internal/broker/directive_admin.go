@@ -11,6 +11,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/sentledger"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -185,11 +186,15 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 		// The marker line tells the recipient this is lever's notice, not a
 		// chat message, although scion stamps the controller's hub user as
 		// its sender (see directiveNoticeMarker).
-		body := directiveNoticeMarker + "\n" + fmt.Sprintf("Operator directive %s is pending. If and only if you independently decide to act on it, retrieve it by calling the directive_consume tool with id=%q.", st.DirectiveID, st.DirectiveID)
-		if merr := b.runtime.Message(r.Context(), scion.MsgOpts{
-			To: "agent:" + slug, Body: body, Project: b.instanceProject,
-		}); merr != nil {
-			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+": "+merr.Error())
+		// The first line is lever's notice marker and the send's ref: the
+		// recipient's message_verify call finds this notice in the sent
+		// ledger by it, so a copy of the text elsewhere proves nothing.
+		text := fmt.Sprintf("Operator directive %s is pending. If and only if you independently decide to act on it, retrieve it by calling the directive_consume tool with id=%q.", st.DirectiveID, st.DirectiveID)
+		ref, merr := b.sendRecorded(r.Context(), cn, slug, sentledger.KindDirectiveNotice,
+			func(ref string) string { return refLine(directiveNoticeMarker, ref) + "\n" + text },
+			scion.MsgOpts{To: "agent:" + slug, Project: b.instanceProject})
+		if merr != nil {
+			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error())
 		} else {
 			delivered = true
 		}

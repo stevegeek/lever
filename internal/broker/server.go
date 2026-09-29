@@ -14,7 +14,7 @@ import (
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
 // Routes: /worker/*, /msg/send, /msg/list, /directive/consume,
-// /directive/check, /enrol, /renew, /request, and one gated proxy per
+// /directive/check, /message/verify, /chat/verify, /enrol, /renew, /request, and one gated proxy per
 // currently-registered tool under /mcp/<name>/. Tool routes are bound at
 // call time — tools must be registered before JailHandler() is called.
 //
@@ -50,6 +50,7 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathMsgList, control(b.handleMsgList))
 	mux.Handle("POST "+wire.PathDirectiveConsume, control(b.handleDirectiveConsume))
 	mux.Handle("POST "+wire.PathDirectiveCheck, control(b.handleDirectiveCheck))
+	mux.Handle("POST "+wire.PathMessageVerify, control(b.handleMessageVerify))
 	mux.Handle("POST "+wire.PathChatVerify, control(b.handleChatVerify))
 	mux.Handle("POST "+wire.PathEnrol, control(b.handleEnrol))
 	mux.Handle("POST "+wire.PathRenew, control(b.handleRenew))
@@ -120,6 +121,19 @@ func (b *Broker) AdminHandler() http.Handler {
 	return mux
 }
 
+// OperatorHandler builds an http.Handler for the operator note channel: the
+// 0600 UNIX socket `lever msg send` posts to (see brokerctl's bindListeners).
+// It is not on the admin TCP listener on purpose: those routes are
+// unauthenticated loopback, reachable by any local process and by the hub's
+// network namespace, and a route there that writes operator-note records
+// would let any of them pass text off as the operator's. The socket's file
+// permissions are the gate, the same boundary as the host records it writes.
+func (b *Broker) OperatorHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
+	return mux
+}
+
 // ServeListeners runs the broker on pre-bound listeners (the supervisor binds
 // them so it can learn OS-assigned ports before starting tools). Runs until ctx
 // is cancelled. jailLn carries mTLS with a self-rotating serving cert (certSrc
@@ -129,25 +143,31 @@ func (b *Broker) AdminHandler() http.Handler {
 // disabled (or a caller has no socket to offer); when non-nil it MUST be a
 // *net.UnixListener (fail closed otherwise), since the directive admin routes
 // are gated by the socket's 0600 file permissions, not by network origin.
-func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveLn net.Listener, certSrc *ca.ServerCertSource) error {
+// operatorLn is the operator note channel's UDS socket (OperatorHandler), with
+// the same rules: nil for none, else a *net.UnixListener.
+func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveLn, operatorLn net.Listener, certSrc *ca.ServerCertSource) error {
 	// Fail closed if the caller bound adminLn on a non-loopback interface.
 	// The unauthenticated admin routes (/bootstrap, /register, /revoke, …) must
 	// never be reachable from a routable interface — enforce the invariant here
 	// rather than relying on every caller to get it right.
-	if ta, ok := adminLn.Addr().(*net.TCPAddr); !ok || !ta.IP.IsLoopback() {
-		_ = jailLn.Close()
-		_ = adminLn.Close()
-		if directiveLn != nil {
-			_ = directiveLn.Close()
+	closeAll := func() {
+		for _, ln := range []net.Listener{jailLn, adminLn, directiveLn, operatorLn} {
+			if ln != nil {
+				_ = ln.Close()
+			}
 		}
+	}
+	if ta, ok := adminLn.Addr().(*net.TCPAddr); !ok || !ta.IP.IsLoopback() {
+		closeAll()
 		return fmt.Errorf("broker: admin listener must be loopback, got %s", adminLn.Addr())
 	}
-	if directiveLn != nil {
-		if _, ok := directiveLn.(*net.UnixListener); !ok {
-			_ = jailLn.Close()
-			_ = adminLn.Close()
-			_ = directiveLn.Close()
-			return fmt.Errorf("broker: directive listener must be a unix socket, got %T", directiveLn)
+	for what, ln := range map[string]net.Listener{"directive": directiveLn, "operator": operatorLn} {
+		if ln == nil {
+			continue
+		}
+		if _, ok := ln.(*net.UnixListener); !ok {
+			closeAll()
+			return fmt.Errorf("broker: %s listener must be a unix socket, got %T", what, ln)
 		}
 	}
 	onLapse := b.lapseFunc()
@@ -167,9 +187,9 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		Handler:           b.AdminHandler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
 	}
-	var directiveSrv *http.Server
+	var directiveSrv, operatorSrv *http.Server
 	numServers := 2
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 	go func() { errc <- jailSrv.ServeTLS(jailLn, "", "") }()
 	go func() { errc <- adminSrv.Serve(adminLn) }()
 	if directiveLn != nil {
@@ -177,8 +197,16 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 			Handler:           b.DirectiveAdminHandler(),
 			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
 		}
-		numServers = 3
+		numServers++
 		go func() { errc <- directiveSrv.Serve(directiveLn) }()
+	}
+	if operatorLn != nil {
+		operatorSrv = &http.Server{
+			Handler:           b.OperatorHandler(),
+			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
+		}
+		numServers++
+		go func() { errc <- operatorSrv.Serve(operatorLn) }()
 	}
 	go func() {
 		<-ctx.Done()
@@ -188,6 +216,9 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		_ = adminSrv.Shutdown(shutCtx)
 		if directiveSrv != nil {
 			_ = directiveSrv.Shutdown(shutCtx)
+		}
+		if operatorSrv != nil {
+			_ = operatorSrv.Shutdown(shutCtx)
 		}
 	}()
 	// Return the first real error (ignore ErrServerClosed from clean shutdown).

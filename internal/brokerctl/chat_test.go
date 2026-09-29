@@ -10,7 +10,7 @@ import (
 )
 
 func chatApp(tree string, remote bool, users ...string) *config.App {
-	return &config.App{Tree: tree, Remote: config.Remote{Enabled: remote, AllowedUsers: users}}
+	return &config.App{Tree: tree, Remote: config.Remote{Enabled: remote, AllowedUsers: remoteUsers(users...)}}
 }
 
 func TestChatLedgerPath(t *testing.T) {
@@ -66,4 +66,12 @@ func TestConfigHashCoversVerifiedChat(t *testing.T) {
 	if ConfigHash(on) == ConfigHash(off) {
 		t.Fatal("ConfigHash does not change when verified chat is turned on")
 	}
+}
+
+func remoteUsers(logins ...string) []config.RemoteUser {
+	out := make([]config.RemoteUser, len(logins))
+	for i, l := range logins {
+		out[i] = config.RemoteUser{Login: l}
+	}
+	return out
 }

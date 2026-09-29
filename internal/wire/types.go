@@ -130,37 +130,110 @@ type DirectiveCheckResponse struct {
 	State string `json:"state"`
 }
 
+// ---- operator notes (UDS channel) ----
+
+// OperatorNoteRequest is the body of POST /operator/note: `lever msg send`.
+// To names the recipient the way `lever attach` does (the app name, the
+// manager slug or "manager" for the manager; a declared worker's name).
+type OperatorNoteRequest struct {
+	To        string `json:"to"`
+	Body      string `json:"body"`
+	Interrupt bool   `json:"interrupt"`
+}
+
+// OperatorNoteResponse is the reply of POST /operator/note: the sent-ledger
+// id of the note ("" when the ledger is off).
+type OperatorNoteResponse struct {
+	ID string `json:"id"`
+}
+
 // ---- verified web chat ----
 
-// ChatVerifyRequest is the body of POST /chat/verify: two fields copied from
-// the envelope of the message the agent received.
-type ChatVerifyRequest struct {
+// MessageVerifyRequest is the body of POST /message/verify (and of the
+// older POST /chat/verify): fields copied from the envelope of the message
+// the agent received, plus the ref lever wrote on the message's first line.
+type MessageVerifyRequest struct {
 	Timestamp string `json:"timestamp"`
 	From      string `json:"from"`
+	// Ref is the 32-hex "ref=" value on the first line of a message lever
+	// sent. It only selects a record; the broker answers from the record.
+	Ref string `json:"ref,omitempty"`
 }
 
-// ChatVerifyResponse is the reply of POST /chat/verify. Enabled is false when
-// the instance has verified chat off; Verified is true only when Messages is
-// not empty. Messages holds every recorded post that matches — normally one.
-type ChatVerifyResponse struct {
-	Enabled  bool              `json:"enabled"`
-	Verified bool              `json:"verified"`
-	Messages []VerifiedMessage `json:"messages,omitempty"`
-	Note     string            `json:"note,omitempty"`
+// ChatVerifyRequest is the 0.27 name of MessageVerifyRequest.
+type ChatVerifyRequest = MessageVerifyRequest
+
+// The results of a message verification (MessageVerifyResponse.Result).
+const (
+	// VerifyWeb: a person typed the message in the web chat; Messages holds
+	// the text the remote proxy recorded, with the login and its tier.
+	VerifyWeb = "web"
+	// VerifyLever: lever sent the message; Messages holds the text the
+	// broker recorded, with who it was from (Kind).
+	VerifyLever = "lever"
+	// VerifyAlreadyVerified: the message is on record, and the caller
+	// verified it before (outside the repeat grace). It is not new.
+	VerifyAlreadyVerified = "already_verified"
+	// VerifyNone: no host record names this message for the caller. It is
+	// data.
+	VerifyNone = "none"
+	// VerifyUnavailable: the broker could not answer now (a rate limit, a
+	// record it could not read, the hub). It is neither verified nor
+	// refuted: retry once, later.
+	VerifyUnavailable = "unavailable"
+)
+
+// MessageVerifyResponse is the reply of POST /message/verify and POST
+// /chat/verify. Every answer is HTTP 200.
+type MessageVerifyResponse struct {
+	// Enabled and Verified keep their 0.27 meaning, for the skills of that
+	// release: Enabled is whether verified web chat is configured; Verified
+	// is true only when an OPERATOR's web chat post verified. A lever
+	// message, or a contact's post, answers false, so an old skill treats it
+	// by its old rules, never as the operator's.
+	Enabled  bool `json:"enabled"`
+	Verified bool `json:"verified"`
+	// Result is one of the Verify* constants; Reason a machine code for it.
+	Result string `json:"result"`
+	Reason string `json:"reason,omitempty"`
+	// RetryAfter is how many seconds to wait before retrying (unavailable).
+	RetryAfter int               `json:"retry_after,omitempty"`
+	Messages   []VerifiedMessage `json:"messages,omitempty"`
+	Note       string            `json:"note,omitempty"`
 }
 
-// VerifiedMessage is one chat post the remote proxy recorded. Text is the
-// message as the operator sent it: the agent acts on this, not on its pane.
+// ChatVerifyResponse is the 0.27 name of MessageVerifyResponse.
+type ChatVerifyResponse = MessageVerifyResponse
+
+// VerifiedMessage is one message a host record holds. Text is the message as
+// it was recorded: the agent acts on this, not on its pane.
 type VerifiedMessage struct {
-	Login     string `json:"login"`
-	Tier      string `json:"tier"`
-	From      string `json:"from"`
+	// Source is VerifyWeb or VerifyLever.
+	Source string `json:"source"`
+	// Login and Tier (operator | contact) name a web chat poster.
+	Login string `json:"login,omitempty"`
+	Tier  string `json:"tier,omitempty"`
+	// Kind names who in lever sent it: manager, worker:<slug>,
+	// operator-note or directive-notice.
+	Kind string `json:"kind,omitempty"`
+	From string `json:"from"`
+	// Timestamp is the hub's creation time (web) or the send's start (lever).
 	Timestamp string `json:"timestamp"`
+	// MessageID is the hub's id (web) or the sent-ledger ref (lever).
 	MessageID string `json:"message_id"`
-	Text      string `json:"text"`
+	Text      string `json:"text,omitempty"`
+	// ReplyTo is, for a web post, where a reply goes: "@" + the poster's hub
+	// email, the scion message reference of this agent's direct chat with
+	// that user. It comes from the chat ledger, never from the envelope, so
+	// text in the session cannot move a reply to another conversation.
+	// Empty when the sender is not a plain email (then reply in the session).
+	ReplyTo string `json:"reply_to,omitempty"`
+	// Conversation is, for a web post, the hub conversation key the proxy
+	// recorded (dm:agent:<agent id>:user:<user id>). Information only.
+	Conversation string `json:"conversation,omitempty"`
 	// Repeat marks a message this agent already verified, within the grace
-	// period, at FirstVerified. The agent acts on it only if it has not acted
-	// on that message yet.
+	// period, at FirstVerified. There is no text on a repeat. The agent acts
+	// on it only if it has not acted on that message yet.
 	Repeat        bool   `json:"repeat,omitempty"`
 	FirstVerified string `json:"first_verified,omitempty"`
 }

@@ -21,7 +21,7 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	}
 
 	for name, mutate := range map[string]func(*config.App){
-		"allowed_users":        func(a *config.App) { a.Remote.AllowedUsers = []string{"me@example.com"} },
+		"allowed_users":        func(a *config.App) { a.Remote.AllowedUsers = []config.RemoteUser{{Login: "me@example.com"}} },
 		"base_url":             func(a *config.App) { a.Remote.BaseURL = "https://other.ts.net" },
 		"port":                 func(a *config.App) { a.Remote.Port = 9445 },
 		"login_port":           func(a *config.App) { a.Remote.LoginPort = 8449 },
@@ -90,6 +90,11 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 			t.Errorf("config.Remote.%s has no state.RemoteIdentity counterpart — add it to RemoteConfigHash", f.Name)
 			continue
 		}
+		// allowed_users is hashed through remoteUserKeys (one string per
+		// user, tier and agents included), not copied as its config type.
+		if f.Name == "AllowedUsers" && g.Type == reflect.TypeFor[[]string]() {
+			continue
+		}
 		if g.Type != f.Type {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}
@@ -97,5 +102,19 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 	const appExtras = 2 // Name, Backend
 	if got, want := identity.NumField(), remote.NumField()+appExtras; got != want {
 		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend)", got, want)
+	}
+}
+
+// TestRemoteConfigHashCoversTiers: an operator entry hashes as its bare
+// login (a pre-tier config keeps its hash), and a contact's tier or agents
+// change the hash.
+func TestRemoteConfigHashCoversTiers(t *testing.T) {
+	if got := remoteUserKeys([]config.RemoteUser{{Login: "op@x"}}); got[0] != "op@x" {
+		t.Fatalf("operator key %q, want the bare login", got[0])
+	}
+	a := remoteUserKeys([]config.RemoteUser{{Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}})
+	b := remoteUserKeys([]config.RemoteUser{{Login: "c@x", Tier: config.TierContact, Agents: []string{"w1", "w2"}}})
+	if a[0] == b[0] || a[0] == "c@x" {
+		t.Fatalf("contact keys %q / %q do not carry tier and agents", a[0], b[0])
 	}
 }

@@ -1,37 +1,52 @@
 package broker
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/http"
 	"os"
-	"strings"
+	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
-	"github.com/stevegeek/lever/internal/chatledger"
-	"github.com/stevegeek/lever/internal/wire"
+	"github.com/stevegeek/lever/internal/hostledger"
+	"github.com/stevegeek/lever/internal/sentledger"
 )
 
-// ChatConfig configures verified web chat (package chatledger).
+// ChatConfig configures message verification (verify.go): the host records
+// an agent's message_verify call is answered from. Web chat posts are in the
+// remote proxy's chat ledger (package chatledger), lever's own sends in the
+// broker's sent ledger (package sentledger).
 type ChatConfig struct {
-	// LedgerPath is the remote proxy's chat ledger. "" means verified chat
-	// is off: /chat/verify answers enabled=false.
+	// Configured is whether verified web chat is configured (remote access
+	// with allowed_users). It is the 0.27 "enabled" of the answer.
+	Configured bool
+	// LedgerPath is the remote proxy's chat ledger. "" means no web chat
+	// post can be verified: off when !Configured, unsafe when the state
+	// directory is inside the tree.
 	LedgerPath string
+	// WebSenders are the envelope senders the remote proxy's sign-ins post
+	// as ("user:" + hub email, lowercased): a message from one of them is
+	// looked up in the chat ledger only. Empty when remote access is off.
+	WebSenders []string
 	// UsedPath records which messages have been verified, so the one-use
 	// rule survives a broker restart. "" keeps it in memory only (tests).
 	UsedPath string
+	// SentLedgerDir is the sent ledger (package sentledger): the record of
+	// every message the broker sends to an agent. "" means the state
+	// directory is inside the tree: sends go out unrecorded and no lever
+	// message can be verified.
+	SentLedgerDir string
 }
 
 // maxChatFromLen bounds the "from" an agent may send: a sender reference is
 // "user:" plus an email.
 const maxChatFromLen = 320
 
-// chatVerifyWindow is how long after the proxy recorded a post it can still
-// be verified. With the one-use rule below it bounds a replay: text that
+// chatVerifyWindow is how long after the proxy recorded a web chat post it
+// can still be verified. With the one-use rule below it bounds a replay: text that
 // copies an old real envelope (in an email, a tool result, a worker's
 // message) cannot turn an old "yes, go ahead" into a new one. A message the
 // agent reads later than this is unverified: the operator sends it again.
@@ -45,15 +60,27 @@ const chatVerifyWindow = time.Hour
 // agent check early) — without it the operator's message would be lost.
 const chatRepeatGrace = 10 * time.Minute
 
+// useRetention is how long a recorded use is kept: past the longest window a
+// message can verify in (sentledger.Window, from its send; a use comes after
+// the send), with room to spare.
+const useRetention = 2 * sentledger.Window
+
+// usesRotateAt is the size past which the record of uses is moved to
+// <path>.1 before the next append, but only once that .1 holds nothing that
+// can still matter (see rotateUses).
+const usesRotateAt = 4 << 20
+
 // chatUses records which recorded messages each agent has verified, so each
-// verifies once (like a directive is consumed once). It is written through
-// to path (one JSON line per use, 0600), read back at start and again before
-// each use, so neither a broker restart nor a second broker running for a
-// moment re-opens a message inside its window.
+// verifies once (like a directive is consumed once): web chat posts by the
+// hub's message id, lever sends by "lever:" + their sent-ledger id, so the
+// two can never collide. It is written through to path (one JSON line per
+// use, 0600), read back at start and again before each use, so neither a
+// broker restart nor a second broker running for a moment re-opens a message
+// inside its window.
 //
 // Every persistence failure fails closed. A use that cannot be written is
 // not granted. A record that cannot be read at start is left alone, and
-// until chatVerifyWindow has passed the broker refuses every entry recorded
+// until sentledger.Window has passed the broker refuses every entry recorded
 // before it started (notBefore): it cannot know which of those were used.
 type chatUses struct {
 	mu        sync.Mutex
@@ -71,30 +98,63 @@ type chatUseLine struct {
 
 func useKey(caller, id string) string { return caller + "\x00" + id }
 
-// readUses returns the uses recorded at path that can still matter (inside
-// twice the window). A missing file is none.
+// usesLabel prefixes the errors of the record of uses.
+const usesLabel = "record of verified messages"
+
+// readUses returns the uses recorded at path and its rotated copy that can
+// still matter (inside useRetention). A missing file is none. The record is
+// read like the ledgers (hostledger.CheckDir, hostledger.ReadFile): a
+// directory or file another user can write, a symlink, or a file swapped
+// while it was opened is hostledger.ErrUnsafe, so no one but the broker's
+// user can mark a message used (and so lose it) or make the broker start
+// degraded.
 func readUses(path string, now time.Time) ([]chatUseLine, error) {
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	if err := hostledger.CheckDir(filepath.Dir(path), usesLabel); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var out []chatUseLine
-	for _, l := range bytes.Split(b, []byte("\n")) {
-		var c chatUseLine
-		if json.Unmarshal(l, &c) == nil && c.ID != "" && now.Sub(c.At) <= 2*chatVerifyWindow {
-			out = append(out, c)
+	for _, p := range []string{path + ".1", path} {
+		err := hostledger.ReadFile(p, usesLabel, func(l []byte) {
+			var c chatUseLine
+			if json.Unmarshal(l, &c) == nil && c.ID != "" && now.Sub(c.At) <= useRetention {
+				out = append(out, c)
+			}
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
 }
 
+// rotateUses moves the record of uses to <path>.1 when it has grown past
+// usesRotateAt and the current .1 is absent or untouched for longer than
+// useRetention, so a rotation never drops a use that can still matter (the
+// dropped .1 holds only uses older than that). A second broker appending
+// into the renamed file during a handoff is still read, since readUses reads
+// .1 too. It never follows a symlink and does nothing in an unsafe
+// directory; readUses refuses what it would leave behind anyway.
+func rotateUses(path string, now time.Time) {
+	if hostledger.CheckDir(filepath.Dir(path), usesLabel) != nil {
+		return
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() <= usesRotateAt {
+		return
+	}
+	if old, err := os.Lstat(path + ".1"); err == nil && now.Sub(old.ModTime()) <= useRetention {
+		return
+	}
+	_ = os.Rename(path, path+".1")
+}
+
 // newChatUses loads the record. It never rewrites it: a rewrite could drop a
 // use another broker (a restart handoff) appends at the same moment. Old
-// lines are only skipped on read, and the file grows by one line per first
-// verification of real operator chat.
+// lines are only skipped on read; the file grows by one line per first
+// verification and is rotated (rotateUses) only when that is safe.
 func newChatUses(path string, now time.Time) *chatUses {
 	u := &chatUses{path: path, used: map[string]time.Time{}}
 	if path == "" {
@@ -102,7 +162,7 @@ func newChatUses(path string, now time.Time) *chatUses {
 	}
 	keep, err := readUses(path, now)
 	if err != nil {
-		u.notBefore, u.degraded = now, now.Add(chatVerifyWindow)
+		u.notBefore, u.degraded = now, now.Add(sentledger.Window)
 		return u
 	}
 	for _, c := range keep {
@@ -114,27 +174,54 @@ func newChatUses(path string, now time.Time) *chatUses {
 // errUseNotRecorded means a use could not be written, so it is not granted.
 var errUseNotRecorded = errors.New("cannot record the verification")
 
+// useWant is one use takeAll is asked for.
+type useWant struct {
+	id       string
+	recorded time.Time // when the record was made (for the degraded start)
+}
+
+// useGot is takeAll's answer for one useWant: when the message was first
+// verified, and whether this is that first time.
+type useGot struct {
+	at    time.Time
+	fresh bool
+}
+
 // take marks id used by caller. It returns when the message was first
 // verified and whether this is that first time, or an error when the use
 // could not be recorded (then nothing is granted).
 func (u *chatUses) take(caller, id string, recorded, now time.Time) (time.Time, bool, error) {
+	got, err := u.takeAll(caller, []useWant{{id: id, recorded: recorded}}, now)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return got[0].at, got[0].fresh, nil
+}
+
+// takeAll marks every wanted id used by caller, all or nothing: it checks
+// every id (the degraded start, the record read once) before it writes, and
+// writes the new uses in one append. So a failure never leaves an earlier
+// match used without its text reaching the agent. On an error nothing is
+// granted.
+func (u *chatUses) takeAll(caller string, want []useWant, now time.Time) ([]useGot, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if !u.notBefore.IsZero() && now.Before(u.degraded) && recorded.Before(u.notBefore) {
-		return time.Time{}, false, errors.New("the record of verified messages could not be read at broker start")
+	for _, w := range want {
+		if !u.notBefore.IsZero() && now.Before(u.degraded) && w.recorded.Before(u.notBefore) {
+			return nil, errors.New("the record of verified messages could not be read at broker start")
+		}
 	}
 	for k, t := range u.used {
-		if now.Sub(t) > 2*chatVerifyWindow {
+		if now.Sub(t) > useRetention {
 			delete(u.used, k)
 		}
 	}
-	k := useKey(caller, id)
 	if u.path != "" {
 		// Another broker (a restart handoff) may have recorded a use since
 		// this one started: read the record again.
 		lines, err := readUses(u.path, now)
 		if err != nil {
-			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+			return nil, fmt.Errorf("%w: %v", errUseNotRecorded, err)
 		}
 		for _, c := range lines {
 			if t, ok := u.used[useKey(c.Caller, c.ID)]; !ok || c.At.Before(t) {
@@ -142,129 +229,47 @@ func (u *chatUses) take(caller, id string, recorded, now time.Time) (time.Time, 
 			}
 		}
 	}
-	if t, ok := u.used[k]; ok {
-		return t, false, nil
-	}
-	if u.path != "" {
-		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|chatledger.ONoFollow, 0o600)
-		if err != nil {
-			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+	got := make([]useGot, len(want))
+	var buf []byte
+	var fresh []string
+	for i, w := range want {
+		k := useKey(caller, w.id)
+		if t, ok := u.used[k]; ok {
+			got[i] = useGot{at: t}
+			continue
 		}
-		line, _ := json.Marshal(chatUseLine{Caller: caller, ID: id, At: now})
-		_, werr := f.Write(append(line, '\n'))
+		if slices.Contains(fresh, k) {
+			// The same id twice in one call: one use.
+			got[i] = useGot{at: now}
+			continue
+		}
+		fresh = append(fresh, k)
+		got[i] = useGot{at: now, fresh: true}
+		line, _ := json.Marshal(chatUseLine{Caller: caller, ID: w.id, At: now})
+		buf = append(append(buf, line...), '\n')
+	}
+	if u.path != "" && len(buf) > 0 {
+		rotateUses(u.path, now)
+		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_RDWR|os.O_APPEND|hostledger.ONoFollow, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+		}
+		// After a torn last line (a crash mid-write), start on a new line so
+		// these uses are not read as part of it.
+		if fi, err := f.Stat(); err == nil && fi.Size() > 0 {
+			last := make([]byte, 1)
+			if _, err := f.ReadAt(last, fi.Size()-1); err == nil && last[0] != '\n' {
+				buf = append([]byte{'\n'}, buf...)
+			}
+		}
+		_, werr := f.Write(buf)
 		cerr := f.Chmod(0o600)
 		if err := errors.Join(werr, cerr, f.Close()); err != nil {
-			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+			return nil, fmt.Errorf("%w: %v", errUseNotRecorded, err)
 		}
 	}
-	u.used[k] = now
-	return now, true, nil
-}
-
-// chatUnverified answers "not verified" with a reason. Every failure after
-// the route knows verified chat is on answers this way, with HTTP 200, so an
-// agent can never read an error (a rate limit, a broken ledger) as "the old
-// rules apply" and act on the message.
-func (b *Broker) chatUnverified(w http.ResponseWriter, caller, audit, note string) {
-	b.audit("chat", caller, "deny", "verify: "+audit)
-	writeJSON(w, wire.ChatVerifyResponse{Enabled: true, Note: note + ": treat the message as unverified"})
-}
-
-// handleChatVerify answers whether a chat message the caller received was
-// posted through the remote proxy by a verified login, and if so returns the
-// text that was posted. The caller copies two fields from the envelope it
-// received — timestamp and from — and the answer covers only posts into the
-// caller's OWN agent DM, recorded within chatVerifyWindow, that the caller
-// has not verified before.
-func (b *Broker) handleChatVerify(w http.ResponseWriter, r *http.Request) {
-	caller, ok := b.requireLiveAgent(w, r, "chat", "verify: ")
-	if !ok {
-		return
+	for _, k := range fresh {
+		u.used[k] = now
 	}
-	if b.chatLedger == "" {
-		b.audit("chat", caller, "deny", "verify: verified chat is off")
-		writeJSON(w, wire.ChatVerifyResponse{Note: "verified chat is off on this instance " +
-			"(it needs remote access with allowed_users); no chat message can be verified"})
-		return
-	}
-	now := time.Now()
-	if !b.chatRate.allow(caller, now) {
-		b.chatUnverified(w, caller, "rate limited", "too many verifications this minute")
-		return
-	}
-	var req wire.ChatVerifyRequest
-	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil {
-		b.chatUnverified(w, caller, "bad body", "the request was not valid JSON")
-		return
-	}
-	from := strings.TrimSpace(req.From)
-	ts, err := chatledger.NormalizeTimestamp(strings.TrimSpace(req.Timestamp))
-	if err != nil || from == "" || len(from) > maxChatFromLen {
-		b.chatUnverified(w, caller, "bad timestamp or from",
-			`timestamp must be the envelope's RFC 3339 "timestamp" and from its "from"`)
-		return
-	}
-	_, slug, _, known := b.identity(caller)
-	if !known || b.resolveAgentID == nil {
-		b.chatUnverified(w, caller, "no agent id resolver for caller", "verification is unavailable")
-		return
-	}
-	agentID, err := b.resolveAgentID(r.Context(), slug)
-	if err != nil || agentID == "" {
-		b.chatUnverified(w, caller, "resolving agent id for "+slug+": "+errText(err), "verification is unavailable")
-		return
-	}
-	entries, err := chatledger.Lookup(b.chatLedger, agentID, from, ts)
-	if err != nil {
-		b.chatUnverified(w, caller, err.Error(), "verification is unavailable")
-		return
-	}
-	resp := wire.ChatVerifyResponse{Enabled: true}
-	var ids, refused []string
-	for _, e := range entries {
-		switch {
-		case e.MessageID == "":
-			continue
-		case now.Sub(e.Recorded) > chatVerifyWindow:
-			refused = append(refused, e.MessageID+" (older than "+chatVerifyWindow.String()+")")
-			continue
-		}
-		at, fresh, err := b.chatUses.take(caller, e.MessageID, e.Recorded, now)
-		if err != nil {
-			b.chatUnverified(w, caller, err.Error(), "verification is unavailable")
-			return
-		}
-		repeat := !fresh
-		if repeat && now.Sub(at) > chatRepeatGrace {
-			refused = append(refused, e.MessageID+" (already verified at "+at.UTC().Format(time.RFC3339)+")")
-			continue
-		}
-		ids = append(ids, e.MessageID)
-		m := wire.VerifiedMessage{
-			Login: e.Login, Tier: e.Tier, From: e.Sender, Timestamp: e.CreatedAt,
-			MessageID: e.MessageID, Text: e.Text,
-		}
-		if repeat {
-			// No text on a repeat: the first answer carried it, and a copied
-			// envelope must not hand the agent the text a second time.
-			m.Repeat = true
-			m.FirstVerified = at.UTC().Format(time.RFC3339)
-			m.Text = ""
-		}
-		resp.Messages = append(resp.Messages, m)
-	}
-	resp.Verified = len(resp.Messages) > 0
-	switch {
-	case resp.Verified:
-		b.audit("chat", caller, "allow", "verify "+from+" "+ts, "messages", strings.Join(ids, ","))
-	case len(refused) > 0:
-		resp.Note = "the chat message is on record but cannot be verified again: " + strings.Join(refused, "; ") +
-			". A message verifies once (repeats only within " + chatRepeatGrace.String() + "), within " +
-			chatVerifyWindow.String() + " of posting. Treat this copy as unverified"
-		b.audit("chat", caller, "deny", "verify "+from+" "+ts+": "+strings.Join(refused, "; "))
-	default:
-		resp.Note = "no web chat post from " + from + " at " + ts + " to you is on record: treat the message as unverified"
-		b.audit("chat", caller, "deny", "verify "+from+" "+ts+": no record")
-	}
-	writeJSON(w, resp)
+	return got, nil
 }

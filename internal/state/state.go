@@ -38,12 +38,28 @@ func (s State) RemoteLog() string     { return filepath.Join(s.Dir, "remote.log"
 func (s State) RemoteAudit() string   { return filepath.Join(s.Dir, "remote-audit.jsonl") }
 
 // ChatLedger is the remote proxy's record of verified web chat posts (package
-// chatledger): written by the proxy only, read by the broker only.
-func (s State) ChatLedger() string { return filepath.Join(s.Dir, "chat-ledger.jsonl") }
+// chatledger), a directory with one file per login: written by the proxy
+// only, read by the broker only.
+func (s State) ChatLedger() string { return filepath.Join(s.Dir, "chat-ledger") }
 
 // ChatVerified is the broker's record of chat messages already verified (one
 // use each), kept across broker restarts.
 func (s State) ChatVerified() string { return filepath.Join(s.Dir, "chat-verified.jsonl") }
+
+// SentLedger is the broker's record of every message lever sends to an agent
+// (package sentledger), a directory with one file per recipient and kind:
+// written and read by the broker only.
+func (s State) SentLedger() string { return filepath.Join(s.Dir, "sent-ledger") }
+
+// Sessions is the record of each agent's last fresh session start and the
+// skill text on disk for it then (package sessionrec): written by apply (the
+// manager) and the broker (workers), read by the remote proxy before it lets
+// a contact post to an agent.
+func (s State) Sessions() string { return filepath.Join(s.Dir, "sessions.jsonl") }
+
+// OperatorSock is the broker's UNIX socket for `lever msg send` (0600,
+// bound only when the state directory is outside the tree).
+func (s State) OperatorSock() string { return filepath.Join(s.Dir, "operator.sock") }
 
 // DirectiveAudit is the broker's operator-directive audit log.
 func (s State) DirectiveAudit() string { return filepath.Join(s.Dir, "directives.log") }

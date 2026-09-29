@@ -626,7 +626,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		// answers with the hub down, so a pin upgrade followed by `lever
 		// up` re-grants the role while no container runs.
 		lifecycle = remoteRoleLifecycle(ctx, o.ScopeKnown, rolerec)
-		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remoteRolePermissions(lifecycle))
+		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remote.Contacts, remoteRolePermissions(lifecycle))
 	}
 	if controllerReason == "" && remoteReason == "" && roleReason == "" {
 		return nil // nothing to mint or grant; no dev-auth window
@@ -732,7 +732,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		}
 	}
 	if remote.Enabled {
-		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote.Emails, lifecycle, now, o); err != nil {
+		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote, lifecycle, now, o); err != nil {
 			return err
 		}
 	}
@@ -825,7 +825,7 @@ func closeDevAuthWindow(ctx context.Context, jr proc.Runner, tw *scion.Client, s
 // The exception is errCeilingRemoved: the grant deleted a user's ceiling and
 // could not write the new one, so that user can create projects until the next
 // apply — that fails the apply.
-func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, emails []string, lifecycle bool, now time.Time, o patMintOpts) error {
+func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, remote remoteAccess, lifecycle bool, now time.Time, o patMintOpts) error {
 	fail := func(err error) {
 		o.warn("bootstrap-token: remote web role not granted, so the web UI may answer 403; the next `lever apply` retries: %v", err)
 	}
@@ -834,7 +834,7 @@ func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, pro
 		fail(err)
 		return nil
 	}
-	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, emails, lifecycle, now, o.warn)
+	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, remote.Emails, remote.Contacts, lifecycle, now, o.warn)
 	if errors.Is(err, errCeilingRemoved) {
 		return fmt.Errorf("bootstrap-token: remote web role: %w", err)
 	}
@@ -892,6 +892,10 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("backend: %s\n", p.Summary())
 			}
 			printRemoteWarnings(cmd, app)
+			if err := checkContactGate(app, stateFor(path)); err != nil {
+				return err
+			}
+			printContactSessionWarnings(cmd, app, stateFor(path))
 			if dryRun {
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					if s.TarPath != "" {
@@ -1318,6 +1322,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// state of its own (unlike Start's reuse probe).
 		StartRemoteProxy: rc.Start,
 		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
+		// BeginSession records the manager's fresh starts for the contact
+		// gate (see sessionrec and remoteContactSession).
+		BeginSession: func(agent string) func() error {
+			return brokerctl.BeginSession(w.app, st, cli.VersionString(), agent)
+		},
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is

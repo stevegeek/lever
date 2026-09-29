@@ -20,7 +20,7 @@ func verifiedChatFixture(t *testing.T, users ...string) (*config.App, state.Stat
 			t.Fatal(err)
 		}
 	}
-	return &config.App{Tree: tree, Remote: config.Remote{Enabled: true, AllowedUsers: users}}, st
+	return &config.App{Tree: tree, Remote: config.Remote{Enabled: true, AllowedUsers: remoteUsers(users...)}}, st
 }
 
 func TestCheckVerifiedChat(t *testing.T) {
@@ -50,9 +50,9 @@ func TestCheckVerifiedChat(t *testing.T) {
 			t.Fatalf("row = %+v", r)
 		}
 	})
-	t.Run("on, ledger 0600", func(t *testing.T) {
+	t.Run("on, ledger 0700", func(t *testing.T) {
 		app, st := verifiedChatFixture(t, "op@example.com")
-		if err := os.WriteFile(st.ChatLedger(), []byte("{}\n"), 0o600); err != nil {
+		if err := os.Mkdir(st.ChatLedger(), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if r := checkVerifiedChat(app, st); !r.ok || r.fix != "" {
@@ -61,14 +61,22 @@ func TestCheckVerifiedChat(t *testing.T) {
 	})
 	t.Run("writable ledger fails", func(t *testing.T) {
 		app, st := verifiedChatFixture(t, "op@example.com")
-		if err := os.WriteFile(st.ChatLedger(), []byte("{}\n"), 0o600); err != nil {
+		if err := os.Mkdir(st.ChatLedger(), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(st.ChatLedger(), 0o666); err != nil {
+		if err := os.Chmod(st.ChatLedger(), 0o777); err != nil {
 			t.Fatal(err)
 		}
 		if r := checkVerifiedChat(app, st); r.ok {
 			t.Fatalf("row = %+v, want a failure", r)
 		}
 	})
+}
+
+func remoteUsers(logins ...string) []config.RemoteUser {
+	out := make([]config.RemoteUser, len(logins))
+	for i, l := range logins {
+		out[i] = config.RemoteUser{Login: l}
+	}
+	return out
 }

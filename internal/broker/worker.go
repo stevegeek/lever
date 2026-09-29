@@ -496,6 +496,10 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		}
 	}
 	volumes, env := workerTicketVolumes(spec)
+	var commit func() error
+	if b.beginSession != nil {
+		commit = b.beginSession(spec.Name)
+	}
 	if err := b.runtime.Start(ctx, scion.StartOpts{
 		Worker: spec.Name, Task: task, Harness: "claude",
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
@@ -505,6 +509,13 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
+	}
+	// The agent exists now with a new conversation: record the fresh start
+	// (contacts may post to it). A failure only keeps contacts out.
+	if commit != nil {
+		if err := commit(); err != nil {
+			b.audit("worker", b.manager, "error", "start "+spec.Name+": session record: "+err.Error())
+		}
 	}
 	if err := b.waitWorkerLive(ctx, spec); err != nil {
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())

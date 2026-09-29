@@ -32,12 +32,13 @@ func DirectiveCheck(ctx context.Context, brokerURL string, client *http.Client, 
 	return directivePost(ctx, brokerURL, client, wire.PathDirectiveCheck, id)
 }
 
-// ChatVerify asks the broker whether a received web chat message is on the
-// remote proxy's record (verified web chat). The returned JSON is the only
-// authoritative copy of the message text.
-func ChatVerify(ctx context.Context, brokerURL string, client *http.Client, timestamp, from string) (json.RawMessage, error) {
+// MessageVerify asks the broker who wrote a received message (web chat, a
+// lever send, or no record), from host records only. The returned JSON is the
+// only authoritative copy of the message text.
+func MessageVerify(ctx context.Context, brokerURL string, client *http.Client, timestamp, from, ref string) (json.RawMessage, error) {
 	var raw json.RawMessage
-	if err := httpjson.Post(ctx, client, brokerURL+wire.PathChatVerify, wire.ChatVerifyRequest{Timestamp: timestamp, From: from}, &raw); err != nil {
+	req := wire.MessageVerifyRequest{Timestamp: timestamp, From: from, Ref: ref}
+	if err := httpjson.Post(ctx, client, brokerURL+wire.PathMessageVerify, req, &raw); err != nil {
 		return nil, err
 	}
 	return raw, nil

@@ -407,7 +407,7 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 	// Last, because it depends on everything above: this is the only probe
 	// that goes end to end through the proxy to the hub.
 	status, err := p.remoteHealthz(healthzProbe{Addr: addr, Port: port,
-		Header: app.EffectiveRemoteIdentityHeader(), Login: firstOrEmpty(app.Remote.AllowedUsers)})
+		Header: app.EffectiveRemoteIdentityHeader(), Login: firstOrEmpty(app.Remote.Logins())})
 	if err != nil {
 		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect " + remoteLog + " — the hub may be down, or the proxy misconfigured"}
 	}
@@ -450,33 +450,41 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 			", which agents mount, so a ledger there proves nothing",
 			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
 	case len(app.Remote.AllowedUsers) == 0:
-		return warnResult(name, "off: remote.allowed_users is empty, so the proxy verifies no login and records no chat",
-			"list the operator's login in remote.allowed_users, then run `lever apply`")
+		return warnResult(name, "off: remote.allowed_users is empty, so the proxy verifies no login and records no chat; "+
+			"agents cannot verify a web chat post and treat every one as data (they do not act on it or reply)",
+			"list the operator's login in remote.allowed_users, then run `lever apply` and `lever init`")
 	}
 	p := brokerctl.ChatLedgerPath(app, st)
 	// Every allowed login speaks with operator authority once verified: say
 	// who, so a login added only to look at the web UI is not a surprise.
-	tier := "operator tier for " + strings.Join(app.Remote.AllowedUsers, ", ")
+	var tiers []string
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			tiers = append(tiers, u.Login+" contact ("+strings.Join(u.Agents, ", ")+")")
+		} else {
+			tiers = append(tiers, u.Login+" operator")
+		}
+	}
+	tier := "tiers: " + strings.Join(tiers, "; ")
 	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + ")", ""}
-	}
-	if err == nil && !fi.Mode().IsRegular() {
-		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a regular file (a symlink?), so agents get no answer",
-			"remove " + p + "; the remote proxy writes a new one"}
+		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + "/)", ""}
 	}
 	if err != nil {
 		return checkResult{name, false, "cannot read the chat ledger: " + err.Error(), "check " + stateRel(st, p)}
 	}
+	fix := "remove " + p + "; the remote proxy writes a new one"
+	if !fi.IsDir() {
+		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a directory (a symlink?), so agents get no answer", fix}
+	}
 	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
-		return checkResult{name, false, fmt.Sprintf("the chat ledger %s is %v: another user can add a line, so agents get no answer", stateRel(st, p), perm),
-			"chmod 600 " + p}
+		return checkResult{name, false, fmt.Sprintf("the chat ledger %s is %v: another user can add a file, so agents get no answer", stateRel(st, p), perm), "chmod 700 " + p}
 	}
 	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
-		return checkResult{name, false, fmt.Sprintf("the chat ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()),
-			"remove " + p + "; the remote proxy writes a new one"}
+		return checkResult{name, false, fmt.Sprintf("the chat ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()), fix}
 	}
-	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s (%d bytes, 0600)", tier, stateRel(st, p), fi.Size()), ""}
+	files, _ := os.ReadDir(p)
+	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s/ (%d files, 0700)", tier, stateRel(st, p), len(files)), ""}
 }
 
 // warnResult is a warning row: not a failure (doctor's exit status ignores
@@ -1488,10 +1496,22 @@ func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess
 		return checkResult{name, false, err.Error(), fix}
 	}
 	perms := remoteRolePermissions(remoteRoleLifecycle(ctx, known, rec))
-	reason := remoteRoleReason(rec, found, remote.Emails, perms)
+	reason := remoteRoleReason(rec, found, remote.Emails, remote.Contacts, perms)
 	if reason == "" {
-		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s; %s withheld by an access constraint",
-			remoteWebRoleName, strings.Join(remote.Emails, ", "), projectCreatePermission), ""}
+		var ops []string
+		for _, e := range remote.Emails {
+			if !slices.Contains(remote.Contacts, e) {
+				ops = append(ops, e)
+			}
+		}
+		bound := fmt.Sprintf("%s bound on the project for %s", remoteWebRoleName, strings.Join(ops, ", "))
+		if len(ops) == 0 {
+			bound = "no operator login"
+		}
+		if len(remote.Contacts) > 0 {
+			bound += fmt.Sprintf("; %s for %s", contactRoleName, strings.Join(remote.Contacts, ", "))
+		}
+		return checkResult{name, true, bound + "; " + projectCreatePermission + " withheld by an access constraint", ""}
 	}
 	if strings.HasPrefix(reason, remoteCeilingMissing) {
 		return checkResult{name, false, reason, fix}

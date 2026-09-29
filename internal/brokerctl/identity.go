@@ -1,6 +1,8 @@
 package brokerctl
 
 import (
+	"strings"
+
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -25,15 +27,16 @@ func ConfigHash(app *config.App) string {
 	// (restart), which fails toward the safe side.
 	//
 	// VerifiedChat is whether verified web chat is configured
-	// (ChatConfigured): it derives from the remote block, which the broker
-	// otherwise ignores, so turning allowed_users on or off must bounce the
-	// broker too.
+	// (ChatConfigured) and WebSenders the remote sign-ins' sender labels:
+	// both derive from the remote block, which the broker otherwise ignores,
+	// so changing allowed_users must bounce the broker too.
 	return state.HashJSON(struct {
 		Broker       config.Broker
 		Workers      []config.Worker
 		Scion        config.ScionConfig
 		VerifiedChat bool
-	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app)})
+		WebSenders   []string `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app)})
 }
 
 // RemoteConfigHash digests the config a `lever remote serve` process captures
@@ -45,7 +48,7 @@ func RemoteConfigHash(app *config.App) string {
 		Enabled:      app.Remote.Enabled,
 		Port:         app.Remote.Port,
 		BaseURL:      app.Remote.BaseURL,
-		AllowedUsers: app.Remote.AllowedUsers,
+		AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
 		LoginPort:    app.Remote.LoginPort,
 		// Effective values, so spelling the default out (or changing the
 		// header's case) is not a config change that bounces the proxy.
@@ -56,4 +59,19 @@ func RemoteConfigHash(app *config.App) string {
 		Name:               app.Name,
 		Backend:            app.Backend,
 	})
+}
+
+// remoteUserKeys is each allowed user as one string for the proxy's config
+// hash: the bare login for an operator (so a config written before tiers
+// hashes as it did), and the login with its tier and agents for a contact, so
+// changing either restarts the proxy.
+func remoteUserKeys(users []config.RemoteUser) []string {
+	out := make([]string, len(users))
+	for i, u := range users {
+		out[i] = u.Login
+		if u.EffectiveTier() != config.TierOperator {
+			out[i] += " tier=" + u.EffectiveTier() + " agents=" + strings.Join(u.Agents, ",")
+		}
+	}
+	return out
 }

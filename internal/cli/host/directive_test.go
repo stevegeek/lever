@@ -103,7 +103,13 @@ func startDirectiveUDS(t *testing.T, dir string, routes map[string]canned) *reqR
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sock := filepath.Join(stateDir, "directive.sock")
+	return startUDSAt(t, filepath.Join(stateDir, "directive.sock"), routes)
+}
+
+// startUDSAt serves canned responses per route on a real UNIX socket at
+// sock, recording every request.
+func startUDSAt(t *testing.T, sock string, routes map[string]canned) *reqRecorder {
+	t.Helper()
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen unix %s: %v", sock, err)

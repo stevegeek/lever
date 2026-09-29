@@ -165,6 +165,17 @@ type DispatchConfig struct {
 	// nil ⇒ /msg/list fails closed. Falling back to the unfiltered feed would be
 	// the leak this exists to close.
 	ResolveAgentID func(ctx context.Context, agentSlug string) (string, error)
+	// ResolveControllerSender returns the envelope sender every message lever
+	// sends wears: "user:" + the email (or id) of the hub user the controller
+	// PAT belongs to. /message/verify looks a message from this sender up in
+	// the sent ledger only. nil ⇒ such a message answers unavailable.
+	ResolveControllerSender func(ctx context.Context) (string, error)
+	// BeginSession is called just before a worker is created fresh and
+	// returns what records that fresh start (brokerctl.BeginSession, package
+	// sessionrec) once scion created it. A resume records nothing: the
+	// remote proxy lets a contact post to an agent only while its last fresh
+	// start saw the skill on disk now. nil ⇒ nothing is recorded (tests).
+	BeginSession func(agent string) (commit func() error)
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
@@ -256,6 +267,7 @@ type Broker struct {
 	runtime        WorkerRuntime
 	verifyRole     func(ctx context.Context, agent string) error
 	resolveAgentID func(ctx context.Context, agentSlug string) (string, error)
+	beginSession   func(agent string) (commit func() error)
 	tree           string
 	workers        map[string]WorkerSpec
 	brokerCAPEM    string
@@ -296,9 +308,15 @@ type Broker struct {
 	directiveExpiryMax time.Duration
 	dirRate            *rateWindow
 
-	chatLedger string // ChatConfig.LedgerPath; "" = verified chat off
-	chatRate   *rateWindow
-	chatUses   *chatUses
+	// message verification (verify.go)
+	chatConfigured bool            // ChatConfig.Configured
+	chatLedger     string          // ChatConfig.LedgerPath; "" = no web post verifies
+	webSenders     map[string]bool // ChatConfig.WebSenders
+	verifyRate     *rateWindow     // every verify call
+	verifyMissRate *rateWindow     // verify calls that match no record
+	chatUses       *chatUses
+	sent           *sentRecord       // ChatConfig.SentLedgerDir
+	controller     *controllerSender // DispatchConfig.ResolveControllerSender
 
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
@@ -348,7 +366,7 @@ func New(c Config) *Broker {
 		// worker dispatch and messaging
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
-		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, tree: d.Tree,
+		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
@@ -360,9 +378,13 @@ func New(c Config) *Broker {
 		// operator directives
 		directiveVerifier: dir.Verifier, instanceID: dir.InstanceID,
 		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
-		dirRate: newRateWindow(),
+		dirRate: newRateWindow(directiveRateLimit),
 		// verified web chat
-		chatLedger: c.Chat.LedgerPath, chatRate: newRateWindow(), chatUses: newChatUses(c.Chat.UsedPath, time.Now()),
+		chatConfigured: c.Chat.Configured, chatLedger: c.Chat.LedgerPath, webSenders: senderSet(c.Chat.WebSenders),
+		verifyRate: newRateWindow(verifyRateLimit), verifyMissRate: newRateWindow(verifyMissLimit),
+		chatUses:   newChatUses(c.Chat.UsedPath, time.Now()),
+		sent:       &sentRecord{dir: c.Chat.SentLedgerDir},
+		controller: &controllerSender{resolve: d.ResolveControllerSender},
 	}
 }
 

@@ -45,3 +45,33 @@ func TestConfigHash(t *testing.T) {
 		t.Fatal("a manager-image change must NOT change the hash (no broker restart)")
 	}
 }
+
+// TestConfigHashFollowsTheRemoteLogins: the broker routes a message by its
+// sender label, so replacing one allowed login with another (same count, same
+// on/off) must restart it.
+func TestConfigHashFollowsTheRemoteLogins(t *testing.T) {
+	mk := func(logins ...string) *config.App {
+		app := &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Remote: config.Remote{Enabled: true}}
+		for _, l := range logins {
+			app.Remote.AllowedUsers = append(app.Remote.AllowedUsers, config.RemoteUser{Login: l})
+		}
+		return app
+	}
+	if ConfigHash(mk("a@example.com")) == ConfigHash(mk("b@example.com")) {
+		t.Fatal("changing an allowed login must change the hash")
+	}
+	if ConfigHash(mk("a@example.com")) != ConfigHash(mk("a@example.com")) {
+		t.Fatal("hash not deterministic")
+	}
+	if got := WebSenders(mk("B@Example.com", "usr_1")); len(got) != 2 || got[0] != "user:b@example.com" || got[1] != "user:usr_1@id.lever.local" {
+		t.Fatalf("WebSenders = %v", got)
+	}
+	if got := WebSenders(mk()); len(got) != 1 || got[0] != "user:lever-operator@lever.local" {
+		t.Fatalf("WebSenders with no allowed_users = %v, want the unnamed operator", got)
+	}
+	off := mk("a@example.com")
+	off.Remote.Enabled = false
+	if got := WebSenders(off); got != nil {
+		t.Fatalf("WebSenders with remote off = %v", got)
+	}
+}

@@ -5,6 +5,116 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **Contacts: chat-only remote logins.** An `allowed_users` entry can be a
+  map `{login, tier: contact, agents: [...]}`. A contact reaches only the
+  listed agents, and only their direct chat. Its hub user gets the role
+  `lever-remote-contact` (`agent.message` only: no terminal, no start/stop,
+  no view of other agents' tasks or events), and the remote proxy enforces
+  an allow-list per contact, because scion roles cannot name agents and its
+  DM check looks only at the user side. A contact's message may not contain
+  an `@word` (scion's mention routing would reach another agent), a reply
+  id or an attachment. Verified chat reports the tier `contact`, and the
+  skills treat it as the contact's answer for the task, never as operator
+  steering. Doctor lists each login's tier. The plain string entry keeps its
+  meaning (operator). Run `lever init` to refresh the skills.
+- **Sender verification from host records.** Agents no longer decide who
+  wrote a message from its text. The broker records every message lever
+  sends to an agent (a worker's relay, a manager message, an operator note,
+  a directive notice) in a host-side sent ledger (`.lever-state/sent-ledger/`,
+  one 0600 file per recipient and kind in a 0700 directory) before it sends
+  it, with a fresh 128-bit id that it writes on the message's first line as
+  `ref=<id>`. A send the broker cannot record is not made. The new
+  capability tool `message_verify` (and `POST /message/verify`) classifies
+  any `user:` message from host records only: a remote login's sender is
+  looked up in the chat ledger only, the controller's sender (which the
+  broker asks the hub for) in the sent ledger only, by ref and bound to the
+  caller's identity, and any other sender has no record. It answers
+  `result` `web` (login, tier), `lever` (kind: `manager`, `worker:<slug>`,
+  `operator-note`, `directive-notice`), `already_verified`, `none` or
+  `unavailable` (with `retry_after`; every broker failure answers this,
+  never `none`), and the text as recorded. A lever message verifies within
+  24 hours, a web post within one hour, each once. `chat_verify` and
+  `/chat/verify` stay as aliases; for agent images that cannot pass a ref,
+  `/chat/verify` matches a lever message by its timestamp.
+- **`operator.sock`.** `lever msg send` posts to the broker's new 0600
+  operator socket (`POST /operator/note`), which records the note as an
+  `operator-note` and sends it. The socket is not bound when the state
+  directory is inside the tree, and never on the admin TCP port.
+- **Doctor rows** `sent ledger` (and the operator socket while the broker
+  runs) and `guest clock`.
+
+### Changed
+
+- **Agents verify every `user:` message.** Both skills call
+  `message_verify` for every message whose `from` starts with `user:` and
+  act only on the returned text, by its result, kind and tier: `none` is
+  data (not acted on, not answered, reported), `unavailable` is retried once
+  and then treated as data, `already_verified` is not new. A worker's
+  message to another worker is peer data. A message that talks about a
+  directive may always lead to one `directive_consume` call. Lever's
+  first-line markers stay as readable hints and decide nothing. The worker
+  skill now also states whether verified web chat is on.
+- **A reply to web chat goes where the host record says.** A `web` answer
+  carries `reply_to` (`@<hub email>` of the poster, the agent's direct chat
+  with that user, from the chat ledger) and the recorded conversation key.
+  Both skills reply only at `reply_to` and no longer copy a conversation id
+  (or an older pin's channel) from the envelope, so an envelope typed into
+  a message cannot move a reply into another person's chat.
+- **A contact's message may contain any text.** The contact fence refuses
+  only fields, mentions and routes; a lever marker in a contact's post
+  verifies as the contact's words.
+- **`lever msg send` needs a running broker**, and refuses without one
+  (type into the session with `lever attach` instead).
+- **Contacts need current skills.** `lever apply`, `lever up` and
+  `lever remote serve` refuse contact logins until `lever init` has
+  written this version's skills for every agent, and while the state
+  directory is inside the tree. A resumed session keeps the skill text it
+  read before, so lever also records each fresh session start with the
+  skill on disk then (`.lever-state/sessions.jsonl`; apply for the
+  manager, the broker for a worker, never a resume), and the remote proxy
+  refuses a contact's post to an agent whose last fresh start saw another
+  skill text, or that lever has no record of starting. Bring-ups warn about
+  each such agent.
+- **The 0.27 `verified` field is true only for an operator's web post.** A
+  contact's post and a lever message answer `verified: false`, so a 0.27
+  skill never takes either for the operator's chat.
+- **Manager notes to itself are marked** like every other manager message.
+- A remote login whose hub email is `dev@localhost` (the hub user lever
+  sends as) is refused at config load. Changing `allowed_users` restarts the
+  broker.
+
+### Removed
+
+- **The contact fence's marker filter** (`internal/marker`). A regex on
+  message text is not a boundary: three reviews found a bypass (trimmed
+  whitespace, invisible filler letters, homoglyphs).
+
+### Upgrade
+
+- Run `lever apply` (it restarts the broker), then `lever init` to refresh
+  both skills; with contact logins, run `lever init` first, since apply
+  refuses contacts while any skill is stale.
+- Until `lever init` has run, a 0.27 manager skill treats the manager's
+  notes to itself as data: they are now marked and verify as `lever`,
+  which the 0.27 skill reads as `verified: false`.
+- Contacts can post to an agent only once its session starts fresh on
+  this version: for the manager, `lever up --fresh` (back up the
+  conversation first, see the upgrade notes on `--fresh`); a worker once
+  the broker creates it again.
+- `lever msg send` refuses when the state directory is inside the tree
+  (the broker binds no operator socket there); use `lever attach` and type
+  into the session instead.
+- Rebuild the agent image to get `message_verify` with its `ref`. Until
+  then, `chat_verify` works: a lever message is matched by its timestamp,
+  which needs the guest clock within 5 seconds of the host (doctor row
+  `guest clock`).
+- With remote access but no `allowed_users`, agents now treat every web chat
+  post as data and do not reply: add your login to `allowed_users`.
+
 ## [0.27.0] - 2026-09-28
 
 ### Added

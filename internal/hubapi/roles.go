@@ -200,6 +200,19 @@ func (c *Client) CreateRoleBinding(ctx context.Context, rb RoleBinding) (RoleBin
 	return got, err
 }
 
+// DeleteRoleBinding removes one binding (DELETE
+// /api/v1/admin/role-bindings/{id}). A binding already gone is not an error.
+func (c *Client) DeleteRoleBinding(ctx context.Context, id string) error {
+	status, resp, err := c.doBody(ctx, http.MethodDelete, "/api/v1/admin/role-bindings/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusNotFound || (status >= 200 && status <= 299) {
+		return nil
+	}
+	return &APIError{Status: status, Msg: fmt.Sprintf("DELETE role binding %s: HTTP %d: %s", id, status, snippet(resp))}
+}
+
 // SamePermissions reports whether two permission lists hold the same set,
 // ignoring order and duplicates.
 func SamePermissions(a, b []string) bool {

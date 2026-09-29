@@ -1015,3 +1015,37 @@ func TestWorkerResumeListErrorIsRuntimeError(t *testing.T) {
 		t.Fatalf("a failed listing must neither stage nor resume: resumed=%d staged=%d", len(rt.resumed), len(rt.staged))
 	}
 }
+
+// TestWorkerStartRecordsOnlyAFreshSession: a worker created fresh records
+// its session start (so contacts may post to it); a resume, a no-op and a
+// failed create record nothing.
+func TestWorkerStartRecordsOnlyAFreshSession(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		agents     []scion.Agent
+		startErr   error
+		wantCommit bool
+	}{
+		{"absent", nil, nil, true},
+		{"absent, create fails", nil, errors.New("boom"), false},
+		{"suspended", []scion.Agent{{Slug: "worker", Phase: "suspended"}}, nil, false},
+		{"running", []scion.Agent{{Slug: "worker", Phase: "running"}}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+				HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"), TicketDir: "/run/user/501/lever/tickets/worker"}
+			rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: tc.agents}, startErr: tc.startErr}
+			var begun, committed []string
+			b := New(testConfig(t, withManager("test-manager", ""), withRuntime(rt, spec), func(c *Config) {
+				c.Dispatch.BeginSession = func(agent string) func() error {
+					begun = append(begun, agent)
+					return func() error { committed = append(committed, agent); return nil }
+				}
+			}))
+			callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+			if got := len(committed) == 1 && committed[0] == "worker"; got != tc.wantCommit {
+				t.Fatalf("begun %v committed %v, want a commit: %v", begun, committed, tc.wantCommit)
+			}
+		})
+	}
+}

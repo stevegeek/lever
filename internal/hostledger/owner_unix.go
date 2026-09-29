@@ -1,13 +1,14 @@
 //go:build unix
 
-package chatledger
+package hostledger
 
 import (
 	"io/fs"
 	"syscall"
 )
 
-func fileOwner(fi fs.FileInfo) (int, bool) {
+// FileOwner is the uid that owns fi, where the platform reports one.
+func FileOwner(fi fs.FileInfo) (int, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return 0, false

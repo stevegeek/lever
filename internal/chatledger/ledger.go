@@ -15,20 +15,19 @@
 package chatledger
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/stevegeek/lever/internal/hostledger"
 )
 
 // The tiers a ledger entry can carry (config.TierOperator/TierContact): what
@@ -78,45 +77,23 @@ type Entry struct {
 // fileWriter appends entries to one login's file.
 type fileWriter struct {
 	path string
-	mu   sync.Mutex
+	once sync.Once
+	f    *hostledger.File
 }
 
 // Append writes e as one JSON line, rotating first when the file has grown
-// past RotateCap. The file is created 0600, and an existing file is set back
-// to 0600, so no other user can add a line.
+// past RotateCap (hostledger.File.Append: 0600, O_NOFOLLOW).
 func (w *fileWriter) Append(e Entry) error {
-	line, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	line = append(line, '\n')
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if fi, err := os.Stat(w.path); err == nil && fi.Size() > RotateCap {
-		if err := os.Rename(w.path, w.path+".1"); err != nil {
-			return fmt.Errorf("chat ledger: rotate: %w", err)
-		}
-	}
-	// O_NOFOLLOW: never append to (or chmod) whatever a symlink here points
-	// at; Lookup refuses a symlinked ledger anyway.
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|ONoFollow, 0o600)
-	if err != nil {
-		return fmt.Errorf("chat ledger: %w", err)
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("chat ledger: %w", err)
-	}
-	if _, err := f.Write(line); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("chat ledger: %w", err)
-	}
-	return f.Close()
+	w.once.Do(func() { w.f = &hostledger.File{Path: w.path, Label: label, Cap: RotateCap} })
+	return w.f.Append(e)
 }
 
+// label prefixes the ledger's errors.
+const label = "chat ledger"
+
 // ErrUnsafe means a ledger file can be written by another user, so its
-// entries prove nothing.
-var ErrUnsafe = errors.New("chat ledger is writable by another user")
+// entries prove nothing (hostledger.ErrUnsafe).
+var ErrUnsafe = hostledger.ErrUnsafe
 
 // lookupFile returns the entries for agentID whose Sender is sender and whose
 // CreatedAt is createdAt, from path and its rotated copy. A missing file is
@@ -146,84 +123,23 @@ func lookupFile(path, agentID, sender, createdAt string) ([]Entry, error) {
 	return out, nil
 }
 
-// maxLine bounds one ledger line: a message is at most 16000 characters
-// (scion's messages.MaxMessageLength), so this leaves room for JSON escaping.
-const maxLine = 1 << 20
+// maxLine bounds one ledger line (hostledger.MaxLine).
+const maxLine = hostledger.MaxLine
 
 func readFile(p string) ([]Entry, error) {
-	// Lstat first: a symlink could point at a file some other process can
-	// write, whatever its own mode says.
-	li, err := os.Lstat(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("chat ledger: %w", err)
-	}
-	if li.Mode()&fs.ModeSymlink != 0 || !li.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s is not a regular file", ErrUnsafe, p)
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, fmt.Errorf("chat ledger: %w", err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("chat ledger: %w", err)
-	}
-	if !os.SameFile(li, fi) {
-		return nil, fmt.Errorf("%w: %s changed while it was opened", ErrUnsafe, p)
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("%w: %s is %v", ErrUnsafe, p, fi.Mode().Perm())
-	}
-	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
-		return nil, fmt.Errorf("%w: %s belongs to uid %d", ErrUnsafe, p, owner)
-	}
 	var out []Entry
-	rd := bufio.NewReaderSize(f, 64<<10)
-	for {
-		line, err := readLine(rd)
-		if len(line) > 0 {
-			var e Entry
-			// A torn line (a crash mid-write) or an oversized one is skipped,
-			// not fatal: every other entry is still good.
-			if json.Unmarshal(line, &e) == nil {
-				out = append(out, e)
-			}
+	err := hostledger.ReadFile(p, label, func(line []byte) {
+		var e Entry
+		// A torn line (a crash mid-write) or an oversized one is skipped,
+		// not fatal: every other entry is still good.
+		if json.Unmarshal(line, &e) == nil {
+			out = append(out, e)
 		}
-		if errors.Is(err, io.EOF) {
-			return out, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("chat ledger: %w", err)
-		}
+	})
+	if err != nil {
+		return nil, err
 	}
-}
-
-// readLine returns the next line without its newline, or nil when the line
-// is longer than maxLine (the rest of it is consumed and dropped).
-func readLine(rd *bufio.Reader) ([]byte, error) {
-	var buf []byte
-	tooLong := false
-	for {
-		chunk, err := rd.ReadSlice('\n')
-		if !tooLong {
-			if len(buf)+len(chunk) > maxLine {
-				tooLong, buf = true, nil
-			} else {
-				buf = append(buf, chunk...)
-			}
-		}
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
-		}
-		if tooLong {
-			return nil, err
-		}
-		return bytes.TrimSpace(buf), err
-	}
+	return out, nil
 }
 
 // NormalizeTimestamp parses an envelope timestamp (RFC 3339) and returns it
@@ -286,22 +202,7 @@ func (w *Writer) Append(e Entry) error {
 
 // checkDir refuses a ledger directory that is a symlink, not a directory,
 // writable by others, or owned by another user.
-func checkDir(dir string) error {
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return fmt.Errorf("chat ledger: %w", err)
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%w: %s is not a directory", ErrUnsafe, dir)
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%w: %s is %v", ErrUnsafe, dir, fi.Mode().Perm())
-	}
-	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
-		return fmt.Errorf("%w: %s belongs to uid %d", ErrUnsafe, dir, owner)
-	}
-	return nil
-}
+func checkDir(dir string) error { return hostledger.CheckDir(dir, label) }
 
 // Lookup returns the entries for agentID whose Sender is sender and whose
 // CreatedAt is createdAt, from every login's file (and its rotated copy) in

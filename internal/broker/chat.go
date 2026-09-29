@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/chatledger"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -146,7 +147,7 @@ func (u *chatUses) take(caller, id string, recorded, now time.Time) (time.Time, 
 		return t, false, nil
 	}
 	if u.path != "" {
-		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|chatledger.ONoFollow, 0o600)
+		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|hostledger.ONoFollow, 0o600)
 		if err != nil {
 			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
 		}

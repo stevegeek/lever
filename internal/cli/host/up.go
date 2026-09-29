@@ -106,6 +106,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			printRemoteWarnings(cmd, app)
+			if err := checkContactGate(app, stateFor(path)); err != nil {
+				return err
+			}
 			// The bring-up runs under a signal-aware context (see
 			// applySignalContext); the attach below does not, so the
 			// operator's keys go to the manager, not to this handler.

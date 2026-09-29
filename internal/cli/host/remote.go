@@ -45,6 +45,10 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
+			// The proxy is what lets a contact in: the same gate as apply.
+			if err := checkContactGate(app, st); err != nil {
+				return err
+			}
 			auditFn, auditCloser, err := remoteproxy.OpenAudit(st.RemoteAudit())
 			if err != nil {
 				return err

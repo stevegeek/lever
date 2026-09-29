@@ -892,6 +892,9 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("backend: %s\n", p.Summary())
 			}
 			printRemoteWarnings(cmd, app)
+			if err := checkContactGate(app, stateFor(path)); err != nil {
+				return err
+			}
 			if dryRun {
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					if s.TarPath != "" {

@@ -456,7 +456,15 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	p := brokerctl.ChatLedgerPath(app, st)
 	// Every allowed login speaks with operator authority once verified: say
 	// who, so a login added only to look at the web UI is not a surprise.
-	tier := "operator tier for " + strings.Join(app.Remote.Logins(), ", ")
+	var tiers []string
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			tiers = append(tiers, u.Login+" contact ("+strings.Join(u.Agents, ", ")+")")
+		} else {
+			tiers = append(tiers, u.Login+" operator")
+		}
+	}
+	tier := "tiers: " + strings.Join(tiers, "; ")
 	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + ")", ""}

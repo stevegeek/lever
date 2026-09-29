@@ -148,7 +148,7 @@ func remoteAccessFor(app *config.App) remoteAccess {
 	if !app.RemoteEnabled() {
 		return remoteAccess{}
 	}
-	return remoteAccess{Enabled: true, Emails: remoteproxy.HubUserEmails(app.Remote.AllowedUsers)}
+	return remoteAccess{Enabled: true, Emails: remoteproxy.HubUserEmails(app.Remote.Logins())}
 }
 
 // remoteRoleFix is the one repair for a pending user: the hub user exists

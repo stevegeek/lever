@@ -504,8 +504,12 @@ func (a *App) validateRemote() error {
 		return err
 	}
 	seen := map[string]string{}
-	for _, au := range a.Remote.AllowedUsers {
+	for _, u := range a.Remote.AllowedUsers {
+		au := u.Login
 		if err := validRemoteLogin(au); err != nil {
+			return err
+		}
+		if err := a.validRemoteUserTier(u); err != nil {
 			return err
 		}
 		// scion lowercases emails, so two entries that differ only in case
@@ -516,6 +520,40 @@ func (a *App) validateRemote() error {
 			return fmt.Errorf("config: remote: allowed_users lists %q and %q, which the hub treats as the same user (it lowercases emails); keep one", prev, au)
 		}
 		seen[key] = au
+	}
+	return nil
+}
+
+// validRemoteUserTier checks an entry's tier and agent list: a contact must
+// list the agents it may reach (declared workers or the manager, each once);
+// an operator reaches every agent and lists none.
+func (a *App) validRemoteUserTier(u RemoteUser) error {
+	switch u.EffectiveTier() {
+	case TierOperator:
+		if len(u.Agents) > 0 {
+			return fmt.Errorf("config: remote: allowed_users %q is an operator, which reaches every agent; remove its agents list, or set tier: contact", u.Login)
+		}
+		return nil
+	case TierContact:
+	default:
+		return fmt.Errorf("config: remote: allowed_users %q has tier %q; use operator or contact", u.Login, u.Tier)
+	}
+	if len(u.Agents) == 0 {
+		return fmt.Errorf("config: remote: allowed_users %q is a contact and must list its agents (agents: [<worker>, ...])", u.Login)
+	}
+	seen := map[string]bool{}
+	for _, name := range u.Agents {
+		known := name == a.Name
+		for _, w := range a.Workers {
+			known = known || w.Name == name
+		}
+		if !known {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q, which is not a declared worker or the manager (%s)", u.Login, name, a.Name)
+		}
+		if seen[name] {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q twice", u.Login, name)
+		}
+		seen[name] = true
 	}
 	return nil
 }

@@ -1,6 +1,8 @@
 package brokerctl
 
 import (
+	"strings"
+
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -45,7 +47,7 @@ func RemoteConfigHash(app *config.App) string {
 		Enabled:      app.Remote.Enabled,
 		Port:         app.Remote.Port,
 		BaseURL:      app.Remote.BaseURL,
-		AllowedUsers: app.Remote.AllowedUsers,
+		AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
 		LoginPort:    app.Remote.LoginPort,
 		// Effective values, so spelling the default out (or changing the
 		// header's case) is not a config change that bounces the proxy.
@@ -56,4 +58,19 @@ func RemoteConfigHash(app *config.App) string {
 		Name:               app.Name,
 		Backend:            app.Backend,
 	})
+}
+
+// remoteUserKeys is each allowed user as one string for the proxy's config
+// hash: the bare login for an operator (so a config written before tiers
+// hashes as it did), and the login with its tier and agents for a contact, so
+// changing either restarts the proxy.
+func remoteUserKeys(users []config.RemoteUser) []string {
+	out := make([]string, len(users))
+	for i, u := range users {
+		out[i] = u.Login
+		if u.EffectiveTier() != config.TierOperator {
+			out[i] += " tier=" + u.EffectiveTier() + " agents=" + strings.Join(u.Agents, ",")
+		}
+	}
+	return out
 }

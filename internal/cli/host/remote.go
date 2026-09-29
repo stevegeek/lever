@@ -125,7 +125,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// So the Host gate admits `lever doctor`'s loopback /healthz
 		// probe without widening the allowlist beyond this one port.
 		ListenPort:         app.EffectiveRemotePort(),
-		AllowedUsers:       app.Remote.AllowedUsers,
+		AllowedUsers:       app.Remote.Logins(),
 		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
 		TrustForwardedHost: app.Remote.TrustForwardedHost,
 		BindHost:           remoteBindHost(app),

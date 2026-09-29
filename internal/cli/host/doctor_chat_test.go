@@ -20,7 +20,7 @@ func verifiedChatFixture(t *testing.T, users ...string) (*config.App, state.Stat
 			t.Fatal(err)
 		}
 	}
-	return &config.App{Tree: tree, Remote: config.Remote{Enabled: true, AllowedUsers: users}}, st
+	return &config.App{Tree: tree, Remote: config.Remote{Enabled: true, AllowedUsers: remoteUsers(users...)}}, st
 }
 
 func TestCheckVerifiedChat(t *testing.T) {
@@ -71,4 +71,12 @@ func TestCheckVerifiedChat(t *testing.T) {
 			t.Fatalf("row = %+v, want a failure", r)
 		}
 	})
+}
+
+func remoteUsers(logins ...string) []config.RemoteUser {
+	out := make([]config.RemoteUser, len(logins))
+	for i, l := range logins {
+		out[i] = config.RemoteUser{Login: l}
+	}
+	return out
 }

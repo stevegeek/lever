@@ -407,7 +407,7 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 	// Last, because it depends on everything above: this is the only probe
 	// that goes end to end through the proxy to the hub.
 	status, err := p.remoteHealthz(healthzProbe{Addr: addr, Port: port,
-		Header: app.EffectiveRemoteIdentityHeader(), Login: firstOrEmpty(app.Remote.AllowedUsers)})
+		Header: app.EffectiveRemoteIdentityHeader(), Login: firstOrEmpty(app.Remote.Logins())})
 	if err != nil {
 		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy failed: %v", err), "inspect " + remoteLog + " — the hub may be down, or the proxy misconfigured"}
 	}
@@ -456,7 +456,7 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	p := brokerctl.ChatLedgerPath(app, st)
 	// Every allowed login speaks with operator authority once verified: say
 	// who, so a login added only to look at the web UI is not a surprise.
-	tier := "operator tier for " + strings.Join(app.Remote.AllowedUsers, ", ")
+	tier := "operator tier for " + strings.Join(app.Remote.Logins(), ", ")
 	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return checkResult{name, true, "on (" + tier + "); no chat post recorded yet (" + stateRel(st, p) + ")", ""}

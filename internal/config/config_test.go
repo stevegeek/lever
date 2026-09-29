@@ -1767,7 +1767,7 @@ func TestRemoteAllowedUsersShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("well-formed logins must load: %v", err)
 	}
-	if !slices.Equal(app.Remote.AllowedUsers, ok) {
+	if !slices.Equal(app.Remote.Logins(), ok) {
 		t.Fatalf("allowed_users = %v", app.Remote.AllowedUsers)
 	}
 	for _, bad := range []string{

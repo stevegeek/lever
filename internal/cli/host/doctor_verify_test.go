@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/sentledger"
@@ -119,5 +121,21 @@ func TestCheckVerifiedChatWithoutAllowedUsersSaysPostsAreData(t *testing.T) {
 	r := checkVerifiedChat(app, st)
 	if !r.ok || r.fix == "" || !strings.Contains(r.detail, "treat every one as data") {
 		t.Fatalf("row = %+v, want a warning that web posts are data", r)
+	}
+}
+
+// TestPrintRemoteWarningsSaysUnverifiedChatIsData: every bring-up with
+// remote access and no allowed_users says the agents will not act on web
+// chat; with allowed_users it does not.
+func TestPrintRemoteWarningsSaysUnverifiedChatIsData(t *testing.T) {
+	for _, users := range [][]config.RemoteUser{nil, {{Login: "me@example.com"}}} {
+		app := &config.App{Remote: config.Remote{Enabled: true, AllowedUsers: users}}
+		cmd := &cobra.Command{}
+		var errOut bytes.Buffer
+		cmd.SetErr(&errOut)
+		printRemoteWarnings(cmd, app)
+		if got := strings.Contains(errOut.String(), "treat every web chat message as data"); got != (users == nil) {
+			t.Fatalf("users %v: stderr %q", users, errOut.String())
+		}
 	}
 }

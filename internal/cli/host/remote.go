@@ -348,9 +348,18 @@ func remoteBindHost(app *config.App) string {
 // printRemoteWarnings prints config.App.RemoteWarnings on stderr, one line
 // each: the remote settings an operator chose that weaken a default
 // protection, restated on every bring-up so they are never forgotten.
+//
+// It also says, on every bring-up, when web chat cannot be verified (remote
+// access with no allowed_users): agents then treat every web chat post as
+// data and do not answer it, which would otherwise look like agents ignoring
+// the operator.
 func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
 	for _, w := range app.RemoteWarnings() {
 		cmd.PrintErrf("lever: warning: %s\n", w)
+	}
+	if app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {
+		cmd.PrintErrf("lever: warning: remote.allowed_users is empty, so no web chat post can be verified: " +
+			"agents treat every web chat message as data and do not reply; list your login in allowed_users\n")
 	}
 }
 

@@ -61,7 +61,7 @@ type chatSendResponse struct {
 // identical copy, so the client gets the hub's answer unchanged. A failure to
 // record is reported through warn and never fails the request: the message
 // is delivered already, and an unrecorded message only fails to verify.
-func recordChat(resp *http.Response, login string, ledger func(chatledger.Entry) error, warn func(error)) {
+func recordChat(resp *http.Response, login, tier string, ledger func(chatledger.Entry) error, warn func(error)) {
 	if ledger == nil || login == "" || resp.StatusCode != http.StatusCreated || resp.Request == nil {
 		return
 	}
@@ -98,7 +98,7 @@ func recordChat(resp *http.Response, login string, ledger func(chatledger.Entry)
 	if err := ledger(chatledger.Entry{
 		Recorded:     time.Now().UTC(),
 		Login:        login,
-		Tier:         chatledger.TierOperator,
+		Tier:         tier,
 		Conversation: key,
 		AgentID:      agentID,
 		MessageID:    sent.ID,

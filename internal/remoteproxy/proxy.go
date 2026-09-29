@@ -121,6 +121,11 @@ type Config struct {
 	// chatledger). Nil records nothing, and so nothing verifies. It is
 	// never called when AllowedUsers is empty: then no login is verified.
 	ChatLedger func(chatledger.Entry) error
+	// Contacts maps each contact-tier login to the hub agent ids it may
+	// reach (see contactFence). A login not in the map is an operator. The
+	// ledger records the tier, so chat_verify reports a contact's message
+	// as a contact's.
+	Contacts map[string][]string
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -454,7 +459,7 @@ func NewHandler(cfg Config) http.Handler {
 func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
 		Rewrite:        rewriteUpstream(cfg.Target, cfg.identityHeader()),
-		ModifyResponse: completeAudit(cfg.Audit, cfg.ChatLedger),
+		ModifyResponse: completeAudit(cfg.Audit, cfg.ChatLedger, cfg.Contacts),
 		ErrorHandler:   upstreamFailed(cfg.Audit),
 	}
 	if cfg.DialContext != nil {
@@ -520,7 +525,7 @@ func clientIdentityHeader(k string) bool {
 // completeAudit is the ReverseProxy ModifyResponse hook: strip the hub's
 // session cookie, flag a rejected session for the gate's one retry, and
 // otherwise complete the audit line with the real upstream status.
-func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) func(*http.Response) error {
+func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, contacts map[string][]string) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		// The hub mints a fresh session cookie on every cookie-less
 		// request. The client must never hold a hub credential, cookie
@@ -545,7 +550,7 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error) f
 				// session so the next request heals it.
 				s.stale = true
 			}
-			recordChat(resp, s.login, ledger, func(err error) { daemon.Warnf("remote proxy: %v", err) })
+			recordChat(resp, s.login, tierOf(contacts, s.login), ledger, func(err error) { daemon.Warnf("remote proxy: %v", err) })
 			if s.line != nil && audit != nil {
 				s.line.Status = resp.StatusCode
 				audit(*s.line)
@@ -1072,4 +1077,13 @@ func isIPHost(host string) bool {
 		return false // a zoned address is no Host a front sends
 	}
 	return net.ParseIP(h) != nil
+}
+
+// tierOf is the chat tier of a verified login: contact when Contacts names
+// it, operator otherwise.
+func tierOf(contacts map[string][]string, login string) string {
+	if _, ok := contacts[login]; ok {
+		return chatledger.TierContact
+	}
+	return chatledger.TierOperator
 }

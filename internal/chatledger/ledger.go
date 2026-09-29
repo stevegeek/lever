@@ -27,9 +27,14 @@ import (
 	"time"
 )
 
-// TierOperator is the tier of every allowed login in this version: the
-// login is the operator's own.
-const TierOperator = "operator"
+// The tiers a ledger entry can carry (config.TierOperator/TierContact): what
+// the verified message counts as.
+const (
+	// TierOperator: the operator's own steering.
+	TierOperator = "operator"
+	// TierContact: an external contact's words for the task.
+	TierContact = "contact"
+)
 
 // RotateCap is the size at which the ledger is moved to <path>.1 (replacing
 // any previous .1) before the next append. Lookup reads both files, so a

@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/marker"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -49,23 +49,9 @@ const (
 	managerMarker = "[lever: from the manager]"
 )
 
-// markerLike matches anything a reader could take for a lever marker or for a
-// scion envelope delimiter: "[lever:" with any case and spacing (fullwidth
-// and white square brackets too), and the BEGIN/END SCION MESSAGE lines.
-var markerLike = regexp.MustCompile(`(?i)[\[［⟦〚][\s\p{Cf}]*lever[\s\p{Cf}]*[:：]|-{3}[\s\p{Cf}]*(begin|end)[\s\p{Cf}]+scion[\s\p{Cf}]+message[\s\p{Cf}]*-{3}`)
-
-// neutraliseMarkers rewrites every marker-like sequence in text a worker
-// wrote, so the body cannot claim to be relayed from a different worker, a
-// directive notice, or a second envelope. The text stays readable; only the
-// sequence that makes it look like lever's is changed.
-func neutraliseMarkers(body string) string {
-	return markerLike.ReplaceAllStringFunc(body, func(m string) string {
-		if strings.HasPrefix(m, "-") {
-			return "(quoted scion delimiter)"
-		}
-		return "(quoted lever marker:"
-	})
-}
+// neutraliseMarkers rewrites every marker-like sequence in text a worker or
+// the manager wrote (see package marker).
+func neutraliseMarkers(body string) string { return marker.Neutralise(body) }
 
 // relayedWorkerBody is the body the broker sends for a worker: the relay
 // marker naming the worker (a slug from the operator's config, never from
@@ -202,7 +188,9 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	body := req.Body
 	if tgt.relayFrom != "" {
 		body = relayedWorkerBody(tgt.relayFrom, body)
-	} else {
+	} else if tgt.scionTo != "agent:"+b.managerSlug {
+		// A manager note to itself stays as it is: its skill knows no
+		// manager marker, and no one else can be taken for it there.
 		body = managerMarker + "\n" + neutraliseMarkers(body)
 	}
 	if err := b.runtime.Message(r.Context(), scion.MsgOpts{

@@ -738,7 +738,9 @@ remote:
   a lever page with links to the contact's conversations. Everything else is refused (audit
   `deny-contact`).
 - **What a contact may not send.** A word that starts with `@` (scion would route the message to
-  another agent), a reply to a message by id, an attachment, or any field other than the text.
+  another agent), a reply to a message by id, an attachment, any field other than the text, a
+  lever marker anywhere, or a first line that starts with a bracket (agents trust a marker on
+  the first line without a check).
 - **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
   contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
   contact only with what the task needs, but that is an instruction, not a fence.

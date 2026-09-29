@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/stevegeek/lever/internal/marker"
 )
 
 // The contact fence.
@@ -285,6 +287,11 @@ func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line 
 		return deny("message is not valid JSON")
 	}
 	switch {
+	case marker.Contains(msg.Content) || marker.FirstLineLooksLikeMarker(msg.Content):
+		// Agents trust a lever marker on a message's first line without
+		// verifying it ([lever: from the manager], [lever: operator note]):
+		// a contact may not write one, in any spelling.
+		return deny("a contact's message may not start with a bracket or contain a lever marker")
 	case hasMention(msg.Content):
 		return deny(`a contact's message may not contain a word starting with "@" (it would route to another agent); write "at" or leave it out`)
 	}

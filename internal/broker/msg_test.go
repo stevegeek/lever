@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/marker"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -518,7 +519,7 @@ func TestMsgSend_workerCannotForgeAMarker(t *testing.T) {
 			if first != "[lever: relayed from worker scratch]" {
 				t.Fatalf("%q: first line %q, want the broker's marker", body, first)
 			}
-			if markerLike.MatchString(rest) {
+			if marker.Contains(rest) {
 				t.Fatalf("%q: forged marker survived: %q", body, rest)
 			}
 		}
@@ -530,5 +531,15 @@ func TestNeutraliseMarkersKeepsOrdinaryText(t *testing.T) {
 		if got := neutraliseMarkers(s); got != s {
 			t.Errorf("neutraliseMarkers(%q) = %q, want it unchanged", s, got)
 		}
+	}
+}
+
+// TestMsgSend_managerToItselfIsNotMarked: the manager marker is for
+// workers; a manager note to itself goes through as it is.
+func TestMsgSend_managerToItselfIsNotMarked(t *testing.T) {
+	b, rt, _ := newMsgTestBroker(t, true)
+	rec := callWorker(t, b, "/msg/send", `{"to":"user:manager","body":"note to self"}`, "manager")
+	if rec.Code != 200 || len(rt.sent) != 1 || rt.sent[0].Body != "note to self" {
+		t.Fatalf("status %d, sent %+v", rec.Code, rt.sent)
 	}
 }

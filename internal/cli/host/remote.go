@@ -193,7 +193,20 @@ func remoteChatLedger(app *config.App, st state.State) func(chatledger.Entry) er
 	if p == "" {
 		return nil
 	}
+	removeOldChatLedger(st)
 	return chatledger.NewWriter(p).Append
+}
+
+// removeOldChatLedger deletes lever 0.27's single-file ledger (and its
+// rotated copy): 0.28 keeps one file per login in a directory, and the old
+// file only holds old chat text.
+func removeOldChatLedger(st state.State) {
+	for _, name := range []string{"chat-ledger.jsonl", "chat-ledger.jsonl.1"} {
+		p := filepath.Join(st.Dir, name)
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(p)
+		}
+	}
 }
 
 // serveRemote runs the proxy until ctx ends, stamping the config THIS process

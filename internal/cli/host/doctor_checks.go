@@ -474,7 +474,7 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	}
 	fix := "remove " + p + "; the remote proxy writes a new one"
 	if !fi.IsDir() {
-		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a directory (a symlink, or a file from lever 0.27), so agents get no answer", fix}
+		return checkResult{name, false, "the chat ledger " + stateRel(st, p) + " is not a directory (a symlink?), so agents get no answer", fix}
 	}
 	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
 		return checkResult{name, false, fmt.Sprintf("the chat ledger %s is %v: another user can add a file, so agents get no answer", stateRel(st, p), perm), "chmod 700 " + p}

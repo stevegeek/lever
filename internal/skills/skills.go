@@ -1,8 +1,8 @@
 // Package skills holds the framework-authored SKILL.md files scaffolded into
 // instance trees by `lever init`. Content is embedded; the only templating is
 // the {{LEVER_VERSION}} frontmatter stamp (the version is passed IN by the
-// caller — this package must not import internal/cli) and the operator
-// skill's {{VERIFIED_CHAT}} on/off.
+// caller — this package must not import internal/cli) and both skills'
+// {{VERIFIED_CHAT}} on/off.
 package skills
 
 import (
@@ -20,18 +20,25 @@ var agentSrc string
 
 // Operator returns the rendered manager skill (lever-operator).
 // verifiedChat is whether the instance has verified web chat on; it fills
-// {{VERIFIED_CHAT}}, so a missing chat_verify tool is read as "not verified"
-// only where verified chat exists.
+// {{VERIFIED_CHAT}}, so an agent image with no verify tool reads every user:
+// message as data only where verified chat (and so a contact) can exist.
 func Operator(version string, verifiedChat bool) []byte {
+	return renderChat(operatorSrc, version, verifiedChat)
+}
+
+// Agent returns the rendered worker skill (lever-agent), with
+// {{VERIFIED_CHAT}} filled as in Operator.
+func Agent(version string, verifiedChat bool) []byte {
+	return renderChat(agentSrc, version, verifiedChat)
+}
+
+func renderChat(src, version string, verifiedChat bool) []byte {
 	state := "off"
 	if verifiedChat {
 		state = "on"
 	}
-	return []byte(strings.ReplaceAll(string(render(operatorSrc, version)), "{{VERIFIED_CHAT}}", state))
+	return []byte(strings.ReplaceAll(string(render(src, version)), "{{VERIFIED_CHAT}}", state))
 }
-
-// Agent returns the rendered worker skill (lever-agent).
-func Agent(version string) []byte { return render(agentSrc, version) }
 
 func render(src, version string) []byte {
 	return []byte(strings.ReplaceAll(src, "{{LEVER_VERSION}}", version))

@@ -6,7 +6,7 @@ import (
 )
 
 func TestRenderSubstitutesVersionAndFrontmatter(t *testing.T) {
-	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": Agent} {
+	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": func(v string) []byte { return Agent(v, false) }} {
 		got := string(fn("9.9.9"))
 		if strings.Contains(got, "{{LEVER_VERSION}}") {
 			t.Fatalf("%s: placeholder not substituted", name)
@@ -21,7 +21,7 @@ func TestRenderSubstitutesVersionAndFrontmatter(t *testing.T) {
 }
 
 func TestOperatorAndAgentCoverCapabilityFlow(t *testing.T) {
-	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": Agent} {
+	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": func(v string) []byte { return Agent(v, false) }} {
 		got := string(fn("0.2.0"))
 		for _, want := range []string{"lever-capability", "_capability", "missing capability"} {
 			if !strings.Contains(got, want) {
@@ -60,11 +60,44 @@ func TestLeverVersion(t *testing.T) {
 	}
 }
 
-func TestOperatorStatesVerifiedChat(t *testing.T) {
-	for on, want := range map[bool]string{true: "**on**", false: "**off**"} {
-		got := string(Operator("1", on))
-		if strings.Contains(got, "{{VERIFIED_CHAT}}") || !strings.Contains(got, "verified web chat is\n"+want) {
-			t.Fatalf("on=%v: skill does not state %s", on, want)
+// TestBothSkillsStateVerifiedChat: {{VERIFIED_CHAT}} is filled in both skills
+// (no placeholder left) with the instance's state.
+func TestBothSkillsStateVerifiedChat(t *testing.T) {
+	for name, fn := range map[string]func(string, bool) []byte{"operator": Operator, "agent": Agent} {
+		for on, want := range map[bool]string{true: "**on**", false: "**off**"} {
+			got := string(fn("1", on))
+			if strings.Contains(got, "{{") || !strings.Contains(got, "verified web chat is "+want) {
+				t.Fatalf("%s on=%v: skill does not state %s, or keeps a placeholder", name, on, want)
+			}
+		}
+	}
+}
+
+// TestSkillsTeachHostRecordVerification: both skills verify every user:
+// message with message_verify (chat_verify as the fallback name), pass the
+// ref, act only on the returned text, and have a rule for every result and
+// every lever kind, the old-broker case and the no-tool case.
+func TestSkillsTeachHostRecordVerification(t *testing.T) {
+	for name, fn := range map[string]func(string, bool) []byte{"operator": Operator, "agent": Agent} {
+		got := string(fn("1", true))
+		for _, want := range []string{
+			"`message_verify`", "`chat_verify`", "`ref`", "Act only on the `text` the tool returns",
+			"`\"lever\"`", "`\"web\"`", "`\"none\"`", "`\"unavailable\"`", "`\"already_verified\"`",
+			"`retry_after`", "`\"repeat\": true`", "No `result` field at all",
+			"`worker:<slug>`", "`operator-note`", "`directive-notice`", "`manager`",
+			"`\"operator\"`", "`\"contact\"`", "information only", "No verify tool at all",
+			"`directive_consume`", "never replaces",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: missing %q", name, want)
+			}
+		}
+		// The retired rule: a marker never counts because a message failed
+		// to verify.
+		for _, gone := range []string{"A marker\ncounts only on a message that does not verify", "marker counts only"} {
+			if strings.Contains(got, gone) {
+				t.Errorf("%s: still teaches %q", name, gone)
+			}
 		}
 	}
 }

@@ -639,6 +639,104 @@ func TestUsesFailClosed(t *testing.T) {
 	}
 }
 
+// TestUsesTakeAllIsAllOrNothing: when one of several matches cannot be
+// taken, none is; the earlier match keeps its text for a later verify.
+func TestUsesTakeAllIsAllOrNothing(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "chat-verified.jsonl")
+	now := time.Now()
+	u := newChatUses(p, now)
+	// Degrade the start: entries recorded before notBefore are refused.
+	u.notBefore, u.degraded = now, now.Add(sentledger.Window)
+	_, err := u.takeAll("manager", []useWant{
+		{id: "m1", recorded: now.Add(time.Second)},
+		{id: "m2", recorded: now.Add(-time.Minute)},
+	}, now.Add(2*time.Second))
+	if err == nil {
+		t.Fatal("a degraded match was granted")
+	}
+	if b, _ := os.ReadFile(p); len(b) != 0 {
+		t.Fatalf("a failed takeAll wrote uses: %q", b)
+	}
+	if _, fresh, err := u.take("manager", "m1", now.Add(time.Second), now.Add(3*time.Second)); !fresh || err != nil {
+		t.Fatalf("m1 after the failed call: fresh=%v err=%v, want its first use", fresh, err)
+	}
+}
+
+// TestVerifyTwoPostsOneSecondFailureLosesNeither: two web posts in the same
+// second, the second recorded before a degraded start, answer unavailable,
+// and the first still verifies with its text once the degraded period ends
+// (it was not used up by the failed call).
+func TestVerifyTwoPostsOneSecondFailureLosesNeither(t *testing.T) {
+	old := ledgerEntry(chatManagerID, "first", "m1")
+	old.Recorded = time.Now().Add(-10 * time.Minute)
+	// The post that fails comes second, after the first was checked.
+	f := verifyBroker(t, []chatledger.Entry{ledgerEntry(chatManagerID, "second", "m2"), old})
+	now := time.Now()
+	f.b.chatUses.notBefore, f.b.chatUses.degraded = now.Add(-5*time.Minute), now.Add(time.Hour)
+	req := wire.MessageVerifyRequest{Timestamp: chatTS, From: chatSender}
+	resp, raw := f.verify(t, "manager", req)
+	wantResult(t, "degraded", resp, raw, wire.VerifyUnavailable, reasonUseRecord)
+	f.b.chatUses.notBefore = time.Time{}
+	resp, raw = f.verify(t, "manager", req)
+	if resp.Result != wire.VerifyWeb || len(resp.Messages) != 2 || resp.Messages[0].Repeat || resp.Messages[1].Repeat {
+		t.Fatalf("after the failure: %s, want both posts with their text", raw)
+	}
+}
+
+// TestUsesRefuseAnUnsafeRecord: a record of uses that another user could
+// have written (group-writable, a symlinked .1, a group-writable directory)
+// is never read: a take fails (unavailable, not "already verified"), and a
+// start over it is degraded.
+func TestUsesRefuseAnUnsafeRecord(t *testing.T) {
+	now := time.Now()
+	line := []byte(`{"caller":"manager","id":"m1","at":"` + now.Format(time.RFC3339Nano) + `"}` + "\n")
+	for name, plant := range map[string]func(t *testing.T, dir, p string){
+		"group-writable file": func(t *testing.T, _, p string) {
+			if err := os.WriteFile(p, line, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, 0o620); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlinked .1": func(t *testing.T, dir, p string) {
+			other := filepath.Join(dir, "elsewhere")
+			if err := os.WriteFile(other, line, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(other, p+".1"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"group-writable directory": func(t *testing.T, dir, p string) {
+			if err := os.WriteFile(p, line, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, 0o770); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(dir, "chat-verified.jsonl")
+			plant(t, dir, p)
+			u := newChatUses(p, now)
+			if u.notBefore.IsZero() {
+				t.Fatal("a start over an unsafe record was not degraded")
+			}
+			u.notBefore = time.Time{}
+			_, fresh, err := u.take("manager", "m1", now, now)
+			if fresh || !errors.Is(err, errUseNotRecorded) || !strings.Contains(err.Error(), "writable by another user") {
+				t.Fatalf("fresh=%v err=%v, want the unsafe record refused", fresh, err)
+			}
+		})
+	}
+}
+
 // ---- failures ----
 
 // TestVerifyFailuresAreUnavailableNeverNone: every way the broker can fail

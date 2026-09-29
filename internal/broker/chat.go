@@ -1,12 +1,13 @@
 package broker
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -97,23 +98,33 @@ type chatUseLine struct {
 
 func useKey(caller, id string) string { return caller + "\x00" + id }
 
+// usesLabel prefixes the errors of the record of uses.
+const usesLabel = "record of verified messages"
+
 // readUses returns the uses recorded at path and its rotated copy that can
-// still matter (inside useRetention). A missing file is none.
+// still matter (inside useRetention). A missing file is none. The record is
+// read like the ledgers (hostledger.CheckDir, hostledger.ReadFile): a
+// directory or file another user can write, a symlink, or a file swapped
+// while it was opened is hostledger.ErrUnsafe, so no one but the broker's
+// user can mark a message used (and so lose it) or make the broker start
+// degraded.
 func readUses(path string, now time.Time) ([]chatUseLine, error) {
+	if err := hostledger.CheckDir(filepath.Dir(path), usesLabel); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
 	var out []chatUseLine
 	for _, p := range []string{path + ".1", path} {
-		b, err := os.ReadFile(p)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		for _, l := range bytes.Split(b, []byte("\n")) {
+		err := hostledger.ReadFile(p, usesLabel, func(l []byte) {
 			var c chatUseLine
 			if json.Unmarshal(l, &c) == nil && c.ID != "" && now.Sub(c.At) <= useRetention {
 				out = append(out, c)
 			}
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
@@ -124,13 +135,17 @@ func readUses(path string, now time.Time) ([]chatUseLine, error) {
 // useRetention, so a rotation never drops a use that can still matter (the
 // dropped .1 holds only uses older than that). A second broker appending
 // into the renamed file during a handoff is still read, since readUses reads
-// .1 too.
+// .1 too. It never follows a symlink and does nothing in an unsafe
+// directory; readUses refuses what it would leave behind anyway.
 func rotateUses(path string, now time.Time) {
-	fi, err := os.Stat(path)
-	if err != nil || fi.Size() <= usesRotateAt {
+	if hostledger.CheckDir(filepath.Dir(path), usesLabel) != nil {
 		return
 	}
-	if old, err := os.Stat(path + ".1"); err == nil && now.Sub(old.ModTime()) <= useRetention {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() <= usesRotateAt {
+		return
+	}
+	if old, err := os.Lstat(path + ".1"); err == nil && now.Sub(old.ModTime()) <= useRetention {
 		return
 	}
 	_ = os.Rename(path, path+".1")
@@ -159,27 +174,54 @@ func newChatUses(path string, now time.Time) *chatUses {
 // errUseNotRecorded means a use could not be written, so it is not granted.
 var errUseNotRecorded = errors.New("cannot record the verification")
 
+// useWant is one use takeAll is asked for.
+type useWant struct {
+	id       string
+	recorded time.Time // when the record was made (for the degraded start)
+}
+
+// useGot is takeAll's answer for one useWant: when the message was first
+// verified, and whether this is that first time.
+type useGot struct {
+	at    time.Time
+	fresh bool
+}
+
 // take marks id used by caller. It returns when the message was first
 // verified and whether this is that first time, or an error when the use
 // could not be recorded (then nothing is granted).
 func (u *chatUses) take(caller, id string, recorded, now time.Time) (time.Time, bool, error) {
+	got, err := u.takeAll(caller, []useWant{{id: id, recorded: recorded}}, now)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return got[0].at, got[0].fresh, nil
+}
+
+// takeAll marks every wanted id used by caller, all or nothing: it checks
+// every id (the degraded start, the record read once) before it writes, and
+// writes the new uses in one append. So a failure never leaves an earlier
+// match used without its text reaching the agent. On an error nothing is
+// granted.
+func (u *chatUses) takeAll(caller string, want []useWant, now time.Time) ([]useGot, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if !u.notBefore.IsZero() && now.Before(u.degraded) && recorded.Before(u.notBefore) {
-		return time.Time{}, false, errors.New("the record of verified messages could not be read at broker start")
+	for _, w := range want {
+		if !u.notBefore.IsZero() && now.Before(u.degraded) && w.recorded.Before(u.notBefore) {
+			return nil, errors.New("the record of verified messages could not be read at broker start")
+		}
 	}
 	for k, t := range u.used {
 		if now.Sub(t) > useRetention {
 			delete(u.used, k)
 		}
 	}
-	k := useKey(caller, id)
 	if u.path != "" {
 		// Another broker (a restart handoff) may have recorded a use since
 		// this one started: read the record again.
 		lines, err := readUses(u.path, now)
 		if err != nil {
-			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+			return nil, fmt.Errorf("%w: %v", errUseNotRecorded, err)
 		}
 		for _, c := range lines {
 			if t, ok := u.used[useKey(c.Caller, c.ID)]; !ok || c.At.Before(t) {
@@ -187,22 +229,47 @@ func (u *chatUses) take(caller, id string, recorded, now time.Time) (time.Time, 
 			}
 		}
 	}
-	if t, ok := u.used[k]; ok {
-		return t, false, nil
-	}
-	if u.path != "" {
-		rotateUses(u.path, now)
-		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|hostledger.ONoFollow, 0o600)
-		if err != nil {
-			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+	got := make([]useGot, len(want))
+	var buf []byte
+	var fresh []string
+	for i, w := range want {
+		k := useKey(caller, w.id)
+		if t, ok := u.used[k]; ok {
+			got[i] = useGot{at: t}
+			continue
 		}
-		line, _ := json.Marshal(chatUseLine{Caller: caller, ID: id, At: now})
-		_, werr := f.Write(append(line, '\n'))
+		if slices.Contains(fresh, k) {
+			// The same id twice in one call: one use.
+			got[i] = useGot{at: now}
+			continue
+		}
+		fresh = append(fresh, k)
+		got[i] = useGot{at: now, fresh: true}
+		line, _ := json.Marshal(chatUseLine{Caller: caller, ID: w.id, At: now})
+		buf = append(append(buf, line...), '\n')
+	}
+	if u.path != "" && len(buf) > 0 {
+		rotateUses(u.path, now)
+		f, err := os.OpenFile(u.path, os.O_CREATE|os.O_RDWR|os.O_APPEND|hostledger.ONoFollow, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+		}
+		// After a torn last line (a crash mid-write), start on a new line so
+		// these uses are not read as part of it.
+		if fi, err := f.Stat(); err == nil && fi.Size() > 0 {
+			last := make([]byte, 1)
+			if _, err := f.ReadAt(last, fi.Size()-1); err == nil && last[0] != '\n' {
+				buf = append([]byte{'\n'}, buf...)
+			}
+		}
+		_, werr := f.Write(buf)
 		cerr := f.Chmod(0o600)
 		if err := errors.Join(werr, cerr, f.Close()); err != nil {
-			return time.Time{}, false, fmt.Errorf("%w: %v", errUseNotRecorded, err)
+			return nil, fmt.Errorf("%w: %v", errUseNotRecorded, err)
 		}
 	}
-	u.used[k] = now
-	return now, true, nil
+	for _, k := range fresh {
+		u.used[k] = now
+	}
+	return got, nil
 }

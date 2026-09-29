@@ -357,15 +357,27 @@ func (b *Broker) answerFound(caller, branch, what string, found []verifiedEntry,
 	resultFor := map[string]string{"web": wire.VerifyWeb, "lever": wire.VerifyLever}[branch]
 	var msgs []wire.VerifiedMessage
 	var ids, expired, used []string
+	var live []verifiedEntry
+	var want []useWant
 	for _, f := range found {
 		if f.expired {
 			expired = append(expired, f.msg.MessageID)
 			continue
 		}
-		at, fresh, err := b.chatUses.take(caller, f.useID, f.recorded, now)
-		if err != nil {
+		live = append(live, f)
+		want = append(want, useWant{id: f.useID, recorded: f.recorded})
+	}
+	// All the matches are taken at once: a failure takes none of them, so no
+	// match is used up without its text reaching the agent.
+	var got []useGot
+	if len(want) > 0 {
+		var err error
+		if got, err = b.chatUses.takeAll(caller, want, now); err != nil {
 			return b.verifyUnavailable(branch, reasonUseRecord, 0, "the record of verified messages cannot be used", what+": "+err.Error())
 		}
+	}
+	for i, f := range live {
+		at, fresh := got[i].at, got[i].fresh
 		if !fresh && now.Sub(at) > chatRepeatGrace {
 			used = append(used, f.msg.MessageID+" at "+at.UTC().Format(time.RFC3339))
 			continue

@@ -101,3 +101,22 @@ func TestSkillsTeachHostRecordVerification(t *testing.T) {
 		}
 	}
 }
+
+// TestSkillsRouteRepliesFromTheVerifyResult: a web reply goes to the
+// reply_to the broker returned from the host record, never to a
+// conversation copied from the session.
+func TestSkillsRouteRepliesFromTheVerifyResult(t *testing.T) {
+	for name, fn := range map[string]func(string, bool) []byte{"operator": Operator, "agent": Agent} {
+		got := string(fn("1", true))
+		for _, want := range []string{"`reply_to`", "-- '<reply_to>'", "--body-file"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: missing %q", name, want)
+			}
+		}
+		for _, gone := range []string{"conv:<conversation.id>", "--thread-id="} {
+			if strings.Contains(got, gone) {
+				t.Errorf("%s: still routes from the envelope (%q)", name, gone)
+			}
+		}
+	}
+}

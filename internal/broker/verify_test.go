@@ -400,6 +400,50 @@ func TestControllerSenderFailureIsRememberedBriefly(t *testing.T) {
 	}
 }
 
+// TestVerifyWebReturnsTheRecordedReplyTarget: a verified web post carries
+// where its reply goes, from the chat ledger (the poster's hub email as a
+// scion @<email> reference) and the recorded conversation key; the envelope
+// has no say. A lever message has no reply target.
+func TestVerifyWebReturnsTheRecordedReplyTarget(t *testing.T) {
+	op, ct := ledgerEntry(chatManagerID, "go", "m1"), contactEntry(chatManagerID, "the invoice", "m2")
+	ct.CreatedAt = "2026-09-28T10:15:09Z"
+	f := verifyBroker(t, []chatledger.Entry{op, ct})
+	resp, raw := f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: chatSender})
+	if resp.Result != wire.VerifyWeb || resp.Messages[0].ReplyTo != "@op@example.com" || resp.Messages[0].Conversation != op.Conversation {
+		t.Fatalf("operator post: %s", raw)
+	}
+	resp, raw = f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: ct.CreatedAt, From: contactSender})
+	if resp.Result != wire.VerifyWeb || resp.Messages[0].ReplyTo != "@client@example.org" {
+		t.Fatalf("contact post: %s", raw)
+	}
+	o := f.send(t, "scratch", "agent:assistant", "x")
+	resp, raw = f.verify(t, "manager", envelope(t, o))
+	if resp.Result != wire.VerifyLever || resp.Messages[0].ReplyTo != "" || resp.Messages[0].Conversation != "" {
+		t.Fatalf("lever message: %s", raw)
+	}
+}
+
+// TestReplyRefIsAPlainEmailOnly: only a plain email becomes a reference, so
+// the value is safe inside single quotes on a command line.
+func TestReplyRefIsAPlainEmailOnly(t *testing.T) {
+	for sender, want := range map[string]string{
+		"user:op@example.com":           "@op@example.com",
+		"user:a.b+c_d-e@id.lever.local": "@a.b+c_d-e@id.lever.local",
+		"user:u-1":                      "",
+		"user:@example.com":             "",
+		"user:op@":                      "",
+		"user:a@b@c":                    "",
+		"user:o'p@example.com":          "",
+		"user:op@example.com\n":         "",
+		"user:op@exa$(x).com":           "",
+		"agent:op@example.com":          "",
+	} {
+		if got := replyRef(sender); got != want {
+			t.Errorf("replyRef(%q) = %q, want %q", sender, got, want)
+		}
+	}
+}
+
 // ---- lever branch ----
 
 // TestVerifyLeverEveryKind: each kind of lever send verifies for its

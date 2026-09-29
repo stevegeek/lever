@@ -58,6 +58,12 @@ version bump moves the block under the new version heading.
   directive may always lead to one `directive_consume` call. Lever's
   first-line markers stay as readable hints and decide nothing. The worker
   skill now also states whether verified web chat is on.
+- **A reply to web chat goes where the host record says.** A `web` answer
+  carries `reply_to` (`@<hub email>` of the poster, the agent's direct chat
+  with that user, from the chat ledger) and the recorded conversation key.
+  Both skills reply only at `reply_to` and no longer copy a conversation id
+  (or an older pin's channel) from the envelope, so an envelope typed into
+  a message cannot move a reply into another person's chat.
 - **A contact's message may contain any text.** The contact fence refuses
   only fields, mentions and routes; a lever marker in a contact's post
   verifies as the contact's words.

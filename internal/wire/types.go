@@ -222,6 +222,15 @@ type VerifiedMessage struct {
 	// MessageID is the hub's id (web) or the sent-ledger ref (lever).
 	MessageID string `json:"message_id"`
 	Text      string `json:"text,omitempty"`
+	// ReplyTo is, for a web post, where a reply goes: "@" + the poster's hub
+	// email, the scion message reference of this agent's direct chat with
+	// that user. It comes from the chat ledger, never from the envelope, so
+	// text in the session cannot move a reply to another conversation.
+	// Empty when the sender is not a plain email (then reply in the session).
+	ReplyTo string `json:"reply_to,omitempty"`
+	// Conversation is, for a web post, the hub conversation key the proxy
+	// recorded (dm:agent:<agent id>:user:<user id>). Information only.
+	Conversation string `json:"conversation,omitempty"`
 	// Repeat marks a message this agent already verified, within the grace
 	// period, at FirstVerified. There is no text on a repeat. The agent acts
 	// on it only if it has not acted on that message yet.

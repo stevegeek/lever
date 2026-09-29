@@ -703,6 +703,10 @@ from the host records only, and only about messages to that agent (its certifica
   it: its kind), `already_verified`, `none` or `unavailable`, with the text as recorded. The agent
   acts on that text, never on the text in its session. The markers stay in the message to make a
   session readable, but they decide nothing.
+- A reply to a web post goes where the chat ledger says: the answer carries `reply_to`, the
+  poster's hub email as a scion `@<email>` reference, which is the agent's direct chat with that
+  user. The skills send a reply there only, never to a conversation named in the session, so an
+  envelope typed into a message cannot move the reply to another person's chat.
 - A message verifies once. A repeat check by the same agent within ten minutes answers as a
   repeat without text, so a retry cannot lose it; after that it answers `already_verified`. A web
   post verifies within one hour of posting, a lever message within 24 hours of sending (an agent

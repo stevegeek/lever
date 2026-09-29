@@ -354,7 +354,8 @@ func (b *Broker) verifyWeb(ctx context.Context, caller, from string, ts, now tim
 		found = append(found, verifiedEntry{
 			useID: e.MessageID, recorded: e.Recorded, expired: now.Sub(e.Recorded) > chatVerifyWindow,
 			msg: wire.VerifiedMessage{Source: wire.VerifyWeb, Login: e.Login, Tier: e.Tier, From: e.Sender,
-				Timestamp: e.CreatedAt, MessageID: e.MessageID, Text: e.Text},
+				Timestamp: e.CreatedAt, MessageID: e.MessageID, Text: e.Text,
+				ReplyTo: replyRef(e.Sender), Conversation: e.Conversation},
 		})
 	}
 	a := b.answerFound(caller, branch, what, found, now, chatVerifyWindow)
@@ -370,6 +371,29 @@ func (b *Broker) verifyWeb(ctx context.Context, caller, from string, ts, now tim
 		}
 	}
 	return a
+}
+
+// replyRef is the scion message reference for a reply to a web post whose
+// recorded sender is sender ("user:<email>"): "@<email>", which scion
+// resolves to this agent's direct chat with that user
+// (messaging.resolveEmailDM, the same dm:agent:<agent>:user:<user> key the
+// post went to). It is "" unless the email is plain (letters, digits and
+// ".-_+", one "@" not at either end), so the value is safe inside the single
+// quotes the skills put it in.
+func replyRef(sender string) string {
+	email, ok := strings.CutPrefix(sender, "user:")
+	at := strings.IndexByte(email, '@')
+	if !ok || at <= 0 || at == len(email)-1 || strings.Count(email, "@") != 1 || len(email) > maxChatFromLen {
+		return ""
+	}
+	for _, r := range email {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', strings.ContainsRune(".-_+@", r):
+		default:
+			return ""
+		}
+	}
+	return "@" + email
 }
 
 // verifyLever answers from the sent ledger only: sends recorded for the

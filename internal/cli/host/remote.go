@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,16 +10,19 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/chatledger"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -134,11 +138,52 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// Verified web chat. Only with allowed_users: without it no login
 		// is verified, so there is nothing to vouch for.
 		ChatLedger: remoteChatLedger(app, st),
+		// Contacts: chat only, and only with their agents (see
+		// remoteproxy/contact.go). Agent names resolve to hub ids with the
+		// remote PAT, which can read and list agents and nothing more.
+		Contacts:      remoteContacts(app),
+		ResolveAgents: remoteAgentResolver(app, st, target, dial),
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
 	})
 	return provider, handler, nil
+}
+
+// remoteContacts maps each contact-tier login to the agents it may chat with.
+func remoteContacts(app *config.App) map[string][]string {
+	out := map[string][]string{}
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			out[u.Login] = u.Agents
+		}
+	}
+	return out
+}
+
+// remoteAgentResolver lists the instance project's agents, name → hub id,
+// for the contact fence.
+func remoteAgentResolver(app *config.App, st state.State, target *url.URL, dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(context.Context) (map[string]string, error) {
+	hc := &hubapi.Client{T: &remoteproxy.HubDoer{Target: target, DialContext: dial, Token: func() (string, error) {
+		tok, err := st.LoadRemotePAT()
+		if err == nil && tok == "" {
+			err = errors.New("no remote PAT on disk; run `lever apply`")
+		}
+		return tok, err
+	}}}
+	return func(ctx context.Context) (map[string]string, error) {
+		agents, err := hc.Agents(ctx, filepath.Base(common.MountDest), scion.DefaultHubEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for _, a := range agents {
+			if a.Slug != "" && a.ID != "" {
+				out[a.Slug] = a.ID
+			}
+		}
+		return out, nil
+	}
 }
 
 // remoteChatLedger is the proxy's ledger writer, or nil when verified chat is

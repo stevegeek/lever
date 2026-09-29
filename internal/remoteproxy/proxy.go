@@ -121,11 +121,15 @@ type Config struct {
 	// chatledger). Nil records nothing, and so nothing verifies. It is
 	// never called when AllowedUsers is empty: then no login is verified.
 	ChatLedger func(chatledger.Entry) error
-	// Contacts maps each contact-tier login to the hub agent ids it may
-	// reach (see contactFence). A login not in the map is an operator. The
-	// ledger records the tier, so chat_verify reports a contact's message
-	// as a contact's.
+	// Contacts maps each contact-tier login to the names of the agents it
+	// may chat with (see contact.go). A login not in the map is an operator.
+	// The ledger records the tier, so chat_verify reports a contact's
+	// message as a contact's.
 	Contacts map[string][]string
+	// ResolveAgents maps agent names to hub agent ids for the contact fence.
+	// Required when Contacts is set: without it every contact request is
+	// refused.
+	ResolveAgents func(ctx context.Context) (map[string]string, error)
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -448,7 +452,11 @@ func stateFrom(r *http.Request) *ctxState {
 // host, identity and path checks, session injection and one session retry)
 // in front of the reverse proxy newReverseProxy builds.
 func NewHandler(cfg Config) http.Handler {
-	return &gate{cfg: cfg, rp: newReverseProxy(cfg)}
+	g := &gate{cfg: cfg, rp: newReverseProxy(cfg)}
+	if len(cfg.Contacts) > 0 && cfg.ResolveAgents != nil {
+		g.contacts = &contactFence{resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg)}
+	}
+	return g
 }
 
 // newReverseProxy builds the upstream half: rewriteUpstream injects the
@@ -658,8 +666,9 @@ func checkOrigin(r *http.Request, serveHost string) (Decision, string) {
 // gate is the request-side half of the handler: every check that decides
 // whether a request reaches the hub, and the session plumbing around it.
 type gate struct {
-	cfg Config
-	rp  *httputil.ReverseProxy
+	cfg      Config
+	rp       *httputil.ReverseProxy
+	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
 }
 
 func (g *gate) audit(line AuditLine) {
@@ -737,6 +746,11 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state.cookie = cookie
+	if names, isContact := cfg.Contacts[operator]; isContact && operator != "" {
+		if r = g.fenceContact(w, r, &line, operator, names, cookie); r == nil {
+			return
+		}
+	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.
 	state.retryable = r.Method == http.MethodGet || r.Method == http.MethodHead

@@ -165,6 +165,11 @@ type DispatchConfig struct {
 	// nil ⇒ /msg/list fails closed. Falling back to the unfiltered feed would be
 	// the leak this exists to close.
 	ResolveAgentID func(ctx context.Context, agentSlug string) (string, error)
+	// ResolveControllerSender returns the envelope sender every message lever
+	// sends wears: "user:" + the email (or id) of the hub user the controller
+	// PAT belongs to. /message/verify looks a message from this sender up in
+	// the sent ledger only. nil ⇒ such a message answers unavailable.
+	ResolveControllerSender func(ctx context.Context) (string, error)
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
@@ -296,10 +301,15 @@ type Broker struct {
 	directiveExpiryMax time.Duration
 	dirRate            *rateWindow
 
-	chatLedger string // ChatConfig.LedgerPath; "" = verified chat off
-	chatRate   *rateWindow
-	chatUses   *chatUses
-	sent       *sentRecord // ChatConfig.SentLedgerDir
+	// message verification (verify.go)
+	chatConfigured bool            // ChatConfig.Configured
+	chatLedger     string          // ChatConfig.LedgerPath; "" = no web post verifies
+	webSenders     map[string]bool // ChatConfig.WebSenders
+	verifyRate     *rateWindow     // every verify call
+	verifyMissRate *rateWindow     // verify calls that match no record
+	chatUses       *chatUses
+	sent           *sentRecord       // ChatConfig.SentLedgerDir
+	controller     *controllerSender // DispatchConfig.ResolveControllerSender
 
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
@@ -361,10 +371,13 @@ func New(c Config) *Broker {
 		// operator directives
 		directiveVerifier: dir.Verifier, instanceID: dir.InstanceID,
 		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
-		dirRate: newRateWindow(),
+		dirRate: newRateWindow(directiveRateLimit),
 		// verified web chat
-		chatLedger: c.Chat.LedgerPath, chatRate: newRateWindow(), chatUses: newChatUses(c.Chat.UsedPath, time.Now()),
-		sent: &sentRecord{dir: c.Chat.SentLedgerDir},
+		chatConfigured: c.Chat.Configured, chatLedger: c.Chat.LedgerPath, webSenders: senderSet(c.Chat.WebSenders),
+		verifyRate: newRateWindow(verifyRateLimit), verifyMissRate: newRateWindow(verifyMissLimit),
+		chatUses:   newChatUses(c.Chat.UsedPath, time.Now()),
+		sent:       &sentRecord{dir: c.Chat.SentLedgerDir},
+		controller: &controllerSender{resolve: d.ResolveControllerSender},
 	}
 }
 

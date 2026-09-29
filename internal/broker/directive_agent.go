@@ -11,27 +11,49 @@ import (
 
 const directiveRateLimit = 30 // consume+check calls per CN per minute
 
+// rateWindow counts calls per CN in fixed one-minute windows, up to limit.
 type rateWindow struct {
-	mu  sync.Mutex
-	win map[string]*winCount
+	limit int
+	mu    sync.Mutex
+	win   map[string]*winCount
 }
 type winCount struct {
 	start time.Time
 	n     int
 }
 
-func newRateWindow() *rateWindow { return &rateWindow{win: map[string]*winCount{}} }
+func newRateWindow(limit int) *rateWindow {
+	return &rateWindow{limit: limit, win: map[string]*winCount{}}
+}
 
+// allow counts one call by cn and reports whether it is within the limit.
 func (rw *rateWindow) allow(cn string, now time.Time) bool {
+	ok, _ := rw.take(cn, now)
+	return ok
+}
+
+// take counts one call by cn. Over the limit it reports false and how long
+// until the window ends.
+func (rw *rateWindow) take(cn string, now time.Time) (bool, time.Duration) {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
+	// Drop ended windows, so the map holds only the callers of the last
+	// minute.
+	for k, w := range rw.win {
+		if now.Sub(w.start) >= time.Minute {
+			delete(rw.win, k)
+		}
+	}
 	w := rw.win[cn]
-	if w == nil || now.Sub(w.start) >= time.Minute {
+	if w == nil {
 		rw.win[cn] = &winCount{start: now, n: 1}
-		return true
+		return 1 <= rw.limit, 0
 	}
 	w.n++
-	return w.n <= directiveRateLimit
+	if w.n <= rw.limit {
+		return true, 0
+	}
+	return false, w.start.Add(time.Minute).Sub(now)
 }
 
 // opaque404 is the single indistinguishable failure response for every

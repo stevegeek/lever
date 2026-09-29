@@ -626,7 +626,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		// answers with the hub down, so a pin upgrade followed by `lever
 		// up` re-grants the role while no container runs.
 		lifecycle = remoteRoleLifecycle(ctx, o.ScopeKnown, rolerec)
-		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remoteRolePermissions(lifecycle))
+		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remote.Contacts, remoteRolePermissions(lifecycle))
 	}
 	if controllerReason == "" && remoteReason == "" && roleReason == "" {
 		return nil // nothing to mint or grant; no dev-auth window
@@ -732,7 +732,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		}
 	}
 	if remote.Enabled {
-		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote.Emails, lifecycle, now, o); err != nil {
+		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote, lifecycle, now, o); err != nil {
 			return err
 		}
 	}
@@ -825,7 +825,7 @@ func closeDevAuthWindow(ctx context.Context, jr proc.Runner, tw *scion.Client, s
 // The exception is errCeilingRemoved: the grant deleted a user's ceiling and
 // could not write the new one, so that user can create projects until the next
 // apply — that fails the apply.
-func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, emails []string, lifecycle bool, now time.Time, o patMintOpts) error {
+func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, remote remoteAccess, lifecycle bool, now time.Time, o patMintOpts) error {
 	fail := func(err error) {
 		o.warn("bootstrap-token: remote web role not granted, so the web UI may answer 403; the next `lever apply` retries: %v", err)
 	}
@@ -834,7 +834,7 @@ func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, pro
 		fail(err)
 		return nil
 	}
-	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, emails, lifecycle, now, o.warn)
+	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, remote.Emails, remote.Contacts, lifecycle, now, o.warn)
 	if errors.Is(err, errCeilingRemoved) {
 		return fmt.Errorf("bootstrap-token: remote web role: %w", err)
 	}

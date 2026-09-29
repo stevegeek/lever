@@ -1488,7 +1488,7 @@ func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess
 		return checkResult{name, false, err.Error(), fix}
 	}
 	perms := remoteRolePermissions(remoteRoleLifecycle(ctx, known, rec))
-	reason := remoteRoleReason(rec, found, remote.Emails, perms)
+	reason := remoteRoleReason(rec, found, remote.Emails, remote.Contacts, perms)
 	if reason == "" {
 		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s; %s withheld by an access constraint",
 			remoteWebRoleName, strings.Join(remote.Emails, ", "), projectCreatePermission), ""}

@@ -37,6 +37,14 @@ type RemoteRoleRecord struct {
 	// every ceiling.
 	CeilingPermissions []string  `json:"ceiling_permissions,omitempty"`
 	GrantedAt          time.Time `json:"granted_at"`
+	// Contacts lists the bound emails granted as contacts: the contact role
+	// (ContactRoleID, ContactPermissions) instead of the web role, and a
+	// ceiling written with ContactCeilingPermissions. Every other bound
+	// email is an operator.
+	Contacts                  []string `json:"contacts,omitempty"`
+	ContactRoleID             string   `json:"contact_role_id,omitempty"`
+	ContactPermissions        []string `json:"contact_permissions,omitempty"`
+	ContactCeilingPermissions []string `json:"contact_ceiling_permissions,omitempty"`
 }
 
 // RemoteRole sits beside remote.pat.json; `lever destroy` removes it with the

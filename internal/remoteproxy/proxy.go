@@ -437,6 +437,9 @@ type ctxState struct {
 	// login is the verified login this request runs as ("" when
 	// AllowedUsers is empty and nothing verified it). recordChat reads it.
 	login string
+	// keepDM, when set, filters the hub's /api/v1/chat/dms answer to the
+	// conversations it allows (the contact fence).
+	keepDM func(key string) bool
 }
 
 type ctxStateKey struct{}
@@ -542,6 +545,9 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 		// the hub sent or what case it used.
 		resp.Header.Del("Set-Cookie")
 		sandboxAPIDocument(resp)
+		if s := stateFrom(resp.Request); s != nil && s.keepDM != nil {
+			filterDMList(resp, s.keepDM)
+		}
 		if s := stateFrom(resp.Request); s != nil {
 			if s.retryable && sessionRejected(resp) {
 				// The hub does not know this session (it restarted, or the
@@ -751,6 +757,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		state.cookie = cookie
+		state.keepDM = contactKeepDM(r)
 	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.
@@ -895,7 +902,7 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 	}
 	// retryable is deliberately not set: one retry, then the hub's answer
 	// stands whatever it is.
-	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login}
+	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }
 

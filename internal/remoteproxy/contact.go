@@ -159,7 +159,7 @@ var contactCanned = map[string]string{
 // contactForwardGET are the other GET routes a contact may use as they are.
 var contactForwardGET = []string{
 	"/api/v1/auth/me", "/auth/me", "/api/v1/auth/admin-status", "/api/v1/settings/public",
-	"/api/v1/system/status", "/api/v1/chat/dms", "/api/v1/chat/user-prefs",
+	"/api/v1/system/status", "/api/v1/chat/user-prefs",
 }
 
 // fenceContact decides one request from a contact. It returns the request to
@@ -213,6 +213,10 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 	case m == http.MethodPost && p == "/api/v1/chat/presence":
 		g.answerContact(w, line, "application/json", `{}`)
 		return nil
+	case (m == http.MethodGet || m == http.MethodHead) && p == "/api/v1/chat/dms":
+		// The hub lists every DM the user is in, with a message preview;
+		// the answer is cut down to the contact's own conversations.
+		return r.WithContext(context.WithValue(r.Context(), keepDMKey{}, scope.allows))
 	case (m == http.MethodGet || m == http.MethodHead) && slices.Contains(contactForwardGET, p):
 		return r
 	case (m == http.MethodPut && p == "/api/v1/chat/user-prefs") || (m == http.MethodPost && p == "/auth/logout"):
@@ -424,4 +428,44 @@ func (d *HubDoer) Do(ctx context.Context, method, p string) (int, []byte, error)
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	return resp.StatusCode, b, err
+}
+
+type keepDMKey struct{}
+
+// contactKeepDM is the DM filter fenceContact attached to r, if any.
+func contactKeepDM(r *http.Request) func(string) bool {
+	f, _ := r.Context().Value(keepDMKey{}).(func(string) bool)
+	return f
+}
+
+// filterDMList keeps only the DMs keep allows in a /api/v1/chat/dms answer.
+// An answer it cannot read is replaced by an empty list: failing closed.
+func filterDMList(resp *http.Response, keep func(string) bool) {
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	_ = resp.Body.Close()
+	out := []byte(`{"dms":[]}`)
+	var doc map[string]json.RawMessage
+	if err == nil && resp.Header.Get("Content-Encoding") == "" && json.Unmarshal(body, &doc) == nil {
+		var dms []map[string]json.RawMessage
+		if json.Unmarshal(doc["dms"], &dms) == nil {
+			kept := []map[string]json.RawMessage{}
+			for _, d := range dms {
+				var key string
+				if json.Unmarshal(d["conversationKey"], &key) == nil && keep(key) {
+					kept = append(kept, d)
+				}
+			}
+			doc["dms"], _ = json.Marshal(kept)
+			if b, err := json.Marshal(doc); err == nil {
+				out = b
+			}
+		}
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(out))
+	resp.ContentLength = int64(len(out))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	resp.Header.Del("Content-Encoding")
 }

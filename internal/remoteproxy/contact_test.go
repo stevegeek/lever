@@ -261,3 +261,54 @@ func TestContactFenceHealsALapsedSession(t *testing.T) {
 		t.Fatalf("forwarded with %q, want the new session", last)
 	}
 }
+
+// TestContactDMListIsFiltered: the DM list keeps only the contact's own
+// conversations with its listed agents (the hub lists every DM, previews too).
+func TestContactDMListIsFiltered(t *testing.T) {
+	own := "dm:agent:" + agentW1 + ":user:" + contactUID
+	other := "dm:agent:" + agentW2 + ":user:" + contactUID
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = io.WriteString(w, `{"id":"`+contactUID+`"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"dms":[{"conversationKey":"`+own+`","peerSlug":"w1"},{"conversationKey":"`+other+`","lastMessagePreview":"secret"}]}`)
+	}))
+	t.Cleanup(hub.Close)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
+		AllowedUsers: []string{"c@x"}, Contacts: map[string][]string{"c@x": {"w1"}},
+		ResolveAgents: func(context.Context) (map[string]string, error) {
+			return map[string]string{"w1": agentW1, "w2": agentW2}, nil
+		}})
+	rw := contactDo(h, "c@x", "GET", "/api/v1/chat/dms", "")
+	if rw.Code != 200 || !strings.Contains(rw.Body.String(), own) || strings.Contains(rw.Body.String(), "secret") {
+		t.Fatalf("dms = %d %s, want only the own conversation", rw.Code, rw.Body)
+	}
+}
+
+// TestContactDMListIsFilteredOnTheRetry: the session-retry attempt keeps the filter.
+func TestContactDMListIsFilteredOnTheRetry(t *testing.T) {
+	own := "dm:agent:" + agentW1 + ":user:" + contactUID
+	other := "dm:agent:" + agentW2 + ":user:" + contactUID
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = io.WriteString(w, `{"id":"`+contactUID+`"}`)
+			return
+		}
+		if r.Header.Get("Cookie") != sessionCookieName+"=new" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = io.WriteString(w, `{"dms":[{"conversationKey":"`+own+`"},{"conversationKey":"`+other+`","lastMessagePreview":"secret"}]}`)
+	}))
+	t.Cleanup(hub.Close)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: &rotatingSession{}, ServeHost: testServeHost,
+		AllowedUsers: []string{"c@x"}, Contacts: map[string][]string{"c@x": {"w1"}},
+		ResolveAgents: func(context.Context) (map[string]string, error) {
+			return map[string]string{"w1": agentW1, "w2": agentW2}, nil
+		}})
+	rw := contactDo(h, "c@x", "GET", "/api/v1/chat/dms", "")
+	if rw.Code != 200 || strings.Contains(rw.Body.String(), "secret") || !strings.Contains(rw.Body.String(), own) {
+		t.Fatalf("dms after the session retry = %d %s", rw.Code, rw.Body)
+	}
+}

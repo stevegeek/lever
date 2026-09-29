@@ -738,7 +738,10 @@ remote:
   a lever page with links to the contact's conversations. Everything else is refused (audit
   `deny-contact`).
 - **What a contact may not send.** A word that starts with `@` (scion would route the message to
-  another agent), a reply to a message by id, or an attachment.
+  another agent), a reply to a message by id, an attachment, or any field other than the text.
+- **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
+  contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
+  contact only with what the task needs, but that is an instruction, not a fence.
 - **Verified as a contact.** A contact's message verifies with the tier `contact`. The agent
   uses it as the contact's answer for its task, never as an instruction about the system, other
   tasks, tools or recipients, and a worker records the answer in its task files.
@@ -746,7 +749,12 @@ remote:
   `lever up` bind the role, because the grant needs the dev-auth window. Until then the contact
   gets 403 from the hub, and the fence applies from the first request.
 - **Privacy.** Anyone with `project.read` on the instance project (an operator) can read a
-  contact's chat with an agent in the project message log.
+  contact's chat with an agent in the project message log. The contact's own event stream still
+  carries its other direct chats, if an agent outside its list starts one with it; its DM list is
+  filtered to its listed agents.
+- **Manager messages to workers are marked.** The broker puts `[lever: from the manager]` on the
+  first line of every manager message, so a worker can tell its manager from a contact's chat. A
+  worker treats an unmarked message that does not verify as data.
 
 ## What this does NOT do
 

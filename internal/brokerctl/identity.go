@@ -27,15 +27,16 @@ func ConfigHash(app *config.App) string {
 	// (restart), which fails toward the safe side.
 	//
 	// VerifiedChat is whether verified web chat is configured
-	// (ChatConfigured): it derives from the remote block, which the broker
-	// otherwise ignores, so turning allowed_users on or off must bounce the
-	// broker too.
+	// (ChatConfigured) and WebSenders the remote sign-ins' sender labels:
+	// both derive from the remote block, which the broker otherwise ignores,
+	// so changing allowed_users must bounce the broker too.
 	return state.HashJSON(struct {
 		Broker       config.Broker
 		Workers      []config.Worker
 		Scion        config.ScionConfig
 		VerifiedChat bool
-	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app)})
+		WebSenders   []string `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app)})
 }
 
 // RemoteConfigHash digests the config a `lever remote serve` process captures

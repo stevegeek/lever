@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // The server-side login handshake.
@@ -528,11 +530,7 @@ func identityFor(login string) Identity {
 	if login == "" {
 		return Identity{Subject: unnamedOperator, Email: unnamedOperatorEmail, Name: "Lever operator"}
 	}
-	email := login
-	if !strings.Contains(login, "@") {
-		email = login + "@" + IDEmailDomain
-	}
-	return Identity{Subject: "lever-remote:" + login, Email: email, Name: login}
+	return Identity{Subject: "lever-remote:" + login, Email: config.HubEmailFor(login), Name: login}
 }
 
 // HubUserEmails is the set of hub user emails the proxy's sign-ins can
@@ -542,7 +540,7 @@ func identityFor(login string) Identity {
 // names are exactly the ones this proxy signs in.
 func HubUserEmails(allowedUsers []string) []string {
 	if len(allowedUsers) == 0 {
-		return []string{identityFor("").Email}
+		return []string{config.HubEmailFor("")}
 	}
 	out := make([]string, 0, len(allowedUsers))
 	for _, l := range allowedUsers {

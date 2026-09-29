@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -77,4 +78,44 @@ func (r Remote) LoginsWithTier(tier string) []string {
 		}
 	}
 	return out
+}
+
+// HubEmailFor is the hub user email a remote sign-in as login becomes
+// (remoteproxy's identityFor): the login itself when it contains "@", else
+// <login>@id.lever.local; the unnamed operator (login "", when allowed_users
+// is empty) is lever-operator@lever.local.
+func HubEmailFor(login string) string {
+	switch {
+	case login == "":
+		return remoteUnnamedOperatorKey
+	case strings.Contains(login, "@"):
+		return login
+	}
+	return login + "@" + remoteIDEmailDomain
+}
+
+// HubUserEmails is the set of hub user emails the proxy's sign-ins can
+// create: one per allowed login, or the single unnamed operator when the
+// list is empty.
+func (r Remote) HubUserEmails() []string {
+	if len(r.AllowedUsers) == 0 {
+		return []string{HubEmailFor("")}
+	}
+	out := make([]string, 0, len(r.AllowedUsers))
+	for _, u := range r.AllowedUsers {
+		out = append(out, HubEmailFor(u.Login))
+	}
+	return out
+}
+
+// WebSenders is the envelope sender each of those sign-ins posts as: "user:"
+// plus the hub email, lowercased (the hub lowercases emails), sorted. A
+// message an agent receives from one of them can only be a web chat post.
+func (r Remote) WebSenders() []string {
+	var out []string
+	for _, e := range r.HubUserEmails() {
+		out = append(out, "user:"+strings.ToLower(e))
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }

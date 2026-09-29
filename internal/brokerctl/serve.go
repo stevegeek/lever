@@ -213,7 +213,7 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	// ledger (web posts, only with verified chat on) and the sent ledger
 	// (lever's own sends), plus the record of which were verified. None of
 	// them is kept inside the tree, where an agent could write it.
-	cfg.Chat = broker.ChatConfig{LedgerPath: ChatLedgerPath(app, st)}
+	cfg.Chat = broker.ChatConfig{Configured: ChatConfigured(app), LedgerPath: ChatLedgerPath(app, st), WebSenders: WebSenders(app)}
 	if !StateInsideTree(app, st) {
 		cfg.Chat.UsedPath = st.ChatVerified()
 		cfg.Chat.SentLedgerDir = st.SentLedger()
@@ -314,6 +314,17 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// broker.DispatchConfig.ResolveAgentID).
 	d.ResolveAgentID = func(ctx context.Context, agentSlug string) (string, error) {
 		return hc.AgentID(ctx, projectKey, scion.DefaultHubEndpoint, agentSlug)
+	}
+	// Every message lever sends wears the controller PAT's hub user as its
+	// sender; /message/verify learns that label from the hub, the way the hub
+	// stamps it (the email, else the user id), rather than assuming the dev
+	// user's default address.
+	d.ResolveControllerSender = func(ctx context.Context) (string, error) {
+		u, err := hc.Me(ctx)
+		if err != nil {
+			return "", err
+		}
+		return cmp.Or("user:"+u.Email, "user:"+u.ID), nil
 	}
 	return d, nil
 }

@@ -319,3 +319,24 @@ func TestBindSocketRefusesAnOverlongPath(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// TestDecorateConfigWiresVerification: outside the tree the broker keeps the
+// sent ledger and the record of uses in the state dir; with remote access on
+// the web senders are the sign-ins' labels; verified chat needs allowed_users.
+func TestDecorateConfigWiresVerification(t *testing.T) {
+	app := wiringApp(t.TempDir(), "")
+	app.Remote = config.Remote{Enabled: true, AllowedUsers: []config.RemoteUser{{Login: "Me@Example.com"}}}
+	cfg, st := decorateForTest(t, app, "v1")
+	c := cfg.Chat
+	if !c.Configured || c.LedgerPath != st.ChatLedger() || c.SentLedgerDir != st.SentLedger() || c.UsedPath != st.ChatVerified() {
+		t.Fatalf("chat config = %+v", c)
+	}
+	if len(c.WebSenders) != 1 || c.WebSenders[0] != "user:me@example.com" {
+		t.Fatalf("web senders = %v", c.WebSenders)
+	}
+	app.Remote = config.Remote{}
+	cfg, st = decorateForTest(t, app, "v1")
+	if c := cfg.Chat; c.Configured || c.LedgerPath != "" || len(c.WebSenders) != 0 || c.SentLedgerDir != st.SentLedger() {
+		t.Fatalf("remote off: chat config = %+v", c)
+	}
+}

@@ -31,6 +31,18 @@ func ChatConfigured(app *config.App) bool {
 	return app.RemoteEnabled() && len(app.Remote.AllowedUsers) > 0
 }
 
+// WebSenders is the envelope sender of every remote sign-in (see
+// config.Remote.WebSenders), or none when remote access is off. The broker
+// looks a message from one of them up in the chat ledger only. With remote
+// access on and no allowed_users it is the unnamed operator, who can post too
+// (and whose posts then cannot be verified).
+func WebSenders(app *config.App) []string {
+	if !app.RemoteEnabled() {
+		return nil
+	}
+	return app.Remote.WebSenders()
+}
+
 // StateInsideTree reports whether the state directory is the tree or inside
 // it, comparing real paths where they resolve.
 func StateInsideTree(app *config.App, st state.State) bool {

@@ -123,7 +123,7 @@ type Config struct {
 	ChatLedger func(chatledger.Entry) error
 	// Contacts maps each contact-tier login to the names of the agents it
 	// may chat with (see contact.go). A login not in the map is an operator.
-	// The ledger records the tier, so chat_verify reports a contact's
+	// The ledger records the tier, so message_verify reports a contact's
 	// message as a contact's.
 	Contacts map[string][]string
 	// ResolveAgents maps agent names to hub agent ids for the contact fence.

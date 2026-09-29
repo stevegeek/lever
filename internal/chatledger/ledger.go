@@ -5,7 +5,7 @@
 // came through the authenticating front from an allowed login, the proxy
 // appends one Entry. The broker is the only reader: an agent asks it, over
 // its own mTLS channel, whether a message it received is in the ledger
-// (`chat_verify`), and acts only on the text the broker returns.
+// (`message_verify`), and acts only on the text the broker returns.
 //
 // Why an agent cannot forge an entry: the file lives in the host state
 // directory, outside every jail mount; agents reach the hub directly, never

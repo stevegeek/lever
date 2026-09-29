@@ -719,6 +719,12 @@ func isHeaderTokenChar(c byte) bool {
 const (
 	remoteIDEmailDomain      = "id.lever.local"
 	remoteUnnamedOperatorKey = "lever-operator@lever.local"
+	// scionDevUserEmail is the scion dev user's default address. lever mints
+	// its controller token as that user, so every message lever sends wears
+	// "user:dev@localhost"; a remote login with that address would post as
+	// lever. The broker also refuses the collision at run time, against the
+	// address the hub actually reports.
+	scionDevUserEmail = "dev@localhost"
 )
 
 // userIDChars are what a login without "@" may carry: it becomes the local
@@ -749,6 +755,8 @@ func validRemoteLogin(l string) error {
 		// and the unnamed operator's. Listing one would make two different
 		// logins the same hub user.
 		return fmt.Errorf("config: remote: allowed_users entry %q is an address lever synthesizes for other logins; list the login itself", l)
+	case strings.EqualFold(HubEmailFor(l), scionDevUserEmail):
+		return fmt.Errorf("config: remote: allowed_users entry %q is the hub user lever itself sends every message as; a login with it would post as lever", l)
 	}
 	return nil
 }

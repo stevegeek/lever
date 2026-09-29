@@ -5,6 +5,23 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **Contacts: chat-only remote logins.** An `allowed_users` entry can be a
+  map `{login, tier: contact, agents: [...]}`. A contact reaches only the
+  listed agents, and only their direct chat. Its hub user gets the role
+  `lever-remote-contact` (`agent.message` only: no terminal, no start/stop,
+  no view of other agents' tasks or events), and the remote proxy enforces
+  an allow-list per contact, because scion roles cannot name agents and its
+  DM check looks only at the user side. A contact's message may not contain
+  an `@word` (scion's mention routing would reach another agent), a reply
+  id or an attachment. Verified chat reports the tier `contact`, and the
+  skills treat it as the contact's answer for the task, never as operator
+  steering. Doctor lists each login's tier. The plain string entry keeps its
+  meaning (operator). Run `lever init` to refresh the skills.
+
 ## [0.27.0] - 2026-09-28
 
 ### Added

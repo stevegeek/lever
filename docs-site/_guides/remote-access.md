@@ -693,9 +693,9 @@ output. Verified web chat closes that gap for the web chat.
   and then a missing tool counts as "not verified": rebuild the agent image before you run
   `lever init`, or the manager ignores your chat. Run `lever init` again after you change
   `remote` or `allowed_users`.
-- **Who is the operator.** Every login in `allowed_users` gets the tier `operator`. Do not add a
-  login only so that someone can look at the web UI: once verified, that person's chat is
-  operator steering for every agent.
+- **Who is the operator.** A plain login in `allowed_users` gets the tier `operator`. Do not add
+  a login as an operator only so that someone can look at the web UI: once verified, that
+  person's chat is operator steering for every agent. For anyone else, use a contact (below).
 - **Web pages from agents are sandboxed.** The hub serves workspace files, attachments and other
   agent-written files inline under `/api/`. The proxy adds `Content-Security-Policy: sandbox` to
   every `/api/` answer, so such a page cannot run script with your session or post chat as you.
@@ -710,6 +710,43 @@ What is not covered:
 - A choice you tap in the web UI that sends agent-suggested text is recorded as sent by you.
 - The ledger keeps the text of your recent chat on the host (it rotates at 1 MiB, one old copy
   kept).
+
+## Contacts: chat-only logins
+
+A contact is an external person (a client, a domain expert) who answers an agent's questions in
+chat. A contact gets no operator authority, no terminal and no start or stop, and reaches only
+the agents its entry lists:
+
+```yaml
+remote:
+  allowed_users:
+    - operator@example.com                       # tier operator, every agent
+    - login: contact@example.com
+      tier: contact
+      agents: [research]                         # required: declared workers or the manager
+```
+
+- **Hub role.** A contact's hub user gets the project role `lever-remote-contact`, which holds
+  `agent.message` and nothing else, plus the same project-create ceiling as an operator. It
+  cannot read agent details (their tasks and configuration), list agents, follow the project's
+  events or open a terminal. Moving a login from operator to contact removes its
+  `lever-remote` binding at the next grant.
+- **Proxy fence.** scion binds roles to a whole project, not to named agents, and its direct
+  chat checks only the user half of a conversation. So the proxy allows a contact only an
+  allow-list: its own conversations with its listed agents, its own identity, the web UI's
+  static files and public settings, and its own chat and notification events. Other pages show
+  a lever page with links to the contact's conversations. Everything else is refused (audit
+  `deny-contact`).
+- **What a contact may not send.** A word that starts with `@` (scion would route the message to
+  another agent), a reply to a message by id, or an attachment.
+- **Verified as a contact.** A contact's message verifies with the tier `contact`. The agent
+  uses it as the contact's answer for its task, never as an instruction about the system, other
+  tasks, tools or recipients, and a worker records the answer in its task files.
+- **Setup order.** The contact signs in once (so the hub has the user); then `lever stop` and
+  `lever up` bind the role, because the grant needs the dev-auth window. Until then the contact
+  gets 403 from the hub, and the fence applies from the first request.
+- **Privacy.** Anyone with `project.read` on the instance project (an operator) can read a
+  contact's chat with an agent in the project message log.
 
 ## What this does NOT do
 

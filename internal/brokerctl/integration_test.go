@@ -243,7 +243,7 @@ broker:
 
 	// ── Run the broker on the pre-bound listeners ──────────────────────────────
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, nil, certSrc) }()
+	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, nil, nil, certSrc) }()
 
 	// Wait until the real tool's MCP backend is accepting connections. The "db"
 	// gateway route already exists (BuildBroker pre-loads the config-authoritative
@@ -377,7 +377,7 @@ broker:
 	}
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
-	go func() { _ = b2.ServeListeners(ctx2, jailLn2, adminLn2, nil, certSrc2) }()
+	go func() { _ = b2.ServeListeners(ctx2, jailLn2, adminLn2, nil, nil, certSrc2) }()
 	waitEpoch(t, "http://"+adminLn2.Addr().String()) // broker #2 up
 
 	// The same epoch-0 token, against the freshly-restarted broker, is denied by

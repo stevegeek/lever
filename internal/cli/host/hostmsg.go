@@ -1,26 +1,39 @@
 package host
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"net/url"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
-	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // newHostMsgCmd is the operator's fire-and-forget note sender: `lever msg send
-// BODY --to NAME`. Operator authority, no broker hop (the host owns the CA,
-// jail, and config — the same trust model as `lever attach`). Strictly passive:
-// it resolves the jail transport but never provisions. NAME resolves like
-// attach (the app name → manager; a declared worker name → that worker).
-func newHostMsgCmd(bf BackendFactory) *cobra.Command {
+// BODY --to NAME`. Operator authority (the host user's, the same trust model as
+// `lever attach`), never a signed directive's. The note goes through the
+// broker's 0600 operator socket (state.State.OperatorSock), which records it in
+// the sent ledger as an operator note before it sends it, so the recipient can
+// verify who wrote it. NAME resolves like attach (the app name → manager; a
+// declared worker name → that worker).
+func newHostMsgCmd(_ BackendFactory) *cobra.Command {
 	cmd := &cobra.Command{Use: "msg", Short: "Send a note to an agent (host-side, fire-and-forget)"}
-	cmd.AddCommand(hostMsgSend(bf))
+	cmd.AddCommand(hostMsgSend())
 	return cmd
 }
 
-func hostMsgSend(bf BackendFactory) *cobra.Command {
+// errNoOperatorSocket is the refusal when the broker has no operator socket:
+// it is not running, or it keeps no host records (the state directory is
+// inside the tree). An unrecorded note would never verify, and the agent
+// would treat it as data, so none is sent.
+var errNoOperatorSocket = errors.New("the broker is not running (no operator socket)")
+
+func hostMsgSend() *cobra.Command {
 	var to string
 	var interrupt bool
 	c := &cobra.Command{
@@ -30,31 +43,33 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Config is always discovered from the CWD; the recipient NAME comes
 			// from --to, never a positional config path.
-			app, state, err := loadAppAndState(nil)
+			app, st, err := loadAppAndState(nil)
 			if err != nil {
 				return err
 			}
-			b, err := bf(app.Backend, machineName(app.Name))
+			// A friendly local error for a name the broker would refuse.
+			if _, _, err := attachTarget(app, "", to); err != nil {
+				return fmt.Errorf("msg: %w", err)
+			}
+			if brokerctl.StateInsideTree(app, st) {
+				return fmt.Errorf("msg: the state directory %s is inside the tree, so the broker keeps no record of notes and agents could not verify one; "+
+					"move the instance's state out of the tree, or type into the session with `lever attach`", st.Dir)
+			}
+			sock := st.OperatorSock()
+			if _, err := os.Stat(sock); errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("msg: %w; run `lever up` (or type into the session with `lever attach`)", errNoOperatorSocket)
+			}
+			var resp wire.OperatorNoteResponse
+			err = httpjson.Post(cmd.Context(), udsClient(sock), udsURL+wire.PathOperatorNote,
+				wire.OperatorNoteRequest{To: to, Body: strings.Join(args, " "), Interrupt: interrupt}, &resp)
 			if err != nil {
-				return err
+				var uerr *url.Error
+				if errors.As(err, &uerr) {
+					return fmt.Errorf("msg: %w (%v); run `lever up` (or type into the session with `lever attach`)", errNoOperatorSocket, err)
+				}
+				return fmt.Errorf("msg: %w", err)
 			}
-			slug, project, err := attachTarget(app, b.MountDest(), to)
-			if err != nil {
-				return err
-			}
-			if err := b.ResolveRunUser(cmd.Context()); err != nil {
-				return fmt.Errorf("msg: %w (%v) — run `lever up` first", errJailNotUp, err)
-			}
-			// state gives this client the controller PAT (minted by a prior
-			// `lever apply`'s bootstrap-token step) via HubTokenSource, so `msg
-			// send` authenticates against the real, dev-auth-off hub.
-			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
-			if err := sc.Message(cmd.Context(), scion.MsgOpts{
-				To: "agent:" + slug, Body: operatorNoteBody(strings.Join(args, " ")), Interrupt: interrupt, Project: project,
-			}); err != nil {
-				return err
-			}
-			cmd.Printf("Sent to %s.\n", to)
+			cmd.Printf("Sent to %s (ref %s).\n", to, resp.ID)
 			return nil
 		},
 	}
@@ -62,16 +77,4 @@ func hostMsgSend(bf BackendFactory) *cobra.Command {
 	c.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
 	_ = c.MarkFlagRequired("to")
 	return c
-}
-
-// operatorNoteMarker is the first line of every `lever msg send` body. The
-// note goes out with the controller PAT, so scion stamps the controller's hub
-// user as its sender, the same label a broker-relayed worker message wears.
-// The marker is how the recipient's skill tells an operator note (answer in
-// the session) from chat (answer in the conversation); see the broker's
-// relay and directive markers in internal/broker/msg.go.
-const operatorNoteMarker = "[lever: operator note]"
-
-func operatorNoteBody(body string) string {
-	return operatorNoteMarker + "\n" + body
 }

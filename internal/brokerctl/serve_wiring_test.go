@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,11 +177,11 @@ func TestBindListenersBindsAllThreeAndChmodsSocket(t *testing.T) {
 		t.Fatalf("mkdir state: %v", err)
 	}
 
-	jailLn, adminLn, dirLn, err := bindListeners(app, st)
+	jailLn, adminLn, dirLn, opLn, err := bindListeners(app, st)
 	if err != nil {
 		t.Fatalf("bindListeners: %v", err)
 	}
-	defer daemon.CloseListeners(jailLn, adminLn, dirLn)
+	defer daemon.CloseListeners(jailLn, adminLn, dirLn, opLn)
 
 	if jailLn == nil || adminLn == nil || dirLn == nil {
 		t.Fatalf("listeners = (%v,%v,%v), want all non-nil", jailLn, adminLn, dirLn)
@@ -206,11 +207,11 @@ func TestBindListenersNoSocketWhenDirectivesDisabled(t *testing.T) {
 		t.Fatalf("mkdir state: %v", err)
 	}
 
-	jailLn, adminLn, dirLn, err := bindListeners(app, st)
+	jailLn, adminLn, dirLn, opLn, err := bindListeners(app, st)
 	if err != nil {
 		t.Fatalf("bindListeners: %v", err)
 	}
-	defer daemon.CloseListeners(jailLn, adminLn, dirLn)
+	defer daemon.CloseListeners(jailLn, adminLn, dirLn, opLn)
 
 	if dirLn != nil {
 		t.Error("dirLn is non-nil with directives disabled, want nil (no channel)")
@@ -233,13 +234,13 @@ func TestBindListenersClosesJailWhenAdminBindFails(t *testing.T) {
 		t.Fatalf("mkdir state: %v", err)
 	}
 
-	jailLn, adminLn, dirLn, err := bindListeners(app, st)
+	jailLn, adminLn, dirLn, opLn, err := bindListeners(app, st)
 	if err == nil {
-		daemon.CloseListeners(jailLn, adminLn, dirLn)
+		daemon.CloseListeners(jailLn, adminLn, dirLn, opLn)
 		t.Fatal("bindListeners succeeded, want admin-bind failure on the shared port")
 	}
-	if jailLn != nil || adminLn != nil || dirLn != nil {
-		t.Fatalf("failure returned non-nil listeners: (%v,%v,%v)", jailLn, adminLn, dirLn)
+	if jailLn != nil || adminLn != nil || dirLn != nil || opLn != nil {
+		t.Fatalf("failure returned non-nil listeners: (%v,%v,%v,%v)", jailLn, adminLn, dirLn, opLn)
 	}
 	// The jail listener must have been closed on the failure path — proven by
 	// the port being re-bindable now.
@@ -248,4 +249,73 @@ func TestBindListenersClosesJailWhenAdminBindFails(t *testing.T) {
 		t.Fatalf("jail port %d still bound after failure — jail listener leaked: %v", port, rerr)
 	}
 	_ = reln.Close()
+}
+
+// shortStateDir is a state dir outside tree whose socket paths fit the
+// macOS limit (t.TempDir paths do not).
+func shortStateDir(t *testing.T) state.State {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "b")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	return st
+}
+
+// TestBindListenersBindsTheOperatorSocket: the operator note socket is bound
+// with directives off, 0600, replacing a stale one.
+func TestBindListenersBindsTheOperatorSocket(t *testing.T) {
+	app := wiringApp(t.TempDir(), "") // directives OFF
+	app.Broker.JailPort = freePort(t)
+	app.Broker.AdminPort = freePort(t)
+	st := shortStateDir(t)
+	if err := os.WriteFile(st.OperatorSock(), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jailLn, adminLn, dirLn, opLn, err := bindListeners(app, st)
+	if err != nil {
+		t.Fatalf("bindListeners: %v", err)
+	}
+	defer daemon.CloseListeners(jailLn, adminLn, dirLn, opLn)
+	if opLn == nil || dirLn != nil {
+		t.Fatalf("opLn = %v, dirLn = %v; want the operator socket only", opLn, dirLn)
+	}
+	fi, err := os.Stat(st.OperatorSock())
+	if err != nil || fi.Mode().Perm() != 0o600 || fi.Mode()&fs.ModeSocket == 0 {
+		t.Fatalf("operator socket = %v, %v; want a 0600 socket", fi, err)
+	}
+}
+
+// TestBindListenersNoOperatorSocketInsideTheTree: with the state directory
+// inside the tree the operator socket is not bound (an agent could reach it).
+func TestBindListenersNoOperatorSocketInsideTheTree(t *testing.T) {
+	st := shortStateDir(t)
+	app := wiringApp(filepath.Dir(st.Dir), "")
+	app.Broker.JailPort = freePort(t)
+	app.Broker.AdminPort = freePort(t)
+	jailLn, adminLn, dirLn, opLn, err := bindListeners(app, st)
+	if err != nil {
+		t.Fatalf("bindListeners: %v", err)
+	}
+	defer daemon.CloseListeners(jailLn, adminLn, dirLn, opLn)
+	if opLn != nil {
+		t.Fatal("operator socket bound inside the tree")
+	}
+	if _, err := os.Stat(st.OperatorSock()); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("operator socket exists inside the tree: %v", err)
+	}
+}
+
+// TestBindSocketRefusesAnOverlongPath: a socket path past the platform limit
+// is a clear error, not a bind failure deep in the kernel.
+func TestBindSocketRefusesAnOverlongPath(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), strings.Repeat("d", 120), "operator.sock")
+	if _, err := bindSocket(sock); err == nil || !strings.Contains(err.Error(), "longer than a UNIX socket path") {
+		t.Fatalf("err = %v", err)
+	}
 }

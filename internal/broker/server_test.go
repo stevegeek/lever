@@ -132,7 +132,7 @@ func TestServeListenersRejectsNonLoopbackAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- b.ServeListeners(context.Background(), jailLn, adminLn, nil, certSrc) }()
+	go func() { errc <- b.ServeListeners(context.Background(), jailLn, adminLn, nil, nil, certSrc) }()
 	select {
 	case err := <-errc:
 		if err == nil {

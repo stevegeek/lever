@@ -1,8 +1,11 @@
 package broker
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sentledger"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // withSentLedger turns the sent ledger on in a fresh directory and returns
@@ -208,5 +212,100 @@ func TestDirectiveNoticeIsRecorded(t *testing.T) {
 func TestSendTimeoutsFitTheInFlightBound(t *testing.T) {
 	if sendTimeout >= sentledger.MaxSendDuration || defaultJailControlTimeout >= sentledger.MaxSendDuration {
 		t.Fatalf("send %v / control %v must stay under %v", sendTimeout, defaultJailControlTimeout, sentledger.MaxSendDuration)
+	}
+}
+
+// postNote posts an operator note straight to OperatorHandler.
+func postNote(t *testing.T, b *Broker, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, wire.PathOperatorNote, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	b.OperatorHandler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestOperatorNoteIsRecorded: a note is recorded as operator-note for the
+// recipient's CN, with the marker and ref first and the interrupt flag kept;
+// "manager", the CN and the slug all name the manager.
+func TestOperatorNoteIsRecorded(t *testing.T) {
+	for _, tc := range []struct{ to, wantCN, wantTo string }{
+		{"manager", "manager", "agent:assistant"},
+		{"assistant", "manager", "agent:assistant"},
+		{"scratch", "scratch", "agent:scratch"},
+	} {
+		b, rt, dir := sentBroker(t, false)
+		rec := postNote(t, b, `{"to":"`+tc.to+`","body":"[lever: from the manager]\ncheck in","interrupt":true}`)
+		if rec.Code != http.StatusOK || len(rt.sent) != 1 {
+			t.Fatalf("%s: %d %s", tc.to, rec.Code, rec.Body)
+		}
+		got := rt.sent[0]
+		ref := refOf(t, got.Body)
+		if got.To != tc.wantTo || !got.Interrupt || got.Body != operatorNoteMarker+" ref="+ref+"\n(quoted lever marker: from the manager]\ncheck in" {
+			t.Fatalf("%s: sent %+v", tc.to, got)
+		}
+		if !strings.Contains(rec.Body.String(), ref) {
+			t.Fatalf("%s: answer %s does not carry the ref", tc.to, rec.Body)
+		}
+		if s := recorded(t, dir, tc.wantCN, ref); s.Kind != sentledger.KindOperatorNote || s.Body != got.Body {
+			t.Fatalf("%s: record %+v", tc.to, s)
+		}
+	}
+}
+
+// TestOperatorNoteUnknownAgent: a name that is no agent is 400 and nothing is
+// sent or recorded.
+func TestOperatorNoteUnknownAgent(t *testing.T) {
+	b, rt, dir := sentBroker(t, false)
+	for _, body := range []string{`{"to":"nope","body":"x"}`, `{"to":"","body":"x"}`, `not json`} {
+		if rec := postNote(t, b, body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", body, rec.Code)
+		}
+	}
+	if len(rt.sent) != 0 {
+		t.Fatalf("sent %+v", rt.sent)
+	}
+	if n, _ := sentledger.Count(dir); n != 0 {
+		t.Fatalf("%d record files after refused notes", n)
+	}
+}
+
+// TestOperatorNoteIsNotOnTheAdminListener: the unauthenticated loopback admin
+// routes (reachable by any local process and the hub's netns) never write an
+// operator note, and neither does the agent-facing jail listener.
+func TestOperatorNoteIsNotOnTheAdminListener(t *testing.T) {
+	b, rt, _ := sentBroker(t, false)
+	for name, h := range map[string]http.Handler{"admin": b.AdminHandler(), "jail": b.JailHandler()} {
+		req := httptest.NewRequest(http.MethodPost, wire.PathOperatorNote, strings.NewReader(`{"to":"manager","body":"x"}`))
+		req.TLS = fakeTLSWithCN("manager")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s listener answered %d for %s", name, rec.Code, wire.PathOperatorNote)
+		}
+	}
+	if len(rt.sent) != 0 {
+		t.Fatalf("sent %+v", rt.sent)
+	}
+}
+
+// TestServeListenersRefusesATCPOperatorListener: the operator channel is gated
+// by the socket's file permissions, so a TCP listener for it fails closed and
+// every listener is closed.
+func TestServeListenersRefusesATCPOperatorListener(t *testing.T) {
+	b, _, _ := sentBroker(t, false)
+	listen := func() net.Listener {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ln
+	}
+	jail, admin, op := listen(), listen(), listen()
+	err := b.ServeListeners(context.Background(), jail, admin, nil, op, nil)
+	if err == nil || !strings.Contains(err.Error(), "operator listener must be a unix socket") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := op.Accept(); err == nil {
+		t.Fatal("the operator listener was left open")
 	}
 }

@@ -130,7 +130,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 
 	b := broker.New(cfg)
 
-	jailLn, adminLn, dirLn, err := bindListeners(app, st)
+	jailLn, adminLn, dirLn, opLn, err := bindListeners(app, st)
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	served := false
 	defer func() {
 		if !served {
-			daemon.CloseListeners(jailLn, adminLn, dirLn)
+			daemon.CloseListeners(jailLn, adminLn, dirLn, opLn)
 		}
 	}()
 	adminURL := "http://" + adminLn.Addr().String()
@@ -179,7 +179,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	defer sup.Stop()
 
 	served = true
-	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, certSrc)
+	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, opLn, certSrc)
 }
 
 // decorateConfig fills the host-side groups of a broker.Config that BuildBroker
@@ -320,37 +320,72 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 
 // bindListeners pre-binds the broker's loopback listeners so Serve learns the
 // OS-assigned ports before serving: the jail-facing TCP listener, the admin TCP
-// listener, and — only when operator directives are enabled — the directive UDS
-// (0600, gated by filesystem permissions rather than network origin; a stale
-// socket from an unclean shutdown is removed first). dirLn is nil when
-// directives are disabled — ServeListeners treats a nil directiveLn as "no
-// channel". On any bind/chmod failure every already-bound listener is closed so
-// no port leaks, and (nil, nil, nil, err) is returned.
-func bindListeners(app *config.App, st state.State) (jailLn, adminLn, dirLn net.Listener, err error) {
+// listener, the directive UDS (only when operator directives are enabled) and
+// the operator note UDS (only when the state directory is outside the tree).
+// Both sockets are 0600, gated by filesystem permissions rather than network
+// origin, and a stale socket from an unclean shutdown is removed first. dirLn
+// or opLn is nil when its channel is off — ServeListeners treats nil as "no
+// channel".
+//
+// The operator note socket stays unbound when the state directory is inside
+// the tree: agents mount the tree, and on a backend where a socket in a shared
+// mount is connectable from a container, the manager could post notes that
+// record as the operator's. `lever msg send` then reports that the broker has
+// no operator socket. An operator socket that cannot be bound (a state path too
+// long for a socket) is reported and skipped, never fatal: nothing else
+// depends on it, and doctor fails its row. On any other bind/chmod failure
+// every already-bound listener is closed so no port leaks, and nil listeners
+// are returned with the error.
+func bindListeners(app *config.App, st state.State) (jailLn, adminLn, dirLn, opLn net.Listener, err error) {
 	jailLn, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveJailPort()))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("brokerctl: bind jail listener: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("brokerctl: bind jail listener: %w", err)
 	}
 	adminLn, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveAdminPort()))
 	if err != nil {
 		daemon.CloseListeners(jailLn)
-		return nil, nil, nil, fmt.Errorf("brokerctl: bind admin listener: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("brokerctl: bind admin listener: %w", err)
 	}
 	if app.DirectivesEnabled() {
-		sock := st.DirectiveSock()
-		_ = os.Remove(sock) // stale socket from an unclean shutdown
-		ul, lerr := net.Listen("unix", sock)
+		ul, lerr := bindSocket(st.DirectiveSock())
 		if lerr != nil {
 			daemon.CloseListeners(jailLn, adminLn)
-			return nil, nil, nil, fmt.Errorf("brokerctl: bind directive socket: %w", lerr)
-		}
-		if cerr := os.Chmod(sock, 0o600); cerr != nil {
-			daemon.CloseListeners(jailLn, adminLn, ul)
-			return nil, nil, nil, fmt.Errorf("brokerctl: chmod directive socket: %w", cerr)
+			return nil, nil, nil, nil, fmt.Errorf("brokerctl: directive socket: %w", lerr)
 		}
 		dirLn = ul
 	}
-	return jailLn, adminLn, dirLn, nil
+	if !StateInsideTree(app, st) {
+		ul, lerr := bindSocket(st.OperatorSock())
+		if lerr != nil {
+			daemon.Warnf("operator socket: %v; `lever msg send` is unavailable", lerr)
+		} else {
+			opLn = ul
+		}
+	}
+	return jailLn, adminLn, dirLn, opLn, nil
+}
+
+// maxSocketPath is the longest UNIX socket path every host platform binds
+// (macOS's sun_path holds 104 bytes with the terminating NUL; Linux's 108).
+const maxSocketPath = 103
+
+// bindSocket binds a UNIX socket at sock with mode 0600, removing a stale
+// one first.
+func bindSocket(sock string) (net.Listener, error) {
+	if len(sock) > maxSocketPath {
+		return nil, fmt.Errorf("%s is %d bytes, longer than a UNIX socket path may be (%d); move the state directory to a shorter path",
+			sock, len(sock), maxSocketPath)
+	}
+	_ = os.Remove(sock) // stale socket from an unclean shutdown
+	ul, err := net.Listen("unix", sock)
+	if err != nil {
+		return nil, fmt.Errorf("bind: %w", err)
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		daemon.CloseListeners(ul)
+		return nil, fmt.Errorf("chmod: %w", err)
+	}
+	return ul, nil
 }
 
 // jailTicketStager is broker.TicketStager over the jail runner.

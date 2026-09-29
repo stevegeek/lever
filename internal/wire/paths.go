@@ -34,6 +34,9 @@ const (
 	PathWorkerTicket = "/worker-ticket"
 )
 
+// Operator note (UDS) channel route: `lever msg send`.
+const PathOperatorNote = "/operator/note"
+
 // Operator-directive (UDS) admin channel routes.
 const (
 	PathDirectiveSend     = "/directive/send"

@@ -130,6 +130,23 @@ type DirectiveCheckResponse struct {
 	State string `json:"state"`
 }
 
+// ---- operator notes (UDS channel) ----
+
+// OperatorNoteRequest is the body of POST /operator/note: `lever msg send`.
+// To names the recipient the way `lever attach` does (the app name, the
+// manager slug or "manager" for the manager; a declared worker's name).
+type OperatorNoteRequest struct {
+	To        string `json:"to"`
+	Body      string `json:"body"`
+	Interrupt bool   `json:"interrupt"`
+}
+
+// OperatorNoteResponse is the reply of POST /operator/note: the sent-ledger
+// id of the note ("" when the ledger is off).
+type OperatorNoteResponse struct {
+	ID string `json:"id"`
+}
+
 // ---- verified web chat ----
 
 // ChatVerifyRequest is the body of POST /chat/verify: two fields copied from

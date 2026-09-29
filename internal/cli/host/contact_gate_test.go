@@ -178,3 +178,27 @@ func TestContactSessionWarningsNameTheAgentAndTheFix(t *testing.T) {
 		t.Fatalf("a fresh session still warned: %q", out.String())
 	}
 }
+
+// TestStaleSkillWarningWithVerifiedChat: with verified chat on and no
+// contact, a bring-up warns about stale skills (a 0.27 manager skill reads
+// the manager's own notes as data), and says nothing once they are current.
+func TestStaleSkillWarningWithVerifiedChat(t *testing.T) {
+	app, _, st := scaffoldFixture(t)
+	app.Name = "hello"
+	app.Remote = config.Remote{Enabled: true, AllowedUsers: []config.RemoteUser{{Login: "op@example.com"}}}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetErr(&out)
+	printContactSessionWarnings(cmd, app, st)
+	if !strings.Contains(out.String(), "lever init") || !strings.Contains(out.String(), "notes to itself") {
+		t.Fatalf("stale skills: %q", out.String())
+	}
+	if _, err := syncSkills(app, st, false, false); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	printContactSessionWarnings(cmd, app, st)
+	if out.Len() != 0 {
+		t.Fatalf("current skills warned: %q", out.String())
+	}
+}

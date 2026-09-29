@@ -98,10 +98,16 @@ version bump moves the block under the new version heading.
 - Run `lever apply` (it restarts the broker), then `lever init` to refresh
   both skills; with contact logins, run `lever init` first, since apply
   refuses contacts while any skill is stale.
+- Until `lever init` has run, a 0.27 manager skill treats the manager's
+  notes to itself as data: they are now marked and verify as `lever`,
+  which the 0.27 skill reads as `verified: false`.
 - Contacts can post to an agent only once its session starts fresh on
   this version: for the manager, `lever up --fresh` (back up the
   conversation first, see the upgrade notes on `--fresh`); a worker once
   the broker creates it again.
+- `lever msg send` refuses when the state directory is inside the tree
+  (the broker binds no operator socket there); use `lever attach` and type
+  into the session instead.
 - Rebuild the agent image to get `message_verify` with its `ref`. Until
   then, `chat_verify` works: a lever message is matched by its timestamp,
   which needs the guest clock within 5 seconds of the host (doctor row

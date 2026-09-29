@@ -48,9 +48,24 @@ func checkContactGate(app *config.App, st state.State) error {
 		return fmt.Errorf("remote: contact logins need host records agents cannot write, but the state directory %s is inside the tree %s; "+
 			"point `tree:` at a subdirectory that does not contain it, or remove the contact logins", st.Dir, app.Tree)
 	}
-	results, err := syncSkills(app, st, false, true)
+	stale, err := staleSkillList(app, st)
 	if err != nil {
 		return fmt.Errorf("remote: contact logins need current lever skills, and they cannot be checked: %w", err)
+	}
+	if len(stale) > 0 {
+		return fmt.Errorf("remote: contact logins need every agent on lever %s's skills, which verify each message against host records; "+
+			"these are not: %s. Run `lever init` (or `lever init --force` over an edited skill), then apply again",
+			cli.Version, strings.Join(stale, ", "))
+	}
+	return nil
+}
+
+// staleSkillList names each agent skill on disk that is not this version's
+// (an adopted skill counts when it was adopted at this version).
+func staleSkillList(app *config.App, st state.State) ([]string, error) {
+	results, err := syncSkills(app, st, false, true)
+	if err != nil {
+		return nil, err
 	}
 	var stale []string
 	for _, r := range results {
@@ -61,12 +76,14 @@ func checkContactGate(app *config.App, st state.State) error {
 			stale = append(stale, r.RelPath+" ("+string(r.Action)+")")
 		}
 	}
-	if len(stale) > 0 {
-		return fmt.Errorf("remote: contact logins need every agent on lever %s's skills, which verify each message against host records; "+
-			"these are not: %s. Run `lever init` (or `lever init --force` over an edited skill), then apply again",
-			cli.Version, strings.Join(stale, ", "))
-	}
-	return nil
+	return stale, nil
+}
+
+// staleSkills is staleSkillList for a warning: a check that fails names
+// nothing (doctor reports the skills in full).
+func staleSkills(app *config.App, st state.State) []string {
+	stale, _ := staleSkillList(app, st)
+	return stale
 }
 
 // contactSession is the remote proxy's check before a contact's post reaches
@@ -146,9 +163,20 @@ func contactAgents(app *config.App) []string {
 // a warning, not a refusal: an agent that does not exist yet (a worker not
 // dispatched, a manager this bring-up creates) has no record either, and
 // the proxy refuses the posts anyway.
+//
+// With verified chat on and no contact (checkContactGate refuses stale
+// skills when there is one), it also warns about stale skills: a 0.27
+// manager skill reads the manager's notes to itself, now marked and
+// verifying as lever, as data.
 func printContactSessionWarnings(cmd *cobra.Command, app *config.App, st state.State) {
 	if !app.RemoteEnabled() {
 		return
+	}
+	if brokerctl.ChatConfigured(app) && len(app.Remote.LoginsWithTier(config.TierContact)) == 0 {
+		if stale := staleSkills(app, st); len(stale) > 0 {
+			cmd.PrintErrf("lever: warning: these skills are not lever %s's: %s; until `lever init` refreshes them, the agents on them treat some lever messages (the manager's notes to itself) as data\n",
+				cli.Version, strings.Join(stale, ", "))
+		}
 	}
 	for _, a := range contactAgents(app) {
 		if err := contactSession(app, st, a); err != nil {

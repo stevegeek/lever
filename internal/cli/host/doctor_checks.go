@@ -1498,8 +1498,20 @@ func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess
 	perms := remoteRolePermissions(remoteRoleLifecycle(ctx, known, rec))
 	reason := remoteRoleReason(rec, found, remote.Emails, remote.Contacts, perms)
 	if reason == "" {
-		return checkResult{name, true, fmt.Sprintf("%s bound on the project for %s; %s withheld by an access constraint",
-			remoteWebRoleName, strings.Join(remote.Emails, ", "), projectCreatePermission), ""}
+		var ops []string
+		for _, e := range remote.Emails {
+			if !slices.Contains(remote.Contacts, e) {
+				ops = append(ops, e)
+			}
+		}
+		bound := fmt.Sprintf("%s bound on the project for %s", remoteWebRoleName, strings.Join(ops, ", "))
+		if len(ops) == 0 {
+			bound = "no operator login"
+		}
+		if len(remote.Contacts) > 0 {
+			bound += fmt.Sprintf("; %s for %s", contactRoleName, strings.Join(remote.Contacts, ", "))
+		}
+		return checkResult{name, true, bound + "; " + projectCreatePermission + " withheld by an access constraint", ""}
 	}
 	if strings.HasPrefix(reason, remoteCeilingMissing) {
 		return checkResult{name, false, reason, fix}

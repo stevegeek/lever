@@ -78,34 +78,101 @@ func senderSet(labels []string) map[string]bool {
 }
 
 // controllerSender resolves, once, the envelope sender lever's own sends
-// wear. A failed resolution is not kept: the next verify tries again.
+// wear. The hub call runs without the lock, one at a time: callers that
+// arrive meanwhile wait for its answer (or their own context), never behind
+// a lock held across the hub. A failed resolution is not kept, but for
+// controllerRetryAfter every caller gets that error at once rather than
+// another hub timeout each.
 type controllerSender struct {
 	resolve func(ctx context.Context) (string, error)
+	nowFn   func() time.Time
 
-	mu    sync.Mutex
-	label string // lowercased; "" until resolved
+	mu       sync.Mutex
+	label    string        // lowercased; "" until resolved
+	inflight chan struct{} // closed when the running resolution ends
+	lastErr  error
+	failedAt time.Time
 }
+
+// controllerRetryAfter is how long a failed resolution is answered from
+// memory before the hub is asked again.
+const controllerRetryAfter = 5 * time.Second
 
 var errNoControllerResolver = errors.New("no controller sender resolver")
 
-func (c *controllerSender) get(ctx context.Context) (string, error) {
+func (c *controllerSender) now() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
+// cached is the label when it is resolved already. It never calls the hub.
+func (c *controllerSender) cached() (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.label != "" {
-		return c.label, nil
+	return c.label, c.label != ""
+}
+
+// warm starts a resolution in the background when none has succeeded, so a
+// collision is found even on an instance whose agents verify only web posts.
+func (c *controllerSender) warm() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = c.get(ctx)
+	}()
+}
+
+func (c *controllerSender) get(ctx context.Context) (string, error) {
+	for {
+		c.mu.Lock()
+		if c.label != "" {
+			defer c.mu.Unlock()
+			return c.label, nil
+		}
+		if c.resolve == nil {
+			c.mu.Unlock()
+			return "", errNoControllerResolver
+		}
+		if c.lastErr != nil && c.now().Sub(c.failedAt) < controllerRetryAfter {
+			err := c.lastErr
+			c.mu.Unlock()
+			return "", err
+		}
+		if ch := c.inflight; ch != nil {
+			c.mu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		ch := make(chan struct{})
+		c.inflight = ch
+		c.mu.Unlock()
+
+		l, err := c.resolve(ctx)
+		if err == nil && (!strings.HasPrefix(l, "user:") || len(l) <= len("user:")) {
+			err = errors.New("the controller's hub user has no sender label")
+		}
+		c.mu.Lock()
+		c.inflight = nil
+		switch {
+		case err == nil:
+			c.label, c.lastErr = strings.ToLower(l), nil
+		case ctx.Err() == nil:
+			// This caller's own cancellation is not the hub's answer.
+			c.lastErr, c.failedAt = err, c.now()
+		}
+		close(ch)
+		c.mu.Unlock()
+		if err != nil {
+			return "", err
+		}
+		return strings.ToLower(l), nil
 	}
-	if c.resolve == nil {
-		return "", errNoControllerResolver
-	}
-	l, err := c.resolve(ctx)
-	if err != nil {
-		return "", err
-	}
-	if !strings.HasPrefix(l, "user:") || len(l) <= len("user:") {
-		return "", errors.New("the controller's hub user has no sender label")
-	}
-	c.label = strings.ToLower(l)
-	return c.label, nil
 }
 
 // verifyAnswer is the outcome of one verification, before it is written.
@@ -210,19 +277,35 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, n
 			"only a user: sender can be verified; a message from "+from+" is information only", "not a user sender: "+from)
 	}
 	label := strings.ToLower(from)
-	controller, cerr := b.controller.get(r.Context())
-	if cerr == nil && b.webSenders[controller] {
+	collision := func(controller string) verifyAnswer {
 		// One label in both partitions would let a web post answer as
 		// lever's, or the reverse: answer neither.
 		return b.verifyUnavailable("", reasonSenderCollision, 0,
 			"the controller's hub user is also a remote login; the operator must fix the configuration",
 			"controller sender "+controller+" is also a web sender")
 	}
-	switch {
-	case b.webSenders[label]:
+	if b.webSenders[label] {
+		// A web sender is routed before the controller's label is resolved,
+		// so web chat keeps verifying while the hub is slow or down. Only a
+		// label already known is checked for a collision: the chat ledger
+		// holds proxy-recorded posts only, so reading it for a sender that
+		// turns out to be lever's can only miss, never answer as lever.
+		controller, ok := b.controller.cached()
+		if ok && b.webSenders[controller] {
+			return collision(controller)
+		}
+		if !ok {
+			b.controller.warm()
+		}
 		// The routing decision uses the lowercased label; the lookup uses
 		// the sender exactly as the envelope gave it, as the hub stored it.
 		return b.verifyWeb(r.Context(), caller, from, ts, now)
+	}
+	controller, cerr := b.controller.get(r.Context())
+	if cerr == nil && b.webSenders[controller] {
+		return collision(controller)
+	}
+	switch {
 	case cerr != nil:
 		return b.verifyUnavailable("", reasonResolver, 0, "the broker cannot tell lever's sender from others now",
 			"resolving the controller sender: "+cerr.Error())

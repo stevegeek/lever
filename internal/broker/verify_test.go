@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -293,14 +294,109 @@ func TestVerifyPartition(t *testing.T) {
 }
 
 // TestVerifySenderCollision: a controller label that is also a web label
-// would let one answer for the other: every such verify is unavailable.
+// would let one answer for the other: once the label is known, every such
+// verify is unavailable. (A web sender is routed before the label is
+// resolved; see TestVerifyWebDoesNotWaitForTheHub.)
 func TestVerifySenderCollision(t *testing.T) {
 	f := verifyBroker(t, []chatledger.Entry{ledgerEntry(chatManagerID, "x", "m1")}, func(c *Config) {
 		c.Chat.WebSenders = []string{chatSender, "USER:DEV@LOCALHOST"}
 	})
-	for _, from := range []string{chatSender, ctlSender} {
+	// The first web verify starts the resolution in the background; once
+	// it is known, both labels collide.
+	f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: chatSender})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := f.b.controller.cached(); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the controller label was never resolved in the background")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for _, from := range []string{ctlSender, chatSender} {
 		resp, raw := f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: from})
 		wantResult(t, from, resp, raw, wire.VerifyUnavailable, reasonSenderCollision)
+	}
+}
+
+// TestVerifyWebDoesNotWaitForTheHub: while the controller's label cannot be
+// resolved (the hub hangs), a web post still verifies at once, and callers
+// never queue behind one hub call.
+func TestVerifyWebDoesNotWaitForTheHub(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	f := verifyBroker(t, []chatledger.Entry{ledgerEntry(chatManagerID, "go", "m1")}, func(c *Config) {
+		c.Dispatch.ResolveControllerSender = func(ctx context.Context) (string, error) {
+			calls.Add(1)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return "", errors.New("hub down")
+		}
+	})
+	// A lever verify that hangs on the hub, in the background.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = f.b.controller.get(ctx)
+	}()
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	done := make(chan wire.MessageVerifyResponse, 1)
+	go func() {
+		resp, _ := f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: chatSender})
+		done <- resp
+	}()
+	select {
+	case resp := <-done:
+		if resp.Result != wire.VerifyWeb {
+			t.Fatalf("web verify while the hub hangs = %+v", resp)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a web verify waited for the controller's hub call")
+	}
+	// A second lever caller waits for the running call (or its own
+	// context) rather than starting another.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := f.b.controller.get(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second caller: %v, want its own deadline", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d hub calls in flight, want 1", n)
+	}
+}
+
+// TestControllerSenderFailureIsRememberedBriefly: a failed resolution is
+// answered from memory for controllerRetryAfter, then the hub is asked again.
+func TestControllerSenderFailureIsRememberedBriefly(t *testing.T) {
+	var calls int
+	now := time.Now()
+	c := &controllerSender{nowFn: func() time.Time { return now }, resolve: func(context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("hub down")
+		}
+		return "user:Dev@Localhost", nil
+	}}
+	for i := 0; i < 3; i++ {
+		if _, err := c.get(context.Background()); err == nil {
+			t.Fatal("a failed resolution was not answered")
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("%d hub calls inside the retry period, want 1", calls)
+	}
+	now = now.Add(controllerRetryAfter)
+	if l, err := c.get(context.Background()); err != nil || l != "user:dev@localhost" {
+		t.Fatalf("after the retry period: %q, %v", l, err)
+	}
+	if l, ok := c.cached(); !ok || l != "user:dev@localhost" || calls != 2 {
+		t.Fatalf("cached %q %v after %d calls", l, ok, calls)
 	}
 }
 

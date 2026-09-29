@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/marker"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sentledger"
 	"github.com/stevegeek/lever/internal/wire"
@@ -56,9 +56,24 @@ const (
 	operatorNoteMarker = "[lever: operator note]"
 )
 
+// markerLike matches anything a reader could take for a lever marker or for
+// a scion envelope delimiter: "[lever:" with any case and spacing (fullwidth
+// and white square brackets too), and the BEGIN/END SCION MESSAGE lines. It
+// keeps a session readable; it is not a boundary (nothing is trusted for
+// looking like a marker).
+var markerLike = regexp.MustCompile(`(?i)[\[［⟦〚][\s\p{Cf}]*lever[\s\p{Cf}]*[:：]|-{3}[\s\p{Cf}]*(begin|end)[\s\p{Cf}]+scion[\s\p{Cf}]+message[\s\p{Cf}]*-{3}`)
+
 // neutraliseMarkers rewrites every marker-like sequence in text a worker or
-// the manager wrote (see package marker).
-func neutraliseMarkers(body string) string { return marker.Neutralise(body) }
+// the manager wrote, so the text does not read as a second lever marker or a
+// second envelope. The text stays readable.
+func neutraliseMarkers(body string) string {
+	return markerLike.ReplaceAllStringFunc(body, func(m string) string {
+		if strings.HasPrefix(m, "-") {
+			return "(quoted scion delimiter)"
+		}
+		return "(quoted lever marker:"
+	})
+}
 
 // markedBody is the body the broker sends for text someone else wrote: the
 // marker and the send's ref on the first line (refLine), then the text with

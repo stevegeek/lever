@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/marker"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -519,7 +518,7 @@ func TestMsgSend_workerCannotForgeAMarker(t *testing.T) {
 			if first != "[lever: relayed from worker scratch]" {
 				t.Fatalf("%q: first line %q, want the broker's marker", body, first)
 			}
-			if marker.Contains(rest) {
+			if markerLike.MatchString(rest) {
 				t.Fatalf("%q: forged marker survived: %q", body, rest)
 			}
 		}

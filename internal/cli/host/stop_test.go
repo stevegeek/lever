@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -57,6 +58,85 @@ func TestStopSuspendsManager(t *testing.T) {
 	}
 	if got := call.Env["SCION_HUB_TOKEN"]; got != "pat-stop-suspend" {
 		t.Fatalf("suspend env SCION_HUB_TOKEN = %q, want %q (HubTokenSource dropped)", got, "pat-stop-suspend")
+	}
+}
+
+// twoWorkersYAML declares the workers the worker-suspend tests list: scratch
+// and idle.
+const twoWorkersYAML = scratchWorkerYAML + "  - name: idle\n    dir: workers/idle\n"
+
+// stopFleetJSON is a `scion list --format json` answer: the manager and
+// scratch running, idle suspended, and an agent the config does not declare.
+const stopFleetJSON = `[{"slug":"demo","phase":"running"},{"slug":"scratch","phase":"running"},` +
+	`{"slug":"idle","phase":"suspended"},{"slug":"stray","phase":"running"}]`
+
+// TestStopSuspendsRunningWorkers: after the manager, `lever stop` suspends
+// every configured worker the hub shows running — a worker left running
+// across the power-off comes back in phase error and does not resume. A
+// suspended worker and an undeclared agent are left alone. Every failure of
+// the worker pass is a warning: the machine is powered off regardless.
+func TestStopSuspendsRunningWorkers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		scripts map[string]string
+		// wantArgv are the leading words of every scion call, in order.
+		wantArgv []string
+		wantOut  string
+	}{
+		{
+			name:     "running worker suspended after the manager",
+			scripts:  map[string]string{"scion suspend": "ok", argvScionList: stopFleetJSON},
+			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantOut:  `worker "scratch" suspended`,
+		},
+		{
+			name:     "list fails",
+			scripts:  map[string]string{"scion suspend": "ok"},
+			wantArgv: []string{"suspend demo", "list"},
+			wantOut:  "warning: listing agents failed",
+		},
+		{
+			name:     "worker suspend fails",
+			scripts:  map[string]string{"scion suspend demo": "ok", argvScionList: stopFleetJSON},
+			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantOut:  `warning: scion suspend of worker "scratch" failed`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeInstance(t, managerYAML+twoWorkersYAML)
+			t.Chdir(dir)
+			f := proc.NewFakeRunner()
+			for key, out := range tc.scripts {
+				f.Script(key, proc.Result{Stdout: out})
+			}
+			sb := &stubBackend{runner: f}
+			root := stubRoot(sb)
+			var out bytes.Buffer
+			root.SetOut(&out)
+			root.SetErr(&out)
+			root.SetArgs([]string{"stop"})
+
+			if err := root.Execute(); err != nil {
+				t.Fatalf("stop must succeed whatever the worker pass does: %v\n%s", err, out.String())
+			}
+			if !sb.stopped {
+				t.Fatal("stop must power the machine off")
+			}
+			if len(f.Calls) != len(tc.wantArgv) {
+				t.Fatalf("scion calls = %+v, want %v", f.Calls, tc.wantArgv)
+			}
+			for i, want := range tc.wantArgv {
+				if got := f.Calls[i].Argv(); !strings.HasPrefix(got, "scion "+want+" ") && got != "scion "+want {
+					t.Fatalf("call %d = %q, want `scion %s …`", i, got, want)
+				}
+			}
+			if !strings.Contains(out.String(), tc.wantOut) {
+				t.Fatalf("output %q does not contain %q", out.String(), tc.wantOut)
+			}
+			if !strings.Contains(out.String(), "stopped — disk preserved") {
+				t.Fatalf("stop did not report the power-off: %q", out.String())
+			}
+		})
 	}
 }
 

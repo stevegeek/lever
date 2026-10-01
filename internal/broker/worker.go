@@ -498,8 +498,15 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 }
 
 // comingUp reports whether phase is one of scion's interim phases on the way
-// to running ("resumed" is reported by the CLI and is not in the hub's enum).
-func comingUp(phase string) bool { return phase == "resumed" || phase == "starting" }
+// to running: a first start (created, provisioning, cloning, starting) or a
+// resume ("resumed", which the CLI reports and the hub's enum does not have).
+func comingUp(phase string) bool {
+	switch phase {
+	case "created", "provisioning", "cloning", "starting", "resumed":
+		return true
+	}
+	return false
+}
 
 // workerPurgeHint names the recovery for a worker record that does not
 // resume. The broker only names it: deleting a record is never automatic.

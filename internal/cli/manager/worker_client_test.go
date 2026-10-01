@@ -155,3 +155,41 @@ func TestMTLSCaller_gatewayWhenTheBootstrapIsUnreadable(t *testing.T) {
 		t.Fatalf("a broken bootstrap: err=%v gateway path=%q, want an error and no gateway call", err, gotPath)
 	}
 }
+
+// TestMTLSCaller_gatewayWhenTheTicketBelongsToAnotherUser: a ticket this user
+// may not read (staged 0600 under a 0700 directory by another owner) is the
+// same case as an absent one: the call goes through the gateway.
+func TestMTLSCaller_gatewayWhenTheTicketBelongsToAnotherUser(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through any mode")
+	}
+	var calls int
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]string{"worker": "w", "phase": "running"})
+	}))
+	defer gw.Close()
+	dir := t.TempDir()
+	ticketDir := filepath.Join(dir, "run", "lever")
+	ticket := filepath.Join(ticketDir, "bootstrap.json")
+	if err := os.MkdirAll(ticketDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ticket, []byte(`{"broker_url":"https://127.0.0.1:1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := mtlsCaller{bootstrapPath: ticket, idDir: filepath.Join(dir, "id"), gatewayURL: gw.URL}
+	for name, lock := range map[string]func(){
+		"unreadable file":      func() { _ = os.Chmod(ticket, 0o000) },
+		"unreadable directory": func() { _ = os.Chmod(ticketDir, 0o000) },
+	} {
+		lock()
+		before := calls
+		_, err := workerCall(context.Background(), c, "/msg/send", struct{}{})
+		_ = os.Chmod(ticketDir, 0o700)
+		_ = os.Chmod(ticket, 0o600)
+		if err != nil || calls != before+1 {
+			t.Fatalf("%s: err=%v gateway calls=%d, want one call through the gateway", name, err, calls-before)
+		}
+	}
+}

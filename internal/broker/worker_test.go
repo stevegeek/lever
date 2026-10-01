@@ -1180,7 +1180,7 @@ func TestWorkerResumeFailureNeverRemovesTheRecord(t *testing.T) {
 // worker is about to spend; it waits and answers running.
 func TestWorkerResumeOfAWorkerAlreadyComingUpOnlyWaits(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
-	for _, phase := range []string{"resumed", "starting"} {
+	for _, phase := range []string{"resumed", "starting", "created", "provisioning", "cloning"} {
 		rt := &fakeRuntime{
 			listFirst: [][]scion.Agent{{{Slug: "worker", Phase: phase, ContainerStatus: "Up 1 second"}}},
 			agents: map[string][]scion.Agent{

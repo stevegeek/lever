@@ -120,7 +120,7 @@ func suspendRunningWorkers(cmd *cobra.Command, sc *scion.Client, app *config.App
 			cmd.PrintErrf("warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %v\n", wk.Name, err)
 			continue
 		}
-		cmd.Printf("worker %q suspended — after `lever up`, the manager resumes it (`lever-manager agent resume %s`).\n", wk.Name, wk.Name)
+		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", wk.Name, wk.Name)
 	}
 }
 

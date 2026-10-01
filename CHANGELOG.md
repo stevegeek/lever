@@ -14,15 +14,19 @@ version bump moves the block under the new version heading.
   `/workspace/.lever/bootstrap.json`, which a worker does not have: `msg send`
   failed with "read bootstrap ... no such file or directory" before it reached
   the broker, and worked only where a stale `bootstrap.json` sat in the
-  worker's own tree. It now reads the ticket `$LEVER_BOOTSTRAP` names (the
-  read-only `/run/lever` mount), as `lever-agent` does, and falls back to the
-  agent's loopback gateway when no bootstrap can be read. `lever doctor` has a
-  new row, "worker tree bootstraps", that fails on a `bootstrap.json` under a
-  worker's tree and names the file to delete. Workers get the fix with a
-  rebuilt agent image (`lever-manager` ships in it).
+  worker's own tree. It now takes its bootstrap from the ticket
+  `$LEVER_BOOTSTRAP` names (the read-only `/run/lever` mount), as
+  `lever-agent` does. Where the agent's user may not read that ticket, or no
+  bootstrap exists, the call goes through the agent's loopback gateway, which
+  needs neither file. `lever doctor` has a new row, "worker tree bootstraps",
+  that fails on a `bootstrap.json` under a worker's tree and names the file to
+  delete. `lever-manager` ships in the agent image: a worker gets the fix
+  when it is created on a rebuilt image (`lever worker purge <worker>`, then
+  start it again from the manager).
 - **`lever-manager agent resume` of a worker that is already coming up only
-  waits.** A record in scion's interim `resumed` or `starting` phase is not
-  resumed a second time and gets no new ticket.
+  waits.** A record in one of scion's interim phases (`resumed`, `starting`,
+  `created`, `provisioning`, `cloning`) is not resumed a second time and gets
+  no new ticket.
 - **A message to a worker that is not running answers 409, by name.**
   `lever-manager msg send` (and `lever msg send`) to an agent in any phase
   but `running` (suspended, stopped, error, or scion's interim `resumed`)
@@ -44,10 +48,13 @@ version bump moves the block under the new version heading.
   resume answered 409 "agent already exists in this project", and only
   `lever worker purge --force` recovered it. `lever stop` now suspends
   every configured worker that is running (after the manager, with its own
-  30 s budget; a failure is a warning and the power-off always runs), and
+  30 s budget; a failure is a warning and the power-off always runs). A
+  worker suspended this way stays suspended after `lever up` until the
+  manager resumes it. And
   the resume verb uses `scion resume --force` for an `error`-phase record,
   as `agent start` already did. A resume the hub refuses answers 409 and
-  says the record was kept; any other failure stays 502 and names
+  says the record was kept; a ticket that cannot be staged is 500; any
+  other failure stays 502 and names
   `lever worker purge <worker>`. lever never deletes a worker record on
   its own.
 

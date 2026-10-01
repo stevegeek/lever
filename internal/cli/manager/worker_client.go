@@ -104,10 +104,15 @@ func (c mtlsCaller) Call(ctx context.Context, endpoint string, body, out any) er
 			return fmt.Errorf("bootstrap %s: %w", c.bootstrapPath, err)
 		}
 		gerr := httpCaller{client: gatewayClient, baseURL: c.gatewayURL}.Call(ctx, endpoint, body, out)
-		if gerr == nil || httpjson.Status(gerr) != 0 {
-			// The broker answered through the gateway; its answer stands,
-			// a refusal included.
-			return gerr
+		if gerr == nil {
+			return nil
+		}
+		if httpjson.Status(gerr) != 0 {
+			// An HTTP answer through the gateway stands, a broker refusal
+			// included. The wrap keeps the status and says which way the
+			// call went: a bare 502 here is the gateway failing to reach
+			// the broker.
+			return fmt.Errorf("via the agent gateway: %w", gerr)
 		}
 		return fmt.Errorf("bootstrap %s: %w; and the agent gateway at %s did not answer: %v", c.bootstrapPath, err, c.gatewayURL, gerr)
 	}

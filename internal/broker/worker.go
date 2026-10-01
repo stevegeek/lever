@@ -406,9 +406,9 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// resumeExistingWorker brings a non-running record (suspended/stopped/terminal/
-// error) back up. It refuses a re-dispatch that carries a NEW task, then stages
-// a fresh ticket and resumes (resume --force for an error-phase record).
+// resumeExistingWorker is the start route's arm for a non-running record
+// (suspended/stopped/terminal/error). It refuses a re-dispatch that carries a
+// NEW task, then resumes the record (resumeRecord).
 func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, phase, task string) {
 	ctx := r.Context()
 	// Resuming replays the record's ORIGINAL task — scion pins the task at
@@ -426,12 +426,26 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	b.resumeRecord(ctx, w, spec, phase)
+}
+
+// resumeRecord brings an existing, non-running worker record back up and
+// answers the request: stage a fresh ticket, resume by phase, wait until the
+// worker is live. The start route (resumeExistingWorker) and the resume verb
+// (handleWorkerResume) share it, so both recover an error-phase record and
+// neither answers before the worker can take a message. It never deletes a
+// record: a purge is the operator's decision.
+func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase string) {
 	// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
-	// ensureFreshBootstrap for the manager): a worker resumed after its
-	// leaf/ticket lifetime re-enrols on boot, and the previously staged
-	// ticket is long spent — without this it wedges into phase=error
-	// (live-hit 2026-07-31). Harmless when the leaf is still valid: boot
-	// skips enrol and the ticket ages out unspent.
+	// ensureFreshBootstrap for the manager), for two reasons. A worker
+	// resumed after its leaf/ticket lifetime re-enrols on boot, and the
+	// previously staged ticket is long spent — without this it wedges into
+	// phase=error (live-hit 2026-07-31). And the record's ticket volume is a
+	// tmpfs directory under the run user's XDG_RUNTIME_DIR, so a jail machine
+	// restart empties it and podman refuses the mount source ("statfs
+	// …/lever/tickets/<w>: no such file or directory") on every resume until
+	// something re-stages (lever#36). Harmless when the leaf is still valid:
+	// boot skips enrol and the ticket ages out unspent.
 	if err := b.stageWorkerTicket(ctx, spec); err != nil {
 		b.audit("worker", b.manager, "error", "resume "+err.Error())
 		http.Error(w, "stage error", http.StatusInternalServerError)
@@ -439,21 +453,40 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 	}
 	resume := b.runtime.Resume
 	if phase == scion.PhaseError {
-		// Only resume --force (scion#895) recovers an error-phase record.
+		// Only resume --force (scion#895) recovers an error-phase record: a
+		// worker left running across `lever stop` + `lever up` comes back in
+		// this phase, and a plain resume of it answers 409.
 		resume = b.runtime.ResumeForce
 	}
 	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
-		b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
-		http.Error(w, "runtime error", http.StatusBadGateway)
+		b.audit("worker", b.manager, "error", "resume "+spec.Name+" (phase "+phase+"): "+err.Error())
+		// Generic wire bodies (the scion error text can echo the container
+		// env): the detail stays in the audit log.
+		if scion.IsRefusedByHub(err) {
+			// The hub refused the call, which says nothing about the worker's
+			// state (scion folds an authorization denial and a record in a
+			// transitional phase into one 409 "already exists in this project").
+			http.Error(w, "the hub refused to resume worker "+spec.Name+" (phase "+phase+"); its record was kept, nothing was deleted. "+
+				"The record may be in a transitional phase: check `lever-manager agent list` and try again. "+
+				"If the refusal persists, the operator should run `lever doctor`.", http.StatusConflict)
+			return
+		}
+		http.Error(w, "runtime error: worker "+spec.Name+" (phase "+phase+") did not resume. "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
 	if err := b.waitWorkerLive(ctx, spec); err != nil {
 		b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
 	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+}
+
+// workerPurgeHint names the recovery for a worker record that does not
+// resume. The broker only names it: deleting a record is never automatic.
+func workerPurgeHint(worker string) string {
+	return "If it does not recover, the operator can run `lever worker purge " + worker + "` on the host, then start the worker fresh."
 }
 
 // startFreshWorker provisions an absent worker: mint a one-use ticket, stage it
@@ -601,8 +634,9 @@ func (b *Broker) handleWorkerSuspend(w http.ResponseWriter, r *http.Request) {
 }
 func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 	// Not workerVerb: that helper folds every failure into error/502
-	// "runtime error", and this verb has two refusals that are not runtime
-	// errors and must read as such in the audit log — the same branches
+	// "runtime error" and answers one phase reading. This verb has refusals
+	// that are not runtime errors and must read as such in the audit log, and
+	// it answers only when the worker is live — the same branches
 	// resumeExistingWorker takes on the start path.
 	var req wire.WorkerRequest
 	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
@@ -634,29 +668,18 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 			"start it instead: `lever-manager agent start "+spec.Name+" --task \"…\"`", http.StatusNotFound)
 		return
 	}
-	// Stage a fresh one-use ticket BEFORE resuming, as resumeExistingWorker
-	// does (lever#36): the record's ticket volume is a tmpfs directory under
-	// the run user's XDG_RUNTIME_DIR, so a jail machine restart empties it
-	// and podman refuses the mount source ("statfs …/lever/tickets/<w>: no
-	// such file or directory") on every resume until something re-stages —
-	// and this verb is the one the manager actually uses. Also covers the
-	// re-enrol case the start path documents.
-	if err := b.stageWorkerTicket(ctx, spec); err != nil {
-		b.audit("worker", b.manager, "error", "resume "+err.Error())
-		http.Error(w, "stage error", http.StatusInternalServerError)
+	if phase == scion.PhaseRunning {
+		// Already running: a no-op, as on the start route. Nothing is staged.
+		b.audit("worker", b.manager, "allow", "resume "+spec.Name+": already running")
+		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
-	if err := b.runtime.Resume(ctx, spec.Name, b.instanceProject); err != nil {
-		b.audit("worker", b.manager, "error", r.URL.Path+" "+spec.Name+": "+err.Error())
-		http.Error(w, "runtime error", http.StatusBadGateway)
-		return
-	}
-	phase, perr := b.phaseOf(ctx, spec)
-	if perr != nil {
-		phase = "unknown"
-	}
-	b.audit("worker", b.manager, "allow", r.URL.Path+" "+spec.Name)
-	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: phase})
+	// This verb is the one the manager actually uses, so it stages the ticket,
+	// picks the verb by phase and waits for the worker exactly as the start
+	// route does. Answering scion's interim "resumed" phase instead made the
+	// manager's next message fail: the hub refuses a message to an agent that
+	// is not running.
+	b.resumeRecord(ctx, w, spec, phase)
 }
 
 // checkAgentRole runs the pre-role record guard for one agent, if wired.

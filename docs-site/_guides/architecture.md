@@ -188,8 +188,8 @@ Three lifecycle verbs, at increasing cost:
 
 - **detach** (`Ctrl-b d`) — leave the TTY. The manager stays suspended in memory; the jail machine
   keeps running.
-- **`lever stop`** — suspend the manager (best-effort), stop the host broker, power the jail
-  machine off. Disk and session are preserved; `lever up` powers back on and resumes the same
+- **`lever stop`** — suspend the manager and every running worker (best-effort), stop the host
+  broker, power the jail machine off. Disk and session are preserved; `lever up` powers back on and resumes the same
   conversation.
 - **`lever destroy`** — delete the jail machine and clear staged runtime state; `lever up` fully
   re-provisions. (`lever down` is a deprecated alias.)

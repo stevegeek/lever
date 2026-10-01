@@ -272,6 +272,17 @@ var msgWorkers = []WorkerSpec{
 	{Name: "worker", WorkspaceSubdir: "workers/worker"},
 }
 
+// runningFleet is the hub the messaging fixtures run against: the manager
+// (slug "assistant") and every msgWorkers worker in phase running, the only
+// phase in which the broker sends to an agent (notRunningRefusal).
+func runningFleet() *fakeRuntime {
+	agents := []scion.Agent{{Slug: "assistant", Phase: scion.PhaseRunning}}
+	for _, w := range msgWorkers {
+		agents = append(agents, scion.Agent{Slug: w.Name, Phase: scion.PhaseRunning})
+	}
+	return &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: agents}}
+}
+
 // msgBroker's fixture deliberately makes the manager cert CN ("manager") and
 // the manager scion agent SLUG ("assistant", the app name) DIFFER: a live bug
 // (scion: `Agent "manager" not found in project`) hid behind an earlier
@@ -288,7 +299,7 @@ func msgBroker(t *testing.T, g2g bool) *Broker {
 func newMsgTestBroker(t *testing.T, g2g bool) (*Broker, *fakeMsgRuntime, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	rt := &fakeMsgRuntime{WorkerRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
+	rt := &fakeMsgRuntime{WorkerRuntime: runningFleet()}
 	b := New(testConfig(t, withAudit(&buf), withManager("manager", "assistant"), withRuntime(rt, msgWorkers...),
 		func(c *Config) { c.Dispatch.WorkerToWorker = g2g }))
 	return b, rt, &buf

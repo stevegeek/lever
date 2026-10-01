@@ -5,6 +5,38 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Fixed
+
+- **A message to a worker that is not running answers 409, by name.**
+  `lever-manager msg send` (and `lever msg send`) to an agent in any phase
+  but `running` (suspended, stopped, error, or scion's interim `resumed`)
+  answered 502 "runtime error": the hub refuses such a message and the
+  broker folded the refusal away. The broker now reads the recipient's phase
+  first and answers 409 with the phase and the verb to run
+  (`lever-manager agent resume <worker>`; for the manager, `lever up`). A
+  refused message is not sent and leaves no sent-ledger record. The broker
+  does not queue the message and does not wake the agent. When the phase
+  cannot be read the send goes on and the hub decides, as before.
+- **`lever-manager agent resume` answers when the worker is live.** It
+  returned right after scion's resume, often with phase `resumed`, so the
+  next `msg send` failed. It now waits for phase `running` and a live
+  container, as `agent start` does, and a worker that does not come up is
+  an error that names the last phase. Resume of a running worker is a
+  no-op.
+- **A worker left running across `lever stop` + `lever up` is recoverable.**
+  It came back with hub phase `error` (container created, never started),
+  resume answered 409 "agent already exists in this project", and only
+  `lever worker purge --force` recovered it. `lever stop` now suspends
+  every configured worker that is running (after the manager, with its own
+  30 s budget; a failure is a warning and the power-off always runs), and
+  the resume verb uses `scion resume --force` for an `error`-phase record,
+  as `agent start` already did. A resume the hub refuses answers 409 and
+  says the record was kept; any other failure stays 502 and names
+  `lever worker purge <worker>`. lever never deletes a worker record on
+  its own.
+
 ## [0.28.0] - 2026-09-29
 
 ### Added

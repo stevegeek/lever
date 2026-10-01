@@ -54,6 +54,9 @@ type fakeRuntime struct {
 	// the harness died after scion reported success.
 	dieAfterLists int
 	actedLists    int
+	// interimLists, when > 0, makes that many List calls after a Start/Resume
+	// report scion's interim phase "resumed" before the record reads running.
+	interimLists int
 	// staged records every worker ticket the broker handed to the guest
 	// channel (TicketStager), newest last; stageErr makes the channel fail.
 	staged   map[string][][]byte
@@ -101,6 +104,10 @@ func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, er
 	if name, acted := f.lastActed(); acted && !f.staticPhases {
 		if f.exitedAfterStart {
 			return []scion.Agent{{Slug: name, Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}}, nil
+		}
+		if f.interimLists > 0 {
+			f.interimLists--
+			return []scion.Agent{{Slug: name, Phase: "resumed", ContainerStatus: "Up 1 second"}}, nil
 		}
 		if f.dieAfterLists > 0 {
 			f.actedLists++
@@ -1047,5 +1054,113 @@ func TestWorkerStartRecordsOnlyAFreshSession(t *testing.T) {
 				t.Fatalf("begun %v committed %v, want a commit: %v", begun, committed, tc.wantCommit)
 			}
 		})
+	}
+}
+
+// The resume verb picks its scion verb by the record's phase, as the start
+// route does: a running record is a no-op (nothing staged), an error-phase
+// record needs resume --force (the phase a worker left running across `lever
+// stop` + `lever up` comes back in), anything else a plain resume.
+func TestWorkerResumeVerbByPhase(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
+	for _, tc := range []struct {
+		phase                  string
+		resumed, forced, stage int
+	}{
+		{"running", 0, 0, 0},
+		{"error", 0, 1, 1},
+		{"suspended", 1, 0, 1},
+		{"stopped", 1, 0, 1},
+	} {
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{
+			testInstanceProject: {{Slug: "worker", Phase: tc.phase}},
+		}}
+		b := newTestBroker(t, rt, spec)
+		rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"phase":"running"`) {
+			t.Fatalf("%s: status = %d (%s), want 200 running", tc.phase, rec.Code, rec.Body.String())
+		}
+		if len(rt.resumed) != tc.resumed || len(rt.resumeForced) != tc.forced || len(rt.staged["worker"]) != tc.stage {
+			t.Fatalf("%s: resumed=%d forced=%d staged=%d, want %d/%d/%d", tc.phase,
+				len(rt.resumed), len(rt.resumeForced), len(rt.staged["worker"]), tc.resumed, tc.forced, tc.stage)
+		}
+	}
+}
+
+// The resume verb answers only when the worker is live. scion's resume
+// returns while the record still reads "resumed", and the hub refuses a
+// message to an agent in that phase, so an answer given then made the
+// manager's next `msg send` fail.
+func TestWorkerResumeVerbWaitsUntilRunning(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
+	}, interimLists: 2}
+	b := newTestBroker(t, rt, spec)
+	b.liveAttempts, b.liveInterval = 5, time.Millisecond
+	rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"phase":"running"`) {
+		t.Fatalf("status = %d (%s), want 200 running", rec.Code, rec.Body.String())
+	}
+	// One observe-first read, two "resumed" readings, then the running one.
+	if rt.listCalls != 4 {
+		t.Fatalf("List calls = %d, want 4 (the verb must poll past the interim phase)", rt.listCalls)
+	}
+
+	// A worker that never leaves the interim phase is an error that names it.
+	rt2 := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
+	}, interimLists: 100}
+	b2 := newTestBroker(t, rt2, spec)
+	b2.liveAttempts, b2.liveInterval = 3, time.Millisecond
+	rec = callWorker(t, b2, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d (%s), want 502", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "resumed") || !strings.Contains(body, "lever worker purge worker") {
+		t.Fatalf("the timeout must name the last phase and the recovery: %q", body)
+	}
+}
+
+// A resume the hub refuses says nothing about the worker (scion folds an
+// authorization denial into the 409 "already exists in this project"), so
+// the answer is 409, says the record was kept, and no other verb runs. Any
+// other failure stays 502 and names the purge as the operator's recovery.
+// Both routes share the arm.
+func TestWorkerResumeFailureNeverRemovesTheRecord(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
+	refused := errors.New(`scion resume worker: Error: agent "worker" already exists in this project (status: 409)`)
+	broken := errors.New("scion resume worker: Error: container run failed")
+	for _, tc := range []struct {
+		name, path, phase string
+		err               error
+		wantCode          int
+		wantBody          string
+	}{
+		{"refused resume", "/worker/resume", "suspended", refused, http.StatusConflict, "record was kept"},
+		{"refused forced resume", "/worker/resume", "error", refused, http.StatusConflict, "record was kept"},
+		{"refused start", "/worker/start", "suspended", refused, http.StatusConflict, "record was kept"},
+		{"broken resume", "/worker/resume", "suspended", broken, http.StatusBadGateway, "lever worker purge worker"},
+		{"broken forced resume", "/worker/resume", "error", broken, http.StatusBadGateway, "lever worker purge worker"},
+	} {
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{
+			testInstanceProject: {{Slug: "worker", Phase: tc.phase}},
+		}, resumeErr: tc.err, resumeForceErr: tc.err, staticPhases: true}
+		b := newTestBroker(t, rt, spec)
+		var buf bytes.Buffer
+		b.log = slog.New(slog.NewTextHandler(&buf, nil))
+		rec := callWorker(t, b, tc.path, `{"worker":"worker"}`, "test-manager")
+		if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
+			t.Fatalf("%s: status = %d body = %q, want %d naming %q", tc.name, rec.Code, rec.Body.String(), tc.wantCode, tc.wantBody)
+		}
+		// The scion text stays in the audit log (it can echo the container env).
+		if strings.Contains(rec.Body.String(), "Error:") || !strings.Contains(buf.String(), "Error:") {
+			t.Fatalf("%s: scion's error text belongs in the audit log only: body %q", tc.name, rec.Body.String())
+		}
+		// WorkerRuntime has no delete verb; a failed resume must not fall back
+		// to a fresh start or a stop either.
+		if len(rt.started) != 0 || len(rt.stopped) != 0 || len(rt.suspend) != 0 {
+			t.Fatalf("%s: started=%d stopped=%d suspended=%d, want none", tc.name, len(rt.started), len(rt.stopped), len(rt.suspend))
+		}
 	}
 }

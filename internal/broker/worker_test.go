@@ -37,9 +37,13 @@ type fakeRuntime struct {
 	envSets        []string
 	envSetProj     []string
 	startErr       error
-	listErr        error    // every List fails with it
-	listCalls      int      // total List invocations, to assert the fan-out is collapsed
-	listProjects   []string // project arg of every List call
+	listErr        error // every List fails with it
+	// listFirst, when non-empty, is consumed one entry per List call before
+	// any other modelling: a record seen in a phase that then changes on its
+	// own (a resume already under way).
+	listFirst    [][]scion.Agent
+	listCalls    int      // total List invocations, to assert the fan-out is collapsed
+	listProjects []string // project arg of every List call
 	// staticPhases disables the acted->running modelling below: List always
 	// returns the seeded agents. Healer tests need a phase that persists
 	// across repeated heal attempts.
@@ -95,6 +99,11 @@ func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, er
 	f.listProjects = append(f.listProjects, project)
 	if f.listErr != nil {
 		return nil, f.listErr
+	}
+	if len(f.listFirst) > 0 {
+		next := f.listFirst[0]
+		f.listFirst = f.listFirst[1:]
+		return next, nil
 	}
 	// After a Start/Resume, model scion bringing the worker up: the record shows
 	// running + a live container, so the post-start liveness poll succeeds. This
@@ -1161,6 +1170,29 @@ func TestWorkerResumeFailureNeverRemovesTheRecord(t *testing.T) {
 		// to a fresh start or a stop either.
 		if len(rt.started) != 0 || len(rt.stopped) != 0 || len(rt.suspend) != 0 {
 			t.Fatalf("%s: started=%d stopped=%d suspended=%d, want none", tc.name, len(rt.started), len(rt.stopped), len(rt.suspend))
+		}
+	}
+}
+
+// TestWorkerResumeOfAWorkerAlreadyComingUpOnlyWaits: a record in scion's
+// interim phase is already being resumed. The verb neither resumes it again
+// (the hub would refuse) nor stages a new ticket over the one the booting
+// worker is about to spend; it waits and answers running.
+func TestWorkerResumeOfAWorkerAlreadyComingUpOnlyWaits(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
+	for _, phase := range []string{"resumed", "starting"} {
+		rt := &fakeRuntime{
+			listFirst: [][]scion.Agent{{{Slug: "worker", Phase: phase, ContainerStatus: "Up 1 second"}}},
+			agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "worker", Phase: "running", ContainerStatus: "Up 3 seconds"}},
+			}}
+		b := newTestBroker(t, rt, spec)
+		rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"running"`) {
+			t.Fatalf("%s: status = %d (%s), want 200 running", phase, rec.Code, rec.Body.String())
+		}
+		if len(rt.resumed) != 0 || len(rt.resumeForced) != 0 || len(rt.staged) != 0 {
+			t.Fatalf("%s: resumed=%v forced=%v staged=%d, want only a wait", phase, rt.resumed, rt.resumeForced, len(rt.staged))
 		}
 	}
 }

@@ -9,6 +9,20 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **A worker can message the manager without a bootstrap copy in its tree.**
+  `lever-manager` in a worker container read the manager's
+  `/workspace/.lever/bootstrap.json`, which a worker does not have: `msg send`
+  failed with "read bootstrap ... no such file or directory" before it reached
+  the broker, and worked only where a stale `bootstrap.json` sat in the
+  worker's own tree. It now reads the ticket `$LEVER_BOOTSTRAP` names (the
+  read-only `/run/lever` mount), as `lever-agent` does, and falls back to the
+  agent's loopback gateway when no bootstrap can be read. `lever doctor` has a
+  new row, "worker tree bootstraps", that fails on a `bootstrap.json` under a
+  worker's tree and names the file to delete. Workers get the fix with a
+  rebuilt agent image (`lever-manager` ships in it).
+- **`lever-manager agent resume` of a worker that is already coming up only
+  waits.** A record in scion's interim `resumed` or `starting` phase is not
+  resumed a second time and gets no new ticket.
 - **A message to a worker that is not running answers 409, by name.**
   `lever-manager msg send` (and `lever msg send`) to an agent in any phase
   but `running` (suspended, stopped, error, or scion's interim `resumed`)

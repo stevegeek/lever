@@ -436,6 +436,20 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 // neither answers before the worker can take a message. It never deletes a
 // record: a purge is the operator's decision.
 func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase string) {
+	if comingUp(phase) {
+		// A start or resume is already under way (scion's interim phases).
+		// A second resume would be refused by the hub, and a fresh ticket
+		// would replace the one the booting worker is about to spend. Only
+		// wait for it.
+		if err := b.waitWorkerLive(ctx, spec); err != nil {
+			b.audit("worker", b.manager, "error", "resume "+spec.Name+" (already "+phase+"): "+err.Error())
+			http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
+			return
+		}
+		b.audit("worker", b.manager, "allow", "resume "+spec.Name+" (already "+phase+")")
+		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+		return
+	}
 	// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
 	// ensureFreshBootstrap for the manager), for two reasons. A worker
 	// resumed after its leaf/ticket lifetime re-enrols on boot, and the
@@ -482,6 +496,10 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
+
+// comingUp reports whether phase is one of scion's interim phases on the way
+// to running ("resumed" is reported by the CLI and is not in the hub's enum).
+func comingUp(phase string) bool { return phase == "resumed" || phase == "starting" }
 
 // workerPurgeHint names the recovery for a worker record that does not
 // resume. The broker only names it: deleting a record is never automatic.

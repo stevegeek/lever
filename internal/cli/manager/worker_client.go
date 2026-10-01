@@ -2,7 +2,9 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -57,34 +59,72 @@ func (c httpCaller) Call(ctx context.Context, endpoint string, body, out any) er
 	return httpjson.Post(ctx, c.client, c.baseURL+endpoint, body, out)
 }
 
-// mtlsCaller builds the manager's mTLS client from its bootstrap + identity on
-// every call and POSTs through it. The bootstrap/identity paths are
-// agent-generic (workers get their own bootstrap at the same in-container
-// path, so the same binary works for manager AND workers).
+// bootstrapEnv names an agent's bootstrap.json when it is not at the manager's
+// path: the broker sets it on every worker to the ticket it mounts read-only
+// at /run/lever (broker.workerTicketEnv), and `lever-agent` reads the same
+// variable.
+const bootstrapEnv = "LEVER_BOOTSTRAP"
+
+// bootstrapPath is the bootstrap.json this agent's broker URL comes from:
+// $LEVER_BOOTSTRAP when set (a worker), else the manager's path. A worker has
+// no bootstrap.json in its tree; reading the manager's path there fails, or
+// worse, finds a stale copy someone left in the agent-writable tree.
+func bootstrapPath() string {
+	if p := os.Getenv(bootstrapEnv); p != "" {
+		return p
+	}
+	return managerBootstrapPath
+}
+
+// mtlsCaller builds the agent's mTLS client from its bootstrap + identity on
+// every call and POSTs through it. The same binary serves the manager and the
+// workers: bootstrapPath picks the bootstrap, and the identity directory is
+// the process user's in both.
+//
+// gatewayURL, when set, is the agent's loopback gateway (`lever-agent
+// gateway`), which forwards any path to the broker with the agent's own
+// identity. It is the fallback when the bootstrap cannot be read at all (a
+// ticket mounted with an owner this user is not): the gateway learned the
+// broker URL at boot, so the call needs neither file.
 type mtlsCaller struct {
 	bootstrapPath string
 	idDir         string
+	gatewayURL    string
 }
 
 func newMTLSCaller() mtlsCaller {
-	return mtlsCaller{bootstrapPath: managerBootstrapPath, idDir: managerIDDir()}
+	return mtlsCaller{bootstrapPath: bootstrapPath(), idDir: managerIDDir(), gatewayURL: agent.LocalGatewayURL}
 }
 
 func (c mtlsCaller) Call(ctx context.Context, endpoint string, body, out any) error {
 	bs, err := agent.LoadBootstrap(c.bootstrapPath)
 	if err != nil {
-		return fmt.Errorf("manager bootstrap: %w", err)
+		unreadable := errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission)
+		if c.gatewayURL == "" || !unreadable {
+			return fmt.Errorf("bootstrap %s: %w", c.bootstrapPath, err)
+		}
+		gerr := httpCaller{client: gatewayClient, baseURL: c.gatewayURL}.Call(ctx, endpoint, body, out)
+		if gerr == nil || httpjson.Status(gerr) != 0 {
+			// The broker answered through the gateway; its answer stands,
+			// a refusal included.
+			return gerr
+		}
+		return fmt.Errorf("bootstrap %s: %w; and the agent gateway at %s did not answer: %v", c.bootstrapPath, err, c.gatewayURL, gerr)
 	}
 	id, ok := agent.LoadIdentity(c.idDir)
 	if !ok {
-		return fmt.Errorf("manager identity not found in %s", c.idDir)
+		return fmt.Errorf("agent identity not found in %s", c.idDir)
 	}
 	client, err := id.Client()
 	if err != nil {
-		return fmt.Errorf("manager mTLS client: %w", err)
+		return fmt.Errorf("agent mTLS client: %w", err)
 	}
 	return httpCaller{client: client, baseURL: bs.BrokerURL}.Call(ctx, endpoint, body, out)
 }
+
+// gatewayClient talks plaintext HTTP to the loopback gateway. No timeout of
+// its own: the caller's ctx bounds the call, as it does on the mTLS path.
+var gatewayClient = &http.Client{}
 
 // brokerCall is c.Call with a typed return: the decoded T, or the zero T on
 // error.

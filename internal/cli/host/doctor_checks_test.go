@@ -1797,3 +1797,33 @@ func TestNetworkCheckedAgentsIncludesManager(t *testing.T) {
 		t.Fatalf("got %v; the manager must be inspected too", got)
 	}
 }
+
+// TestCheckWorkerTreeBootstraps: a bootstrap.json under a worker's own tree
+// fails the row and names the file to delete; the manager's own bootstrap
+// (the tree root's .lever) is not a worker's.
+func TestCheckWorkerTreeBootstraps(t *testing.T) {
+	tree := t.TempDir()
+	dirs := map[string]string{"a": filepath.Join(tree, "workers", "a"), "b": filepath.Join(tree, "workers", "b")}
+	for _, d := range append([]string{tree}, dirs["a"], dirs["b"]) {
+		if err := os.MkdirAll(filepath.Join(d, ".lever"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tree, ".lever", "bootstrap.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := checkWorkerTreeBootstraps(dirs); !r.ok {
+		t.Fatalf("no worker copy: %+v, want a pass", r)
+	}
+	stray := filepath.Join(dirs["b"], ".lever", "bootstrap.json")
+	if err := os.WriteFile(stray, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := checkWorkerTreeBootstraps(dirs)
+	if r.ok || !strings.Contains(r.detail, "worker b ") || !strings.Contains(r.fix, "rm "+stray) {
+		t.Fatalf("a copy in worker b's tree: %+v, want a failure that names b and the file", r)
+	}
+	if r := checkWorkerTreeBootstraps(nil); !r.ok {
+		t.Fatalf("no workers: %+v", r)
+	}
+}

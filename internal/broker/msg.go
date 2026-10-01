@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -190,6 +191,35 @@ func eventsForAgent(events []scion.Event, agentID string) []scion.Event {
 	return kept
 }
 
+// notRunningRefusal reads the recipient agent's phase and returns the refusal
+// for one that cannot take a message now, or "" to send. The hub refuses a
+// message to an agent in any phase but running (409), scion's interim
+// "resumed" included; without this check that reached the caller as a bare
+// "runtime error", after the sent ledger had recorded the send. The broker
+// does not queue the message and does not wake the agent: the caller resumes
+// it, then sends again.
+//
+// It is an early, named answer, not a boundary: when the phase cannot be read
+// the send goes on and the hub decides, as it did before this check.
+func (b *Broker) notRunningRefusal(ctx context.Context, actor, slug string, toManager bool) string {
+	phase, err := b.phaseOf(ctx, WorkerSpec{Name: slug})
+	if err != nil {
+		b.audit("msg", actor, "error", "send->agent:"+slug+": phase: "+err.Error()+" (sending without the check)")
+		return ""
+	}
+	switch {
+	case phase == scion.PhaseRunning:
+		return ""
+	case toManager && phase == "":
+		return "the manager has no record on the hub; the operator starts it with `lever up`"
+	case toManager:
+		return "the manager is not running (phase " + phase + "); the operator resumes it with `lever up`"
+	case phase == "":
+		return "worker " + slug + " has no record on the hub (never started, or purged); start it first: `lever-manager agent start " + slug + " --task \"…\"`"
+	}
+	return "worker " + slug + " is not running (phase " + phase + "); resume it first: `lever-manager agent resume " + slug + "`"
+}
+
 func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	// A revoked agent loses its messaging channel too — otherwise a
 	// compromised-then-revoked agent could keep steering other agents via
@@ -213,6 +243,13 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	if !b.runtimeReady(w) {
 		return
 	}
+	// Before sendRecorded: a refused send is not made, so it leaves no record.
+	slug := strings.TrimPrefix(tgt.scionTo, "agent:")
+	if refusal := b.notRunningRefusal(r.Context(), caller, slug, tgt.recipientCN == b.manager); refusal != "" {
+		b.audit("msg", caller, "deny", "send->"+tgt.scionTo+": "+refusal)
+		http.Error(w, refusal, http.StatusConflict)
+		return
+	}
 	// The kind comes from the caller's identity, never from the request: a
 	// worker's message is recorded as that worker's, and anything the
 	// manager sends (a note to itself included) as the manager's.
@@ -221,7 +258,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 		kind = sentledger.WorkerKind(tgt.relayFrom)
 		compose = func(ref string) string { return relayedWorkerBody(tgt.relayFrom, ref, req.Body) }
 	}
-	ref, err := b.sendRecorded(r.Context(), tgt.recipientCN, strings.TrimPrefix(tgt.scionTo, "agent:"), kind, compose, scion.MsgOpts{
+	ref, err := b.sendRecorded(r.Context(), tgt.recipientCN, slug, kind, compose, scion.MsgOpts{
 		To: tgt.scionTo, Interrupt: req.Interrupt, Project: tgt.project,
 	})
 	if errors.Is(err, errNotRecorded) {

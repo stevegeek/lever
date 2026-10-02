@@ -15,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -1236,9 +1237,18 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 		return fmt.Errorf("start-manager: the hub refused %s of the manager (%v). lever did NOT delete the manager, "+
 			"so its conversation is kept. %s", v.label, rerr, scion.RefusalHint)
 	}
-	return fmt.Errorf("start-manager: %s of the manager failed (%v). lever did NOT delete the manager: its record and its conversation are kept. "+
+	return ResumeFailed(v.label, rerr)
+}
+
+// ResumeFailed is the error for a manager resume that failed and was not a
+// hub refusal: the record stays, and the operator decides. `lever up`'s own
+// resume path (a machine that is already running) returns it too, so both
+// paths say the same thing. The text "lever did NOT delete the manager" is
+// what a script matches to tell this case from other failures; keep it.
+func ResumeFailed(verb string, err error) error {
+	return fmt.Errorf("start-manager: %s of the manager failed (%s). lever did NOT delete the manager: its record and its conversation are kept. "+
 		"Run `lever up` again (a transient failure clears), and `lever doctor` for the cause if it does not. "+
-		"`lever up --fresh` discards the session and starts a new manager", v.label, rerr)
+		"`lever up --fresh` discards the session and starts a new manager", verb, termsafe.Sanitize(scion.ErrSummary(err)))
 }
 
 // retryOnBrokerUnavailable runs action up to r.brokerStart.Attempts times,

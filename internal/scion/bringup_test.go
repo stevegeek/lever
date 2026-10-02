@@ -580,3 +580,30 @@ func TestIsRefusedByHub(t *testing.T) {
 		t.Error("IsRefusedByHub(nil) = true")
 	}
 }
+
+// TestErrSummary: the cause line survives; the settings warnings and the
+// usage dump do not; the result is one bounded line.
+func TestErrSummary(t *testing.T) {
+	raw := "scion resume m -g /lever: Resuming agent 'm'...\n" +
+		"2026/10/02 15:25:35 WARN settings file contains unrecognized keys (these will be ignored) keys=\"[a b]\"\n" +
+		"Using hub: http://127.0.0.1:8080\n" +
+		"Error: failed to start agent via Hub: runtime_error: Failed to resume suspended agent\r\n" +
+		"Usage:\n  scion resume <agent> [flags]\n      --force   Resume an agent in the error phase\n"
+	got := ErrSummary(errors.New(raw))
+	for _, want := range []string{"scion resume m", "Failed to resume suspended agent"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q lacks %q", got, want)
+		}
+	}
+	for _, not := range []string{"WARN", "Usage", "--force", "\n"} {
+		if strings.Contains(got, not) {
+			t.Errorf("summary %q still has %q", got, not)
+		}
+	}
+	if long := ErrSummary(errors.New(strings.Repeat("x", 5000))); len(long) > 610 {
+		t.Errorf("summary of a 5000-byte error is %d bytes", len(long))
+	}
+	if ErrSummary(nil) != "" {
+		t.Error("nil error has a summary")
+	}
+}

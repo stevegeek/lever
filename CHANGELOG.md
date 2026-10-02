@@ -21,7 +21,9 @@ version bump moves the block under the new version heading.
   thing that deletes a manager record, and its delete now retries through
   the window in which the hub's runtime broker has not registered yet. The
   error text contains "lever did NOT delete the manager"; a script that
-  wants to fall back to `--fresh` can match that. **Behaviour change:** an instance
+  wants to fall back to `--fresh` can match that. The error carries scion's
+  cause line, without its settings warnings and usage dump; `lever up` on a
+  machine that is already running says the same thing. **Behaviour change:** an instance
   whose manager cannot be resumed stays down until the operator acts; it
   does not heal itself by losing the session.
 - **A directive that cannot be delivered is not stored (#25).** `lever

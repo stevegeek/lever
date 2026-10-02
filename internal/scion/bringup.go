@@ -102,6 +102,40 @@ const RefusalHint = "Two causes are possible. (1) On scion f7155ecb or later, a 
 	"that cannot be resumed now (running, starting, stopping or error): wait, check `lever doctor`, then run `lever up` again. " +
 	"To discard the session instead, run `lever up --fresh`"
 
+// ErrSummary reduces a scion CLI error to the lines that say what went wrong.
+// A failed scion verb returns its whole stderr: the "settings file contains
+// unrecognized keys" warnings, the hub's error, and cobra's usage dump. The
+// summary drops the warnings and everything from "Usage:" on, joins the rest
+// on one line and bounds it, so an operator-facing message can carry the
+// cause. It returns plain text; the caller sanitizes it for the terminal.
+func ErrSummary(err error) string {
+	if err == nil {
+		return ""
+	}
+	const maxSummary = 600
+	var kept []string
+	for _, line := range strings.FieldsFunc(err.Error(), func(r rune) bool { return r == '\n' || r == '\r' }) {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+			continue
+		case strings.HasPrefix(line, "Usage:"):
+			return boundSummary(strings.Join(kept, " "), maxSummary)
+		case strings.Contains(line, "settings file contains unrecognized keys"):
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return boundSummary(strings.Join(kept, " "), maxSummary)
+}
+
+func boundSummary(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return strings.ToValidUTF8(s[:limit], "") + "…"
+}
+
 // IsAgentAbsent reports whether err from a scion agent verb (`list`, `status`,
 // `resume`…) DEFINITIVELY means the named agent cannot be running — as opposed
 // to an unknown failure a caller must not paper over. It matches, case-

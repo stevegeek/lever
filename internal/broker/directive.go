@@ -39,6 +39,9 @@ type DirectiveRecord struct {
 	NotBefore  time.Time       `json:"not_before"`
 	ExpiresAt  time.Time       `json:"expires_at"`
 	ConsumedAt time.Time       `json:"consumed_at,omitzero"`
+	// Previews counts the target's successful non-consuming reads (Preview).
+	// It is the only thing a preview changes; it never affects State.
+	Previews int `json:"previews,omitempty"`
 }
 
 // DirectiveState is the persisted directive store snapshot: per-CN enrolment
@@ -172,6 +175,51 @@ func (s *DirectiveStore) Consume(id, callerCN string, now time.Time) (DirectiveR
 		return DirectiveRecord{}, false
 	}
 	return *r, true
+}
+
+// PreviewOutcome is the result of DirectiveStore.Preview.
+type PreviewOutcome int
+
+const (
+	// PreviewMiss covers every case Consume would refuse (and a persist
+	// failure). Callers must answer it with the same opaque error as a
+	// consume miss.
+	PreviewMiss PreviewOutcome = iota
+	// PreviewOK: the record is returned and its preview count went up by one.
+	PreviewOK
+	// PreviewCapped: the caller IS the target of an active, in-window
+	// directive, but it used all its previews. Nothing is returned or counted.
+	PreviewCapped
+)
+
+// Preview is the non-consuming read of a pending directive (#17). Its gate is
+// EXACTLY Consume's — active, target CN, current generation, inside the time
+// window — so a preview can never show a directive that a consume at the same
+// instant would refuse, and it is no wider an oracle than consume is. It does
+// not flip State: the single-use compare-and-swap stays with Consume alone,
+// and a previewed directive is still consumable exactly once. The one mutation
+// is the persisted Previews count, capped at limit so the route cannot be
+// polled without bound.
+func (s *DirectiveStore) Preview(id, callerCN string, now time.Time, limit int) (DirectiveRecord, PreviewOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.findLocked(id)
+	if r == nil || r.State != DirectiveActive ||
+		r.TargetCN != callerCN || r.TargetGen != s.gens[callerCN] ||
+		now.Before(r.NotBefore) || !now.Before(r.ExpiresAt) {
+		return DirectiveRecord{}, PreviewMiss
+	}
+	if r.Previews >= limit {
+		return DirectiveRecord{}, PreviewCapped
+	}
+	r.Previews++
+	if err := s.persistLocked(); err != nil {
+		// Fail closed, like Consume: content must not leave the broker on a
+		// count that is not durable, or a restart would reset the cap.
+		r.Previews--
+		return DirectiveRecord{}, PreviewMiss
+	}
+	return *r, PreviewOK
 }
 
 // Check reports the directive's state, but ONLY to its target at the current

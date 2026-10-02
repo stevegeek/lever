@@ -139,7 +139,7 @@ func TestMCPToolsListAdvertisesDirectiveTools(t *testing.T) {
 	for _, tl := range tools {
 		names[tl.(map[string]any)["name"].(string)] = true
 	}
-	if !names["directive_consume"] || !names["directive_check"] {
+	if !names["directive_consume"] || !names["directive_check"] || !names["directive_preview"] {
 		t.Fatalf("directive tools missing: %v", names)
 	}
 }
@@ -187,6 +187,48 @@ func TestMCPDirectiveCheckPostsIDAndSurfacesState(t *testing.T) {
 	}
 }
 
+func TestMCPDirectivePreviewPostsIDAndSurfacesPreviewVerbatim(t *testing.T) {
+	var gotPath, gotID string
+	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, path, id string) {
+		gotPath, gotID = path, id
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": id, "kind": "tool_call", "consumed": false,
+			"preview": map[string]any{"tool": "db", "op": "read"}, "note": "PREVIEW ONLY",
+		})
+	})
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
+
+	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"directive_preview","arguments":{"id":"D3"}}}`)
+	if gotPath != "/directive/preview" || gotID != "D3" {
+		t.Fatalf("posted (%q, %q), want (/directive/preview, D3)", gotPath, gotID)
+	}
+	for _, want := range []string{`"consumed":false`, `"preview":{`, `PREVIEW ONLY`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("tool result text = %q, want it to contain %s", text, want)
+		}
+	}
+}
+
+// The tool description is what tells the model a preview is not a consume.
+func TestMCPDirectivePreviewDescriptionSaysNotAuthority(t *testing.T) {
+	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
+	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	for _, tl := range resp["result"].(map[string]any)["tools"].([]any) {
+		tool := tl.(map[string]any)
+		if tool["name"] != "directive_preview" {
+			continue
+		}
+		desc := tool["description"].(string)
+		for _, want := range []string{"WITHOUT consuming", "not operator authority", "directive_consume"} {
+			if !strings.Contains(desc, want) {
+				t.Fatalf("directive_preview description lacks %q: %s", want, desc)
+			}
+		}
+		return
+	}
+	t.Fatal("directive_preview not advertised")
+}
+
 func TestMCPDirectiveConsume404SurfacesAsToolCallError(t *testing.T) {
 	// The broker's opaque-404 contract (unknown id / wrong target / already
 	// consumed / expired / stale generation — all byte-identical) must reach
@@ -221,6 +263,7 @@ func TestMCPDirectiveAcceptsDirectiveIDAlias(t *testing.T) {
 	for _, tc := range []struct{ tool, route string }{
 		{"directive_consume", "/directive/consume"},
 		{"directive_check", "/directive/check"},
+		{"directive_preview", "/directive/preview"},
 	} {
 		var gotPath, gotID string
 		srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, path, id string) {
@@ -242,7 +285,7 @@ func TestMCPDirectiveMissingIDIsALocalArgumentError(t *testing.T) {
 	// Letting it through would return the opaque "not found" — indistinguishable
 	// from "no such directive", which teaches the agent to disbelieve a genuine
 	// operator authorization.
-	for _, tool := range []string{"directive_consume", "directive_check"} {
+	for _, tool := range []string{"directive_consume", "directive_check", "directive_preview"} {
 		called := false
 		srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) { called = true })
 		s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "manager", Client: srv.Client()})
@@ -329,7 +372,7 @@ func TestMCPDirectiveSchemaDeclaresBothSpellings(t *testing.T) {
 	for _, tl := range resp["result"].(map[string]any)["tools"].([]any) {
 		tool := tl.(map[string]any)
 		name := tool["name"].(string)
-		if name != "directive_consume" && name != "directive_check" {
+		if name != "directive_consume" && name != "directive_check" && name != "directive_preview" {
 			continue
 		}
 		schema := tool["inputSchema"].(map[string]any)

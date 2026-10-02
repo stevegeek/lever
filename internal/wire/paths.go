@@ -19,6 +19,7 @@ const (
 	PathMsgList          = "/msg/list"
 	PathDirectiveConsume = "/directive/consume"
 	PathDirectiveCheck   = "/directive/check"
+	PathDirectivePreview = "/directive/preview"
 	PathMessageVerify    = "/message/verify"
 	// PathChatVerify is the 0.27 route agent images of that release post
 	// to; it answers like PathMessageVerify.

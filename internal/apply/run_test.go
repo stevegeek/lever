@@ -287,6 +287,8 @@ type agentLifecycleRunner struct {
 	// default) preserves the original all-tests-so-far behavior: if resumeErr
 	// is set, resume fails EVERY call (no eventual success).
 	resumeFailsThenSucceed int
+	// deleteFailsThenSucceed is the same for delete (with deleteErr).
+	deleteFailsThenSucceed int
 	// dieAfterLiveLists, when > 0, models lever#31: once live, the record stays
 	// running/Up for this many list calls and then flips to error/Exited — the
 	// harness died after scion reported success.
@@ -422,7 +424,7 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	case "delete":
 		r.deleteCalls++
 		r.record(dir, env, name, args)
-		if r.deleteErr != nil {
+		if r.deleteErr != nil && (r.deleteFailsThenSucceed == 0 || r.deleteCalls <= r.deleteFailsThenSucceed) {
 			return proc.Result{Code: 1, Stderr: r.deleteErr.Error()}, r.deleteErr
 		}
 		r.phase, r.containerStatus = "", ""
@@ -1104,6 +1106,40 @@ func TestStartManagerFreshRearmsBeforeFreshCreate(t *testing.T) {
 	}
 	if r.deleteCalls != 1 || r.startCalls != 1 || r.resumeCalls != 0 {
 		t.Errorf("deleteCalls=%d startCalls=%d resumeCalls=%d, want 1/1/0", r.deleteCalls, r.startCalls, r.resumeCalls)
+	}
+}
+
+// TestStartManagerFreshDeleteRetriesOnBrokerUnavailable: `up --fresh` is the
+// operator's way out of a manager that does not resume (a failed resume keeps
+// the record, lever#3), so its delete must absorb the runtime-broker
+// registration race like a create or a resume does — and a failed --fresh
+// must leave the record for the next attempt, never create over it.
+func TestStartManagerFreshDeleteRetriesOnBrokerUnavailable(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "error", initContainerStatus: "stopped",
+		deleteErr:              fmt.Errorf("cannot delete agent: no runtime broker available"),
+		deleteFailsThenSucceed: 2,
+	}
+	deps := Deps{BrokerStartRetry: fastRetry(5), Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}}
+	if err := runApplyFresh(app, deps); err != nil {
+		t.Fatalf("--fresh over an error-phase record once the broker registers: %v", err)
+	}
+	if r.deleteCalls != 3 || r.startCalls != 1 || r.resumeCalls != 0 {
+		t.Fatalf("deleteCalls=%d startCalls=%d resumeCalls=%d, want 3/1/0", r.deleteCalls, r.startCalls, r.resumeCalls)
+	}
+
+	app, f = newObserveFirstApp(t)
+	r = &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "stopped", initContainerStatus: "stopped",
+		deleteErr: fmt.Errorf("delete: agent locked"),
+	}
+	err := runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(3), Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}})
+	testutil.WantErrContaining(t, err, "delete failed", "agent locked")
+	if r.deleteCalls != 1 || r.startCalls != 0 {
+		t.Fatalf("deleteCalls=%d startCalls=%d, want 1/0 (a non-transient delete failure ends at once, and nothing is created over the record)", r.deleteCalls, r.startCalls)
 	}
 }
 

@@ -1371,7 +1371,12 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) erro
 // record would just 409.
 func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.StartOpts, logMsg, deleteFailReason string) error {
 	r.d.Log("%s", logMsg)
-	if derr := r.d.Scion.Delete(ctx, r.app.Name, jp); derr != nil {
+	// The delete rides the same runtime-broker-race retry as a create or a
+	// resume: on a cold VM the hub serves before its runtime broker has
+	// registered, and a delete issued in that window fails the same way.
+	// `up --fresh` is the operator's one way out of a manager that does not
+	// resume, so it must not fail on a broker that was only late.
+	if derr := r.retryOnBrokerUnavailable(ctx, func() error { return r.d.Scion.Delete(ctx, r.app.Name, jp) }); derr != nil {
 		return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 	}
 	return r.startManagerCreate(ctx, opts)

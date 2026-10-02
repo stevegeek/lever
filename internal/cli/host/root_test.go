@@ -3,6 +3,7 @@ package host
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -68,5 +69,20 @@ func TestHostRootLeavesErrorPrintingToExecute(t *testing.T) {
 	}
 	if got, want := stderr.String(), "Error: scion: all good\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+// TestRootVersionFlag: `lever --version` prints what `lever version` prints.
+func TestRootVersionFlag(t *testing.T) {
+	flag, err := clitest.Exec(t, newRootWith(defaultFactory), "--version")
+	if err != nil {
+		t.Fatalf("lever --version: %v", err)
+	}
+	verb, err := clitest.Exec(t, newRootWith(defaultFactory), "version")
+	if err != nil {
+		t.Fatalf("lever version: %v", err)
+	}
+	if strings.TrimSpace(flag) == "" || strings.TrimSpace(flag) != strings.TrimSpace(verb) {
+		t.Fatalf("--version printed %q, version printed %q", flag, verb)
 	}
 }

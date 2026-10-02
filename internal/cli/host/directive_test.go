@@ -210,7 +210,7 @@ func TestDirectiveSendActionFlag(t *testing.T) {
 
 	rec := startDirectiveUDS(t, dir, map[string]canned{
 		"/directive/resolve": {body: `{"cn":"worker1","slug":"worker1","generation":1}`},
-		"/directive/send":    {body: `{"id":"x","delivered":false}`},
+		"/directive/send":    {body: `{"id":"x","delivered":true}`},
 	})
 
 	action := `{"kind":"tool_call","tool":"qmd","op":"search","args":{"q":"x"},"arg_binding":"exact","uses":1}`
@@ -511,5 +511,36 @@ func TestDirectiveSelftestFailureExitsNonZero(t *testing.T) {
 	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "selftest")
 	if err == nil {
 		t.Fatal("selftest failure should return a non-nil error (non-zero exit)")
+	}
+}
+
+// TestDirectiveSendUndeliveredIsAnError: a directive whose notice did not
+// reach the agent is not a success (lever#25). The broker refuses or revokes
+// it (a non-200 answer whose text the command shows); an older broker stores
+// it and answers delivered=false, which is an error too.
+func TestDirectiveSendUndeliveredIsAnError(t *testing.T) {
+	for name, send := range map[string]canned{
+		"refused, not stored": {status: http.StatusConflict, body: "worker worker1 is not running (phase suspended). The directive was not stored"},
+		"stored, undelivered": {body: `{"id":"x","delivered":false}`},
+	} {
+		dir := directiveTestDir(t)
+		priv, _ := genDirectiveKey(t, dir, "testinst")
+		writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
+		t.Chdir(dir)
+		startDirectiveUDS(t, dir, map[string]canned{
+			"/directive/resolve": {body: `{"cn":"worker1","slug":"worker1","generation":1}`},
+			"/directive/send":    send,
+		})
+		out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "x")
+		if err == nil {
+			t.Fatalf("%s: directive send succeeded\noutput: %s", name, out)
+		}
+		want := "not running (phase suspended)"
+		if send.status == 0 {
+			want = "did not reach the agent"
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: error %q does not say %q", name, err, want)
+		}
 	}
 }

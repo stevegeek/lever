@@ -23,6 +23,7 @@ signature; all cryptography is host-side. The rationale and threat model are in
 | 2. Submit | operator CLI → broker | The exact signed bytes go to the broker over a **0600 UNIX-domain socket** in the instance state dir — unreachable from inside the jail. Every admin op (send/list/revoke) is signed regardless; the socket is defence in depth, not the trust boundary. |
 | 3. Verify + store | broker, host-side | The broker verifies the signature with `ssh-keygen -Y verify` against `allowed_signers`, parses the *exact* received bytes (no re-serialize, duplicate JSON keys rejected), validates instance/window/target, and stores the directive `active`. |
 | 4. Deliver a pointer | broker → agent | The agent's inbox gets only a `directive_id` — never the action content. No directive content ever transits the message channel an attacker could also write to. |
+| 4a. Preview (optional) | agent, over its own mTLS | `directive_preview(id)` returns the verified action **without** consuming it, so the agent can decide first. It is not authority; see [Preview before consume](#preview-before-consume). |
 | 5. Consume | agent, over its own mTLS | If the agent independently decides to act, it calls `directive_consume(id)` on the `lever-capability` MCP server (the same server that mints capability tokens — see [capabilities](/capabilities/)). |
 | 6. Atomic CAS | broker | Returns the action **only if** the caller's mTLS-verified CN + current enrolment generation match the directive's target, it's active, and it's inside its time window — and flips it to `consumed` in the same step. Single use. |
 
@@ -31,13 +32,31 @@ the same byte-identical opaque `{"error":"not found"}`. There is no oracle for *
 occurred; a revoked caller gets `403`, a rate-limited one `429`. A read-only `directive_check(id)`
 exists too, target-gated with the same opaque miss.
 
+### Preview before consume
+
+`directive_consume` is single use, so without a preview "read the request" and "commit to it" are
+the same step. `directive_preview(id)` separates them: the target agent reads the action, decides,
+and then consumes or leaves the directive.
+
+| Rule | Behaviour |
+|---|---|
+| Who | Only the target: the caller's mTLS CN and current generation. The gate is the same as for consume. |
+| Miss | Unknown id, other agent, stale generation, consumed, revoked, invalidated, expired, before `not_before`: the same opaque `{"error":"not found"}` as consume. A preview shows nothing that a consume at the same moment would refuse. |
+| Content | The action, parsed from the stored signed bytes by the same validator as consume. The reply is `{"id", "kind", "consumed": false, "preview": {…action…}, "expires_at", "previews_remaining", "note"}`. |
+| Authority | None. The content is under `preview`, never under `action` or `advisory_text`, and the note says the directive is not consumed. The reply holds no token and no grant. Only a `directive_consume` result is operator authority. |
+| State | A preview does not consume. The directive stays `active` and a later consume succeeds exactly once. Only the preview count changes. |
+| Cap | 5 previews per directive (persisted). After that the target gets `429 {"error":"preview limit reached: …"}`; other callers still get the opaque miss. A capped directive is still consumable. Previews share the per-agent directive rate limit. |
+| Audit | Each preview writes `previewed` (caller, id, kind, count) to `directives.log`; a refused lookup (no active match for this caller) writes `preview_denied`, a capped call `preview_capped`; a malformed, rate-limited or disabled call is in `broker.log` only. The `consumed` line records how many previews came first, and `lever directive list` shows `previews`. |
+
+The tool is in the agent image's `lever-agent` binary: rebuild the agent image to get it.
+
 **Identity binding.** A directive targets `{cn, generation}`, not a recyclable agent slug; consume
 requires the caller's live CN and current generation to match
 ([§11.4](/security-model/operator-directives/)).
 
 Directive state (active/consumed/revoked/invalidated/expired, plus tombstones for replay defence,
 plus per-CN generations) persists to `.lever-state/directives.json` with atomic writes, and
-consume/submit fail closed on a persistence error rather than report a success that isn't durable.
+consume/submit/preview fail closed on a persistence error rather than report a success that isn't durable.
 `invalidated` is set on an active directive when its target CN re-enrols (generation bump).
 
 This depends on per-agent network-namespace isolation; see

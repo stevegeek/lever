@@ -41,7 +41,7 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The same early answer /msg/send gives, before anything is recorded.
-	if refusal := b.notRunningRefusal(r.Context(), "operator", slug, toManager); refusal != "" {
+	if refusal := b.notRunningRefusal(r.Context(), operatorActor, slug, toManager); refusal != "" {
 		b.audit("msg", "operator", "deny", "note->"+cn+": "+refusal)
 		http.Error(w, refusal, http.StatusConflict)
 		return

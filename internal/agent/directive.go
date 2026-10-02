@@ -32,6 +32,12 @@ func DirectiveCheck(ctx context.Context, brokerURL string, client *http.Client, 
 	return directivePost(ctx, brokerURL, client, wire.PathDirectiveCheck, id)
 }
 
+// DirectivePreview reads a pending directive's verified action WITHOUT
+// consuming it (target-gated). The result is not operator authority.
+func DirectivePreview(ctx context.Context, brokerURL string, client *http.Client, id string) (json.RawMessage, error) {
+	return directivePost(ctx, brokerURL, client, wire.PathDirectivePreview, id)
+}
+
 // MessageVerify asks the broker who wrote a received message (web chat, a
 // lever send, or no record), from host records only. The returned JSON is the
 // only authoritative copy of the message text.

@@ -158,7 +158,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 					if scion.IsRefusedByHub(err) {
 						return fmt.Errorf("the hub refused to resume the manager (%w); nothing was deleted. %s", err, scion.RefusalHint)
 					}
-					return err
+					return apply.ResumeFailed("resume", err)
 				}
 			case upNone:
 				// A running manager is not exempt: it refreshes its own token

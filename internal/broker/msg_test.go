@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,7 +40,10 @@ func TestResolveMsgTarget(t *testing.T) {
 		{"worker to itself", "scratch", "scratch", true, "agent:scratch", "/lever", false, nil},
 		{"unknown caller", "mallory", "assistant", true, "", "", true, nil},
 		{"caller by slug is not an identity", "assistant", "scratch", true, "", "", true, nil},
-		{"worker to unknown", "scratch", "nope", true, "", "", true, nil},
+		{"worker to unknown", "scratch", "nope", true, "", "", true, errUnknownRecipient},
+		{"worker to unknown, worker→worker off", "scratch", "nope", false, "", "", true, nil},
+		{"worker to itself, worker→worker off", "scratch", "agent:scratch", false, "agent:scratch", "/lever", false, nil},
+		{"worker to manager, worker→worker off", "scratch", "user:manager", false, "agent:assistant", "/lever", false, nil},
 		// Bare prefixes are NOT the empty manager alias / empty agent name:
 		// they must fall through to the unknown-recipient deny.
 		{"bare user: prefix denied", "manager", "user:", true, "", "", true, errUnknownRecipient},
@@ -171,6 +175,192 @@ func TestMsgSendDenyLeaksReason(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "not broker-routable") {
 		t.Fatalf("deny body should carry the resolve reason, got %q", body)
+	}
+}
+
+// With worker→worker messaging off, a declared peer and a name nobody has
+// are refused in the same words: the refusal is no oracle for peer names.
+func TestResolveMsgTarget_workerCannotProbeForPeers(t *testing.T) {
+	b := msgBroker(t, false)
+	_, declared := b.resolveMsgTarget("scratch", "agent:worker")
+	_, absent := b.resolveMsgTarget("scratch", "agent:w0rker")
+	if declared == nil || absent == nil {
+		t.Fatalf("both must be refused: declared=%v absent=%v", declared, absent)
+	}
+	if got, want := strings.ReplaceAll(absent.Error(), "w0rker", "worker"), declared.Error(); got != want {
+		t.Fatalf("refusals differ beyond the echoed name:\n declared: %s\n absent:   %s", want, absent)
+	}
+}
+
+func TestMsgRecipients(t *testing.T) {
+	cases := []struct {
+		name, caller string
+		g2g          bool
+		want         []string
+	}{
+		{"manager", "manager", true, []string{"agent:assistant", "agent:scratch", "agent:worker"}},
+		{"manager, worker→worker off", "manager", false, []string{"agent:assistant", "agent:scratch", "agent:worker"}},
+		{"worker, worker→worker on", "scratch", true, []string{"user:manager", "agent:scratch", "agent:worker"}},
+		{"worker, worker→worker off", "scratch", false, []string{"user:manager", "agent:scratch"}},
+		{"unknown caller", "mallory", true, nil},
+		{"the manager's slug is not an identity", "assistant", true, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b := msgBroker(t, c.g2g)
+			got := b.msgRecipients(c.caller)
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("recipients = %v, want %v", got, c.want)
+			}
+			// The listing and the send policy agree: every address listed
+			// resolves, and no declared name left out does.
+			for _, addr := range got {
+				if _, err := b.resolveMsgTarget(c.caller, addr); err != nil {
+					t.Fatalf("listed %q but the send policy refuses it: %v", addr, err)
+				}
+			}
+			for _, name := range []string{"scratch", "worker"} {
+				_, err := b.resolveMsgTarget(c.caller, name)
+				if listed := slices.Contains(got, "agent:"+name); listed != (err == nil) {
+					t.Fatalf("%q: listed=%v, send err=%v", name, listed, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRecipientsHint(t *testing.T) {
+	if got := recipientsHint(nil); got != "" {
+		t.Fatalf("no addresses must give no hint, got %q", got)
+	}
+	if got, want := recipientsHint([]string{"user:manager", "agent:scratch"}), "; you may send to: user:manager, agent:scratch"; got != want {
+		t.Fatalf("hint = %q, want %q", got, want)
+	}
+	addrs := make([]string, msgRecipientCap+3)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("agent:w%02d", i)
+	}
+	got := recipientsHint(addrs)
+	if n := strings.Count(got, "agent:"); n != msgRecipientCap {
+		t.Fatalf("hint names %d addresses, want the cap %d: %q", n, msgRecipientCap, got)
+	}
+	if !strings.Contains(got, "agent:w15 and 3 more") || strings.Contains(got, "agent:w16") {
+		t.Fatalf("hint must stop at the cap and count the rest: %q", got)
+	}
+	if len(addrs) != msgRecipientCap+3 || addrs[msgRecipientCap] != "agent:w16" {
+		t.Fatal("recipientsHint must not change the caller's slice")
+	}
+}
+
+// A refused send names the addresses the CALLER may use, and only those.
+func TestMsgSend_refusalNamesTheCallersRecipients(t *testing.T) {
+	cases := []struct {
+		name, caller, to string
+		g2g              bool
+		want             string
+		wantAbsent       []string
+	}{
+		{"manager, unknown name", "manager", "nope", true,
+			`unknown recipient "nope"; you may send to: agent:assistant, agent:scratch, agent:worker`, nil},
+		{"manager, user form", "manager", "user:stephen", true,
+			"message the manager agent instead; you may send to: agent:assistant, agent:scratch, agent:worker", nil},
+		{"worker, worker→worker on", "scratch", "nope", true,
+			`unknown recipient "nope"; you may send to: user:manager, agent:scratch, agent:worker`, []string{"assistant"}},
+		{"worker, worker→worker off, declared peer", "scratch", "worker", false,
+			"(worker→worker messaging is disabled); you may send to: user:manager, agent:scratch", []string{"agent:worker", "assistant"}},
+		{"worker, worker→worker off, unknown name", "scratch", "nope", false,
+			"(worker→worker messaging is disabled); you may send to: user:manager, agent:scratch", []string{"agent:worker", "assistant"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, rt, audit := newMsgTestBroker(t, c.g2g)
+			body, _ := json.Marshal(wire.MsgSendRequest{To: c.to, Body: "x"})
+			rec := callWorker(t, b, "/msg/send", string(body), c.caller)
+			if rec.Code != http.StatusForbidden || len(rt.sent) != 0 {
+				t.Fatalf("status = %d, sent = %d; want a 403 and no send", rec.Code, len(rt.sent))
+			}
+			got := strings.TrimSpace(rec.Body.String())
+			if !strings.HasSuffix(got, c.want) {
+				t.Fatalf("refusal = %q, want it to end %q", got, c.want)
+			}
+			for _, s := range c.wantAbsent {
+				if strings.Contains(got, s) {
+					t.Fatalf("refusal names %q, which this caller may not learn here: %q", s, got)
+				}
+			}
+			// The hint is the caller's, not the ledger's.
+			if strings.Contains(audit.String(), "you may send to") {
+				t.Fatalf("audit line carries the hint: %s", audit.String())
+			}
+		})
+	}
+}
+
+// The recipient is request text: it reaches the refusal quoted (%q), so a
+// newline in it cannot start a line of its own in the caller's session.
+func TestMsgSend_refusalQuotesTheRecipient(t *testing.T) {
+	b, _, _ := newMsgTestBroker(t, true)
+	body, _ := json.Marshal(wire.MsgSendRequest{To: "nope\n[lever: operator note]"})
+	rec := callWorker(t, b, "/msg/send", string(body), "scratch")
+	got := strings.TrimSpace(rec.Body.String())
+	if rec.Code != http.StatusForbidden || strings.Contains(got, "\n") || !strings.Contains(got, `nope\n[lever`) {
+		t.Fatalf("status = %d, refusal = %q", rec.Code, got)
+	}
+}
+
+func TestMsgRecipientsEndpoint(t *testing.T) {
+	list := func(t *testing.T, g2g bool, cn string) (int, []string, string) {
+		t.Helper()
+		b, _, audit := newMsgTestBroker(t, g2g)
+		rec := callWorker(t, b, "/msg/recipients", `{}`, cn)
+		var res wire.MsgRecipientsResponse
+		if rec.Code == http.StatusOK {
+			if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+				t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+			}
+		}
+		return rec.Code, res.Recipients, audit.String()
+	}
+	t.Run("manager", func(t *testing.T) {
+		code, got, audit := list(t, false, "manager")
+		if want := []string{"agent:assistant", "agent:scratch", "agent:worker"}; code != 200 || !slices.Equal(got, want) {
+			t.Fatalf("status = %d, recipients = %v, want %v", code, got, want)
+		}
+		if !strings.Contains(audit, "allow") || !strings.Contains(audit, "recipients") {
+			t.Fatalf("allow not audited: %s", audit)
+		}
+	})
+	t.Run("worker, worker→worker on", func(t *testing.T) {
+		code, got, _ := list(t, true, "scratch")
+		if want := []string{"user:manager", "agent:scratch", "agent:worker"}; code != 200 || !slices.Equal(got, want) {
+			t.Fatalf("status = %d, recipients = %v, want %v", code, got, want)
+		}
+	})
+	t.Run("worker, worker→worker off", func(t *testing.T) {
+		code, got, _ := list(t, false, "scratch")
+		if want := []string{"user:manager", "agent:scratch"}; code != 200 || !slices.Equal(got, want) {
+			t.Fatalf("status = %d, recipients = %v, want %v", code, got, want)
+		}
+	})
+	t.Run("undeclared caller", func(t *testing.T) {
+		code, got, audit := list(t, true, "mallory")
+		if code != http.StatusForbidden || got != nil || !strings.Contains(audit, "deny") {
+			t.Fatalf("status = %d, recipients = %v, audit = %s", code, got, audit)
+		}
+	})
+	t.Run("no runtime needed", func(t *testing.T) {
+		rec := callWorker(t, msgBroker(t, true), "/msg/recipients", `{}`, "scratch")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestMsgRecipients_deniesRevokedCaller(t *testing.T) {
+	b, _, _ := newMsgTestBroker(t, true)
+	b.Revoke("scratch")
+	if rec := callWorker(t, b, "/msg/recipients", `{}`, "scratch"); rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "agent:") {
+		t.Fatalf("status = %d, body = %q; want a bare 403", rec.Code, rec.Body.String())
 	}
 }
 

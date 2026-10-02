@@ -36,6 +36,7 @@ func TestDirectiveConsumeCheckRevokedDenyAuditDetail(t *testing.T) {
 	}{
 		{"/directive/consume", `detail="consume: revoked"`},
 		{"/directive/check", `detail="check: revoked"`},
+		{"/directive/preview", `detail="preview: revoked"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
@@ -116,6 +117,7 @@ func TestDirectiveCertlessDenyAuditsEmptyCallerAndError(t *testing.T) {
 	}{
 		{"/directive/consume", `detail="consume: ca: request has no TLS state"`},
 		{"/directive/check", `detail="check: ca: request has no TLS state"`},
+		{"/directive/preview", `detail="preview: ca: request has no TLS state"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {

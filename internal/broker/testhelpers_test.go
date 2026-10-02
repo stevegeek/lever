@@ -312,7 +312,11 @@ func newMsgTestBroker(t *testing.T, g2g bool) (*Broker, *fakeMsgRuntime, *bytes.
 func directiveTestBroker(t *testing.T) (b *Broker, priv string, allowedSigners string, rt *fakeDirectiveRuntime) {
 	t.Helper()
 	priv, as := genOperatorKey(t)
-	rt = &fakeDirectiveRuntime{fakeRuntime: fakeRuntime{agents: map[string][]scion.Agent{}}}
+	// The manager and the worker are running: a directive for an agent that
+	// is not is refused before it is stored (lever#25).
+	rt = &fakeDirectiveRuntime{fakeRuntime: fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {
+		{Slug: "manager", Phase: scion.PhaseRunning}, {Slug: "worker", Phase: scion.PhaseRunning},
+	}}}}
 	cfg := testConfig(t, withRuntime(rt, WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker"}),
 		func(c *Config) {
 			c.Directives = DirectiveConfig{

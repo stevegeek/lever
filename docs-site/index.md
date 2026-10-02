@@ -52,7 +52,7 @@ confined to a subtree with narrower tool grants.
 
 **Platforms:** macOS on Apple Silicon with [OrbStack](https://orbstack.dev), or
 Lima (macOS `vz`, Linux QEMU/KVM; Lima >= 2.0.0, checked at bring-up). The
-Linux/Lima path is validated end-to-end. On Lima, `lever stop` -> `up` starts a fresh manager conversation.
+Linux/Lima path is validated end-to-end. `lever stop` -> `lever up` resumes the manager conversation; if the resume fails, lever keeps the record, and `lever up --fresh` is how you start a new one.
 `remote:` loads on both backends; on Lima it is not yet live-validated (see the
 [remote access guide](/remote-access/#lima)).
 

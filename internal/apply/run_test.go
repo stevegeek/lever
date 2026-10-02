@@ -287,6 +287,8 @@ type agentLifecycleRunner struct {
 	// default) preserves the original all-tests-so-far behavior: if resumeErr
 	// is set, resume fails EVERY call (no eventual success).
 	resumeFailsThenSucceed int
+	// deleteFailsThenSucceed is the same for delete (with deleteErr).
+	deleteFailsThenSucceed int
 	// dieAfterLiveLists, when > 0, models lever#31: once live, the record stays
 	// running/Up for this many list calls and then flips to error/Exited — the
 	// harness died after scion reported success.
@@ -422,7 +424,7 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 	case "delete":
 		r.deleteCalls++
 		r.record(dir, env, name, args)
-		if r.deleteErr != nil {
+		if r.deleteErr != nil && (r.deleteFailsThenSucceed == 0 || r.deleteCalls <= r.deleteFailsThenSucceed) {
 			return proc.Result{Code: 1, Stderr: r.deleteErr.Error()}, r.deleteErr
 		}
 		r.phase, r.containerStatus = "", ""
@@ -567,15 +569,14 @@ func TestStartManagerRunningRecordButDeadContainerFailsLoud(t *testing.T) {
 	}
 }
 
-// TestStartManagerResumeFailsRecoversFresh: when Resume cannot restore the
-// conversation, start-manager must log the loss LOUDLY (Deps.Log), then
-// Delete the orphaned record and create a fresh manager — never fail the
-// whole apply just because the OLD session is unrecoverable. The failure here
-// is NON-transient ("agent does not exist" — not the broker-unavailable
-// wording), so this also pins C1's other half: a non-transient resume error
-// must recover immediately (resumeCalls == 1), never burning the broker-race
-// retry budget on an error retrying could never fix.
-func TestStartManagerResumeFailsRecoversFresh(t *testing.T) {
+// TestStartManagerResumeFailsKeepsTheManager (lever#3): a resume that fails
+// refuses. The record and its conversation stay; nothing is deleted and no
+// fresh manager is created — discarding a session is `up --fresh`, which the
+// error names. The failure here is NON-transient ("agent does not exist" —
+// not the broker-unavailable wording), so this also pins C1's other half: a
+// non-transient resume error ends at once (resumeCalls == 1), never burning
+// the broker-race retry budget on an error retrying could never fix.
+func TestStartManagerResumeFailsKeepsTheManager(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -587,23 +588,18 @@ func TestStartManagerResumeFailsRecoversFresh(t *testing.T) {
 		Scion: scion.New(r, scion.Options{}),
 		Log:   logged.logf,
 	}
-	if err := runApply(app, deps); err != nil {
-		t.Fatalf("Run should recover from a failed resume by starting fresh: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "resume of the manager failed", "agent does not exist", "did NOT delete", "lever up --fresh")
 	if r.resumeCalls != 1 {
 		t.Errorf("resumeCalls = %d, want 1", r.resumeCalls)
 	}
-	if r.deleteCalls != 1 {
-		t.Errorf("deleteCalls = %d, want 1 (clearing the unresumable record)", r.deleteCalls)
+	if r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0: a failed resume must keep the record", r.deleteCalls, r.startCalls)
 	}
-	if r.startCalls != 1 {
-		t.Errorf("startCalls = %d, want 1 (fresh create after the failed resume)", r.startCalls)
-	}
-	if len(logged.lines) != 1 {
-		t.Fatalf("expected exactly one loud log line, got %+v", logged.lines)
-	}
-	if !strings.Contains(logged.lines[0], "resume failed") || !strings.Contains(logged.lines[0], "FRESH") || !strings.Contains(logged.lines[0], "previous session lost") {
-		t.Fatalf("recovery log line missing expected wording, got %q", logged.lines[0])
+	for _, l := range logged.lines {
+		if strings.Contains(l, "FRESH") {
+			t.Fatalf("logged a fresh start: %q", l)
+		}
 	}
 }
 
@@ -642,63 +638,12 @@ func TestStartManagerResumeRefusedByHubKeepsTheManager(t *testing.T) {
 	}
 }
 
-// TestStartManagerResumeFailsAndDeleteFailsReturnsError: if the record can be
-// neither resumed NOR deleted, start-manager must surface a hard error naming
-// BOTH failures — there is no safe fallback (a fresh Start over an
-// undeleted, un-resumable record would just 409 again).
-func TestStartManagerResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
-	app, f := newObserveFirstApp(t)
-	r := &agentLifecycleRunner{
-		FakeRunner: f, slug: "hello",
-		initPhase: "suspended", initContainerStatus: "stopped",
-		resumeErr: fmt.Errorf("cannot resume agent 'hello': agent does not exist"),
-		deleteErr: fmt.Errorf("delete: agent locked"),
-	}
-	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
-	}
-	err := runApply(app, deps)
-	testutil.WantErrContaining(t, err, "cannot resume", "delete: agent locked")
-	if r.startCalls != 0 {
-		t.Errorf("startCalls = %d, want 0 (must not attempt a fresh create over an undeleted record)", r.startCalls)
-	}
-}
-
 // TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds proves the
 // CRITICAL fix: `scion resume` shares Start's
 // runtime-broker-registration race, so a resume that fails with the
 // broker-unavailable wording must be RETRIED (same BrokerStartRetry
 // budget as Start) before any loud recovery — a transient
 // blip must never destroy a resumable conversation.
-// TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError pins
-// the ERROR branch's distinct delete-fail error wrap ("forced resume failed
-// (%v) and delete failed: %w"), which is worded differently from the
-// suspended branch's ("resume failed (%v) and delete failed") — an
-// error-phase record whose `resume --force` fails AND whose delete then fails
-// must surface a hard error naming BOTH failures and must not attempt a fresh
-// create over the undeleted record.
-func TestStartManagerErrorPhaseForcedResumeFailsAndDeleteFailsReturnsError(t *testing.T) {
-	app, f := newObserveFirstApp(t)
-	r := &agentLifecycleRunner{
-		FakeRunner: f, slug: "hello",
-		initPhase: "error", initContainerStatus: "stopped",
-		resumeErr: fmt.Errorf("forced resume: container state corrupt"),
-		deleteErr: fmt.Errorf("delete: agent locked"),
-	}
-	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
-	}
-	err := runApply(app, deps)
-	testutil.WantErrContaining(t, err, "forced resume failed")
-	testutil.WantErrContaining(t, err, "container state corrupt", "delete: agent locked")
-	if r.resumeForceCalls != 1 {
-		t.Errorf("resumeForceCalls = %d, want 1 (error phase must TRY resume --force first)", r.resumeForceCalls)
-	}
-	if r.startCalls != 0 {
-		t.Errorf("startCalls = %d, want 0 (must not attempt a fresh create over an undeleted record)", r.startCalls)
-	}
-}
-
 func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
@@ -729,12 +674,12 @@ func TestStartManagerResumeRetriesOnBrokerUnavailableThenSucceeds(t *testing.T) 
 	}
 }
 
-// TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers is C1's
+// TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRefuses is C1's
 // complement: if the broker-unavailable race NEVER resolves within the retry
-// budget, start-manager must still fall back to the loud delete+fresh
-// recovery — the retry absorbs a transient blip, it does not turn a
-// permanently-unavailable broker into an infinite hang.
-func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testing.T) {
+// budget, start-manager ends with an error that keeps the record — the retry
+// absorbs a transient blip, it neither hangs nor discards a conversation over
+// a runtime broker that was late (lever#3).
+func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRefuses(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -749,17 +694,13 @@ func TestStartManagerResumeBrokerUnavailableExhaustsRetriesThenRecovers(t *testi
 		Scion:            scion.New(r, scion.Options{}),
 		Log:              logged.logf,
 	}
-	if err := runApply(app, deps); err != nil {
-		t.Fatalf("an exhausted-but-transient resume must still recover fresh, not fail the apply: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "no runtime broker available", "did NOT delete")
 	if r.resumeCalls != 3 {
 		t.Fatalf("resumeCalls = %d, want 3 (the full retry budget burned)", r.resumeCalls)
 	}
-	if r.deleteCalls != 1 || r.startCalls != 1 {
-		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (loud recovery only AFTER the retry budget exhausts)", r.deleteCalls, r.startCalls)
-	}
-	if len(logged.lines) != 1 || !strings.Contains(logged.lines[0], "resume failed") || !strings.Contains(logged.lines[0], "FRESH") {
-		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged.lines)
+	if r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 (the record is kept)", r.deleteCalls, r.startCalls)
 	}
 }
 
@@ -893,12 +834,12 @@ func TestStartManagerLivenessNeverGreenAfterCreate(t *testing.T) {
 	}
 }
 
-// TestStartManagerUnexpectedPhaseRecoversFresh proves the IMPORTANT fix:
-// an unhandled-but-real scion phase (here
-// "error" — a crashed manager, e.g. an OOM/harness crash) must NOT hard-fail
-// (brick) `lever up` with no path forward but `lever destroy`. It takes the
-// SAME loud delete+fresh recovery as a failed resume, so `up` converges.
-func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
+// TestStartManagerErrorPhaseForcedResumeFailsKeepsTheManager (lever#3): a
+// crashed manager (phase "error") gets `resume --force`; when that fails
+// too, the apply ends with an error and the record stays. It used to take
+// the loud delete+fresh recovery, which is how a VM reboot that corrupted the
+// container state cost a conversation.
+func TestStartManagerErrorPhaseForcedResumeFailsKeepsTheManager(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "error", initContainerStatus: "stopped",
 		resumeErr: fmt.Errorf("container state corrupt")}
@@ -907,20 +848,18 @@ func TestStartManagerUnexpectedPhaseRecoversFresh(t *testing.T) {
 		Scion: scion.New(r, scion.Options{}),
 		Log:   logged.logf,
 	}
-	if err := runApply(app, deps); err != nil {
-		t.Fatalf("an unrecoverable error phase must recover fresh, not hard-fail the apply: %v", err)
-	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "resume --force of the manager failed", "container state corrupt", "did NOT delete", "lever up --fresh")
 	if r.resumeForceCalls != 1 {
-		t.Errorf("resumeForceCalls = %d, want 1 (error phase must TRY resume --force before discarding)", r.resumeForceCalls)
+		t.Errorf("resumeForceCalls = %d, want 1 (error phase must TRY resume --force)", r.resumeForceCalls)
 	}
-	if r.deleteCalls != 1 || r.startCalls != 1 {
-		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1 (delete the unrecoverable record, then fresh create)", r.deleteCalls, r.startCalls)
+	if r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Errorf("deleteCalls=%d startCalls=%d, want 0/0 (the record is kept)", r.deleteCalls, r.startCalls)
 	}
-	if len(logged.lines) != 1 {
-		t.Fatalf("expected exactly one loud recovery log line, got %+v", logged.lines)
-	}
-	if !strings.Contains(logged.lines[0], `phase "error"`) || !strings.Contains(logged.lines[0], "FRESH") || !strings.Contains(logged.lines[0], "previous session lost") {
-		t.Fatalf("recovery log line missing expected wording, got %q", logged.lines[0])
+	for _, l := range logged.lines {
+		if strings.Contains(l, "FRESH") {
+			t.Fatalf("logged a fresh start: %q", l)
+		}
 	}
 }
 
@@ -1142,16 +1081,15 @@ func TestStartManagerCreateSkipsRearmWhenFreshMintAlreadyHappened(t *testing.T) 
 	}
 }
 
-// TestStartManagerRecoveryRearmsBeforeFreshCreate: the post-recovery-delete
-// create path (a non-transient resume failure -> delete -> fresh create) must
-// ALSO re-arm before its Start — it takes the identical startManagerCreate
-// helper as the absent-record branch, so it must get the identical guarantee.
-func TestStartManagerRecoveryRearmsBeforeFreshCreate(t *testing.T) {
+// TestStartManagerFreshRearmsBeforeFreshCreate: the create that follows a
+// `--fresh` delete must ALSO re-arm before its Start — it takes the identical
+// startManagerCreate helper as the absent-record branch, so it must get the
+// identical guarantee.
+func TestStartManagerFreshRearmsBeforeFreshCreate(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
 		initPhase: "suspended", initContainerStatus: "stopped",
-		resumeErr: fmt.Errorf("cannot resume agent 'hello': agent does not exist"),
 	}
 	rearmCalls := 0
 	deps := Deps{
@@ -1160,14 +1098,60 @@ func TestStartManagerRecoveryRearmsBeforeFreshCreate(t *testing.T) {
 		Log:                  func(string, ...any) {},
 		RearmBootstrap:       countRearm(&rearmCalls),
 	}
-	if err := runApply(app, deps); err != nil {
+	if err := runApplyFresh(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rearmCalls != 1 {
-		t.Errorf("RearmBootstrap calls = %d, want 1 (the post-recovery-delete create must re-arm too)", rearmCalls)
+		t.Errorf("RearmBootstrap calls = %d, want 1 (the create after a --fresh delete must re-arm too)", rearmCalls)
 	}
-	if r.deleteCalls != 1 || r.startCalls != 1 {
-		t.Errorf("deleteCalls=%d startCalls=%d, want 1/1", r.deleteCalls, r.startCalls)
+	if r.deleteCalls != 1 || r.startCalls != 1 || r.resumeCalls != 0 {
+		t.Errorf("deleteCalls=%d startCalls=%d resumeCalls=%d, want 1/1/0", r.deleteCalls, r.startCalls, r.resumeCalls)
+	}
+}
+
+// TestStartManagerFreshDeleteRetriesOnBrokerUnavailable: `up --fresh` is the
+// operator's way out of a manager that does not resume (a failed resume keeps
+// the record, lever#3), so its delete must absorb the runtime-broker
+// registration race like a create or a resume does — and a failed --fresh
+// must leave the record for the next attempt, never create over it.
+func TestStartManagerFreshDeleteRetriesOnBrokerUnavailable(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "error", initContainerStatus: "stopped",
+		deleteErr:              fmt.Errorf("cannot delete agent: no runtime broker available"),
+		deleteFailsThenSucceed: 2,
+	}
+	deps := Deps{BrokerStartRetry: fastRetry(5), Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}}
+	if err := runApplyFresh(app, deps); err != nil {
+		t.Fatalf("--fresh over an error-phase record once the broker registers: %v", err)
+	}
+	if r.deleteCalls != 3 || r.startCalls != 1 || r.resumeCalls != 0 {
+		t.Fatalf("deleteCalls=%d startCalls=%d resumeCalls=%d, want 3/1/0", r.deleteCalls, r.startCalls, r.resumeCalls)
+	}
+
+	// An attempt that removed the record and then reported the transient
+	// failure: the retry finds nothing, which is the result asked for.
+	app, f = newObserveFirstApp(t)
+	gone := &deleteThenGoneRunner{agentLifecycleRunner: agentLifecycleRunner{FakeRunner: f, slug: "hello",
+		initPhase: "suspended", initContainerStatus: "stopped"}}
+	if err := runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(5), Scion: scion.New(gone, scion.Options{}), Log: func(string, ...any) {}}); err != nil {
+		t.Fatalf("--fresh when the first delete succeeded but reported a transient error: %v", err)
+	}
+	if gone.deletes != 2 || gone.startCalls != 1 {
+		t.Fatalf("deletes=%d startCalls=%d, want 2/1", gone.deletes, gone.startCalls)
+	}
+
+	app, f = newObserveFirstApp(t)
+	r = &agentLifecycleRunner{
+		FakeRunner: f, slug: "hello",
+		initPhase: "stopped", initContainerStatus: "stopped",
+		deleteErr: fmt.Errorf("delete: agent locked"),
+	}
+	err := runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(3), Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}})
+	testutil.WantErrContaining(t, err, "delete failed", "agent locked")
+	if r.deleteCalls != 1 || r.startCalls != 0 {
+		t.Fatalf("deleteCalls=%d startCalls=%d, want 1/0 (a non-transient delete failure ends at once, and nothing is created over the record)", r.deleteCalls, r.startCalls)
 	}
 }
 
@@ -3861,10 +3845,10 @@ func (s *sessionSpy) begin(agent string) func() error {
 	return func() error { s.committed = append(s.committed, agent); return nil }
 }
 
-// TestStartManagerRecordsOnlyFreshSessions: a create (absent record, --fresh,
-// a failed resume's recovery) records the manager's fresh session; a resume
-// or a no-op never does, so a resumed conversation is never taken for one
-// that loaded the current skill.
+// TestStartManagerRecordsOnlyFreshSessions: a create (absent record,
+// --fresh) records the manager's fresh session; a resume, a no-op or a failed
+// resume (which keeps the record) never does, so a resumed conversation is
+// never taken for one that loaded the current skill.
 func TestStartManagerRecordsOnlyFreshSessions(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -3884,10 +3868,10 @@ func TestStartManagerRecordsOnlyFreshSessions(t *testing.T) {
 		{"fresh over suspended", func(f *proc.FakeRunner) *agentLifecycleRunner {
 			return &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
 		}, true, true},
-		{"failed resume recovered", func(f *proc.FakeRunner) *agentLifecycleRunner {
+		{"failed resume", func(f *proc.FakeRunner) *agentLifecycleRunner {
 			return &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped",
 				resumeErr: fmt.Errorf("cannot resume agent 'hello': agent does not exist")}
-		}, false, true},
+		}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app, f := newObserveFirstApp(t)
@@ -3897,7 +3881,7 @@ func TestStartManagerRecordsOnlyFreshSessions(t *testing.T) {
 			if tc.fresh {
 				run = runApplyFresh
 			}
-			if err := run(app, deps); err != nil {
+			if err := run(app, deps); err != nil && tc.name != "failed resume" {
 				t.Fatalf("Run: %v", err)
 			}
 			if got := len(spy.committed) == 1 && spy.committed[0] == "hello"; got != tc.wantCommit {
@@ -3925,4 +3909,40 @@ func TestStartManagerCreateRaceIsNotRecorded(t *testing.T) {
 	if len(spy.committed) != 0 {
 		t.Fatalf("an existing session was recorded as fresh: %v", spy.committed)
 	}
+}
+
+// deleteThenGoneRunner models a delete whose first attempt removes the record
+// and still reports the runtime-broker race; later attempts find no agent.
+type deleteThenGoneRunner struct {
+	agentLifecycleRunner
+	deletes int
+}
+
+func (r *deleteThenGoneRunner) intercept(args []string) (proc.Result, error, bool) {
+	if r.verb(args) != "delete" {
+		return proc.Result{}, nil, false
+	}
+	r.deletes++
+	if r.deletes == 1 {
+		r.ensureInit()
+		r.phase, r.containerStatus = "", ""
+		err := fmt.Errorf("context deadline exceeded")
+		return proc.Result{Code: 1, Stderr: err.Error()}, err, true
+	}
+	err := fmt.Errorf("agent 'hello' not found")
+	return proc.Result{Code: 1, Stderr: err.Error()}, err, true
+}
+
+func (r *deleteThenGoneRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if res, err, ok := r.intercept(args); ok {
+		return res, err
+	}
+	return r.agentLifecycleRunner.Run(ctx, env, name, args...)
+}
+
+func (r *deleteThenGoneRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if res, err, ok := r.intercept(args); ok {
+		return res, err
+	}
+	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
 }

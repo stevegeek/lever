@@ -73,6 +73,10 @@ type doctorProbes struct {
 	// archive the image ships in (image_tar), for a host with no docker.
 	claudeVersion    func(imageRef string) (string, error)
 	claudeVersionTar func(tarPath, imageRef string) (string, error)
+	// leverVersion and leverVersionTar read the image's lever_version label
+	// the same two ways.
+	leverVersion    func(imageRef string) (string, error)
+	leverVersionTar func(tarPath, imageRef string) (string, error)
 	// remoteHealthz issues GET /healthz through the remote-access proxy.
 	remoteHealthz func(healthzProbe) (int, error)
 	// remoteLogin inspects the local OIDC provider on its loopback port.
@@ -88,9 +92,13 @@ func productionProbes(r proc.Runner) doctorProbes {
 		dial:          tcpDial,
 		goVersion:     func() (string, error) { return goVersionProbe(r) },
 		nodeToolchain: func() (string, error) { return nodeToolchainProbe(r) },
-		claudeVersion: func(imageRef string) (string, error) { return claudeVersionProbe(r, imageRef) },
+		claudeVersion: func(imageRef string) (string, error) { return imageLabelProbe(r, imageRef, claudeVersionLabel) },
 		claudeVersionTar: func(tarPath, imageRef string) (string, error) {
-			return jail.ImageTarLabel(tarPath, imageRef, "claude_code_version")
+			return jail.ImageTarLabel(tarPath, imageRef, claudeVersionLabel)
+		},
+		leverVersion: func(imageRef string) (string, error) { return imageLabelProbe(r, imageRef, leverVersionLabel) },
+		leverVersionTar: func(tarPath, imageRef string) (string, error) {
+			return jail.ImageTarLabel(tarPath, imageRef, leverVersionLabel)
 		},
 		remoteHealthz:   remoteHealthzProbe,
 		remoteLogin:     remoteLoginProbe,
@@ -729,12 +737,13 @@ type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, er
 // The activity is the hub-side state scion's Claude Code hooks report
 // (scion.Activity*), shown with the age of its last change. A harness that
 // cannot complete a turn — no guest DNS (lever#34), an expired credential, an
-// API outage — keeps a live container and a running phase, and until this row
-// read the activity it was indistinguishable from a healthy idle manager. The
-// hub's stall sweeper marks such a harness stalled after its threshold
-// (default 5 min); that, crashed and offline fail the row. A long working
-// stays green: real work looks the same from here, and `lever attach` is the
-// way to tell. A list error is "not checked" (a down jail or hub is another
+// API outage — keeps a live container and a running phase. Crashed and
+// offline fail the row. Stalled does not: the hub's stall sweeper marks a
+// stuck harness stalled after its threshold (default 5 min), but it marks an
+// idle manager the same way, so the row passes and names both readings (the
+// `guest DNS` row is the one that fails on the lever#34 cause). A long
+// working stays green: real work looks the same from here, and `lever
+// attach` is the way to tell. A list error is "not checked" (a down jail or hub is another
 // check's finding), never a pass.
 func checkManagerLive(ctx context.Context, project, name string, list agentLister, now time.Time) checkResult {
 	const check = "manager agent"
@@ -751,6 +760,18 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 			"run `lever up`"}
 	}
 	if a.Phase == "running" && scionpkg.ContainerLive(a.ContainerStatus) {
+		if a.Activity == scionpkg.ActivityStalled {
+			// The hub's stall sweeper also marks a manager that sits idle at
+			// its prompt: after a turn that ended without a waiting-for-input
+			// report, the record reads working, then stalled. That is the
+			// normal state of an instance nobody talked to for a while, so it
+			// cannot fail the row (it failed scripted deploy gates on idle
+			// instances). A turn that never finishes looks the same from
+			// here; the detail says how to tell them apart.
+			return checkResult{check, true,
+				fmt.Sprintf("%q is running (container %s; %s) — idle at its prompt, or a turn that never finished: `lever attach` shows which (a stuck LLM call ends in `Request timed out`; then check the `guest DNS` and credential rows)",
+					name, a.ContainerStatus, activityAge(a, now)), ""}
+		}
 		if scionpkg.ActivityDead(a.Activity) {
 			return checkResult{check, false,
 				fmt.Sprintf("manager %q has a live container but its harness is %s — it is not completing turns", name, activityAge(a, now)),
@@ -767,7 +788,7 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	}
 	fix := "run `lever up` to resume it"
 	if a.Phase == "error" {
-		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the conversation is lost and a fresh manager is created) — its container log in the guest holds the harness's last output"
+		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
 	}
 	return checkResult{check, false,
 		fmt.Sprintf("manager %q is not live: phase %q, container %q", name, a.Phase, a.ContainerStatus), fix}
@@ -1416,15 +1437,23 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 	return latest, found, nil
 }
 
-// claudeVersionProbe reads the baked Claude Code version from an image's
-// `claude_code_version` label via `docker image inspect`. The image ID
+// The labels image/lever-claude/Dockerfile bakes from build args: the pinned
+// Claude Code version, and the lever version the in-jail binaries were built
+// from.
+const (
+	claudeVersionLabel = "claude_code_version"
+	leverVersionLabel  = "lever_version"
+)
+
+// imageLabelProbe reads one label of an image in the host docker store via
+// `docker image inspect`; "" when the image has no such label. The image ID
 // inspect in internal/jail (hostImageID) reads a different field and is not
 // exported, so this is its own invocation.
-func claudeVersionProbe(r proc.Runner, imageRef string) (string, error) {
+func imageLabelProbe(r proc.Runner, imageRef, label string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := r.Run(ctx, nil, "docker", "image", "inspect",
-		"--format", `{{index .Config.Labels "claude_code_version"}}`, imageRef)
+		"--format", `{{index .Config.Labels "`+label+`"}}`, imageRef)
 	if err != nil {
 		if msg := strings.TrimSpace(res.Stderr + res.Stdout); msg != "" {
 			return "", errors.New(msg)
@@ -1463,6 +1492,50 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 		return checkResult{name, true, "no claude_code_version label on " + source + " (pre-label image; rebuild to record it)", ""}
 	}
 	return checkResult{name, true, "baked " + v + " in " + source + " (a manager keeps the image it was created on until recreated: `lever up --fresh`; the manager image row compares the two)", ""}
+}
+
+// checkLeverVersion compares the lever version baked into the manager image
+// (its lever_version label, set by `make lever-image`) with this binary's.
+// The image tag names only the arch, so a build from another lever source
+// replaces it with nothing else to show for it (lever#18). host is the
+// release (cli.Version) and hostFull what `lever version` prints; the label
+// holds the latter form. Releases are compared, not commits: a host built
+// from a later commit of the same release is not a finding, and the detail
+// names both commits.
+//
+// A missing label (an image older than the label, or one not built by `make
+// lever-image`) and an image that cannot be read are informational: the
+// claude-version row already fails on an unreadable image.
+func checkLeverVersion(imageRef, tarPath, host, hostFull string, p doctorProbes) checkResult {
+	const name = "agent lever version"
+	source := imageRef
+	var v string
+	var err error
+	if tarPath != "" {
+		source = imageRef + " (from " + tarPath + ")"
+		v, err = p.leverVersionTar(tarPath, imageRef)
+	} else {
+		v, err = p.leverVersion(imageRef)
+	}
+	if err != nil {
+		return checkResult{name, true, "not checked (could not inspect image " + source + "): " + firstLine(err.Error()), ""}
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return checkResult{name, true, "not checked: no " + leverVersionLabel + " label on " + source +
+			" — the image predates the label (or was not built by `make lever-image`); rebuild it so this row can compare it with the host lever", ""}
+	}
+	if release := strings.Fields(v)[0]; release != host {
+		return checkResult{name, false,
+			fmt.Sprintf("%s carries lever %s but the host lever is %s — its in-jail binaries (lever-agent, lever-manager) were built from another release", source, v, hostFull),
+			"rebuild the agent image from this lever's source (`make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built FROM it), " +
+				"then `lever apply`; a running manager keeps its image until `lever up --fresh` (the conversation is discarded)"}
+	}
+	if v == hostFull {
+		return checkResult{name, true, fmt.Sprintf("%s carries lever %s, the same as the host", source, v), ""}
+	}
+	return checkResult{name, true,
+		fmt.Sprintf("%s carries lever %s, host lever is %s — same release %s (the release is compared, not the commit)", source, v, hostFull, host), ""}
 }
 
 // checkPATTokens judges the hub tokens on disk by the records lever kept at

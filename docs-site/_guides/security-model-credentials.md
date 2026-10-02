@@ -146,10 +146,17 @@ controls bound what that token can do:
   verbs 403 on the missing scope, including agent `DELETE`, which scion gates on lifecycle scope plus
   project isolation.
 
-**The explicit stamp is the only ceiling.** Scion's own default for an unspecified role is **full**
-(agent create, agent lifecycle, project-secret-read). Its project ceiling (`projectMax`) also defaults
-to full and narrows only when the `scion.io/max-agent-role` annotation is set, which lever does not
-set, and the user ceiling is a pass-through. So lever never relies on a scion default: it decides
+**The stamp, and a hub-side ceiling behind it.** Scion's own default for an unspecified role is
+**full** (agent create, agent lifecycle, project-secret-read). Its project ceiling (`projectMax`)
+also defaults to full and narrows only when the project's maximum agent role (the
+`scion.io/max-agent-role` annotation) is set; the user ceiling is a pass-through. lever sets it:
+the register-project step of `lever apply` writes the project's maximum and default agent role to
+the role it stamps, through the hub's project-settings route under the host-side controller PAT,
+and reads it back (`internal/hubapi/ceiling.go`; [§4.3](/security-model/worker-isolation/)). The hub
+then refuses a create that asks for a higher role, whoever sends it; a failed write fails the apply,
+and `lever doctor`'s `agent role ceiling` row fails on an unset or different value. The ceiling
+bounds creates only: it does not narrow a record that already exists (next paragraph). lever still
+never relies on a scion default for the stamp: it decides
 whether to pass `--role` by probing the installed binary for the flag, and if the probe cannot answer
 the start fails rather than guessing. The probe does **not** memoise its answer: `scion.source` and
 `scion.binary` name *paths*, so swapping the artifact behind one leaves the broker-identity hash
@@ -165,8 +172,8 @@ which refreshes its own token on the same rule. The ways out are to delete the a
 recreates it with `--role baseline` (losing its conversation), or to stamp `agentRole: baseline`
 into the stored records in `~/.scion/hub.db` with the hub stopped (this only narrows).
 `lever doctor` reports unrolled records (`agent authorization roles` check,
-`internal/cli/doctor_checks.go`). A resume of a declared worker with no hub record falls through to
-creation, which stamps the role; lever does not set the project annotation.
+`internal/cli/host/doctor_checks.go`). A resume of a declared worker with no hub record falls through
+to creation, which stamps the role, under the project ceiling above.
 
 **Egress mode gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically
 so the in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable

@@ -106,9 +106,16 @@ type MsgListRequest struct {
 	Worker string `json:"worker"`
 }
 
+// MsgRecipientsResponse is the reply of POST /msg/recipients: the addresses
+// the caller may pass as MsgSendRequest.To.
+type MsgRecipientsResponse struct {
+	Recipients []string `json:"recipients"`
+}
+
 // ---- operator directives: agent side (jail listener) ----
 
-// DirectiveIDRequest is the body of POST /directive/consume and /directive/check.
+// DirectiveIDRequest is the body of POST /directive/consume, /directive/check
+// and /directive/preview.
 type DirectiveIDRequest struct {
 	ID string `json:"id"`
 }
@@ -128,6 +135,24 @@ type DirectiveConsumeResponse struct {
 type DirectiveCheckResponse struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
+}
+
+// DirectivePreviewResponse is the reply of POST /directive/preview: the
+// verified action of a directive that is still pending, read WITHOUT consuming
+// it. The shape is deliberately not a DirectiveConsumeResponse: the content
+// sits under "preview" (never "action" or "advisory_text"), and Consumed is
+// always present and always false, so a preview result cannot pass for the
+// result of a consume. It carries no token and no grant.
+type DirectivePreviewResponse struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Consumed bool   `json:"consumed"`
+	// Preview is the signed opsig action, encoded as-is.
+	Preview   any    `json:"preview"`
+	ExpiresAt string `json:"expires_at"`
+	// PreviewsRemaining is how many more previews this directive allows.
+	PreviewsRemaining int    `json:"previews_remaining"`
+	Note              string `json:"note"`
 }
 
 // ---- operator notes (UDS channel) ----

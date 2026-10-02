@@ -151,11 +151,22 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// A contact's post reaches an agent only while that agent's session
 		// started fresh with the skill on disk now (contactSession).
 		ContactSession: func(agent string) error { return contactSession(app, st, agent) },
+		// lever's chat page with the manager (remote.landing: chat).
+		ChatAgent: remoteChatAgent(app),
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
 	})
 	return provider, handler, nil
+}
+
+// remoteChatAgent is the agent lever's chat page talks to: the manager, whose
+// agent name is the instance name. Empty when the page is off.
+func remoteChatAgent(app *config.App) string {
+	if !app.RemoteLandingChat() {
+		return ""
+	}
+	return app.Name
 }
 
 // remoteContacts maps each contact-tier login to the agents it may chat with.

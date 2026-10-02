@@ -5,6 +5,20 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **A chat page for the manager, served by the remote proxy.** `remote.landing: chat` makes the
+  remote origin open on a page lever serves itself: your direct chat with the manager, a link to
+  its terminal, and a link to the hub's web UI, which stays at its own paths. The page sends
+  through the hub's existing chat route, so the proxy records each message in the chat ledger and
+  the manager verifies it with `message_verify` as before; no message path, signature or ledger
+  is new. Operator logins only: a contact gets the contact fence's answers for every one of the
+  page's paths. The page is embedded in the binary (no build step, no other origin), writes what
+  it reads from the hub as text only, and carries a Content-Security-Policy with no inline
+  script. `landing: chat` needs an operator login in `allowed_users`; unset, nothing changes.
+  After upgrading, `lever apply` restarts the proxy once (the key is part of its config stamp).
 ## [0.29.1] - 2026-10-02
 
 Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them

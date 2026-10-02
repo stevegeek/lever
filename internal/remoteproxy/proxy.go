@@ -136,6 +136,12 @@ type Config struct {
 	// resumed session may still follow an older skill that trusts a marker a
 	// contact can type. Nil refuses every contact post.
 	ContactSession func(agent string) error
+	// ChatAgent, when set, is the manager's agent name, and turns on lever's
+	// chat page for operator logins (chatpage.go): the proxy answers
+	// /lever/* itself and redirects "/" to the page. It needs ResolveAgents
+	// to find the agent's hub id, and a verified login (AllowedUsers).
+	// Empty leaves every one of those paths to the hub, as before.
+	ChatAgent string
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -465,6 +471,9 @@ func NewHandler(cfg Config) http.Handler {
 	if len(cfg.Contacts) > 0 && cfg.ResolveAgents != nil {
 		g.contacts = &contactFence{resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), session: cfg.ContactSession}
 	}
+	if cfg.ChatAgent != "" {
+		g.chat = newChatPage(cfg)
+	}
 	return g
 }
 
@@ -681,6 +690,7 @@ type gate struct {
 	cfg      Config
 	rp       *httputil.ReverseProxy
 	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
+	chat     *chatPage     // nil unless Config.ChatAgent is set
 }
 
 func (g *gate) audit(line AuditLine) {
@@ -764,6 +774,10 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		state.cookie = cookie
 		state.keepDM = contactKeepDM(r)
+	} else if g.serveChatPage(w, r, &line, operator, cookie) {
+		// An operator's request for lever's own chat page. Only on this
+		// branch: a contact's requests all went to the fence above.
+		return
 	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.

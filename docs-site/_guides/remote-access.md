@@ -754,6 +754,55 @@ What is not covered:
   up early (the genuine envelope then answers as a repeat). It cannot get text lever did not send
   to that agent.
 
+## The chat page
+
+The hub's web UI is an operator console: projects, agent lists, graphs, settings. To talk to one
+manager from a phone, most of that is in the way. Set
+
+```yaml
+remote:
+  landing: chat
+```
+
+and `lever apply`. The origin then opens on a page lever serves itself: one conversation, your
+direct chat with the manager, and nothing else but two links.
+
+- **Terminal** opens the hub web UI's terminal for the manager, for the times you need Claude Code
+  itself.
+- **Console** opens the hub's full web UI. It is still there, at its own paths (`/agents`,
+  `/chat`, ...); only `/` now leads to the chat page.
+
+What it is, and is not:
+
+- **The same conversation.** The chat goes into the manager's one session, the one `lever up`
+  attaches your terminal to. The page shows your messages and the manager's replies (the final
+  text of each turn). It does not show tool calls; the terminal does.
+- **The same message path.** The page posts to the hub's own chat route, through the proxy, like
+  the hub's web UI does. So the proxy records each message in the chat ledger, and the manager
+  verifies it as yours with `message_verify` (see [Verified web chat](#verified-web-chat)).
+  Nothing about signing, recording or delivery is new. This is why `landing: chat` needs an
+  operator login in `allowed_users`.
+- **Operator logins only.** A [contact](#contacts-chat-only-logins) never gets the page, its
+  script or its data; the contact fence answers first.
+- **Nothing to build.** The page is four small files inside the lever binary: no framework, no
+  build step, no outside origin. It holds no credential, like every page behind the proxy.
+- **Text only.** A manager's reply is agent-written text on your origin, so the page writes it as
+  plain text and its Content-Security-Policy allows no inline script. Markdown shows as typed.
+
+The proxy answers these itself, for an operator login, and forwards none of them to the hub:
+`GET /` (a redirect to `/lever/chat`), `/lever/chat`, its `.css` and two `.js` files, and
+`/lever/api/chat`, which tells the page your hub user id and the manager's agent id. Anything
+else under `/lever/` is a 404. With `landing` unset, none of this exists and every path goes to
+the hub as before.
+
+The page reads the conversation again when the hub's event stream says something changed, and
+every 20 seconds while it is visible, so a missed event costs a short delay, not a lost reply.
+The line under the manager's name is the hub's own state for it; when it says the manager is not
+running, start it on the host with `lever up`.
+
+Not in the page: file upload, conversations with workers, and notifications while it is closed.
+Use the Console for the first two.
+
 ## Contacts: chat-only logins
 
 A contact is an external person (a client, a domain expert) who answers an agent's questions in

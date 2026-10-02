@@ -1,0 +1,126 @@
+:root {
+  --bg: #f6f6f4;
+  --panel: #ffffff;
+  --text: #1c1c1a;
+  --muted: #6b6b66;
+  --line: #deded8;
+  --mine: #1f4fd8;
+  --mine-text: #ffffff;
+  --agent: #ffffff;
+  --bad: #b3261e;
+  --ok: #1b7f3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131312;
+    --panel: #1e1e1c;
+    --text: #ecece8;
+    --muted: #9a9a93;
+    --line: #33332f;
+    --mine: #3d6df0;
+    --mine-text: #ffffff;
+    --agent: #262623;
+    --bad: #f2867f;
+    --ok: #6fcf8e;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+[hidden] { display: none !important; }
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(8px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.who { flex: 1; min-width: 0; }
+h1 { margin: 0; font-size: 17px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.state { margin: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.state.ok::before, .state.bad::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--ok); }
+.state.bad::before { background: var(--bad); }
+.state.bad { color: var(--bad); }
+nav { display: flex; gap: 8px; }
+nav a {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  text-decoration: none;
+}
+main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+}
+#list { display: flex; flex-direction: column; gap: 10px; max-width: 760px; margin: 0 auto; }
+.msg { display: flex; flex-direction: column; max-width: 88%; }
+.msg .body {
+  padding: 8px 12px;
+  border-radius: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.msg .meta { font-size: 12px; color: var(--muted); margin: 0 6px 2px; }
+.msg.mine { align-self: flex-end; align-items: flex-end; }
+.msg.mine .body { background: var(--mine); color: var(--mine-text); border-bottom-right-radius: 4px; }
+.msg.agent { align-self: flex-start; align-items: flex-start; }
+.msg.agent .body { background: var(--agent); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.msg.system { align-self: center; max-width: 100%; }
+.msg.system .body { padding: 0; font-size: 12px; color: var(--muted); text-align: center; }
+.msg .fail { font-size: 12px; color: var(--bad); margin: 2px 6px 0; }
+#older {
+  display: block;
+  margin: 0 auto 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+.notice { max-width: 760px; margin: 24px auto; color: var(--muted); text-align: center; }
+form {
+  padding: 8px max(16px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.row { display: flex; gap: 8px; align-items: flex-end; max-width: 760px; margin: 0 auto; }
+textarea {
+  flex: 1;
+  min-height: 42px;
+  max-height: 40dvh;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  resize: none;
+}
+#send {
+  height: 42px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--mine);
+  color: var(--mine-text);
+  font: inherit;
+  font-weight: 600;
+}
+#send:disabled { opacity: 0.45; }
+.error { max-width: 760px; margin: 0 auto 6px; font-size: 14px; color: var(--bad); overflow-wrap: anywhere; }

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Chat</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/lever/chat.css">
+<script type="module" src="/lever/chat.js"></script>
+</head>
+<body>
+<header>
+  <div class="who">
+    <h1 id="agent">Chat</h1>
+    <p id="state" class="state">connecting</p>
+  </div>
+  <nav>
+    <a id="terminal" hidden>Terminal</a>
+    <a id="console" hidden>Console</a>
+  </nav>
+</header>
+<main id="scroll">
+  <button id="older" type="button" hidden>Load earlier messages</button>
+  <p id="notice" class="notice" hidden></p>
+  <div id="list" role="log" aria-live="polite"></div>
+</main>
+<form id="composer">
+  <p id="error" class="error" role="alert" hidden></p>
+  <div class="row">
+    <textarea id="text" rows="1" maxlength="16000" placeholder="Message" aria-label="Message" disabled></textarea>
+    <button id="send" type="submit" disabled>Send</button>
+  </div>
+</form>
+<noscript><p class="notice">This page needs JavaScript.</p></noscript>
+</body>
+</html>

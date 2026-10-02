@@ -1130,6 +1130,18 @@ func TestStartManagerFreshDeleteRetriesOnBrokerUnavailable(t *testing.T) {
 		t.Fatalf("deleteCalls=%d startCalls=%d resumeCalls=%d, want 3/1/0", r.deleteCalls, r.startCalls, r.resumeCalls)
 	}
 
+	// An attempt that removed the record and then reported the transient
+	// failure: the retry finds nothing, which is the result asked for.
+	app, f = newObserveFirstApp(t)
+	gone := &deleteThenGoneRunner{agentLifecycleRunner: agentLifecycleRunner{FakeRunner: f, slug: "hello",
+		initPhase: "suspended", initContainerStatus: "stopped"}}
+	if err := runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(5), Scion: scion.New(gone, scion.Options{}), Log: func(string, ...any) {}}); err != nil {
+		t.Fatalf("--fresh when the first delete succeeded but reported a transient error: %v", err)
+	}
+	if gone.deletes != 2 || gone.startCalls != 1 {
+		t.Fatalf("deletes=%d startCalls=%d, want 2/1", gone.deletes, gone.startCalls)
+	}
+
 	app, f = newObserveFirstApp(t)
 	r = &agentLifecycleRunner{
 		FakeRunner: f, slug: "hello",
@@ -3897,4 +3909,40 @@ func TestStartManagerCreateRaceIsNotRecorded(t *testing.T) {
 	if len(spy.committed) != 0 {
 		t.Fatalf("an existing session was recorded as fresh: %v", spy.committed)
 	}
+}
+
+// deleteThenGoneRunner models a delete whose first attempt removes the record
+// and still reports the runtime-broker race; later attempts find no agent.
+type deleteThenGoneRunner struct {
+	agentLifecycleRunner
+	deletes int
+}
+
+func (r *deleteThenGoneRunner) intercept(args []string) (proc.Result, error, bool) {
+	if r.verb(args) != "delete" {
+		return proc.Result{}, nil, false
+	}
+	r.deletes++
+	if r.deletes == 1 {
+		r.ensureInit()
+		r.phase, r.containerStatus = "", ""
+		err := fmt.Errorf("context deadline exceeded")
+		return proc.Result{Code: 1, Stderr: err.Error()}, err, true
+	}
+	err := fmt.Errorf("agent 'hello' not found")
+	return proc.Result{Code: 1, Stderr: err.Error()}, err, true
+}
+
+func (r *deleteThenGoneRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if res, err, ok := r.intercept(args); ok {
+		return res, err
+	}
+	return r.agentLifecycleRunner.Run(ctx, env, name, args...)
+}
+
+func (r *deleteThenGoneRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if res, err, ok := r.intercept(args); ok {
+		return res, err
+	}
+	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
 }

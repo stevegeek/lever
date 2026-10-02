@@ -1386,7 +1386,17 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 	// registered, and a delete issued in that window fails the same way.
 	// `up --fresh` is the operator's one way out of a manager that does not
 	// resume, so it must not fail on a broker that was only late.
-	if derr := r.retryOnBrokerUnavailable(ctx, func() error { return r.d.Scion.Delete(ctx, r.app.Name, jp) }); derr != nil {
+	attempts := 0
+	if derr := r.retryOnBrokerUnavailable(ctx, func() error {
+		attempts++
+		err := r.d.Scion.Delete(ctx, r.app.Name, jp)
+		if err != nil && attempts > 1 && strings.Contains(strings.ToLower(err.Error()), "not found") {
+			// An earlier attempt removed the record and then reported the
+			// transient failure: the record being gone is what was asked.
+			return nil
+		}
+		return err
+	}); derr != nil {
 		return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 	}
 	return r.startManagerCreate(ctx, opts)

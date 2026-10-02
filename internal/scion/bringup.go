@@ -126,6 +126,9 @@ func ErrSummary(err error) string {
 		}
 		kept = append(kept, line)
 	}
+	if len(kept) == 0 {
+		return "scion gave no cause"
+	}
 	return boundSummary(strings.Join(kept, " "), maxSummary)
 }
 

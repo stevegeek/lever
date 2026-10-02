@@ -17,6 +17,7 @@ const (
 	PathWorkerList       = "/worker/list"
 	PathMsgSend          = "/msg/send"
 	PathMsgList          = "/msg/list"
+	PathMsgRecipients    = "/msg/recipients"
 	PathDirectiveConsume = "/directive/consume"
 	PathDirectiveCheck   = "/directive/check"
 	PathDirectivePreview = "/directive/preview"

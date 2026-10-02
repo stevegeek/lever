@@ -13,7 +13,10 @@ func workerCall(ctx context.Context, c brokerCaller, endpoint string, body any) 
 }
 
 func newAgentCmd(c brokerCaller) *cobra.Command {
-	cmd := &cobra.Command{Use: "agent", Short: "Drive worker agents via the broker"}
+	cmd := &cobra.Command{Use: "agent", Short: "Drive worker agents via the broker",
+		Long: "Drive worker agents via the broker (manager only).\n\n" +
+			"NAME is a worker's bare name as the instance config declares it: no agent: or user: prefix\n" +
+			"(those are `msg send --to` address forms; see `lever-manager msg send --help`)."}
 	cmd.AddCommand(agentList(c), agentStart(c), agentStop(c), agentSuspend(c), agentResume(c))
 	return cmd
 }

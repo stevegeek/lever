@@ -133,3 +133,45 @@ func TestMsgList_emptyInboxPrintsFallback(t *testing.T) {
 		t.Fatalf("out=%q", out)
 	}
 }
+
+func TestMsgRecipients_printsOneAddressPerLine(t *testing.T) {
+	var gotPath string
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, path string, _ map[string]any) {
+		gotPath = path
+		_ = json.NewEncoder(w).Encode(map[string]any{"recipients": []string{"user:manager", "agent:scratch"}})
+	}))
+
+	out, err := clitest.Exec(t, root, "msg", "recipients")
+	if err != nil {
+		t.Fatalf("recipients: %v", err)
+	}
+	if gotPath != "/msg/recipients" {
+		t.Fatalf("path = %s, want /msg/recipients", gotPath)
+	}
+	if out != "user:manager\nagent:scratch\n" {
+		t.Fatalf("out=%q", out)
+	}
+}
+
+// A refusal reaches the agent whole: the broker's hint is the point of it.
+func TestMsgSend_refusalCarriesTheBrokersHint(t *testing.T) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+		http.Error(w, `unknown recipient "nope"; you may send to: user:manager`, http.StatusForbidden)
+	}))
+
+	_, err := clitest.Exec(t, root, "msg", "send", "hi", "--to", "nope")
+	testutil.WantErrContaining(t, err, "you may send to: user:manager")
+}
+
+func TestMsgSendHelp_statesTheAddressForms(t *testing.T) {
+	out, err := clitest.Exec(t, newRoot(fakeBroker(t, nil)), "msg", "send", "--help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	// "--to string": a backtick in the flag's usage would rename its value.
+	for _, want := range []string{"user:manager", "agent:<name>", "msg recipients", "--to string"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help lacks %q:\n%s", want, out)
+		}
+	}
+}

@@ -72,7 +72,7 @@ All host-side state lives in `.lever-state/` at the instance root:
 | File | What's in it | When to read it |
 |---|---|---|
 | `broker.log` | every capability decision — `allow`/`deny` with caller, tool, op, and the deny reason. Mint allows are a ledger line: the token `id`, the matched policy `rule` (`obtain:…`/`delegate:…`), `exp`, `epoch`, and any baked `constraints`. Gateway and LLM lines carry the same `id`, so a mint correlates with every later use — and denied use — of that token: `grep id=<id> .lever-state/broker.log`. (On deny lines the id is the token's *claimed* id — the signature was not necessarily valid.) | **first stop for any 403**: it names the difference between "no token attached", "not granted", and "revoked" |
-| `broker.out.log` | the broker process's own stderr (startup, proxy errors) | broker won't start, or brokered tool calls 502 (backend refused) |
+| `broker.out.log` | the broker process's own stdout and stderr (startup, proxy errors) | broker won't start, or brokered tool calls 502 (backend refused) |
 | `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 
@@ -81,11 +81,24 @@ tool call. Run `lever doctor` first whenever anything looks wrong; every check p
 
 ### Log rotation
 
-None of the files above rotate on their own — a long-running instance's `.lever-state/` grows
-without bound. Rotate them with a weekly `logrotate` drop-in (adjust the path to your instance):
+The plain logs do not rotate on their own — on a long-running instance they grow without bound.
+Rotate them with a `logrotate` drop-in (adjust the path to your instance):
 
 ```
-/path/to/instance/.lever-state/*.log /path/to/instance/.lever-state/tool-logs/*.log {
+# The audit trail: keep it longer than the rest.
+/path/to/instance/.lever-state/broker.log
+/path/to/instance/.lever-state/remote-audit.jsonl {
+    monthly
+    rotate 24
+    copytruncate
+    compress
+    missingok
+    notifempty
+}
+
+/path/to/instance/.lever-state/broker.out.log
+/path/to/instance/.lever-state/remote.log
+/path/to/instance/.lever-state/tool-logs/*.log {
     weekly
     rotate 8
     copytruncate
@@ -95,9 +108,102 @@ without bound. Rotate them with a weekly `logrotate` drop-in (adjust the path to
 }
 ```
 
-`copytruncate` avoids restarting the broker/tools on rotation — they keep writing to the same
-(now-truncated) file descriptor. Give `broker.log` (the audit trail) a longer retention than the
-others if you split it into its own stanza.
+`copytruncate` avoids restarting the broker, the remote proxy or the tools on rotation: each holds
+its file open in append mode, so it keeps writing to the same (now-truncated) file. Name the files
+rather than globbing `.lever-state/*.log`: the glob also matches `directives.log`, which lever
+rotates itself (below).
+
+### What lever writes, and what to retain
+
+Everything is in `.lever-state/`, mode 0600. Two kinds of file differ in who bounds them:
+
+| File | What it is | Bounded by |
+|---|---|---|
+| `broker.log` | the capability and messaging audit trail | **you** — unbounded |
+| `remote-audit.jsonl` | one line per request the remote-access proxy allowed or denied (only with `remote:` configured) | **you** — unbounded |
+| `broker.out.log`, `remote.log`, `tool-logs/<tool>.log` | process output of the broker, the remote proxy and each supervised tool | **you** — unbounded |
+| `directives.log` | the operator-directive audit log (issued, delivered, consumed, revoked, and each denial) | lever — past 1 MiB it is renamed to `directives.log.1`, replacing the previous `.1` |
+| `sent-ledger/` | the text of every message lever sent to an agent, one file per recipient and kind; `message_verify` reads it | lever — each file past 1 MiB moves to `<file>.1` |
+| `chat-ledger/` | verified web-chat posts, one file per login (only with `remote:`) | lever — each file past 1 MiB moves to `<file>.1` |
+| `chat-verified.jsonl` | which messages an agent has already verified (one use each) | lever — past 4 MiB it moves to `.1`, and only once the old `.1` is 48 h stale |
+| `sessions.jsonl` | each agent's last fresh session start | lever — past 1 MiB it moves to `.1` |
+
+The files lever bounds keep **one** previous generation: the current file plus its `.1`, so at most
+about 2 MiB each (8 MiB for `chat-verified.jsonl`), and older lines are gone. That is enough for
+what lever reads them for (a message verifies for 24 hours), but it is not retention. Leave these
+files to lever: do not point `logrotate` at them, since the broker reads both generations by name.
+
+If you need the audit trail kept (who was allowed what, which directives were sent), the two things
+to arrange yourself are the retention of `broker.log` and `remote-audit.jsonl` (the first stanza
+above) and a copy of `directives.log` taken more often than it turns over — a nightly `cp` into
+dated files is enough on any instance that does not send directives by the thousand. The ledgers
+hold message **text**; ship them off the host only if you want that text kept.
+
+### The hub's log, inside the jail
+
+The scion hub runs in the guest as a daemon and writes `~/.scion/server.log` in the run user's home
+(the guest's default user). scion opens it in append mode and never rotates it; it is chatty at the
+default level. Lever does not install a rotation for it, and the guest is not provisioned with one,
+so add a drop-in in the guest. Get a root shell there with `orb -u root -m lever-<name>` (OrbStack)
+or `limactl shell lever-<name>` then `sudo -i` (Lima), install `logrotate` if the guest lacks it
+(`apt-get install -y logrotate`), and write `/etc/logrotate.d/scion-hub`:
+
+```
+/home/<run-user>/.scion/server.log {
+    su <run-user> <run-user>
+    weekly
+    rotate 4
+    copytruncate
+    compress
+    missingok
+    notifempty
+}
+```
+
+Use the path `echo ~/.scion/server.log` prints for the run user (a Lima guest's home is not always
+`/home/<user>`). `copytruncate` matters here too: lever starts the hub and expects to stop it, so
+the rotation must not restart it. `su` is needed because the file is in a user-owned directory. The drop-in lives on
+the guest's disk: it survives `lever stop`/`up`, and `lever destroy` removes it with the machine.
+
+### Running under systemd or launchd
+
+Lever ships **no unit file**, and it is not a service in the supervisor's sense.
+`lever up --no-attach` (or `lever apply`) is a one-shot bring-up: it powers the jail on, starts the
+hub, starts the broker (and the remote proxy) as **detached** host processes with their own pid
+files, and returns. `lever stop` stops those host processes by pid, suspends the manager and the
+running workers, and powers the jail off. Nothing restarts a broker that dies; the next `lever up`,
+`apply` or `reload` starts one.
+
+So do not wrap `lever broker serve` in a unit with a restart policy: `lever stop` and
+`lever reload` stop the broker by its pid file and start their own, and a supervisor that brings it
+straight back fights them. Log to the files above and rotate them; there is no journald output.
+
+What a supervisor can usefully do is run the bring-up at boot and the stop at shutdown. The unit
+below only wraps the two documented commands. It is an **untested example**, not a shipped or
+supported file — check it on your host before relying on it:
+
+```ini
+# ~/.config/systemd/user/lever-myinstance.service   (example, untested)
+[Unit]
+Description=lever instance myinstance
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/path/to/instance
+ExecStart=/usr/local/bin/lever up --no-attach
+ExecStop=/usr/local/bin/lever stop
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=default.target
+```
+
+Run it as the user that owns the instance (a user unit, with `loginctl enable-linger <user>` so it
+starts without a login), with the same `PATH` your shell gives `lever` — the backend CLI
+(`limactl`), and the Go toolchain the bring-up resolves, must be on it. On macOS the same two
+commands go in a LaunchAgent (`RunAtLoad`), in the user's session; OrbStack itself must be running
+first.
 
 ## Troubleshooting quick table
 

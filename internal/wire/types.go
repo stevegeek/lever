@@ -106,6 +106,12 @@ type MsgListRequest struct {
 	Worker string `json:"worker"`
 }
 
+// MsgRecipientsResponse is the reply of POST /msg/recipients: the addresses
+// the caller may pass as MsgSendRequest.To.
+type MsgRecipientsResponse struct {
+	Recipients []string `json:"recipients"`
+}
+
 // ---- operator directives: agent side (jail listener) ----
 
 // DirectiveIDRequest is the body of POST /directive/consume and /directive/check.

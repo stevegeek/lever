@@ -32,14 +32,26 @@ func decodeMsgEvents(raw json.RawMessage) ([]scion.Event, error) {
 
 func newMsgCmd(c brokerCaller) *cobra.Command {
 	cmd := &cobra.Command{Use: "msg", Short: "Send/read typed agent messages (broker-routed)"}
-	cmd.AddCommand(msgSend(c), msgList(c))
+	cmd.AddCommand(msgSend(c), msgList(c), msgRecipients(c))
 	return cmd
 }
+
+// msgAddressHelp is the address vocabulary of `msg send --to`. The broker
+// decides (identity-derived, default-deny); `msg recipients` asks it.
+const msgAddressHelp = "Address forms for --to:\n" +
+	"  user:manager          the manager, from any agent (the form a worker uses)\n" +
+	"  agent:<name> | <name> a declared worker, or the manager by its own agent name\n\n" +
+	"The manager may message any declared worker. A worker may message the manager, and\n" +
+	"another worker only when the instance allows worker-to-worker messaging. No other\n" +
+	"user:<name> is routable.\n" +
+	"`lever-manager msg recipients` lists the addresses this agent may send to; a refused\n" +
+	"send names them too."
 
 func msgSend(c brokerCaller) *cobra.Command {
 	var to string
 	var interrupt bool
-	cmd := &cobra.Command{Use: "send BODY", Args: cobra.MinimumNArgs(1), Short: "Send a message to an agent/user",
+	cmd := &cobra.Command{Use: "send BODY", Args: cobra.MinimumNArgs(1), Short: "Send a message to a running agent",
+		Long: "Send a message to a running agent through the broker.\n\n" + msgAddressHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := strings.Join(args, " ")
 			if _, err := msgCall(cmd.Context(), c, wire.PathMsgSend,
@@ -49,10 +61,25 @@ func msgSend(c brokerCaller) *cobra.Command {
 			cmd.Printf("Sent to %s.\n", to)
 			return nil
 		}}
-	cmd.Flags().StringVar(&to, "to", "", "recipient: agent:<name> | user:<name> | <name> (required)")
+	cmd.Flags().StringVar(&to, "to", "", "recipient: user:manager | agent:<name> | <name> (required; \"msg recipients\" lists yours)")
 	cmd.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
 	_ = cmd.MarkFlagRequired("to")
 	return cmd
+}
+
+func msgRecipients(c brokerCaller) *cobra.Command {
+	return &cobra.Command{Use: "recipients", Args: cobra.NoArgs, Short: "List the addresses this agent may send to",
+		Long: "List the addresses this agent may pass to `msg send --to`, as the broker's policy has them.\n\n" + msgAddressHelp,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			res, err := brokerCall[wire.MsgRecipientsResponse](cmd.Context(), c, wire.PathMsgRecipients, struct{}{})
+			if err != nil {
+				return err
+			}
+			for _, addr := range res.Recipients {
+				cmd.Println(addr)
+			}
+			return nil
+		}}
 }
 
 func msgList(c brokerCaller) *cobra.Command {

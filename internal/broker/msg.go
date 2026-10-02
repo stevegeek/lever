@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/scion"
@@ -129,14 +130,68 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 	}
 	cn, slug, toManager, known := b.identity(name)
 	switch {
-	case !known:
-		return msgTarget{}, fmt.Errorf("%w %q", errUnknownRecipient, to)
 	case toManager:
 		return managerTarget, nil
 	case !isManager && caller != name && !b.workerToWorker:
-		return msgTarget{}, fmt.Errorf("worker→worker messaging is disabled")
+		// Before the unknown check, and one text for both: a declared peer and
+		// a name nobody has read the same, so a worker cannot probe for the
+		// names of peers it may not message.
+		return msgTarget{}, fmt.Errorf("recipient %q is not the manager or this worker (worker→worker messaging is disabled)", to)
+	case !known:
+		return msgTarget{}, fmt.Errorf("%w %q", errUnknownRecipient, to)
 	}
 	return msgTarget{scionTo: "agent:" + slug, project: b.instanceProject, relayFrom: relayFrom, recipientCN: cn}, nil
+}
+
+// managerAlias is the address every agent may use for the manager (see
+// resolveMsgTarget). A worker is taught this form and never the manager's
+// slug or cert CN.
+const managerAlias = "user:manager"
+
+// msgRecipientCap bounds the addresses a refusal echoes (recipientsHint):
+// a refusal is a line of text in an agent's session, not a listing.
+const msgRecipientCap = 16
+
+// msgRecipients lists every address caller may send to, in a form
+// resolveMsgTarget accepts: the same policy, read the other way. The manager
+// gets itself and each declared worker; a worker gets the manager alias and
+// itself, and its peers only when worker→worker messaging is on. Nothing here
+// is a name the caller cannot already reach, and every name is the operator's
+// config (never request text). nil for a caller that is not an identity.
+func (b *Broker) msgRecipients(caller string) []string {
+	callerCN, _, isManager, ok := b.identity(caller)
+	if !ok || callerCN != caller {
+		return nil
+	}
+	var workers []string
+	switch {
+	case isManager || b.workerToWorker:
+		for name := range b.workers {
+			workers = append(workers, "agent:"+name)
+		}
+		slices.Sort(workers)
+	default:
+		workers = []string{"agent:" + caller}
+	}
+	if isManager {
+		return append([]string{"agent:" + b.managerSlug}, workers...)
+	}
+	return append([]string{managerAlias}, workers...)
+}
+
+// recipientsHint is the tail a send refusal carries so the caller can correct
+// the address without trial and error: the first msgRecipientCap of addrs,
+// and how many it left out. "" for no addrs.
+func recipientsHint(addrs []string) string {
+	if len(addrs) == 0 {
+		return ""
+	}
+	more := ""
+	if n := len(addrs) - msgRecipientCap; n > 0 {
+		addrs = addrs[:msgRecipientCap]
+		more = fmt.Sprintf(" and %d more (`lever-manager msg recipients` lists them all)", n)
+	}
+	return "; you may send to: " + strings.Join(addrs, ", ") + more
 }
 
 // resolveListSubject resolves WHOSE inbox caller may read, as an agent slug.
@@ -237,7 +292,8 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	tgt, rerr := b.resolveMsgTarget(caller, req.To)
 	if rerr != nil {
 		b.audit("msg", caller, "deny", "send->"+req.To+": "+rerr.Error())
-		http.Error(w, rerr.Error(), http.StatusForbidden)
+		// The hint is for the caller only: the audit line keeps the reason.
+		http.Error(w, rerr.Error()+recipientsHint(b.msgRecipients(caller)), http.StatusForbidden)
 		return
 	}
 	if !b.runtimeReady(w) {
@@ -275,6 +331,25 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	}
 	b.audit("msg", caller, "allow", "send->"+tgt.scionTo, "kind", kind, "ref", ref)
 	writeJSON(w, wire.MsgSendResponse{OK: true})
+}
+
+// handleMsgRecipients answers which addresses the caller may send to: the
+// whole of msgRecipients, uncapped (the config bounds it). It reads no body
+// and needs no runtime.
+func (b *Broker) handleMsgRecipients(w http.ResponseWriter, r *http.Request) {
+	// Revoked ⇒ no listing either, as for /msg/list.
+	caller, ok := b.requireLiveAgent(w, r, "msg", "")
+	if !ok {
+		return
+	}
+	addrs := b.msgRecipients(caller)
+	if addrs == nil {
+		b.audit("msg", caller, "deny", "recipients: not the manager or a declared worker")
+		http.Error(w, fmt.Sprintf("caller %q is not the manager or a declared worker", caller), http.StatusForbidden)
+		return
+	}
+	b.audit("msg", caller, "allow", "recipients")
+	writeJSON(w, wire.MsgRecipientsResponse{Recipients: addrs})
 }
 
 func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {

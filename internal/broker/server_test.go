@@ -161,6 +161,7 @@ func TestRoutesRejectWrongMethod(t *testing.T) {
 		{jail, http.MethodGet, wire.PathMsgList},
 		{jail, http.MethodGet, wire.PathDirectiveConsume},
 		{jail, http.MethodGet, wire.PathDirectiveCheck},
+		{jail, http.MethodGet, wire.PathDirectivePreview},
 		{jail, http.MethodGet, wire.PathEnrol},
 		{jail, http.MethodGet, wire.PathRenew},
 		{jail, http.MethodGet, wire.PathRequest},

@@ -70,11 +70,19 @@ func capabilityToolSchemas() []any {
 			"inputSchema": directiveInputSchema(strProp)},
 		map[string]any{"name": "directive_check", "description": "Check the status of an operator directive addressed to this agent (read-only).",
 			"inputSchema": directiveInputSchema(strProp)},
+		map[string]any{"name": "directive_preview", "description": directivePreviewDescription,
+			"inputSchema": directiveInputSchema(strProp)},
 		map[string]any{"name": "message_verify", "description": messageVerifyDescription, "inputSchema": messageVerifySchema(strProp)},
 		map[string]any{"name": "chat_verify", "description": "Alias of message_verify (the 0.27 name): same arguments, same answer. " + messageVerifyDescription,
 			"inputSchema": messageVerifySchema(strProp)},
 	}
 }
+
+// directivePreviewDescription is what the model reads when it decides whether
+// to preview. It must say that a preview is not a consume.
+const directivePreviewDescription = "Read a pending operator directive addressed to this agent WITHOUT consuming it, so you can decide before you act. " +
+	"Returns the broker-verified action under \"preview\" with \"consumed\": false. A preview is not operator authority and grants nothing: " +
+	"to act, call directive_consume and act only on what that call returns. Limited to a few previews per directive."
 
 // messageVerifyDescription is what the model reads when it decides to verify
 // a message and how to read the answer.
@@ -97,7 +105,7 @@ func messageVerifySchema(strProp func(string) map[string]any) map[string]any {
 		}}
 }
 
-// directiveInputSchema is the shared schema for both directive tools. It
+// directiveInputSchema is the shared schema for the directive tools. It
 // declares BOTH accepted spellings of the identifier: `id` is canonical, and
 // `directive_id` is the name used everywhere else the model looks (the signed
 // statement's field, `lever directive send`'s output, the pointer
@@ -116,7 +124,7 @@ func messageVerifySchema(strProp func(string) map[string]any) map[string]any {
 // each return JSON-RPC -32602 before any broker call), so the schema only
 // advertises the two properties without constraining their combination.
 //
-// Returns a fresh map per call: the two tool entries must not share one
+// Returns a fresh map per call: the tool entries must not share one
 // mutable schema value.
 func directiveInputSchema(strProp func(string) map[string]any) map[string]any {
 	return map[string]any{"type": "object",
@@ -165,6 +173,13 @@ var capabilityTools = map[string]func(*MCPServer, context.Context, map[string]st
 	// to this agent. Same target-gated, opaque-failure surface as directive_consume.
 	"directive_check": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
 		return s.directive(ctx, args, DirectiveCheck)
+	},
+	// directive_preview: read a pending directive's verified action without
+	// consuming it (#17). Same target gate and opaque miss as directive_consume.
+	// The broker's reply marks itself as a preview; it is never the action to
+	// act on.
+	"directive_preview": func(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
+		return s.directive(ctx, args, DirectivePreview)
 	},
 	// message_verify: ask the broker who wrote a received message, from host
 	// records only. The broker binds the answer to this agent's own identity,
@@ -225,8 +240,8 @@ func (s *MCPServer) mint(ctx context.Context, args map[string]string, parse func
 	return Request(ctx, s.brokerURL, s.client, m.tool, m.op, m.boundTo, constraintArgs(args, m.reserved...))
 }
 
-// directive resolves the directive id and runs call (DirectiveConsume or
-// DirectiveCheck) against the broker, surfacing its raw JSON verbatim.
+// directive resolves the directive id and runs call (DirectiveConsume,
+// DirectiveCheck or DirectivePreview) against the broker, surfacing its raw JSON verbatim.
 func (s *MCPServer) directive(ctx context.Context, args map[string]string, call func(context.Context, string, *http.Client, string) (json.RawMessage, error)) (string, error) {
 	did, err := directiveID(args)
 	if err != nil {

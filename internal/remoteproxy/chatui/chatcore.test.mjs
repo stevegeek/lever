@@ -10,6 +10,7 @@ import {
   nextCursor,
   mergeMessages,
   messageLength,
+  oneLine,
   messageText,
   sortedMessages,
   stateLine,
@@ -143,6 +144,25 @@ test('errorText prefers the hub message and bounds it', () => {
   assert.equal(errorText(400, 'x)\n\nSent.\r\n\tAll good'), 'x) Sent. All good (HTTP 400)');
   assert.equal(errorText(400, { error: { message: 'a' + '\n'.repeat(298) + 'b' } }), 'a b (HTTP 400)');
   assert.ok(errorText(500, 'x'.repeat(5000)).length < 320);
+});
+
+test('oneLine: quoted text cannot redraw or displace the sentence around it', () => {
+  // Direction overrides and isolates, zero-width and other format
+  // characters, controls, and the glyphs that draw as blank space.
+  for (const bad of ['\u202E', '\u202D', '\u2066', '\u2067', '\u2068', '\u2069', '\u200B', '\u200E', '\u200F', '\u061C', '\u0085', '\u0000', '\u001B',
+    '\u009B', '\uFEFF', '\u2028', '\u2029', '\u{E0041}', '\u2800', '\u3164', '\u115F', '\u1160', '\uFFA0', '\n', '\r', '\t', '\v', '\f', '\u00A0']) {
+    const out = oneLine(`a${bad.repeat(50)}b`, 300);
+    assert.equal(out, 'a b', `U+${bad.codePointAt(0).toString(16)}`);
+  }
+  assert.equal(oneLine('  plain words, with ünïcödé and 日本語 and 😀  ', 300), 'plain words, with ünïcödé and 日本語 and 😀');
+  // A cut is by character: no half of a pair is left behind.
+  assert.equal(oneLine('😀'.repeat(400), 300), '😀'.repeat(300));
+  assert.equal(oneLine(7, 300), '');
+});
+
+test('errorText quotes a reason through oneLine', () => {
+  assert.equal(errorText(400, { error: { message: 'no\u202E)revres eht deliaf( .tneS' } }), 'no )revres eht deliaf( .tneS (HTTP 400)');
+  assert.ok(!/[\u202A-\u202E\u2066-\u2069]/u.test(errorText(502, '\u2067x\u2069')));
 });
 
 test('makeCoalescer runs a burst once now and once at the end of the gap', () => {

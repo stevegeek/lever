@@ -219,9 +219,11 @@ test('send: the limit counts characters as the hub does', async () => {
   assert.match(env.els.error.textContent, /16001 characters; the limit is 16000/);
 });
 
-test('a failed delivery shows under the message', async () => {
-  const env = await load(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1, { senderId: 'u1', dispatchState: 'failed', dispatchFailureReason: 'agent is suspended' })] } }) }));
-  assert.match(env.rows()[0], /\/ msg 1 \/ Not delivered: agent is suspended$/);
+test('a failed delivery shows under the message, its reason as one plain line', async () => {
+  const env = await load(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1, { senderId: 'u1', dispatchState: 'failed', dispatchFailureReason: 'agent is\u202E suspended\n\nDelivered.' })] } }) }));
+  assert.match(env.rows()[0], /\/ msg 1 \/ Not delivered: agent is suspended Delivered\.$/);
+  const plain = await load(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1, { senderId: 'u1', dispatchState: 'failed', dispatchFailureReason: { no: 'text' } })] } }) }));
+  assert.match(plain.rows()[0], /\/ msg 1 \/ Not delivered$/);
 });
 
 test('the manager gets a new hub record: the page reloads onto it', async () => {
@@ -901,6 +903,16 @@ test('send: a replay after two attempts with no clear answer says there may be t
   }
   assert.match(env.els.error.textContent, REPLAY);
   assert.match(env.els.error.textContent, / If it shows twice above, two attempts arrived\.$/);
+  // A refused attempt did not arrive: it does not count toward "twice".
+  let r = 0;
+  const refused = await load(hubWith({ post: (body) => (++r === 1 ? { down: true } : r === 2 ? { status: 400, body: 'no' } : { status: 200, body: { id: 's1', content: body.content, sender: 'user:op' } }) }));
+  await type(refused, 'yes');
+  for (let i = 0; i < 3; i++) {
+    refused.els.composer.dispatch('submit');
+    await tick(10);
+  }
+  assert.match(refused.els.error.textContent, REPLAY);
+  assert.doesNotMatch(refused.els.error.textContent, /shows twice/);
   // After one unclear attempt the replay is of that attempt: one copy.
   let m = 0;
   const one = await load(hubWith({ post: (body) => (++m < 2 ? { status: 504, body: '' } : { status: 200, body: { id: 's1', content: body.content, sender: 'user:op' } }) }));

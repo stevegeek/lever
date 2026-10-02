@@ -120,6 +120,18 @@ export function stateLine(agent) {
   return unknown;
 }
 
+// oneLine makes another party's text safe to quote inside a sentence of the
+// page's own: one line, at most max characters. Control and format
+// characters go (a direction override would redraw the rest of the
+// sentence, the page's words included, right to left), as do the glyphs
+// that draw as blank space, so the text cannot set a part of itself apart
+// or push the page's words out of sight.
+export function oneLine(text, max) {
+  const flat = str(text).replace(/[\p{Cc}\p{Cf}\u2800\u3164\u115F\u1160\uFFA0]/gu, ' ').replace(/\s+/g, ' ').trim();
+  // By character, so a cut never splits one.
+  return [...flat].slice(0, max).join('');
+}
+
 // errorText is what to show for a failed request: the hub's own message when
 // its answer has one, else the status.
 export function errorText(status, body) {
@@ -129,9 +141,7 @@ export function errorText(status, body) {
   } else {
     msg = str(body);
   }
-  // One line: the text is another party's, and sits inside a sentence of
-  // the page's own. A line break in it must not set a part of it apart.
-  msg = msg.replace(/\s+/g, ' ').trim().slice(0, 300);
+  msg = oneLine(msg, 300);
   // Status 0 is the page's own word for "no answer": nothing to name.
   if (!status) return msg || 'no answer';
   return msg ? `${msg} (HTTP ${status})` : `request failed (HTTP ${status})`;

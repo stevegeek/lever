@@ -21,6 +21,7 @@ import {
   messageLength,
   messageText,
   nextCursor,
+  oneLine,
   sortedMessages,
   stateLine,
 } from './chatcore.js';
@@ -193,7 +194,7 @@ function render(toBottom) {
     if (kind === 'mine' && m.dispatchState === 'failed') {
       const fail = document.createElement('div');
       fail.className = 'fail';
-      const why = typeof m.dispatchFailureReason === 'string' ? m.dispatchFailureReason.slice(0, 200) : '';
+      const why = oneLine(m.dispatchFailureReason, 200);
       setText(fail, why ? `Not delivered: ${why}` : 'Not delivered');
       row.append(fail);
     }
@@ -502,6 +503,8 @@ async function send() {
   } else if (again) {
     // The hub refused this attempt, which says nothing about the earlier
     // one. The key stays, so a later press still finds it.
+    // A refused attempt did not arrive, so it does not count as one that may have.
+    setUnsent({ ...unsent, tries: earlier });
     showError(`This attempt was refused (${reason(res)}). An earlier attempt had no clear answer and may have arrived: look at the conversation.`);
     void readState();
   } else {

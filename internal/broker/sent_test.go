@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sentledger"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -28,7 +27,7 @@ func withSentLedger(dir *string) configOpt {
 func sentBroker(t *testing.T, g2g bool) (*Broker, *fakeMsgRuntime, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "sent-ledger")
-	rt := &fakeMsgRuntime{WorkerRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
+	rt := &fakeMsgRuntime{WorkerRuntime: runningFleet()}
 	b := New(testConfig(t, withManager("manager", "assistant"), withRuntime(rt, msgWorkers...), withSentLedger(&dir),
 		func(c *Config) { c.Dispatch.WorkerToWorker = g2g }))
 	return b, rt, dir
@@ -118,7 +117,7 @@ func failingLedgerDir(t *testing.T) string {
 // written never reaches scion, and the caller gets 502.
 func TestSendIsNotMadeWhenItCannotBeRecorded(t *testing.T) {
 	dir := failingLedgerDir(t)
-	rt := &fakeMsgRuntime{WorkerRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
+	rt := &fakeMsgRuntime{WorkerRuntime: runningFleet()}
 	b := New(testConfig(t, withManager("manager", "assistant"), withRuntime(rt, msgWorkers...), withSentLedger(&dir)))
 	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"x"}`, "manager")
 	if rec.Code != http.StatusBadGateway || len(rt.sent) != 0 {
@@ -307,5 +306,94 @@ func TestServeListenersRefusesATCPOperatorListener(t *testing.T) {
 	}
 	if _, err := op.Accept(); err == nil {
 		t.Fatal("the operator listener was left open")
+	}
+}
+
+// fleetWith is runningFleet with one agent's phase replaced ("" removes its
+// record).
+func fleetWith(slug, phase string) *fakeRuntime {
+	rt := runningFleet()
+	agents := rt.agents[testInstanceProject][:0]
+	for _, a := range rt.agents[testInstanceProject] {
+		if a.Slug == slug {
+			if phase == "" {
+				continue
+			}
+			a.Phase = phase
+		}
+		agents = append(agents, a)
+	}
+	rt.agents[testInstanceProject] = agents
+	return rt
+}
+
+// TestSendToAnAgentThatIsNotRunningIsRefused: the hub refuses a message to an
+// agent in any phase but running (scion's interim "resumed" included). The
+// broker answers 409 by name before it records anything, so nothing reaches
+// scion and the sent ledger holds no entry for a message that was not sent.
+func TestSendToAnAgentThatIsNotRunningIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		caller, to, slug, phase, want string
+	}{
+		{"manager", "scratch", "scratch", "suspended", "worker scratch is not running (phase suspended); resume it first: `lever-manager agent resume scratch`"},
+		{"manager", "agent:scratch", "scratch", "resumed", "worker scratch is not running (phase resumed)"},
+		{"manager", "scratch", "scratch", "error", "worker scratch is not running (phase error)"},
+		{"manager", "scratch", "scratch", "", "worker scratch has no record on the hub"},
+		{"worker", "scratch", "scratch", "stopped", "worker scratch is not running (phase stopped)"},
+		{"scratch", "user:manager", "assistant", "suspended", "the manager is not running (phase suspended)"},
+	} {
+		dir := filepath.Join(t.TempDir(), "sent-ledger")
+		rt := &fakeMsgRuntime{WorkerRuntime: fleetWith(tc.slug, tc.phase)}
+		b := New(testConfig(t, withManager("manager", "assistant"), withRuntime(rt, msgWorkers...), withSentLedger(&dir),
+			func(c *Config) { c.Dispatch.WorkerToWorker = true }))
+		rec := callWorker(t, b, "/msg/send", `{"to":"`+tc.to+`","body":"hello"}`, tc.caller)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s->%s (%s): %d %q, want 409 with %q", tc.caller, tc.to, tc.phase, rec.Code, rec.Body.String(), tc.want)
+		}
+		if len(rt.sent) != 0 {
+			t.Fatalf("%s->%s (%s): %d scion message calls, want none", tc.caller, tc.to, tc.phase, len(rt.sent))
+		}
+		if n, _ := sentledger.Count(dir); n != 0 {
+			t.Fatalf("%s->%s (%s): %d record files after a refused send", tc.caller, tc.to, tc.phase, n)
+		}
+	}
+}
+
+// TestSendGoesOnWhenThePhaseCannotBeRead: the phase check is an early answer,
+// not a boundary. A failed listing does not refuse the send; the hub decides.
+func TestSendGoesOnWhenThePhaseCannotBeRead(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sent-ledger")
+	fleet := runningFleet()
+	fleet.listErr = errors.New("hub not responding")
+	rt := &fakeMsgRuntime{WorkerRuntime: fleet}
+	b := New(testConfig(t, withManager("manager", "assistant"), withRuntime(rt, msgWorkers...), withSentLedger(&dir)))
+	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"hello"}`, "manager")
+	if rec.Code != http.StatusOK || len(rt.sent) != 1 {
+		t.Fatalf("status %d (%s), sent %d; want the send made", rec.Code, rec.Body, len(rt.sent))
+	}
+	recorded(t, dir, "scratch", refOf(t, rt.sent[0].Body))
+}
+
+// TestOperatorNoteToAnAgentThatIsNotRunningIsRefused: `lever msg send` gets
+// the same answer as /msg/send, and nothing is sent or recorded.
+func TestOperatorNoteToAnAgentThatIsNotRunningIsRefused(t *testing.T) {
+	for _, tc := range []struct{ to, slug, phase, want string }{
+		{"scratch", "scratch", "suspended", "worker scratch is not running (phase suspended)"},
+		{"scratch", "scratch", "resumed", "worker scratch is not running (phase resumed)"},
+		{"manager", "assistant", "suspended", "the manager is not running (phase suspended)"},
+	} {
+		dir := filepath.Join(t.TempDir(), "sent-ledger")
+		rt := &fakeMsgRuntime{WorkerRuntime: fleetWith(tc.slug, tc.phase)}
+		b := New(testConfig(t, withManager("manager", "assistant"), withRuntime(rt, msgWorkers...), withSentLedger(&dir)))
+		rec := postNote(t, b, `{"to":"`+tc.to+`","body":"check in"}`)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s (%s): %d %q, want 409 with %q", tc.to, tc.phase, rec.Code, rec.Body.String(), tc.want)
+		}
+		if len(rt.sent) != 0 {
+			t.Fatalf("%s (%s): sent %+v", tc.to, tc.phase, rt.sent)
+		}
+		if n, _ := sentledger.Count(dir); n != 0 {
+			t.Fatalf("%s (%s): %d record files after a refused note", tc.to, tc.phase, n)
+		}
 	}
 }

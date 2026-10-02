@@ -55,7 +55,7 @@ func verifyBroker(t *testing.T, entries []chatledger.Entry, opts ...verifyOpt) *
 			t.Fatal(err)
 		}
 	}
-	f.rt = &fakeMsgRuntime{WorkerRuntime: &fakeRuntime{agents: map[string][]scion.Agent{}}}
+	f.rt = &fakeMsgRuntime{WorkerRuntime: runningFleet()}
 	ids := map[string]string{"assistant": chatManagerID, "scratch": chatScratchID}
 	cfg := testConfig(t, withAudit(f.audit), withManager("manager", "assistant"), withRuntime(f.rt, msgWorkers...),
 		func(c *Config) {

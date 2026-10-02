@@ -993,6 +993,38 @@ func checkWorkerTicketMounts(ctx context.Context, project string, workers []stri
 	return checkResult{check, true, fmt.Sprintf("%d worker container(s) mount %s", checked, workerTicketMount), ""}
 }
 
+// checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own
+// tree (<tree>/<worker dir>/.lever/bootstrap.json). Since the guest ticket
+// channel (0.22) lever stages a worker's ticket only in the guest runtime
+// directory, mounted read-only at /run/lever in that worker alone; a copy in
+// the tree is one an older lever left or an agent wrote, readable by the
+// manager, and it hid a worker-side `lever-manager` that read the wrong path
+// (it worked only where such a copy sat). dirs maps a worker to its host
+// directory.
+func checkWorkerTreeBootstraps(dirs map[string]string) checkResult {
+	const check = "worker tree bootstraps"
+	if len(dirs) == 0 {
+		return checkResult{check, true, "no workers declared", ""}
+	}
+	var found, paths []string
+	for name, dir := range dirs {
+		p := filepath.Join(dir, ".lever", "bootstrap.json")
+		if _, err := os.Lstat(p); err == nil {
+			found = append(found, name)
+			paths = append(paths, p)
+		}
+	}
+	if len(found) == 0 {
+		return checkResult{check, true, "no bootstrap.json under a worker tree", ""}
+	}
+	slices.Sort(found)
+	slices.Sort(paths)
+	return checkResult{check, false,
+		fmt.Sprintf("worker %s has a bootstrap.json in its own tree: a worker's ticket belongs only in its read-only %s mount, never in the agent-writable tree",
+			braceList(found), workerTicketMount),
+		"delete it: rm " + strings.Join(paths, " ")}
+}
+
 // braceList renders names as a shell brace-expansion hint ({a,b}) for the fix
 // text, or the bare name for a single entry.
 func braceList(names []string) string {

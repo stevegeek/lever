@@ -29,7 +29,7 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 	if name == "manager" {
 		name = b.manager
 	}
-	cn, slug, _, ok := b.identity(name)
+	cn, slug, toManager, ok := b.identity(name)
 	if !ok || req.To == "" {
 		b.audit("msg", "operator", "deny", "note->"+req.To+": unknown agent")
 		http.Error(w, "unknown agent", http.StatusBadRequest)
@@ -38,6 +38,12 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 	if b.runtime == nil {
 		b.audit("msg", "operator", "error", "note: runtime not wired")
 		http.Error(w, "messaging unavailable", http.StatusBadGateway)
+		return
+	}
+	// The same early answer /msg/send gives, before anything is recorded.
+	if refusal := b.notRunningRefusal(r.Context(), "operator", slug, toManager); refusal != "" {
+		b.audit("msg", "operator", "deny", "note->"+cn+": "+refusal)
+		http.Error(w, refusal, http.StatusConflict)
 		return
 	}
 	ref, err := b.sendRecorded(r.Context(), cn, slug, sentledger.KindOperatorNote,

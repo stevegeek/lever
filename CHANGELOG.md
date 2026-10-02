@@ -5,6 +5,59 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Fixed
+
+- **A worker can message the manager without a bootstrap copy in its tree.**
+  `lever-manager` in a worker container read the manager's
+  `/workspace/.lever/bootstrap.json`, which a worker does not have: `msg send`
+  failed with "read bootstrap ... no such file or directory" before it reached
+  the broker, and worked only where a stale `bootstrap.json` sat in the
+  worker's own tree. It now takes its bootstrap from the ticket
+  `$LEVER_BOOTSTRAP` names (the read-only `/run/lever` mount), as
+  `lever-agent` does. Where the agent's user may not read that ticket, or no
+  bootstrap exists, the call goes through the agent's loopback gateway, which
+  needs neither file. `lever doctor` has a new row, "worker tree bootstraps",
+  that fails on a `bootstrap.json` under a worker's tree and names the file to
+  delete. `lever-manager` ships in the agent image: a worker gets the fix
+  when it is created on a rebuilt image (`lever worker purge <worker>`, then
+  start it again from the manager).
+- **`lever-manager agent resume` of a worker that is already coming up only
+  waits.** A record in one of scion's interim phases (`resumed`, `starting`,
+  `created`, `provisioning`, `cloning`) is not resumed a second time and gets
+  no new ticket.
+- **A message to a worker that is not running answers 409, by name.**
+  `lever-manager msg send` (and `lever msg send`) to an agent in any phase
+  but `running` (suspended, stopped, error, or scion's interim `resumed`)
+  answered 502 "runtime error": the hub refuses such a message and the
+  broker folded the refusal away. The broker now reads the recipient's phase
+  first and answers 409 with the phase and the verb to run
+  (`lever-manager agent resume <worker>`; for the manager, `lever up`). A
+  refused message is not sent and leaves no sent-ledger record. The broker
+  does not queue the message and does not wake the agent. When the phase
+  cannot be read the send goes on and the hub decides, as before.
+- **`lever-manager agent resume` answers when the worker is live.** It
+  returned right after scion's resume, often with phase `resumed`, so the
+  next `msg send` failed. It now waits for phase `running` and a live
+  container, as `agent start` does, and a worker that does not come up is
+  an error that names the last phase. Resume of a running worker is a
+  no-op.
+- **A worker left running across `lever stop` + `lever up` is recoverable.**
+  It came back with hub phase `error` (container created, never started),
+  resume answered 409 "agent already exists in this project", and only
+  `lever worker purge --force` recovered it. `lever stop` now suspends
+  every configured worker that is running (after the manager, with its own
+  30 s budget; a failure is a warning and the power-off always runs). A
+  worker suspended this way stays suspended after `lever up` until the
+  manager resumes it. And
+  the resume verb uses `scion resume --force` for an `error`-phase record,
+  as `agent start` already did. A resume the hub refuses answers 409 and
+  says the record was kept; a ticket that cannot be staged is 500; any
+  other failure stays 502 and names
+  `lever worker purge <worker>`. lever never deletes a worker record on
+  its own.
+
 ## [0.28.0] - 2026-09-29
 
 ### Added

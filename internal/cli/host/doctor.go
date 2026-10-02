@@ -136,8 +136,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		return jail.ContainerEnvValue(ctx, jr, ref, key)
 	}
 	workerNames := make([]string, 0, len(app.Workers))
+	workerDirs := make(map[string]string, len(app.Workers))
 	for _, w := range app.Workers {
 		workerNames = append(workerNames, w.Name)
+		workerDirs[w.Name] = app.WorkerDir(w)
 	}
 
 	checks := []func() checkResult{
@@ -179,6 +181,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},
+		func() checkResult { return checkWorkerTreeBootstraps(workerDirs) },
 		func() checkResult {
 			return checkAgentNetwork(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), jail.ForceHostNetworkFromEnv(), listAgents, inspectNetMode)
 		},

@@ -186,7 +186,8 @@ Three levels, from lightest to heaviest:
 | Host broker | still running | stopped | stopped, staged state cleared |
 | Resume with | `lever up` / `lever attach` | `lever up` (powers back on, **same conversation**) | `lever up` (full re-provision) |
 
-`stop` suspends the manager (best-effort), stops the host broker, then powers the jail off; the
+`stop` suspends the manager and every running worker (best-effort), stops the host broker, then
+powers the jail off; the
 next `lever up` resumes the same manager conversation. `destroy` removes the jail machine
 `lever-<name>`; your tree on disk is untouched, and the next `lever up` re-provisions from scratch.
 See the [CLI reference](/reference/cli/#everyday-lifecycle).

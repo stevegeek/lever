@@ -6,6 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -62,13 +64,16 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// HubTokenSource lets suspend authenticate against the real,
 					// dev-auth-off hub with the controller PAT minted by a prior
 					// `lever apply`.
-					// Empty agent role: this client only calls Suspend, and only
-					// start emits --role.
+					// Empty agent role: this client only calls List and Suspend,
+					// and only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %v\n", serr)
 					}
 					cancel()
+					// After the manager, under its own budget, so a slow worker
+					// pass cannot cost the manager its suspend.
+					suspendRunningWorkers(cmd, sc, ia.app, b.MountDest())
 				}
 			}
 
@@ -81,6 +86,54 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
+}
+
+// workerSuspendBudget bounds the whole worker pass of `lever stop`: one list
+// and one suspend per running worker.
+const workerSuspendBudget = 30 * time.Second
+
+// suspendRunningWorkers suspends every configured worker the hub shows
+// running, or on its way up, before the power-off. A worker left running
+// across the power-off comes back with hub phase error and a container that
+// was created but never started; a plain resume of that record answers 409,
+// so it needed `lever worker purge`. A suspended record resumes cleanly.
+//
+// Best-effort, like the manager's suspend: every failure is a warning and the
+// caller powers off regardless. No worker is stopped or deleted here.
+func suspendRunningWorkers(cmd *cobra.Command, sc *scion.Client, app *config.App, project string) {
+	if len(app.Workers) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), workerSuspendBudget)
+	defer cancel()
+	agents, err := sc.List(ctx, project)
+	if err != nil {
+		cmd.PrintErrf("warning: listing agents failed, no worker was suspended (a running worker may not resume cleanly on next up): %v\n", err)
+		return
+	}
+	for _, wk := range app.Workers {
+		a := scion.FindAgent(agents, wk.Name)
+		if a == nil || !suspendBeforeStop(a.Phase) {
+			continue
+		}
+		if err := sc.Suspend(ctx, wk.Name, project); err != nil {
+			cmd.PrintErrf("warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %v\n", wk.Name, err)
+			continue
+		}
+		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", wk.Name, wk.Name)
+	}
+}
+
+// suspendBeforeStop reports a phase in which a worker's container is up or
+// coming up: running, and the two interim phases that lead to it ("resumed"
+// is scion's own, outside the hub enum). Suspended, stopped and error records
+// have no live container to lose.
+func suspendBeforeStop(phase string) bool {
+	switch phase {
+	case scion.PhaseRunning, "resumed", "starting":
+		return true
+	}
+	return false
 }
 
 // stopHostDaemons stops the host-side daemons tied to the current instance:

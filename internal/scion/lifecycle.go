@@ -363,9 +363,13 @@ func PhaseLabel(phase string) string {
 }
 
 // containerStatusRE matches the container status texts podman and scion
-// produce: "running", "stopped", "created", "Up 6 seconds", "Up About a
-// minute", "Exited (1) 4 minutes ago".
-var containerStatusRE = regexp.MustCompile(`^(running|stopped|created|Created|paused|Up [A-Za-z0-9 ]{1,40}|Exited \(\d{1,3}\) [A-Za-z0-9 ]{1,40})$`)
+// produce, and nothing else: "running", "stopped", "created", "Up 6
+// seconds", "Up About a minute", "Up Less than a second", "Exited (1) 4
+// minutes ago". The age is a number and a unit, never free words: an agent
+// can post this field about itself, so no slot may hold a sentence.
+const containerAge = `(\d{1,4} (second|minute|hour|day|week|month|year)s?|About an? (minute|hour)|Less than a second)`
+
+var containerStatusRE = regexp.MustCompile(`^(running|stopped|created|Created|paused|Paused|Up ` + containerAge + `|Exited \(\d{1,3}\) ` + containerAge + ` ago)$`)
 
 // ContainerLabel is status when it has one of the shapes a runtime reports,
 // "" when empty, else LabelUnrecognised (or "up" for a text that only starts

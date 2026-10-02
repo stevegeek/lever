@@ -3966,14 +3966,14 @@ func TestStartManagerFreshNeverReportsADiscardThatDidNotHappen(t *testing.T) {
 	race := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped",
 		startErr: errors.New("agent 'hello' already exists")}
 	err = runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(3), Scion: scion.New(race, scion.Options{}), Log: func(string, ...any) {}})
-	testutil.WantErrContaining(t, err, "--fresh found a manager record where none may exist", "NOT replaced")
+	testutil.WantErrContaining(t, err, "--fresh expected no manager record", "did NOT report a fresh manager")
 
 	// --fresh with NO record observed (scion's lazy sync hid a live one): the
 	// create's "already exists" is that session, not a success.
 	app, f = newObserveFirstApp(t)
 	hidden := &agentLifecycleRunner{FakeRunner: f, slug: "hello", startErr: errors.New("agent 'hello' already exists")}
 	err = runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(3), Scion: scion.New(hidden, scion.Options{}), Log: func(string, ...any) {}})
-	testutil.WantErrContaining(t, err, "--fresh found a manager record where none may exist")
+	testutil.WantErrContaining(t, err, "--fresh expected no manager record")
 	if hidden.deleteCalls != 0 {
 		t.Fatalf("deleteCalls=%d, want 0 (nothing was observed to delete)", hidden.deleteCalls)
 	}

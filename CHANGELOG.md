@@ -21,7 +21,8 @@ correct behaviour those releases introduced.
   `lever msg send` / `lever directive send` errors and the audit log. The
   broker now passes every phase and activity through a list of known values;
   anything else is `unrecognised`. The container status (which an agent can
-  also post) is shown only when it has the shape of a runtime status. This
+  also post) is shown only when it is exactly a runtime status ("Up 3
+  hours", "Exited (1) 4 minutes ago"); words in it are not shown. This
   covers the refusals, the "did not come up" error of `agent start` /
   `agent resume`, the worker list and the audit lines. Operator-facing
   messages quote such strings and cut them at 48 bytes.
@@ -32,7 +33,7 @@ correct behaviour those releases introduced.
   and kept the old manager. `--fresh` is how an operator evicts a session.
   lever now lists the agents after the delete and creates only when the
   manager record is absent; a record still there, or a create that meets an
-  existing record, is an error that says the session was NOT discarded.
+  existing record, is an error: lever does not report a fresh manager.
   The same holds when `--fresh` saw no record at all and the create then
   meets one.
 - **The doctor row "worker tree bootstraps" prints no `rm` line for a path

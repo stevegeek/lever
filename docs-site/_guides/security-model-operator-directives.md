@@ -89,6 +89,15 @@ directive's target and it is unconsumed and in its time window. Every failure mo
 wrong target, stale generation, already consumed, expired — returns a byte-identical opaque
 `{"error":"not found"}`; there is no existence, target, or state oracle.
 
+**Preview.** Before it decides, the target may call `directive_preview(id)`. The broker applies the
+consume gate unchanged (target CN, current generation, active, inside the time window) and answers
+every miss with the same opaque not-found, so preview is no wider an oracle than consume. It returns
+the validated action in a reply of its own shape (`"consumed": false`, content under `preview`) and
+does not flip the directive: the compare-and-swap, and with it the single use, stays with consume
+alone. A preview is not operator origin. It returns no token or grant, and any later call-time
+enforcement (Layer 3) must key on the consumed state, which a preview never sets. Each preview is
+audited with the caller and counted; the count is persisted and capped at 5 per directive.
+
 ### 11.4 Identity binding: `{cn, generation}`
 
 A directive binds to the target agent's mTLS **CN plus enrolment generation**, not to a recyclable
@@ -147,6 +156,8 @@ could present as another agent's identity.
 | A compromised hub reads a directive id off the wire | Accepted: ids are treated as public. Nothing acted-on ever transits the hub — only the pointer does. |
 | Notification flood (spam ids at an agent) | Per-agent rate limiting; the bootstrap carve-out treats a flood of ids as inert, not a work queue. |
 | `directive_check` used as an existence/target oracle | Target-gated, same opaque not-found response as consume. |
+| `directive_preview` used as an oracle or to read another agent's directive | Same gate and same opaque not-found as consume; only the target at the current generation reads content. The over-cap `429` is reachable only after that gate. |
+| Previewed content treated as authority, or acted on repeatedly without a consume | The reply is marked not consumed and has a different shape from a consume result; the bootstrap rule stays "only a `directive_consume` you emitted this turn". Previews are capped per directive and audited, so content read without a consume is visible to the operator. Bar-raising for all kinds until Layer 3. |
 | Stolen operator signing key | Live revocation via `allowed_signers` edit, short default expiry (10m, hard-capped 24h), ≥2 keys recommended, hardware touch-to-sign for the strongest posture (§11.5). |
 | `allowed_signers` misconfiguration / operator lockout | `lever directive selftest` plus the multi-key recommendation (§11.5). |
 
@@ -154,6 +165,9 @@ could present as another agent's identity.
 
 - `tool_call`/`approval` execution is model discipline, not host-enforced; Layer 3 (§11.1)
   is not implemented.
+- With `directive_preview`, directive content can reach its target without a consume event. The
+  audit signal for that is the `previewed` line, not `consumed`. An agent that acts on a preview
+  without consuming breaks the bootstrap rule; the host does not stop it (same residual as above).
 - The "this turn, you emitted it" property that the bootstrap carve-out relies on depends on the
   harness rendering tool results distinguishably from message text — bar-raising, not a proof.
 - A compromised hub sits on the delivery path for the pointer and can block a notification or

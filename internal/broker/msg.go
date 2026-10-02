@@ -285,6 +285,10 @@ func (b *Broker) notRunningRefusal(ctx context.Context, actor, slug string, toMa
 // answer for the host, where `lever-manager` does not exist.
 const operatorActor = "operator"
 
+// maxMsgRecipientLen bounds the `to` of a send: agent names are at most 63
+// bytes (config.nameRE) plus an "agent:"/"user:" prefix.
+const maxMsgRecipientLen = 128
+
 func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	// A revoked agent loses its messaging channel too — otherwise a
 	// compromised-then-revoked agent could keep steering other agents via
@@ -297,6 +301,13 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
 		b.audit("msg", caller, "deny", "bad body")
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// A recipient is a short name. Bound it before it is echoed in a refusal
+	// or written to the audit log (an agent chooses this string).
+	if len(req.To) > maxMsgRecipientLen {
+		b.audit("msg", caller, "deny", "send: recipient longer than the limit")
+		http.Error(w, "recipient is too long", http.StatusBadRequest)
 		return
 	}
 	tgt, rerr := b.resolveMsgTarget(caller, req.To)

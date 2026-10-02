@@ -76,6 +76,15 @@ func (rw *rateWindow) refund(cn string) {
 	}
 }
 
+// maxDirectiveIDLen bounds a directive id an agent sends. Real ids are UUIDs
+// (36 bytes); a longer one cannot match, and writing it into the audit lines
+// would let one agent rotate the directive log with junk.
+const maxDirectiveIDLen = 64
+
+// plausibleDirectiveID reports whether id can be looked up at all. A false
+// is answered as a bad body: the same opaque 404, and no id in the audit.
+func plausibleDirectiveID(id string) bool { return id != "" && len(id) <= maxDirectiveIDLen }
+
 // opaque404 is the single indistinguishable failure response for every
 // consume/check miss — no existence, target, or state oracle.
 func opaque404(w http.ResponseWriter) {
@@ -96,7 +105,7 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req wire.DirectiveIDRequest
-	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.ID == "" {
+	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || !plausibleDirectiveID(req.ID) {
 		b.audit("directive", caller, "deny", "consume: bad body")
 		opaque404(w)
 		return
@@ -151,7 +160,7 @@ func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.DirectiveIDRequest
-	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.ID == "" || b.directiveVerifier == nil {
+	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || !plausibleDirectiveID(req.ID) || b.directiveVerifier == nil {
 		opaque404(w)
 		return
 	}
@@ -197,7 +206,7 @@ func (b *Broker) handleDirectivePreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req wire.DirectiveIDRequest
-	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.ID == "" {
+	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || !plausibleDirectiveID(req.ID) {
 		b.audit("directive", caller, "deny", "preview: bad body")
 		opaque404(w)
 		return

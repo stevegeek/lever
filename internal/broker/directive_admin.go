@@ -212,9 +212,21 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 			// the agent was never told about; if the notice did land after
 			// all, its id now consumes as the usual opaque not-found.
 			revoked := b.directives.RevokeDirective(st.DirectiveID)
-			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error()+" (directive revoked)")
+			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error()+" (directive revoked)", "revoked", revoked)
 			b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": false})
 			b.dirAudit.append("revoked", map[string]any{"id": st.DirectiveID, "ok": revoked, "reason": "undelivered"})
+			if !revoked {
+				// Not active any more, so nothing was revoked. The one way
+				// there in this window: the notice DID land although scion
+				// reported a failure, and the agent consumed the directive.
+				// Saying "revoked, send again" would have the operator sign
+				// a second authority for one intent.
+				state := b.directiveState(st.DirectiveID)
+				http.Error(w, "directive "+st.DirectiveID+": the notice was reported as not delivered, but the directive is no longer active (state: "+state+"). "+
+					"If the state is consumed, the notice reached the agent and the agent took the directive: do NOT send it again. "+
+					"Check `lever directive list` and the agent's session.", http.StatusBadGateway)
+				return
+			}
 			http.Error(w, "directive "+st.DirectiveID+": the notice could not be delivered to the agent, so the directive was revoked and nothing is pending. "+
 				"Check the agent with `lever doctor`, then send again.", http.StatusBadGateway)
 			return
@@ -224,6 +236,17 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	b.audit("directive", "operator", "allow", "send "+st.DirectiveID, "target", st.TargetAgent.CN, "kind", st.Action.Kind)
 	b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": delivered})
 	writeJSON(w, wire.DirectiveSendResponse{ID: st.DirectiveID, Delivered: delivered})
+}
+
+// directiveState is the stored state of directive id for an operator-facing
+// answer, or "unknown" when the store no longer lists it.
+func (b *Broker) directiveState(id string) string {
+	for _, rec := range b.directives.List(time.Now()) {
+		if rec.ID == id {
+			return string(rec.State)
+		}
+	}
+	return "unknown"
 }
 
 // handleDirectiveResolve is UNSIGNED: the UDS socket's 0600 perms are the

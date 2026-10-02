@@ -995,7 +995,7 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 
 // convergeManager acts on the observed manager record (nil when absent, already
 // settled out of any transitional phase by observeManager): create, keep,
-// resume, forced resume, the loud delete+fresh recovery, or — for a phase it
+// resume, forced resume, the `--fresh` delete+create, or — for a phase it
 // does not know — a refusal that leaves the record alone. acted reports
 // whether it started or resumed anything — what decides if the liveness gate
 // that follows must hold for the settle window (lever#31) or may take one look.

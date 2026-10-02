@@ -52,10 +52,16 @@ type fakeDirectiveRuntime struct {
 	fakeRuntime
 	messages []scion.MsgOpts
 	msgErr   error // every Message fails with it, and nothing is captured
+	// beforeMsgErr runs before msgErr is returned: what happened on the hub
+	// side of a send that scion then reported as failed.
+	beforeMsgErr func()
 }
 
 func (f *fakeDirectiveRuntime) Message(ctx context.Context, o scion.MsgOpts) error {
 	if f.msgErr != nil {
+		if f.beforeMsgErr != nil {
+			f.beforeMsgErr()
+		}
 		return f.msgErr
 	}
 	f.messages = append(f.messages, o)

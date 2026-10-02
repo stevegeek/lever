@@ -1,8 +1,10 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -275,6 +277,58 @@ func TestDirectiveWhoseNoticeFailsIsRevoked(t *testing.T) {
 	}
 	if _, ok := b.directives.Consume(id, "manager", time.Now()); ok {
 		t.Fatal("the revoked directive was consumable")
+	}
+}
+
+// TestDirectiveConsumedBeforeAReportedDeliveryFailureIsNotCalledRevoked: scion
+// can deliver the notice and still report an error. If the agent consumes the
+// directive in that window, the revoke does nothing — and the answer must not
+// say "revoked, send again", or the operator signs a second authority for one
+// intent.
+func TestDirectiveConsumedBeforeAReportedDeliveryFailureIsNotCalledRevoked(t *testing.T) {
+	b, priv, _, rt := directiveTestBroker(t)
+	client := directiveClient(serveDirectiveAdmin(t, b))
+	b.directives.BumpGeneration("manager")
+	id := "11111111-2222-4333-8444-5555555555d1"
+	rt.msgErr = errors.New("context deadline exceeded")
+	rt.beforeMsgErr = func() {
+		if _, ok := b.directives.Consume(id, "manager", time.Now()); !ok {
+			t.Error("the agent could not consume the delivered directive")
+		}
+	}
+	code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, instructionAction("x")))
+	if code != http.StatusBadGateway || !strings.Contains(string(body), "consumed") || !strings.Contains(string(body), "do NOT send it again") {
+		t.Fatalf("%d %s, want 502 that says the directive was consumed and must not be sent again", code, body)
+	}
+	if strings.Contains(string(body), "was revoked and nothing is pending") {
+		t.Fatalf("the answer claims a revoke that did not happen: %s", body)
+	}
+	if recs := b.directives.List(time.Now()); len(recs) != 1 || recs[0].State != DirectiveConsumed {
+		t.Fatalf("records %+v, want one consumed", recs)
+	}
+}
+
+// TestOverlongAgentInputsAreRefusedBeforeTheAuditLog: an agent chooses a
+// directive id and a message recipient; neither reaches a store lookup, a
+// refusal echo or an audit line at more than a name's length.
+func TestOverlongAgentInputsAreRefusedBeforeTheAuditLog(t *testing.T) {
+	long := strings.Repeat("a", 4000)
+	b, _, _, _ := directiveTestBroker(t)
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	for _, path := range []string{"/directive/consume", "/directive/check", "/directive/preview"} {
+		rec := callWorker(t, b, path, `{"id":"`+long+`"}`, "manager")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s with a 4000-byte id: %d, want the opaque 404", path, rec.Code)
+		}
+	}
+	mb, rt, mbuf := newMsgTestBroker(t, true)
+	rec := callWorker(t, mb, "/msg/send", `{"to":"`+long+`","body":"x"}`, "manager")
+	if rec.Code != http.StatusBadRequest || rec.Body.Len() > 200 || len(rt.sent) != 0 {
+		t.Fatalf("/msg/send with a 4000-byte recipient: %d, %d bytes, sent %d", rec.Code, rec.Body.Len(), len(rt.sent))
+	}
+	if strings.Contains(buf.String(), long[:200]) || strings.Contains(mbuf.String(), long[:200]) {
+		t.Fatal("an over-long agent input reached the audit log")
 	}
 }
 

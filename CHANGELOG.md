@@ -30,7 +30,9 @@ version bump moves the block under the new version heading.
   manager; the manager resumes a worker). If the notice still fails after
   the check, the directive is revoked and the answer is 502. `lever
   directive send` exits non-zero whenever the notice did not reach the
-  agent. lever does not wake the agent itself.
+  agent. lever does not wake the agent itself. If scion reports a failure
+  for a notice that did land and the agent consumed the directive in that
+  window, the answer says so and tells the operator not to send it again.
 - **A refused `lever-manager msg send` names the addresses the caller may
   use (#4)** — at most 16, then a count — and `msg send --help` states the
   address forms.
@@ -62,6 +64,11 @@ version bump moves the block under the new version heading.
 - **With `messaging.worker_to_worker: false`, a worker gets the same refusal
   for a declared peer and for an unknown name (#4).** The two texts differed,
   which let a worker probe for peer names.
+
+- **Agent-chosen strings are bounded before they reach the audit logs.** A
+  directive id longer than 64 bytes gets the usual opaque 404 without a
+  lookup or an id in the log, and a message recipient longer than 128 bytes
+  is refused: one agent could otherwise rotate the directive log with junk.
 
 ### Documentation
 

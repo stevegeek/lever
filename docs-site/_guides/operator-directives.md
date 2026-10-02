@@ -46,7 +46,7 @@ and then consumes or leaves the directive.
 | Authority | None. The content is under `preview`, never under `action` or `advisory_text`, and the note says the directive is not consumed. The reply holds no token and no grant. Only a `directive_consume` result is operator authority. |
 | State | A preview does not consume. The directive stays `active` and a later consume succeeds exactly once. Only the preview count changes. |
 | Cap | 5 previews per directive (persisted). After that the target gets `429 {"error":"preview limit reached: …"}`; other callers still get the opaque miss. A capped directive is still consumable. Previews share the per-agent directive rate limit. |
-| Audit | Each preview writes `previewed` (caller, id, kind, count) to `directives.log`; a refusal writes `preview_denied`, a capped call `preview_capped`. The `consumed` line records how many previews came first, and `lever directive list` shows `previews`. |
+| Audit | Each preview writes `previewed` (caller, id, kind, count) to `directives.log`; a refused lookup (no active match for this caller) writes `preview_denied`, a capped call `preview_capped`; a malformed, rate-limited or disabled call is in `broker.log` only. The `consumed` line records how many previews came first, and `lever directive list` shows `previews`. |
 
 The tool is in the agent image's `lever-agent` binary: rebuild the agent image to get it.
 

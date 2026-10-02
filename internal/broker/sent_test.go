@@ -376,6 +376,33 @@ func TestAnAgentsOwnPhaseTextNeverLeavesTheBroker(t *testing.T) {
 	}
 }
 
+// TestMessageToARunningRecordWithADeadContainerIsRefused: no "Sent" and no
+// sent-ledger record for a message to a worker whose container is gone while
+// the hub still says running.
+func TestMessageToARunningRecordWithADeadContainerIsRefused(t *testing.T) {
+	fleet := runningFleet()
+	for i := range fleet.agents[testInstanceProject] {
+		if fleet.agents[testInstanceProject][i].Slug == "scratch" {
+			fleet.agents[testInstanceProject][i].ContainerStatus = "Exited (137) 20 seconds ago"
+		}
+	}
+	rt := &fakeMsgRuntime{WorkerRuntime: fleet}
+	b := New(testConfig(t, withManager("manager", "assistant"), withRuntime(rt, msgWorkers...)))
+	dir := filepath.Join(t.TempDir(), "sent-ledger")
+	b.sent = &sentRecord{dir: dir}
+	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"x"}`, "manager")
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "container down") || len(rt.sent) != 0 {
+		t.Fatalf("%d %s, sent %d; want 409 that names the dead container and no send", rec.Code, rec.Body.String(), len(rt.sent))
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatal("a refused message left a sent-ledger record")
+	}
+	rec = callWorker(t, b, "/msg/send", `{"to":"worker","body":"x"}`, "manager")
+	if rec.Code != http.StatusOK || len(rt.sent) != 1 {
+		t.Fatalf("a worker with no reported container status must still get its message: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSendTimeoutsFitTheInFlightBound: every recorded send's scion call ends
 // inside sentledger.MaxSendDuration, which bounds an entry with no done line.
 func TestSendTimeoutsFitTheInFlightBound(t *testing.T) {

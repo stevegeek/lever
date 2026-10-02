@@ -157,11 +157,27 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 			// (scion.PhaseLabel): only a known phase leaves this function,
 			// so no caller can echo or audit an agent's own words as a
 			// phase.
-			return scion.PhaseLabel(a.Phase), nil
+			phase := scion.PhaseLabel(a.Phase)
+			if phase == scion.PhaseRunning && a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus) {
+				// The hub keeps a record "running" for minutes after its
+				// container died (until its own sweep marks it error). In
+				// that window a resume was a no-op and a message was "sent"
+				// to nothing (live-seen on Lima). A blank status is "cannot
+				// tell" and stays running.
+				return phaseRunningContainerDown, nil
+			}
+			return phase, nil
 		}
 	}
 	return "", nil
 }
+
+// phaseRunningContainerDown is what phaseOf reports for a record the hub
+// still calls running while it reports a container that is not live. It is
+// not a scion phase: every comparison with scion.PhaseRunning fails for it,
+// so a message is refused, and the resume verb treats it like the error
+// phase it is about to become.
+const phaseRunningContainerDown = "running, container down"
 
 // bootstrapFor mints a one-use enrolment ticket for cn and wraps it in the
 // envelope lever-agent boot consumes: the ONE construction site for a
@@ -470,10 +486,13 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		return
 	}
 	resume := b.runtime.Resume
-	if phase == scion.PhaseError {
+	if phase == scion.PhaseError || phase == phaseRunningContainerDown {
 		// Only resume --force (scion#895) recovers an error-phase record: a
 		// worker left running across `lever stop` + `lever up` comes back in
-		// this phase, and a plain resume of it answers 409.
+		// this phase, and a plain resume of it answers 409. A running record
+		// whose container died is the same case a few minutes early; if the
+		// hub does not take the forced resume yet, its refusal below tells
+		// the manager to try again.
 		resume = b.runtime.ResumeForce
 	}
 	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {

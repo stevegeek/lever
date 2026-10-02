@@ -44,6 +44,19 @@ correct behaviour those releases introduced.
 - **`lever stop` passes scion's error text through the terminal filter** in
   its three warnings, as every other command does.
 
+### Fixed
+
+- **A worker whose container died is not treated as running.** The hub keeps
+  a record `running` for some minutes after its container is gone (until its
+  own sweep marks it `error`). In that window `lever-manager agent resume`
+  answered "already running" and did nothing, and `msg send` reported "Sent"
+  for a message nobody received (seen on Lima after a container kill). When
+  the hub reports a container that is not live for a `running` record, the
+  broker now refuses the message with 409 ("phase running, container down")
+  and the resume verb tries the forced resume; if the hub does not take it
+  yet, the answer says to try again. A record with no reported container
+  status is still treated as running.
+
 ### Changed
 
 - **Exit codes for a manager that was kept.** `lever up` / `lever apply`

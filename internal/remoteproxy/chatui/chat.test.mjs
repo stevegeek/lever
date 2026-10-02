@@ -206,18 +206,6 @@ test('send: a forgotten session is retried once under the same key', async () =>
   assert.match(env.rows()[0], /again$/);
 });
 
-test('send: a replay answer (200) is not drawn from its thin body', async () => {
-  const hub = hubWith({ post: (body) => ({ status: 200, body: { id: 'r1', content: body.content, sender: 'user:op' } }) });
-  const env = await load(hub);
-  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { id: 'r1', msg: 'replayed', senderId: 'u1' })] } });
-  await type(env, 'replayed');
-  env.els.composer.dispatch('submit');
-  await tick(5);
-  await env.runTimers();
-  assert.deepEqual(env.rows().map((r) => r.split(':')[0]), ['msg mine']);
-  assert.equal(env.els.text.value, '');
-});
-
 test('send: the limit counts characters as the hub does', async () => {
   const env = await load(hubWith());
   await type(env, '😀'.repeat(16000));
@@ -341,7 +329,7 @@ test('send: only a stored message counts as sent', async () => {
     await tick(10);
     assert.equal(env.els.text.value, 'do not lose me', JSON.stringify(answer));
     assert.equal(env.store['lever-chat-draft'], 'do not lose me');
-    assert.match(env.els.error.textContent, /^Not sent: /, JSON.stringify(answer));
+    assert.match(env.els.error.textContent, /^(Not sent: |No clear answer )/, JSON.stringify(answer));
     assert.equal(env.rows().length, 0);
   }
 });
@@ -365,7 +353,7 @@ test('send: the same text sent again after an unclear answer keeps its key', asy
   await type(env, 'once only');
   env.els.composer.dispatch('submit');
   await tick(10);
-  assert.equal(env.els.error.textContent, 'Not sent: cannot reach the server');
+  assert.equal(env.els.error.textContent, 'No clear answer (cannot reach the server). The message may have arrived. Press Send again: the hub stores it only once.');
   env.els.composer.dispatch('submit');
   await tick(10);
   const posts = env.calls.filter((c) => c.method === 'POST');
@@ -551,96 +539,21 @@ function storingHub(lose) {
   return hub;
 }
 
-test('send: a message that did arrive after "Not sent" is shown as sent, and its words can be sent again', async () => {
-  const hub = storingHub((n) => n === 1);
-  const env = await load(hub);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  assert.match(env.els.error.textContent, /^Not sent/);
-  assert.equal(env.els.text.value, 'yes');
-  // The history shows it: the page takes back the error and the draft, so
-  // nothing invites a second send of the same message. It says the message
-  // may be unverified: the proxy may never have seen the hub's answer.
-  await env.poll();
-  assert.equal(env.rows().length, 1);
-  assert.match(env.els.error.textContent, /^The message did arrive\. If the manager treats it as unverified/);
-  assert.equal(env.els.text.value, '');
-  assert.equal(env.store['lever-chat-draft'], '');
-  assert.equal(env.store['lever-chat-unsent'], undefined);
-  // The same words typed now are a new answer, stored as its own message.
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  await env.runTimers();
-  assert.equal(hub.stored.length, 2);
-  assert.equal(env.rows().length, 2);
-});
-
-test('send: an older message with the same words does not settle a failed send', async () => {
-  const hub = storingHub((n) => n === 2);
-  const env = await load(hub);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  await env.poll();
-  assert.equal(env.rows().length, 1);
-  // A second "yes" fails without reaching the hub.
-  hub.parts.post = () => ({ down: true });
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  await env.poll();
-  assert.match(env.els.error.textContent, /^Not sent/);
-  assert.equal(env.els.text.value, 'yes', 'the first "yes" in the history is not this one');
-});
-
-test('send: a draft changed after a failed send is kept when the first arrives', async () => {
-  const hub = storingHub((n) => n === 1);
-  const env = await load(hub);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  await type(env, 'yes, and one more thing');
-  await env.poll();
-  assert.equal(env.els.text.value, 'yes, and one more thing');
-  assert.match(env.els.error.textContent, /^The message did arrive/);
-});
-
-test('send: a replay answer says the message may be unverified', async () => {
-  const hub = storingHub((n) => n === 1);
-  const env = await load(hub);
-  hub.parts.history = () => ({ status: 502, body: '' }); // the page cannot see that it arrived
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  assert.equal(hub.stored.length, 1);
-  assert.match(env.els.error.textContent, /^Sent, but the first attempt had no clear answer/);
-  assert.equal(env.els.text.value, '');
-});
-
-test('send: the key of an unsent message survives a reload', async () => {
-  const hub = storingHub((n) => n === 1);
-  const first = await load(hub);
-  hub.parts.history = () => ({ status: 200, body: { messages: [] } });
-  await type(first, 'yes');
-  first.els.composer.dispatch('submit');
-  await tick(10);
-  const again = await load(hub, { store: first.store });
-  assert.equal(again.els.text.value, 'yes');
-  again.els.composer.dispatch('submit');
-  await tick(10);
-  assert.equal(hub.stored.length, 1, 'the resend after a reload must go under the first key');
-  // Stored junk in its place is ignored, and removed.
-  for (const junk of ['{', 'null', '7', '{"text":1,"key":2}', '{"text":"a","key":"k"}', '{"text":"a","key":"k","conversation":"dm:agent:OLD:user:u1"}']) {
+test('send: a stored record that is junk, or for another conversation, is ignored and removed', async () => {
+  for (const junk of ['{', 'null', '7', '[]', '{"text":1,"key":2}', '{"text":"a","key":"k"}', '{"text":"a","key":"k","conversation":"dm:agent:OLD:user:u1"}',
+    '{"text":"a","key":"k","conversation":7}', '{"__proto__":{"text":"a","key":"k"}}']) {
     const env = await load(hubWith(), { store: { 'lever-chat-unsent': junk, 'lever-chat-draft': 'a' } });
     assert.equal(env.els.text.disabled, false, junk);
     env.els.composer.dispatch('submit');
     await tick(10);
     assert.notEqual(env.calls.find((c) => c.method === 'POST').body.idempotency_key, 'k', junk);
   }
+  // A good one is used.
+  const good = JSON.stringify({ text: 'a', key: 'k', conversation: KEY });
+  const env = await load(hubWith(), { store: { 'lever-chat-unsent': good, 'lever-chat-draft': 'a' } });
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.calls.find((c) => c.method === 'POST').body.idempotency_key, 'k');
 });
 
 test('send: a refused message sent again keeps its key', async () => {
@@ -725,120 +638,6 @@ test('the bootstrap failing during a check is no reason to reload', async () => 
   assert.equal(env.reloads, 0);
 });
 
-test('send: a resend before the first is seen stays one message', async () => {
-  const stored = [];
-  const hub = hubWith({
-    post: (body) => {
-      const known = stored.find((m) => m.key === body.idempotency_key);
-      if (known) return { status: 200, body: { id: known.id, content: body.content, sender: 'user:op' } };
-      stored.push({ key: body.idempotency_key, id: `s${stored.length + 1}` });
-      return { down: true };
-    },
-    history: () => ({ status: 200, body: { messages: [] } }),
-  });
-  const env = await load(hub);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  assert.equal(stored.length, 1, 'an immediate resend must not store the message twice');
-  assert.equal(env.els.text.value, '');
-});
-
-test('send: the manager saying the same words does not settle a failed send', async () => {
-  const hub = hubWith({ post: () => ({ down: true }) });
-  const env = await load(hub);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { msg: 'yes', senderId: 'a1' })] } });
-  await env.poll();
-  assert.match(env.els.error.textContent, /^Not sent/);
-  assert.equal(env.els.text.value, 'yes');
-});
-
-test('send: with no history read yet, an old message never settles a failed send', async () => {
-  // The first read fails, so the page holds no ids: every message it reads
-  // later would look new. A failed "yes" must not be taken for an old one.
-  const hub = hubWith({ history: () => ({ status: 502, body: '' }), post: () => ({ down: true }) });
-  const env = await load(hub);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { msg: 'yes', senderId: 'u1' })] } });
-  await env.poll();
-  assert.equal(env.rows().length, 1);
-  assert.equal(env.els.error.textContent, 'Not sent: cannot reach the server');
-  assert.equal(env.els.text.value, 'yes');
-});
-
-test('send: a message just sent, not yet in a history read, does not settle a second one', async () => {
-  let n = 0;
-  const hub = hubWith({ post: (body) => (++n === 1 ? { status: 201, body: { id: 's1', content: body.content, senderId: 'u1', createdAt: new Date(1.8e12).toISOString() } } : { down: true }) });
-  const env = await load(hub);
-  hub.parts.history = () => ({ status: 502, body: '' }); // s1 is known only from its 201
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  assert.match(env.els.error.textContent, /^Not sent/);
-  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { id: 's1', msg: 'yes', senderId: 'u1' })] } });
-  await env.poll();
-  assert.match(env.els.error.textContent, /^Not sent/, 's1 is the first "yes", not the second');
-  assert.equal(env.els.text.value, 'yes');
-});
-
-test('send: after a reload, a message that arrived is settled by the first read', async () => {
-  const hub = storingHub((n) => n === 1);
-  const first = await load(hub);
-  const seen = hub.parts.history;
-  hub.parts.history = () => ({ status: 200, body: { messages: [] } });
-  await type(first, 'yes');
-  first.els.composer.dispatch('submit');
-  await tick(10);
-  assert.match(first.els.error.textContent, /^Not sent/);
-  // Reload: the record comes back with the ids it knew, so the stored
-  // message in the first read is told from an old one.
-  hub.parts.history = seen;
-  const again = await load(hub, { store: first.store });
-  assert.equal(again.rows().length, 1);
-  assert.equal(again.els.text.value, '');
-  assert.match(again.els.error.textContent, /^The message did arrive/);
-  await type(again, 'yes');
-  again.els.composer.dispatch('submit');
-  await tick(10);
-  assert.equal(hub.stored.length, 2, 'the same words after that are a new message');
-});
-
-test('send: a replay of a message already on screen is said, not shown as sent', async () => {
-  // The page could not settle it (it had read no history when the send
-  // failed), but the list shows the message when the operator presses Send.
-  const hub = storingHub((n) => n === 1);
-  const seen = hub.parts.history;
-  hub.parts.history = () => ({ status: 502, body: '' });
-  const env = await load(hub);
-  await type(env, 'yes');
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  hub.parts.history = seen;
-  await env.poll();
-  assert.equal(env.rows().length, 1);
-  assert.match(env.els.error.textContent, /^Not sent/);
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  assert.equal(hub.stored.length, 1);
-  assert.match(env.els.error.textContent, /^The hub already has this message/);
-  assert.equal(env.els.text.value, 'yes', 'the draft stays: the page cannot tell a retry from a second answer');
-  // One more press is a deliberate second message.
-  env.els.composer.dispatch('submit');
-  await tick(10);
-  assert.equal(hub.stored.length, 2);
-  assert.equal(env.els.text.value, '');
-});
-
 test('send: a key is not reused for another conversation', async () => {
   // The hub keeps a key per user, not per conversation: reused after the
   // manager got a new record, it would answer for the message in the old one.
@@ -849,4 +648,128 @@ test('send: a key is not reused for another conversation', async () => {
   await tick(10);
   const post = env.calls.find((c) => c.method === 'POST');
   assert.notEqual(post.body.idempotency_key, 'old-key');
+});
+
+const UNCLEAR = /^No clear answer \(.*\)\. The message may have arrived\. Press Send again: the hub stores it only once\.$/;
+const REPLAY = /^The earlier attempt did arrive: the message is in the conversation, and nothing new was stored\./;
+
+test('send: an answer that leaves the outcome open says so; a refusal says not sent', async () => {
+  for (const [answer, want] of [
+    [{ down: true }, UNCLEAR],
+    [{ status: 502, body: 'bad gateway\n' }, UNCLEAR],
+    [{ status: 504, body: '' }, UNCLEAR],
+    [{ redirect: true }, UNCLEAR],
+    [{ status: 400, body: { error: { message: 'too long' } } }, /^Not sent: too long \(HTTP 400\)$/],
+    [{ status: 403, body: { error: { message: 'forbidden' } } }, /^Not sent: forbidden \(HTTP 403\)$/],
+    [{ status: 429, body: { error: { message: 'slow down' } } }, /^Not sent: slow down \(HTTP 429\)$/],
+  ]) {
+    const env = await load(hubWith({ post: () => answer }));
+    await type(env, 'yes');
+    env.els.composer.dispatch('submit');
+    await tick(10);
+    assert.match(env.els.error.textContent, want, JSON.stringify(answer));
+    assert.equal(env.els.text.value, 'yes', 'the draft always stays without a stored message');
+  }
+});
+
+test('send: stored but the answer was lost: the retry is told so, and nothing is stored twice', async () => {
+  const hub = storingHub((n) => n === 1);
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, UNCLEAR);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await env.runTimers();
+  assert.equal(hub.stored.length, 1);
+  assert.match(env.els.error.textContent, REPLAY);
+  assert.match(env.els.error.textContent, /If the manager treats the message as unverified, send it in other words\.$/);
+  assert.equal(env.els.text.value, 'yes', 'the draft stays: only the operator knows if this was a retry');
+  assert.equal(env.store['lever-chat-unsent'], undefined);
+  // The row comes from the history, never from the replay answer's thin body.
+  assert.deepEqual(env.rows().map((r) => r.split(':')[0]), ['msg mine']);
+  // One more press is a deliberate second message.
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 2);
+  assert.equal(env.els.text.value, '');
+  assert.equal(env.els.error.hidden, true);
+});
+
+test('send: not stored the first time: the retry stores it once and clears the draft', async () => {
+  let n = 0;
+  const env = await load(hubWith({ post: (body) => (++n === 1 ? { status: 502, body: '' } : { status: 201, body: { id: 's', content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.els.text.value, '');
+  assert.equal(env.els.error.hidden, true);
+  assert.equal(env.rows().length, 1);
+});
+
+test('send: the history never settles a send: only the hub\'s answer to the key does', async () => {
+  // Whatever the history shows after a failed send, the page concludes
+  // nothing: the error and the draft stay. Each of these once looked like
+  // "it arrived" to a rule that guessed, and none of them is the failed send.
+  const own = (over) => msg(1, { msg: 'yes', senderId: 'u1', ...over });
+  for (const [name, firstRead, laterRead] of [
+    ['an old message with the same words, first read failed', { status: 502, body: '' }, { status: 200, body: { messages: [own()] } }],
+    ['a first read that was not a history at all', { status: 200, body: '<html>front</html>' }, { status: 200, body: { messages: [own()] } }],
+    ['the same words from another tab', { status: 200, body: { messages: [] } }, { status: 200, body: { messages: [own({ id: 'other-tab' })] } }],
+    ['the hub\'s hidden mention copy', { status: 200, body: { messages: [] } }, { status: 200, body: { messages: [own({ type: 'mention' })] } }],
+    ['a row with no id', { status: 200, body: { messages: [] } }, { status: 200, body: { messages: [own({ id: undefined })] } }],
+    ['the manager saying the same words', { status: 200, body: { messages: [] } }, { status: 200, body: { messages: [own({ senderId: 'a1' })] } }],
+  ]) {
+    const hub = hubWith({ history: () => firstRead, post: () => ({ down: true }) });
+    const env = await load(hub);
+    await type(env, 'yes');
+    env.els.composer.dispatch('submit');
+    await tick(10);
+    hub.parts.history = () => laterRead;
+    await env.poll();
+    await env.poll();
+    assert.match(env.els.error.textContent, UNCLEAR, name);
+    assert.equal(env.els.text.value, 'yes', name);
+    assert.ok(env.store['lever-chat-unsent'], name);
+  }
+});
+
+test('send: a message stored a moment ago does not answer for the next one', async () => {
+  // "yes" is stored (201). A second "yes" fails without reaching the hub. It
+  // gets its own key, so the retry stores it: two messages, as sent.
+  const hub = storingHub((n) => false);
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const store = hub.parts.post;
+  hub.parts.post = () => ({ down: true });
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, UNCLEAR);
+  hub.parts.post = store;
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 2);
+  assert.equal(env.els.text.value, '');
+});
+
+test('send: after a reload the retry still goes under the first key', async () => {
+  const hub = storingHub((n) => n === 1);
+  const first = await load(hub);
+  await type(first, 'yes');
+  first.els.composer.dispatch('submit');
+  await tick(10);
+  const again = await load(hub, { store: first.store });
+  assert.equal(again.els.text.value, 'yes');
+  assert.equal(again.rows().length, 1, 'the stored message shows; the page still concludes nothing');
+  assert.equal(again.els.error.hidden, true);
+  again.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 1);
+  assert.match(again.els.error.textContent, REPLAY);
 });

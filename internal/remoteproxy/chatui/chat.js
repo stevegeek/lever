@@ -56,13 +56,16 @@ const el = {
 const messages = new Map();
 const fromHistory = new Set(); // ids a history read returned (not a send answer)
 let generation = 0; // counts restarts of the list
-// A send that did not get a clear "stored": {text, key, conversation, known}.
-// key is its idempotency key, reused if the same text goes again to the same
-// conversation (the hub keeps a key per user, not per conversation). known is
-// every message id the page held at that moment, so the message turning up
-// later in the history can be told from an older one with the same words; it
-// is null when the page had not read the history yet, and then nothing is
-// ever concluded from the history.
+// A send that did not get a clear "stored": {text, key, conversation}. key is
+// its idempotency key. While the same text goes again to the same
+// conversation it goes under that key, so the hub stores it once whether or
+// not the first attempt arrived (the hub keeps a key per user, not per
+// conversation, hence the conversation here).
+//
+// The page concludes nothing from this record. It never decides from the
+// history that a send "must have arrived": only the hub's answer to the
+// same key says so. A wrong guess there would clear a draft that was never
+// stored.
 let unsent = null;
 let boot = null;
 let loaded = false; // a history read has succeeded
@@ -250,36 +253,18 @@ function applyHistory(res) {
   }
   const first = !loaded;
   loaded = true;
-  settleUnsent(items);
   for (const m of items) fromHistory.add(m.id);
   if (mergeMessages(messages, items) || restart) render(first);
 }
 
-// Fixed texts for the two ways a message turns out to be stored although the
-// page never got a clear answer. In both, the answer may have been lost
-// before the proxy, which then recorded nothing: the manager cannot verify
-// such a message, and the operator is told what to do about it.
-const UNVERIFIED = 'If the manager treats it as unverified, send it again in other words.';
-const NOTE_ARRIVED = `The message did arrive. ${UNVERIFIED}`;
-const NOTE_REPLAY = `Sent, but the first attempt had no clear answer. ${UNVERIFIED}`;
-const NOTE_ALREADY = 'The hub already has this message: it is in the conversation above and was not stored again. Send once more to post the same words a second time.';
-const MAX_KNOWN = 2000; // ids kept with an unsent record across a reload
-
-// settleUnsent notices that a send the page gave up on did reach the hub: the
-// message is in the history now. The page then says so (no draft left to
-// send a second time), and the same words typed again are a new message.
-function settleUnsent(items) {
-  if (!unsent || !unsent.known) return;
-  const arrived = items.some((m) => m.senderId === boot.userId && messageText(m) === unsent.text && !unsent.known.has(m.id));
-  if (!arrived) return;
-  if (el.text.value.trim() === unsent.text) {
-    el.text.value = '';
-    saveDraft();
-    grow();
-  }
-  showError(NOTE_ARRIVED);
-  setUnsent(null);
-}
+// What the page says when the hub answers a repeated key: the earlier
+// attempt was stored, and nothing was stored now. The draft stays, since the
+// page cannot tell a retry from the same words meant a second time. The
+// answer to that first attempt may have been lost before the proxy, which
+// then recorded nothing, so the manager may be unable to verify the message.
+const NOTE_REPLAY = 'The earlier attempt did arrive: the message is in the conversation, and nothing new was stored. ' +
+  'Press Send again only to post the same words a second time. ' +
+  'If the manager treats the message as unverified, send it in other words.';
 
 function setUnsent(v) {
   unsent = v;
@@ -288,8 +273,7 @@ function setUnsent(v) {
       sessionStorage.removeItem(UNSENT_KEY);
       return;
     }
-    const known = v.known && v.known.size <= MAX_KNOWN ? [...v.known] : null;
-    sessionStorage.setItem(UNSENT_KEY, JSON.stringify({ text: v.text, key: v.key, conversation: v.conversation, known }));
+    sessionStorage.setItem(UNSENT_KEY, JSON.stringify(v));
   } catch {
     // storage is off: the record just does not survive a reload
   }
@@ -306,8 +290,7 @@ function loadUnsent() {
       sessionStorage.removeItem(UNSENT_KEY);
       return;
     }
-    const known = Array.isArray(v.known) ? new Set(v.known.filter((id) => typeof id === 'string')) : null;
-    unsent = { text: v.text, key: v.key, conversation: v.conversation, known };
+    unsent = { text: v.text, key: v.key, conversation: v.conversation };
   } catch {
     // storage is off, or holds something else
   }
@@ -435,6 +418,13 @@ function post(text, key) {
   });
 }
 
+// unclear reports whether an answer leaves open that the hub stored the
+// message: no answer at all, or a fault somewhere between the page and the
+// hub. A refusal by the hub (4xx) is not unclear.
+function unclear(res) {
+  return !res.status || res.status >= 500;
+}
+
 // sent reports whether the hub's answer says the message is stored: a 201
 // with the message, or the 200 the hub gives a repeated key. Any other
 // answer, a 2xx included, is not a stored message.
@@ -459,15 +449,7 @@ async function send() {
   if (!res) return; // the page is reloading onto the manager's new record
   if (res.blocked) {
     showError(`Not sent: ${res.blocked}`);
-  } else if (res.status === 200 && sent(res) && (fromHistory.has(res.body.id) || messages.has(res.body.id))) {
-    // The hub had this key already, and the message it names is in the list:
-    // the earlier attempt was stored and is on screen. Nothing new was
-    // stored now. Whether this press was a retry or the same words meant a
-    // second time, the page cannot tell, so it says what happened and keeps
-    // the draft; the record is gone, so one more press sends a new message.
-    setUnsent(null);
-    showError(NOTE_ALREADY);
-  } else if (sent(res)) {
+  } else if (res.status === 201) {
     setUnsent(null);
     // Clear only what was sent: text typed while the send was under way stays.
     if (el.text.value.trim() === text) {
@@ -475,13 +457,18 @@ async function send() {
       saveDraft();
       grow();
     }
-    // 201 carries the stored message. The answer to a repeated key carries
-    // less, so the history read shows that one instead.
-    if (res.status === 201 && res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
-    // The hub had this key already: an earlier attempt was stored, and its
-    // answer never came back.
-    if (res.status === 200) showError(NOTE_REPLAY);
+    if (res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
     refreshSoon();
+  } else if (sent(res)) {
+    // The hub had this key already (see NOTE_REPLAY). The record goes, so
+    // one more press is a new message.
+    setUnsent(null);
+    showError(NOTE_REPLAY);
+    refreshSoon();
+  } else if (unclear(res)) {
+    showError(`No clear answer (${errorText(res.status, res.body)}). The message may have arrived. Press Send again: the hub stores it only once.`);
+    refreshSoon();
+    void readState();
   } else {
     showError(`Not sent: ${errorText(res.status, res.body)}`);
     void readState();
@@ -512,10 +499,7 @@ async function deliver(text) {
     await api(historyPath(''));
     res = await post(text, key);
   }
-  // known needs a history read to mean anything: before one, the page holds
-  // no ids, and every older message would look new. It also takes the ids of
-  // send answers, which no history read may have returned yet.
-  if (!sent(res)) setUnsent({ text, key, conversation: boot.conversation, known: loaded ? new Set([...fromHistory, ...messages.keys()]) : null });
+  if (!sent(res)) setUnsent({ text, key, conversation: boot.conversation });
   return res;
 }
 

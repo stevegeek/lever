@@ -17,6 +17,10 @@
 #   LEVER_IMAGE_ARCH      arch the staged binaries were built for (default: arm64);
 #                         selects the scion-claude:<arch> base and the output tag
 #   LEVER_IMAGE_FORCE=1   overwrite an existing scionlocal/lever-claude:<arch>
+#   LEVER_IMAGE_VERSION   lever version the staged binaries were built from, baked
+#                         as the lever_version label (`make lever-image` sets it;
+#                         unset leaves the label empty and `lever doctor` skips
+#                         its host-vs-image version check)
 set -euo pipefail
 
 CTX="$(cd "$(dirname "$0")" && pwd)"
@@ -82,6 +86,6 @@ EOF
   exit 1
 fi
 
-docker build --build-arg "SCION_BASE=${BASE}" -t "lever-claude:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
+docker build --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" -t "lever-claude:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
 
 echo "Built lever-claude:${ARCH} (+ ${TARGET})."

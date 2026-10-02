@@ -35,6 +35,13 @@ LEVER_VERSION := $(shell sed -n 's/^const Version = "\(.*\)"/\1/p' internal/cli/
 LEVER_AGENT_LDFLAGS := -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION)
 # lever-tool-db reports its version the same way (captool serverInfo).
 LEVER_TOOL_DB_LDFLAGS := -X main.Version=$(LEVER_VERSION)
+# The agent image's lever_version label: what `lever version` prints for this
+# source (release const, short commit, -dirty for an uncommitted tree), so
+# `lever doctor` can compare the image's binaries with the host lever (#18).
+# Lazy (`=`), so git only runs for the targets that build an image.
+LEVER_GIT_REV = $(shell git rev-parse --short=12 HEAD 2>/dev/null)
+LEVER_GIT_DIRTY = $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
+LEVER_IMAGE_VERSION = $(LEVER_VERSION)$(if $(LEVER_GIT_REV), ($(LEVER_GIT_REV)$(LEVER_GIT_DIRTY)))
 
 # Cross-compile the in-jail agent helper for the OrbStack arm64 VM. Used by the
 # acceptance gate (run directly in the VM) and, baked into the
@@ -86,7 +93,14 @@ lever-image:
 		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
-	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+
+# Print the lever_version label value for this source, for an instance image
+# build that stages the binaries itself (`make lever-image-bins`) and so sets
+# the label in its own Dockerfile.
+.PHONY: lever-image-version
+lever-image-version:
+	@echo "$(LEVER_IMAGE_VERSION)"
 
 # Build + install the host control plane (PATH). The in-jail binaries
 # (lever-manager, lever-agent, lever-tool-db) ship baked into the agent image
@@ -106,7 +120,7 @@ test-integration:
 
 .PHONY: test-apikey-e2e
 test-apikey-e2e: install lever-image-bins
-	bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
+	LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
 	bash tools/test/apikey-e2e.sh
 
 # Live lima-backend e2e: §19 `lever acceptance` six checks under both egress

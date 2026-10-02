@@ -74,4 +74,12 @@ ENV DISABLE_AUTOUPDATER=1
 # as scion (uid 1000) maps writable under rootless.
 RUN chown -R scion:scion /home/scion
 
+# The lever version the binaries above were built from (what `lever version`
+# prints for that source; build-lever-image.sh passes it). `lever doctor`
+# compares it with the host lever: the image tag names only the arch, so a
+# build from another lever source replaces it unseen. Declared last so a new
+# value re-runs no layer.
+ARG LEVER_VERSION=
+LABEL lever_version="${LEVER_VERSION}"
+
 USER scion

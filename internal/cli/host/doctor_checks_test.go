@@ -1039,6 +1039,65 @@ func TestCheckClaudeVersionFromTar(t *testing.T) {
 	}
 }
 
+// checkLeverVersion (lever#18): the image tag names only the arch, so the
+// label is the one thing that says which lever its in-jail binaries came
+// from. A different release fails; no label, or an image that cannot be
+// read, is "not checked".
+func TestCheckLeverVersion(t *testing.T) {
+	const host, hostFull = "0.28.1", "0.28.1 (21ff051f651f)"
+	for _, tc := range []struct {
+		name   string
+		label  string
+		err    error
+		ok     bool
+		detail string
+		fix    string
+	}{
+		{"same build", "0.28.1 (21ff051f651f)", nil, true, "the same as the host", ""},
+		{"same release, other commit", "0.28.1 (0123456789ab-dirty)", nil, true, "same release 0.28.1 (the release is compared, not the commit)", ""},
+		{"same release, bare label", "0.28.1\n", nil, true, "same release 0.28.1", ""},
+		{"older release", "0.7.0 (26c87cd47dcc)", nil, false, "carries lever 0.7.0 (26c87cd47dcc) but the host lever is 0.28.1 (21ff051f651f)", "make lever-image"},
+		{"newer release", "0.29.0", nil, false, "carries lever 0.29.0 but the host lever is", "lever up --fresh"},
+		{"release is a prefix of the host's", "0.28", nil, false, "carries lever 0.28 ", "lever apply"},
+		{"no label", "", nil, true, "not checked: no lever_version label on img — the image predates the label", ""},
+		{"blank label", "  \n", nil, true, "not checked: no lever_version label", ""},
+		{"inspect fails", "", fmt.Errorf("no such image\nsecond line"), true, "not checked (could not inspect image img): no such image", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := doctorProbes{leverVersion: func(string) (string, error) { return tc.label, tc.err }}
+			r := checkLeverVersion("img", "", host, hostFull, p)
+			if r.name != "agent lever version" || r.ok != tc.ok || !strings.Contains(r.detail, tc.detail) || !strings.Contains(r.fix, tc.fix) {
+				t.Fatalf("got %+v, want ok=%v detail~%q fix~%q", r, tc.ok, tc.detail, tc.fix)
+			}
+			if tc.ok && r.fix != "" {
+				t.Fatalf("a passing row carries no fix: %+v", r)
+			}
+			if strings.Contains(r.detail, "second line") {
+				t.Fatalf("only the first line of an inspect error belongs in the detail: %q", r.detail)
+			}
+		})
+	}
+}
+
+// With an image_tar the label comes from the archive, as for the Claude
+// version: the host docker probe is never consulted and the detail names the
+// tar.
+func TestCheckLeverVersionFromTar(t *testing.T) {
+	p := doctorProbes{
+		leverVersion:    func(string) (string, error) { return "", fmt.Errorf("docker: command not found") },
+		leverVersionTar: func(tar, ref string) (string, error) { return "0.27.0 (aaaaaaaaaaaa)", nil },
+	}
+	got := checkLeverVersion("img", "/inst/images/img.tar", "0.28.1", "0.28.1 (21ff051f651f)", p)
+	if got.ok || !strings.Contains(got.detail, "0.27.0") || !strings.Contains(got.detail, "img.tar") {
+		t.Fatalf("expected a failure naming the version and the tar, got %+v", got)
+	}
+	p.leverVersionTar = func(tar, ref string) (string, error) { return "", fmt.Errorf("image %q is not in the tar", ref) }
+	got = checkLeverVersion("img", "/inst/images/img.tar", "0.28.1", "0.28.1 (21ff051f651f)", p)
+	if !got.ok || !strings.Contains(got.detail, "not checked") || !strings.Contains(got.detail, "img.tar") {
+		t.Fatalf("a tar read failure is not-checked, naming the tar, got %+v", got)
+	}
+}
+
 // rolesYes/rolesNo stand in for the scion capability probe.
 func rolesYes(context.Context) (bool, error) { return true, nil }
 func rolesNo(context.Context) (bool, error)  { return false, nil }
@@ -1282,19 +1341,24 @@ func TestCheckListeningProcess(t *testing.T) {
 	}
 }
 
-// claudeVersionProbe maps docker's "<no value>" (label absent) to "", and
-// reports docker's own stderr on failure.
-func TestClaudeVersionProbe(t *testing.T) {
+// imageLabelProbe asks for the one label it is given, maps docker's
+// "<no value>" (label absent) to "", and reports docker's own stderr on
+// failure.
+func TestImageLabelProbe(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} labelled", proc.Result{Stdout: "2.1.207\n"})
 	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} bare", proc.Result{Stdout: "<no value>\n"})
-	if v, err := claudeVersionProbe(r, "labelled"); err != nil || v != "2.1.207" {
+	r.Script("docker image inspect --format {{index .Config.Labels \"lever_version\"}} labelled", proc.Result{Stdout: "0.28.1 (21ff051f651f)\n"})
+	if v, err := imageLabelProbe(r, "labelled", claudeVersionLabel); err != nil || v != "2.1.207" {
 		t.Fatalf("labelled: %q, %v", v, err)
 	}
-	if v, err := claudeVersionProbe(r, "bare"); err != nil || v != "" {
+	if v, err := imageLabelProbe(r, "labelled", leverVersionLabel); err != nil || v != "0.28.1 (21ff051f651f)" {
+		t.Fatalf("lever label: %q, %v", v, err)
+	}
+	if v, err := imageLabelProbe(r, "bare", claudeVersionLabel); err != nil || v != "" {
 		t.Fatalf("bare: %q, %v", v, err)
 	}
-	if _, err := claudeVersionProbe(r, "missing"); err == nil {
+	if _, err := imageLabelProbe(r, "missing", claudeVersionLabel); err == nil {
 		t.Fatal("an inspect failure must be an error")
 	}
 }
@@ -1304,6 +1368,7 @@ func TestClaudeVersionProbe(t *testing.T) {
 func TestProductionProbesWiresEveryField(t *testing.T) {
 	p := productionProbes(proc.NewFakeRunner())
 	if p.dial == nil || p.goVersion == nil || p.nodeToolchain == nil || p.claudeVersion == nil ||
+		p.claudeVersionTar == nil || p.leverVersion == nil || p.leverVersionTar == nil ||
 		p.remoteHealthz == nil || p.remoteLogin == nil || p.remoteJailLogin == nil {
 		t.Fatalf("productionProbes left a probe nil: %+v", p)
 	}

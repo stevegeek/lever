@@ -1389,13 +1389,16 @@ func TestCheckManagerLive(t *testing.T) {
 		wantFix    string
 	}{
 		{"running", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days"}), true, "Up 4 days", ""},
-		// Activity and its age ride along on a live manager; a dead activity
-		// (the hub's stall sweeper, lever#34) fails the row even though the
-		// container is up — that is the DNS-dead / bad-credential shape.
+		// Activity and its age ride along on a live manager. Crashed and
+		// offline fail the row even though the container is up. Stalled
+		// passes with both readings named: the hub's stall sweeper marks an
+		// idle manager stalled too, and an idle instance must not fail doctor.
 		{"running, completed", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "completed", LastActivityEvent: now.Add(-3 * time.Minute)}), true, "activity completed, 3m0s ago", ""},
 		{"running, working long", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "working", LastActivityEvent: now.Add(-40 * time.Minute)}), true, "activity working, 40m0s ago", ""},
 		{"running, no event time", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "waiting_for_input"}), true, "activity waiting_for_input)", ""},
-		{"running, stalled", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "stalled", LastActivityEvent: now.Add(-6 * time.Minute)}), false, "stalled", "guest DNS"},
+		{"running, stalled", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "stalled", LastActivityEvent: now.Add(-6 * time.Minute)}), true, "idle at its prompt, or a turn that never finished", ""},
+		{"running, stalled for days", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "stalled", LastActivityEvent: now.Add(-47 * time.Hour)}), true, "activity stalled, 47h0m0s ago", ""},
+		{"running, offline", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "offline"}), false, "offline", "lever attach"},
 		{"running, crashed", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "crashed"}), false, "crashed", "lever attach"},
 		{"absent", listing(scion.Agent{Slug: "scratch", Phase: "running", ContainerStatus: "Up 1 second"}), false, "no record", "lever up"},
 		{"crashed", listing(scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}), false, `phase "error"`, "--force"},

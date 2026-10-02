@@ -37,8 +37,18 @@ version bump moves the block under the new version heading.
   use (#4)** — at most 16, then a count — and `msg send --help` states the
   address forms.
 
+- **`lever doctor` no longer fails on an idle manager.** The "manager agent"
+  row failed when the hub reported the manager's activity as `stalled`. The
+  hub's stall sweeper marks a manager that sits idle at its prompt the same
+  way as one stuck in a call, so an instance nobody talked to for a while
+  failed doctor and any scripted gate on it. The row now passes for
+  `stalled` and names both readings (`lever attach` shows which); `crashed`
+  and `offline` still fail it, and the `guest DNS` row still fails on the
+  cause of a turn that cannot finish.
+
 ### Added
 
+- **`lever --version`** prints what `lever version` prints.
 - **`directive_preview`: read a directive before you consume it (#17).** The
   target agent can read a pending directive's verified action without
   consuming it. The gate and the opaque not-found are the same as for

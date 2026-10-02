@@ -737,12 +737,13 @@ type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, er
 // The activity is the hub-side state scion's Claude Code hooks report
 // (scion.Activity*), shown with the age of its last change. A harness that
 // cannot complete a turn — no guest DNS (lever#34), an expired credential, an
-// API outage — keeps a live container and a running phase, and until this row
-// read the activity it was indistinguishable from a healthy idle manager. The
-// hub's stall sweeper marks such a harness stalled after its threshold
-// (default 5 min); that, crashed and offline fail the row. A long working
-// stays green: real work looks the same from here, and `lever attach` is the
-// way to tell. A list error is "not checked" (a down jail or hub is another
+// API outage — keeps a live container and a running phase. Crashed and
+// offline fail the row. Stalled does not: the hub's stall sweeper marks a
+// stuck harness stalled after its threshold (default 5 min), but it marks an
+// idle manager the same way, so the row passes and names both readings (the
+// `guest DNS` row is the one that fails on the lever#34 cause). A long
+// working stays green: real work looks the same from here, and `lever
+// attach` is the way to tell. A list error is "not checked" (a down jail or hub is another
 // check's finding), never a pass.
 func checkManagerLive(ctx context.Context, project, name string, list agentLister, now time.Time) checkResult {
 	const check = "manager agent"
@@ -759,6 +760,18 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 			"run `lever up`"}
 	}
 	if a.Phase == "running" && scionpkg.ContainerLive(a.ContainerStatus) {
+		if a.Activity == scionpkg.ActivityStalled {
+			// The hub's stall sweeper also marks a manager that sits idle at
+			// its prompt: after a turn that ended without a waiting-for-input
+			// report, the record reads working, then stalled. That is the
+			// normal state of an instance nobody talked to for a while, so it
+			// cannot fail the row (it failed scripted deploy gates on idle
+			// instances). A turn that never finishes looks the same from
+			// here; the detail says how to tell them apart.
+			return checkResult{check, true,
+				fmt.Sprintf("%q is running (container %s; %s) — idle at its prompt, or a turn that never finished: `lever attach` shows which (a stuck LLM call ends in `Request timed out`; then check the `guest DNS` and credential rows)",
+					name, a.ContainerStatus, activityAge(a, now)), ""}
+		}
 		if scionpkg.ActivityDead(a.Activity) {
 			return checkResult{check, false,
 				fmt.Sprintf("manager %q has a live container but its harness is %s — it is not completing turns", name, activityAge(a, now)),

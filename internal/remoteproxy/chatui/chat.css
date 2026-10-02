@@ -123,4 +123,4 @@ textarea {
   font-weight: 600;
 }
 #send:disabled { opacity: 0.45; }
-.error { max-width: 760px; margin: 0 auto 6px; font-size: 14px; color: var(--bad); overflow-wrap: anywhere; white-space: pre-wrap; }
+.error { max-width: 760px; margin: 0 auto 6px; font-size: 14px; color: var(--bad); overflow-wrap: anywhere; }

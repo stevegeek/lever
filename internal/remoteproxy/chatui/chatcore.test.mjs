@@ -139,6 +139,9 @@ test('errorText prefers the hub message and bounds it', () => {
   assert.equal(errorText(500, { error: { message: 7 } }), 'request failed (HTTP 500)');
   assert.equal(errorText(0, 'cannot reach the server'), 'cannot reach the server');
   assert.equal(errorText(0, null), 'no answer');
+  // A body cannot break out of the sentence it is quoted in.
+  assert.equal(errorText(400, 'x)\n\nSent.\r\n\tAll good'), 'x) Sent. All good (HTTP 400)');
+  assert.equal(errorText(400, { error: { message: 'a' + '\n'.repeat(298) + 'b' } }), 'a b (HTTP 400)');
   assert.ok(errorText(500, 'x'.repeat(5000)).length < 320);
 });
 

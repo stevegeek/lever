@@ -854,24 +854,79 @@ test('send: a first attempt the hub refuses is done with: its key is not kept', 
   assert.equal(env.store['lever-chat-unsent'], undefined);
 });
 
-test('send: a 200 on a first attempt is no replay, whatever it carries', async () => {
-  // The hub answers 200 only to a key it has seen. A new key that gets one
-  // is some other answer, and never "the earlier attempt did arrive".
-  const env = await load(hubWith({ post: () => ({ status: 200, body: { id: 'x', content: 'yes' } }) }));
+test('send: a success that is no stored message leaves the outcome open and keeps the key', async () => {
+  // The hub answers 200 only to a key it has seen. A first attempt that gets
+  // one was answered by something else (a front that replayed the post, a
+  // cache): the hub may hold the message. Never "the earlier attempt did
+  // arrive", never "not sent", and the other party's body is not shown.
+  let n = 0;
+  const hub = hubWith({ post: (body) => (++n === 1 ? { status: 200, body: { id: 'x', content: '<b>front page</b>' } } : { status: 200, body: { id: 'x', content: body.content, sender: 'user:op' } }) });
+  const env = await load(hub);
   await type(env, 'yes');
   env.els.composer.dispatch('submit');
   await tick(10);
-  assert.equal(env.els.error.textContent, 'Not sent: unexpected answer (HTTP 200)');
+  assert.equal(env.els.error.textContent, 'No clear answer (unexpected answer (HTTP 200)). The message may have arrived: look at the conversation first. A repeat within a few minutes is stored only once.');
   assert.equal(env.els.text.value, 'yes');
   assert.equal(env.rows().length, 0);
+  assert.ok(env.store['lever-chat-unsent']);
+  // The retry goes under the same key, and the hub's replay is told.
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const posts = env.calls.filter((c) => c.method === 'POST');
+  assert.equal(posts[0].body.idempotency_key, posts[1].body.idempotency_key);
+  assert.match(env.els.error.textContent, REPLAY);
+});
+
+test('send: a retry answered with a success that is no message does not show its body', async () => {
+  let n = 0;
+  const env = await load(hubWith({ post: () => (++n === 1 ? { down: true } : { status: 200, body: '<html>Sent. All good.</html>' }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, /^No clear answer \(unexpected answer \(HTTP 200\)\)\./);
+  assert.equal(env.els.text.value, 'yes');
+});
+
+test('send: a replay after two attempts with no clear answer says there may be two copies', async () => {
+  // Attempt 1 arrives, answer lost. The hub forgets the key. Attempt 2
+  // arrives, answer lost. Attempt 3 gets the replay of attempt 2.
+  let n = 0;
+  const env = await load(hubWith({ post: (body) => (++n < 3 ? { status: 504, body: '' } : { status: 200, body: { id: 's2', content: body.content, sender: 'user:op' } }) }));
+  await type(env, 'yes');
+  for (let i = 0; i < 3; i++) {
+    env.els.composer.dispatch('submit');
+    await tick(10);
+  }
+  assert.match(env.els.error.textContent, REPLAY);
+  assert.match(env.els.error.textContent, / If it shows twice above, two attempts arrived\.$/);
+  // After one unclear attempt the replay is of that attempt: one copy.
+  let m = 0;
+  const one = await load(hubWith({ post: (body) => (++m < 2 ? { status: 504, body: '' } : { status: 200, body: { id: 's1', content: body.content, sender: 'user:op' } }) }));
+  await type(one, 'yes');
+  for (let i = 0; i < 2; i++) {
+    one.els.composer.dispatch('submit');
+    await tick(10);
+  }
+  assert.match(one.els.error.textContent, REPLAY);
+  assert.doesNotMatch(one.els.error.textContent, /shows twice/);
+  // The count survives a reload with the record.
+  const stored = JSON.stringify({ text: 'yes', key: 'k', conversation: KEY, tries: 2 });
+  const again = await load(hubWith({ post: (body) => ({ status: 200, body: { id: 's2', content: body.content, sender: 'user:op' } }) }), { store: { 'lever-chat-unsent': stored, 'lever-chat-draft': 'yes' } });
+  again.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(again.els.error.textContent, /shows twice/);
 });
 
 test('a held Enter is one send', async () => {
   const env = await load(hubWith());
   await type(env, 'once');
-  for (let i = 0; i < 5; i++) env.els.text.dispatch('keydown', { key: 'Enter', repeat: i > 0 });
+  let prevented = 0;
+  for (let i = 0; i < 5; i++) env.els.text.dispatch('keydown', { key: 'Enter', repeat: i > 0, preventDefault: () => prevented++ });
   await tick(10);
   assert.equal(env.count('POST', HISTORY), 1);
+  assert.equal(prevented, 5, 'the repeats add no new lines to the draft either');
   await type(env, 'twice');
   env.els.text.dispatch('keydown', { key: 'Enter', repeat: true });
   await tick(10);

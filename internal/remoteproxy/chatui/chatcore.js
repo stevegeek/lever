@@ -129,7 +129,9 @@ export function errorText(status, body) {
   } else {
     msg = str(body);
   }
-  msg = msg.trim().slice(0, 300);
+  // One line: the text is another party's, and sits inside a sentence of
+  // the page's own. A line break in it must not set a part of it apart.
+  msg = msg.replace(/\s+/g, ' ').trim().slice(0, 300);
   // Status 0 is the page's own word for "no answer": nothing to name.
   if (!status) return msg || 'no answer';
   return msg ? `${msg} (HTTP ${status})` : `request failed (HTTP ${status})`;

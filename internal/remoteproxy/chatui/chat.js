@@ -269,6 +269,7 @@ function applyHistory(res) {
 // And when the hub stores, under a key sent before, a message it should have
 // known if the earlier attempt arrived within its memory: both may be there.
 const NOTE_STORED_AGAIN = 'Stored now. An earlier attempt had no clear answer: if the message shows twice above, both arrived.';
+const NOTE_TWICE = 'If it shows twice above, two attempts arrived.';
 const NOTE_REPLAY = 'The earlier attempt did arrive: the message is in the conversation, and nothing new was stored. ' +
   'Press Send again only to post the same words a second time. ' +
   'If the manager treats the message as unverified, send it in other words.';
@@ -297,7 +298,7 @@ function loadUnsent() {
       sessionStorage.removeItem(UNSENT_KEY);
       return;
     }
-    unsent = { text: v.text, key: v.key, conversation: v.conversation };
+    unsent = { text: v.text, key: v.key, conversation: v.conversation, tries: Number.isInteger(v.tries) && v.tries > 0 ? v.tries : 1 };
   } catch {
     // storage is off, or holds something else
   }
@@ -432,6 +433,19 @@ function unclear(res) {
   return !res.status || res.status >= 500;
 }
 
+// okButNoMessage reports whether an answer claims success without being the
+// stored message or a replay of it. Something answered in the hub's place
+// (a front, a cache), so whether the hub stored the message is open.
+function okButNoMessage(res) {
+  return res.status >= 200 && res.status < 300 && res.status !== 201;
+}
+
+// reason is the text for an answer that is not a stored message. The body
+// of a success that is none is not shown: it is some other party's page.
+function reason(res) {
+  return okButNoMessage(res) ? `unexpected answer (HTTP ${res.status})` : errorText(res.status, res.body);
+}
+
 // replayed reports whether the hub's answer is the one it gives a key it has
 // seen: 200, naming the message it stored then.
 function replayed(res) {
@@ -453,7 +467,7 @@ async function send() {
   sending = false;
   el.send.disabled = false;
   if (!out) return; // the page is reloading onto the manager's new record
-  const { res, again } = out;
+  const { res, again, earlier } = out;
   if (out.blocked) {
     showError(`Not sent: ${out.blocked}`);
   } else if (res.status === 201) {
@@ -475,24 +489,26 @@ async function send() {
     // The hub had this key already (see NOTE_REPLAY). The record goes, so
     // one more press is a new message; Send rests a moment first, so a
     // double tap is not that press.
+    // After two or more attempts with no clear answer, the hub may have
+    // forgotten the key between them and stored the message each time.
     setUnsent(null);
-    showError(NOTE_REPLAY);
+    showError(earlier > 1 ? `${NOTE_REPLAY} ${NOTE_TWICE}` : NOTE_REPLAY);
     hold();
     refreshSoon();
-  } else if (unclear(res)) {
-    showError(`No clear answer (${errorText(res.status, res.body)}). The message may have arrived: look at the conversation first. A repeat within a few minutes is stored only once.`);
+  } else if (unclear(res) || okButNoMessage(res)) {
+    showError(`No clear answer (${reason(res)}). The message may have arrived: look at the conversation first. A repeat within a few minutes is stored only once.`);
     refreshSoon();
     void readState();
   } else if (again) {
     // The hub refused this attempt, which says nothing about the earlier
     // one. The key stays, so a later press still finds it.
-    showError(`This attempt was refused (${errorText(res.status, res.body)}). An earlier attempt had no clear answer and may have arrived: look at the conversation.`);
+    showError(`This attempt was refused (${reason(res)}). An earlier attempt had no clear answer and may have arrived: look at the conversation.`);
     void readState();
   } else {
-    // A first attempt the hub refused, or answered with something that is
-    // no stored message: nothing arrived, and the key is done with.
+    // A first attempt the hub refused: nothing arrived, and the key is
+    // done with.
     setUnsent(null);
-    showError(`Not sent: ${res.status >= 200 && res.status < 300 ? `unexpected answer (HTTP ${res.status})` : errorText(res.status, res.body)}`);
+    showError(`Not sent: ${reason(res)}`);
     void readState();
   }
   el.text.focus();
@@ -528,9 +544,11 @@ async function deliver(text) {
   // hub stores it once if it still knows the key.
   const again = !!unsent && unsent.text === text && unsent.conversation === boot.conversation;
   const key = again ? unsent.key : newKey();
+  // How many times this text went out before under this key.
+  const earlier = again ? unsent.tries : 0;
   // The record is written BEFORE the post: a reload while the post is under
   // way restores the draft, and must restore its key with it.
-  setUnsent({ text, key, conversation: boot.conversation });
+  setUnsent({ text, key, conversation: boot.conversation, tries: earlier + 1 });
   let res = await post(text, key);
   if (res.status === 401 || res.redirect) {
     // The hub forgot the session. A read makes the proxy sign in again;
@@ -538,7 +556,7 @@ async function deliver(text) {
     await api(historyPath(''));
     res = await post(text, key);
   }
-  return { res, again };
+  return { res, again, earlier };
 }
 
 function grow() {
@@ -610,11 +628,11 @@ el.text.addEventListener('keydown', (ev) => {
   // Enter sends where there is a keyboard and a mouse; on a touch screen it
   // is a new line, and the button sends. An Enter that confirms an input
   // method's composition is neither (keyCode 229 is how Safari reports it).
-  // A held key repeats: one press, one send.
-  if (ev.key !== 'Enter' || ev.shiftKey || ev.isComposing || ev.keyCode === 229 || ev.repeat) return;
+  if (ev.key !== 'Enter' || ev.shiftKey || ev.isComposing || ev.keyCode === 229) return;
   if (!window.matchMedia('(pointer: fine)').matches) return;
   ev.preventDefault();
-  void send();
+  // A held key repeats: one press, one send (and no new lines from it).
+  if (!ev.repeat) void send();
 });
 el.older.addEventListener('click', () => void loadOlder());
 window.addEventListener('resize', grow);

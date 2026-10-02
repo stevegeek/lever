@@ -34,6 +34,7 @@ const RETRY_MS = 5000; // between attempts to start while the hub is away
 // Longer than the proxy's own wait for the hub (45 s), so the proxy's answer
 // comes first when there is one.
 const REQUEST_MS = 60000;
+const HOLD_MS = 2000; // Send stays off this long after the replay note
 const DRAFT_KEY = 'lever-chat-draft';
 const UNSENT_KEY = 'lever-chat-unsent';
 
@@ -56,11 +57,13 @@ const el = {
 const messages = new Map();
 const fromHistory = new Set(); // ids a history read returned (not a send answer)
 let generation = 0; // counts restarts of the list
-// A send that did not get a clear "stored": {text, key, conversation}. key is
+// The send that is under way or got no clear "stored": {text, key,
+// conversation}, written before the post and kept in sessionStorage. key is
 // its idempotency key. While the same text goes again to the same
-// conversation it goes under that key, so the hub stores it once whether or
-// not the first attempt arrived (the hub keeps a key per user, not per
-// conversation, hence the conversation here).
+// conversation it goes under that key, so the hub stores it once if it still
+// knows the key (it keeps one for a few minutes, per user, not per
+// conversation, hence the conversation here). One record: an unclear send of
+// one text, then another text, then the first again gets a new key.
 //
 // The page concludes nothing from this record. It never decides from the
 // history that a send "must have arrived": only the hub's answer to the
@@ -73,6 +76,7 @@ let reading = false; // a history read is under way
 let readAgain = false; // something changed while it was
 let olderCursor = '';
 let sending = false;
+let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
 
@@ -262,6 +266,9 @@ function applyHistory(res) {
 // page cannot tell a retry from the same words meant a second time. The
 // answer to that first attempt may have been lost before the proxy, which
 // then recorded nothing, so the manager may be unable to verify the message.
+// And when the hub stores, under a key sent before, a message it should have
+// known if the earlier attempt arrived within its memory: both may be there.
+const NOTE_STORED_AGAIN = 'Stored now. An earlier attempt had no clear answer: if the message shows twice above, both arrived.';
 const NOTE_REPLAY = 'The earlier attempt did arrive: the message is in the conversation, and nothing new was stored. ' +
   'Press Send again only to post the same words a second time. ' +
   'If the manager treats the message as unverified, send it in other words.';
@@ -425,16 +432,15 @@ function unclear(res) {
   return !res.status || res.status >= 500;
 }
 
-// sent reports whether the hub's answer says the message is stored: a 201
-// with the message, or the 200 the hub gives a repeated key. Any other
-// answer, a 2xx included, is not a stored message.
-function sent(res) {
-  return res.status === 201 || (res.status === 200 && !!res.body && typeof res.body === 'object' && typeof res.body.id === 'string');
+// replayed reports whether the hub's answer is the one it gives a key it has
+// seen: 200, naming the message it stored then.
+function replayed(res) {
+  return res.status === 200 && !!res.body && typeof res.body === 'object' && typeof res.body.id === 'string';
 }
 
 async function send() {
   const text = el.text.value.trim();
-  if (sending || !text || !boot || !boot.conversation) return;
+  if (sending || held || !text || !boot || !boot.conversation) return;
   const length = messageLength(text);
   if (length > MAX_MESSAGE) {
     showError(`The message is ${length} characters; the limit is ${MAX_MESSAGE}.`);
@@ -443,41 +449,70 @@ async function send() {
   sending = true;
   el.send.disabled = true;
   showError('');
-  const res = await deliver(text);
+  const out = await deliver(text);
   sending = false;
   el.send.disabled = false;
-  if (!res) return; // the page is reloading onto the manager's new record
-  if (res.blocked) {
-    showError(`Not sent: ${res.blocked}`);
+  if (!out) return; // the page is reloading onto the manager's new record
+  const { res, again } = out;
+  if (out.blocked) {
+    showError(`Not sent: ${out.blocked}`);
   } else if (res.status === 201) {
+    // Stored now. This is the only answer that clears the draft, and only
+    // the text that was sent: text typed while the send was under way stays.
     setUnsent(null);
-    // Clear only what was sent: text typed while the send was under way stays.
     if (el.text.value.trim() === text) {
       el.text.value = '';
       saveDraft();
       grow();
     }
     if (res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
+    // The hub keeps a key for a few minutes, in memory. A 201 for a key
+    // sent before means it did not know the key: the earlier attempt never
+    // arrived, or it did and the hub has forgotten. The page cannot tell.
+    if (again) showError(NOTE_STORED_AGAIN);
     refreshSoon();
-  } else if (sent(res)) {
+  } else if (again && replayed(res)) {
     // The hub had this key already (see NOTE_REPLAY). The record goes, so
-    // one more press is a new message.
+    // one more press is a new message; Send rests a moment first, so a
+    // double tap is not that press.
     setUnsent(null);
     showError(NOTE_REPLAY);
+    hold();
     refreshSoon();
   } else if (unclear(res)) {
-    showError(`No clear answer (${errorText(res.status, res.body)}). The message may have arrived. Press Send again: the hub stores it only once.`);
+    showError(`No clear answer (${errorText(res.status, res.body)}). The message may have arrived: look at the conversation first. A repeat within a few minutes is stored only once.`);
     refreshSoon();
     void readState();
+  } else if (again) {
+    // The hub refused this attempt, which says nothing about the earlier
+    // one. The key stays, so a later press still finds it.
+    showError(`This attempt was refused (${errorText(res.status, res.body)}). An earlier attempt had no clear answer and may have arrived: look at the conversation.`);
+    void readState();
   } else {
-    showError(`Not sent: ${errorText(res.status, res.body)}`);
+    // A first attempt the hub refused, or answered with something that is
+    // no stored message: nothing arrived, and the key is done with.
+    setUnsent(null);
+    showError(`Not sent: ${res.status >= 200 && res.status < 300 ? `unexpected answer (HTTP ${res.status})` : errorText(res.status, res.body)}`);
     void readState();
   }
   el.text.focus();
 }
 
-// deliver posts text to the conversation and returns the hub's answer, or
-// null when the page reloads instead.
+// hold keeps Send off for a moment after a note the operator must read
+// before pressing again.
+function hold() {
+  held = true;
+  el.send.disabled = true;
+  setTimeout(() => {
+    held = false;
+    if (!sending) el.send.disabled = false;
+  }, HOLD_MS);
+}
+
+// deliver posts text to the conversation. It returns {res, again}: the hub's
+// answer, and whether this text had been posted before under the same key
+// with no clear answer. {blocked} means nothing was posted; null means the
+// page reloads instead.
 async function deliver(text) {
   // The manager may have a new hub record since the page loaded (`lever up
   // --fresh`). The hub would store a message for the old one and deliver it
@@ -490,8 +525,12 @@ async function deliver(text) {
     return null;
   }
   // The same text sent again after an unclear answer keeps its key, so the
-  // hub stores it once even if the first attempt did reach it.
-  const key = unsent && unsent.text === text && unsent.conversation === boot.conversation ? unsent.key : newKey();
+  // hub stores it once if it still knows the key.
+  const again = !!unsent && unsent.text === text && unsent.conversation === boot.conversation;
+  const key = again ? unsent.key : newKey();
+  // The record is written BEFORE the post: a reload while the post is under
+  // way restores the draft, and must restore its key with it.
+  setUnsent({ text, key, conversation: boot.conversation });
   let res = await post(text, key);
   if (res.status === 401 || res.redirect) {
     // The hub forgot the session. A read makes the proxy sign in again;
@@ -499,8 +538,7 @@ async function deliver(text) {
     await api(historyPath(''));
     res = await post(text, key);
   }
-  if (!sent(res)) setUnsent({ text, key, conversation: boot.conversation });
-  return res;
+  return { res, again };
 }
 
 function grow() {
@@ -572,7 +610,8 @@ el.text.addEventListener('keydown', (ev) => {
   // Enter sends where there is a keyboard and a mouse; on a touch screen it
   // is a new line, and the button sends. An Enter that confirms an input
   // method's composition is neither (keyCode 229 is how Safari reports it).
-  if (ev.key !== 'Enter' || ev.shiftKey || ev.isComposing || ev.keyCode === 229) return;
+  // A held key repeats: one press, one send.
+  if (ev.key !== 'Enter' || ev.shiftKey || ev.isComposing || ev.keyCode === 229 || ev.repeat) return;
   if (!window.matchMedia('(pointer: fine)').matches) return;
   ev.preventDefault();
   void send();

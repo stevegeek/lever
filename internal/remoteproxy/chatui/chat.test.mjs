@@ -353,7 +353,7 @@ test('send: the same text sent again after an unclear answer keeps its key', asy
   await type(env, 'once only');
   env.els.composer.dispatch('submit');
   await tick(10);
-  assert.equal(env.els.error.textContent, 'No clear answer (cannot reach the server). The message may have arrived. Press Send again: the hub stores it only once.');
+  assert.equal(env.els.error.textContent, 'No clear answer (cannot reach the server). The message may have arrived: look at the conversation first. A repeat within a few minutes is stored only once.');
   env.els.composer.dispatch('submit');
   await tick(10);
   const posts = env.calls.filter((c) => c.method === 'POST');
@@ -650,7 +650,8 @@ test('send: a key is not reused for another conversation', async () => {
   assert.notEqual(post.body.idempotency_key, 'old-key');
 });
 
-const UNCLEAR = /^No clear answer \(.*\)\. The message may have arrived\. Press Send again: the hub stores it only once\.$/;
+const UNCLEAR = /^No clear answer \(.*\)\. The message may have arrived: look at the conversation first\. A repeat within a few minutes is stored only once\.$/;
+const STORED_AGAIN = 'Stored now. An earlier attempt had no clear answer: if the message shows twice above, both arrived.';
 const REPLAY = /^The earlier attempt did arrive: the message is in the conversation, and nothing new was stored\./;
 
 test('send: an answer that leaves the outcome open says so; a refusal says not sent', async () => {
@@ -681,12 +682,20 @@ test('send: stored but the answer was lost: the retry is told so, and nothing is
   assert.match(env.els.error.textContent, UNCLEAR);
   env.els.composer.dispatch('submit');
   await tick(10);
-  await env.runTimers();
   assert.equal(hub.stored.length, 1);
   assert.match(env.els.error.textContent, REPLAY);
   assert.match(env.els.error.textContent, /If the manager treats the message as unverified, send it in other words\.$/);
   assert.equal(env.els.text.value, 'yes', 'the draft stays: only the operator knows if this was a retry');
   assert.equal(env.store['lever-chat-unsent'], undefined);
+  // Send rests after the note: a double tap is not the deliberate press.
+  assert.equal(env.els.send.disabled, true);
+  env.els.composer.dispatch('submit');
+  env.els.text.dispatch('keydown', { key: 'Enter' });
+  await tick(10);
+  assert.equal(hub.stored.length, 1);
+  assert.match(env.els.error.textContent, REPLAY, 'the note is still there to read');
+  await env.runTimers();
+  assert.equal(env.els.send.disabled, false);
   // The row comes from the history, never from the replay answer's thin body.
   assert.deepEqual(env.rows().map((r) => r.split(':')[0]), ['msg mine']);
   // One more press is a deliberate second message.
@@ -706,8 +715,11 @@ test('send: not stored the first time: the retry stores it once and clears the d
   env.els.composer.dispatch('submit');
   await tick(10);
   assert.equal(env.els.text.value, '');
-  assert.equal(env.els.error.hidden, true);
   assert.equal(env.rows().length, 1);
+  // The hub did not know the key. Either the first attempt never arrived, or
+  // it did and the hub has forgotten: the page cannot tell, and says so.
+  assert.equal(env.els.error.textContent, STORED_AGAIN);
+  assert.equal(env.store['lever-chat-unsent'], undefined);
 });
 
 test('send: the history never settles a send: only the hub\'s answer to the key does', async () => {
@@ -772,4 +784,96 @@ test('send: after a reload the retry still goes under the first key', async () =
   await tick(10);
   assert.equal(hub.stored.length, 1);
   assert.match(again.els.error.textContent, REPLAY);
+});
+
+test('send: a reload while the post is under way keeps the key with the draft', async () => {
+  // The hub stores the message; the page reloads before the answer. The
+  // draft comes back, and it must come back with its key, or Send stores a
+  // second copy without a word.
+  const hub = storingHub(() => false);
+  let release;
+  const store = hub.parts.post;
+  hub.parts.post = (body) => {
+    const answer = store(body);
+    return new Promise((r) => (release = () => r(answer)));
+  };
+  const first = await load(hub);
+  await type(first, 'yes');
+  first.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 1);
+  assert.ok(first.store['lever-chat-unsent'], 'the record is written before the post');
+  hub.parts.post = store;
+  const again = await load(hub, { store: { ...first.store } });
+  assert.equal(again.els.text.value, 'yes');
+  again.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 1, 'the same key: the hub answers with the message it has');
+  assert.match(again.els.error.textContent, REPLAY);
+  release();
+});
+
+test('send: the hub forgot the key: the second copy is stored, and said', async () => {
+  // An unclear answer, the message did arrive, and by the retry the hub no
+  // longer knows the key (it keeps keys in memory for a few minutes).
+  let n = 0;
+  const env = await load(hubWith({ post: (body) => (++n === 1 ? { status: 504, body: '' } : { status: 201, body: { id: `s${n}`, content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.els.error.textContent, STORED_AGAIN);
+  assert.equal(env.els.text.value, '');
+  // A first send that is simply stored says nothing.
+  await type(env, 'next');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.els.error.hidden, true);
+});
+
+test('send: a retry the hub refuses does not say the earlier attempt failed', async () => {
+  let n = 0;
+  const env = await load(hubWith({ post: () => (++n === 1 ? { down: true } : { status: 429, body: { error: { message: 'slow down' } } }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.els.error.textContent, 'This attempt was refused (slow down (HTTP 429)). An earlier attempt had no clear answer and may have arrived: look at the conversation.');
+  assert.equal(env.els.text.value, 'yes');
+  assert.ok(env.store['lever-chat-unsent'], 'the key stays for the next press');
+});
+
+test('send: a first attempt the hub refuses is done with: its key is not kept', async () => {
+  const env = await load(hubWith({ post: () => ({ status: 400, body: { error: { message: 'no' } } }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.els.error.textContent, 'Not sent: no (HTTP 400)');
+  assert.equal(env.store['lever-chat-unsent'], undefined);
+});
+
+test('send: a 200 on a first attempt is no replay, whatever it carries', async () => {
+  // The hub answers 200 only to a key it has seen. A new key that gets one
+  // is some other answer, and never "the earlier attempt did arrive".
+  const env = await load(hubWith({ post: () => ({ status: 200, body: { id: 'x', content: 'yes' } }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.els.error.textContent, 'Not sent: unexpected answer (HTTP 200)');
+  assert.equal(env.els.text.value, 'yes');
+  assert.equal(env.rows().length, 0);
+});
+
+test('a held Enter is one send', async () => {
+  const env = await load(hubWith());
+  await type(env, 'once');
+  for (let i = 0; i < 5; i++) env.els.text.dispatch('keydown', { key: 'Enter', repeat: i > 0 });
+  await tick(10);
+  assert.equal(env.count('POST', HISTORY), 1);
+  await type(env, 'twice');
+  env.els.text.dispatch('keydown', { key: 'Enter', repeat: true });
+  await tick(10);
+  assert.equal(env.count('POST', HISTORY), 1, 'a repeat alone sends nothing');
 });

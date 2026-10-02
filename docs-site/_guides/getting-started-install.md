@@ -43,8 +43,9 @@ CLAUDE_CODE_VERSION` in the Dockerfile) and disables the in-container auto-updat
 self-update; upgrades happen by rebuild. To bump: edit the ARG (or pass `--build-arg
 CLAUDE_CODE_VERSION=X.Y.Z`), rebuild the image with `make lever-image LEVER_IMAGE_FORCE=1` (the
 build script refuses to overwrite an existing `scionlocal/lever-claude:<arch>` without it),
-`lever apply`, and power-cycle the manager
-(`lever stop && lever up` — the conversation is preserved on OrbStack). Don't rely on the scion
+`lever apply`, and recreate the manager on the new image with `lever up --fresh` — a record keeps
+the image it was created with, so `lever stop && lever up` resumes the old one. `--fresh` discards
+the manager's conversation; back it up first if you want it. Don't rely on the scion
 base image's copy: it installs claude unpinned, so it's whatever was current when that base was
 last rebuilt.
 

@@ -29,7 +29,13 @@ const PAGE = 50; // messages per history request
 const POLL_MS = 20000; // state + history safety poll while the page shows
 const REFRESH_GAP_MS = 1500; // at most one history read per gap on a burst
 const RETRY_MS = 5000; // between attempts to start while the hub is away
+// No request may wait for ever: a phone that changes network mid-request can
+// leave one that never settles, and the page reads and sends one at a time.
+// Longer than the proxy's own wait for the hub (45 s), so the proxy's answer
+// comes first when there is one.
+const REQUEST_MS = 60000;
 const DRAFT_KEY = 'lever-chat-draft';
+const UNSENT_KEY = 'lever-chat-unsent';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -50,7 +56,11 @@ const el = {
 const messages = new Map();
 const fromHistory = new Set(); // ids a history read returned (not a send answer)
 let generation = 0; // counts restarts of the list
-let lastFailed = null; // {text, key} of a send that got no clear answer
+// A send that did not get a clear "stored": {text, key, known}. key is its
+// idempotency key, reused if the same text goes again; known is the ids the
+// list held then (null after a reload), so the message turning up later in
+// the history can be told from an older one with the same words.
+let unsent = null;
 let boot = null;
 let loaded = false; // a history read has succeeded
 let reading = false; // a history read is under way
@@ -67,10 +77,14 @@ let streamFailed = false;
 // with a redirect to its login page; followed, that ends in a page and a
 // 200, which would read as success. It comes back as {redirect: true}.
 async function api(path, init) {
+  const limit = new AbortController();
+  const timer = setTimeout(() => limit.abort(), REQUEST_MS);
   try {
-    const res = await fetch(path, { credentials: 'same-origin', redirect: 'manual', headers: { Accept: 'application/json' }, ...init });
+    const res = await fetch(path, { credentials: 'same-origin', redirect: 'manual', signal: limit.signal, headers: { Accept: 'application/json' }, ...init });
     if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
-      return { ok: false, status: res.status, redirect: true, body: 'the hub asked to sign in again' };
+      // The proxy signs in to the hub again by itself on a read, so a
+      // redirect that reaches the page is the front's own sign-in.
+      return { ok: false, status: 0, redirect: true, body: 'sign-in is needed again: reload the page' };
     }
     const raw = await res.text();
     let body = raw;
@@ -81,7 +95,9 @@ async function api(path, init) {
     }
     return { ok: res.ok, status: res.status, body };
   } catch {
-    return { ok: false, status: 0, body: 'cannot reach the server' };
+    return { ok: false, status: 0, body: limit.signal.aborted ? 'no answer in time' : 'cannot reach the server' };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -231,8 +247,47 @@ function applyHistory(res) {
   }
   const first = !loaded;
   loaded = true;
+  settleUnsent(items);
   for (const m of items) fromHistory.add(m.id);
   if (mergeMessages(messages, items) || restart) render(first);
+}
+
+// settleUnsent notices that a send the page gave up on did reach the hub: the
+// message is in the history now. The page then says so (no error, no draft
+// left to send a second time), and the same words typed again are a new
+// message.
+function settleUnsent(items) {
+  if (!unsent || !unsent.known) return;
+  const arrived = items.some((m) => m.senderId === boot.userId && messageText(m) === unsent.text && !unsent.known.has(m.id));
+  if (!arrived) return;
+  if (el.text.value.trim() === unsent.text) {
+    el.text.value = '';
+    saveDraft();
+    grow();
+  }
+  showError('');
+  setUnsent(null);
+}
+
+function setUnsent(v) {
+  unsent = v;
+  try {
+    if (v) sessionStorage.setItem(UNSENT_KEY, JSON.stringify({ text: v.text, key: v.key }));
+    else sessionStorage.removeItem(UNSENT_KEY);
+  } catch {
+    // storage is off: the key just does not survive a reload
+  }
+}
+
+// loadUnsent restores the key of a send that had no clear answer, so that
+// after a reload the same draft still goes under the same key.
+function loadUnsent() {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(UNSENT_KEY) || 'null');
+    if (v && typeof v.text === 'string' && typeof v.key === 'string') unsent = { text: v.text, key: v.key, known: null };
+  } catch {
+    // storage is off, or holds something else
+  }
 }
 
 const refreshSoon = makeCoalescer(() => void refresh(), REFRESH_GAP_MS);
@@ -379,8 +434,10 @@ async function send() {
   sending = false;
   el.send.disabled = false;
   if (!res) return; // the page is reloading onto the manager's new record
-  if (sent(res)) {
-    lastFailed = null;
+  if (res.blocked) {
+    showError(`Not sent: ${res.blocked}`);
+  } else if (sent(res)) {
+    setUnsent(null);
     // Clear only what was sent: text typed while the send was under way stays.
     if (el.text.value.trim() === text) {
       el.text.value = '';
@@ -390,6 +447,10 @@ async function send() {
     // 201 carries the stored message. The answer to a repeated key carries
     // less, so the history read shows that one instead.
     if (res.status === 201 && res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
+    // The hub had this key already: an earlier attempt was stored, and its
+    // answer never came back. If it got lost before the proxy, the proxy
+    // did not record the message, and the manager cannot verify it.
+    if (res.status === 200) showError('Sent, but the first attempt had no clear answer. If the manager treats this message as unverified, send it again in other words.');
     refreshSoon();
   } else {
     showError(`Not sent: ${errorText(res.status, res.body)}`);
@@ -405,7 +466,7 @@ async function deliver(text) {
   // --fresh`). The hub would store a message for the old one and deliver it
   // to nobody, so ask first. The draft is kept across the reload.
   const now = await readBoot();
-  if (now.error) return { ok: false, status: 0, body: now.error };
+  if (now.error) return { blocked: now.error };
   if (movedOn(now)) {
     saveDraft();
     location.reload();
@@ -413,7 +474,7 @@ async function deliver(text) {
   }
   // The same text sent again after an unclear answer keeps its key, so the
   // hub stores it once even if the first attempt did reach it.
-  const key = lastFailed && lastFailed.text === text ? lastFailed.key : newKey();
+  const key = unsent && unsent.text === text ? unsent.key : newKey();
   let res = await post(text, key);
   if (res.status === 401 || res.redirect) {
     // The hub forgot the session. A read makes the proxy sign in again;
@@ -421,7 +482,7 @@ async function deliver(text) {
     await api(historyPath(''));
     res = await post(text, key);
   }
-  if (!sent(res)) lastFailed = { text, key };
+  if (!sent(res)) setUnsent({ text, key, known: new Set(fromHistory) });
   return res;
 }
 
@@ -472,6 +533,7 @@ async function start() {
   }
   showNotice('');
   loadDraft();
+  loadUnsent();
   el.text.disabled = false;
   el.send.disabled = false;
   grow();

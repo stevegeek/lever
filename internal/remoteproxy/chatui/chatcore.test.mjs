@@ -137,6 +137,8 @@ test('errorText prefers the hub message and bounds it', () => {
   assert.equal(errorText(502, 'bad gateway\n'), 'bad gateway (HTTP 502)');
   assert.equal(errorText(500, null), 'request failed (HTTP 500)');
   assert.equal(errorText(500, { error: { message: 7 } }), 'request failed (HTTP 500)');
+  assert.equal(errorText(0, 'cannot reach the server'), 'cannot reach the server');
+  assert.equal(errorText(0, null), 'no answer');
   assert.ok(errorText(500, 'x'.repeat(5000)).length < 320);
 });
 

@@ -365,7 +365,7 @@ test('send: the same text sent again after an unclear answer keeps its key', asy
   await type(env, 'once only');
   env.els.composer.dispatch('submit');
   await tick(10);
-  assert.match(env.els.error.textContent, /Not sent: cannot reach the server/);
+  assert.equal(env.els.error.textContent, 'Not sent: cannot reach the server');
   env.els.composer.dispatch('submit');
   await tick(10);
   const posts = env.calls.filter((c) => c.method === 'POST');
@@ -429,8 +429,9 @@ test('send: the bootstrap cannot be read: nothing is posted, the draft stays', a
   env.els.composer.dispatch('submit');
   await tick(10);
   assert.equal(env.count('POST', ''), 0);
-  assert.match(env.els.error.textContent, /^Not sent: cannot resolve the manager agent/);
+  assert.equal(env.els.error.textContent, 'Not sent: cannot resolve the manager agent (HTTP 502)');
   assert.equal(env.els.text.value, 'hold on');
+  assert.equal(env.els.send.disabled, false);
 });
 
 test('a sent message does not hide a hole behind it', async () => {
@@ -463,6 +464,7 @@ test('a "Load earlier" answer that lands after a restart is dropped', async () =
   await env.poll(); // the restart
   releaseOlder();
   await tick(5);
+  assert.equal(env.els.older.disabled, false, 'the button comes back even when its answer is dropped');
   assert.equal(env.rows().length, 50);
   assert.match(env.rows()[0], /msg 251$/);
   // The cursor is the new list's, so the next "Load earlier" continues from it.
@@ -527,4 +529,227 @@ test('no hub record: the fields are off even if the browser restored them on', a
   const env = await load(hubWith({ boot: () => ({ status: 200, body: { login: 'op', userId: 'u1', agent: { name: 'boss', id: '' }, console: '/agents' } }) }), { fieldsEnabled: true });
   assert.equal(env.els.text.disabled, true);
   assert.equal(env.els.send.disabled, true);
+});
+
+// storingHub keeps what it is sent, as the hub does: a key it has seen gets
+// the 200 replay answer. lose(n) makes the answer to post number n vanish.
+function storingHub(lose) {
+  const stored = [];
+  let posts = 0;
+  const hub = hubWith({
+    post: (body) => {
+      posts++;
+      const known = stored.find((m) => m.key === body.idempotency_key);
+      if (known) return { status: 200, body: { id: known.id, content: body.content, sender: 'user:op' } };
+      stored.push({ key: body.idempotency_key, id: `s${stored.length + 1}`, text: body.content });
+      if (lose(posts)) return { down: true };
+      return { status: 201, body: { id: `s${stored.length}`, content: body.content, senderId: 'u1', createdAt: new Date(1.8e12 + stored.length).toISOString() } };
+    },
+    history: () => ({ status: 200, body: { messages: stored.map((m, i) => msg(i, { id: m.id, msg: m.text, senderId: 'u1' })).reverse() } }),
+  });
+  hub.stored = stored;
+  return hub;
+}
+
+test('send: a message that did arrive after "Not sent" is shown as sent, and its words can be sent again', async () => {
+  const hub = storingHub((n) => n === 1);
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, /^Not sent/);
+  assert.equal(env.els.text.value, 'yes');
+  // The history shows it: the page takes back the error and the draft, so
+  // nothing invites a second send of the same message.
+  await env.poll();
+  assert.equal(env.rows().length, 1);
+  assert.equal(env.els.error.hidden, true);
+  assert.equal(env.els.text.value, '');
+  assert.equal(env.store['lever-chat-draft'], '');
+  assert.equal(env.store['lever-chat-unsent'], undefined);
+  // The same words typed now are a new answer, stored as its own message.
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await env.runTimers();
+  assert.equal(hub.stored.length, 2);
+  assert.equal(env.rows().length, 2);
+});
+
+test('send: an older message with the same words does not settle a failed send', async () => {
+  const hub = storingHub((n) => n === 2);
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await env.poll();
+  assert.equal(env.rows().length, 1);
+  // A second "yes" fails without reaching the hub.
+  hub.parts.post = () => ({ down: true });
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await env.poll();
+  assert.match(env.els.error.textContent, /^Not sent/);
+  assert.equal(env.els.text.value, 'yes', 'the first "yes" in the history is not this one');
+});
+
+test('send: a draft changed after a failed send is kept when the first arrives', async () => {
+  const hub = storingHub((n) => n === 1);
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await type(env, 'yes, and one more thing');
+  await env.poll();
+  assert.equal(env.els.text.value, 'yes, and one more thing');
+  assert.equal(env.els.error.hidden, true);
+});
+
+test('send: a replay answer says the message may be unverified', async () => {
+  const hub = storingHub((n) => n === 1);
+  const env = await load(hub);
+  hub.parts.history = () => ({ status: 502, body: '' }); // the page cannot see that it arrived
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 1);
+  assert.match(env.els.error.textContent, /^Sent, but the first attempt had no clear answer/);
+  assert.equal(env.els.text.value, '');
+});
+
+test('send: the key of an unsent message survives a reload', async () => {
+  const hub = storingHub((n) => n === 1);
+  const first = await load(hub);
+  hub.parts.history = () => ({ status: 200, body: { messages: [] } });
+  await type(first, 'yes');
+  first.els.composer.dispatch('submit');
+  await tick(10);
+  const again = await load(hub, { store: first.store });
+  assert.equal(again.els.text.value, 'yes');
+  again.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 1, 'the resend after a reload must go under the first key');
+  // Stored junk in its place is ignored.
+  for (const junk of ['{', 'null', '7', '{"text":1,"key":2}']) {
+    const env = await load(hubWith(), { store: { 'lever-chat-unsent': junk } });
+    assert.equal(env.els.text.disabled, false, junk);
+  }
+});
+
+test('send: a refused message sent again keeps its key', async () => {
+  let n = 0;
+  const env = await load(hubWith({ post: (body) => (++n === 1 ? { status: 500, body: 'boom' } : { status: 201, body: { id: 's', content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }) }));
+  await type(env, 'retry me');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const posts = env.calls.filter((c) => c.method === 'POST');
+  assert.equal(posts[0].body.idempotency_key, posts[1].body.idempotency_key);
+});
+
+test('a request that never answers is given up on, and the page goes on', async () => {
+  const hub = hubWith();
+  const env = await load(hub);
+  const never = () => new Promise(() => {});
+  // A history read hangs: later signals must still get a read.
+  hub.parts.history = never;
+  await env.poll();
+  const stuck = env.count('GET', HISTORY);
+  await env.poll();
+  assert.equal(env.count('GET', HISTORY), stuck, 'one read at a time');
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1)] } });
+  await env.runTimers(Infinity); // the time limit passes
+  await env.poll();
+  assert.equal(env.rows().length, 1, 'reads resume after the hung one is dropped');
+  // A send whose bootstrap check hangs does not lock the composer for ever.
+  hub.parts.boot = never;
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  assert.equal(env.els.send.disabled, true);
+  await env.runTimers(Infinity);
+  assert.equal(env.els.send.disabled, false);
+  assert.equal(env.els.error.textContent, 'Not sent: no answer in time');
+  assert.equal(env.els.text.value, 'hello');
+  // A hung "Load earlier" gives the button back too.
+  hub.parts.boot = () => ({ status: 200, body: bootBody() });
+  hub.parts.history = (path) => (path.includes('cursor=') ? never() : { status: 200, body: { messages: page(100), nextCursor: 'C1' } });
+  await env.poll();
+  env.els.older.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.older.disabled, true);
+  await env.runTimers(Infinity);
+  assert.equal(env.els.older.disabled, false);
+});
+
+test('a finished request leaves no time limit behind', async () => {
+  const env = await load(hubWith());
+  await env.runTimers();
+  assert.deepEqual(env.timers.filter((t) => t.ms > 10000), []);
+});
+
+test('a redirect on a read is never taken for an answer', async () => {
+  // The front's own sign-in lapsed: every request is redirected.
+  for (const part of ['boot', 'history', 'agent']) {
+    for (const answer of [{ redirect: true }, { status: 302, body: '' }]) {
+      const env = await load(hubWith({ [part]: () => answer }));
+      if (part === 'boot') {
+        assert.equal(env.els.notice.textContent, 'The chat page cannot start yet: sign-in is needed again: reload the page. Trying again.');
+        assert.equal(env.els.text.disabled, true);
+      } else if (part === 'history') {
+        assert.match(env.els.notice.textContent, /Cannot read the conversation: sign-in is needed again: reload the page$/);
+        assert.equal(env.rows().length, 0);
+      } else {
+        assert.equal(env.els.state.className, 'state bad');
+      }
+    }
+  }
+});
+
+test('the bootstrap failing during a check is no reason to reload', async () => {
+  const hub = hubWith();
+  const env = await load(hub);
+  hub.parts.agent = () => ({ status: 404, body: '' });
+  for (const boot of [() => ({ status: 502, body: 'x' }), () => ({ down: true }), () => ({ redirect: true }), () => ({ status: 200, body: 'null' })]) {
+    hub.parts.boot = boot;
+    await env.poll();
+  }
+  assert.equal(env.reloads, 0);
+});
+
+test('send: a resend before the first is seen stays one message', async () => {
+  const stored = [];
+  const hub = hubWith({
+    post: (body) => {
+      const known = stored.find((m) => m.key === body.idempotency_key);
+      if (known) return { status: 200, body: { id: known.id, content: body.content, sender: 'user:op' } };
+      stored.push({ key: body.idempotency_key, id: `s${stored.length + 1}` });
+      return { down: true };
+    },
+    history: () => ({ status: 200, body: { messages: [] } }),
+  });
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(stored.length, 1, 'an immediate resend must not store the message twice');
+  assert.equal(env.els.text.value, '');
+});
+
+test('send: the manager saying the same words does not settle a failed send', async () => {
+  const hub = hubWith({ post: () => ({ down: true }) });
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { msg: 'yes', senderId: 'a1' })] } });
+  await env.poll();
+  assert.match(env.els.error.textContent, /^Not sent/);
+  assert.equal(env.els.text.value, 'yes');
 });

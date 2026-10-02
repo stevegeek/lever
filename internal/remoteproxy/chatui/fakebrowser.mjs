@@ -54,7 +54,7 @@ export async function load(hub, opts = {}) {
   globalThis.document = doc;
   globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener() {} };
   globalThis.location = { origin: 'https://mac.ts.net', reload: () => env.reloads++ };
-  globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)) };
+  globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)), removeItem: (k) => delete env.store[k] };
   globalThis.EventSource = class {
     static CLOSED = 2;
     constructor(url) {
@@ -76,7 +76,9 @@ export async function load(hub, opts = {}) {
     const method = init.method || 'GET';
     env.calls.push({ method, path, body: init.body ? JSON.parse(init.body) : undefined });
     env.log.push(`${method} ${path}`);
-    const r = await hub(method, path, init.body ? JSON.parse(init.body) : undefined);
+    // As a browser does: an aborted request rejects, however far it got.
+    const aborted = new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+    const r = await Promise.race([hub(method, path, init.body ? JSON.parse(init.body) : undefined), aborted]);
     if (r.down) throw new Error('network');
     if (r.redirect) {
       // As a browser does: an unfollowed redirect is opaque, a followed one
@@ -89,10 +91,21 @@ export async function load(hub, opts = {}) {
     return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => text };
   };
   globalThis.setInterval = (f, ms) => env.intervals.push({ f, ms });
-  // Timers are held, not run: a test fires the ones it wants (runTimers).
-  globalThis.setTimeout = (f, ms) => env.timers.push({ f, ms });
-  env.runTimers = async () => {
-    for (const t of env.timers.splice(0)) t.f();
+  // Timers are held, not run: a test fires the ones it wants. runTimers
+  // fires the short ones (the page's own pacing); a request's time limit is
+  // long, and runs only when a test asks for it (runTimers(Infinity)).
+  let timerIds = 0;
+  globalThis.setTimeout = (f, ms) => {
+    env.timers.push({ f, ms, id: ++timerIds });
+    return timerIds;
+  };
+  globalThis.clearTimeout = (id) => {
+    env.timers = env.timers.filter((t) => t.id !== id);
+  };
+  env.runTimers = async (upTo = 10000) => {
+    const due = env.timers.filter((t) => t.ms <= upTo);
+    env.timers = env.timers.filter((t) => t.ms > upTo);
+    for (const t of due) t.f();
     await tick(5);
   };
   env.poll = async () => {

@@ -554,6 +554,27 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 			t.Errorf("%s contains %q: the chat page writes network text as text only", name, m)
 		}
 	}
+	// What the script may build and where it may reach, counted: every
+	// element it makes is a div, the one attribute it sets is the href of
+	// the two fixed links, and the one fetch is the api helper's. A new
+	// element kind, attribute or request shows up here, to be looked at.
+	js, err := chatUI.ReadFile("chatui/chat.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for re, want := range map[string]int{
+		`createElement\(`:        4,
+		`createElement\('div'\)`: 4,
+		`setAttribute\(`:         1,
+		`setAttribute\('href', `: 1,
+		`\bfetch\(`:              1,
+		`new EventSource\(`:      1,
+		`location\.reload\(\)`:   2,
+	} {
+		if got := len(regexp.MustCompile(re).FindAll(js, -1)); got != want {
+			t.Errorf("chat.js has %d of %s, want %d: review what the new one writes or requests", got, re, want)
+		}
+	}
 	page, err := chatUI.ReadFile("chatui/chat.html")
 	if err != nil {
 		t.Fatal(err)

@@ -19,6 +19,7 @@ version bump moves the block under the new version heading.
   it reads from the hub as text only, and carries a Content-Security-Policy with no inline
   script. `landing: chat` needs an operator login in `allowed_users`; unset, nothing changes.
   After upgrading, `lever apply` restarts the proxy once (the key is part of its config stamp).
+
 ## [0.29.1] - 2026-10-02
 
 Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them

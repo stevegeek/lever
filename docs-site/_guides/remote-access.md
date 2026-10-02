@@ -790,6 +790,10 @@ What it is, and is not:
   build step, no outside origin. It holds no credential, like every page behind the proxy.
 - **Text only.** A manager's reply is agent-written text on your origin, so the page writes it as
   plain text and its Content-Security-Policy allows no inline script. Markdown shows as typed.
+- **A display, not a proof.** The page shows what the hub stores. Which bubble a message is in
+  comes from the hub's record of its sender, but the words inside a manager bubble are the
+  manager's own and can imitate anything, a system notice or a line of yours included. What
+  proves a message is yours is `message_verify` on the manager's side, not the page.
 
 The proxy answers these itself, for an operator login, and forwards none of them to the hub:
 `GET /` (a redirect to `/lever/chat`), `/lever/chat`, its `.css` and two `.js` files, and

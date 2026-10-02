@@ -130,6 +130,8 @@ export function errorText(status, body) {
     msg = str(body);
   }
   msg = msg.trim().slice(0, 300);
+  // Status 0 is the page's own word for "no answer": nothing to name.
+  if (!status) return msg || 'no answer';
   return msg ? `${msg} (HTTP ${status})` : `request failed (HTTP ${status})`;
 }
 

@@ -367,8 +367,7 @@ type Deps struct {
 	// exposes no route to set a stored role.
 	VerifyAgentRole func(ctx context.Context, project, agent string) error
 	// Log surfaces a loud, user-facing progress/warning line during apply —
-	// currently just start-manager's resume-failed recovery notice ("resume
-	// failed … starting FRESH, previous session lost"), which MUST reach the
+	// such as start-manager's `--fresh` discard notice, which MUST reach the
 	// user rather than vanish into a swallowed return value. buildApplyDeps
 	// wires this to the invoking cobra command's PrintErrf, mirroring how
 	// other user-facing warnings already surface (see internal/cli/host/stop.go,
@@ -874,10 +873,10 @@ func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 }
 
 // startManager runs the start-manager plan step: observe the manager record,
-// then act on the delta (create / no-op / resume / forced resume / loud
-// recovery, or a refusal on a phase lever cannot act on) and verify the
-// container is actually live. The two unresumable tails and --fresh share
-// recoverDeleteAndCreate.
+// then act on the delta (create / no-op / resume / forced resume, or a
+// refusal on a failed resume or a phase lever cannot act on) and verify the
+// container is actually live. Only --fresh deletes a record
+// (recoverDeleteAndCreate).
 func (r *run) startManager(ctx context.Context, s Step) error {
 	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
 	// Read the prompt before any waiting: a missing or unreadable prompt file
@@ -1026,19 +1025,19 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// identical transient window. Only once the retry budget is exhausted
 		// (or the error is not the transient one at all) is the session
 		// declared unrecoverable.
-		return true, r.resumeOrRecover(ctx, jp, opts, resumeVerbPlain(func() error {
+		return true, r.resumeOrRecover(ctx, jp, resumeVerbPlain(func() error {
 			return r.d.Scion.Resume(ctx, r.app.Name, jp)
 		}))
 	case rec.Phase == scion.PhaseError:
 		// A crashed/wedged manager record. Since scion#895 (`resume
 		// --force`, pin >= 68507153) the error phase IS recoverable — try
 		// that first, with a fresh ticket staged (the leaf may have lapsed
-		// while wedged; same rationale as the suspended branch), and only
-		// discard the conversation when the forced resume itself fails.
+		// while wedged; same rationale as the suspended branch). A forced
+		// resume that fails keeps the record, like any failed resume.
 		// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
 		// container state, resume failed, and the then-unconditional
 		// delete+fresh destroyed the manager conversation (#3).
-		return true, r.resumeOrRecover(ctx, jp, opts, resumeVerbForce(func() error {
+		return true, r.resumeOrRecover(ctx, jp, resumeVerbForce(func() error {
 			return r.d.Scion.ResumeForce(ctx, r.app.Name, jp)
 		}))
 	default:
@@ -1177,40 +1176,33 @@ func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, erro
 
 // resumeVerb is one of the two resumable arms of convergeManager: a
 // suspended/stopped record via `scion resume`, an error record via `scion
-// resume --force`. Each carries its own verbatim wording for the loud
-// session-lost notice and the delete-failure clause (both take the resume
-// error as their one %v).
+// resume --force`.
 type resumeVerb struct {
-	label   string // verb name in the "recovered concurrently" log line
-	lostFmt string // loud previous-session-lost line
-	lostWhy string // delete-failure clause for recoverDeleteAndCreate
-	resume  func() error
+	label  string // verb name in the log line and the refusal
+	resume func() error
 }
 
 // resumeVerbPlain is the `scion resume` arm for a suspended/stopped record.
 func resumeVerbPlain(run func() error) resumeVerb {
-	return resumeVerb{
-		label:   "resume",
-		lostFmt: "start-manager: resume failed (%v) — deleting the manager record and starting FRESH (previous session lost)",
-		lostWhy: "resume failed (%v)",
-		resume:  run,
-	}
+	return resumeVerb{label: "resume", resume: run}
 }
 
 // resumeVerbForce is the `scion resume --force` arm for an error record.
 func resumeVerbForce(run func() error) resumeVerb {
-	return resumeVerb{
-		label:   "resume --force",
-		lostFmt: "start-manager: manager in phase \"error\" and resume --force failed (%v) — deleting the manager record and starting FRESH (previous session lost)",
-		lostWhy: "forced resume failed (%v)",
-		resume:  run,
-	}
+	return resumeVerb{label: "resume --force", resume: run}
 }
 
 // resumeOrRecover is the shared body of the two resumable arms. It stages
-// fresh bootstrap material, runs the verb through the runtime-broker-race
-// retry, and on failure either keeps a manager that recovered concurrently or
-// takes the LOUD delete+fresh recovery.
+// fresh bootstrap material and runs the verb through the runtime-broker-race
+// retry. On failure it keeps a manager that recovered concurrently, and
+// otherwise REFUSES: the record and its conversation stay where they are.
+//
+// It used to delete the record and create a fresh manager when a resume
+// failed, which discarded the conversation on any failure lever could not
+// classify (lever#3: a VM reboot that corrupted the container state). A
+// resume that fails says the session could not be brought up NOW; it does not
+// say the session is worthless. Discarding one is the operator's decision,
+// and `lever up --fresh` is how they make it.
 //
 // Self-heal an expired mTLS leaf BEFORE resuming. A manager whose short-lived
 // agent leaf expired while the instance was down (the in-container renew
@@ -1227,7 +1219,7 @@ func resumeVerbForce(run func() error) resumeVerb {
 // manager's downtime — exactly the expired-leaf case. The unspent ticket is
 // harmless when the leaf is still valid (boot's ValidCert passes and skips
 // enrol, leaving it unredeemed).
-func (r *run) resumeOrRecover(ctx context.Context, jp string, opts scion.StartOpts, v resumeVerb) error {
+func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) error {
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
@@ -1239,18 +1231,14 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, opts scion.StartOp
 		r.d.Log("start-manager: %s failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", v.label, rerr)
 		return nil
 	}
-	// The hub refused the call: the manager is not broken, so deleting it
-	// would discard a conversation for nothing. Stop here instead.
 	if scion.IsRefusedByHub(rerr) {
+		// The hub refused the call, which says nothing about the manager.
 		return fmt.Errorf("start-manager: the hub refused %s of the manager (%v). lever did NOT delete the manager, "+
 			"so its conversation is kept. %s", v.label, rerr, scion.RefusalHint)
 	}
-	// LOUD recovery: the conversation could not be restored. This MUST reach
-	// the user — resume failing means the durable session (the whole point of
-	// suspending, not stopping, at power-off; see internal/cli/host/stop.go) is about to be
-	// discarded.
-	return r.recoverDeleteAndCreate(ctx, jp, opts,
-		fmt.Sprintf(v.lostFmt, rerr), fmt.Sprintf(v.lostWhy, rerr))
+	return fmt.Errorf("start-manager: %s of the manager failed (%v). lever did NOT delete the manager: its record and its conversation are kept. "+
+		"Run `lever up` again (a transient failure clears), and `lever doctor` for the cause if it does not. "+
+		"`lever up --fresh` discards the session and starts a new manager", v.label, rerr)
 }
 
 // retryOnBrokerUnavailable runs action up to r.brokerStart.Attempts times,
@@ -1375,18 +1363,15 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) erro
 	return err
 }
 
-// recoverDeleteAndCreate performs the LOUD delete+fresh recovery shared by
-// start-manager's two unresumable tails (a failed resume, a failed forced
-// resume) and the operator's explicit `--fresh`: emit the caller's loud
-// previous-session-lost notice, delete the stale record, and — only if the
-// delete succeeds — fall back to startManagerCreate's fresh create.
+// recoverDeleteAndCreate is the operator's explicit `--fresh`: emit the loud
+// session-discarded notice, delete the record, and — only if the delete
+// succeeds — create a fresh manager. Nothing else deletes a manager record
+// (a failed resume refuses; see resumeOrRecover).
 //
-// The wording differs per tail and is preserved verbatim: logMsg is the
-// fully-formed loud line, and deleteFailReason is that tail's clause for the
-// hard delete-failure error ("start-manager: <reason> and delete failed: %w"),
-// which surfaces BOTH the original failure (baked into the clause) and the
-// delete failure — there is no safe fallback, since a fresh Start over an
-// undeleted, un-resumable record would just 409 again.
+// logMsg is the fully-formed loud line, and deleteFailReason the clause for
+// the hard delete-failure error ("start-manager: <reason> and delete failed:
+// %w"): there is no safe fallback, since a fresh Start over an undeleted
+// record would just 409.
 func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.StartOpts, logMsg, deleteFailReason string) error {
 	r.d.Log("%s", logMsg)
 	if derr := r.d.Scion.Delete(ctx, r.app.Name, jp); derr != nil {

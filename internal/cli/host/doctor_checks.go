@@ -767,7 +767,7 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	}
 	fix := "run `lever up` to resume it"
 	if a.Phase == "error" {
-		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the conversation is lost and a fresh manager is created) — its container log in the guest holds the harness's last output"
+		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
 	}
 	return checkResult{check, false,
 		fmt.Sprintf("manager %q is not live: phase %q, container %q", name, a.Phase, a.ContainerStatus), fix}

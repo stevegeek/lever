@@ -560,10 +560,11 @@ test('send: a message that did arrive after "Not sent" is shown as sent, and its
   assert.match(env.els.error.textContent, /^Not sent/);
   assert.equal(env.els.text.value, 'yes');
   // The history shows it: the page takes back the error and the draft, so
-  // nothing invites a second send of the same message.
+  // nothing invites a second send of the same message. It says the message
+  // may be unverified: the proxy may never have seen the hub's answer.
   await env.poll();
   assert.equal(env.rows().length, 1);
-  assert.equal(env.els.error.hidden, true);
+  assert.match(env.els.error.textContent, /^The message did arrive\. If the manager treats it as unverified/);
   assert.equal(env.els.text.value, '');
   assert.equal(env.store['lever-chat-draft'], '');
   assert.equal(env.store['lever-chat-unsent'], undefined);
@@ -603,7 +604,7 @@ test('send: a draft changed after a failed send is kept when the first arrives',
   await type(env, 'yes, and one more thing');
   await env.poll();
   assert.equal(env.els.text.value, 'yes, and one more thing');
-  assert.equal(env.els.error.hidden, true);
+  assert.match(env.els.error.textContent, /^The message did arrive/);
 });
 
 test('send: a replay answer says the message may be unverified', async () => {
@@ -632,10 +633,13 @@ test('send: the key of an unsent message survives a reload', async () => {
   again.els.composer.dispatch('submit');
   await tick(10);
   assert.equal(hub.stored.length, 1, 'the resend after a reload must go under the first key');
-  // Stored junk in its place is ignored.
-  for (const junk of ['{', 'null', '7', '{"text":1,"key":2}']) {
-    const env = await load(hubWith(), { store: { 'lever-chat-unsent': junk } });
+  // Stored junk in its place is ignored, and removed.
+  for (const junk of ['{', 'null', '7', '{"text":1,"key":2}', '{"text":"a","key":"k"}', '{"text":"a","key":"k","conversation":"dm:agent:OLD:user:u1"}']) {
+    const env = await load(hubWith(), { store: { 'lever-chat-unsent': junk, 'lever-chat-draft': 'a' } });
     assert.equal(env.els.text.disabled, false, junk);
+    env.els.composer.dispatch('submit');
+    await tick(10);
+    assert.notEqual(env.calls.find((c) => c.method === 'POST').body.idempotency_key, 'k', junk);
   }
 });
 
@@ -752,4 +756,97 @@ test('send: the manager saying the same words does not settle a failed send', as
   await env.poll();
   assert.match(env.els.error.textContent, /^Not sent/);
   assert.equal(env.els.text.value, 'yes');
+});
+
+test('send: with no history read yet, an old message never settles a failed send', async () => {
+  // The first read fails, so the page holds no ids: every message it reads
+  // later would look new. A failed "yes" must not be taken for an old one.
+  const hub = hubWith({ history: () => ({ status: 502, body: '' }), post: () => ({ down: true }) });
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { msg: 'yes', senderId: 'u1' })] } });
+  await env.poll();
+  assert.equal(env.rows().length, 1);
+  assert.equal(env.els.error.textContent, 'Not sent: cannot reach the server');
+  assert.equal(env.els.text.value, 'yes');
+});
+
+test('send: a message just sent, not yet in a history read, does not settle a second one', async () => {
+  let n = 0;
+  const hub = hubWith({ post: (body) => (++n === 1 ? { status: 201, body: { id: 's1', content: body.content, senderId: 'u1', createdAt: new Date(1.8e12).toISOString() } } : { down: true }) });
+  const env = await load(hub);
+  hub.parts.history = () => ({ status: 502, body: '' }); // s1 is known only from its 201
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, /^Not sent/);
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { id: 's1', msg: 'yes', senderId: 'u1' })] } });
+  await env.poll();
+  assert.match(env.els.error.textContent, /^Not sent/, 's1 is the first "yes", not the second');
+  assert.equal(env.els.text.value, 'yes');
+});
+
+test('send: after a reload, a message that arrived is settled by the first read', async () => {
+  const hub = storingHub((n) => n === 1);
+  const first = await load(hub);
+  const seen = hub.parts.history;
+  hub.parts.history = () => ({ status: 200, body: { messages: [] } });
+  await type(first, 'yes');
+  first.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(first.els.error.textContent, /^Not sent/);
+  // Reload: the record comes back with the ids it knew, so the stored
+  // message in the first read is told from an old one.
+  hub.parts.history = seen;
+  const again = await load(hub, { store: first.store });
+  assert.equal(again.rows().length, 1);
+  assert.equal(again.els.text.value, '');
+  assert.match(again.els.error.textContent, /^The message did arrive/);
+  await type(again, 'yes');
+  again.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 2, 'the same words after that are a new message');
+});
+
+test('send: a replay of a message already on screen is said, not shown as sent', async () => {
+  // The page could not settle it (it had read no history when the send
+  // failed), but the list shows the message when the operator presses Send.
+  const hub = storingHub((n) => n === 1);
+  const seen = hub.parts.history;
+  hub.parts.history = () => ({ status: 502, body: '' });
+  const env = await load(hub);
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.history = seen;
+  await env.poll();
+  assert.equal(env.rows().length, 1);
+  assert.match(env.els.error.textContent, /^Not sent/);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 1);
+  assert.match(env.els.error.textContent, /^The hub already has this message/);
+  assert.equal(env.els.text.value, 'yes', 'the draft stays: the page cannot tell a retry from a second answer');
+  // One more press is a deliberate second message.
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(hub.stored.length, 2);
+  assert.equal(env.els.text.value, '');
+});
+
+test('send: a key is not reused for another conversation', async () => {
+  // The hub keeps a key per user, not per conversation: reused after the
+  // manager got a new record, it would answer for the message in the old one.
+  const record = JSON.stringify({ text: 'yes', key: 'old-key', conversation: 'dm:agent:OLD:user:u1', known: [] });
+  const env = await load(hubWith(), { store: { 'lever-chat-unsent': record, 'lever-chat-draft': 'yes' } });
+  assert.equal(env.store['lever-chat-unsent'], undefined);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const post = env.calls.find((c) => c.method === 'POST');
+  assert.notEqual(post.body.idempotency_key, 'old-key');
 });

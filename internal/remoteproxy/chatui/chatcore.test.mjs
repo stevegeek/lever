@@ -7,7 +7,9 @@ import {
   historyItems,
   isChatSubject,
   makeCoalescer,
+  nextCursor,
   mergeMessages,
+  messageLength,
   messageText,
   sortedMessages,
   stateLine,
@@ -19,6 +21,11 @@ test('historyItems reads either key and drops junk', () => {
   for (const junk of [null, undefined, 'text', 4, [], {}, { messages: 'no' }]) {
     assert.deepEqual(historyItems(junk), []);
   }
+});
+
+test('nextCursor reads only a string from an object', () => {
+  assert.equal(nextCursor({ nextCursor: 'c1' }), 'c1');
+  for (const junk of [null, undefined, 'x', 3, {}, { nextCursor: 7 }, { nextCursor: null }]) assert.equal(nextCursor(junk), '');
 });
 
 test('messageText reads msg or content, and only strings', () => {
@@ -36,6 +43,20 @@ test('mergeMessages dedupes by id and reports change', () => {
   assert.equal(mergeMessages(map, [{ id: '1', msg: 'edited' }]), true);
   assert.equal(messageText(map.get('1')), 'edited');
   assert.equal(mergeMessages(map, [{ id: 7, msg: 'numeric id' }]), false);
+});
+
+test('mergeMessages takes a changed delivery state', () => {
+  const map = new Map();
+  mergeMessages(map, [{ id: 'm', msg: 'x', dispatchState: 'pending' }]);
+  assert.equal(mergeMessages(map, [{ id: 'm', msg: 'x', dispatchState: 'failed' }]), true);
+  assert.equal(map.get('m').dispatchState, 'failed');
+});
+
+test('messageLength counts characters like the hub, not UTF-16 units', () => {
+  assert.equal(messageLength('abc'), 3);
+  assert.equal(messageLength('a😀b'), 3);
+  assert.equal('a😀b'.length, 4);
+  assert.equal(messageLength(''), 0);
 });
 
 test('a send answer and its history row are the same message', () => {
@@ -61,7 +82,11 @@ test('classify', () => {
   assert.equal(classify({ id: '2', msg: 'x', senderId: 'agent-id', type: 'assistant-reply' }, uid), 'agent');
   assert.equal(classify({ id: '3', msg: 'x', senderId: 'agent-id', type: 'something-new' }, uid), 'agent');
   assert.equal(classify({ id: '4', msg: 'working', type: 'state-change' }, uid), 'system');
+  assert.equal(classify({ id: '4a', msg: 'note', type: 'system', senderId: 'agent-id' }, uid), 'system');
   assert.equal(classify({ id: '5', msg: 'x', type: 'mention', senderId: 'u1' }, uid), 'hidden');
+  // The agent picks its own type: it cannot hide a message with one.
+  assert.equal(classify({ id: '5a', msg: 'x', type: 'mention', senderId: 'agent-id' }, uid), 'agent');
+  assert.equal(classify({ id: '5b', msg: 'x', type: 'state-change', senderId: 'u1' }, uid), 'mine');
   assert.equal(classify({ id: '6', msg: '' }, uid), 'hidden');
   assert.equal(classify({ id: '7', msg: 'x', senderId: '' }, ''), 'agent');
 });
@@ -75,21 +100,41 @@ test('isChatSubject admits only this user', () => {
   assert.equal(isChatSubject(undefined, 'u1'), false);
 });
 
-test('stateLine', () => {
+test('stateLine reads the hub phases and activities', () => {
   assert.deepEqual(stateLine({ phase: 'running', activity: 'waiting_for_input' }), { text: 'waiting for input', ok: true });
   assert.deepEqual(stateLine({ phase: 'running' }), { text: 'running', ok: true });
-  assert.equal(stateLine({ phase: 'stopped' }).ok, false);
-  assert.match(stateLine({ phase: 'stopped' }).text, /^stopped/);
-  assert.equal(stateLine({ phase: 'error' }).ok, false);
+  assert.deepEqual(stateLine({ phase: 'resumed', activity: 'working' }), { text: 'working', ok: true });
+  // A running agent that reports it is not answering is not shown as fine.
+  for (const activity of ['offline', 'crashed', 'stalled', 'limits_exceeded']) {
+    const line = stateLine({ phase: 'running', activity });
+    assert.equal(line.ok, false, activity);
+    assert.match(line.text, /may not answer/);
+  }
+  // The hub holds a message for an agent that is still starting.
+  for (const phase of ['created', 'provisioning', 'cloning', 'starting']) {
+    const line = stateLine({ phase });
+    assert.equal(line.ok, true, phase);
+    assert.match(line.text, /waits until it runs/);
+  }
+  for (const phase of ['suspended', 'stopping', 'stopped', 'error']) {
+    const line = stateLine({ phase });
+    assert.equal(line.ok, false, phase);
+    assert.ok(line.text.startsWith(`${phase} (not running`), line.text);
+  }
   assert.deepEqual(stateLine(null), { text: 'state unknown', ok: true });
   assert.deepEqual(stateLine({ phase: 42 }), { text: 'state unknown', ok: true });
+  // The activity is the agent's own word: bounded.
+  assert.ok(stateLine({ phase: 'running', activity: 'x'.repeat(500) }).text.length <= 40);
 });
 
 test('errorText prefers the hub message and bounds it', () => {
-  assert.equal(errorText(409, { message: 'agent is not running' }), 'agent is not running (HTTP 409)');
-  assert.equal(errorText(400, { error: { message: 'too long' } }), 'too long (HTTP 400)');
+  // The hub's two real error shapes: an API error, and the session 401.
+  assert.equal(errorText(400, { error: { code: 'validation', message: 'too long' } }), 'too long (HTTP 400)');
+  assert.equal(errorText(401, { error: 'authentication required' }), 'authentication required (HTTP 401)');
+  assert.equal(errorText(403, { message: 'refused' }), 'refused (HTTP 403)');
   assert.equal(errorText(502, 'bad gateway\n'), 'bad gateway (HTTP 502)');
   assert.equal(errorText(500, null), 'request failed (HTTP 500)');
+  assert.equal(errorText(500, { error: { message: 7 } }), 'request failed (HTTP 500)');
   assert.ok(errorText(500, 'x'.repeat(5000)).length < 320);
 });
 

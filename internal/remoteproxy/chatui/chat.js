@@ -18,7 +18,9 @@ import {
   isChatSubject,
   makeCoalescer,
   mergeMessages,
+  messageLength,
   messageText,
+  nextCursor,
   sortedMessages,
   stateLine,
 } from './chatcore.js';
@@ -26,6 +28,7 @@ import {
 const PAGE = 50; // messages per history request
 const POLL_MS = 20000; // state + history safety poll while the page shows
 const REFRESH_GAP_MS = 1500; // at most one history read per gap on a burst
+const RETRY_MS = 5000; // between attempts to start while the hub is away
 const DRAFT_KEY = 'lever-chat-draft';
 
 const $ = (id) => document.getElementById(id);
@@ -46,6 +49,8 @@ const el = {
 
 const messages = new Map();
 let boot = null;
+let loaded = false; // a history read has succeeded
+let refreshSeq = 0;
 let olderCursor = '';
 let sending = false;
 let stream = null;
@@ -83,10 +88,23 @@ function showNotice(text) {
   el.notice.hidden = !text;
 }
 
+function showState(text, ok) {
+  setText(el.state, text);
+  el.state.className = `state ${ok ? 'ok' : 'bad'}`;
+}
+
 // localPath admits only a path on this origin, so a link target can never
-// leave it whatever the bootstrap says.
+// leave it whatever the bootstrap says. The browser's own URL parser decides:
+// it is what reads the link, and it drops tabs and newlines a string check
+// would let through.
 function localPath(p) {
-  return typeof p === 'string' && p.startsWith('/') && !p.startsWith('//') && !p.startsWith('/\\') ? p : '';
+  if (typeof p !== 'string' || !p.startsWith('/')) return '';
+  try {
+    const u = new URL(p, location.origin);
+    return u.origin === location.origin ? u.pathname + u.search : '';
+  } catch {
+    return '';
+  }
 }
 
 function setLink(a, path) {
@@ -109,8 +127,8 @@ function nearBottom() {
   return el.scroll.scrollHeight - el.scroll.scrollTop - el.scroll.clientHeight < 80;
 }
 
-function render(keepBottom) {
-  const stick = keepBottom || nearBottom();
+function render(toBottom) {
+  const stick = toBottom || nearBottom();
   const frag = document.createDocumentFragment();
   let shown = 0;
   for (const m of sortedMessages(messages)) {
@@ -127,7 +145,9 @@ function render(keepBottom) {
     }
     const body = document.createElement('div');
     body.className = 'body';
-    setText(body, messageText(m));
+    // A system line is the agent's own text too, so it carries the agent's
+    // name: it must not read as a notice from lever or the hub.
+    setText(body, kind === 'system' ? `${boot.agent.name}: ${messageText(m)}` : messageText(m));
     row.append(body);
     if (kind === 'mine' && m.dispatchState === 'failed') {
       const fail = document.createElement('div');
@@ -139,7 +159,7 @@ function render(keepBottom) {
     frag.append(row);
   }
   el.list.replaceChildren(frag);
-  if (boot.conversation) showNotice(shown ? '' : 'No messages yet.');
+  showNotice(shown ? '' : 'No messages yet.');
   if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
 }
 
@@ -151,22 +171,32 @@ function historyPath(cursor) {
 
 // refresh reads the newest page again and merges it. Every live signal ends
 // here: the page never trusts an event's payload, only the hub's history.
-async function refresh(first) {
+async function refresh() {
   if (!boot || !boot.conversation) return;
+  const seq = ++refreshSeq;
   const res = await api(historyPath(''));
+  if (seq !== refreshSeq) return; // a later read is under way; its answer is the newer one
   if (!res.ok) {
-    if (first) showNotice(`Cannot read the conversation: ${errorText(res.status, res.body)}`);
+    if (!loaded) showNotice(`Cannot read the conversation: ${errorText(res.status, res.body)}`);
     return;
   }
   const items = historyItems(res.body);
-  if (first) {
-    olderCursor = typeof res.body.nextCursor === 'string' ? res.body.nextCursor : '';
-    el.older.hidden = !olderCursor || items.length < PAGE;
+  // A full page with nothing the page already holds means more arrived than
+  // one page while it was not looking. Start again from this page instead of
+  // showing the two ends with a hole between them; "Load earlier" then
+  // reaches the rest.
+  const restart = !loaded || (items.length >= PAGE && !items.some((m) => messages.has(m.id)));
+  if (restart) {
+    messages.clear();
+    olderCursor = nextCursor(res.body);
+    el.older.hidden = !olderCursor;
   }
-  if (mergeMessages(messages, items) || first) render(first);
+  const first = !loaded;
+  loaded = true;
+  if (mergeMessages(messages, items) || restart) render(first);
 }
 
-const refreshSoon = makeCoalescer(() => void refresh(false), REFRESH_GAP_MS);
+const refreshSoon = makeCoalescer(() => void refresh(), REFRESH_GAP_MS);
 
 async function loadOlder() {
   if (!olderCursor) return;
@@ -177,27 +207,58 @@ async function loadOlder() {
     showError(`Cannot load earlier messages: ${errorText(res.status, res.body)}`);
     return;
   }
-  const items = historyItems(res.body);
-  olderCursor = typeof res.body.nextCursor === 'string' ? res.body.nextCursor : '';
-  el.older.hidden = !olderCursor || items.length < PAGE;
+  olderCursor = nextCursor(res.body);
+  el.older.hidden = !olderCursor;
   const before = el.scroll.scrollHeight;
-  if (mergeMessages(messages, items)) {
+  if (mergeMessages(messages, historyItems(res.body))) {
     render(false);
     el.scroll.scrollTop += el.scroll.scrollHeight - before;
   }
 }
 
+// readBoot asks the proxy who the operator is and which agent and
+// conversation the page is for.
+async function readBoot() {
+  const res = await api('/lever/api/chat');
+  const b = res.body;
+  if (!res.ok || !b || typeof b !== 'object' || !b.agent || typeof b.agent !== 'object') {
+    return { error: errorText(res.status, b) };
+  }
+  return {
+    userId: typeof b.userId === 'string' ? b.userId : '',
+    conversation: typeof b.conversation === 'string' ? b.conversation : '',
+    agent: {
+      name: typeof b.agent.name === 'string' ? b.agent.name : 'agent',
+      id: typeof b.agent.id === 'string' ? b.agent.id : '',
+    },
+    terminal: b.terminal,
+    console: b.console,
+  };
+}
+
+// checkBoot reloads the page when the manager's hub record is not the one
+// the page started with: `lever up --fresh` gives the manager a new id, and
+// a message to the old conversation would be stored and reach nobody.
+async function checkBoot() {
+  const now = await readBoot();
+  if (now.error) return;
+  if (now.agent.id !== boot.agent.id || now.conversation !== boot.conversation) location.reload();
+}
+
 async function readState() {
   if (!boot || !boot.agent.id) return;
   const res = await api(`/api/v1/agents/${encodeURIComponent(boot.agent.id)}`);
+  if (res.status === 404) {
+    showState('no hub record', false);
+    void checkBoot();
+    return;
+  }
   if (!res.ok) {
-    setText(el.state, res.status === 0 ? 'offline' : `state unknown (HTTP ${res.status})`);
-    el.state.className = 'state bad';
+    showState(res.status === 0 ? 'offline' : `state unknown (HTTP ${res.status})`, false);
     return;
   }
   const line = stateLine(res.body && res.body.agent ? res.body.agent : res.body);
-  setText(el.state, line.text);
-  el.state.className = `state ${line.ok ? 'ok' : 'bad'}`;
+  showState(line.text, line.ok);
 }
 
 // openStream listens for the hub's chat events for this user. An event is
@@ -227,6 +288,11 @@ function openStream() {
 
 function poll() {
   if (document.visibilityState !== 'visible') return;
+  if (!boot.conversation) {
+    // The manager had no hub record at start: look for one.
+    void checkBoot();
+    return;
+  }
   void readState();
   refreshSoon();
   if (!stream || stream.readyState === EventSource.CLOSED) openStream();
@@ -249,29 +315,34 @@ function post(text, key) {
 async function send() {
   const text = el.text.value.trim();
   if (sending || !text || !boot || !boot.conversation) return;
-  if (text.length > MAX_MESSAGE) {
-    showError(`The message is ${text.length} characters; the limit is ${MAX_MESSAGE}.`);
+  const length = messageLength(text);
+  if (length > MAX_MESSAGE) {
+    showError(`The message is ${length} characters; the limit is ${MAX_MESSAGE}.`);
     return;
   }
   sending = true;
   el.send.disabled = true;
   showError('');
-  // One key for both attempts, so the hub stores the message once even if
-  // the first attempt reached it.
   const key = newKey();
   let res = await post(text, key);
   if (res.status === 401) {
-    // The hub forgot the session. A read makes the proxy sign in again;
-    // then the message goes once more.
+    // The hub forgot the session, so it stored nothing. A read makes the
+    // proxy sign in again; then the message goes once more, under the same
+    // key in case the hub did see the first attempt.
     await api(historyPath(''));
     res = await post(text, key);
   }
   sending = false;
   if (res.ok) {
-    el.text.value = '';
-    saveDraft();
-    grow();
-    if (res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
+    // Clear only what was sent: text typed while the send was under way stays.
+    if (el.text.value.trim() === text) {
+      el.text.value = '';
+      saveDraft();
+      grow();
+    }
+    // 201 carries the stored message. Any other success (a replay of the
+    // key) carries less, so the history read shows it instead.
+    if (res.status === 201 && res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
     refreshSoon();
   } else {
     showError(`Not sent: ${errorText(res.status, res.body)}`);
@@ -303,39 +374,35 @@ function loadDraft() {
 }
 
 async function start() {
-  const res = await api('/lever/api/chat');
-  if (!res.ok || !res.body || typeof res.body !== 'object' || !res.body.agent) {
-    setText(el.state, 'unavailable');
-    el.state.className = 'state bad';
-    showNotice(`The chat page cannot start: ${errorText(res.status, res.body)}`);
+  const b = await readBoot();
+  if (b.error) {
+    // The hub may be starting: keep trying rather than leave a dead page.
+    showState('unavailable', false);
+    showNotice(`The chat page cannot start yet: ${b.error}. Trying again.`);
+    setTimeout(() => void start(), RETRY_MS);
     return;
   }
-  boot = {
-    userId: typeof res.body.userId === 'string' ? res.body.userId : '',
-    conversation: typeof res.body.conversation === 'string' ? res.body.conversation : '',
-    agent: {
-      name: typeof res.body.agent.name === 'string' ? res.body.agent.name : 'agent',
-      id: typeof res.body.agent.id === 'string' ? res.body.agent.id : '',
-    },
-  };
+  boot = b;
   setText(el.agent, boot.agent.name);
   document.title = boot.agent.name;
-  setLink(el.terminal, res.body.terminal);
-  setLink(el.console, res.body.console);
+  setLink(el.terminal, boot.terminal);
+  setLink(el.console, boot.console);
+  setInterval(poll, POLL_MS);
+  document.addEventListener('visibilitychange', poll);
   if (!boot.conversation) {
-    setText(el.state, 'no hub record');
-    el.state.className = 'state bad';
-    showNotice(`${boot.agent.name} has no record on the hub yet. Start it on the host with lever up, then reload.`);
+    showState('no hub record', false);
+    showNotice(`${boot.agent.name} has no record on the hub yet. Start it on the host with lever up.`);
     return;
   }
+  showNotice('');
   loadDraft();
   el.text.disabled = false;
   el.send.disabled = false;
   grow();
-  await Promise.all([refresh(true), readState()]);
+  // The stream first, so a message stored while the history is read still
+  // raises an event.
   openStream();
-  setInterval(poll, POLL_MS);
-  document.addEventListener('visibilitychange', poll);
+  await Promise.all([refresh(), readState()]);
 }
 
 el.form.addEventListener('submit', (ev) => {
@@ -348,12 +415,14 @@ el.text.addEventListener('input', () => {
 });
 el.text.addEventListener('keydown', (ev) => {
   // Enter sends where there is a keyboard and a mouse; on a touch screen it
-  // is a new line, and the button sends.
-  if (ev.key !== 'Enter' || ev.shiftKey || ev.isComposing) return;
+  // is a new line, and the button sends. An Enter that confirms an input
+  // method's composition is neither (keyCode 229 is how Safari reports it).
+  if (ev.key !== 'Enter' || ev.shiftKey || ev.isComposing || ev.keyCode === 229) return;
   if (!window.matchMedia('(pointer: fine)').matches) return;
   ev.preventDefault();
   void send();
 });
 el.older.addEventListener('click', () => void loadOlder());
+window.addEventListener('resize', grow);
 
 void start();

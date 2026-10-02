@@ -359,7 +359,8 @@ type AuditLine struct {
 	// Decision is the outcome: one of the Decision constants. The gate emits
 	// DecisionAllow, DecisionDenyHost, DecisionDenyOrigin, DecisionDenyUser,
 	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
-	// navigation, DecisionLoginRedirect; the login driver DecisionOIDCSession
+	// navigation, DecisionLoginRedirect; the contact fence DecisionDenyContact;
+	// the chat page DecisionChatUnavailable; the login driver DecisionOIDCSession
 	// and DecisionOIDCSessionFailed; the provider the DecisionOIDC* values and
 	// DecisionDenyAuthorize.
 	Decision Decision `json:"decision"`

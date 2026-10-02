@@ -102,11 +102,11 @@ func TestChatPageServesItsFiles(t *testing.T) {
 		if rw.Code != http.StatusOK || rw.Header().Get("Content-Type") != ctype || rw.Body.Len() == 0 {
 			t.Errorf("%s: %d %q (%d bytes), want 200 %s", path, rw.Code, rw.Header().Get("Content-Type"), rw.Body.Len(), ctype)
 		}
-		if got := rw.Header().Get("Content-Security-Policy"); got != chatCSP {
+		if got := rw.Header().Get("Content-Security-Policy"); got != chatCSPFor(testServeHost) {
 			t.Errorf("%s: CSP %q", path, got)
 		}
 		for k, want := range map[string]string{"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
-			"Referrer-Policy": "no-referrer", "Cache-Control": "no-cache"} {
+			"Referrer-Policy": "no-referrer", "Cache-Control": "private, no-cache"} {
 			if got := rw.Header().Get(k); got != want {
 				t.Errorf("%s: %s = %q, want %q", path, k, got, want)
 			}
@@ -115,8 +115,16 @@ func TestChatPageServesItsFiles(t *testing.T) {
 		if etag == "" {
 			t.Errorf("%s: no ETag", path)
 		}
-		if again := chatDo(h, chatOp, "GET", path, "If-None-Match", etag); again.Code != http.StatusNotModified || again.Body.Len() != 0 {
-			t.Errorf("%s: revalidation answered %d with %d bytes, want 304 and none", path, again.Code, again.Body.Len())
+		// A front that compresses weakens the tag; a client may send a list.
+		for _, inm := range []string{etag, "W/" + etag, `"other", ` + etag, `"other",W/` + etag, "*"} {
+			if again := chatDo(h, chatOp, "GET", path, "If-None-Match", inm); again.Code != http.StatusNotModified || again.Body.Len() != 0 {
+				t.Errorf("%s: If-None-Match %s answered %d with %d bytes, want 304 and none", path, inm, again.Code, again.Body.Len())
+			}
+		}
+		for _, inm := range []string{`"other"`, "", ",", strings.Trim(etag, `"`), `W/"other"`} {
+			if again := chatDo(h, chatOp, "GET", path, "If-None-Match", inm); again.Code != http.StatusOK {
+				t.Errorf("%s: If-None-Match %q answered %d, want 200", path, inm, again.Code)
+			}
 		}
 		if head := chatDo(h, chatOp, "HEAD", path); head.Code != http.StatusOK || head.Body.Len() != 0 {
 			t.Errorf("%s: HEAD answered %d with %d bytes", path, head.Code, head.Body.Len())
@@ -127,17 +135,32 @@ func TestChatPageServesItsFiles(t *testing.T) {
 	}
 }
 
-// TestChatPageCSPAllowsNoInlineCode: the policy is what makes agent text
-// that slipped into the page inert, so its load-bearing parts are pinned.
+// TestChatPageCSPAllowsNoInlineCode: the policy is what keeps text that
+// slipped into the page from running, so its load-bearing parts are pinned.
+// Script and style come from /lever/ only: on this origin 'self' would also
+// admit a .js file an agent wrote, which the hub serves under /api/.
 func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
-	for _, bad := range []string{"unsafe-inline", "unsafe-eval", "*", "data:", "blob:", "http:", "https:"} {
-		if strings.Contains(chatCSP, bad) {
-			t.Errorf("chat CSP contains %q: %s", bad, chatCSP)
+	csp := chatCSPFor("mac.ts.net")
+	for _, bad := range []string{"unsafe-inline", "unsafe-eval", "*", "data:", "blob:", "http:", "https:", "script-src 'self'", "style-src 'self'"} {
+		if strings.Contains(csp, bad) {
+			t.Errorf("chat CSP contains %q: %s", bad, csp)
 		}
 	}
-	for _, need := range []string{"default-src 'none'", "script-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"} {
-		if !strings.Contains(chatCSP, need) {
-			t.Errorf("chat CSP lacks %q: %s", need, chatCSP)
+	for _, need := range []string{"default-src 'none'", "script-src mac.ts.net/lever/;", "style-src mac.ts.net/lever/;", "img-src mac.ts.net/favicon.svg;",
+		"connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+		"require-trusted-types-for 'script'", "trusted-types 'none'"} {
+		if !strings.Contains(csp, need) {
+			t.Errorf("chat CSP lacks %q: %s", need, csp)
+		}
+	}
+	if got := chatCSPFor("[::1]:8445"); !strings.Contains(got, "script-src [::1]:8445/lever/;") {
+		t.Errorf("an address with a port must be nameable: %s", got)
+	}
+	// A host the policy cannot name is never written into it.
+	for _, odd := range []string{"", "a b", "a;script-src *", "a,b", "a'b", "a/b", strings.Repeat("a", 256)} {
+		got := chatCSPFor(odd)
+		if !strings.Contains(got, "script-src 'self';") || (odd != "" && strings.Contains(got, odd)) {
+			t.Errorf("chatCSPFor(%q) = %s, want the 'self' fallback", odd, got)
 		}
 	}
 }
@@ -152,6 +175,10 @@ func TestChatPageLanding(t *testing.T) {
 			rw := chatDo(h, chatOp, method, target)
 			if rw.Code != http.StatusFound || rw.Header().Get("Location") != chatPagePath {
 				t.Errorf("%s %s: %d Location %q, want 302 %s", method, target, rw.Code, rw.Header().Get("Location"), chatPagePath)
+			}
+			// An operator and a contact get different answers for "/".
+			if got := rw.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("%s %s: Cache-Control %q, want no-store", method, target, got)
 			}
 		}
 	}
@@ -176,12 +203,13 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
 	for _, p := range []string{"/lever", "/lever/", "/lever/nope", "/lever/chat/", "/lever/chat.html", "/lever/chatui/chat.js",
-		"/lever/../api/v1/agents", "/lever/api/", "/lever/api/chat/x", "/lever/chatcore.test.mjs", "/lever/package.json"} {
+		"/lever/../api/v1/agents", "/lever/api/", "/lever/api/chat/x", "/lever/chatcore.test.mjs", "/lever/chat.test.mjs",
+		"/lever/fakebrowser.mjs", "/lever/package.json"} {
 		rw := chatDo(h, chatOp, "GET", p)
-		if rw.Code != http.StatusNotFound {
-			t.Errorf("GET %s: %d, want 404", p, rw.Code)
+		if rw.Code != http.StatusNotFound || rw.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("GET %s: %d (Cache-Control %q), want an uncached 404", p, rw.Code, rw.Header().Get("Cache-Control"))
 		}
-		if rw.Header().Get("Content-Security-Policy") != chatCSP || rw.Header().Get("X-Content-Type-Options") != "nosniff" {
+		if rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost) || rw.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("GET %s: the 404 lacks the page's headers", p)
 		}
 	}
@@ -238,6 +266,11 @@ func TestChatPageIsNotForContacts(t *testing.T) {
 		body := rw.Body.String()
 		if rw.Code != http.StatusOK || !strings.Contains(body, "<h1>Chat</h1>") {
 			t.Errorf("GET %s as a contact: %d %q, want the contact landing page", p, rw.Code, body)
+		}
+		// The operator gets another answer at the same URL: no cache may
+		// hand this one to them.
+		if got := rw.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("GET %s as a contact: Cache-Control %q, want no-store", p, got)
 		}
 		for _, leak := range []string{chatMgrID, "boss", chatOp, "chatcore", "userId", "EventSource"} {
 			if strings.Contains(body, leak) {
@@ -385,6 +418,10 @@ func TestChatBootstrapFailsClosed(t *testing.T) {
 		if strings.Contains(rw.Body.String(), "conversation") || strings.Contains(rw.Body.String(), "{") {
 			t.Errorf("%s: a refused bootstrap still carries data: %s", name, rw.Body)
 		}
+		if h := rw.Header(); h.Get("Content-Security-Policy") != chatCSPFor(testServeHost) || h.Get("Cache-Control") != "no-store" ||
+			h.Get("X-Frame-Options") != "DENY" || h.Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s: a refused bootstrap lacks the page's headers: %v", name, h)
+		}
 		if len(lines) != 1 || lines[0].Decision != DecisionChatUnavailable || lines[0].Status != http.StatusBadGateway {
 			t.Errorf("%s: audit %+v, want one chat-unavailable 502", name, lines)
 		}
@@ -524,16 +561,33 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 	}
 }
 
-// TestChatCoreJS runs the page logic's own tests when node is installed.
-func TestChatCoreJS(t *testing.T) {
+// TestChatPageJS runs the page's own tests (chatui/*.test.mjs: its logic, and
+// its script against a scripted hub in a fake browser) when node is installed.
+func TestChatPageJS(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node is not installed; chatui/chatcore.test.mjs not run")
+		t.Skip("node is not installed; chatui/*.test.mjs not run")
 	}
-	cmd := exec.Command(node, "--test", "chatcore.test.mjs")
+	cmd := exec.Command(node, "--test")
 	cmd.Dir = "chatui"
 	cmd.Env = append(os.Environ(), "NODE_NO_WARNINGS=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node --test: %v\n%s", err, out)
+	}
+}
+
+// TestChatPageEmbedsOnlyThePage: the test support files beside the page are
+// not in the binary.
+func TestChatPageEmbedsOnlyThePage(t *testing.T) {
+	entries, err := chatUI.ReadDir("chatui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if got := strings.Join(names, ","); got != "chat.css,chat.html,chat.js,chatcore.js" {
+		t.Fatalf("embedded %s, want only the page's four files", got)
 	}
 }

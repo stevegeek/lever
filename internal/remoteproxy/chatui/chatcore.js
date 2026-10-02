@@ -6,8 +6,16 @@
 // field that is not the expected type reads as absent, never as a fault.
 
 // MAX_MESSAGE is the hub's own cap on one message (scion
-// messages.MaxMessageLength), in characters.
+// messages.MaxMessageLength). The hub counts characters, not UTF-16 units:
+// see messageLength.
 export const MAX_MESSAGE = 16000;
+
+// messageLength counts text the way the hub does, so an emoji is one.
+export function messageLength(text) {
+  let n = 0;
+  for (const _ of text) n++;
+  return n;
+}
 
 const str = (v) => (typeof v === 'string' ? v : '');
 
@@ -19,6 +27,11 @@ export function historyItems(body) {
     if (Array.isArray(body[key])) return body[key].filter((m) => m && typeof m === 'object');
   }
   return [];
+}
+
+// nextCursor is the history answer's cursor for the page before it, or ''.
+export function nextCursor(body) {
+  return body && typeof body === 'object' ? str(body.nextCursor) : '';
 }
 
 // messageText is a message's text: history rows carry it as `msg`, the
@@ -56,16 +69,17 @@ export function sortedMessages(map) {
 }
 
 // classify says how a message shows: 'mine' (the operator wrote it), 'agent',
-// 'system' (a state line, shown small), or 'hidden' (a record the hub keeps
-// for its own routing, or a message with nothing to show). An unknown type
-// from the agent's side shows as an agent message rather than vanishing.
+// 'system' (a state line, shown small), or 'hidden' (the hub's own copy of an
+// operator message for @mention routing, or a message with nothing to show).
+//
+// The agent chooses the type of what it sends, so a type never hides an
+// agent's message: any type from the agent's side but a state line shows as
+// an agent message.
 export function classify(m, userId) {
   const type = str(m && m.type);
-  if (type === 'mention') return 'hidden';
   if (!messageText(m)) return 'hidden';
-  if (type === 'state-change') return 'system';
-  if (userId && str(m.senderId) === userId) return 'mine';
-  return 'agent';
+  if (userId && str(m.senderId) === userId) return type === 'mention' ? 'hidden' : 'mine';
+  return type === 'state-change' || type === 'system' ? 'system' : 'agent';
 }
 
 // isChatSubject reports whether an event subject is one of this user's own
@@ -75,17 +89,29 @@ export function isChatSubject(subject, userId) {
   return !!userId && str(subject).startsWith(`user.${userId}.chat.`);
 }
 
+// The hub's agent phases before "running", and the activities that mean a
+// running agent is not answering (scion pkg/agent/state).
+const STARTING = new Set(['created', 'provisioning', 'cloning', 'starting']);
+const NOT_ANSWERING = new Set(['offline', 'crashed', 'stalled', 'limits_exceeded']);
+
+// label makes a hub state word readable. The agent reports its own activity,
+// so the word is agent text: it is bounded here and shown as text.
+const label = (s) => s.replaceAll('_', ' ').slice(0, 40);
+
 // stateLine describes the agent for the header: {text, ok}. ok is false when
-// a message sent now would not reach a running agent.
+// a message sent now would likely get no answer.
 export function stateLine(agent) {
   if (!agent || typeof agent !== 'object') return { text: 'state unknown', ok: true };
   const phase = str(agent.phase).toLowerCase();
   const activity = str(agent.activity).toLowerCase();
-  if (phase === 'running' || phase === 'resumed') {
-    return { text: activity ? activity.replaceAll('_', ' ') : 'running', ok: true };
-  }
   if (!phase) return { text: 'state unknown', ok: true };
-  return { text: `${phase} (not running: start it with lever up)`, ok: false };
+  // "resumed" is what the hub reports for a short time after a resume.
+  if (phase === 'running' || phase === 'resumed') {
+    if (NOT_ANSWERING.has(activity)) return { text: `${label(activity)} (it may not answer)`, ok: false };
+    return { text: activity ? label(activity) : 'running', ok: true };
+  }
+  if (STARTING.has(phase)) return { text: `${label(phase)} (a message waits until it runs)`, ok: true };
+  return { text: `${label(phase)} (not running: start it with lever up)`, ok: false };
 }
 
 // errorText is what to show for a failed request: the hub's own message when

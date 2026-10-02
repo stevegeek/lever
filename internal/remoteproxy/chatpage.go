@@ -54,11 +54,43 @@ const (
 	chatConsolePath = "/agents"
 )
 
-// chatCSP lets the page load lever's own script and style and talk to its
-// own origin, and nothing else: no inline script or style, no frame, no form
-// target, no other origin.
-const chatCSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; " +
-	"img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+// chatCSPFor is the page's policy: it loads script and style only from
+// lever's own /lever/ path, talks only to its own origin, and allows no
+// inline script or style, no frame, no form target and no other origin.
+//
+// The path matters. The hub serves agent-written files under /api/ with a
+// type taken from the file name, so on this origin 'self' would also admit a
+// .js file an agent wrote. The page has no markup sink for an agent to name
+// such a file through (TestChatPageHasNoMarkupSink); this keeps a sink added
+// by mistake from loading agent script as well. A serveHost the policy
+// cannot name safely falls back to 'self'.
+func chatCSPFor(serveHost string) string {
+	own, icon := "'self'", "'self'"
+	if cspHost(serveHost) {
+		own, icon = serveHost+chatPrefix, serveHost+"/favicon.svg"
+	}
+	// Trusted Types with no policy allowed makes every markup or script sink
+	// throw where the browser supports it: a second guard on the same rule.
+	return "default-src 'none'; script-src " + own + "; style-src " + own + "; connect-src 'self'; " +
+		"img-src " + icon + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
+		"require-trusted-types-for 'script'; trusted-types 'none'"
+}
+
+// cspHost reports whether host (a name or address, with an optional port) can
+// be written into a CSP source as it is.
+func cspHost(host string) bool {
+	if host == "" || len(host) > 255 {
+		return false
+	}
+	for _, c := range []byte(host) {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '.', c == ':', c == '[', c == ']':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // chatFile is one embedded file, read once.
 type chatFile struct {
@@ -70,6 +102,7 @@ type chatFile struct {
 // chatPage serves the page for one manager agent.
 type chatPage struct {
 	agent   string // the manager's agent name (Config.ChatAgent)
+	csp     string
 	files   map[string]chatFile
 	resolve func(ctx context.Context) (map[string]string, error) // agent name → hub id
 	whoAmI  func(ctx context.Context, cookie string) (string, error)
@@ -78,7 +111,7 @@ type chatPage struct {
 // newChatPage loads the embedded files. A file that is missing is a build
 // fault, so it panics rather than serve a page with a hole in it.
 func newChatPage(cfg Config) *chatPage {
-	p := &chatPage{agent: cfg.ChatAgent, resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), files: map[string]chatFile{}}
+	p := &chatPage{agent: cfg.ChatAgent, csp: chatCSPFor(cfg.ServeHost), resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), files: map[string]chatFile{}}
 	for route, f := range map[string]struct{ name, contentType string }{
 		chatPagePath:         {"chatui/chat.html", "text/html; charset=utf-8"},
 		"/lever/chat.css":    {"chatui/chat.css", "text/css; charset=utf-8"},
@@ -147,7 +180,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 			return false
 		}
 		// A fixed target: nothing of the request goes into Location.
-		g.answerChat(w, line, http.StatusFound, func() { w.Header().Set("Location", chatPagePath) }, nil, r)
+		g.answerChat(w, line, DecisionAllow, http.StatusFound, func() { w.Header().Set("Location", chatPagePath) }, nil, r)
 		return true
 	}
 	if p != strings.TrimSuffix(chatPrefix, "/") && !strings.HasPrefix(p, chatPrefix) {
@@ -155,7 +188,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	}
 	if !read {
 		w.Header().Set("Allow", "GET, HEAD")
-		g.answerChat(w, line, http.StatusMethodNotAllowed, nil, []byte("method not allowed\n"), r)
+		g.answerChat(w, line, DecisionAllow, http.StatusMethodNotAllowed, nil, []byte("method not allowed\n"), r)
 		return true
 	}
 	if p == chatBootstrapPath {
@@ -164,35 +197,51 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	}
 	f, ok := g.chat.files[p]
 	if !ok {
-		g.answerChat(w, line, http.StatusNotFound, nil, []byte("not found\n"), r)
+		g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
 		return true
 	}
 	hdr := func() {
 		w.Header().Set("Content-Type", f.contentType)
 		w.Header().Set("ETag", f.etag)
 		// Revalidate on every load: the files change with the lever binary.
-		w.Header().Set("Cache-Control", "no-cache")
+		// private: the answer at this URL depends on who asks (a contact
+		// gets the fence's page), so no shared cache may keep it.
+		w.Header().Set("Cache-Control", "private, no-cache")
 	}
-	if r.Header.Get("If-None-Match") == f.etag {
-		g.answerChat(w, line, http.StatusNotModified, hdr, nil, r)
+	if etagMatches(r.Header.Get("If-None-Match"), f.etag) {
+		g.answerChat(w, line, DecisionAllow, http.StatusNotModified, hdr, nil, r)
 		return true
 	}
-	g.answerChat(w, line, http.StatusOK, hdr, f.body, r)
+	g.answerChat(w, line, DecisionAllow, http.StatusOK, hdr, f.body, r)
 	return true
+}
+
+// etagMatches reports whether an If-None-Match value names etag: "*", or a
+// list with the tag in it, strong or weak (a front that compresses the
+// answer weakens the tag it passes on).
+func etagMatches(header, etag string) bool {
+	for _, v := range strings.Split(header, ",") {
+		v = strings.TrimSpace(v)
+		if v == "*" || strings.TrimPrefix(v, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // answerChat writes one of the chat page's own answers and audits it. Every
 // answer carries the page's CSP, whatever its type: a 404 text is then as
-// inert as the page is strict.
-func (g *gate) answerChat(w http.ResponseWriter, line *AuditLine, status int, headers func(), body []byte, r *http.Request) {
-	line.Decision, line.Status = DecisionAllow, status
+// inert as the page is strict. Nothing is stored unless headers says so.
+func (g *gate) answerChat(w http.ResponseWriter, line *AuditLine, decision Decision, status int, headers func(), body []byte, r *http.Request) {
+	line.Decision, line.Status = decision, status
 	g.audit(*line)
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")
-	h.Set("Content-Security-Policy", chatCSP)
+	h.Set("Content-Security-Policy", g.chat.csp)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "no-store")
 	if headers != nil {
 		headers()
 	}
@@ -207,7 +256,7 @@ func (g *gate) answerChat(w http.ResponseWriter, line *AuditLine, status int, he
 func (g *gate) serveChatBootstrap(w http.ResponseWriter, r *http.Request, line *AuditLine, operator, cookie string) {
 	c := g.chat
 	unavailable := func(msg string) {
-		g.deny(w, line, http.StatusBadGateway, DecisionChatUnavailable, msg)
+		g.answerChat(w, line, DecisionChatUnavailable, http.StatusBadGateway, nil, []byte(msg+"\n"), r)
 	}
 	if c.resolve == nil {
 		unavailable("the chat page cannot resolve its agent")
@@ -248,9 +297,8 @@ func (g *gate) serveChatBootstrap(w http.ResponseWriter, r *http.Request, line *
 		unavailable("cannot encode the chat page's data")
 		return
 	}
-	g.answerChat(w, line, http.StatusOK, func() {
+	g.answerChat(w, line, DecisionAllow, http.StatusOK, func() {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
 		// Like every /api/ answer the proxy forwards (sandboxAPIDocument):
 		// opened as a page, this is an inert document.
 		w.Header().Set("Content-Security-Policy", "sandbox")

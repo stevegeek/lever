@@ -594,7 +594,9 @@ Every request the proxy handles — allowed or denied — is appended as one JSO
 `.lever-state/remote-audit.jsonl`: timestamp, the identity header's value if present (the
 `ts_login` field, whatever the header), method, path, the
 decision (`allow` / `deny-host` when the `Host` header does not match `base_url` / `deny-origin` /
-`deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session`), and the
+`deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session` / `deny-contact` when the
+contact fence refuses a request / `chat-unavailable` when the [chat page](#the-chat-page) cannot
+resolve your hub user or the manager), and the
 upstream status once known. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
@@ -797,11 +799,14 @@ the hub as before.
 
 The page reads the conversation again when the hub's event stream says something changed, and
 every 20 seconds while it is visible, so a missed event costs a short delay, not a lost reply.
-The line under the manager's name is the hub's own state for it; when it says the manager is not
-running, start it on the host with `lever up`.
+The line under the manager's name is the state the hub reports for it (the agent reports its own
+activity, so read it as a hint); when it says the manager is not running, start it on the host
+with `lever up`. After a `lever up --fresh` the manager has a new hub record, and an open page
+reloads itself onto the new conversation.
 
 Not in the page: file upload, conversations with workers, and notifications while it is closed.
-Use the Console for the first two.
+Use the Console for the first two. The page does not mark the conversation as read either, so
+the Console may show it as unread.
 
 ## Contacts: chat-only logins
 

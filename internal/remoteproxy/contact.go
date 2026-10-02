@@ -351,6 +351,9 @@ func (g *gate) answerContact(w http.ResponseWriter, line *AuditLine, contentType
 	g.audit(*line)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	// The answer depends on who asks: an operator gets another one at the
+	// same URL, so no cache may keep this.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = io.WriteString(w, body)
 }

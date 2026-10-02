@@ -31,7 +31,8 @@ version bump moves the block under the new version heading.
   before it stores anything and answers 409 with the phase; the statement is
   not spent, so the same send works once the agent runs (`lever up` for the
   manager; the manager resumes a worker). If the notice still fails after
-  the check, the directive is revoked and the answer is 502. `lever
+  the check, the directive is revoked and the answer is 502 (see the last
+  sentence for the one case where there is nothing to revoke). `lever
   directive send` exits non-zero whenever the notice did not reach the
   agent. lever does not wake the agent itself. If scion reports a failure
   for a notice that did land and the agent consumed the directive in that
@@ -46,8 +47,10 @@ version bump moves the block under the new version heading.
   way as one stuck in a call, so an instance nobody talked to for a while
   failed doctor and any scripted gate on it. The row now passes for
   `stalled` and names both readings (`lever attach` shows which); `crashed`
-  and `offline` still fail it, and the `guest DNS` row still fails on the
-  cause of a turn that cannot finish.
+  and `offline` still fail it. A turn that cannot finish is no longer a
+  failed row by itself: the `guest DNS` row fails on a guest with no DNS, and
+  for the other causes (an API outage, an expired credential) `lever attach`
+  shows the harness.
 
 ### Added
 
@@ -78,10 +81,14 @@ version bump moves the block under the new version heading.
   for a declared peer and for an unknown name (#4).** The two texts differed,
   which let a worker probe for peer names.
 
-- **Agent-chosen strings are bounded before they reach the audit logs.** A
-  directive id longer than 64 bytes gets the usual opaque 404 without a
-  lookup or an id in the log, and a message recipient longer than 128 bytes
-  is refused: one agent could otherwise rotate the directive log with junk.
+- **Three agent-chosen strings are bounded before they reach the audit
+  logs.** A directive id longer than 64 bytes gets the usual opaque 404
+  without a lookup or an id in the log, and a message recipient or a
+  `msg list` worker name longer than 128 bytes is refused: one agent could
+  otherwise rotate the logs with junk.
+- **`operator` is a reserved name.** A worker or a `broker.manager_identity`
+  named `operator` is a config error: the broker's audit log gives that name
+  to the host operator's own actions.
 
 ### Documentation
 

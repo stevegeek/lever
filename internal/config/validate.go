@@ -182,6 +182,9 @@ func (a *App) Validate() error {
 	if err := validateBackend(a.Backend); err != nil {
 		return err
 	}
+	if a.ManagerCN() == operatorName {
+		return fmt.Errorf("config: broker.manager_identity %q is reserved — it is the name the broker's audit log gives the host operator", operatorName)
+	}
 	if !a.Broker.AutoReenrol.valid() {
 		return fmt.Errorf("config: broker.auto_reenrol %q must be one of all|manager|off (or unset = all)", a.Broker.AutoReenrol)
 	}
@@ -293,6 +296,12 @@ func backendPort(backend string) (int, bool) {
 // broker.resolveDirectiveAgent). Reserved for that reason.
 const managerAlias = "manager"
 
+// operatorName is the actor the broker's audit log gives the host operator's
+// own actions (the operator socket, the directive channel), and the name the
+// broker words its answers for (broker.operatorActor). No agent may carry
+// it: an agent's audit lines would read as the operator's.
+const operatorName = "operator"
+
 // validateWorkerDirsDisjoint rejects two workers whose dirs overlap — the same
 // subtree, or one an ancestor of the other.
 //
@@ -353,6 +362,9 @@ func (a *App) validateWorker(g Worker) error {
 		// agent instead. The ManagerCN check above does not cover it, because a
 		// custom manager_identity moves the CN off this word.
 		return fmt.Errorf("config: worker name %q is reserved — it is the alias the operator-directive channel resolves to the manager, so a worker of that name could never be addressed", g.Name)
+	}
+	if g.Name == operatorName {
+		return fmt.Errorf("config: worker name %q is reserved — it is the name the broker's audit log gives the host operator", g.Name)
 	}
 	if g.Name == a.Name {
 		// The manager's scion agent slug IS the app name (apply dispatches

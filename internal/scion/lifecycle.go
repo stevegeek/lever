@@ -317,7 +317,8 @@ type Agent struct {
 // waiting_for_input; the hub's sweeper sets stalled when no activity event
 // arrives within its stalled_threshold (default 5 min). A harness that cannot
 // reach the model API sits in working until the sweeper marks it stalled
-// (lever#34), which is the one signal that tells a dead turn from an idle one.
+// (lever#34). The sweeper marks a manager idle at its prompt the same way,
+// so stalled alone does not tell a dead turn from an idle one.
 const (
 	ActivityWorking         = "working"
 	ActivityWaitingForInput = "waiting_for_input"

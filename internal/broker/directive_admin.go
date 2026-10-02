@@ -212,7 +212,7 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 			// the agent was never told about; if the notice did land after
 			// all, its id now consumes as the usual opaque not-found.
 			revoked := b.directives.RevokeDirective(st.DirectiveID)
-			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error()+" (directive revoked)", "revoked", revoked)
+			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error(), "revoked", revoked)
 			b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": false})
 			b.dirAudit.append("revoked", map[string]any{"id": st.DirectiveID, "ok": revoked, "reason": "undelivered"})
 			if !revoked {
@@ -224,6 +224,7 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 				state := b.directiveState(st.DirectiveID)
 				http.Error(w, "directive "+st.DirectiveID+": the notice was reported as not delivered, but the directive is no longer active (state: "+state+"). "+
 					"If the state is consumed, the notice reached the agent and the agent took the directive: do NOT send it again. "+
+					"If it is invalidated, the agent re-enrolled meanwhile: send a new directive. "+
 					"Check `lever directive list` and the agent's session.", http.StatusBadGateway)
 				return
 			}

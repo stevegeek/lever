@@ -384,6 +384,11 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if len(req.Worker) > maxMsgRecipientLen {
+		b.audit("msg", caller, "deny", "list: worker name longer than the limit")
+		http.Error(w, "worker name is too long", http.StatusBadRequest)
+		return
+	}
 	subject, rerr := b.resolveListSubject(caller, req.Worker)
 	if rerr != nil {
 		b.audit("msg", caller, "deny", "list "+req.Worker+": "+rerr.Error())

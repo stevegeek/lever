@@ -1866,3 +1866,21 @@ func TestRemoteWildcardBindRefusedWithTailscaleHeader(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateReservesTheOperatorName: the broker's audit log names the host
+// operator "operator"; no agent identity may be that word.
+func TestValidateReservesTheOperatorName(t *testing.T) {
+	app := testApp(t, "workers/a", "workers/b")
+	if err := app.Validate(); err != nil {
+		t.Fatalf("baseline app: %v", err)
+	}
+	app.Workers[0].Name = "operator"
+	if err := app.Validate(); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("worker named operator: %v, want a reserved-name error", err)
+	}
+	app = testApp(t, "workers/a", "workers/b")
+	app.Broker.ManagerIdentity = "operator"
+	if err := app.Validate(); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("manager_identity operator: %v, want a reserved-name error", err)
+	}
+}

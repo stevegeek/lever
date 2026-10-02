@@ -1868,30 +1868,65 @@ func TestNetworkCheckedAgentsIncludesManager(t *testing.T) {
 
 // TestCheckWorkerTreeBootstraps: a bootstrap.json under a worker's own tree
 // fails the row and names the file to delete; the manager's own bootstrap
-// (the tree root's .lever) is not a worker's.
+// (the tree root's .lever) is not a worker's. A path that goes through a
+// symlink an agent planted fails the row too, but gets NO rm line: pasting
+// one would delete the link's target (the manager's bootstrap).
 func TestCheckWorkerTreeBootstraps(t *testing.T) {
 	tree := t.TempDir()
-	dirs := map[string]string{"a": filepath.Join(tree, "workers", "a"), "b": filepath.Join(tree, "workers", "b")}
-	for _, d := range append([]string{tree}, dirs["a"], dirs["b"]) {
+	dirs := map[string]string{"a": filepath.Join(tree, "workers", "a"), "b": filepath.Join(tree, "workers", "b"), "c": filepath.Join(tree, "workers", "c")}
+	for _, d := range []string{tree, dirs["a"], dirs["b"]} {
 		if err := os.MkdirAll(filepath.Join(d, ".lever"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(tree, ".lever", "bootstrap.json"), []byte("{}"), 0o600); err != nil {
+	managers := filepath.Join(tree, ".lever", "bootstrap.json")
+	if err := os.WriteFile(managers, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := checkWorkerTreeBootstraps(dirs); !r.ok {
+	if r := checkWorkerTreeBootstraps(tree, dirs); !r.ok {
 		t.Fatalf("no worker copy: %+v, want a pass", r)
 	}
 	stray := filepath.Join(dirs["b"], ".lever", "bootstrap.json")
 	if err := os.WriteFile(stray, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := checkWorkerTreeBootstraps(dirs)
-	if r.ok || !strings.Contains(r.detail, "worker b ") || !strings.Contains(r.fix, "rm "+stray) {
-		t.Fatalf("a copy in worker b's tree: %+v, want a failure that names b and the file", r)
+	r := checkWorkerTreeBootstraps(tree, dirs)
+	if r.ok || !strings.Contains(r.detail, "worker b ") || !strings.Contains(r.fix, "rm -- "+shellQuote(stray)) {
+		t.Fatalf("a copy in worker b's tree: %+v, want a failure that names b and the quoted file", r)
 	}
-	if r := checkWorkerTreeBootstraps(nil); !r.ok {
+	// Worker c plants `.lever` as a link to the manager's directory.
+	if err := os.MkdirAll(dirs["c"], 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(tree, ".lever"), filepath.Join(dirs["c"], ".lever")); err != nil {
+		t.Fatal(err)
+	}
+	r = checkWorkerTreeBootstraps(tree, dirs)
+	viaLink := filepath.Join(dirs["c"], ".lever", "bootstrap.json")
+	if r.ok || !strings.Contains(r.detail, "symbolic link") || strings.Contains(r.fix, viaLink) || !strings.Contains(r.fix, "do NOT delete through the path") {
+		t.Fatalf("a planted .lever link: %+v, want a failure with no rm line for %s", r, viaLink)
+	}
+	if !strings.Contains(r.fix, shellQuote(stray)) {
+		t.Fatalf("the real copy in worker b must still get its rm line: %q", r.fix)
+	}
+	if _, err := os.Stat(managers); err != nil {
+		t.Fatalf("the manager's bootstrap must be untouched: %v", err)
+	}
+	if r := checkWorkerTreeBootstraps(tree, nil); !r.ok {
 		t.Fatalf("no workers: %+v", r)
+	}
+}
+
+// TestShellQuote: a pasted rm line must not expand anything a path contains.
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/a/b":             `'/a/b'`,
+		"/a/$(touch x)/b":  `'/a/$(touch x)/b'`,
+		"/a/it's`id`/b":    `'/a/it'\''s` + "`id`" + `/b'`,
+		"/a/new\nline -rf": `'/a/new` + "\n" + `line -rf'`,
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
 	}
 }

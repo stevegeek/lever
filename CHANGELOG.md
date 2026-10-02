@@ -5,6 +5,76 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.29.1] - 2026-10-02
+
+Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them
+correct behaviour those releases introduced.
+
+### Security
+
+- **An agent's own status text no longer reaches another agent or a lever
+  message.** An agent may post any text as its own `phase` (and `activity`)
+  to the hub. The 409 that 0.28.1 added for a message to an agent that is
+  not running printed that phase, as did the resume errors and the worker
+  list the manager reads: a worker could write into the manager's session
+  outside the relay marker and `message_verify`, and into the operator's
+  `lever msg send` / `lever directive send` errors and the audit log. The
+  broker now passes every phase and activity through a list of known values;
+  anything else is `unrecognised`. The container status (which an agent can
+  also post) is shown only when it is exactly a runtime status ("Up 3
+  hours", "Exited (1) 4 minutes ago"); words in it are not shown. This
+  covers the refusals, the "did not come up" error of `agent start` /
+  `agent resume`, the worker list and the audit lines. Operator-facing
+  messages quote such strings and cut them at 48 bytes.
+- **`lever up --fresh` cannot report a discard that did not happen.** 0.29.0
+  made the `--fresh` delete retry and counted a later "not found" as "the
+  record is gone", and the create that follows accepted "already exists":
+  with the wrong error text, `--fresh` printed "previous session discarded"
+  and kept the old manager. `--fresh` is how an operator evicts a session.
+  lever now lists the agents after the delete and creates only when the
+  manager record is absent; a record still there, or a create that meets an
+  existing record, is an error: lever does not report a fresh manager.
+  The same holds when `--fresh` saw no record at all and the create then
+  meets one.
+- **The doctor row "worker tree bootstraps" prints no `rm` line for a path
+  that goes through a symbolic link.** A worker could plant `.lever` as a
+  link to the manager's directory, and the printed `rm` would delete the
+  manager's bootstrap. The row still fails and tells the operator to remove
+  the link itself; paths are quoted for the shell, and the hint says to look
+  first.
+- **`lever stop` passes scion's error text through the terminal filter** in
+  its three warnings, as every other command does.
+
+### Fixed
+
+- **A worker whose container died is not treated as running.** The hub keeps
+  a record `running` for some minutes after its container is gone (until its
+  own sweep marks it `error`). In that window `lever-manager agent resume`
+  answered "already running" and did nothing, and `msg send` reported "Sent"
+  for a message nobody received (seen on Lima after a container kill). When
+  the hub reports a container that is not live for a `running` record, the
+  broker now refuses the message with 409 ("phase running, container down")
+  and the resume verb tries the forced resume; if the hub does not take it
+  yet, the answer says to try again; `agent start` with a task answers 409
+  for such a record, as for any record that is not running. A record with
+  no reported container status (or a brief `created`) is still treated as
+  running.
+
+### Changed
+
+- **Exit codes for a manager that was kept.** `lever up` / `lever apply`
+  exit **3** when a manager resume failed (the record is kept; `lever up
+  --fresh` discards it) and **4** when the hub refused the resume (the
+  manager is kept; do not answer with `--fresh`). A script reads the exit
+  code, not the error text: the text ends with the hub's own words after
+  "Cause:", which an agent can influence. The refusal no longer contains
+  "did NOT delete the manager"; it says "lever kept the manager".
+- **A revocation that could not be written to disk is reported.** `lever
+  directive revoke` exits non-zero, and the automatic revoke of an
+  undelivered directive says so: such a revocation holds only until the
+  broker restarts. Revoking an already revoked directive writes it again, so
+  "fix the disk and revoke it again" works.
+
 ## [0.29.0] - 2026-10-02
 
 ### Changed

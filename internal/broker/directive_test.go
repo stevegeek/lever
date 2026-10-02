@@ -54,8 +54,8 @@ func TestConsumeDeniesWrongCallerWrongGenExpiredRevoked(t *testing.T) {
 	}
 	// Revoked.
 	_ = s.Submit(rec("d3", "mgr", 2, now), now)
-	if !s.RevokeDirective("d3") {
-		t.Fatal("revoke failed")
+	if ok, perr := s.RevokeDirective("d3"); !ok || perr != nil {
+		t.Fatalf("revoke failed: %v %v", ok, perr)
 	}
 	if _, ok := s.Consume("d3", "mgr", now); ok {
 		t.Fatal("revoked consume succeeded")
@@ -233,8 +233,20 @@ func TestRevokeAndBumpApplyDespitePersistFailure(t *testing.T) {
 	s.BumpGeneration("mgr")
 	_ = s.Submit(rec("d1", "mgr", 1, now), now)
 	fail = true
-	if !s.RevokeDirective("d1") {
+	ok, perr := s.RevokeDirective("d1")
+	if !ok {
 		t.Fatal("revoke must apply in memory even when persist fails (deny is safe)")
+	}
+	// The caller must learn that the revocation is not on disk: a restart
+	// would bring the directive back active.
+	if perr == nil {
+		t.Fatal("a revoke that could not be persisted must report it")
+	}
+	// "Revoke it again" is the remedy: once the disk works, a second revoke
+	// of the same (already revoked) directive must write it and say so.
+	fail = false
+	if ok, perr := s.RevokeDirective("d1"); !ok || perr != nil {
+		t.Fatalf("second revoke after the disk recovered: %v %v, want true and a write", ok, perr)
 	}
 	if _, ok := s.Consume("d1", "mgr", now); ok {
 		t.Fatal("revoked directive consumable")

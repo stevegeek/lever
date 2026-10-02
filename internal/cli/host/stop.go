@@ -9,6 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // newStopCmd powers the jail machine off while keeping its disk, so a
@@ -68,7 +69,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// and only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
-						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %v\n", serr)
+						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
 					}
 					cancel()
 					// After the manager, under its own budget, so a slow worker
@@ -108,7 +109,7 @@ func suspendRunningWorkers(cmd *cobra.Command, sc *scion.Client, app *config.App
 	defer cancel()
 	agents, err := sc.List(ctx, project)
 	if err != nil {
-		cmd.PrintErrf("warning: listing agents failed, no worker was suspended (a running worker may not resume cleanly on next up): %v\n", err)
+		cmd.PrintErrf("warning: listing agents failed, no worker was suspended (a running worker may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(err)))
 		return
 	}
 	for _, wk := range app.Workers {
@@ -117,7 +118,7 @@ func suspendRunningWorkers(cmd *cobra.Command, sc *scion.Client, app *config.App
 			continue
 		}
 		if err := sc.Suspend(ctx, wk.Name, project); err != nil {
-			cmd.PrintErrf("warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %v\n", wk.Name, err)
+			cmd.PrintErrf("warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", wk.Name, termsafe.Sanitize(scion.ErrSummary(err)))
 			continue
 		}
 		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", wk.Name, wk.Name)

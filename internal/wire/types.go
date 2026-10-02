@@ -303,6 +303,10 @@ type DirectiveListResponse[T any] struct {
 // DirectiveRevokeResponse is the reply of POST /directive/revoke.
 type DirectiveRevokeResponse struct {
 	Revoked bool `json:"revoked"`
+	// NotPersisted: the revocation holds in the broker's memory but could not
+	// be written to disk, so a broker restart inside the directive's lifetime
+	// would make it active again.
+	NotPersisted bool `json:"not_persisted,omitempty"`
 }
 
 // DirectiveSelftestResponse is the reply of POST /directive/selftest.

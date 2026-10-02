@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -207,7 +209,7 @@ func describeReading(phase, container string) string {
 	if phase == "" && container == "" {
 		return "record gone from the listing"
 	}
-	return fmt.Sprintf("phase %q, container %q", phase, container)
+	return fmt.Sprintf("phase %q, container %q", PhaseLabel(phase), ContainerLabel(container))
 }
 
 // ErrAgentNotLive is wrapped by WaitAgentLive when its budget exhausts without
@@ -234,7 +236,10 @@ type NotLiveError struct {
 }
 
 func (e *NotLiveError) Error() string {
-	return fmt.Sprintf("%v (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, e.Phase, e.Container)
+	// Labels, not the raw strings: this error reaches the manager through
+	// the broker's resume and start answers, and both fields are text an
+	// agent can set for itself on the hub.
+	return fmt.Sprintf("%v (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, PhaseLabel(e.Phase), ContainerLabel(e.Container))
 }
 
 func (e *NotLiveError) Is(target error) bool { return target == ErrAgentNotLive }
@@ -336,6 +341,70 @@ func ActivityDead(activity string) bool {
 		return true
 	}
 	return false
+}
+
+// LabelUnrecognised stands in for a phase or an activity lever does not know.
+const LabelUnrecognised = "unrecognised"
+
+// PhaseLabel is phase when it is one of scion's phases (or the CLI's interim
+// "resumed"), "" when empty, else LabelUnrecognised. An agent can post any
+// text as its own phase to the hub (its baseline role may update its own
+// status, and the hub stores the string unchecked), so a phase read from the
+// hub is agent-chosen text. Everything that prints a phase to another agent
+// or acts on it by name takes it through here first; what no label matches
+// is never echoed.
+func PhaseLabel(phase string) string {
+	switch phase {
+	case "", "created", "provisioning", "cloning", "starting", PhaseRunning,
+		PhaseSuspended, "stopping", PhaseStopped, PhaseError, "resumed":
+		return phase
+	}
+	return LabelUnrecognised
+}
+
+// containerStatusRE matches the container status texts podman and scion
+// produce, and nothing else: "running", "stopped", "created", "Up 6
+// seconds", "Up About a minute", "Up Less than a second", "Exited (1) 4
+// minutes ago". The age is a number and a unit, never free words: an agent
+// can post this field about itself, so no slot may hold a sentence.
+const containerAge = `(\d{1,4} (second|minute|hour|day|week|month|year)s?|About an? (minute|hour)|Less than a second)`
+
+var containerStatusRE = regexp.MustCompile(`^(running|stopped|created|Created|paused|Paused|Up ` + containerAge + `|Exited \(\d{1,3}\) ` + containerAge + ` ago)$`)
+
+// ContainerLabel is status when it has one of the shapes a runtime reports,
+// "" when empty, else LabelUnrecognised (or "up" for a text that only starts
+// like a live status). An agent can post a containerStatus for its own
+// record, so the text is shown only when it is plainly a status. This is
+// for DISPLAY: ContainerLive still decides liveness from the raw text.
+func ContainerLabel(status string) string {
+	switch {
+	case status == "", containerStatusRE.MatchString(status):
+		return status
+	case ContainerLive(status):
+		return "up"
+	}
+	return LabelUnrecognised
+}
+
+// BoundedQuote renders a hub-reported string for the OPERATOR: quoted, and cut
+// at 48 bytes. The operator may see an odd value (it helps a diagnosis), but
+// never a wall of agent-chosen text inside a lever message.
+func BoundedQuote(s string) string {
+	const limit = 48
+	if len(s) > limit {
+		s = strings.ToValidUTF8(s[:limit], "") + "…"
+	}
+	return strconv.Quote(s)
+}
+
+// ActivityLabel is the same for an activity (also agent-reported).
+func ActivityLabel(activity string) string {
+	switch activity {
+	case "", ActivityWorking, "thinking", "executing", ActivityWaitingForInput, "blocked",
+		ActivityCompleted, "limits_exceeded", ActivityStalled, ActivityOffline, ActivityCrashed:
+		return activity
+	}
+	return LabelUnrecognised
 }
 
 // Phase values for Agent.Phase. These mirror upstream scion's agent-state wire

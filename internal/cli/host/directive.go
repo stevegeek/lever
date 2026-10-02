@@ -317,6 +317,9 @@ func newDirectiveRevokeCmd() *cobra.Command {
 				return err
 			}
 			cmd.Printf("directive %s revoked=%v\n", id, out.Revoked)
+			if out.NotPersisted {
+				return fmt.Errorf("directive %s is revoked in the broker's memory, but the broker could not write that to disk: a broker restart before the directive expires would make it active again. Fix the disk (see the broker log) and revoke it again", id)
+			}
 			return nil
 		},
 	}

@@ -185,7 +185,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},
-		func() checkResult { return checkWorkerTreeBootstraps(workerDirs) },
+		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult {
 			return checkAgentNetwork(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), jail.ForceHostNetworkFromEnv(), listAgents, inspectNetMode)
 		},

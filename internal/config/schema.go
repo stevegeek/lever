@@ -400,6 +400,14 @@ type Remote struct {
 	// Zero = DefaultRemoteLoginPort (EffectiveRemoteLoginPort). Validated against the proxy
 	// port, the broker's listeners, and the guest port's host mirror.
 	LoginPort int `yaml:"login_port"`
+	// Landing is what the remote origin opens on. Empty or
+	// RemoteLandingConsole: the hub's own web UI, as before. RemoteLandingChat:
+	// lever's chat page with the manager (remoteproxy/chatpage.go), which the
+	// proxy then serves under /lever/ to operator logins and redirects "/"
+	// to; the hub's UI stays reachable from it. Chat needs an operator-tier
+	// allowed_users entry (validateRemote): with no verified login, nothing
+	// the page sends would verify.
+	Landing string `yaml:"landing"`
 }
 
 type App struct {

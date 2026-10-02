@@ -187,6 +187,22 @@ func (a *App) EffectiveRemoteBind() string {
 	return cmp.Or(strings.TrimSpace(a.Remote.Bind), DefaultRemoteBind)
 }
 
+// Values of remote.landing.
+const (
+	RemoteLandingConsole = "console"
+	RemoteLandingChat    = "chat"
+)
+
+// EffectiveRemoteLanding is remote.landing with unset read as the console.
+func (a *App) EffectiveRemoteLanding() string {
+	return cmp.Or(a.Remote.Landing, RemoteLandingConsole)
+}
+
+// RemoteLandingChat reports whether the proxy serves lever's chat page.
+func (a *App) RemoteLandingChat() bool {
+	return a.RemoteEnabled() && a.Remote.Landing == RemoteLandingChat
+}
+
 // RemoteBindLoopback reports whether the proxy listens on loopback only — the
 // default, and the posture every other remote-access check assumes.
 func (a *App) RemoteBindLoopback() bool {

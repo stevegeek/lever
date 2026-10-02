@@ -56,6 +56,7 @@ func RemoteConfigHash(app *config.App) string {
 		Bind:               app.EffectiveRemoteBind(),
 		AllowWildcardBind:  app.Remote.AllowWildcardBind,
 		TrustForwardedHost: app.Remote.TrustForwardedHost,
+		Landing:            app.EffectiveRemoteLanding(),
 		Name:               app.Name,
 		Backend:            app.Backend,
 	})

@@ -30,6 +30,7 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 		"bind":                 func(a *config.App) { a.Remote.Bind = "10.0.0.5" },
 		"allow_wildcard_bind":  func(a *config.App) { a.Remote.AllowWildcardBind = true },
 		"trust_forwarded_host": func(a *config.App) { a.Remote.TrustForwardedHost = true },
+		"landing":              func(a *config.App) { a.Remote.Landing = config.RemoteLandingChat },
 	} {
 		changed := &config.App{Remote: base.Remote}
 		mutate(changed)
@@ -42,6 +43,7 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	spelled := &config.App{Remote: base.Remote}
 	spelled.Remote.IdentityHeader = "tailscale-user-login"
 	spelled.Remote.Bind = "127.0.0.1"
+	spelled.Remote.Landing = config.RemoteLandingConsole
 	if RemoteConfigHash(spelled) != h {
 		t.Error("spelling out the default identity header or bind must not bounce the proxy")
 	}

@@ -26,6 +26,9 @@ type RemoteIdentity struct {
 	Bind               string
 	AllowWildcardBind  bool
 	TrustForwardedHost bool
+	// Landing decides whether the proxy serves lever's chat page and where
+	// "/" goes; captured at startup like the rest.
+	Landing string
 	// Name selects the JAIL the proxy dials and Backend gates which
 	// transport it uses. Renaming the instance would otherwise leave a
 	// running proxy fronting the OLD machine's hub while apply happily

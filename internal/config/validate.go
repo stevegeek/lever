@@ -533,6 +533,15 @@ func (a *App) validateRemote() error {
 		}
 		seen[key] = au
 	}
+	switch a.Remote.Landing {
+	case "", RemoteLandingConsole:
+	case RemoteLandingChat:
+		if len(a.Remote.LoginsWithTier(TierOperator)) == 0 {
+			return fmt.Errorf("config: remote: landing: chat needs an operator login in allowed_users (without one no message from the page is verified)")
+		}
+	default:
+		return fmt.Errorf("config: remote: landing %q; use %s or %s", a.Remote.Landing, RemoteLandingConsole, RemoteLandingChat)
+	}
 	return nil
 }
 

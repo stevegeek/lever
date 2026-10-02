@@ -153,7 +153,11 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	}
 	for _, a := range agents {
 		if a.Slug == spec.Name {
-			return a.Phase, nil
+			// The hub's phase is text the agent can set for itself
+			// (scion.PhaseLabel): only a known phase leaves this function,
+			// so no caller can echo or audit an agent's own words as a
+			// phase.
+			return scion.PhaseLabel(a.Phase), nil
 		}
 	}
 	return "", nil
@@ -731,6 +735,13 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 		b.audit("worker", b.manager, "error", "list: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
+	}
+	// Phase and activity are text each agent reports about itself. The
+	// manager reads this list in its session, so only known labels go out:
+	// a worker cannot write to the manager through its own status.
+	for i := range agents {
+		agents[i].Phase = scion.PhaseLabel(agents[i].Phase)
+		agents[i].Activity = scion.ActivityLabel(agents[i].Activity)
 	}
 	writeJSON(w, wire.WorkerListResponse[scion.Agent]{Agents: agents})
 }

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -78,5 +80,24 @@ func TestExecutePrintsErrorsSanitized(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("success must print nothing: %q", stderr.String())
+	}
+}
+
+// TestExecuteExitCode: an ExitError decides the process exit code; any other
+// error is 1.
+func TestExecuteExitCode(t *testing.T) {
+	run := func(err error) int {
+		root := &cobra.Command{Use: "lever", RunE: func(*cobra.Command, []string) error { return err }, SilenceUsage: true}
+		root.SetArgs(nil)
+		return Execute(root, io.Discard)
+	}
+	if got := run(errors.New("plain")); got != 1 {
+		t.Fatalf("plain error: exit %d, want 1", got)
+	}
+	if got := run(fmt.Errorf("step x: %w", WithExitCode(errors.New("kept"), ExitManagerResumeFailed))); got != ExitManagerResumeFailed {
+		t.Fatalf("wrapped ExitError: exit %d, want %d", got, ExitManagerResumeFailed)
+	}
+	if got := run(nil); got != 0 {
+		t.Fatalf("no error: exit %d", got)
 	}
 }

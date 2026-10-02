@@ -171,7 +171,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 	phase := ""
 	for _, a := range agents {
 		if a.Slug == slug {
-			phase = a.Phase
+			phase = scion.PhaseLabel(a.Phase)
 			break
 		}
 	}

@@ -791,7 +791,7 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
 	}
 	return checkResult{check, false,
-		fmt.Sprintf("manager %q is not live: phase %q, container %q", name, a.Phase, a.ContainerStatus), fix}
+		fmt.Sprintf("manager %q is not live: phase %s, container %s", name, scionpkg.BoundedQuote(a.Phase), scionpkg.BoundedQuote(a.ContainerStatus)), fix}
 }
 
 // guestDNSProbeName is the name doctor resolves from inside the guest: the
@@ -835,10 +835,12 @@ func activityAge(a *scionpkg.Agent, now time.Time) string {
 	if a.Activity == "" {
 		return "no activity reported"
 	}
+	// The activity is the agent's own report: only a known label is shown.
+	activity := scionpkg.ActivityLabel(a.Activity)
 	if a.LastActivityEvent.IsZero() {
-		return "activity " + a.Activity
+		return "activity " + activity
 	}
-	return fmt.Sprintf("activity %s, %s ago", a.Activity, now.Sub(a.LastActivityEvent).Truncate(time.Second))
+	return fmt.Sprintf("activity %s, %s ago", activity, now.Sub(a.LastActivityEvent).Truncate(time.Second))
 }
 
 // checkManagerImage compares the image the manager record was created with
@@ -1022,28 +1024,64 @@ func checkWorkerTicketMounts(ctx context.Context, project string, workers []stri
 // manager, and it hid a worker-side `lever-manager` that read the wrong path
 // (it worked only where such a copy sat). dirs maps a worker to its host
 // directory.
-func checkWorkerTreeBootstraps(dirs map[string]string) checkResult {
+func checkWorkerTreeBootstraps(tree string, dirs map[string]string) checkResult {
 	const check = "worker tree bootstraps"
 	if len(dirs) == 0 {
 		return checkResult{check, true, "no workers declared", ""}
 	}
-	var found, paths []string
+	var found, paths, linked []string
 	for name, dir := range dirs {
 		p := filepath.Join(dir, ".lever", "bootstrap.json")
-		if _, err := os.Lstat(p); err == nil {
-			found = append(found, name)
-			paths = append(paths, p)
+		if _, err := os.Lstat(p); err != nil {
+			continue
 		}
+		found = append(found, name)
+		// The tree is agent-writable. A path that goes through a symlink
+		// (a `.lever` link planted in a worker tree, or a worker directory
+		// the manager replaced with a link) names a file somewhere else, so
+		// no `rm` line is printed for it: pasting one would delete the
+		// link's target, which can be the manager's own bootstrap.
+		if real, err := filepath.EvalSymlinks(p); err != nil || real != underRealTree(tree, p) {
+			linked = append(linked, name)
+			continue
+		}
+		paths = append(paths, strconv.Quote(p))
 	}
 	if len(found) == 0 {
 		return checkResult{check, true, "no bootstrap.json under a worker tree", ""}
 	}
 	slices.Sort(found)
 	slices.Sort(paths)
-	return checkResult{check, false,
-		fmt.Sprintf("worker %s has a bootstrap.json in its own tree: a worker's ticket belongs only in its read-only %s mount, never in the agent-writable tree",
-			braceList(found), workerTicketMount),
-		"delete it: rm " + strings.Join(paths, " ")}
+	slices.Sort(linked)
+	detail := fmt.Sprintf("worker %s has a bootstrap.json in its own tree: a worker's ticket belongs only in its read-only %s mount, never in the agent-writable tree",
+		braceList(found), workerTicketMount)
+	var fix []string
+	if len(paths) > 0 {
+		fix = append(fix, "delete it: rm -- "+strings.Join(paths, " "))
+	}
+	if len(linked) > 0 {
+		detail += fmt.Sprintf("; for worker %s the path goes through a symbolic link, so it names a file outside that worker's tree", braceList(linked))
+		fix = append(fix, fmt.Sprintf("for worker %s do NOT delete through the path: look at the `.lever` entry (and the worker directory) with `ls -la`, and remove the link itself", braceList(linked)))
+	}
+	return checkResult{check, false, detail, strings.Join(fix, "; ")}
+}
+
+// underRealTree is where p is when nothing below the instance tree is a
+// symlink: the tree's own real location plus p's path inside it. The tree
+// root is the mount point and not an agent's to replace; everything below it
+// is agent-writable. Comparing this with EvalSymlinks(p) tells whether any
+// component below the tree (or the file itself) is a link, while a tree that
+// sits behind a link on the host (/tmp or /var on macOS) does not count.
+func underRealTree(tree, p string) string {
+	real, err := filepath.EvalSymlinks(tree)
+	if err != nil {
+		return ""
+	}
+	rest, err := filepath.Rel(tree, p)
+	if err != nil || strings.HasPrefix(rest, "..") {
+		return ""
+	}
+	return filepath.Join(real, rest)
 }
 
 // braceList renders names as a shell brace-expansion hint ({a,b}) for the fix

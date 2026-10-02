@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
@@ -1003,7 +1004,7 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) (acted bool, err error) {
 	switch {
 	case rec == nil:
-		return true, r.startManagerCreate(ctx, opts)
+		return true, r.startManagerCreate(ctx, opts, false)
 	case r.fresh:
 		// `up --fresh`: the operator asked to discard the session, whatever
 		// phase the record is in. Decided HERE, after the hub is up, because
@@ -1012,7 +1013,7 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// is what puts a changed manager.image into effect (a resume keeps
 		// the image the record was created with).
 		return true, r.recoverDeleteAndCreate(ctx, jp, opts,
-			fmt.Sprintf("start-manager: --fresh — deleting manager %q (phase %q) and starting FRESH (previous session discarded)", r.app.Name, rec.Phase),
+			fmt.Sprintf("start-manager: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.app.Name, scion.BoundedQuote(rec.Phase)),
 			"--fresh delete")
 	case rec.Phase == scion.PhaseRunning:
 		// No-op — the liveness verify in startManager still confirms the
@@ -1050,8 +1051,8 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// a string it could not read (P6). Refuse instead, leaving the record
 		// (and its conversation) in place; the operator's discard is `up
 		// --fresh` (the arm above), which needs no phase at all.
-		return false, fmt.Errorf("start-manager: manager %q is in phase %q, which lever does not recognise; nothing was changed. Retry once it settles, or run `lever up --fresh` to discard the session and start over",
-			r.app.Name, rec.Phase)
+		return false, fmt.Errorf("start-manager: manager %q is in phase %s, which lever does not recognise; nothing was changed. Retry once it settles, or run `lever up --fresh` to discard the session and start over",
+			r.app.Name, scion.BoundedQuote(rec.Phase))
 	}
 }
 
@@ -1234,8 +1235,7 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 	}
 	if scion.IsRefusedByHub(rerr) {
 		// The hub refused the call, which says nothing about the manager.
-		return fmt.Errorf("start-manager: the hub refused %s of the manager (%v). lever did NOT delete the manager, "+
-			"so its conversation is kept. %s", v.label, rerr, scion.RefusalHint)
+		return HubRefusedResume(v.label, rerr)
 	}
 	return ResumeFailed(v.label, rerr)
 }
@@ -1243,12 +1243,27 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 // ResumeFailed is the error for a manager resume that failed and was not a
 // hub refusal: the record stays, and the operator decides. `lever up`'s own
 // resume path (a machine that is already running) returns it too, so both
-// paths say the same thing. The text "lever did NOT delete the manager" is
-// what a script matches to tell this case from other failures; keep it.
+// paths say the same thing.
+//
+// A script tells this case by the exit code (cli.ExitManagerResumeFailed),
+// not by the text. The fixed sentences come first and the hub's words last
+// ("Cause: …"): the cause can carry text an agent chose, and nothing an
+// agent writes may sit where a reader expects lever's own statement.
 func ResumeFailed(verb string, err error) error {
-	return fmt.Errorf("start-manager: %s of the manager failed (%s). lever did NOT delete the manager: its record and its conversation are kept. "+
+	return cli.WithExitCode(fmt.Errorf("start-manager: %s of the manager failed. lever did NOT delete the manager: its record and its conversation are kept. "+
 		"Run `lever up` again (a transient failure clears), and `lever doctor` for the cause if it does not. "+
-		"`lever up --fresh` discards the session and starts a new manager", verb, termsafe.Sanitize(scion.ErrSummary(err)))
+		"`lever up --fresh` discards the session and starts a new manager. Cause: %s", verb, termsafe.Sanitize(scion.ErrSummary(err))),
+		cli.ExitManagerResumeFailed)
+}
+
+// HubRefusedResume is the error for a resume the hub refused. The manager is
+// not broken and is kept; `--fresh` is the wrong answer to it, so it has its
+// own exit code (cli.ExitHubRefusedResume) and does not share ResumeFailed's
+// wording.
+func HubRefusedResume(verb string, err error) error {
+	return cli.WithExitCode(fmt.Errorf("start-manager: the hub refused %s of the manager. lever kept the manager and its conversation. %s. Cause: %s",
+		verb, scion.RefusalHint, termsafe.Sanitize(scion.ErrSummary(err))),
+		cli.ExitHubRefusedResume)
 }
 
 // retryOnBrokerUnavailable runs action up to r.brokerStart.Attempts times,
@@ -1342,7 +1357,7 @@ func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool 
 // already minted earlier in this same run (r.minted, e.g.
 // mint-manager-bootstrap succeeded outright, or an earlier create in this
 // same Run already re-armed), or r.d.RearmBootstrap mints one now.
-func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) error {
+func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, afterDelete bool) error {
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
@@ -1357,6 +1372,13 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts) erro
 		// create-race the observe step missed) is success, not error. It is
 		// not a fresh session, so it is not recorded as one.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
+			if afterDelete {
+				// After a `--fresh` delete nothing may exist. An existing
+				// record here is the session the operator asked to discard
+				// (or one something else created): never report it as the
+				// fresh manager.
+				return fmt.Errorf("start-manager: a manager record exists right after the --fresh delete (%s); the fresh manager was NOT created. Run `lever up --fresh` again", termsafe.Sanitize(scion.ErrSummary(startErr)))
+			}
 			return nil
 		}
 		created = startErr == nil
@@ -1386,20 +1408,26 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 	// registered, and a delete issued in that window fails the same way.
 	// `up --fresh` is the operator's one way out of a manager that does not
 	// resume, so it must not fail on a broker that was only late.
-	attempts := 0
-	if derr := r.retryOnBrokerUnavailable(ctx, func() error {
-		attempts++
-		err := r.d.Scion.Delete(ctx, r.app.Name, jp)
-		if err != nil && attempts > 1 && strings.Contains(strings.ToLower(err.Error()), "not found") {
-			// An earlier attempt removed the record and then reported the
-			// transient failure: the record being gone is what was asked.
-			return nil
+	derr := r.retryOnBrokerUnavailable(ctx, func() error { return r.d.Scion.Delete(ctx, r.app.Name, jp) })
+	// What decides is the record, never the words of an error: an attempt
+	// can remove the record and still report a failure, and a delete can
+	// report success (or a "not found" about something else) with the record
+	// still there. `--fresh` is how an operator evicts a session they no
+	// longer trust, so "discarded" must be true before a create follows.
+	agents, lerr := r.listAgentsRetry(ctx, jp)
+	if lerr != nil {
+		if derr != nil {
+			return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 		}
-		return err
-	}); derr != nil {
-		return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
+		return fmt.Errorf("start-manager: %s: the delete was sent, but lever could not confirm the manager record is gone (%v); nothing was created. Run `lever up --fresh` again", deleteFailReason, lerr)
 	}
-	return r.startManagerCreate(ctx, opts)
+	if rec := scion.FindAgent(agents, r.app.Name); rec != nil {
+		if derr != nil {
+			return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
+		}
+		return fmt.Errorf("start-manager: %s: the delete reported no error, but the manager record is still there (phase %s). The previous session was NOT discarded and nothing was created. Run `lever up --fresh` again", deleteFailReason, scion.BoundedQuote(rec.Phase))
+	}
+	return r.startManagerCreate(ctx, opts, true)
 }
 
 // ensureFreshBootstrap guarantees fresh, enrolable bootstrap material exists
@@ -1501,7 +1529,7 @@ func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error
 	case a == nil:
 		return fmt.Errorf("up: manager %q was running when up looked, but has no record now — %s", name, remedy)
 	case a.Phase != scion.PhaseRunning:
-		return fmt.Errorf("up: manager %q was running when up looked, but is in phase %q now (container %q) — %s", name, a.Phase, a.ContainerStatus, remedy)
+		return fmt.Errorf("up: manager %q was running when up looked, but is in phase %s now (container %s) — %s", name, scion.BoundedQuote(a.Phase), scion.BoundedQuote(a.ContainerStatus), remedy)
 	case a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus):
 		return fmt.Errorf("up: manager %q record says running, but its container is %q — the harness died; %s", name, a.ContainerStatus, remedy)
 	}

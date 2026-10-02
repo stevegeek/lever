@@ -235,20 +235,22 @@ func (s *DirectiveStore) Check(id, callerCN string, now time.Time) (DirectiveSta
 }
 
 // RevokeDirective marks an active directive revoked (tombstone retained).
-func (s *DirectiveStore) RevokeDirective(id string) bool {
+// persistErr is non-nil when the revocation could not be written to disk: it
+// then holds only in memory, and a broker restart inside the directive's
+// lifetime would bring the directive back active. The caller must say so.
+func (s *DirectiveStore) RevokeDirective(id string) (revoked bool, persistErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.findLocked(id)
 	if r == nil || r.State != DirectiveActive {
-		return false
+		return false, nil
 	}
 	r.State = DirectiveRevoked
-	// Apply in memory regardless of persist outcome (error already logged by
-	// persistLocked): refusing to revoke on a disk error would fail OPEN —
-	// an operator trying to invalidate a directive must not be told "still
-	// active" because the write-through failed.
-	_ = s.persistLocked()
-	return true
+	// Apply in memory regardless of persist outcome: refusing to revoke on a
+	// disk error would fail OPEN — an operator trying to invalidate a
+	// directive must not be told "still active" because the write-through
+	// failed.
+	return true, s.persistLocked()
 }
 
 // List returns operator-facing copies with the statement/signature bytes

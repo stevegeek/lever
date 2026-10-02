@@ -211,8 +211,8 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 			// or scion failed). Revoke rather than leave an active directive
 			// the agent was never told about; if the notice did land after
 			// all, its id now consumes as the usual opaque not-found.
-			revoked := b.directives.RevokeDirective(st.DirectiveID)
-			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error(), "revoked", revoked)
+			revoked, perr := b.directives.RevokeDirective(st.DirectiveID)
+			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error(), "revoked", revoked, "persisted", perr == nil)
 			b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": false})
 			b.dirAudit.append("revoked", map[string]any{"id": st.DirectiveID, "ok": revoked, "reason": "undelivered"})
 			if !revoked {
@@ -226,6 +226,14 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 					"If the state is consumed, the notice reached the agent and the agent took the directive: do NOT send it again. "+
 					"If it is invalidated, the agent re-enrolled meanwhile: send a new directive. "+
 					"Check `lever directive list` and the agent's session.", http.StatusBadGateway)
+				return
+			}
+			if perr != nil {
+				// Revoked in memory only. "Nothing is pending" would be
+				// false after a broker restart.
+				http.Error(w, "directive "+st.DirectiveID+": the notice could not be delivered to the agent, and the directive was revoked in memory only: "+
+					"the broker could not write its state to disk. A broker restart before the directive expires would make it active again. "+
+					"Fix the disk (see the broker log), run `lever directive revoke "+st.DirectiveID+"` again, and send a new directive only after that.", http.StatusBadGateway)
 				return
 			}
 			http.Error(w, "directive "+st.DirectiveID+": the notice could not be delivered to the agent, so the directive was revoked and nothing is pending. "+
@@ -326,10 +334,10 @@ func (b *Broker) handleDirectiveRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := env.Params["id"]
-	revoked := b.directives.RevokeDirective(id)
-	b.audit("directive", "operator", "allow", "revoke "+id)
+	revoked, perr := b.directives.RevokeDirective(id)
+	b.audit("directive", "operator", "allow", "revoke "+id, "persisted", perr == nil)
 	b.dirAudit.append("revoked", map[string]any{"id": id, "ok": revoked})
-	writeJSON(w, wire.DirectiveRevokeResponse{Revoked: revoked})
+	writeJSON(w, wire.DirectiveRevokeResponse{Revoked: revoked, NotPersisted: perr != nil})
 }
 
 // handleDirectiveSelftest verifies+parses ONLY (no store, no delivery, no

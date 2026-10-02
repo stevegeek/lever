@@ -5,6 +5,53 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [0.29.1] - 2026-10-02
+
+Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them
+correct behaviour those releases introduced.
+
+### Security
+
+- **An agent's own status text no longer reaches another agent or a lever
+  message.** An agent may post any text as its own `phase` (and `activity`)
+  to the hub. The 409 that 0.28.1 added for a message to an agent that is
+  not running printed that phase, as did the resume errors and the worker
+  list the manager reads: a worker could write into the manager's session
+  outside the relay marker and `message_verify`, and into the operator's
+  `lever msg send` / `lever directive send` errors and the audit log. The
+  broker now passes every phase and activity through a list of known values;
+  anything else is `unrecognised`. Operator-facing messages quote such
+  strings and cut them at 48 bytes.
+- **`lever up --fresh` cannot report a discard that did not happen.** 0.29.0
+  made the `--fresh` delete retry and counted a later "not found" as "the
+  record is gone", and the create that follows accepted "already exists":
+  with the wrong error text, `--fresh` printed "previous session discarded"
+  and kept the old manager. `--fresh` is how an operator evicts a session.
+  lever now lists the agents after the delete and creates only when the
+  manager record is absent; a record still there, or a create that meets an
+  existing record, is an error that says the session was NOT discarded.
+- **The doctor row "worker tree bootstraps" prints no `rm` line for a path
+  that goes through a symbolic link.** A worker could plant `.lever` as a
+  link to the manager's directory, and the printed `rm` would delete the
+  manager's bootstrap. The row still fails and tells the operator to remove
+  the link itself; paths are quoted.
+- **`lever stop` passes scion's error text through the terminal filter** in
+  its three warnings, as every other command does.
+
+### Changed
+
+- **Exit codes for a manager that was kept.** `lever up` / `lever apply`
+  exit **3** when a manager resume failed (the record is kept; `lever up
+  --fresh` discards it) and **4** when the hub refused the resume (the
+  manager is kept; do not answer with `--fresh`). A script reads the exit
+  code, not the error text: the text ends with the hub's own words after
+  "Cause:", which an agent can influence. The refusal no longer contains
+  "did NOT delete the manager"; it says "lever kept the manager".
+- **A revocation that could not be written to disk is reported.** `lever
+  directive revoke` exits non-zero, and the automatic revoke of an
+  undelivered directive says so: such a revocation holds only until the
+  broker restarts.
+
 ## [0.29.0] - 2026-10-02
 
 ### Changed

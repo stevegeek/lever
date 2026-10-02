@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -336,6 +337,46 @@ func ActivityDead(activity string) bool {
 		return true
 	}
 	return false
+}
+
+// LabelUnrecognised stands in for a phase or an activity lever does not know.
+const LabelUnrecognised = "unrecognised"
+
+// PhaseLabel is phase when it is one of scion's phases (or the CLI's interim
+// "resumed"), "" when empty, else LabelUnrecognised. An agent can post any
+// text as its own phase to the hub (its baseline role may update its own
+// status, and the hub stores the string unchecked), so a phase read from the
+// hub is agent-chosen text. Everything that prints a phase to another agent
+// or acts on it by name takes it through here first; what no label matches
+// is never echoed.
+func PhaseLabel(phase string) string {
+	switch phase {
+	case "", "created", "provisioning", "cloning", "starting", PhaseRunning,
+		PhaseSuspended, "stopping", PhaseStopped, PhaseError, "resumed":
+		return phase
+	}
+	return LabelUnrecognised
+}
+
+// BoundedQuote renders a hub-reported string for the OPERATOR: quoted, and cut
+// at 48 bytes. The operator may see an odd value (it helps a diagnosis), but
+// never a wall of agent-chosen text inside a lever message.
+func BoundedQuote(s string) string {
+	const limit = 48
+	if len(s) > limit {
+		s = strings.ToValidUTF8(s[:limit], "") + "…"
+	}
+	return strconv.Quote(s)
+}
+
+// ActivityLabel is the same for an activity (also agent-reported).
+func ActivityLabel(activity string) string {
+	switch activity {
+	case "", ActivityWorking, "thinking", "executing", ActivityWaitingForInput, "blocked",
+		ActivityCompleted, "limits_exceeded", ActivityStalled, ActivityOffline, ActivityCrashed:
+		return activity
+	}
+	return LabelUnrecognised
 }
 
 // Phase values for Agent.Phase. These mirror upstream scion's agent-state wire

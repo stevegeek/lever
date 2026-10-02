@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -590,6 +591,15 @@ func TestStartManagerResumeFailsKeepsTheManager(t *testing.T) {
 	}
 	err := runApply(app, deps)
 	testutil.WantErrContaining(t, err, "resume of the manager failed", "agent does not exist", "did NOT delete", "lever up --fresh")
+	// The exit code is what a script reads; lever's own sentences come
+	// before the hub's words, which only follow "Cause:".
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != cli.ExitManagerResumeFailed {
+		t.Fatalf("a failed resume must exit %d: %v", cli.ExitManagerResumeFailed, err)
+	}
+	if msg := err.Error(); strings.Index(msg, "did NOT delete") > strings.Index(msg, "Cause:") || strings.Index(msg, "agent does not exist") < strings.Index(msg, "Cause:") {
+		t.Fatalf("the hub's text must come last, after \"Cause:\": %q", msg)
+	}
 	if r.resumeCalls != 1 {
 		t.Errorf("resumeCalls = %d, want 1", r.resumeCalls)
 	}
@@ -627,8 +637,14 @@ func TestStartManagerResumeRefusedByHubKeepsTheManager(t *testing.T) {
 		if r.deleteCalls != 0 || r.startCalls != 0 {
 			t.Fatalf("%s: deleteCalls=%d startCalls=%d, want 0 (the manager must be kept)", refusal, r.deleteCalls, r.startCalls)
 		}
-		if !strings.Contains(err.Error(), "did NOT delete") || !strings.Contains(err.Error(), "agent:lifecycle") {
+		if !strings.Contains(err.Error(), "lever kept the manager") || !strings.Contains(err.Error(), "agent:lifecycle") {
 			t.Fatalf("error %q does not say the manager was kept and why", err)
+		}
+		// A refusal is not the resume-failed case: its own exit code, and
+		// none of that case's wording (--fresh is the wrong answer to it).
+		var ee *cli.ExitError
+		if !errors.As(err, &ee) || ee.Code != cli.ExitHubRefusedResume || strings.Contains(err.Error(), "did NOT delete the manager") {
+			t.Fatalf("a hub refusal must exit %d and not read as resume-failed: %v", cli.ExitHubRefusedResume, err)
 		}
 		for _, l := range logged.lines {
 			if strings.Contains(l, "FRESH") {
@@ -3691,8 +3707,10 @@ func TestStartManagerFreshDiscardsPresentRecord(t *testing.T) {
 			if !strings.Contains(strings.Join(logged, "\n"), "--fresh") {
 				t.Errorf("the discard must be announced, got %q", logged)
 			}
-			if r.listCalls > 2 {
-				t.Errorf("listCalls = %d, want <= 2 (--fresh must not wait for a %s record to settle)", r.listCalls, phase)
+			// One list more than the observe and the liveness look: the
+			// one that confirms the record is gone before the create.
+			if r.listCalls > 3 {
+				t.Errorf("listCalls = %d, want <= 3 (--fresh must not wait for a %s record to settle)", r.listCalls, phase)
 			}
 		})
 	}
@@ -3903,12 +3921,93 @@ func TestStartManagerCreateRaceIsNotRecorded(t *testing.T) {
 	lr := &agentLifecycleRunner{FakeRunner: f, slug: "hello", startErr: errors.New("agent 'hello' already exists")}
 	r := &run{app: app, d: fillDeps(Deps{Scion: scion.New(lr, scion.Options{}), BeginSession: spy.begin}),
 		brokerStart: RetryBudget{Attempts: 1, Interval: time.Millisecond}, minted: true}
-	if err := r.startManagerCreate(context.Background(), scion.StartOpts{Worker: "hello"}); err != nil {
+	if err := r.startManagerCreate(context.Background(), scion.StartOpts{Worker: "hello"}, false); err != nil {
 		t.Fatalf("create race: %v", err)
 	}
 	if len(spy.committed) != 0 {
 		t.Fatalf("an existing session was recorded as fresh: %v", spy.committed)
 	}
+}
+
+// TestStartManagerFreshNeverReportsADiscardThatDidNotHappen: `--fresh` is how
+// an operator evicts a session. The record decides, not the words of an
+// error: a delete that fails with some "not found", a delete that reports
+// success and leaves the record, and a create that meets an existing record
+// all end with an error, never with "is up" over the old session.
+func TestStartManagerFreshNeverReportsADiscardThatDidNotHappen(t *testing.T) {
+	for _, text := range []string{"project not found", "sh: scion: command not found",
+		"Failed to delete agent on runtime broker: container not found"} {
+		app, f := newObserveFirstApp(t)
+		r := &keptRecordRunner{agentLifecycleRunner: agentLifecycleRunner{FakeRunner: f, slug: "hello",
+			initPhase: "running", initContainerStatus: "Up 3 days"}, second: text}
+		var logged logSink
+		err := runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(5), Scion: scion.New(r, scion.Options{}), Log: logged.logf})
+		if err == nil {
+			t.Fatalf("%q: --fresh reported success with the record still there", text)
+		}
+		testutil.WantErrContaining(t, err, "delete failed")
+		if r.startCalls != 0 {
+			t.Fatalf("%q: startCalls=%d, want 0 (nothing is created over a kept record)", text, r.startCalls)
+		}
+	}
+
+	// The delete reports success and the record stays.
+	app, f := newObserveFirstApp(t)
+	silent := &keptRecordRunner{agentLifecycleRunner: agentLifecycleRunner{FakeRunner: f, slug: "hello",
+		initPhase: "suspended", initContainerStatus: "stopped"}, lies: true}
+	err := runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(3), Scion: scion.New(silent, scion.Options{}), Log: func(string, ...any) {}})
+	testutil.WantErrContaining(t, err, "still there", "NOT discarded")
+	if silent.startCalls != 0 {
+		t.Fatalf("startCalls=%d after a delete that removed nothing", silent.startCalls)
+	}
+
+	// The record is gone, and the create still meets "already exists".
+	app, f = newObserveFirstApp(t)
+	race := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped",
+		startErr: errors.New("agent 'hello' already exists")}
+	err = runApplyFresh(app, Deps{BrokerStartRetry: fastRetry(3), Scion: scion.New(race, scion.Options{}), Log: func(string, ...any) {}})
+	testutil.WantErrContaining(t, err, "right after the --fresh delete", "NOT created")
+}
+
+// keptRecordRunner models a delete that never removes the record: the first
+// attempt reports the runtime-broker race and the second reports `second`
+// (or, with lies set, every attempt reports success).
+type keptRecordRunner struct {
+	agentLifecycleRunner
+	second  string
+	lies    bool
+	deletes int
+}
+
+func (r *keptRecordRunner) intercept(args []string) (proc.Result, error, bool) {
+	if r.verb(args) != "delete" {
+		return proc.Result{}, nil, false
+	}
+	r.ensureInit()
+	r.deletes++
+	if r.lies {
+		return proc.Result{Stdout: "ok"}, nil, true
+	}
+	text := r.second
+	if r.deletes == 1 {
+		text = "context deadline exceeded"
+	}
+	err := errors.New(text)
+	return proc.Result{Code: 1, Stderr: text}, err, true
+}
+
+func (r *keptRecordRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if res, err, ok := r.intercept(args); ok {
+		return res, err
+	}
+	return r.agentLifecycleRunner.Run(ctx, env, name, args...)
+}
+
+func (r *keptRecordRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if res, err, ok := r.intercept(args); ok {
+		return res, err
+	}
+	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
 }
 
 // deleteThenGoneRunner models a delete whose first attempt removes the record

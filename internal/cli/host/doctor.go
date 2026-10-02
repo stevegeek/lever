@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
@@ -152,6 +153,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkAgentCert(state, time.Now()) },
 		func() checkResult { return checkToolBackends(app.Broker.Tools, probes) },
 		func() checkResult { return checkClaudeVersion(app.ManagerImage(), app.ManagerImageTarPath(), probes) },
+		func() checkResult {
+			return checkLeverVersion(app.ManagerImage(), app.ManagerImageTarPath(), cli.Version, cli.VersionString(), probes)
+		},
 		func() checkResult {
 			return checkManagerImage(ctx, b.MountDest(), app.Name, app.ManagerImage(), listAgents)
 		},

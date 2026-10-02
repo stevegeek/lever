@@ -736,12 +736,14 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	// Phase and activity are text each agent reports about itself. The
+	// Phase, activity and container status are text each agent can report
+	// about itself. The
 	// manager reads this list in its session, so only known labels go out:
 	// a worker cannot write to the manager through its own status.
 	for i := range agents {
 		agents[i].Phase = scion.PhaseLabel(agents[i].Phase)
 		agents[i].Activity = scion.ActivityLabel(agents[i].Activity)
+		agents[i].ContainerStatus = scion.ContainerLabel(agents[i].ContainerStatus)
 	}
 	writeJSON(w, wire.WorkerListResponse[scion.Agent]{Agents: agents})
 }

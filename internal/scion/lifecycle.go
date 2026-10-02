@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -208,7 +209,7 @@ func describeReading(phase, container string) string {
 	if phase == "" && container == "" {
 		return "record gone from the listing"
 	}
-	return fmt.Sprintf("phase %q, container %q", phase, container)
+	return fmt.Sprintf("phase %q, container %q", PhaseLabel(phase), ContainerLabel(container))
 }
 
 // ErrAgentNotLive is wrapped by WaitAgentLive when its budget exhausts without
@@ -235,7 +236,10 @@ type NotLiveError struct {
 }
 
 func (e *NotLiveError) Error() string {
-	return fmt.Sprintf("%v (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, e.Phase, e.Container)
+	// Labels, not the raw strings: this error reaches the manager through
+	// the broker's resume and start answers, and both fields are text an
+	// agent can set for itself on the hub.
+	return fmt.Sprintf("%v (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, PhaseLabel(e.Phase), ContainerLabel(e.Container))
 }
 
 func (e *NotLiveError) Is(target error) bool { return target == ErrAgentNotLive }
@@ -354,6 +358,26 @@ func PhaseLabel(phase string) string {
 	case "", "created", "provisioning", "cloning", "starting", PhaseRunning,
 		PhaseSuspended, "stopping", PhaseStopped, PhaseError, "resumed":
 		return phase
+	}
+	return LabelUnrecognised
+}
+
+// containerStatusRE matches the container status texts podman and scion
+// produce: "running", "stopped", "created", "Up 6 seconds", "Up About a
+// minute", "Exited (1) 4 minutes ago".
+var containerStatusRE = regexp.MustCompile(`^(running|stopped|created|Created|paused|Up [A-Za-z0-9 ]{1,40}|Exited \(\d{1,3}\) [A-Za-z0-9 ]{1,40})$`)
+
+// ContainerLabel is status when it has one of the shapes a runtime reports,
+// "" when empty, else LabelUnrecognised (or "up" for a text that only starts
+// like a live status). An agent can post a containerStatus for its own
+// record, so the text is shown only when it is plainly a status. This is
+// for DISPLAY: ContainerLive still decides liveness from the raw text.
+func ContainerLabel(status string) string {
+	switch {
+	case status == "", containerStatusRE.MatchString(status):
+		return status
+	case ContainerLive(status):
+		return "up"
 	}
 	return LabelUnrecognised
 }

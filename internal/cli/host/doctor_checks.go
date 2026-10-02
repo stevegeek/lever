@@ -770,14 +770,14 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 			// here; the detail says how to tell them apart.
 			return checkResult{check, true,
 				fmt.Sprintf("%q is running (container %s; %s) — idle at its prompt, or a turn that never finished: `lever attach` shows which (a stuck LLM call ends in `Request timed out`; then check the `guest DNS` and credential rows)",
-					name, a.ContainerStatus, activityAge(a, now)), ""}
+					name, scionpkg.ContainerLabel(a.ContainerStatus), activityAge(a, now)), ""}
 		}
 		if scionpkg.ActivityDead(a.Activity) {
 			return checkResult{check, false,
 				fmt.Sprintf("manager %q has a live container but its harness is %s — it is not completing turns", name, activityAge(a, now)),
 				"`lever attach` shows the harness (a stuck LLM call ends in `Request timed out`); on lima check the `guest DNS` row (lever#34), then the credential row; `lever stop` and `lever up` restart the harness"}
 		}
-		return checkResult{check, true, fmt.Sprintf("%q is running (container %s; %s)", name, a.ContainerStatus, activityAge(a, now)), ""}
+		return checkResult{check, true, fmt.Sprintf("%q is running (container %s; %s)", name, scionpkg.ContainerLabel(a.ContainerStatus), activityAge(a, now)), ""}
 	}
 	if a.Phase == "running" && a.ContainerStatus == "" {
 		// The container column is refreshed by the runtime broker's heartbeat,
@@ -1045,7 +1045,7 @@ func checkWorkerTreeBootstraps(tree string, dirs map[string]string) checkResult 
 			linked = append(linked, name)
 			continue
 		}
-		paths = append(paths, strconv.Quote(p))
+		paths = append(paths, shellQuote(p))
 	}
 	if len(found) == 0 {
 		return checkResult{check, true, "no bootstrap.json under a worker tree", ""}
@@ -1057,13 +1057,20 @@ func checkWorkerTreeBootstraps(tree string, dirs map[string]string) checkResult 
 		braceList(found), workerTicketMount)
 	var fix []string
 	if len(paths) > 0 {
-		fix = append(fix, "delete it: rm -- "+strings.Join(paths, " "))
+		fix = append(fix, "look first (`ls -la` on its `.lever` directory: the tree is agent-writable and can change after this check), then delete it: rm -- "+strings.Join(paths, " "))
 	}
 	if len(linked) > 0 {
 		detail += fmt.Sprintf("; for worker %s the path goes through a symbolic link, so it names a file outside that worker's tree", braceList(linked))
 		fix = append(fix, fmt.Sprintf("for worker %s do NOT delete through the path: look at the `.lever` entry (and the worker directory) with `ls -la`, and remove the link itself", braceList(linked)))
 	}
 	return checkResult{check, false, detail, strings.Join(fix, "; ")}
+}
+
+// shellQuote quotes s for a POSIX shell: single quotes, with each single
+// quote in s written as '\”. Nothing is expanded inside single quotes, so a
+// pasted line cannot run a `$(…)` or a backtick that a path contains.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // underRealTree is where p is when nothing below the instance tree is a

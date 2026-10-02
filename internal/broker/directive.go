@@ -242,6 +242,12 @@ func (s *DirectiveStore) RevokeDirective(id string) (revoked bool, persistErr er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.findLocked(id)
+	if r != nil && r.State == DirectiveRevoked {
+		// Revoked already, perhaps only in memory (an earlier write failed).
+		// Write it again: "revoke it again" is the remedy the operator is
+		// given for that case, and it must reach the disk.
+		return true, s.persistLocked()
+	}
 	if r == nil || r.State != DirectiveActive {
 		return false, nil
 	}

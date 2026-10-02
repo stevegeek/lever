@@ -1004,7 +1004,10 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) (acted bool, err error) {
 	switch {
 	case rec == nil:
-		return true, r.startManagerCreate(ctx, opts, false)
+		// Under --fresh an "already exists" answer means the observe step
+		// missed a live record (scion's lazy hub-sync can): that record is
+		// the session the operator asked to discard, never a success.
+		return true, r.startManagerCreate(ctx, opts, r.fresh)
 	case r.fresh:
 		// `up --fresh`: the operator asked to discard the session, whatever
 		// phase the record is in. Decided HERE, after the hub is up, because
@@ -1357,7 +1360,7 @@ func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool 
 // already minted earlier in this same run (r.minted, e.g.
 // mint-manager-bootstrap succeeded outright, or an earlier create in this
 // same Run already re-armed), or r.d.RearmBootstrap mints one now.
-func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, afterDelete bool) error {
+func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, mustCreate bool) error {
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
@@ -1372,12 +1375,13 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, afte
 		// create-race the observe step missed) is success, not error. It is
 		// not a fresh session, so it is not recorded as one.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
-			if afterDelete {
-				// After a `--fresh` delete nothing may exist. An existing
-				// record here is the session the operator asked to discard
-				// (or one something else created): never report it as the
-				// fresh manager.
-				return fmt.Errorf("start-manager: a manager record exists right after the --fresh delete (%s); the fresh manager was NOT created. Run `lever up --fresh` again", termsafe.Sanitize(scion.ErrSummary(startErr)))
+			if mustCreate {
+				// Under `--fresh` nothing may exist at this point. An
+				// existing record is the session the operator asked to
+				// discard (or one something else created): never report it
+				// as the fresh manager.
+				return fmt.Errorf("start-manager: --fresh found a manager record where none may exist (%s). lever did not delete it in this run, so the previous session may still be there and was NOT replaced. "+
+					"Run `lever up --fresh` again; if an earlier attempt of this same run created the record, the next run discards it and creates a new one", termsafe.Sanitize(scion.ErrSummary(startErr)))
 			}
 			return nil
 		}
@@ -1531,7 +1535,7 @@ func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error
 	case a.Phase != scion.PhaseRunning:
 		return fmt.Errorf("up: manager %q was running when up looked, but is in phase %s now (container %s) — %s", name, scion.BoundedQuote(a.Phase), scion.BoundedQuote(a.ContainerStatus), remedy)
 	case a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus):
-		return fmt.Errorf("up: manager %q record says running, but its container is %q — the harness died; %s", name, a.ContainerStatus, remedy)
+		return fmt.Errorf("up: manager %q record says running, but its container is %s — the harness died; %s", name, scion.BoundedQuote(a.ContainerStatus), remedy)
 	}
 	return nil
 }

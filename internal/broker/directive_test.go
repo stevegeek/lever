@@ -242,6 +242,12 @@ func TestRevokeAndBumpApplyDespitePersistFailure(t *testing.T) {
 	if perr == nil {
 		t.Fatal("a revoke that could not be persisted must report it")
 	}
+	// "Revoke it again" is the remedy: once the disk works, a second revoke
+	// of the same (already revoked) directive must write it and say so.
+	fail = false
+	if ok, perr := s.RevokeDirective("d1"); !ok || perr != nil {
+		t.Fatalf("second revoke after the disk recovered: %v %v, want true and a write", ok, perr)
+	}
 	if _, ok := s.Consume("d1", "mgr", now); ok {
 		t.Fatal("revoked directive consumable")
 	}

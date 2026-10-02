@@ -20,8 +20,11 @@ correct behaviour those releases introduced.
   outside the relay marker and `message_verify`, and into the operator's
   `lever msg send` / `lever directive send` errors and the audit log. The
   broker now passes every phase and activity through a list of known values;
-  anything else is `unrecognised`. Operator-facing messages quote such
-  strings and cut them at 48 bytes.
+  anything else is `unrecognised`. The container status (which an agent can
+  also post) is shown only when it has the shape of a runtime status. This
+  covers the refusals, the "did not come up" error of `agent start` /
+  `agent resume`, the worker list and the audit lines. Operator-facing
+  messages quote such strings and cut them at 48 bytes.
 - **`lever up --fresh` cannot report a discard that did not happen.** 0.29.0
   made the `--fresh` delete retry and counted a later "not found" as "the
   record is gone", and the create that follows accepted "already exists":
@@ -30,11 +33,14 @@ correct behaviour those releases introduced.
   lever now lists the agents after the delete and creates only when the
   manager record is absent; a record still there, or a create that meets an
   existing record, is an error that says the session was NOT discarded.
+  The same holds when `--fresh` saw no record at all and the create then
+  meets one.
 - **The doctor row "worker tree bootstraps" prints no `rm` line for a path
   that goes through a symbolic link.** A worker could plant `.lever` as a
   link to the manager's directory, and the printed `rm` would delete the
   manager's bootstrap. The row still fails and tells the operator to remove
-  the link itself; paths are quoted.
+  the link itself; paths are quoted for the shell, and the hint says to look
+  first.
 - **`lever stop` passes scion's error text through the terminal filter** in
   its three warnings, as every other command does.
 
@@ -50,7 +56,8 @@ correct behaviour those releases introduced.
 - **A revocation that could not be written to disk is reported.** `lever
   directive revoke` exits non-zero, and the automatic revoke of an
   undelivered directive says so: such a revocation holds only until the
-  broker restarts.
+  broker restarts. Revoking an already revoked directive writes it again, so
+  "fix the disk and revoke it again" works.
 
 ## [0.29.0] - 2026-10-02
 

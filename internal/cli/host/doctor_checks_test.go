@@ -1891,7 +1891,7 @@ func TestCheckWorkerTreeBootstraps(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := checkWorkerTreeBootstraps(tree, dirs)
-	if r.ok || !strings.Contains(r.detail, "worker b ") || !strings.Contains(r.fix, "rm -- "+strconv.Quote(stray)) {
+	if r.ok || !strings.Contains(r.detail, "worker b ") || !strings.Contains(r.fix, "rm -- "+shellQuote(stray)) {
 		t.Fatalf("a copy in worker b's tree: %+v, want a failure that names b and the quoted file", r)
 	}
 	// Worker c plants `.lever` as a link to the manager's directory.
@@ -1906,7 +1906,7 @@ func TestCheckWorkerTreeBootstraps(t *testing.T) {
 	if r.ok || !strings.Contains(r.detail, "symbolic link") || strings.Contains(r.fix, viaLink) || !strings.Contains(r.fix, "do NOT delete through the path") {
 		t.Fatalf("a planted .lever link: %+v, want a failure with no rm line for %s", r, viaLink)
 	}
-	if !strings.Contains(r.fix, strconv.Quote(stray)) {
+	if !strings.Contains(r.fix, shellQuote(stray)) {
 		t.Fatalf("the real copy in worker b must still get its rm line: %q", r.fix)
 	}
 	if _, err := os.Stat(managers); err != nil {
@@ -1914,5 +1914,19 @@ func TestCheckWorkerTreeBootstraps(t *testing.T) {
 	}
 	if r := checkWorkerTreeBootstraps(tree, nil); !r.ok {
 		t.Fatalf("no workers: %+v", r)
+	}
+}
+
+// TestShellQuote: a pasted rm line must not expand anything a path contains.
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/a/b":             `'/a/b'`,
+		"/a/$(touch x)/b":  `'/a/$(touch x)/b'`,
+		"/a/it's`id`/b":    `'/a/it'\''s` + "`id`" + `/b'`,
+		"/a/new\nline -rf": `'/a/new` + "\n" + `line -rf'`,
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
 	}
 }

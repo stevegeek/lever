@@ -48,9 +48,13 @@ const el = {
 };
 
 const messages = new Map();
+const fromHistory = new Set(); // ids a history read returned (not a send answer)
+let generation = 0; // counts restarts of the list
+let lastFailed = null; // {text, key} of a send that got no clear answer
 let boot = null;
 let loaded = false; // a history read has succeeded
-let refreshSeq = 0;
+let reading = false; // a history read is under way
+let readAgain = false; // something changed while it was
 let olderCursor = '';
 let sending = false;
 let stream = null;
@@ -58,9 +62,16 @@ let streamFailed = false;
 
 // api does one same-origin request and reads the answer as JSON when it is
 // JSON, else as text. It never throws: a network fault is status 0.
+//
+// A redirect is never followed. The hub answers a session it no longer knows
+// with a redirect to its login page; followed, that ends in a page and a
+// 200, which would read as success. It comes back as {redirect: true}.
 async function api(path, init) {
   try {
-    const res = await fetch(path, { credentials: 'same-origin', headers: { Accept: 'application/json' }, ...init });
+    const res = await fetch(path, { credentials: 'same-origin', redirect: 'manual', headers: { Accept: 'application/json' }, ...init });
+    if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+      return { ok: false, status: res.status, redirect: true, body: 'the hub asked to sign in again' };
+    }
     const raw = await res.text();
     let body = raw;
     try {
@@ -93,24 +104,27 @@ function showState(text, ok) {
   el.state.className = `state ${ok ? 'ok' : 'bad'}`;
 }
 
-// localPath admits only a path on this origin, so a link target can never
-// leave it whatever the bootstrap says. The browser's own URL parser decides:
-// it is what reads the link, and it drops tabs and newlines a string check
-// would let through.
-function localPath(p) {
+// localLink turns a path from the bootstrap into a link target on this
+// origin, or '' when it would lead anywhere else. The browser's own URL
+// parser decides, since it is what reads the link: it drops tabs and
+// newlines, and removes dot segments, which a check on the string would
+// miss. The result is the parsed URL itself, whole, so nothing is parsed a
+// second time into something else ("/.//evil.test" has the path
+// "//evil.test", which read again as a link is another host).
+function localLink(p) {
   if (typeof p !== 'string' || !p.startsWith('/')) return '';
   try {
     const u = new URL(p, location.origin);
-    return u.origin === location.origin ? u.pathname + u.search : '';
+    return u.origin === location.origin && !u.pathname.startsWith('//') ? u.href : '';
   } catch {
     return '';
   }
 }
 
 function setLink(a, path) {
-  const p = localPath(path);
-  if (!p) return;
-  a.setAttribute('href', p);
+  const href = localLink(path);
+  if (!href) return;
+  a.setAttribute('href', href);
   a.hidden = false;
 }
 
@@ -145,9 +159,10 @@ function render(toBottom) {
     }
     const body = document.createElement('div');
     body.className = 'body';
-    // A system line is the agent's own text too, so it carries the agent's
-    // name: it must not read as a notice from lever or the hub.
-    setText(body, kind === 'system' ? `${boot.agent.name}: ${messageText(m)}` : messageText(m));
+    // A system line says who it is from, so an agent's own text cannot
+    // read as a notice from lever or the hub.
+    const from = m.senderId === boot.agent.id ? boot.agent.name : 'hub';
+    setText(body, kind === 'system' ? `${from}: ${messageText(m)}` : messageText(m));
     row.append(body);
     if (kind === 'mine' && m.dispatchState === 'failed') {
       const fail = document.createElement('div');
@@ -171,11 +186,29 @@ function historyPath(cursor) {
 
 // refresh reads the newest page again and merges it. Every live signal ends
 // here: the page never trusts an event's payload, only the hub's history.
+//
+// One read at a time: a signal that arrives during a read asks for one more
+// after it. So answers apply in the order they were asked for, and a slow
+// hub under a steady stream of events still gets every read applied.
 async function refresh() {
   if (!boot || !boot.conversation) return;
-  const seq = ++refreshSeq;
-  const res = await api(historyPath(''));
-  if (seq !== refreshSeq) return; // a later read is under way; its answer is the newer one
+  if (reading) {
+    readAgain = true;
+    return;
+  }
+  reading = true;
+  try {
+    applyHistory(await api(historyPath('')));
+  } finally {
+    reading = false;
+    if (readAgain) {
+      readAgain = false;
+      refreshSoon();
+    }
+  }
+}
+
+function applyHistory(res) {
   if (!res.ok) {
     if (!loaded) showNotice(`Cannot read the conversation: ${errorText(res.status, res.body)}`);
     return;
@@ -185,14 +218,20 @@ async function refresh() {
   // one page while it was not looking. Start again from this page instead of
   // showing the two ends with a hole between them; "Load earlier" then
   // reaches the rest.
-  const restart = !loaded || (items.length >= PAGE && !items.some((m) => messages.has(m.id)));
+  //
+  // Only ids from earlier history reads count as "already holds": the id of
+  // a message just sent is in every newest page, and proves no overlap.
+  const restart = !loaded || (items.length >= PAGE && !items.some((m) => fromHistory.has(m.id)));
   if (restart) {
     messages.clear();
+    fromHistory.clear();
+    generation++;
     olderCursor = nextCursor(res.body);
     el.older.hidden = !olderCursor;
   }
   const first = !loaded;
   loaded = true;
+  for (const m of items) fromHistory.add(m.id);
   if (mergeMessages(messages, items) || restart) render(first);
 }
 
@@ -201,8 +240,11 @@ const refreshSoon = makeCoalescer(() => void refresh(), REFRESH_GAP_MS);
 async function loadOlder() {
   if (!olderCursor) return;
   el.older.disabled = true;
+  const asked = generation;
   const res = await api(historyPath(olderCursor));
   el.older.disabled = false;
+  // The list restarted meanwhile: this page belongs to the old one.
+  if (asked !== generation) return;
   if (!res.ok) {
     showError(`Cannot load earlier messages: ${errorText(res.status, res.body)}`);
     return;
@@ -210,7 +252,9 @@ async function loadOlder() {
   olderCursor = nextCursor(res.body);
   el.older.hidden = !olderCursor;
   const before = el.scroll.scrollHeight;
-  if (mergeMessages(messages, historyItems(res.body))) {
+  const items = historyItems(res.body);
+  for (const m of items) fromHistory.add(m.id);
+  if (mergeMessages(messages, items)) {
     render(false);
     el.scroll.scrollTop += el.scroll.scrollHeight - before;
   }
@@ -241,9 +285,10 @@ async function readBoot() {
 // a message to the old conversation would be stored and reach nobody.
 async function checkBoot() {
   const now = await readBoot();
-  if (now.error) return;
-  if (now.agent.id !== boot.agent.id || now.conversation !== boot.conversation) location.reload();
+  if (!now.error && movedOn(now)) location.reload();
 }
+
+const movedOn = (now) => now.agent.id !== boot.agent.id || now.conversation !== boot.conversation;
 
 async function readState() {
   if (!boot || !boot.agent.id) return;
@@ -312,6 +357,13 @@ function post(text, key) {
   });
 }
 
+// sent reports whether the hub's answer says the message is stored: a 201
+// with the message, or the 200 the hub gives a repeated key. Any other
+// answer, a 2xx included, is not a stored message.
+function sent(res) {
+  return res.status === 201 || (res.status === 200 && !!res.body && typeof res.body === 'object' && typeof res.body.id === 'string');
+}
+
 async function send() {
   const text = el.text.value.trim();
   if (sending || !text || !boot || !boot.conversation) return;
@@ -323,33 +375,54 @@ async function send() {
   sending = true;
   el.send.disabled = true;
   showError('');
-  const key = newKey();
-  let res = await post(text, key);
-  if (res.status === 401) {
-    // The hub forgot the session, so it stored nothing. A read makes the
-    // proxy sign in again; then the message goes once more, under the same
-    // key in case the hub did see the first attempt.
-    await api(historyPath(''));
-    res = await post(text, key);
-  }
+  const res = await deliver(text);
   sending = false;
-  if (res.ok) {
+  el.send.disabled = false;
+  if (!res) return; // the page is reloading onto the manager's new record
+  if (sent(res)) {
+    lastFailed = null;
     // Clear only what was sent: text typed while the send was under way stays.
     if (el.text.value.trim() === text) {
       el.text.value = '';
       saveDraft();
       grow();
     }
-    // 201 carries the stored message. Any other success (a replay of the
-    // key) carries less, so the history read shows it instead.
+    // 201 carries the stored message. The answer to a repeated key carries
+    // less, so the history read shows that one instead.
     if (res.status === 201 && res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
     refreshSoon();
   } else {
     showError(`Not sent: ${errorText(res.status, res.body)}`);
     void readState();
   }
-  el.send.disabled = false;
   el.text.focus();
+}
+
+// deliver posts text to the conversation and returns the hub's answer, or
+// null when the page reloads instead.
+async function deliver(text) {
+  // The manager may have a new hub record since the page loaded (`lever up
+  // --fresh`). The hub would store a message for the old one and deliver it
+  // to nobody, so ask first. The draft is kept across the reload.
+  const now = await readBoot();
+  if (now.error) return { ok: false, status: 0, body: now.error };
+  if (movedOn(now)) {
+    saveDraft();
+    location.reload();
+    return null;
+  }
+  // The same text sent again after an unclear answer keeps its key, so the
+  // hub stores it once even if the first attempt did reach it.
+  const key = lastFailed && lastFailed.text === text ? lastFailed.key : newKey();
+  let res = await post(text, key);
+  if (res.status === 401 || res.redirect) {
+    // The hub forgot the session. A read makes the proxy sign in again;
+    // then the message goes once more under the same key.
+    await api(historyPath(''));
+    res = await post(text, key);
+  }
+  if (!sent(res)) lastFailed = { text, key };
+  return res;
 }
 
 function grow() {
@@ -392,6 +465,9 @@ async function start() {
   if (!boot.conversation) {
     showState('no hub record', false);
     showNotice(`${boot.agent.name} has no record on the hub yet. Start it on the host with lever up.`);
+    // Said outright: a browser may restore the fields' state over a reload.
+    el.text.disabled = true;
+    el.send.disabled = true;
     return;
   }
   showNotice('');

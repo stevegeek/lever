@@ -39,8 +39,8 @@ class FakeNode {
 // load starts one page against hub, a function (method, path, body) → {status,
 // body} (or {down: true} for a network fault). It returns the page's parts.
 let loads = 0;
-export async function load(hub) {
-  const env = { els: {}, calls: [], streams: [], intervals: [], timers: [], reloads: 0, store: {} };
+export async function load(hub, opts = {}) {
+  const env = { els: {}, calls: [], streams: [], intervals: [], timers: [], reloads: 0, store: { ...opts.store }, log: [], pointerFine: true };
   const doc = new FakeNode('#document');
   doc.getElementById = (id) => (env.els[id] ||= new FakeNode(id));
   doc.createElement = (tag) => new FakeNode(tag);
@@ -49,9 +49,10 @@ export async function load(hub) {
   doc.title = '';
   // The state chat.html starts in.
   for (const id of ['older', 'notice', 'error', 'terminal', 'console']) doc.getElementById(id).hidden = true;
-  for (const id of ['text', 'send']) doc.getElementById(id).disabled = true;
+  // fieldsEnabled: what a browser that restores form state over a reload leaves.
+  for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
-  globalThis.window = { matchMedia: () => ({ matches: true }), addEventListener() {} };
+  globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener() {} };
   globalThis.location = { origin: 'https://mac.ts.net', reload: () => env.reloads++ };
   globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)) };
   globalThis.EventSource = class {
@@ -59,6 +60,7 @@ export async function load(hub) {
     constructor(url) {
       Object.assign(this, { url, readyState: 1, listeners: {} });
       env.streams.push(this);
+      env.log.push('stream');
     }
     addEventListener(type, f) {
       (this.listeners[type] ||= []).push(f);
@@ -73,8 +75,16 @@ export async function load(hub) {
   globalThis.fetch = async (path, init = {}) => {
     const method = init.method || 'GET';
     env.calls.push({ method, path, body: init.body ? JSON.parse(init.body) : undefined });
+    env.log.push(`${method} ${path}`);
     const r = await hub(method, path, init.body ? JSON.parse(init.body) : undefined);
     if (r.down) throw new Error('network');
+    if (r.redirect) {
+      // As a browser does: an unfollowed redirect is opaque, a followed one
+      // ends in whatever the target serves (here the hub's login page, 200).
+      if (init.redirect === 'manual') return { ok: false, status: 0, type: 'opaqueredirect', text: async () => '' };
+      if (init.redirect === 'error') throw new Error('redirect');
+      return { ok: true, status: 200, type: 'basic', text: async () => '<!doctype html><title>Sign in</title>' };
+    }
     const text = typeof r.body === 'string' ? r.body : JSON.stringify(r.body);
     return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => text };
   };

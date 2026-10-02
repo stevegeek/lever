@@ -89,29 +89,35 @@ export function isChatSubject(subject, userId) {
   return !!userId && str(subject).startsWith(`user.${userId}.chat.`);
 }
 
-// The hub's agent phases before "running", and the activities that mean a
-// running agent is not answering (scion pkg/agent/state).
+// The hub's agent states (scion pkg/agent/state): the phases before
+// "running", the phases after it, the activities of a running agent, and
+// those that mean it is not answering.
 const STARTING = new Set(['created', 'provisioning', 'cloning', 'starting']);
+const STOPPED = new Set(['suspended', 'stopping', 'stopped', 'error']);
+const ACTIVE = new Set(['working', 'thinking', 'executing', 'waiting_for_input', 'blocked', 'completed']);
 const NOT_ANSWERING = new Set(['offline', 'crashed', 'stalled', 'limits_exceeded']);
 
-// label makes a hub state word readable. The agent reports its own activity,
-// so the word is agent text: it is bounded here and shown as text.
-const label = (s) => s.replaceAll('_', ' ').slice(0, 40);
+const label = (s) => s.replaceAll('_', ' ');
 
 // stateLine describes the agent for the header: {text, ok}. ok is false when
 // a message sent now would likely get no answer.
+//
+// An agent reports its own phase and activity to the hub, as free text. So
+// only the words above are ever shown: a value that is not one of them shows
+// as unknown, and an agent cannot write a line of its own into the header.
 export function stateLine(agent) {
-  if (!agent || typeof agent !== 'object') return { text: 'state unknown', ok: true };
+  const unknown = { text: 'state unknown', ok: true };
+  if (!agent || typeof agent !== 'object') return unknown;
   const phase = str(agent.phase).toLowerCase();
   const activity = str(agent.activity).toLowerCase();
-  if (!phase) return { text: 'state unknown', ok: true };
   // "resumed" is what the hub reports for a short time after a resume.
   if (phase === 'running' || phase === 'resumed') {
     if (NOT_ANSWERING.has(activity)) return { text: `${label(activity)} (it may not answer)`, ok: false };
-    return { text: activity ? label(activity) : 'running', ok: true };
+    return { text: ACTIVE.has(activity) ? label(activity) : 'running', ok: true };
   }
-  if (STARTING.has(phase)) return { text: `${label(phase)} (a message waits until it runs)`, ok: true };
-  return { text: `${label(phase)} (not running: start it with lever up)`, ok: false };
+  if (STARTING.has(phase)) return { text: `${phase} (a message waits until it runs)`, ok: true };
+  if (STOPPED.has(phase)) return { text: `${phase} (not running: start it with lever up)`, ok: false };
+  return unknown;
 }
 
 // errorText is what to show for a failed request: the hub's own message when

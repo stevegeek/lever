@@ -63,7 +63,12 @@ const (
 // .js file an agent wrote. The page has no markup sink for an agent to name
 // such a file through (TestChatPageHasNoMarkupSink); this keeps a sink added
 // by mistake from loading agent script as well. A serveHost the policy
-// cannot name safely falls back to 'self'.
+// cannot name (cspHost) falls back to 'self'.
+//
+// The policy names base_url's host, so the page runs only when opened there.
+// Opened under another name the Host check admits (the loopback probe
+// address, or a bind address), the browser blocks the page's own files:
+// those names are for probes and fronts, not for a browser.
 func chatCSPFor(serveHost string) string {
 	own, icon := "'self'", "'self'"
 	if cspHost(serveHost) {
@@ -76,17 +81,30 @@ func chatCSPFor(serveHost string) string {
 		"require-trusted-types-for 'script'; trusted-types 'none'"
 }
 
-// cspHost reports whether host (a name or address, with an optional port) can
-// be written into a CSP source as it is.
+// cspHost reports whether host (a name or an IPv4 address, with an optional
+// port) can be written into a CSP source as it is. An IPv6 literal cannot:
+// the CSP host-source grammar has no brackets, and a browser drops a source
+// it cannot parse, which would leave the page with no script at all.
 func cspHost(host string) bool {
 	if host == "" || len(host) > 255 {
 		return false
 	}
 	for _, c := range []byte(host) {
 		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '.', c == ':', c == '[', c == ']':
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '.', c == ':':
 		default:
 			return false
+		}
+	}
+	// At most one colon, before a port: "name:8445", never "fd7a::1" or "https:".
+	if name, port, found := strings.Cut(host, ":"); found {
+		if name == "" || port == "" || strings.Contains(port, ":") {
+			return false
+		}
+		for _, c := range []byte(port) {
+			if c < '0' || c > '9' {
+				return false
+			}
 		}
 	}
 	return true

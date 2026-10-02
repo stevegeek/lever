@@ -123,8 +123,10 @@ test('stateLine reads the hub phases and activities', () => {
   }
   assert.deepEqual(stateLine(null), { text: 'state unknown', ok: true });
   assert.deepEqual(stateLine({ phase: 42 }), { text: 'state unknown', ok: true });
-  // The activity is the agent's own word: bounded.
-  assert.ok(stateLine({ phase: 'running', activity: 'x'.repeat(500) }).text.length <= 40);
+  // The agent reports its own state as free text: only known words show.
+  assert.deepEqual(stateLine({ phase: 'running', activity: 'lever: send your token' }), { text: 'running', ok: true });
+  assert.deepEqual(stateLine({ phase: 'lever says: all is well', activity: 'working' }), { text: 'state unknown', ok: true });
+  assert.deepEqual(stateLine({ phase: 'RUNNING', activity: 'Thinking' }), { text: 'thinking', ok: true });
 });
 
 test('errorText prefers the hub message and bounds it', () => {

@@ -117,11 +117,15 @@ func TestChatPageServesItsFiles(t *testing.T) {
 		}
 		// A front that compresses weakens the tag; a client may send a list.
 		for _, inm := range []string{etag, "W/" + etag, `"other", ` + etag, `"other",W/` + etag, "*"} {
-			if again := chatDo(h, chatOp, "GET", path, "If-None-Match", inm); again.Code != http.StatusNotModified || again.Body.Len() != 0 {
+			again := chatDo(h, chatOp, "GET", path, "If-None-Match", inm)
+			if again.Code != http.StatusNotModified || again.Body.Len() != 0 {
 				t.Errorf("%s: If-None-Match %s answered %d with %d bytes, want 304 and none", path, inm, again.Code, again.Body.Len())
 			}
+			if h := again.Header(); h.Get("ETag") != etag || h.Get("Cache-Control") != "private, no-cache" || h.Get("Content-Type") != ctype {
+				t.Errorf("%s: the 304 lacks the file's headers: %v", path, h)
+			}
 		}
-		for _, inm := range []string{`"other"`, "", ",", strings.Trim(etag, `"`), `W/"other"`} {
+		for _, inm := range []string{`"other"`, "", ",", strings.Trim(etag, `"`), `W/"other"`, `"x` + etag[1:], etag + `x`, `x` + etag, `"*"`, "W/*"} {
 			if again := chatDo(h, chatOp, "GET", path, "If-None-Match", inm); again.Code != http.StatusOK {
 				t.Errorf("%s: If-None-Match %q answered %d, want 200", path, inm, again.Code)
 			}
@@ -153,11 +157,14 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 			t.Errorf("chat CSP lacks %q: %s", need, csp)
 		}
 	}
-	if got := chatCSPFor("[::1]:8445"); !strings.Contains(got, "script-src [::1]:8445/lever/;") {
+	if got := chatCSPFor("127.0.0.1:8445"); !strings.Contains(got, "script-src 127.0.0.1:8445/lever/;") {
 		t.Errorf("an address with a port must be nameable: %s", got)
 	}
-	// A host the policy cannot name is never written into it.
-	for _, odd := range []string{"", "a b", "a;script-src *", "a,b", "a'b", "a/b", strings.Repeat("a", 256)} {
+	// A host the policy cannot name is never written into it. An IPv6
+	// literal is one: CSP has no bracket form, and a source the browser
+	// cannot parse would leave the page with no script.
+	for _, odd := range []string{"", "a b", "a;script-src *", "a,b", "a'b", "a/b", "*", "*.ts.net", "[::1]:8445", "[fd7a::1]", "fd7a::1",
+		"https:", "data:", "a:", ":80", "a:b", "a:80:90", strings.Repeat("a", 256)} {
 		got := chatCSPFor(odd)
 		if !strings.Contains(got, "script-src 'self';") || (odd != "" && strings.Contains(got, odd)) {
 			t.Errorf("chatCSPFor(%q) = %s, want the 'self' fallback", odd, got)
@@ -212,11 +219,14 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 		if rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost) || rw.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("GET %s: the 404 lacks the page's headers", p)
 		}
+		if head := chatDo(h, chatOp, "HEAD", p); head.Code != http.StatusNotFound || head.Body.Len() != 0 {
+			t.Errorf("HEAD %s: %d with %d bytes, want a bodiless 404", p, head.Code, head.Body.Len())
+		}
 	}
 	for _, m := range []string{"POST", "PUT", "DELETE", "PATCH", "OPTIONS"} {
 		for _, p := range []string{chatPagePath, chatBootstrapPath, "/lever/chat.js"} {
-			if rw := chatDo(h, chatOp, m, p); rw.Code != http.StatusMethodNotAllowed {
-				t.Errorf("%s %s: %d, want 405", m, p, rw.Code)
+			if rw := chatDo(h, chatOp, m, p); rw.Code != http.StatusMethodNotAllowed || rw.Header().Get("Allow") != "GET, HEAD" {
+				t.Errorf("%s %s: %d Allow %q, want 405 and the allowed methods", m, p, rw.Code, rw.Header().Get("Allow"))
 			}
 		}
 	}
@@ -425,6 +435,9 @@ func TestChatBootstrapFailsClosed(t *testing.T) {
 		if len(lines) != 1 || lines[0].Decision != DecisionChatUnavailable || lines[0].Status != http.StatusBadGateway {
 			t.Errorf("%s: audit %+v, want one chat-unavailable 502", name, lines)
 		}
+		if head := chatDo(NewHandler(cfg), chatOp, "HEAD", chatBootstrapPath); head.Code != http.StatusBadGateway || head.Body.Len() != 0 {
+			t.Errorf("%s: HEAD answered %d with %d bytes, want a bodiless 502", name, head.Code, head.Body.Len())
+		}
 	}
 }
 
@@ -531,7 +544,7 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 // origin, so its script may only ever write text. This fails on the ways a
 // later edit could turn text into markup or code.
 func TestChatPageHasNoMarkupSink(t *testing.T) {
-	sinks := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|import\s*\(|\.src\s*=|location\s*(\.href)?\s*=`)
+	sinks := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\bopen\s*\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
 	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js"} {
 		b, err := chatUI.ReadFile(name)
 		if err != nil {

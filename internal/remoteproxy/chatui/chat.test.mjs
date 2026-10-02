@@ -38,8 +38,8 @@ test('start: shows the agent, its state, the links and the history, oldest first
   assert.equal(env.els.agent.textContent, 'boss');
   assert.equal(env.els.state.textContent, 'working');
   assert.equal(env.els.state.className, 'state ok');
-  assert.equal(env.els.terminal.attrs.href, '/agents/a1/terminal');
-  assert.equal(env.els.console.attrs.href, '/agents');
+  assert.equal(env.els.terminal.attrs.href, 'https://mac.ts.net/agents/a1/terminal');
+  assert.equal(env.els.console.attrs.href, 'https://mac.ts.net/agents');
   assert.equal(env.els.text.disabled, false);
   assert.equal(env.rows().length, 2);
   assert.match(env.rows()[0], /^msg mine: You .* \/ msg 1$/);
@@ -49,13 +49,16 @@ test('start: shows the agent, its state, the links and the history, oldest first
   assert.equal(env.els.notice.hidden, true);
   // The stream opens before the history is read, so nothing stored between
   // the two is missed.
-  const order = env.calls.map((c) => c.path);
-  assert.ok(order.indexOf('/lever/api/chat') < order.findIndex((p) => p.startsWith(HISTORY)));
+  assert.ok(env.log.indexOf('stream') >= 0 && env.log.indexOf('stream') < env.log.findIndex((l) => l.startsWith(`GET ${HISTORY}`)), env.log.join(' | '));
 });
 
 test('network text is only ever text, and a link never leaves the origin', async () => {
   const evil = '<img src=x onerror=alert(1)><script>alert(2)</script>';
-  for (const terminal of ['//evil.test/x', '/\t/evil.test/x', '/\\evil.test', 'https://evil.test', 'javascript:alert(1)', 7, null]) {
+  // Each of these reads, to a browser, as a link to another host (or to no
+  // path at all): after a tab is dropped or a dot segment removed, the path
+  // begins with "//".
+  for (const terminal of ['//evil.test/x', '/\t/evil.test/x', '/\\evil.test', '/.//evil.test/x', '/..//evil.test', '/%2e//evil.test',
+    '/x/..//evil.test', '/./\\evil.test', 'https://evil.test', 'javascript:alert(1)', 'agents', '', 7, null]) {
     const env = await load(hubWith({
       boot: () => ({ status: 200, body: bootBody({ agent: { name: evil, id: 'a1' }, terminal }) }),
       history: () => ({ status: 200, body: { messages: [msg(1, { msg: evil }), msg(2, { msg: evil, type: 'state-change' })] } }),
@@ -69,9 +72,9 @@ test('network text is only ever text, and a link never leaves the origin', async
       for (const c of row.children) assert.deepEqual([c.tag, c.children.length], ['div', 0]);
     }
     assert.ok(env.rows()[0].endsWith(evil));
-    // A state line names the agent, so it cannot pass for a lever notice.
+    // A state line names its sender, so it cannot pass for a lever notice.
     assert.equal(env.rows()[1], `msg system: ${evil}: ${evil}`);
-    assert.ok(env.els.state.textContent.length <= 40);
+    assert.equal(env.els.state.textContent, 'running', 'an activity that is not a hub word is not shown');
   }
 });
 
@@ -300,19 +303,228 @@ test('a failed read after a good one leaves the list and shows no notice', async
   assert.equal(env.els.notice.hidden, true);
 });
 
-test('an older answer that arrives late does not replace a newer one', async () => {
-  const hub = hubWith({ history: () => ({ status: 200, body: { messages: [msg(1, { senderId: 'u1', dispatchState: 'pending' })] } }) });
+test('reads run one at a time, in order, and none is lost', async () => {
+  const pending = (state) => ({ status: 200, body: { messages: [msg(1, { senderId: 'u1', dispatchState: state, dispatchFailureReason: 'agent is stopped' })] } });
+  const hub = hubWith({ history: () => pending('pending') });
   const env = await load(hub);
-  // Read A is slow and carries the old state; read B is fast and newer.
+  const reads = () => env.count('GET', HISTORY);
+  // Read A is slow and carries the old state. Events arrive while it runs.
   let releaseA;
-  hub.parts.history = () => new Promise((r) => (releaseA = () => r({ status: 200, body: { messages: [msg(1, { senderId: 'u1', dispatchState: 'pending' })] } })));
-  env.streams[0].emit('update', { data: JSON.stringify({ subject: 'user.u1.chat.dm' }) });
+  hub.parts.history = () => new Promise((r) => (releaseA = () => r(pending('pending'))));
+  const event = () => env.streams[0].emit('update', { data: JSON.stringify({ subject: 'user.u1.chat.dm' }) });
+  event();
   await tick(5);
-  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1, { senderId: 'u1', dispatchState: 'failed', dispatchFailureReason: 'agent is stopped' })] } });
-  env.streams[0].emit('update', { data: JSON.stringify({ subject: 'user.u1.chat.dm' }) });
+  const during = reads();
+  hub.parts.history = () => pending('failed');
+  for (let i = 0; i < 5; i++) event();
   await env.runTimers();
-  assert.match(env.rows()[0], /Not delivered: agent is stopped$/);
+  assert.equal(reads(), during, 'no second read starts while one is under way');
+  // A ends; the one read that was asked for meanwhile follows, and is applied.
   releaseA();
   await tick(5);
-  assert.match(env.rows()[0], /Not delivered: agent is stopped$/, 'the late, older answer must be dropped');
+  await env.runTimers();
+  assert.equal(reads(), during + 1);
+  assert.match(env.rows()[0], /Not delivered: agent is stopped$/);
+});
+
+test('a system line that is not from the agent is not given the agent\'s name', async () => {
+  const env = await load(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1, { type: 'state-change', senderId: '' }), msg(2, { type: 'system', senderId: 'a1' })] } }) }));
+  assert.deepEqual(env.rows(), ['msg system: hub: msg 1', 'msg system: boss: msg 2']);
+});
+
+test('send: only a stored message counts as sent', async () => {
+  // What the hub's login page, an empty success or a stray 2xx look like.
+  for (const answer of [{ redirect: true }, { status: 200, body: '<!doctype html><title>Sign in</title>' }, { status: 204, body: '' }, { status: 200, body: {} }, { status: 200, body: { id: 7 } }, { status: 202, body: { id: 'x' } }]) {
+    const env = await load(hubWith({ post: () => answer }));
+    await type(env, 'do not lose me');
+    env.els.composer.dispatch('submit');
+    await tick(10);
+    assert.equal(env.els.text.value, 'do not lose me', JSON.stringify(answer));
+    assert.equal(env.store['lever-chat-draft'], 'do not lose me');
+    assert.match(env.els.error.textContent, /^Not sent: /, JSON.stringify(answer));
+    assert.equal(env.rows().length, 0);
+  }
+});
+
+test('send: a redirect to the hub\'s login is treated as a lost session and retried once', async () => {
+  let n = 0;
+  const env = await load(hubWith({ post: (body) => (++n === 1 ? { redirect: true } : { status: 201, body: { id: 's', content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }) }));
+  await type(env, 'after sign-in');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const posts = env.calls.filter((c) => c.method === 'POST');
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0].body.idempotency_key, posts[1].body.idempotency_key);
+  assert.match(env.rows()[0], /after sign-in$/);
+  assert.equal(env.els.error.hidden, true);
+});
+
+test('send: the same text sent again after an unclear answer keeps its key', async () => {
+  let n = 0;
+  const env = await load(hubWith({ post: (body) => (++n === 1 ? { down: true } : { status: 201, body: { id: `s${n}`, content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }) }));
+  await type(env, 'once only');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, /Not sent: cannot reach the server/);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const posts = env.calls.filter((c) => c.method === 'POST');
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0].body.idempotency_key, posts[1].body.idempotency_key, 'a resend of the same text must not be a second message');
+  // Once it is stored, the same words sent again are a new message.
+  await type(env, 'once only');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const again = env.calls.filter((c) => c.method === 'POST')[2];
+  assert.notEqual(again.body.idempotency_key, posts[0].body.idempotency_key);
+  // Another message gets its own key.
+  await type(env, 'a new one');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const last = env.calls.filter((c) => c.method === 'POST')[3];
+  assert.notEqual(last.body.idempotency_key, again.body.idempotency_key);
+});
+
+test('send: changed text after a failed send is a new message', async () => {
+  let n = 0;
+  const env = await load(hubWith({ post: (body) => (++n === 1 ? { down: true } : { status: 201, body: { id: `s${n}`, content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }) }));
+  await type(env, 'first wording');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await type(env, 'second wording');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const posts = env.calls.filter((c) => c.method === 'POST');
+  assert.notEqual(posts[0].body.idempotency_key, posts[1].body.idempotency_key);
+});
+
+test('send: a failed send reads the agent state again', async () => {
+  const hub = hubWith({ post: () => ({ status: 500, body: 'boom' }) });
+  const env = await load(hub);
+  hub.parts.agent = () => ({ status: 200, body: { phase: 'stopped' } });
+  await type(env, 'x');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.state.textContent, /^stopped \(not running/);
+});
+
+test('send: the manager has a new hub record: nothing is posted to the old one', async () => {
+  const hub = hubWith();
+  const env = await load(hub);
+  hub.parts.boot = () => ({ status: 200, body: bootBody({ agent: { name: 'boss', id: 'a2' }, conversation: 'dm:agent:a2:user:u1' }) });
+  await type(env, 'for the new manager');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.count('POST', ''), 0);
+  assert.equal(env.reloads, 1);
+  assert.equal(env.store['lever-chat-draft'], 'for the new manager', 'the draft survives the reload');
+  assert.equal(env.els.send.disabled, false);
+});
+
+test('send: the bootstrap cannot be read: nothing is posted, the draft stays', async () => {
+  const hub = hubWith();
+  const env = await load(hub);
+  hub.parts.boot = () => ({ status: 502, body: 'cannot resolve the manager agent\n' });
+  await type(env, 'hold on');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.count('POST', ''), 0);
+  assert.match(env.els.error.textContent, /^Not sent: cannot resolve the manager agent/);
+  assert.equal(env.els.text.value, 'hold on');
+});
+
+test('a sent message does not hide a hole behind it', async () => {
+  const hub = hubWith({ history: () => ({ status: 200, body: { messages: page(100), nextCursor: 'C1' } }) });
+  const env = await load(hub);
+  // 200 more arrive unseen; then the operator sends. The newest page now
+  // holds the sent id, which must not count as overlap with what was shown.
+  hub.parts.history = () => ({ status: 502, body: '' });
+  hub.parts.post = (body) => ({ status: 201, body: msg(301, { id: 'sent', content: body.content, msg: undefined, senderId: 'u1' }) });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(301, { id: 'sent', msg: 'hello', senderId: 'u1' }), ...page(300, 49)], nextCursor: 'C2' } });
+  await env.poll();
+  const rows = env.rows();
+  assert.equal(rows.length, 50, 'the list restarts from the newest page');
+  assert.match(rows[0], /msg 252$/);
+  assert.match(rows[49], /hello$/);
+});
+
+test('a "Load earlier" answer that lands after a restart is dropped', async () => {
+  const hub = hubWith({ history: () => ({ status: 200, body: { messages: page(100), nextCursor: 'C1' } }) });
+  const env = await load(hub);
+  let releaseOlder;
+  hub.parts.history = (path) => (path.includes('cursor=C1')
+    ? new Promise((r) => (releaseOlder = () => r({ status: 200, body: { messages: page(50), nextCursor: 'C0' } })))
+    : { status: 200, body: { messages: page(300), nextCursor: 'C2' } });
+  env.els.older.dispatch('click');
+  await tick(5);
+  await env.poll(); // the restart
+  releaseOlder();
+  await tick(5);
+  assert.equal(env.rows().length, 50);
+  assert.match(env.rows()[0], /msg 251$/);
+  // The cursor is the new list's, so the next "Load earlier" continues from it.
+  hub.parts.history = (path) => ({ status: 200, body: { messages: path.includes('cursor=C2') ? page(250) : page(300) } });
+  env.els.older.dispatch('click');
+  await tick(5);
+  assert.match(env.rows()[0], /msg 201$/);
+});
+
+test('Enter sends with a keyboard and mouse, and only a plain Enter', async () => {
+  const env = await load(hubWith());
+  const key = async (ev) => {
+    let prevented = false;
+    await type(env, 'typed');
+    env.els.text.dispatch('keydown', { key: 'Enter', preventDefault: () => (prevented = true), ...ev });
+    await tick(10);
+    return prevented;
+  };
+  const posts = () => env.count('POST', HISTORY);
+  for (const ev of [{ shiftKey: true }, { isComposing: true }, { keyCode: 229 }, { key: 'a' }]) {
+    assert.equal(await key(ev), false, JSON.stringify(ev));
+    assert.equal(posts(), 0, JSON.stringify(ev));
+  }
+  env.pointerFine = false; // a touch screen: Enter is a new line
+  assert.equal(await key({}), false);
+  assert.equal(posts(), 0);
+  env.pointerFine = true;
+  assert.equal(await key({}), true);
+  assert.equal(posts(), 1);
+});
+
+test('a draft survives a reload', async () => {
+  const env = await load(hubWith(), { store: { 'lever-chat-draft': 'half a thought' } });
+  assert.equal(env.els.text.value, 'half a thought');
+});
+
+test('the stream coming back after an error reads the history again', async () => {
+  const env = await load(hubWith());
+  const reads = () => env.count('GET', HISTORY);
+  await env.runTimers();
+  const before = reads();
+  env.streams[0].emit('open');
+  await env.runTimers();
+  assert.equal(reads(), before, 'a first open is no reason to read');
+  env.streams[0].emit('error');
+  env.streams[0].emit('open');
+  await env.runTimers();
+  assert.equal(reads(), before + 1);
+});
+
+test('coming back to the page reads again at once', async () => {
+  const env = await load(hubWith());
+  await env.runTimers();
+  const before = env.count('GET', HISTORY);
+  document.dispatch('visibilitychange');
+  await tick(5);
+  await env.runTimers();
+  assert.ok(env.count('GET', HISTORY) > before);
+});
+
+test('no hub record: the fields are off even if the browser restored them on', async () => {
+  const env = await load(hubWith({ boot: () => ({ status: 200, body: { login: 'op', userId: 'u1', agent: { name: 'boss', id: '' }, console: '/agents' } }) }), { fieldsEnabled: true });
+  assert.equal(env.els.text.disabled, true);
+  assert.equal(env.els.send.disabled, true);
 });

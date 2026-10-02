@@ -55,8 +55,10 @@ correct behaviour those releases introduced.
   the hub reports a container that is not live for a `running` record, the
   broker now refuses the message with 409 ("phase running, container down")
   and the resume verb tries the forced resume; if the hub does not take it
-  yet, the answer says to try again. A record with no reported container
-  status is still treated as running.
+  yet, the answer says to try again; `agent start` with a task answers 409
+  for such a record, as for any record that is not running. A record with
+  no reported container status (or a brief `created`) is still treated as
+  running.
 
 ### Changed
 

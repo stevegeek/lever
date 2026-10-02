@@ -1386,7 +1386,7 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 				// discard nor a fresh manager.
 				return fmt.Errorf("start-manager: --fresh expected no manager record at this point, and the create answered that one exists. "+
 					"lever did NOT report a fresh manager: the record may be the previous session, or one a timed-out attempt of this run left behind. "+
-					"Run `lever up --fresh` again; it deletes whatever record is there and creates a new manager. Cause: %s", termsafe.Sanitize(scion.ErrSummary(startErr)))
+					"Run `lever up --fresh` again; it deletes the record it finds and creates a new manager. Cause: %s", termsafe.Sanitize(scion.ErrSummary(startErr)))
 			}
 			return nil
 		}

@@ -1290,20 +1290,18 @@ func (r *run) listAgentsRetry(ctx context.Context, jp string) ([]scion.Agent, er
 }
 
 // managerConcurrentlyRecovered re-observes the manager record after a FAILED
-// resume, before the loud delete+fresh recovery destroys the session. The
-// broker's auto-re-enrol healer (#22) lives in the broker daemon — started by
-// the broker-up step, i.e. BEFORE start-manager runs — and it bounces lapsed
+// resume, before the apply ends with the resume error. The broker's
+// auto-re-enrol healer (#22) lives in the broker daemon — started by the
+// broker-up step, i.e. BEFORE start-manager runs — and it bounces lapsed
 // agents via the same scion verbs this step uses, in a separate process with
 // no coordination. So a resume failure here can mean "the healer's own
-// suspend/resume was mid-flight", not "unrecoverable" — and deleting on it
-// would destroy the exact conversation both recovery paths exist to save.
-// Only a record that is NOT running on re-observation justifies the delete.
+// suspend/resume was mid-flight", not "the manager is down": a record that
+// is running on re-observation is a success, not an error to report.
 // The observe rides retryOnBrokerUnavailable: the resume just failed against
 // this same runtime, so a transient blip here is CORRELATED with that failure
 // — an unretried List would undermine the re-observe with a false negative
-// one level up. (Errors that survive the retry budget count as not-recovered:
-// fail toward the loud path, which at least tells the user what it is about
-// to do.)
+// one level up. (Errors that survive the retry budget count as
+// not-recovered: the resume error is reported and the record is kept.)
 func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool {
 	agents, err := r.listAgentsRetry(ctx, jp)
 	if err != nil {
@@ -1319,11 +1317,10 @@ func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool 
 // the runtime-broker registration (see Deps.BrokerStartRetry) and treats an
 // "already running"/"already exists" 409 as success (idempotent re-apply, or a
 // create-race against a record the observe step just missed — scion's own
-// lazy hub-sync can transiently read a live record as absent). Shared by the absent-record branch and the post-delete
-// recovery branches above (a failed resume, or an unresumable phase, falls
-// back to exactly this same create path), so all three take the identical
-// retry behavior — including the bootstrap re-arm below, which is why it
-// lives HERE rather than duplicated at each of the three call sites.
+// lazy hub-sync can transiently read a live record as absent). Shared by the absent-record branch and the create
+// that follows a `--fresh` delete, so both take the identical retry
+// behavior — including the bootstrap re-arm below, which is why it lives
+// HERE rather than duplicated at each call site.
 //
 // A freshly-created scion agent record has no agent home to reuse (unlike
 // resume, which restores an existing one), so lever-agent boot ALWAYS re-enrols after a create.

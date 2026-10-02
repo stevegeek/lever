@@ -269,11 +269,21 @@ func (b *Broker) notRunningRefusal(ctx context.Context, actor, slug string, toMa
 		return "the manager has no record on the hub; the operator starts it with `lever up`"
 	case toManager:
 		return "the manager is not running (phase " + phase + "); the operator resumes it with `lever up`"
+	case phase == "" && actor == operatorActor:
+		// The operator has no host verb for this: the manager dispatches.
+		return "worker " + slug + " has no record on the hub (never started, or purged); ask the manager to start it (`lever-manager agent start " + slug + " --task \"…\"` in the manager's session)"
 	case phase == "":
 		return "worker " + slug + " has no record on the hub (never started, or purged); start it first: `lever-manager agent start " + slug + " --task \"…\"`"
+	case actor == operatorActor:
+		return "worker " + slug + " is not running (phase " + phase + "); ask the manager to resume it (`lever-manager agent resume " + slug + "` in the manager's session)"
 	}
 	return "worker " + slug + " is not running (phase " + phase + "); resume it first: `lever-manager agent resume " + slug + "`"
 }
+
+// operatorActor is the audit actor of the host operator's own sends (the
+// operator socket and the directive channel); notRunningRefusal words its
+// answer for the host, where `lever-manager` does not exist.
+const operatorActor = "operator"
 
 func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	// A revoked agent loses its messaging channel too — otherwise a

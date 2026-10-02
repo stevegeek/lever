@@ -162,7 +162,7 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	// agent that is not running, so ask first; the operator brings the agent
 	// up and sends again (the statement is not spent: nothing saw its id).
 	if b.runtime != nil {
-		if refusal := b.notRunningRefusal(r.Context(), "operator", slug, cn == b.manager); refusal != "" {
+		if refusal := b.notRunningRefusal(r.Context(), operatorActor, slug, cn == b.manager); refusal != "" {
 			b.audit("directive", "operator", "deny", "send "+st.DirectiveID+": "+refusal)
 			b.dirAudit.append("send_denied", map[string]any{"id": st.DirectiveID, "target": st.TargetAgent.CN, "reason": "target_not_running"})
 			http.Error(w, refusal+". The directive was not stored; send it again when the agent is running.", http.StatusConflict)

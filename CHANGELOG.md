@@ -5,6 +5,78 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Changed
+
+- **A manager resume that fails keeps the manager; lever no longer starts a
+  fresh one on its own (#3).** `lever up` / `lever apply` deleted the manager
+  record and created a fresh manager when a resume (or the forced resume of
+  an `error`-phase record) failed for a reason lever could not classify.
+  scion removes the agent home with the record, so the conversation went
+  with it: the last path on which lever discarded a session without being
+  asked. A failed resume now ends with an error that says the record and
+  the conversation are kept. Run `lever up` again (a transient failure
+  clears) and `lever doctor` for the cause. `lever up --fresh` is the only
+  thing that deletes a manager record. **Behaviour change:** an instance
+  whose manager cannot be resumed stays down until the operator acts; it
+  does not heal itself by losing the session.
+- **A directive that cannot be delivered is not stored (#25).** `lever
+  directive send` to an agent that is not running stored the directive
+  active, failed to deliver its notice inside the scion call, printed
+  `delivered=false` and exited 0. The broker now reads the target's phase
+  before it stores anything and answers 409 with the phase; the statement is
+  not spent, so the same send works once the agent runs (`lever up` for the
+  manager; the manager resumes a worker). If the notice still fails after
+  the check, the directive is revoked and the answer is 502. `lever
+  directive send` exits non-zero whenever the notice did not reach the
+  agent. lever does not wake the agent itself.
+- **A refused `lever-manager msg send` names the addresses the caller may
+  use (#4)** — at most 16, then a count — and `msg send --help` states the
+  address forms.
+
+### Added
+
+- **`directive_preview`: read a directive before you consume it (#17).** The
+  target agent can read a pending directive's verified action without
+  consuming it. The gate and the opaque not-found are the same as for
+  `directive_consume`. A preview carries no authority, does not change the
+  directive's state, is audited (`previewed`) and is limited to 5 per
+  directive; `lever directive list` shows `previews`. Needs an agent image
+  rebuild.
+- **`lever-manager msg recipients`** (broker route `POST /msg/recipients`)
+  lists the addresses the calling agent may send to, derived from its
+  identity and the instance config (#4). Needs an agent image rebuild.
+- **`lever doctor` compares the agent image's lever version with the host
+  (#18).** The image tag names only the arch, so a build from another lever
+  checkout replaced it for every instance on the host and nothing reported
+  it. `make lever-image` now bakes a `lever_version` label (the string
+  `lever version` prints for the source). The new row "agent lever version"
+  fails when the release in the label differs from the host `lever`, and
+  names the rebuild, `lever apply` and `lever up --fresh`. It compares the
+  release, not the commit. An image without the label reads "not checked"
+  until it is rebuilt; an image built `FROM lever-claude` inherits the label.
+
+### Security
+
+- **With `messaging.worker_to_worker: false`, a worker gets the same refusal
+  for a declared peer and for an unknown name (#4).** The two texts differed,
+  which let a worker probe for peer names.
+
+### Documentation
+
+- The security model no longer says lever leaves scion's project role ceiling
+  unset: `lever apply` writes and verifies it, and `lever doctor` reads it
+  back (#8).
+- Operations guide: every `.lever-state` log and ledger with its rotation
+  cap, a guest logrotate drop-in for the hub's `server.log`, and running
+  under systemd/launchd (no shipped unit) (#10). The install guide says an
+  image rebuild reaches the manager with `lever up --fresh`.
+- The operator and agent skills describe `directive_preview`,
+  `msg recipients`, the 409 on a message to an agent that is not running,
+  and that workers stay suspended after `lever stop` + `lever up`. Run
+  `lever init` after the upgrade, as after every release.
+
 ## [0.28.1] - 2026-10-02
 
 ### Fixed

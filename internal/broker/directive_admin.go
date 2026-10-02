@@ -156,6 +156,19 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A directive whose notice cannot reach the agent is not stored: a stored
+	// directive nobody was told about reads as "in flight" in the ledger and
+	// only runs down its expiry (lever#25). The hub refuses a message to an
+	// agent that is not running, so ask first; the operator brings the agent
+	// up and sends again (the statement is not spent: nothing saw its id).
+	if b.runtime != nil {
+		if refusal := b.notRunningRefusal(r.Context(), "operator", slug, cn == b.manager); refusal != "" {
+			b.audit("directive", "operator", "deny", "send "+st.DirectiveID+": "+refusal)
+			b.dirAudit.append("send_denied", map[string]any{"id": st.DirectiveID, "target": st.TargetAgent.CN, "reason": "target_not_running"})
+			http.Error(w, refusal+". The directive was not stored; send it again when the agent is running.", http.StatusConflict)
+			return
+		}
+	}
 	rec := DirectiveRecord{
 		ID: st.DirectiveID, Statement: raw, Signature: sig,
 		TargetCN: st.TargetAgent.CN, TargetGen: st.TargetAgent.Generation,
@@ -194,10 +207,19 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 			func(ref string) string { return refLine(directiveNoticeMarker, ref) + "\n" + text },
 			scion.MsgOpts{To: "agent:" + slug, Project: b.instanceProject})
 		if merr != nil {
-			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error())
-		} else {
-			delivered = true
+			// The notice did not go out (the agent stopped after the check,
+			// or scion failed). Revoke rather than leave an active directive
+			// the agent was never told about; if the notice did land after
+			// all, its id now consumes as the usual opaque not-found.
+			revoked := b.directives.RevokeDirective(st.DirectiveID)
+			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error()+" (directive revoked)")
+			b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": false})
+			b.dirAudit.append("revoked", map[string]any{"id": st.DirectiveID, "ok": revoked, "reason": "undelivered"})
+			http.Error(w, "directive "+st.DirectiveID+": the notice could not be delivered to the agent, so the directive was revoked and nothing is pending. "+
+				"Check the agent with `lever doctor`, then send again.", http.StatusBadGateway)
+			return
 		}
+		delivered = true
 	}
 	b.audit("directive", "operator", "allow", "send "+st.DirectiveID, "target", st.TargetAgent.CN, "kind", st.Action.Kind)
 	b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": delivered})

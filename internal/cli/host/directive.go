@@ -235,6 +235,12 @@ func newDirectiveSendCmd() *cobra.Command {
 				return err
 			}
 			cmd.Printf("directive %v sent: delivered=%v\n", out.ID, out.Delivered)
+			if !out.Delivered {
+				// A broker older than 0.29 stores a directive whose notice
+				// failed and answers 200. The agent was not told: that is
+				// not a success (lever#25).
+				return fmt.Errorf("directive %s is stored, but its notice did not reach the agent. Revoke it (`lever directive revoke %s`), bring the agent up (`lever up --no-attach`), then send again", out.ID, out.ID)
+			}
 			return nil
 		},
 	}

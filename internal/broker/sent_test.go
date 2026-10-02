@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sentledger"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -167,8 +168,9 @@ func TestSendWithTheLedgerOffIsUnrecorded(t *testing.T) {
 }
 
 // TestDirectiveNoticeIsRecorded: the notice is recorded as directive-notice
-// for the target's CN; with its record unwritable the directive is still
-// stored (consume does not need the notice) but reported undelivered.
+// for the target's CN. With its record unwritable the notice is not sent, so
+// the directive is revoked and the send is an error: nothing stays pending
+// that the agent was never told about (lever#25).
 func TestDirectiveNoticeIsRecorded(t *testing.T) {
 	for _, broken := range []bool{false, true} {
 		b, priv, _, rt := directiveTestBroker(t)
@@ -184,17 +186,24 @@ func TestDirectiveNoticeIsRecorded(t *testing.T) {
 			id = "11111111-2222-4333-8444-5555555555a2"
 		}
 		code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, instructionAction("x")))
+		recs := b.directives.List(time.Now())
+		if broken {
+			if code != http.StatusBadGateway || len(rt.messages) != 0 || !strings.Contains(string(body), "revoked") {
+				t.Fatalf("unrecordable notice: %d %s, messages %d; want 502, revoked, nothing sent", code, body, len(rt.messages))
+			}
+			if len(recs) != 1 || recs[0].State != DirectiveRevoked {
+				t.Fatalf("the undelivered directive must be revoked: %+v", recs)
+			}
+			if _, ok := b.directives.Consume(id, "manager", time.Now()); ok {
+				t.Fatal("a revoked, undelivered directive was consumable")
+			}
+			continue
+		}
 		if code != http.StatusOK {
 			t.Fatalf("send: %d %s", code, body)
 		}
-		if recs := b.directives.List(time.Now()); len(recs) != 1 || recs[0].ID != id {
+		if len(recs) != 1 || recs[0].ID != id {
 			t.Fatalf("directive not stored: %+v", recs)
-		}
-		if broken {
-			if len(rt.messages) != 0 || !strings.Contains(string(body), `"delivered":false`) {
-				t.Fatalf("unrecordable notice was sent: %d %s", len(rt.messages), body)
-			}
-			continue
 		}
 		if len(rt.messages) != 1 {
 			t.Fatalf("messages = %d", len(rt.messages))
@@ -203,6 +212,64 @@ func TestDirectiveNoticeIsRecorded(t *testing.T) {
 		if s.Kind != sentledger.KindDirectiveNotice || s.Body != rt.messages[0].Body {
 			t.Fatalf("record %+v", s)
 		}
+	}
+}
+
+// TestDirectiveForAnAgentThatIsNotRunningIsNotStored: the hub delivers no
+// notice to a suspended, stopped or recordless agent, so the send is refused
+// with the phase and nothing is stored, sent or recorded; the same statement
+// goes through once the agent runs (lever#25).
+func TestDirectiveForAnAgentThatIsNotRunningIsNotStored(t *testing.T) {
+	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError, "resumed", ""} {
+		b, priv, _, rt := directiveTestBroker(t)
+		dir := filepath.Join(t.TempDir(), "sent-ledger")
+		b.sent = &sentRecord{dir: dir}
+		client := directiveClient(serveDirectiveAdmin(t, b))
+		b.directives.BumpGeneration("worker")
+		agents := []scion.Agent{{Slug: "manager", Phase: scion.PhaseRunning}}
+		if phase != "" {
+			agents = append(agents, scion.Agent{Slug: "worker", Phase: phase})
+		}
+		rt.agents[testInstanceProject] = agents
+		st := directiveStatement("11111111-2222-4333-8444-5555555555b1", "worker", 1, instructionAction("x"))
+		code, body := postSend(t, client, priv, st)
+		if code != http.StatusConflict || !strings.Contains(string(body), "was not stored") {
+			t.Fatalf("phase %q: %d %s, want 409 not stored", phase, code, body)
+		}
+		if phase != "" && !strings.Contains(string(body), "phase "+phase) {
+			t.Fatalf("phase %q: the refusal does not name the phase: %s", phase, body)
+		}
+		if n := len(b.directives.List(time.Now())); n != 0 || len(rt.messages) != 0 {
+			t.Fatalf("phase %q: stored %d, sent %d; want nothing", phase, n, len(rt.messages))
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Fatalf("phase %q: a refused directive left a sent-ledger record", phase)
+		}
+		rt.agents[testInstanceProject] = []scion.Agent{{Slug: "manager", Phase: scion.PhaseRunning}, {Slug: "worker", Phase: scion.PhaseRunning}}
+		if code, body := postSend(t, client, priv, st); code != http.StatusOK || !strings.Contains(string(body), `"delivered":true`) {
+			t.Fatalf("phase %q: the same statement once the worker runs: %d %s", phase, code, body)
+		}
+	}
+}
+
+// TestDirectiveWhoseNoticeFailsIsRevoked: the agent ran at the check and the
+// send still failed. The directive is revoked, the answer is an error, and
+// the id no longer consumes.
+func TestDirectiveWhoseNoticeFailsIsRevoked(t *testing.T) {
+	b, priv, _, rt := directiveTestBroker(t)
+	rt.msgErr = errors.New("hub: agent_not_running")
+	client := directiveClient(serveDirectiveAdmin(t, b))
+	b.directives.BumpGeneration("manager")
+	id := "11111111-2222-4333-8444-5555555555c1"
+	code, body := postSend(t, client, priv, directiveStatement(id, "manager", 1, instructionAction("x")))
+	if code != http.StatusBadGateway || !strings.Contains(string(body), "revoked") || strings.Contains(string(body), "agent_not_running") {
+		t.Fatalf("%d %s, want 502 that says revoked and does not echo the scion error", code, body)
+	}
+	if recs := b.directives.List(time.Now()); len(recs) != 1 || recs[0].State != DirectiveRevoked {
+		t.Fatalf("records %+v, want one revoked", recs)
+	}
+	if _, ok := b.directives.Consume(id, "manager", time.Now()); ok {
+		t.Fatal("the revoked directive was consumable")
 	}
 }
 

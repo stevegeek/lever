@@ -51,9 +51,13 @@ func genOperatorKey(t *testing.T) (string, string) {
 type fakeDirectiveRuntime struct {
 	fakeRuntime
 	messages []scion.MsgOpts
+	msgErr   error // every Message fails with it, and nothing is captured
 }
 
 func (f *fakeDirectiveRuntime) Message(ctx context.Context, o scion.MsgOpts) error {
+	if f.msgErr != nil {
+		return f.msgErr
+	}
 	f.messages = append(f.messages, o)
 	return f.fakeRuntime.Message(ctx, o)
 }

@@ -106,7 +106,9 @@ test('stateLine reads the hub phases and activities', () => {
   assert.deepEqual(stateLine({ phase: 'running' }), { text: 'running', ok: true });
   assert.deepEqual(stateLine({ phase: 'resumed', activity: 'working' }), { text: 'working', ok: true });
   // A running agent that reports it is not answering is not shown as fine.
-  for (const activity of ['offline', 'crashed', 'stalled', 'limits_exceeded']) {
+  // "stalled" is how the hub reports a manager that sits at its prompt.
+  assert.deepEqual(stateLine({ phase: 'running', activity: 'stalled' }), { text: 'idle (no activity for a while)', ok: true });
+  for (const activity of ['offline', 'crashed', 'limits_exceeded']) {
     const line = stateLine({ phase: 'running', activity });
     assert.equal(line.ok, false, activity);
     assert.match(line.text, /may not answer/);

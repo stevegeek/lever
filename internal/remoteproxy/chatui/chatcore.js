@@ -95,7 +95,7 @@ export function isChatSubject(subject, userId) {
 const STARTING = new Set(['created', 'provisioning', 'cloning', 'starting']);
 const STOPPED = new Set(['suspended', 'stopping', 'stopped', 'error']);
 const ACTIVE = new Set(['working', 'thinking', 'executing', 'waiting_for_input', 'blocked', 'completed']);
-const NOT_ANSWERING = new Set(['offline', 'crashed', 'stalled', 'limits_exceeded']);
+const NOT_ANSWERING = new Set(['offline', 'crashed', 'limits_exceeded']);
 
 const label = (s) => s.replaceAll('_', ' ');
 
@@ -113,6 +113,10 @@ export function stateLine(agent) {
   // "resumed" is what the hub reports for a short time after a resume.
   if (phase === 'running' || phase === 'resumed') {
     if (NOT_ANSWERING.has(activity)) return { text: `${label(activity)} (it may not answer)`, ok: false };
+    // The hub marks an agent stalled when it has reported nothing for a
+    // while. That is what a manager waiting at its prompt looks like, and
+    // also a turn that never finished; a message reaches it either way.
+    if (activity === 'stalled') return { text: 'idle (no activity for a while)', ok: true };
     return { text: ACTIVE.has(activity) ? label(activity) : 'running', ok: true };
   }
   if (STARTING.has(phase)) return { text: `${phase} (a message waits until it runs)`, ok: true };

@@ -323,10 +323,31 @@ func (b *Broker) ensureWorkspaceDir(spec WorkerSpec) error {
 	if !strict || b.tree == "" {
 		return nil
 	}
+	if b.afterWorkspaceMkdir != nil {
+		b.afterWorkspaceMkdir()
+	}
 	// Strict: walk again now the directory exists (a swap between the first
 	// walk and the mkdir is caught), then compare where the path REALLY
-	// lands — scion resolves the worker's --workspace through symlinks, so
-	// the real path is what the worker would mount read-write.
+	// lands. The same check guards every resume (verifyStrictWorkspace).
+	return b.verifyStrictWorkspace(spec)
+}
+
+// verifyStrictWorkspace is the manager.read_only check of an EXISTING
+// worker workspace: no symlink anywhere on its path below the tree, and its
+// real path neither is, contains nor lies inside a read_only entry. scion
+// resolves the worker's --workspace through symlinks and the runtime
+// resolves the bind source again on every container start, so the real
+// path is what the worker mounts read-write — on a fresh dispatch AND on
+// every resume, which is why resumeRecord and the healer run it too. A
+// no-op when read_only is unset or no tree is wired (tests).
+func (b *Broker) verifyStrictWorkspace(spec WorkerSpec) error {
+	if len(b.readOnlyDirs) == 0 || b.tree == "" {
+		return nil
+	}
+	root, rel, err := b.treePath(spec.HostWorkspace)
+	if err != nil {
+		return err
+	}
 	if err := refuseEscapingDir(root, rel, true); err != nil {
 		return err
 	}
@@ -524,6 +545,20 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		}
 		b.audit("worker", b.manager, "allow", "resume "+spec.Name+" (already "+phase+")")
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+		return
+	}
+	// manager.read_only: a resume re-resolves the workspace bind source, so
+	// a worker dir the manager swapped for a link since the dispatch would
+	// hand the worker whatever the link names. Checked before the ticket is
+	// spent.
+	if err := b.verifyStrictWorkspace(spec); err != nil {
+		if errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, ErrReadOnlyOverlap) {
+			b.audit("worker", b.manager, "deny", "resume "+spec.Name+": workspace dir: "+err.Error())
+			http.Error(w, "forbidden: worker workspace is reached through a symbolic link or overlaps a manager read-only directory; the record was kept", http.StatusForbidden)
+			return
+		}
+		b.audit("worker", b.manager, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
+		http.Error(w, "workspace error", http.StatusInternalServerError)
 		return
 	}
 	// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's

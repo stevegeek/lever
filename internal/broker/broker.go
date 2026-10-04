@@ -278,9 +278,12 @@ type Broker struct {
 	beginSession   func(agent string) (commit func() error)
 	tree           string
 	readOnlyDirs   []string
-	workers        map[string]WorkerSpec
-	brokerCAPEM    string
-	brokerURL      string
+	// afterWorkspaceMkdir is a test seam: called between a strict worker
+	// workspace mkdir and the walk that follows it. nil outside tests.
+	afterWorkspaceMkdir func()
+	workers             map[string]WorkerSpec
+	brokerCAPEM         string
+	brokerURL           string
 	// liveAttempts/liveInterval bound waitWorkerLive's post-start poll; tests
 	// shrink them per instance (like reenrolNow). liveSettle is the hold that
 	// follows (DispatchConfig.LiveSettle).

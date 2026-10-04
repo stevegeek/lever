@@ -1336,3 +1336,103 @@ func TestWorkerStart_readOnlyStrictWorkspace(t *testing.T) {
 		})
 	}
 }
+
+// strictTree builds a tree with a protected assistant/tools and a real
+// workers/worker dir, and a broker with manager.read_only over it.
+func strictTree(t *testing.T, rt *fakeRuntime, buf *bytes.Buffer) (string, WorkerSpec, *Broker) {
+	t.Helper()
+	tree := t.TempDir()
+	for _, d := range []string{"assistant/tools", "workers/worker", "other"} {
+		if err := os.MkdirAll(filepath.Join(tree, filepath.FromSlash(d)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+		HostWorkspace: filepath.Join(tree, "workers", "worker"),
+		TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
+	b := New(testConfig(t, withAudit(buf), withManager("test-manager", ""), withRuntime(rt, spec),
+		func(c *Config) { c.Dispatch.Tree = tree; c.Dispatch.ReadOnlyDirs = []string{"assistant/tools"} }))
+	return tree, spec, b
+}
+
+// swapToLink replaces dir with a symlink to target.
+func swapToLink(t *testing.T, dir, target string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A resume re-resolves the workspace bind source, so with read_only set a
+// stopped worker whose dir was swapped for a link since its dispatch is
+// refused — before a ticket is spent — and its record is kept.
+func TestWorkerStart_readOnlyResumeRefusesSwappedWorkspace(t *testing.T) {
+	for _, phase := range []string{"stopped", "suspended", "error"} {
+		t.Run(phase, func(t *testing.T) {
+			rt := &fakeRuntime{agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "worker", Phase: phase}},
+			}}
+			var buf bytes.Buffer
+			tree, _, b := strictTree(t, rt, &buf)
+			swapToLink(t, filepath.Join(tree, "workers", "worker"), "../assistant/tools")
+
+			rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+			}
+			if len(rt.resumed) != 0 || len(rt.resumeForced) != 0 || len(rt.staged) != 0 {
+				t.Fatalf("no ticket or resume for a swapped workspace; staged=%d resumed=%d forced=%d", len(rt.staged), len(rt.resumed), len(rt.resumeForced))
+			}
+			if !strings.Contains(buf.String(), "symbolic link refused") {
+				t.Fatalf("refusal must be audited by name; log=%s", buf.String())
+			}
+		})
+	}
+	// The real directory still resumes.
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "stopped"}}}}
+	var buf bytes.Buffer
+	_, _, b := strictTree(t, rt, &buf)
+	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager"); rec.Code != http.StatusOK || len(rt.resumed) != 1 {
+		t.Fatalf("a real workspace must resume; status=%d resumed=%d (%s)", rec.Code, len(rt.resumed), rec.Body.String())
+	}
+}
+
+// The healer's bounce is a resume too: it refuses a swapped worker dir.
+func TestReenrolBounceRefusesSwappedWorkspace(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	swapToLink(t, filepath.Join(tree, "workers"), "assistant")
+	if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker"); ok {
+		t.Fatal("the healer must not bounce a worker whose workspace goes through a link")
+	}
+	if len(rt.resumed) != 0 {
+		t.Fatalf("resumed = %v, want none", rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "refusing to bounce worker") {
+		t.Fatalf("refusal must be audited; log=%s", buf.String())
+	}
+}
+
+// The walk AFTER the mkdir: a workspace swapped for an in-tree link to an
+// UNPROTECTED dir between the mkdir and that walk is still refused (the
+// real-path overlap check alone would let it through).
+func TestWorkerStart_readOnlyRewalksAfterMkdir(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	b.afterWorkspaceMkdir = func() { swapToLink(t, filepath.Join(tree, "workers", "worker"), "../other") }
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.started) != 0 {
+		t.Fatalf("no start for a swapped workspace; got %d", len(rt.started))
+	}
+}

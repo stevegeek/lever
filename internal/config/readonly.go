@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/stevegeek/lever/internal/fsutil"
 )
@@ -27,6 +28,10 @@ import (
 type TreeMount struct {
 	Rel      string
 	ReadOnly bool
+	// WorkerPin marks a pin that exists only for a worker dir (the dir or
+	// one of its ancestors), not as an entry's ancestor: its absence lets
+	// the manager redirect a worker, not move an entry. For wording.
+	WorkerPin bool
 }
 
 // readOnlyForbiddenChars are characters a read_only entry (and, while
@@ -39,9 +44,8 @@ const readOnlyForbiddenChars = "$~:,"
 // ManagerTreeMounts returns the manager's read_only plan: every entry
 // read-only; every strict ancestor of an entry, every worker dir and every
 // strict ancestor of a worker dir (all below the tree root) as a read-write
-// pin; each directory once. Directories are compared case-insensitively
-// (the host filesystem usually is), keeping the first spelling seen, entries
-// first. The order is deterministic — by depth, then by path — so a parent
+// pin; each spelling once (entries first, so an entry is never demoted to
+// a pin). The order is deterministic — by depth, then by path — so a parent
 // is listed before its children. podman sorts mounts by destination depth
 // itself; the order here is for a stable inline config and stable tests.
 // Validate has already rejected nested entries and worker dirs that overlap
@@ -53,35 +57,49 @@ func (a *App) ManagerTreeMounts() []TreeMount {
 	}
 	seen := make(map[string]bool)
 	var out []TreeMount
-	add := func(rel string, readOnly bool) {
-		key := strings.ToLower(rel)
-		if seen[key] {
+	add := func(rel string, readOnly, workerPin bool) {
+		// Keyed on the exact spelling, NOT case-folded: on a case-sensitive
+		// guest filesystem (Lima on a Linux host) `KB` and `kb` are two
+		// directories and each needs its own pin. On a case-insensitive host
+		// the second spelling is a harmless extra mount of the same one.
+		if seen[rel] {
 			return
 		}
-		seen[key] = true
-		out = append(out, TreeMount{Rel: rel, ReadOnly: readOnly})
+		seen[rel] = true
+		out = append(out, TreeMount{Rel: rel, ReadOnly: readOnly, WorkerPin: workerPin})
 	}
 	for _, e := range a.Manager.ReadOnly {
-		add(cleanRel(e), true)
+		add(cleanRel(e), true, false)
 	}
-	pinWithAncestors := func(rel string, self bool) {
+	pinWithAncestors := func(rel string, self, workerPin bool) {
 		if self {
-			add(rel, false)
+			add(rel, false, workerPin)
 		}
 		for dir := parentRel(rel); dir != ""; dir = parentRel(dir) {
-			add(dir, false)
+			add(dir, false, workerPin)
 		}
 	}
 	for _, e := range a.Manager.ReadOnly {
-		pinWithAncestors(cleanRel(e), false)
+		pinWithAncestors(cleanRel(e), false, false)
 	}
 	for _, g := range a.Workers {
-		pinWithAncestors(cleanRel(g.Dir), true)
+		pinWithAncestors(cleanRel(g.Dir), true, true)
 	}
 	slices.SortFunc(out, func(x, y TreeMount) int {
 		return cmp.Or(cmp.Compare(strings.Count(x.Rel, "/"), strings.Count(y.Rel, "/")), cmp.Compare(x.Rel, y.Rel))
 	})
 	return out
+}
+
+// isASCII reports whether s is plain ASCII (no Unicode normalisation
+// aliases are possible).
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // cleanRel is a tree-relative path in the one spelling a mount uses:
@@ -125,6 +143,9 @@ func (a *App) validateManagerReadOnly() error {
 		if strings.ContainsAny(e, readOnlyForbiddenChars) {
 			return fmt.Errorf("config: manager.read_only entry %q must not contain any of %q (scion expands $VAR and ~ in a mount path, and the runtime splits mount options on : and ,)", e, readOnlyForbiddenChars)
 		}
+		if !isASCII(e) {
+			return fmt.Errorf("config: manager.read_only entry %q must be ASCII — APFS treats the composed and decomposed spellings of an accented name as one directory, so a non-ASCII entry can have a second spelling that every comparison here misses", e)
+		}
 		for _, prev := range a.Manager.ReadOnly[:i] {
 			if strings.EqualFold(prev, e) {
 				return fmt.Errorf("config: manager.read_only lists %q twice (as %q and %q; the host filesystem may not tell case apart)", e, prev, e)
@@ -144,6 +165,9 @@ func (a *App) validateManagerReadOnly() error {
 	for _, g := range a.Workers {
 		if strings.ContainsAny(g.Dir, readOnlyForbiddenChars) {
 			return fmt.Errorf("config: worker %q dir %q must not contain any of %q while manager.read_only is set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", g.Name, g.Dir, readOnlyForbiddenChars)
+		}
+		if !isASCII(g.Dir) {
+			return fmt.Errorf("config: worker %q dir %q must be ASCII while manager.read_only is set — APFS treats the composed and decomposed spellings of an accented name as one directory, so the overlap check with the read_only entries could miss an alias", g.Name, g.Dir)
 		}
 	}
 	return nil
@@ -202,12 +226,20 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 		if err := root.MkdirAll(rel, 0o755); err != nil {
 			return fmt.Errorf("config: worker %q dir %q: creating it: %w", g.Name, g.Dir, err)
 		}
+		if afterWorkerDirMkdir != nil {
+			afterWorkerDirMkdir(rel)
+		}
 		if err := walkNoSymlink(a.Tree, rel, false); err != nil {
 			return fmt.Errorf("config: worker %q dir %q (pinned while manager.read_only is set): %w", g.Name, g.Dir, err)
 		}
 	}
 	return nil
 }
+
+// afterWorkerDirMkdir is a test seam: called between a worker dir's mkdir
+// and the walk that follows it, so a test can make the swap that walk
+// exists to catch. nil outside tests.
+var afterWorkerDirMkdir func(rel string)
 
 // walkNoSymlink Lstats each component of rel below tree and fails on a
 // symbolic link or a non-directory. A missing component is an error unless
@@ -233,12 +265,21 @@ func walkNoSymlink(tree, rel string, allowMissing bool) error {
 	return nil
 }
 
-// refuseEscapingLinks walks dir (never following a link) and fails on the
-// first symbolic link whose target lies outside dir: lexically (the target
-// read relative to the link's own directory) or, when it resolves, by its
-// real path. Read-only mounting protects the files under dir, not what a
-// link there points at, and code the host loads through such a link reads
-// whatever the agent put at the target.
+// refuseEscapingLinks walks dir (never following a link) and fails closed
+// on what would let code loaded from dir read agent-writable content:
+//
+//   - a symbolic link whose target lies outside dir, lexically (the target
+//     read relative to the link's own directory) or by its real path; a
+//     link whose real path cannot be resolved (dangling, a loop) is refused
+//     too — the lexical reading of `s/../x` is not the kernel's when `s` is
+//     itself a link, and a dangling target is one the agent may create
+//     later outside the entry;
+//   - a file with more than one hard link: a name for it made before the
+//     protection (anywhere in the tree) lets the manager edit the
+//     protected file through a writable name.
+//
+// Read-only mounting protects the names under dir, not what a link there
+// points at nor another name of the same inode.
 func refuseEscapingLinks(dir string) error {
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -252,7 +293,17 @@ func refuseEscapingLinks(dir string) error {
 		if err != nil {
 			return err
 		}
+		if d.IsDir() {
+			return nil
+		}
 		if d.Type()&fs.ModeSymlink == 0 {
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+				return fmt.Errorf("%s has %d hard links: another name for the same file may sit where the agent can write, and editing it there edits this one; replace it with a copy (cp, then mv over it)", p, st.Nlink)
+			}
 			return nil
 		}
 		target, err := os.Readlink(p)
@@ -263,14 +314,15 @@ func refuseEscapingLinks(dir string) error {
 			target = filepath.Join(filepath.Dir(p), target)
 		}
 		target = filepath.Clean(target)
-		escapes := !inside(dir, target)
-		if !escapes {
-			if real, err := filepath.EvalSymlinks(p); err == nil && !inside(realDir, real) {
-				escapes = true
-			}
-		}
-		if escapes {
+		if !inside(dir, target) {
 			return fmt.Errorf("symbolic link %s points outside the entry (to %s): code loaded through it would read agent-writable content; make it a real file or point it inside the entry", p, target)
+		}
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return fmt.Errorf("symbolic link %s cannot be resolved (%v): a dangling or looping link may resolve outside the entry once the agent creates its target; remove it or make it resolve inside the entry", p, err)
+		}
+		if !inside(realDir, real) {
+			return fmt.Errorf("symbolic link %s resolves outside the entry (to %s): code loaded through it would read agent-writable content; make it a real file or point it inside the entry", p, real)
 		}
 		return nil
 	})

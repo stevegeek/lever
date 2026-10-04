@@ -204,28 +204,37 @@ func TestStartManagerFreshRechecksReadOnlyBeforeCreate(t *testing.T) {
 	}
 }
 
-// A resumed or kept manager may predate read_only: apply warns (never
-// fails) when its container lacks the mounts, and says how to fix it.
+// A resumed or kept manager may predate read_only, or a protected dir may
+// have been replaced on the host since its create: apply warns (never
+// fails) and says how to fix it.
 func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 	_, app := readOnlyConfig(t, true)
 	jp := JailPath(app.Tree, app.Tree, "")
+	held := []jail.Mount{
+		{Source: jp, Destination: "/workspace", RW: true},
+		{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
+		{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
+	}
+	refused := func(context.Context, string, string) (bool, error) { return false, nil }
 	for _, tc := range []struct {
 		name     string
 		inspect  func(context.Context, string) ([]jail.Mount, error)
+		probe    func(context.Context, string, string) (bool, error)
 		wantWarn string
 	}{
 		{"lacks the mounts", func(context.Context, string) ([]jail.Mount, error) {
 			return []jail.Mount{{Source: jp, Destination: "/workspace", RW: true}}, nil
-		}, "does not hold the mounts"},
-		{"holds them", func(context.Context, string) ([]jail.Mount, error) {
-			return []jail.Mount{
-				{Source: jp, Destination: "/workspace", RW: true},
-				{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
-				{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
-			}, nil
-		}, ""},
-		{"cannot inspect", func(context.Context, string) ([]jail.Mount, error) { return nil, errors.New("podman exploded") }, "lever doctor"},
-		{"no probe wired", nil, "lever doctor"},
+		}, refused, "not mounted read-only"},
+		{"holds them", func(context.Context, string) ([]jail.Mount, error) { return held, nil }, refused, ""},
+		{"replaced on the host", func(context.Context, string) ([]jail.Mount, error) { return held, nil },
+			func(_ context.Context, _ string, target string) (bool, error) {
+				return target == "/workspace/assistant/tools", nil
+			},
+			"edit protected directories in place"},
+		{"probe cannot run", func(context.Context, string) ([]jail.Mount, error) { return held, nil },
+			func(context.Context, string, string) (bool, error) { return false, errors.New("exec failed") }, "could not probe"},
+		{"cannot inspect", func(context.Context, string) ([]jail.Mount, error) { return nil, errors.New("podman exploded") }, refused, "lever doctor"},
+		{"no probe wired", nil, nil, "lever doctor"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs []string
@@ -241,6 +250,7 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 					refs = append(refs, ref)
 					return tc.inspect(ctx, ref)
 				}
+				deps.ProbeContainerWritable = tc.probe
 			}
 			if err := runApply(app, deps); err != nil {
 				t.Fatalf("a missing mount must not fail apply: %v", err)
@@ -277,20 +287,43 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 }
 
 func TestManagerTreeMountGaps(t *testing.T) {
-	want := []config.TreeMount{{Rel: "a"}, {Rel: "a/tools", ReadOnly: true}}
+	want := []config.TreeMount{{Rel: "a"}, {Rel: "w", WorkerPin: true}, {Rel: "a/tools", ReadOnly: true}}
 	ok := []jail.Mount{
 		{Source: "/lever/a", Destination: "/workspace/a", RW: true},
+		{Source: "/lever/w", Destination: "/workspace/w", RW: true},
 		{Source: "/lever/a/tools", Destination: "/workspace/a/tools"},
 	}
 	if g := ManagerTreeMountGaps("/lever", want, ok); !g.Empty() {
 		t.Fatalf("a matching container must have no gaps, got %+v", g)
 	}
 	g := ManagerTreeMountGaps("/lever", want, []jail.Mount{{Source: "/other/a/tools", Destination: "/workspace/a/tools"}})
-	if !reflect.DeepEqual(g.Missing, []string{"a"}) || !reflect.DeepEqual(g.WrongSource, []string{"a/tools"}) {
+	if !reflect.DeepEqual(g.MissingPins, []string{"a"}) || !reflect.DeepEqual(g.MissingWorkerPins, []string{"w"}) || !reflect.DeepEqual(g.WrongSource, []string{"a/tools"}) {
 		t.Fatalf("gaps = %+v", g)
 	}
-	g = ManagerTreeMountGaps("/lever", want, []jail.Mount{ok[0], {Source: "/lever/a/tools", Destination: "/workspace/a/tools", RW: true}})
+	if s := g.String(); !strings.Contains(s, "w (a worker dir) not pinned: the manager can replace it with a symbolic link") || strings.Contains(s, "w (a worker dir) not pinned: the agent can write") {
+		t.Fatalf("a missing worker pin must be worded as a redirect, got %q", s)
+	}
+	g = ManagerTreeMountGaps("/lever", want, nil)
+	if !reflect.DeepEqual(g.Missing, []string{"a/tools"}) {
+		t.Fatalf("gaps = %+v", g)
+	}
+	g = ManagerTreeMountGaps("/lever", want, []jail.Mount{ok[0], ok[1], {Source: "/lever/a/tools", Destination: "/workspace/a/tools", RW: true}})
 	if !reflect.DeepEqual(g.Writable, []string{"a/tools"}) || !strings.Contains(g.String(), "a/tools mounted read-write") {
 		t.Fatalf("gaps = %+v (%s)", g, g)
+	}
+	// The live probe: only entries are probed, at their container path; a
+	// probe error is an error, never "protected".
+	var probed []string
+	replaced, err := ProbeReplacedEntries(context.Background(), func(_ context.Context, _ string, target string) (bool, error) {
+		probed = append(probed, target)
+		return true, nil
+	}, "c", want)
+	if err != nil || !reflect.DeepEqual(replaced, []string{"a/tools"}) || !reflect.DeepEqual(probed, []string{"/workspace/a/tools"}) {
+		t.Fatalf("replaced=%v probed=%v err=%v", replaced, probed, err)
+	}
+	if _, err := ProbeReplacedEntries(context.Background(), func(context.Context, string, string) (bool, error) {
+		return false, errors.New("exec failed")
+	}, "c", want); err == nil {
+		t.Fatal("a probe that cannot run must be an error")
 	}
 }

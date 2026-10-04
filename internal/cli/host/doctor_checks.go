@@ -1030,12 +1030,18 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // it is a mount point, which cannot be renamed away, is); each from the
 // same directory of the in-jail tree (project). scion keeps a record's
 // volumes for life, so a manager created before an entry was added has no
-// such mount and writes the path freely; only a fresh create gives it the
-// mounts. The container is found by the id scion reports or else by
-// scion's container name, as for the worker ticket mounts. No manager
-// record or container, a listing or an inspect failure, is "not checked",
-// never a pass.
-func checkManagerReadOnly(ctx context.Context, project, name string, want []config.TreeMount, list agentLister, inspect mountInspector) checkResult {
+// such mount; only a fresh create gives it the mounts.
+//
+// The inspect is not enough on its own: when the host replaces a protected
+// directory after the create, podman still lists the read-only mount while
+// a write from the container lands in the new directory (verified on
+// OrbStack 2026-10-04). So for a RUNNING container every entry is also
+// probed live (apply.ProbeReplacedEntries); a probe that cannot run, or a
+// container that is not running, is a warning that says so — never a pass.
+// The container is found by the id scion reports or else by scion's
+// container name, as for the worker ticket mounts. No manager record or
+// container, a listing or an inspect failure, is "not checked".
+func checkManagerReadOnly(ctx context.Context, project, name string, want []config.TreeMount, list agentLister, inspect mountInspector, probe apply.WritableProbe) checkResult {
 	const check = "manager read-only paths"
 	if len(want) == 0 {
 		return checkResult{check, true, "none configured", ""}
@@ -1062,11 +1068,26 @@ func checkManagerReadOnly(ctx context.Context, project, name string, want []conf
 	if err != nil {
 		return checkResult{check, true, "not checked (could not inspect the manager container): " + firstLine(err.Error()), ""}
 	}
-	if gaps := apply.ManagerTreeMountGaps(project, want, mounts); !gaps.Empty() {
-		return checkResult{check, false,
-			fmt.Sprintf("manager %q has %s: it was created before manager.read_only named these paths, so the agent can still write them (scion keeps a record's mounts for life)",
-				name, gaps),
-			"back up the manager's conversation first, then run `lever up --fresh` to recreate the manager with the mounts (the fresh start deletes the manager record and its conversation)"}
+	gaps := apply.ManagerTreeMountGaps(project, want, mounts)
+	if gaps.Empty() {
+		if !scionpkg.ContainerLive(a.ContainerStatus) {
+			return warnResult(check, "the mounts are listed, but the write probe did not run (the manager container is not running), so a protected directory replaced on the host would go unnoticed",
+				"bring the manager up (`lever up`) and re-run doctor")
+		}
+		if probe == nil {
+			// A warning row needs a fix to print as one ("!"), never as "✓".
+			return warnResult(check, "the mounts are listed, but the write probe is not wired, so a protected directory replaced on the host would go unnoticed",
+				"this is a lever wiring gap; check the manager by hand (`podman exec <container> test -w <entry>` in the guest must fail) and report it")
+		}
+		replaced, err := apply.ProbeReplacedEntries(ctx, probe, ref, want)
+		if err != nil {
+			return warnResult(check, "the mounts are listed, but the write probe could not run ("+firstLine(err.Error())+"), so protection is not confirmed",
+				"re-run doctor once the manager container is up")
+		}
+		gaps.Replaced = replaced
+	}
+	if !gaps.Empty() {
+		return checkResult{check, false, fmt.Sprintf("manager %q: %s", name, gaps), apply.ManagerTreeMountsFix(gaps)}
 	}
 	entries, pins := 0, 0
 	for _, w := range want {
@@ -1076,7 +1097,7 @@ func checkManagerReadOnly(ctx context.Context, project, name string, want []conf
 			pins++
 		}
 	}
-	return checkResult{check, true, fmt.Sprintf("%d path(s) mounted read-only in %q, %d pin(s) mounted", entries, name, pins), ""}
+	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q (mounted, and a write probe refused), %d pin(s) mounted", entries, name, pins), ""}
 }
 
 // checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own

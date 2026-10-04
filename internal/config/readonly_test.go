@@ -54,6 +54,7 @@ func TestValidateRejectsBadManagerReadOnly(t *testing.T) {
 		{"dollar", []string{"$HOME/tools"}, []string{"manager.read_only", "$VAR"}},
 		{"tilde", []string{"~/tools"}, []string{"manager.read_only", "~"}},
 		{"colon", []string{"a:ro"}, []string{"manager.read_only"}},
+		{"non-ASCII", []string{"caf\u00e9/tools"}, []string{"manager.read_only", "ASCII"}},
 		{"duplicate", []string{"tools", "tools"}, []string{"manager.read_only", "twice"}},
 		{"duplicate by case", []string{"tools", "Tools"}, []string{"manager.read_only", "twice"}},
 		{"nested, outer first", []string{"assistant", "assistant/tools"}, []string{"nested", `"assistant"`, `"assistant/tools"`}},
@@ -76,6 +77,8 @@ func TestValidateRejectsBadManagerReadOnly(t *testing.T) {
 	app := readOnlyApp(t, "tools")
 	app.Workers[0].Dir = "workers/$X"
 	testutil.WantErrContaining(t, app.Validate(), `worker "alpha"`, "workers/$X")
+	app.Workers[0].Dir = "workers/caf\u00e9"
+	testutil.WantErrContaining(t, app.Validate(), `worker "alpha"`, "ASCII")
 	// ...but only then: without read_only nothing about worker dirs changes.
 	app.Manager.ReadOnly = nil
 	if err := app.Validate(); err != nil {
@@ -90,17 +93,20 @@ func TestManagerTreeMounts(t *testing.T) {
 	app := readOnlyApp(t, "assistant/tools", "bin", "assistant/lib/ruby", "assistant/lib/go")
 	app.Workers = append(app.Workers, Worker{Name: "gamma", Dir: "./Assistant/notes/"})
 	want := []TreeMount{
-		// Depth 0: a top-level entry has no pin (its parent is the workspace mount).
-		{Rel: "assistant", ReadOnly: false},
+		// Depth 0: a top-level entry has no pin (its parent is the workspace
+		// mount). gamma's "Assistant" is pinned under its own spelling: on a
+		// case-sensitive guest it is another directory.
+		{Rel: "Assistant", WorkerPin: true},
+		{Rel: "assistant"},
 		{Rel: "bin", ReadOnly: true},
-		{Rel: "workers", ReadOnly: false},
+		{Rel: "workers", WorkerPin: true},
 		// Depth 1: the shared pin assistant/lib appears once; each worker
-		// dir is pinned; gamma's ancestor "Assistant" folds into "assistant".
-		{Rel: "Assistant/notes", ReadOnly: false},
-		{Rel: "assistant/lib", ReadOnly: false},
+		// dir is pinned.
+		{Rel: "Assistant/notes", WorkerPin: true},
+		{Rel: "assistant/lib"},
 		{Rel: "assistant/tools", ReadOnly: true},
-		{Rel: "workers/v", ReadOnly: false},
-		{Rel: "workers/w", ReadOnly: false},
+		{Rel: "workers/v", WorkerPin: true},
+		{Rel: "workers/w", WorkerPin: true},
 		{Rel: "assistant/lib/go", ReadOnly: true},
 		{Rel: "assistant/lib/ruby", ReadOnly: true},
 	}
@@ -231,4 +237,76 @@ func TestPrepareManagerReadOnlyHost(t *testing.T) {
 			t.Fatalf("an in-entry link must be accepted: %v", err)
 		}
 	})
+	// sub/s -> .. and sub/a -> s/../evil read as inside the entry, but the
+	// kernel follows s first and lands beside the entry. With the target
+	// present the real-path arm catches it; absent, the dangling arm does.
+	twoHopLinks := func(t *testing.T, app *App) string {
+		t.Helper()
+		tools := filepath.Join(app.Tree, "assistant", "tools")
+		if err := os.MkdirAll(filepath.Join(tools, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("..", filepath.Join(tools, "sub", "s")); err != nil {
+			t.Fatal(err)
+		}
+		a := filepath.Join(tools, "sub", "a")
+		if err := os.Symlink("s/../evil", a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	t.Run("a link that resolves outside through another link", func(t *testing.T) {
+		app := mk(t)
+		a := twoHopLinks(t, app)
+		if err := os.Mkdir(filepath.Join(app.Tree, "assistant", "evil"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		testutil.WantErrContaining(t, app.PrepareManagerReadOnlyHost(), a, "resolves outside the entry")
+	})
+	t.Run("a dangling link is refused", func(t *testing.T) {
+		app := mk(t)
+		a := twoHopLinks(t, app)
+		testutil.WantErrContaining(t, app.PrepareManagerReadOnlyHost(), a, "cannot be resolved")
+	})
+	t.Run("a hard-linked file is refused", func(t *testing.T) {
+		app := mk(t)
+		f := filepath.Join(app.Tree, "assistant", "tools", "run.rb")
+		if err := os.WriteFile(f, []byte("puts 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(f, filepath.Join(app.Tree, "writable-name.rb")); err != nil {
+			t.Fatal(err)
+		}
+		testutil.WantErrContaining(t, app.PrepareManagerReadOnlyHost(), f, "hard links")
+	})
+	// The walk AFTER the mkdir: a worker dir swapped for a link between the
+	// mkdir and that walk is refused.
+	t.Run("a swap right after the worker mkdir", func(t *testing.T) {
+		app := mk(t)
+		afterWorkerDirMkdir = func(rel string) {
+			if rel != "workers/w" {
+				return
+			}
+			p := filepath.Join(app.Tree, rel)
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("../assistant/tools", p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Cleanup(func() { afterWorkerDirMkdir = nil })
+		testutil.WantErrContaining(t, app.PrepareManagerReadOnlyHost(), `worker "alpha"`, "symbolic link")
+	})
+}
+
+// A directory that is both an entry's ancestor and a worker's is an entry
+// pin: its absence lets the agent move the entry, which is the worse case.
+func TestManagerTreeMountsSharedAncestorIsEntryPin(t *testing.T) {
+	app := readOnlyApp(t, "workers/tools")
+	app.Workers = []Worker{{Name: "alpha", Dir: "workers/w"}}
+	want := []TreeMount{{Rel: "workers"}, {Rel: "workers/tools", ReadOnly: true}, {Rel: "workers/w", WorkerPin: true}}
+	if got := app.ManagerTreeMounts(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ManagerTreeMounts = %v, want %v", got, want)
+	}
 }

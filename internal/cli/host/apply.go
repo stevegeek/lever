@@ -1333,6 +1333,9 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
 			return jail.ContainerMounts(ctx, b.JailRunner(), ref)
 		},
+		ProbeContainerWritable: func(ctx context.Context, ref, target string) (bool, error) {
+			return jail.ContainerPathWritable(ctx, b.JailRunner(), ref, target)
+		},
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is

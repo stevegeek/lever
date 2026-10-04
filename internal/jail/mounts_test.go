@@ -177,3 +177,42 @@ func TestContainerEnvScriptFiltersInTheGuest(t *testing.T) {
 		t.Fatal("podman's failure was swallowed")
 	}
 }
+
+func TestContainerPathWritable(t *testing.T) {
+	probe := func(res proc.Result) (bool, error, *proc.FakeRunner) {
+		host := proc.NewFakeRunner()
+		host.Script("orb", res)
+		jr := New(Config{Host: host, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+		ok, err := ContainerPathWritable(context.Background(), jr, "lever--mgr", "/workspace/kb/tools")
+		return ok, err, host
+	}
+	ok, err, host := probe(proc.Result{})
+	if err != nil || !ok {
+		t.Fatalf("exit 0 = writable; got %v, %v", ok, err)
+	}
+	if argv := host.Calls[0].Argv(); !contains(argv, "podman exec lever--mgr test -w /workspace/kb/tools") {
+		t.Fatalf("argv %q", argv)
+	}
+	if ok, err, _ := probe(proc.Result{Code: 1}); err != nil || ok {
+		t.Fatalf("a quiet exit 1 = not writable; got %v, %v", ok, err)
+	}
+	// Anything else never reads as "not writable".
+	for _, res := range []proc.Result{
+		{Code: 125, Stderr: "Error: can only create exec sessions on running containers"},
+		{Code: 127, Stderr: "test: not found"},
+		{Code: 1, Stderr: "orb: machine not running"},
+	} {
+		if _, err, _ := probe(res); err == nil {
+			t.Fatalf("result %+v must be an error, not a verdict", res)
+		}
+	}
+	if _, err, _ := probe(proc.Result{Code: 125, Stderr: `Error: no such container "lever--mgr"`}); !errors.Is(err, ErrNoContainer) {
+		t.Fatalf("err = %v, want ErrNoContainer", err)
+	}
+	jr := New(Config{Host: proc.NewFakeRunner(), Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	for _, bad := range [][2]string{{"--all", "/x"}, {"c", "relative"}} {
+		if _, err := ContainerPathWritable(context.Background(), jr, bad[0], bad[1]); err == nil {
+			t.Fatalf("ref %q target %q must be refused", bad[0], bad[1])
+		}
+	}
+}

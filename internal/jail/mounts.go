@@ -65,6 +65,41 @@ func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]st
 	return targets, nil
 }
 
+// ContainerPathWritable asks the running jail container named by ref
+// whether its own user can write target (`podman exec <ref> test -w
+// <target>`, argv only, no shell). It is the live half of the
+// manager.read_only check: an inspect still lists a read-only mount after
+// the host replaced the directory it covered (a rename-based deploy, rm -rf
+// and recreate), while a write from the container lands in the new,
+// unprotected directory — verified on OrbStack 2026-10-04. `test` answers
+// exit 1 with no output for "not writable" (EROFS on a read-only mount);
+// anything else — podman's own failure, a stopped container, a missing
+// `test` — is an error, never "not writable", so a probe that could not run
+// cannot read as protected.
+func ContainerPathWritable(ctx context.Context, r proc.Runner, ref, target string) (bool, error) {
+	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
+		return false, fmt.Errorf("probing container path: invalid container reference %q", ref)
+	}
+	if !strings.HasPrefix(target, "/") {
+		return false, fmt.Errorf("probing container path: target %q is not absolute", target)
+	}
+	res, err := r.Run(ctx, nil, "podman", "exec", ref, "test", "-w", target)
+	quiet := strings.TrimSpace(res.Stderr) == "" && strings.TrimSpace(res.Stdout) == ""
+	switch {
+	case err == nil && res.Code == 0:
+		return true, nil
+	case res.Code == 1 && quiet:
+		return false, nil
+	}
+	if s := strings.ToLower(res.Stderr); strings.Contains(s, "no such container") || strings.Contains(s, "no such object") {
+		return false, fmt.Errorf("probing container %s: %w", ref, ErrNoContainer)
+	}
+	if err == nil {
+		err = fmt.Errorf("exit status %d", res.Code)
+	}
+	return false, fmt.Errorf("probing %s in container %s: %w: %s", target, ref, err, strings.TrimSpace(res.Stderr))
+}
+
 // ContainerName is the name scion gives an agent's container: the hub
 // project name, two dashes, the agent slug (scion pkg/agent/run.go
 // containerName). project is the hub project key (the mount dest's base).

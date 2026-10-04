@@ -37,13 +37,37 @@ version bump moves the block under the new version heading.
     mounts. A new `lever doctor` row, *manager read-only paths*, fails
     when the manager container lacks a mount, holds an entry read-write,
     or mounts one from another source.
+  - A protected directory must hold no hard-linked file and no symbolic
+    link that fails to resolve; entries (and, while the list is set,
+    worker dirs) must be ASCII.
+  - With the list set, the broker also re-checks a worker's path before
+    every resume and healer bounce (the runtime resolves the bind source
+    again on each container start).
+  - `lever doctor` and the `lever apply` warning probe each entry live
+    (`podman exec <manager> test -w <entry>`): a directory replaced on the
+    host after the create is still listed as a read-only mount, but the
+    manager can write the new one. A probe that cannot run is reported as
+    unconfirmed, never as protected.
   - The protection covers the entry directories only. What host code
     loads from outside an entry (a `Gemfile` beside it, the tree's `.git`
     hooks and config) is still agent-writable; the config reference and
     security model §5.1.1 say so.
 
+### Changed
+
+- With `manager.read_only` set, **every** `lever apply` (also one that
+  keeps or resumes the manager) walks every worker dir, refuses one
+  reached through a symbolic link (an in-tree link included, which was
+  allowed before), and creates a missing worker dir. Without the setting
+  nothing changes.
+
 ### Upgrade
 
+- Edit protected directories in place. Replacing one on the host (rm -rf
+  and recreate, a rename-based deploy, a git checkout that removes and
+  re-adds it) drops its protection until the next fresh create; the same
+  goes for a worker dir recreated on the host, whose pin in the manager
+  stays on the old directory.
 - `manager.read_only` is create-time only: scion keeps a record's mounts
   for life. To protect paths for an existing manager, back up its
   conversation, then run `lever up --fresh` (the fresh start discards the

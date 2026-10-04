@@ -131,6 +131,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	inspectMountsRW := func(ctx context.Context, ref string) ([]jail.Mount, error) {
 		return jail.ContainerMounts(ctx, jr, ref)
 	}
+	// The live half: can the manager's user write a read_only entry?
+	probeWritable := func(ctx context.Context, ref, target string) (bool, error) {
+		return jail.ContainerPathWritable(ctx, jr, ref, target)
+	}
 	// An agent container's network mode (lever#35), through the jail.
 	inspectNetMode := func(ctx context.Context, ref string) (string, error) {
 		return jail.ContainerNetworkMode(ctx, jr, ref)
@@ -190,7 +194,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},
 		func() checkResult {
-			return checkManagerReadOnly(ctx, b.MountDest(), app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW)
+			return checkManagerReadOnly(ctx, b.MountDest(), app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, probeWritable)
 		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult {

@@ -79,6 +79,20 @@ closes that for the directories it names:
   (`TOOLS`, `kb/TOOLS`) reaches the same mounted directory: writes are refused and a rename answers
   `EBUSY`. This was verified on OrbStack; it has **not yet been verified on Lima**.
 
+- Every entry must hold no file with more than one hard link (another name for the inode, made
+  before the protection, would be writable), no link that cannot be resolved, and must be ASCII
+  (APFS treats composed and decomposed spellings as one name). While `read_only` is set the broker
+  re-checks a worker's path on every resume and healer bounce too, because the runtime resolves the
+  bind source again on each container start.
+- **Edit protected directories in place; never replace the directory.** The read-only mount is
+  bound to the directory that existed at the manager's create. If the host replaces it (`rm -rf` and
+  recreate, a rename-based deploy, a `git checkout` that removes and re-adds it), podman still lists
+  the read-only mount but it covers the old directory, and a write from the manager lands in the new
+  one (verified on OrbStack). The protection is gone until the next fresh create. `lever doctor` and
+  `lever apply` probe each entry live (a write test inside the running manager) and fail or warn when
+  it is writable; a probe that cannot run is reported as unconfirmed, never as protected. The same
+  holds for a worker dir recreated on the host: the manager's pin stays on the old directory.
+
 **Scope: it protects the entry directories, nothing else.** Whatever the host code loads from
 **outside** an entry is still agent-writable and is still an escalation path: a `require`/import path
 that reaches out of the entry, a `Gemfile`, `.bundle/config`, `package.json` or lockfile kept beside
@@ -106,7 +120,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute), and rejected if it resolves inside the mounted `tree`. |
 | `manager.instructions_file`, `workers[].instructions_file` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`. The contents become the agent's standing user-level `~/.claude/CLAUDE.md`; scion re-projects its staged copy on every container start, so an agent that rewrites the managed block gets the host's text back. |
 | `manager.image_tar`, `workers[].image_tar` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`: the archive is the code the agent runs, so an agent must not be able to author the next bring-up's image. Needs a tag-bearing `image` (a digest pin cannot be matched against a tar's tags), the archive must carry that tag (a mismatch is a named error before a byte is streamed), and one image ref may come from only one archive. |
-| `manager.read_only` | each entry a clean relative path inside `tree` (no `..`, `./`, trailing slash, `.`, `$`, `~`, `:`, `,`); no duplicates or nested entries (case-folded); no worker `dir` equal to, containing or inside an entry; at bring-up, every entry a real directory reached through no symlink, with no symlink inside it pointing out, and every worker dir reached through no symlink (§5.1.1 above). |
+| `manager.read_only` | each entry a clean ASCII relative path inside `tree` (no `..`, `./`, trailing slash, `.`, `$`, `~`, `:`, `,`); no duplicates or nested entries (case-folded); no worker `dir` equal to, containing or inside an entry; at bring-up, every entry a real directory reached through no symlink, with no symlink inside it pointing out or failing to resolve and no hard-linked file, and every worker dir reached through no symlink (§5.1.1 above). |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |

@@ -184,6 +184,16 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
 		return "", false
 	}
+	// A worker's resume re-resolves its workspace bind source: with
+	// manager.read_only set, refuse to bounce one whose dir is now reached
+	// through a link or overlaps a protected directory (resumeRecord does
+	// the same for a manager-driven resume).
+	if spec, isWorker := b.workers[slug]; isWorker {
+		if err = b.verifyStrictWorkspace(spec); err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": workspace dir: "+err.Error())
+			return "", false
+		}
+	}
 	switch phase {
 	case scion.PhaseRunning:
 		verb = "suspend+resume"

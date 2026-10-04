@@ -208,3 +208,32 @@ func confineInTree(tree, rel string) (fs.FileInfo, error) {
 	}
 	return nil, nil // unreachable: the loop returns on the leaf
 }
+
+// RelOverlapFold reports whether two tree-relative paths name the same
+// directory or one contains the other, comparing component by component
+// with Unicode case folding. The fold is for case-insensitive host
+// filesystems (APFS by default): there `Tools` and `tools` are one
+// directory, so a check that compared bytes would let a config — or an
+// agent-chosen path — name a protected directory under another spelling.
+// Both paths are cleaned and slash-normalised first; "." (the tree root)
+// overlaps everything.
+func RelOverlapFold(a, b string) bool {
+	ca, cb := relComponents(a), relComponents(b)
+	n := min(len(ca), len(cb))
+	for i := range n {
+		if !strings.EqualFold(ca[i], cb[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// relComponents splits a cleaned relative path into its components; the
+// tree root itself has none.
+func relComponents(p string) []string {
+	c := filepath.ToSlash(filepath.Clean(p))
+	if c == "." || c == "" {
+		return nil
+	}
+	return strings.Split(c, "/")
+}

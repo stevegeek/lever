@@ -53,6 +53,42 @@ adoption" until you either re-adopt it yourself or restore with `lever init --fo
 the persistence window to files doctor doesn't watch (working files, scripts); it does not replace
 the audit.
 
+### 5.1.1 Host-run code in the tree: `manager.read_only`
+
+The tree is the agents' working area, but an operator may also keep code there that the **host**
+runs (a CLI that works on the notes the agents write, scripts, hooks). Whatever the manager can
+write, it can turn into code that runs on the host the next time you run it. `manager.read_only`
+closes that for the directories it names:
+
+- Each entry is bind-mounted **read-only over itself** in the manager container. Each directory
+  between the tree root and an entry is bind-mounted read-write over itself (a *pin*): a mount point
+  cannot be renamed or removed (`EBUSY`), so the manager cannot rename a parent away and create a
+  fresh, writable directory at the protected host path.
+- While `read_only` is set, every worker `dir` and its ancestors are **pinned** in the manager too,
+  and must be reached through real directories only (apply refuses a symlink and creates a missing
+  worker dir; the broker refuses a symlink anywhere on a worker's path and a workspace that is,
+  contains or lies inside an entry). Without that, the manager could swap a worker dir for a link to
+  a protected directory and dispatch the worker, which mounts its dir **read-write**. A worker dir
+  that overlaps an entry is rejected at config load.
+- Every entry must be a real directory reached through no symlink, and no symlink inside an entry
+  may point outside it (code loaded through such a link would read agent-writable content). apply
+  checks this before it acts on the manager record and again right before the create, after a
+  `--fresh` delete has removed the old manager.
+- Comparisons fold case: on a case-insensitive host (APFS by default) `Assistant/tools` and
+  `assistant/tools` are one directory. Inside the container, a case alias of a protected path
+  (`TOOLS`, `kb/TOOLS`) reaches the same mounted directory: writes are refused and a rename answers
+  `EBUSY`. This was verified on OrbStack; it has **not yet been verified on Lima**.
+
+**Scope: it protects the entry directories, nothing else.** Whatever the host code loads from
+**outside** an entry is still agent-writable and is still an escalation path: a `require`/import path
+that reaches out of the entry, a `Gemfile`, `.bundle/config`, `package.json` or lockfile kept beside
+(not inside) it, the tree's `.git` (hooks, `core.fsmonitor` and other config run code when **you** run
+`git` there), `mise`/`asdf`/`direnv` files a shell picks up on `cd`. Move such files inside an entry,
+or do not trust them. **Create-time only:** scion keeps a record's mounts for life, so the mounts reach
+a manager created after the setting; `lever up --fresh` recreates an existing one (it discards the
+manager's conversation, back it up first). `lever apply` warns, and `lever doctor`'s *manager
+read-only paths* row fails, when the running manager lacks a mount.
+
 ### 5.2 No walk-up discovery (no planted-parent config)
 
 Config is resolved from the **current directory only**; there is deliberately **no walk-up**. A
@@ -70,6 +106,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute), and rejected if it resolves inside the mounted `tree`. |
 | `manager.instructions_file`, `workers[].instructions_file` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`. The contents become the agent's standing user-level `~/.claude/CLAUDE.md`; scion re-projects its staged copy on every container start, so an agent that rewrites the managed block gets the host's text back. |
 | `manager.image_tar`, `workers[].image_tar` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`: the archive is the code the agent runs, so an agent must not be able to author the next bring-up's image. Needs a tag-bearing `image` (a digest pin cannot be matched against a tar's tags), the archive must carry that tag (a mismatch is a named error before a byte is streamed), and one image ref may come from only one archive. |
+| `manager.read_only` | each entry a clean relative path inside `tree` (no `..`, `./`, trailing slash, `.`, `$`, `~`, `:`, `,`); no duplicates or nested entries (case-folded); no worker `dir` equal to, containing or inside an entry; at bring-up, every entry a real directory reached through no symlink, with no symlink inside it pointing out, and every worker dir reached through no symlink (§5.1.1 above). |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |

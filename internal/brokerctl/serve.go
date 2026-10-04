@@ -261,6 +261,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		// Confinement anchor for every bootstrap.json the broker stages (see
 		// broker.DispatchConfig.Tree): the mount point, which no agent can replace.
 		Tree: app.Tree,
+		// manager.read_only: worker workspaces may not be created through a
+		// symlink, nor over a protected directory (see the field doc).
+		ReadOnlyDirs: app.Manager.ReadOnly,
 		// A dispatched worker must hold live for this long before the manager
 		// hears "running" (lever#31): scion reports the record running before
 		// the harness runs a line, and every observed harness death landed

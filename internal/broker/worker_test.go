@@ -1262,3 +1262,77 @@ func TestRunningRecordWithADeadContainerIsNotRunning(t *testing.T) {
 		t.Fatalf("running record, no container status: %d, resumed=%v forced=%v; want a no-op", rec.Code, rt.resumed, rt.resumeForced)
 	}
 }
+
+// With manager.read_only set, a worker workspace is created only through
+// real directories, and never over a protected directory. The swaps below
+// all stay INSIDE the tree, which the plain rule (above) allows: a link to a
+// protected directory is exactly the in-tree link that would hand the worker
+// that directory read-write.
+func TestWorkerStart_readOnlyStrictWorkspace(t *testing.T) {
+	type setup func(t *testing.T, tree string)
+	link := func(target, at string) setup {
+		return func(t *testing.T, tree string) {
+			t.Helper()
+			p := filepath.Join(tree, at)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, p); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		subdir  string
+		setup   setup
+		code    int
+		wantLog string
+	}{
+		{"real directories", "workers/worker", func(*testing.T, string) {}, http.StatusOK, ""},
+		{"worker dir is a link to the protected dir", "workers/worker", link("../assistant/tools", "workers/worker"), http.StatusForbidden, "symbolic link refused"},
+		{"workers ancestor is an in-tree link", "workers/worker", link("assistant", "workers"), http.StatusForbidden, "symbolic link refused"},
+		{"workspace inside the protected dir", "assistant/tools/x", func(*testing.T, string) {}, http.StatusForbidden, ErrReadOnlyOverlap.Error()},
+		{"workspace over the protected dir, other case", "Assistant", func(*testing.T, string) {}, http.StatusForbidden, ErrReadOnlyOverlap.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := t.TempDir()
+			tools := filepath.Join(tree, "assistant", "tools")
+			if err := os.MkdirAll(tools, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, tree)
+			spec := WorkerSpec{Name: "worker", WorkspaceSubdir: tc.subdir,
+				HostWorkspace: filepath.Join(tree, filepath.FromSlash(tc.subdir)),
+				TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
+			rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+			var buf bytes.Buffer
+			b := New(testConfig(t, withAudit(&buf), withManager("test-manager", ""), withRuntime(rt, spec),
+				func(c *Config) { c.Dispatch.Tree = tree; c.Dispatch.ReadOnlyDirs = []string{"assistant/tools"} }))
+
+			rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+			if rec.Code != tc.code {
+				t.Fatalf("status = %d, want %d (%s)", rec.Code, tc.code, rec.Body.String())
+			}
+			if tc.code == http.StatusOK {
+				if len(rt.started) != 1 {
+					t.Fatalf("start calls = %d, want 1", len(rt.started))
+				}
+				return
+			}
+			if entries, _ := os.ReadDir(tools); len(entries) != 0 {
+				t.Fatalf("SECURITY: the broker created %v inside the protected directory", entries)
+			}
+			if _, err := os.Lstat(filepath.Join(tree, "assistant", "worker")); err == nil {
+				t.Fatal("SECURITY: the broker created the workspace through the link")
+			}
+			if len(rt.started) != 0 || len(rt.staged) != 0 {
+				t.Fatalf("no ticket or start for a refused workspace; staged=%d started=%d", len(rt.staged), len(rt.started))
+			}
+			if !strings.Contains(buf.String(), tc.wantLog) {
+				t.Fatalf("refusal must be audited by name (%q); log=%s", tc.wantLog, buf.String())
+			}
+		})
+	}
+}

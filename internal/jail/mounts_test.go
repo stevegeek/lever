@@ -50,7 +50,7 @@ func TestContainerMountsCarriesRW(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Mount{{Destination: "/workspace", RW: true}, {Destination: "/workspace/a/tools", RW: false}}
+	want := []Mount{{Source: "/lever", Destination: "/workspace", RW: true}, {Source: "/lever/a/tools", Destination: "/workspace/a/tools", RW: false}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("mounts = %v, want %v", got, want)
 	}

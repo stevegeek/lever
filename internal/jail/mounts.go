@@ -17,8 +17,10 @@ import (
 var ErrNoContainer = errors.New("no such container")
 
 // Mount is one mount of a jail container as podman inspect reports it: the
-// in-container destination and whether it is writable.
+// guest-side source, the in-container destination and whether it is
+// writable.
 type Mount struct {
+	Source      string `json:"Source"`
 	Destination string `json:"Destination"`
 	RW          bool   `json:"RW"`
 }

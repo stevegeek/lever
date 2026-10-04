@@ -303,7 +303,13 @@ func (b *Broker) ensureWorkspaceDir(spec WorkerSpec) error {
 			return err
 		}
 	}
-	if err := refuseEscapingDir(root, rel); err != nil {
+	strict := len(b.readOnlyDirs) > 0
+	if strict && b.tree != "" {
+		if err := b.refuseReadOnlyOverlap(spec.Name, rel); err != nil {
+			return err
+		}
+	}
+	if err := refuseEscapingDir(root, rel, strict); err != nil {
 		return err
 	}
 	r, err := os.OpenRoot(root)
@@ -311,7 +317,50 @@ func (b *Broker) ensureWorkspaceDir(spec WorkerSpec) error {
 		return err
 	}
 	defer r.Close()
-	return r.MkdirAll(rel, 0o755)
+	if err := r.MkdirAll(rel, 0o755); err != nil {
+		return err
+	}
+	if !strict || b.tree == "" {
+		return nil
+	}
+	// Strict: walk again now the directory exists (a swap between the first
+	// walk and the mkdir is caught), then compare where the path REALLY
+	// lands — scion resolves the worker's --workspace through symlinks, so
+	// the real path is what the worker would mount read-write.
+	if err := refuseEscapingDir(root, rel, true); err != nil {
+		return err
+	}
+	realTree, err := filepath.EvalSymlinks(b.tree)
+	if err != nil {
+		return err
+	}
+	realWs, err := filepath.EvalSymlinks(spec.HostWorkspace)
+	if err != nil {
+		return err
+	}
+	realRel, err := filepath.Rel(realTree, realWs)
+	if err != nil || !filepath.IsLocal(realRel) {
+		return fmt.Errorf("%s resolves to %s, outside the tree: %w", spec.HostWorkspace, realWs, fsutil.ErrEscapesTree)
+	}
+	return b.refuseReadOnlyOverlap(spec.Name, realRel)
+}
+
+// ErrReadOnlyOverlap refuses a worker workspace that is, contains or lies
+// inside a manager.read_only directory: the worker would mount it
+// read-write. Config validation refuses such a worker dir; this is the
+// broker's own check, against the path as it stands on disk.
+var ErrReadOnlyOverlap = errors.New("worker workspace overlaps a manager read-only directory")
+
+// refuseReadOnlyOverlap compares a tree-relative worker workspace with
+// every manager.read_only entry, case-folded (the host filesystem usually
+// does not tell case apart).
+func (b *Broker) refuseReadOnlyOverlap(worker, rel string) error {
+	for _, ro := range b.readOnlyDirs {
+		if fsutil.RelOverlapFold(rel, ro) {
+			return fmt.Errorf("worker %q workspace %q and manager.read_only %q: %w", worker, rel, ro, ErrReadOnlyOverlap)
+		}
+	}
+	return nil
 }
 
 // existingAnchor splits dir at its nearest existing PROPER ancestor: root
@@ -341,8 +390,10 @@ func existingAnchor(dir string) (root, rel string, err error) {
 // component may resolve only inside the real root, else — or when it
 // dangles — the walk fails with fsutil.ErrEscapesTree; an existing component
 // that is not a directory is a plain error. An absent component ends the walk
-// (MkdirAll creates the rest).
-func refuseEscapingDir(root, rel string) error {
+// (MkdirAll creates the rest). noLinks (manager.read_only is set) refuses
+// every symlink component, in-tree or not: a link to a protected directory
+// stays inside the tree, and would hand a worker that directory read-write.
+func refuseEscapingDir(root, rel string, noLinks bool) error {
 	if rel == "" || rel == "." || !filepath.IsLocal(rel) {
 		return fmt.Errorf("%q: %w", rel, fsutil.ErrEscapesTree)
 	}
@@ -359,6 +410,9 @@ func refuseEscapingDir(root, rel string) error {
 		}
 		if err != nil {
 			return err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 && noLinks {
+			return fmt.Errorf("%s: symbolic link refused (manager.read_only is set, so a worker workspace must be reached through real directories only): %w", cur, fsutil.ErrEscapesTree)
 		}
 		if fi.Mode()&fs.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(cur)
@@ -560,6 +614,11 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		if errors.Is(err, fsutil.ErrEscapesTree) {
 			b.audit("worker", b.manager, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
 			http.Error(w, "forbidden: worker workspace escapes the instance tree", http.StatusForbidden)
+			return
+		}
+		if errors.Is(err, ErrReadOnlyOverlap) {
+			b.audit("worker", b.manager, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
+			http.Error(w, "forbidden: worker workspace overlaps a manager read-only directory", http.StatusForbidden)
 			return
 		}
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": workspace dir: "+err.Error())

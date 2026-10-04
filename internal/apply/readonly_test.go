@@ -1,8 +1,13 @@
 package apply
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -10,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 )
@@ -115,5 +121,176 @@ func TestStartManagerRefusesSymlinkedReadOnlyPath(t *testing.T) {
 		if j := strings.Join(c.Args, " "); strings.Contains(j, "-- hello") || slices.Contains(c.Args, "delete") {
 			t.Fatalf("no start or delete may be attempted; got %q", j)
 		}
+	}
+}
+
+// swapOnDeleteRunner runs onDelete just before the manager delete reaches
+// the fake: the moment the old (unprotected) manager could still change the
+// tree, after start-manager's first read_only check.
+type swapOnDeleteRunner struct {
+	*agentLifecycleRunner
+	onDelete func()
+}
+
+func (r *swapOnDeleteRunner) hook(name string, args []string) {
+	if name == "scion" && r.verb(args) == "delete" && r.onDelete != nil {
+		r.onDelete()
+		r.onDelete = nil
+	}
+}
+
+func (r *swapOnDeleteRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	r.hook(name, args)
+	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *swapOnDeleteRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r *swapOnDeleteRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	r.hook(name, args)
+	return r.agentLifecycleRunner.RunStdin(ctx, stdin, env, name, args...)
+}
+
+// Under --fresh a symlinked read_only path is refused BEFORE the delete:
+// refusing only at the create would discard the old session and start
+// nothing. (The record exists, so the "no delete" assertion has teeth.)
+func TestStartManagerFreshRefusesSymlinkedReadOnlyPathBeforeDelete(t *testing.T) {
+	dir, app := readOnlyConfig(t, false)
+	elsewhere := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(elsewhere, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "workspace", "assistant")); err != nil {
+		t.Fatal(err)
+	}
+	f := scionOKRunner()
+	r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "suspended", initContainerStatus: "stopped"}
+	err := runApplyFresh(app, Deps{Scion: scion.New(r, scion.Options{})})
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("want a symlink refusal, got %v", err)
+	}
+	if r.deleteCalls != 0 || r.startCalls != 0 || r.resumeCalls != 0 {
+		t.Fatalf("delete=%d start=%d resume=%d, want 0/0/0: the session must be left alone", r.deleteCalls, r.startCalls, r.resumeCalls)
+	}
+}
+
+// The second check: the old manager is still running during the first one
+// and can swap the tree until the --fresh delete removes it. A swap made in
+// that window is refused right before the create.
+func TestStartManagerFreshRechecksReadOnlyBeforeCreate(t *testing.T) {
+	dir, app := readOnlyConfig(t, true)
+	f := scionOKRunner()
+	inner := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "running", initContainerStatus: "running"}
+	tools := filepath.Join(dir, "workspace", "assistant", "tools")
+	r := &swapOnDeleteRunner{agentLifecycleRunner: inner, onDelete: func() {
+		if err := os.Remove(tools); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), tools); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	err := runApplyFresh(app, Deps{Scion: scion.New(r, scion.Options{})})
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("want the pre-create check to refuse the swapped path, got %v", err)
+	}
+	if inner.deleteCalls != 1 {
+		t.Fatalf("deleteCalls = %d, want 1 (the swap happens at the delete)", inner.deleteCalls)
+	}
+	if inner.startCalls != 0 {
+		t.Fatalf("startCalls = %d, want 0: no manager may be created over a swapped path", inner.startCalls)
+	}
+}
+
+// A resumed or kept manager may predate read_only: apply warns (never
+// fails) when its container lacks the mounts, and says how to fix it.
+func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
+	_, app := readOnlyConfig(t, true)
+	jp := JailPath(app.Tree, app.Tree, "")
+	for _, tc := range []struct {
+		name     string
+		inspect  func(context.Context, string) ([]jail.Mount, error)
+		wantWarn string
+	}{
+		{"lacks the mounts", func(context.Context, string) ([]jail.Mount, error) {
+			return []jail.Mount{{Source: jp, Destination: "/workspace", RW: true}}, nil
+		}, "does not hold the mounts"},
+		{"holds them", func(context.Context, string) ([]jail.Mount, error) {
+			return []jail.Mount{
+				{Source: jp, Destination: "/workspace", RW: true},
+				{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
+				{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
+			}, nil
+		}, ""},
+		{"cannot inspect", func(context.Context, string) ([]jail.Mount, error) { return nil, errors.New("podman exploded") }, "lever doctor"},
+		{"no probe wired", nil, "lever doctor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs []string
+			f := scionOKRunner()
+			r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "suspended", initContainerStatus: "stopped"}
+			var refs []string
+			deps := Deps{
+				Scion: scion.New(r, scion.Options{}),
+				Log:   func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+			}
+			if tc.inspect != nil {
+				deps.InspectContainerMounts = func(ctx context.Context, ref string) ([]jail.Mount, error) {
+					refs = append(refs, ref)
+					return tc.inspect(ctx, ref)
+				}
+			}
+			if err := runApply(app, deps); err != nil {
+				t.Fatalf("a missing mount must not fail apply: %v", err)
+			}
+			joined := strings.Join(logs, "\n")
+			if tc.wantWarn == "" {
+				if strings.Contains(joined, "WARNING") {
+					t.Fatalf("no warning expected, got %q", joined)
+				}
+			} else if !strings.Contains(joined, "WARNING") || !strings.Contains(joined, tc.wantWarn) {
+				t.Fatalf("want a warning mentioning %q, got %q", tc.wantWarn, joined)
+			}
+			if tc.inspect != nil && (len(refs) != 1 || refs[0] != jail.ContainerName(path.Base(jp), "hello")) {
+				t.Fatalf("inspected %q, want the manager container by name", refs)
+			}
+		})
+	}
+	// A manager this run CREATED is not probed: the create carried the mounts.
+	f := scionOKRunner()
+	probed := false
+	deps := Deps{
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name}, scion.Options{}),
+		InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) {
+			probed = true
+			return nil, nil
+		},
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if probed {
+		t.Fatal("a freshly created manager must not be probed")
+	}
+}
+
+func TestManagerTreeMountGaps(t *testing.T) {
+	want := []config.TreeMount{{Rel: "a"}, {Rel: "a/tools", ReadOnly: true}}
+	ok := []jail.Mount{
+		{Source: "/lever/a", Destination: "/workspace/a", RW: true},
+		{Source: "/lever/a/tools", Destination: "/workspace/a/tools"},
+	}
+	if g := ManagerTreeMountGaps("/lever", want, ok); !g.Empty() {
+		t.Fatalf("a matching container must have no gaps, got %+v", g)
+	}
+	g := ManagerTreeMountGaps("/lever", want, []jail.Mount{{Source: "/other/a/tools", Destination: "/workspace/a/tools"}})
+	if !reflect.DeepEqual(g.Missing, []string{"a"}) || !reflect.DeepEqual(g.WrongSource, []string{"a/tools"}) {
+		t.Fatalf("gaps = %+v", g)
+	}
+	g = ManagerTreeMountGaps("/lever", want, []jail.Mount{ok[0], {Source: "/lever/a/tools", Destination: "/workspace/a/tools", RW: true}})
+	if !reflect.DeepEqual(g.Writable, []string{"a/tools"}) || !strings.Contains(g.String(), "a/tools mounted read-write") {
+		t.Fatalf("gaps = %+v (%s)", g, g)
 	}
 }

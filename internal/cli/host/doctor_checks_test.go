@@ -1577,11 +1577,18 @@ func TestCheckManagerReadOnly(t *testing.T) {
 			return mounts, nil
 		}
 	}
-	want := []config.TreeMount{{Rel: "assistant", ReadOnly: false}, {Rel: "assistant/tools", ReadOnly: true}}
+	// A worker dir and its ancestor are pinned too while read_only is set.
+	want := []config.TreeMount{{Rel: "assistant"}, {Rel: "workers"}, {Rel: "assistant/tools", ReadOnly: true}, {Rel: "workers/w"}}
 	mgr := listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerID: "cm"})
-	ws := jail.Mount{Destination: "/workspace", RW: true}
-	pin := jail.Mount{Destination: "/workspace/assistant", RW: true}
-	ro := jail.Mount{Destination: "/workspace/assistant/tools", RW: false}
+	ws := jail.Mount{Source: "/lever", Destination: "/workspace", RW: true}
+	pin := jail.Mount{Source: "/lever/assistant", Destination: "/workspace/assistant", RW: true}
+	ro := jail.Mount{Source: "/lever/assistant/tools", Destination: "/workspace/assistant/tools", RW: false}
+	wpins := []jail.Mount{
+		{Source: "/lever/workers", Destination: "/workspace/workers", RW: true},
+		{Source: "/lever/workers/w", Destination: "/workspace/workers/w", RW: true},
+	}
+	full := append([]jail.Mount{ws, pin, ro}, wpins...)
+	with := func(ms ...jail.Mount) []jail.Mount { return append(append([]jail.Mount{}, ms...), wpins...) }
 	cases := []struct {
 		label      string
 		want       []config.TreeMount
@@ -1591,15 +1598,18 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		wantDetail string
 		wantFix    string
 	}{
-		{"all mounted", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, ro}}), true, "1 path(s) mounted read-only", ""},
+		{"all mounted", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), true, "1 path(s) mounted read-only in \"assistant\", 3 pin(s)", ""},
 		{"created before the setting", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), false,
-			"no mount at {assistant,assistant/tools}", "lever up --fresh"},
-		{"pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, ro}}), false, "no mount at assistant:", "back up the manager's conversation"},
-		{"entry mounted rw", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, {Destination: "/workspace/assistant/tools", RW: true}}}), false,
+			"no mount at assistant, workers, assistant/tools, workers/w", "lever up --fresh"},
+		{"pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, ro)}), false, "no mount at assistant:", "back up the manager's conversation"},
+		{"worker pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, ro, wpins[0]}}), false, "no mount at workers/w", "lever up --fresh"},
+		{"entry mounted rw", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, pin, jail.Mount{Source: "/lever/assistant/tools", Destination: "/workspace/assistant/tools", RW: true})}), false,
 			"assistant/tools mounted read-write", "lever up --fresh"},
+		{"entry from another source", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, pin, jail.Mount{Source: "/elsewhere", Destination: "/workspace/assistant/tools"})}), false,
+			"assistant/tools mounted from another source", "lever up --fresh"},
 		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
 		{"no container id, found by name", want, listing(scion.Agent{Slug: "assistant", Phase: "running"}),
-			inspectOf(map[string][]jail.Mount{"lever--assistant": {ws, pin, ro}}), true, "mounted read-only", ""},
+			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), true, "mounted read-only", ""},
 		{"none configured", nil, mgr, inspectOf(nil), true, "none configured", ""},
 		{"no record", want, listing(), inspectOf(nil), true, "not checked (no manager record)", ""},
 		{"no container", want, mgr, inspectOf(nil), true, "not checked (no manager container)", ""},

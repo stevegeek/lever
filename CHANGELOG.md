@@ -17,13 +17,30 @@ version bump moves the block under the new version heading.
   the manager container, and each directory between the tree root and it
   is bind-mounted read-write over itself: a mount point cannot be renamed
   or removed, so the agent cannot rename a parent away and create a
-  writable directory at the protected host path. Config load refuses an
-  unclean, duplicate or nested entry, and a worker `dir` that overlaps an
-  entry (a worker mounts its dir read-write). `lever apply` refuses to
-  start the manager when an entry is missing, is not a directory, or is
-  reached through a symbolic link. A new `lever doctor` row, *manager
-  read-only paths*, fails when the manager container lacks a mount or
-  holds an entry read-write.
+  writable directory at the protected host path. While the list is set,
+  every worker `dir` and its ancestors are pinned in the manager the same
+  way, so the manager cannot swap a worker dir for a link to a protected
+  directory and dispatch that worker (which mounts its dir read-write).
+  - Config load refuses an unclean, duplicate or nested entry, an entry
+    with `$`, `~`, `:` or `,`, and a worker `dir` that overlaps an entry.
+    The overlap checks fold case (APFS does not tell case apart).
+  - `lever apply` refuses to start the manager when an entry is missing,
+    is not a directory, is reached through a symbolic link, or holds a
+    symbolic link that points outside it; and when a worker dir is
+    reached through a symbolic link. It creates missing worker dirs. It
+    checks before it acts on the manager record and again right before the
+    create (after a `--fresh` delete has removed the old manager).
+  - With the list set, the broker refuses to create a worker workspace
+    through any symbolic link, or one that is, contains or lies inside an
+    entry (403).
+  - `lever apply` warns when a manager it kept or resumed lacks the
+    mounts. A new `lever doctor` row, *manager read-only paths*, fails
+    when the manager container lacks a mount, holds an entry read-write,
+    or mounts one from another source.
+  - The protection covers the entry directories only. What host code
+    loads from outside an entry (a `Gemfile` beside it, the tree's `.git`
+    hooks and config) is still agent-writable; the config reference and
+    security model §5.1.1 say so.
 
 ### Upgrade
 
@@ -31,6 +48,14 @@ version bump moves the block under the new version heading.
   for life. To protect paths for an existing manager, back up its
   conversation, then run `lever up --fresh` (the fresh start discards the
   manager record and its conversation).
+
+### Known issues
+
+- `lever init` writes its scaffold files into the tree through in-tree
+  symbolic links (`skills_scaffold.go`, `WriteInTree`). An agent could
+  point a scaffold path at another tree file and have `lever init`
+  overwrite it with the fixed scaffold content: corruption, not code
+  execution. Not fixed yet.
 
 ## [0.29.1] - 2026-10-02
 

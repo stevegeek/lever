@@ -194,6 +194,14 @@ type DispatchConfig struct {
 	// MANAGER's bootstrap.json is staged (workers go through Tickets).
 	// Empty disables manager healing (audited as an error on lapse).
 	ManagerBootstrapDir string
+	// ReadOnlyDirs is manager.read_only: tree-relative directories the
+	// manager sees read-only. Non-empty switches worker workspace creation
+	// to its strict form (ensureWorkspaceDir): no symlink anywhere on the
+	// worker's path, and no worker workspace that is, contains or lies in
+	// one of these — a worker mounts its dir read-write, so one placed over
+	// a protected directory would undo the protection. Empty ⇒ today's
+	// in-tree-symlinks-allowed behaviour.
+	ReadOnlyDirs []string
 	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
 	// instance tree (jail.StageWorkerTicket in production). The manager
 	// mounts the whole tree, so nothing a worker must redeem may be written
@@ -269,6 +277,7 @@ type Broker struct {
 	resolveAgentID func(ctx context.Context, agentSlug string) (string, error)
 	beginSession   func(agent string) (commit func() error)
 	tree           string
+	readOnlyDirs   []string
 	workers        map[string]WorkerSpec
 	brokerCAPEM    string
 	brokerURL      string
@@ -366,7 +375,7 @@ func New(c Config) *Broker {
 		// worker dispatch and messaging
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
-		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree,
+		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,

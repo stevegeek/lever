@@ -1097,9 +1097,10 @@ func (g TreeMountGaps) String() string {
 	return strings.Join(parts, "; ")
 }
 
-// Stale reports whether the only gaps are replaced directories, which a
-// fresh create fixes like the rest but which the operator causes by
-// replacing a protected directory instead of editing it in place.
+// Stale reports whether ANY gap is a replaced directory (others may sit
+// beside it). A fresh create fixes it like the rest, but the operator
+// caused it by replacing a protected directory instead of editing it in
+// place, so the fix text adds that rule.
 func (g TreeMountGaps) Stale() bool { return len(g.Replaced) > 0 }
 
 // ManagerTreeMountGaps compares a manager container's mounts with the

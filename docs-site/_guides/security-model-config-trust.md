@@ -91,7 +91,11 @@ closes that for the directories it names:
   one (verified on OrbStack). The protection is gone until the next fresh create. `lever doctor` and
   `lever apply` probe each entry live (a write test inside the running manager) and fail or warn when
   it is writable; a probe that cannot run is reported as unconfirmed, never as protected. The same
-  holds for a worker dir recreated on the host: the manager's pin stays on the old directory.
+  holds for a worker dir (or an entry's parent) recreated on the host: the manager's pin stays on
+  the old directory, and this is **not** detected — doctor checks pins by inspect only, because no
+  non-mutating live test of a pin is known to be reliable. Never recreate those on the host.
+- The hard-link refusal also catches a pnpm `node_modules` (hard-linked from its store) and the
+  objects of a `git clone --local`; keep such things out of protected directories.
 
 **Scope: it protects the entry directories, nothing else.** Whatever the host code loads from
 **outside** an entry is still agent-writable and is still an escalation path: a `require`/import path

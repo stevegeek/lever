@@ -66,8 +66,9 @@ func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]st
 }
 
 // ContainerPathWritable asks the running jail container named by ref
-// whether its own user can write target (`podman exec <ref> test -w
-// <target>`, argv only, no shell). It is the live half of the
+// whether target is writable (`podman exec --user 0 <ref> test -w
+// <target>`, argv only, no shell): as root, so only a read-only mount says
+// no. It is the live half of the
 // manager.read_only check: an inspect still lists a read-only mount after
 // the host replaced the directory it covered (a rename-based deploy, rm -rf
 // and recreate), while a write from the container lands in the new,
@@ -83,8 +84,12 @@ func ContainerPathWritable(ctx context.Context, r proc.Runner, ref, target strin
 	if !strings.HasPrefix(target, "/") {
 		return false, fmt.Errorf("probing container path: target %q is not absolute", target)
 	}
-	res, err := r.Run(ctx, nil, "podman", "exec", ref, "test", "-w", target)
-	quiet := strings.TrimSpace(res.Stderr) == "" && strings.TrimSpace(res.Stdout) == ""
+	// --user 0: the question is "is this a read-only mount", not "may the
+	// agent user write here". root bypasses permission bits but still gets
+	// EROFS on a read-only mount, so the answer does not depend on the
+	// image's USER or the directory's mode.
+	res, err := r.Run(ctx, nil, "podman", "exec", "--user", "0", ref, "test", "-w", target)
+	quiet := strings.TrimSpace(res.Stdout) == "" && benignStderr(res.Stderr)
 	switch {
 	case err == nil && res.Code == 0:
 		return true, nil
@@ -98,6 +103,24 @@ func ContainerPathWritable(ctx context.Context, r proc.Runner, ref, target strin
 		err = fmt.Errorf("exit status %d", res.Code)
 	}
 	return false, fmt.Errorf("probing %s in container %s: %w: %s", target, ref, err, strings.TrimSpace(res.Stderr))
+}
+
+// benignStderr reports whether stderr holds nothing but podman's own
+// warning lines — `WARN[0000] ...` (the default text format) or a logrus
+// `level=warning` line — which podman prints on some guests for every
+// command (a cgroups or config notice). Any other line keeps the probe an
+// error: a stderr lever cannot read never lets a result count as "not
+// writable", so it never reads as protected.
+func benignStderr(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "WARN[") ||
+			(strings.HasPrefix(line, "time=") && strings.Contains(line, " level=warning ")) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // ContainerName is the name scion gives an agent's container: the hub

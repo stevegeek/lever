@@ -1436,3 +1436,47 @@ func TestWorkerStart_readOnlyRewalksAfterMkdir(t *testing.T) {
 		t.Fatalf("no start for a swapped workspace; got %d", len(rt.started))
 	}
 }
+
+// The healer refuses a swapped worker workspace BEFORE it stages a ticket:
+// a refused heal leaves no fresh one-use ticket behind.
+func TestReenrolHealRefusesSwappedWorkspaceBeforeStaging(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	swapToLink(t, filepath.Join(tree, "workers", "worker"), "../assistant/tools")
+
+	b.healLapse(context.Background(), "worker")
+
+	if len(rt.staged) != 0 {
+		t.Fatalf("staged = %d, want 0: the refusal must come before the ticket", len(rt.staged))
+	}
+	if len(rt.resumed) != 0 {
+		t.Fatalf("resumed = %v, want none", rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "refusing to bounce worker") {
+		t.Fatalf("refusal must be audited; log=%s", buf.String())
+	}
+}
+
+// A worker dir the operator removed on the host: the resume answers a
+// clear 409 naming the directory, not a bare 500, and keeps the record.
+func TestWorkerStart_readOnlyResumeMissingWorkspaceIsNamed(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "stopped"}}}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	if err := os.Remove(filepath.Join(tree, "workers", "worker")); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "workers/worker no longer exists on the host") || !strings.Contains(body, "lever worker purge worker --force") {
+		t.Fatalf("body must name the missing dir and the way out; got %q", body)
+	}
+	if len(rt.staged) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("no ticket or resume; staged=%d resumed=%d", len(rt.staged), len(rt.resumed))
+	}
+}

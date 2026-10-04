@@ -81,6 +81,16 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
 		return
 	}
+	// manager.read_only: refuse a worker whose workspace is now reached
+	// through a link (or overlaps a protected dir) BEFORE a ticket is
+	// staged for it — a refused heal must not leave a fresh one-use ticket
+	// behind. bounceForReenrol checks again right before the resume.
+	if spec, isWorker := b.workerSpec(cn); isWorker {
+		if err := b.verifyStrictWorkspace(spec); err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": workspace dir: "+err.Error())
+			return
+		}
+	}
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
 	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
 	// audit line.

@@ -39,12 +39,14 @@ version bump moves the block under the new version heading.
     or mounts one from another source.
   - A protected directory must hold no hard-linked file and no symbolic
     link that fails to resolve; entries (and, while the list is set,
-    worker dirs) must be ASCII.
+    worker dirs) must be ASCII. The hard-link rule also catches a pnpm
+    `node_modules` and `git clone --local` objects; keep them out of
+    protected directories.
   - With the list set, the broker also re-checks a worker's path before
     every resume and healer bounce (the runtime resolves the bind source
     again on each container start).
   - `lever doctor` and the `lever apply` warning probe each entry live
-    (`podman exec <manager> test -w <entry>`): a directory replaced on the
+    (`podman exec --user 0 <manager> test -w <entry>`): a directory replaced on the
     host after the create is still listed as a read-only mount, but the
     manager can write the new one. A probe that cannot run is reported as
     unconfirmed, never as protected.
@@ -66,8 +68,12 @@ version bump moves the block under the new version heading.
 - Edit protected directories in place. Replacing one on the host (rm -rf
   and recreate, a rename-based deploy, a git checkout that removes and
   re-adds it) drops its protection until the next fresh create; the same
-  goes for a worker dir recreated on the host, whose pin in the manager
-  stays on the old directory.
+  goes for a worker dir (or an entry's parent) recreated on the host,
+  whose pin in the manager stays on the old directory — and that one is
+  NOT detected: doctor checks pins by inspect only, since no
+  non-mutating live test of a pin is known to be reliable. Never
+  recreate worker dirs or the parents of protected directories on the
+  host.
 - `manager.read_only` is create-time only: scion keeps a record's mounts
   for life. To protect paths for an existing manager, back up its
   conversation, then run `lever up --fresh` (the fresh start discards the

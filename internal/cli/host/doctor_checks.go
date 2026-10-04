@@ -1097,7 +1097,7 @@ func checkManagerReadOnly(ctx context.Context, project, name string, want []conf
 			pins++
 		}
 	}
-	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q (mounted, and a write probe refused), %d pin(s) mounted", entries, name, pins), ""}
+	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q (mounted, and a write probe refused), %d pin(s) mounted (pins are checked by inspect only)", entries, name, pins), ""}
 }
 
 // checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own

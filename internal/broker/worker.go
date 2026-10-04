@@ -558,6 +558,14 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 			return
 		}
 		b.audit("worker", b.manager, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
+		if errors.Is(err, fs.ErrNotExist) {
+			// The record outlived its directory: the operator removed (or
+			// moved) the worker dir on the host. Say so; a generic 500 sends
+			// the manager guessing.
+			http.Error(w, "worker "+spec.Name+"'s workspace directory "+spec.WorkspaceSubdir+" no longer exists on the host (the operator removed or moved it); the record was kept. "+
+				"Ask the operator to restore the directory, or to run `lever worker purge "+spec.Name+" --force` and dispatch it again", http.StatusConflict)
+			return
+		}
 		http.Error(w, "workspace error", http.StatusInternalServerError)
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1014,6 +1015,83 @@ func checkWorkerTicketMounts(ctx context.Context, project string, workers []stri
 		return checkResult{check, true, "no worker container to inspect", ""}
 	}
 	return checkResult{check, true, fmt.Sprintf("%d worker container(s) mount %s", checked, workerTicketMount), ""}
+}
+
+// mountInspector returns a jail container's mounts with their writability by
+// id or name (jail.ContainerMounts in production); jail.ErrNoContainer when
+// there is none.
+type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
+
+// checkManagerReadOnly verifies that the manager container holds every
+// manager.read_only path the way the config asks: each entry mounted
+// read-only at its place in the workspace, each ancestor pin mounted (its
+// writability is not the point; that it is a mount point, which cannot be
+// renamed away, is). scion keeps a record's volumes for life, so a manager
+// created before an entry was added has no such mount and writes the path
+// freely; only a fresh create gives it the mounts. The container is found
+// by the id scion reports or else by scion's container name, as for the
+// worker ticket mounts. No manager record or container, a listing or an
+// inspect failure, is "not checked", never a pass.
+func checkManagerReadOnly(ctx context.Context, project, name string, want []config.TreeMount, list agentLister, inspect mountInspector) checkResult {
+	const check = "manager read-only paths"
+	if len(want) == 0 {
+		return checkResult{check, true, "none configured", ""}
+	}
+	if list == nil || inspect == nil {
+		return checkResult{check, true, "not checked", ""}
+	}
+	agents, err := list(ctx, project)
+	if err != nil {
+		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+	}
+	a := scionpkg.FindAgent(agents, name)
+	if a == nil {
+		return checkResult{check, true, "not checked (no manager record)", ""}
+	}
+	ref := a.ContainerID
+	if ref == "" {
+		ref = jail.ContainerName(hubProjectKey(project), name)
+	}
+	mounts, err := inspect(ctx, ref)
+	if errors.Is(err, jail.ErrNoContainer) {
+		return checkResult{check, true, "not checked (no manager container)", ""}
+	}
+	if err != nil {
+		return checkResult{check, true, "not checked (could not inspect the manager container): " + firstLine(err.Error()), ""}
+	}
+	byTarget := make(map[string]jail.Mount, len(mounts))
+	for _, m := range mounts {
+		byTarget[m.Destination] = m
+	}
+	var missing, writable []string
+	entries := 0
+	for _, w := range want {
+		target := path.Join(scionpkg.ContainerWorkspace, w.Rel)
+		m, ok := byTarget[target]
+		switch {
+		case !ok:
+			missing = append(missing, w.Rel)
+		case w.ReadOnly && m.RW:
+			writable = append(writable, w.Rel)
+		}
+		if w.ReadOnly {
+			entries++
+		}
+	}
+	if len(missing) > 0 || len(writable) > 0 {
+		var parts []string
+		if len(missing) > 0 {
+			parts = append(parts, fmt.Sprintf("no mount at %s", braceList(missing)))
+		}
+		if len(writable) > 0 {
+			parts = append(parts, fmt.Sprintf("%s mounted read-write", braceList(writable)))
+		}
+		return checkResult{check, false,
+			fmt.Sprintf("manager %q has %s: it was created before manager.read_only named these paths, so the agent can still write them (scion keeps a record's mounts for life)",
+				name, strings.Join(parts, "; ")),
+			"back up the manager's conversation first, then run `lever up --fresh` to recreate the manager with the mounts (the fresh start deletes the manager record and its conversation)"}
+	}
+	return checkResult{check, true, fmt.Sprintf("%d path(s) mounted read-only in %q", entries, name), ""}
 }
 
 // checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own

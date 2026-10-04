@@ -16,14 +16,21 @@ import (
 // removed), which is not an inspect failure.
 var ErrNoContainer = errors.New("no such container")
 
-// ContainerMountTargets returns the in-container mount points of the jail
-// container named by ref — an id or a name (podman inspect, through r).
-// scion's listing carries neither the mounts nor, on every pin, the id
-// (89ed0fe8 reports an empty containerId), so doctor falls back to scion's
-// container name, <project>--<agent>. Doctor uses this to tell a worker
-// created before the guest ticket channel (no /run/lever mount) from one
-// that will boot.
-func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]string, error) {
+// Mount is one mount of a jail container as podman inspect reports it: the
+// in-container destination and whether it is writable.
+type Mount struct {
+	Destination string `json:"Destination"`
+	RW          bool   `json:"RW"`
+}
+
+// ContainerMounts returns the mounts of the jail container named by ref — an
+// id or a name (podman inspect, through r). scion's listing carries neither
+// the mounts nor, on every pin, the id (89ed0fe8 reports an empty
+// containerId), so doctor falls back to scion's container name,
+// <project>--<agent>. Doctor uses this to tell a manager created before
+// manager.read_only named a path (no read-only mount there) from one that
+// holds it read-only.
+func ContainerMounts(ctx context.Context, r proc.Runner, ref string) ([]Mount, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return nil, fmt.Errorf("inspecting container mounts: invalid container reference %q", ref)
 	}
@@ -34,11 +41,20 @@ func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]st
 		}
 		return nil, fmt.Errorf("inspecting container %s mounts: %w: %s", ref, err, strings.TrimSpace(res.Stderr))
 	}
-	var mounts []struct {
-		Destination string `json:"Destination"`
-	}
+	var mounts []Mount
 	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &mounts); err != nil {
 		return nil, fmt.Errorf("inspecting container %s mounts: parse: %w", ref, err)
+	}
+	return mounts, nil
+}
+
+// ContainerMountTargets is ContainerMounts reduced to the in-container mount
+// points. Doctor uses it to tell a worker created before the guest ticket
+// channel (no /run/lever mount) from one that will boot.
+func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]string, error) {
+	mounts, err := ContainerMounts(ctx, r, ref)
+	if err != nil {
+		return nil, err
 	}
 	targets := make([]string, 0, len(mounts))
 	for _, m := range mounts {

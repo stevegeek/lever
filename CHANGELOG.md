@@ -5,6 +5,33 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **`manager.read_only`: tree paths the manager sees read-only.** The
+  manager mounts the whole tree read-write, so code the host also runs
+  (an operator CLI kept in the tree) was code a jailed agent could
+  rewrite and the operator would then run on the host. Each listed
+  directory (relative to `tree`) is bind-mounted read-only over itself in
+  the manager container, and each directory between the tree root and it
+  is bind-mounted read-write over itself: a mount point cannot be renamed
+  or removed, so the agent cannot rename a parent away and create a
+  writable directory at the protected host path. Config load refuses an
+  unclean, duplicate or nested entry, and a worker `dir` that overlaps an
+  entry (a worker mounts its dir read-write). `lever apply` refuses to
+  start the manager when an entry is missing, is not a directory, or is
+  reached through a symbolic link. A new `lever doctor` row, *manager
+  read-only paths*, fails when the manager container lacks a mount or
+  holds an entry read-write.
+
+### Upgrade
+
+- `manager.read_only` is create-time only: scion keeps a record's mounts
+  for life. To protect paths for an existing manager, back up its
+  conversation, then run `lever up --fresh` (the fresh start discards the
+  manager record and its conversation).
+
 ## [0.29.1] - 2026-10-02
 
 Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them

@@ -254,6 +254,9 @@ func (a *App) Validate() error {
 	if err := a.validateWorkerDirsDisjoint(); err != nil {
 		return err
 	}
+	if err := a.validateManagerReadOnly(); err != nil {
+		return err
+	}
 	if err := a.validateImageTarsDistinct(); err != nil {
 		return err
 	}

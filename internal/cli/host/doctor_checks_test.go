@@ -1560,6 +1560,70 @@ func TestCheckWorkerTicketMounts(t *testing.T) {
 	}
 }
 
+func TestCheckManagerReadOnly(t *testing.T) {
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	// inspectOf answers by container ref, like mountsOf in the ticket test.
+	inspectOf := func(m map[string][]jail.Mount, broken ...string) mountInspector {
+		return func(_ context.Context, ref string) ([]jail.Mount, error) {
+			if slices.Contains(broken, ref) {
+				return nil, fmt.Errorf("podman exploded")
+			}
+			mounts, ok := m[ref]
+			if !ok {
+				return nil, fmt.Errorf("inspect %s: %w", ref, jail.ErrNoContainer)
+			}
+			return mounts, nil
+		}
+	}
+	want := []config.TreeMount{{Rel: "assistant", ReadOnly: false}, {Rel: "assistant/tools", ReadOnly: true}}
+	mgr := listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerID: "cm"})
+	ws := jail.Mount{Destination: "/workspace", RW: true}
+	pin := jail.Mount{Destination: "/workspace/assistant", RW: true}
+	ro := jail.Mount{Destination: "/workspace/assistant/tools", RW: false}
+	cases := []struct {
+		label      string
+		want       []config.TreeMount
+		list       agentLister
+		inspect    mountInspector
+		ok         bool
+		wantDetail string
+		wantFix    string
+	}{
+		{"all mounted", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, ro}}), true, "1 path(s) mounted read-only", ""},
+		{"created before the setting", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), false,
+			"no mount at {assistant,assistant/tools}", "lever up --fresh"},
+		{"pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, ro}}), false, "no mount at assistant:", "back up the manager's conversation"},
+		{"entry mounted rw", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, {Destination: "/workspace/assistant/tools", RW: true}}}), false,
+			"assistant/tools mounted read-write", "lever up --fresh"},
+		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
+		{"no container id, found by name", want, listing(scion.Agent{Slug: "assistant", Phase: "running"}),
+			inspectOf(map[string][]jail.Mount{"lever--assistant": {ws, pin, ro}}), true, "mounted read-only", ""},
+		{"none configured", nil, mgr, inspectOf(nil), true, "none configured", ""},
+		{"no record", want, listing(), inspectOf(nil), true, "not checked (no manager record)", ""},
+		{"no container", want, mgr, inspectOf(nil), true, "not checked (no manager container)", ""},
+		{"inspect fails", want, mgr, inspectOf(map[string][]jail.Mount{}, "cm"), true, "not checked (could not inspect", ""},
+		{"list fails", want, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, inspectOf(nil), true, "not checked", ""},
+		{"nil probes", want, nil, nil, true, "not checked", ""},
+	}
+	for _, c := range cases {
+		r := checkManagerReadOnly(context.Background(), "/lever", "assistant", c.want, c.list, c.inspect)
+		if r.name != "manager read-only paths" {
+			t.Fatalf("%s: name = %q", c.label, r.name)
+		}
+		if r.ok != c.ok {
+			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
+		}
+		if !strings.Contains(r.detail, c.wantDetail) {
+			t.Errorf("%s: detail %q should mention %q", c.label, r.detail, c.wantDetail)
+		}
+		if !strings.Contains(r.fix, c.wantFix) {
+			t.Errorf("%s: fix %q should mention %q", c.label, r.fix, c.wantFix)
+		}
+	}
+}
+
 // lever#34: the guest-DNS row is the one that tells a DNS-dead jail from a
 // healthy idle one.
 func TestCheckGuestDNS(t *testing.T) {

@@ -891,6 +891,15 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
+	// The read_only paths must be real directories reached through no
+	// symlink BEFORE anything is acted on: under --fresh the delete runs
+	// ahead of the create, and refusing only at the create would discard
+	// the old session and start no new one. Checked on every path, resume
+	// included — a failure there means the tree changed under a manager
+	// that may hold it writable, which the operator should hear about.
+	if err := r.app.CheckManagerReadOnlyHost(); err != nil {
+		return fmt.Errorf("start-manager: %w", err)
+	}
 	// Gate on runtime-broker readiness before any create/resume: the workstation
 	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
 	// up (waitHubReady only proved the latter), so acting now would race it. This
@@ -985,6 +994,11 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		// names no file, which sends no config at all. Create-time only, like
 		// Model: a resume re-projects what scion staged at the fresh create.
 		Instructions: instructions,
+		// manager.read_only: the protected tree paths and their ancestor
+		// pins, as inline-config volumes. Nil when none are configured.
+		// Create-time only, like Instructions: a resume redispatches the
+		// volumes scion stored with the record.
+		Volumes: managerTreeVolumes(jp, r.app.ManagerTreeMounts()),
 		// Workspace = the in-jail project tree, so the manager edits the real
 		// host files in place (verified 2026-06-16). Without it scion mounts a
 		// managed copy of the externalized config dir, not the live tree.
@@ -993,6 +1007,27 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		// secret set above); the real credential arrives in-container.
 		APIKey: apiKey,
 	}, nil
+}
+
+// managerTreeVolumes turns the manager's read_only plan into scion volumes:
+// each tree directory bind-mounted over its own place in the workspace —
+// source under jp (the in-jail tree, which scion mounts at /workspace),
+// target under scion.ContainerWorkspace — read-only for an entry and
+// read-write for an ancestor pin. The plan's order (by depth, then path) is
+// kept; podman orders mounts by destination depth anyway.
+func managerTreeVolumes(jp string, mounts []config.TreeMount) []scion.VolumeMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]scion.VolumeMount, 0, len(mounts))
+	for _, m := range mounts {
+		out = append(out, scion.VolumeMount{
+			Source:   path.Join(jp, m.Rel),
+			Target:   path.Join(scion.ContainerWorkspace, m.Rel),
+			ReadOnly: m.ReadOnly,
+		})
+	}
+	return out
 }
 
 // convergeManager acts on the observed manager record (nil when absent, already

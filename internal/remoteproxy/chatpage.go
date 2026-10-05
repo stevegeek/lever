@@ -38,7 +38,13 @@ import (
 // under it is a 404, never forwarded, so a route added here later cannot
 // shadow one the hub answers.
 
-//go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js
+// The page is installable as an app (a web app manifest and icons, below),
+// with no service worker on purpose: a worker scoped to /lever/ would sit
+// between the page and every request it makes, and a cache it keeps can
+// serve a page older than the binary. Current browsers install without one.
+
+//go:generate go run chaticons_gen.go
+//go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js chatui/*.png
 var chatUI embed.FS
 
 // DecisionChatUnavailable is the audit decision for a chat page request the
@@ -49,6 +55,7 @@ const (
 	chatPrefix        = "/lever/"
 	chatPagePath      = "/lever/chat"
 	chatBootstrapPath = "/lever/api/chat"
+	chatManifestPath  = "/lever/manifest.webmanifest"
 	// chatConsolePath is where the page's link to the hub's web UI goes: its
 	// agent list, since "/" now leads back to the chat page.
 	chatConsolePath = "/agents"
@@ -62,22 +69,23 @@ const (
 // type taken from the file name, so on this origin 'self' would also admit a
 // .js file an agent wrote. The page has no markup sink for an agent to name
 // such a file through (TestChatPageHasNoMarkupSink); this keeps a sink added
-// by mistake from loading agent script as well. A serveHost the policy
-// cannot name (cspHost) falls back to 'self'.
+// by mistake from loading agent script as well. The app manifest and its
+// icons come from /lever/ too (manifest-src, img-src). A serveHost the
+// policy cannot name (cspHost) falls back to 'self'.
 //
 // The policy names base_url's host, so the page runs only when opened there.
 // Opened under another name the Host check admits (the loopback probe
 // address, or a bind address), the browser blocks the page's own files:
 // those names are for probes and fronts, not for a browser.
 func chatCSPFor(serveHost string) string {
-	own, icon := "'self'", "'self'"
+	own, img := "'self'", "'self'"
 	if cspHost(serveHost) {
-		own, icon = serveHost+chatPrefix, serveHost+"/favicon.svg"
+		own, img = serveHost+chatPrefix, serveHost+"/favicon.svg "+serveHost+chatPrefix
 	}
 	// Trusted Types with no policy allowed makes every markup or script sink
 	// throw where the browser supports it: a second guard on the same rule.
 	return "default-src 'none'; script-src " + own + "; style-src " + own + "; connect-src 'self'; " +
-		"img-src " + icon + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
+		"img-src " + img + "; manifest-src " + own + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
 		"require-trusted-types-for 'script'; trusted-types 'none'"
 }
 
@@ -130,20 +138,81 @@ type chatPage struct {
 // fault, so it panics rather than serve a page with a hole in it.
 func newChatPage(cfg Config) *chatPage {
 	p := &chatPage{agent: cfg.ChatAgent, csp: chatCSPFor(cfg.ServeHost), resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), files: map[string]chatFile{}}
+	add := func(route, contentType string, body []byte) {
+		sum := sha256.Sum256(body)
+		p.files[route] = chatFile{contentType: contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+	}
 	for route, f := range map[string]struct{ name, contentType string }{
-		chatPagePath:         {"chatui/chat.html", "text/html; charset=utf-8"},
-		"/lever/chat.css":    {"chatui/chat.css", "text/css; charset=utf-8"},
-		"/lever/chat.js":     {"chatui/chat.js", "text/javascript; charset=utf-8"},
-		"/lever/chatcore.js": {"chatui/chatcore.js", "text/javascript; charset=utf-8"},
+		chatPagePath:                   {"chatui/chat.html", "text/html; charset=utf-8"},
+		"/lever/chat.css":              {"chatui/chat.css", "text/css; charset=utf-8"},
+		"/lever/chat.js":               {"chatui/chat.js", "text/javascript; charset=utf-8"},
+		"/lever/chatcore.js":           {"chatui/chatcore.js", "text/javascript; charset=utf-8"},
+		"/lever/icon-192.png":          {"chatui/icon-192.png", "image/png"},
+		"/lever/icon-512.png":          {"chatui/icon-512.png", "image/png"},
+		"/lever/icon-maskable-512.png": {"chatui/icon-maskable-512.png", "image/png"},
+		"/lever/apple-touch-icon.png":  {"chatui/apple-touch-icon.png", "image/png"},
 	} {
 		body, err := chatUI.ReadFile(f.name)
 		if err != nil {
 			panic("remoteproxy: embedded chat page file: " + err.Error())
 		}
-		sum := sha256.Sum256(body)
-		p.files[route] = chatFile{contentType: f.contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+		add(route, f.contentType, body)
 	}
+	manifest, err := json.Marshal(chatManifestFor(cfg.ChatAgent))
+	if err != nil {
+		panic("remoteproxy: chat page manifest: " + err.Error())
+	}
+	add(chatManifestPath, "application/manifest+json", manifest)
 	return p
+}
+
+// chatManifest is the page's web app manifest: what a browser needs to
+// install the page as an app (Chrome's "Install page as app", Safari's "Add
+// to Home Screen"). It opens /lever/chat in a window of its own; the
+// Terminal and Console links leave its scope and still work, shown by the
+// browser as pages outside the app.
+type chatManifest struct {
+	Name            string             `json:"name"`
+	ShortName       string             `json:"short_name"`
+	ID              string             `json:"id"`
+	StartURL        string             `json:"start_url"`
+	Scope           string             `json:"scope"`
+	Display         string             `json:"display"`
+	BackgroundColor string             `json:"background_color"`
+	ThemeColor      string             `json:"theme_color"`
+	Icons           []chatManifestIcon `json:"icons"`
+}
+
+type chatManifestIcon struct {
+	Src     string `json:"src"`
+	Sizes   string `json:"sizes"`
+	Type    string `json:"type"`
+	Purpose string `json:"purpose"`
+}
+
+// chatManifestFor names the app after the instance (the manager's agent
+// name is the instance name, a short [a-z0-9-] token config validates). The
+// colours are chat.css's light ones: --bg behind the window while it loads,
+// --panel for the title bar, which the header continues. The dark scheme
+// sets its own bar colour in chat.html; a manifest has one.
+func chatManifestFor(instance string) chatManifest {
+	short := instance
+	if r := []rune(short); len(r) > 12 {
+		short = string(r[:12])
+	}
+	icon := func(src, sizes, purpose string) chatManifestIcon {
+		return chatManifestIcon{Src: chatPrefix + src, Sizes: sizes, Type: "image/png", Purpose: purpose}
+	}
+	return chatManifest{
+		Name: instance + " · lever", ShortName: short,
+		ID: chatPagePath, StartURL: chatPagePath, Scope: chatPrefix, Display: "standalone",
+		BackgroundColor: "#f6f6f4", ThemeColor: "#ffffff",
+		Icons: []chatManifestIcon{
+			icon("icon-192.png", "192x192", "any"),
+			icon("icon-512.png", "512x512", "any"),
+			icon("icon-maskable-512.png", "512x512", "maskable"),
+		},
+	}
 }
 
 // chatBootstrap is what the page needs to find its conversation.

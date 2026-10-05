@@ -18,7 +18,10 @@ version bump moves the block under the new version heading.
   page's paths. The page is embedded in the binary (no build step, no other origin), writes what
   it reads from the hub as text only, and carries a Content-Security-Policy with no inline
   script. `landing: chat` needs an operator login in `allowed_users`; unset, nothing changes.
-  After upgrading, `lever apply` restarts the proxy once (the key is part of its config stamp).
+  The page installs as an app (Chrome's "Install page as app", Safari's "Add to Home Screen"): a
+  web app manifest and icons under `/lever/`, operator-only like the page, named after the
+  instance. There is deliberately no service worker: nothing sits between the page and its
+  requests, and no cache can serve a page older than the binary. After upgrading, `lever apply` restarts the proxy once (the key is part of its config stamp).
 
 ## [0.29.1] - 2026-10-02
 

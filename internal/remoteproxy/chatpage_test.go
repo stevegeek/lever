@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -93,10 +95,15 @@ func TestChatPageServesItsFiles(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
 	for path, ctype := range map[string]string{
-		"/lever/chat":        "text/html; charset=utf-8",
-		"/lever/chat.css":    "text/css; charset=utf-8",
-		"/lever/chat.js":     "text/javascript; charset=utf-8",
-		"/lever/chatcore.js": "text/javascript; charset=utf-8",
+		"/lever/chat":                  "text/html; charset=utf-8",
+		"/lever/chat.css":              "text/css; charset=utf-8",
+		"/lever/chat.js":               "text/javascript; charset=utf-8",
+		"/lever/chatcore.js":           "text/javascript; charset=utf-8",
+		chatManifestPath:               "application/manifest+json",
+		"/lever/icon-192.png":          "image/png",
+		"/lever/icon-512.png":          "image/png",
+		"/lever/icon-maskable-512.png": "image/png",
+		"/lever/apple-touch-icon.png":  "image/png",
 	} {
 		rw := chatDo(h, chatOp, "GET", path)
 		if rw.Code != http.StatusOK || rw.Header().Get("Content-Type") != ctype || rw.Body.Len() == 0 {
@@ -150,12 +157,18 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 			t.Errorf("chat CSP contains %q: %s", bad, csp)
 		}
 	}
-	for _, need := range []string{"default-src 'none'", "script-src mac.ts.net/lever/;", "style-src mac.ts.net/lever/;", "img-src mac.ts.net/favicon.svg;",
-		"connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+	for _, need := range []string{"default-src 'none'", "script-src mac.ts.net/lever/;", "style-src mac.ts.net/lever/;",
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/;", "manifest-src mac.ts.net/lever/;", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 		"require-trusted-types-for 'script'", "trusted-types 'none'"} {
 		if !strings.Contains(csp, need) {
 			t.Errorf("chat CSP lacks %q: %s", need, csp)
 		}
+	}
+	// The whole policy, pinned: a directive added or widened shows up here.
+	if want := "default-src 'none'; script-src mac.ts.net/lever/; style-src mac.ts.net/lever/; connect-src 'self'; " +
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
+		"frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"; csp != want {
+		t.Errorf("chat CSP\n got %s\nwant %s", csp, want)
 	}
 	if got := chatCSPFor("127.0.0.1:8445"); !strings.Contains(got, "script-src 127.0.0.1:8445/lever/;") {
 		t.Errorf("an address with a port must be nameable: %s", got)
@@ -166,7 +179,8 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	for _, odd := range []string{"", "a b", "a;script-src *", "a,b", "a'b", "a/b", "*", "*.ts.net", "[::1]:8445", "[fd7a::1]", "fd7a::1",
 		"https:", "data:", "a:", ":80", "a:b", "a:80:90", strings.Repeat("a", 256)} {
 		got := chatCSPFor(odd)
-		if !strings.Contains(got, "script-src 'self';") || (odd != "" && strings.Contains(got, odd)) {
+		if !strings.Contains(got, "script-src 'self';") || !strings.Contains(got, "img-src 'self'; manifest-src 'self';") ||
+			(odd != "" && strings.Contains(got, odd)) {
 			t.Errorf("chatCSPFor(%q) = %s, want the 'self' fallback", odd, got)
 		}
 	}
@@ -224,7 +238,7 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 		}
 	}
 	for _, m := range []string{"POST", "PUT", "DELETE", "PATCH", "OPTIONS"} {
-		for _, p := range []string{chatPagePath, chatBootstrapPath, "/lever/chat.js"} {
+		for _, p := range []string{chatPagePath, chatBootstrapPath, "/lever/chat.js", chatManifestPath, "/lever/icon-192.png"} {
 			if rw := chatDo(h, chatOp, m, p); rw.Code != http.StatusMethodNotAllowed || rw.Header().Get("Allow") != "GET, HEAD" {
 				t.Errorf("%s %s: %d Allow %q, want 405 and the allowed methods", m, p, rw.Code, rw.Header().Get("Allow"))
 			}
@@ -271,7 +285,8 @@ func TestChatPageNeedsAVerifiedLogin(t *testing.T) {
 func TestChatPageIsNotForContacts(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
-	for _, p := range []string{"/", chatPagePath, "/lever/chat.js", "/lever/chatcore.js", "/lever/chat.css", chatBootstrapPath} {
+	for _, p := range []string{"/", chatPagePath, "/lever/chat.js", "/lever/chatcore.js", "/lever/chat.css", chatBootstrapPath,
+		chatManifestPath, "/lever/icon-192.png", "/lever/icon-512.png", "/lever/icon-maskable-512.png", "/lever/apple-touch-icon.png"} {
 		rw := chatDo(h, "c@x", "GET", p)
 		body := rw.Body.String()
 		if rw.Code != http.StatusOK || !strings.Contains(body, "<h1>Chat</h1>") {
@@ -310,7 +325,7 @@ func TestChatPageStaysBehindTheGate(t *testing.T) {
 		"same-site sibling":  {"Sec-Fetch-Site", "same-site"},
 		"comma-joined login": {"Tailscale-User-Login", "evil@x, " + chatOp},
 	} {
-		for _, p := range []string{"/", chatPagePath, "/lever/chat.js", chatBootstrapPath} {
+		for _, p := range []string{"/", chatPagePath, "/lever/chat.js", chatBootstrapPath, chatManifestPath, "/lever/icon-512.png"} {
 			login := chatOp
 			if hdr[0] == "Tailscale-User-Login" {
 				login = ""
@@ -621,7 +636,80 @@ func TestChatPageEmbedsOnlyThePage(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	if got := strings.Join(names, ","); got != "chat.css,chat.html,chat.js,chatcore.js" {
-		t.Fatalf("embedded %s, want only the page's four files", got)
+	want := "apple-touch-icon.png,chat.css,chat.html,chat.js,chatcore.js,icon-192.png,icon-512.png,icon-maskable-512.png"
+	if got := strings.Join(names, ","); got != want {
+		t.Fatalf("embedded %s, want only the page's files: %s", got, want)
+	}
+}
+
+// TestChatManifest: the page is installable as an app. The manifest names
+// the instance, opens the page in its own window, and lists icons the proxy
+// serves at the sizes it says.
+func TestChatManifest(t *testing.T) {
+	hub := newPageHub(t)
+	h := NewHandler(chatConfig(t, hub))
+	rw := chatDo(h, chatOp, "GET", chatManifestPath)
+	if rw.Code != http.StatusOK || rw.Header().Get("Content-Type") != "application/manifest+json" {
+		t.Fatalf("%d %q, want 200 application/manifest+json", rw.Code, rw.Header().Get("Content-Type"))
+	}
+	var m chatManifest
+	if err := json.Unmarshal(rw.Body.Bytes(), &m); err != nil {
+		t.Fatalf("manifest is not JSON: %v\n%s", err, rw.Body)
+	}
+	if m.Name != "boss · lever" || m.ShortName != "boss" || m.ID != "/lever/chat" || m.StartURL != "/lever/chat" ||
+		m.Scope != "/lever/" || m.Display != "standalone" || m.BackgroundColor != "#f6f6f4" || m.ThemeColor != "#ffffff" {
+		t.Errorf("manifest %+v", m)
+	}
+	// The colours are the page's own (chat.css, light scheme).
+	css, err := chatUI.ReadFile("chatui/chat.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"--bg: " + m.BackgroundColor + ";", "--panel: " + m.ThemeColor + ";"} {
+		if !strings.Contains(string(css), token) {
+			t.Errorf("chat.css has no %q", token)
+		}
+	}
+	var got []string
+	for _, ic := range m.Icons {
+		got = append(got, ic.Src+" "+ic.Sizes+" "+ic.Type+" "+ic.Purpose)
+	}
+	if want := "/lever/icon-192.png 192x192 image/png any,/lever/icon-512.png 512x512 image/png any," +
+		"/lever/icon-maskable-512.png 512x512 image/png maskable"; strings.Join(got, ",") != want {
+		t.Errorf("icons %v, want %s", got, want)
+	}
+	icons := map[string]int{"/lever/apple-touch-icon.png": 180}
+	for _, ic := range m.Icons {
+		var n int
+		if _, err := fmt.Sscanf(ic.Sizes, "%dx", &n); err != nil {
+			t.Fatal(err)
+		}
+		icons[ic.Src] = n
+	}
+	for src, size := range icons {
+		rw := chatDo(h, chatOp, "GET", src)
+		cfg, err := png.DecodeConfig(rw.Body)
+		if rw.Code != http.StatusOK || err != nil || cfg.Width != size || cfg.Height != size {
+			t.Errorf("%s: %d, %dx%d (%v), want a %dx%d PNG", src, rw.Code, cfg.Width, cfg.Height, err, size, size)
+		}
+	}
+	// The page links the manifest and the Apple icon at the routes served.
+	page := chatDo(h, chatOp, "GET", chatPagePath).Body.String()
+	for _, link := range []string{`<link rel="manifest" href="` + chatManifestPath + `">`, `<link rel="apple-touch-icon" href="/lever/apple-touch-icon.png">`} {
+		if !strings.Contains(page, link) {
+			t.Errorf("chat.html lacks %s", link)
+		}
+	}
+	if got := hub.reached(); len(got) != 0 {
+		t.Fatalf("the hub was asked for the app's files: %v", got)
+	}
+}
+
+// TestChatManifestShortName: a launcher shows about twelve characters.
+func TestChatManifestShortName(t *testing.T) {
+	for in, want := range map[string]string{"assistant": "assistant", "a-very-long-instance-name": "a-very-long-", "ééééééééééééé": "éééééééééééé"} {
+		if got := chatManifestFor(in).ShortName; got != want {
+			t.Errorf("short name for %q = %q, want %q", in, got, want)
+		}
 	}
 }

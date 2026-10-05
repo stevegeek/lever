@@ -21,7 +21,10 @@ version bump moves the block under the new version heading.
   The page installs as an app (Chrome's "Install page as app", Safari's "Add to Home Screen"): a
   web app manifest and icons under `/lever/`, operator-only like the page, named after the
   instance. There is deliberately no service worker: nothing sits between the page and its
-  requests, and no cache can serve a page older than the binary. After upgrading, `lever apply` restarts the proxy once (the key is part of its config stamp).
+  requests, and no cache can serve a page older than the binary. The manifest link carries
+  `crossorigin="use-credentials"`, so a front that authenticates by cookie still admits
+  the manifest fetch. After upgrading, `lever apply` restarts the proxy once (the key is
+  part of its config stamp).
 
 ## [0.29.1] - 2026-10-02
 

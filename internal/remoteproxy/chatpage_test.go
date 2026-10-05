@@ -694,8 +694,11 @@ func TestChatManifest(t *testing.T) {
 		}
 	}
 	// The page links the manifest and the Apple icon at the routes served.
+	// The manifest link sends credentials: a front that authenticates by
+	// cookie would otherwise turn the fetch away and the page could not
+	// install.
 	page := chatDo(h, chatOp, "GET", chatPagePath).Body.String()
-	for _, link := range []string{`<link rel="manifest" href="` + chatManifestPath + `">`, `<link rel="apple-touch-icon" href="/lever/apple-touch-icon.png">`} {
+	for _, link := range []string{`<link rel="manifest" href="` + chatManifestPath + `" crossorigin="use-credentials">`, `<link rel="apple-touch-icon" href="/lever/apple-touch-icon.png">`} {
 		if !strings.Contains(page, link) {
 			t.Errorf("chat.html lacks %s", link)
 		}

@@ -172,7 +172,7 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 		}
 	}
 	for _, need := range []string{"default-src 'none'", "script-src mac.ts.net/lever/;", "style-src mac.ts.net/lever/;",
-		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/;", "manifest-src mac.ts.net/lever/;", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/;", "manifest-src mac.ts.net/lever/;", "worker-src mac.ts.net/lever/;", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 		"require-trusted-types-for 'script'", "trusted-types 'none'"} {
 		if !strings.Contains(csp, need) {
 			t.Errorf("chat CSP lacks %q: %s", need, csp)
@@ -180,7 +180,7 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	}
 	// The whole policy, pinned: a directive added or widened shows up here.
 	if want := "default-src 'none'; script-src mac.ts.net/lever/; style-src mac.ts.net/lever/; connect-src 'self'; " +
-		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; worker-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
 		"frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"; csp != want {
 		t.Errorf("chat CSP\n got %s\nwant %s", csp, want)
 	}
@@ -428,7 +428,7 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 // later edit could turn text into markup or code.
 func TestChatPageHasNoMarkupSink(t *testing.T) {
 	sinks := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\bopen\s*\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
-	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js"} {
+	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js", "chatui/sw.js"} {
 		b, err := chatUI.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
@@ -456,6 +456,9 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`setAttribute\(`:            1,
 		`setAttribute\('href', `:    1,
 		`\bfetch\(`:                 1,
+		`serviceWorker\.register\('/lever/sw\.js', \{ scope: '/lever/' \}\)`: 1,
+		`serviceWorker\.register\(`: 1,
+		`pushManager\.subscribe\(`:  1,
 		`new EventSource\(`:         1,
 		`location\.reload\(\)`:      0,
 	} {
@@ -480,6 +483,31 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 	}
 	if m := regexp.MustCompile(`(?i)url\s*\(|@import|expression\s*\(`).Find(css); m != nil {
 		t.Errorf("chat.css contains %q: it loads nothing", m)
+	}
+}
+
+// TestServiceWorkerIsPushOnly: the worker has a push and a click handler
+// and nothing that could sit between the page and its requests.
+func TestServiceWorkerIsPushOnly(t *testing.T) {
+	js, err := chatUI.ReadFile("chatui/sw.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for re, want := range map[string]int{
+		`addEventListener\(`:                    2,
+		`addEventListener\('push'`:              1,
+		`addEventListener\('notificationclick'`: 1,
+		`addEventListener\(\s*['"]fetch`:        0,
+		`\bcaches\b`:                            0,
+		`importScripts`:                         0,
+		`skipWaiting|clients\.claim`:            0,
+		`\bfetch\(`:                             1,
+		`fetch\('/lever/api/agents'`:            1,
+		`openWindow\(`:                          1,
+	} {
+		if got := len(regexp.MustCompile(re).FindAll(js, -1)); got != want {
+			t.Errorf("sw.js has %d of %s, want %d", got, re, want)
+		}
 	}
 }
 
@@ -509,7 +537,7 @@ func TestChatPageEmbedsOnlyThePage(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	want := "apple-touch-icon.png,chat.css,chat.html,chat.js,chatcore.js,icon-192.png,icon-512.png,icon-maskable-512.png"
+	want := "apple-touch-icon.png,chat.css,chat.html,chat.js,chatcore.js,icon-192.png,icon-512.png,icon-maskable-512.png,sw.js"
 	if got := strings.Join(names, ","); got != want {
 		t.Fatalf("embedded %s, want only the page's files: %s", got, want)
 	}

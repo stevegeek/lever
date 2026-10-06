@@ -385,3 +385,41 @@ func TestContactPostNeedsAFreshSession(t *testing.T) {
 		t.Fatalf("a post to a fresh session = %d %s", rw.Code, rw.Body)
 	}
 }
+
+// TestHubWhoAmIRedirectIsAnUnknownSession: the hub answers a session it
+// does not know with a 401 or a redirect to its login page; both read as
+// errSessionUnknown (the callers then renew the session once), and the
+// redirect is not followed.
+func TestHubWhoAmIRedirectIsAnUnknownSession(t *testing.T) {
+	followed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			followed = true
+			_, _ = io.WriteString(w, `{"id":"u-login"}`)
+		case "/api/v1/auth/me":
+			if c, _ := r.Cookie(sessionCookieName); c != nil && c.Value == "ok" {
+				_, _ = io.WriteString(w, `{"id":"u-1"}`)
+				return
+			}
+			if c, _ := r.Cookie(sessionCookieName); c != nil && c.Value == "401" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			http.Redirect(w, r, "/login", http.StatusFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	who := hubWhoAmI(Config{Target: mustURL(t, srv.URL)})
+	for _, c := range []string{"401", "302"} {
+		if _, err := who(context.Background(), c); !errors.Is(err, errSessionUnknown) {
+			t.Fatalf("%s: %v, want errSessionUnknown", c, err)
+		}
+	}
+	if followed {
+		t.Fatal("the redirect was followed")
+	}
+	if id, err := who(context.Background(), "ok"); err != nil || id != "u-1" {
+		t.Fatalf("ok: %q %v", id, err)
+	}
+}

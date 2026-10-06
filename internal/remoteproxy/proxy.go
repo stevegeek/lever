@@ -176,6 +176,19 @@ type Config struct {
 	// driver for nothing, since a login would create the contact's hub user.
 	// Nil: no contact is bound.
 	ContactUser func(login string) (string, bool)
+	// PeekAgentMessages is MatchAgentMessages without binding: it answers
+	// what the contact's own read would keep now, and the broker writes
+	// nothing. The operator view uses it, so an operator's read never decides
+	// which message a record shows. Nil while MatchAgentMessages is set: the
+	// operator view treats every answer as unmatched (no agent row shown).
+	// pending is the kept ids no contact read has bound yet (not shown to
+	// the contact so far).
+	PeekAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (keep, pending map[string]bool, err error)
+	// Push, when non-nil, is the Web Push service (remote.push, push.go):
+	// the page's subscription routes and worker, and the hub streams that
+	// turn agent messages into pushes (the caller runs Push.Run). It needs
+	// ChatAgent: without the chat page there is nothing to notify about.
+	Push *Push
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -522,6 +535,10 @@ func NewHandler(cfg Config) http.Handler {
 	}
 	if cfg.ChatAgent != "" {
 		g.chat = newChatPage(cfg)
+		if cfg.Push != nil {
+			g.push = cfg.Push
+			cfg.Push.attach(g)
+		}
 	}
 	return g
 }
@@ -743,6 +760,7 @@ type gate struct {
 	rp       *httputil.ReverseProxy
 	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
 	chat     *chatPage     // nil unless Config.ChatAgent is set
+	push     *Push         // nil unless Config.Push and ChatAgent are set
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration

@@ -403,6 +403,10 @@ type AgentMessagesMatchRequest struct {
 	Contact  string            `json:"contact"`
 	Agent    string            `json:"agent"`
 	Messages []AgentMessageRef `json:"messages"`
+	// Peek asks without binding: the answer is what the contact's own read
+	// would keep now, and the ledger is not written. The operator's view of
+	// a contact's conversation peeks; the contact's reads bind.
+	Peek bool `json:"peek,omitempty"`
 }
 
 // AgentMessageRef is one agent row without its text.
@@ -416,6 +420,11 @@ type AgentMessageRef struct {
 // order; every other agent row is dropped.
 type AgentMessagesMatchResponse struct {
 	Keep []string `json:"keep"`
+	// Pending (a peek only) lists the ids of Keep that no contact read has
+	// bound yet: kept because a record would bind them, so the contact has
+	// not been shown them. Which one a record finally binds depends on the
+	// pages the contact reads.
+	Pending []string `json:"pending,omitempty"`
 }
 
 // ---- operator directives: admin side (UDS channel) ----

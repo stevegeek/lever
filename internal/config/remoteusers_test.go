@@ -146,3 +146,62 @@ func TestRemoteAgentMessagesYAMLAndDefaults(t *testing.T) {
 		t.Fatal("agent messages need remote access on")
 	}
 }
+func TestRemotePushValidation(t *testing.T) {
+	base := func() *App {
+		return &App{Name: "boss", Tree: "/t", Workers: []Worker{{Name: "w1", Dir: "workers/w1"}},
+			Remote: Remote{Enabled: true, BaseURL: "https://mac.ts.net", Landing: RemoteLandingChat,
+				AllowedUsers: []RemoteUser{{Login: "op@x"}}}}
+	}
+	for name, tc := range map[string]struct {
+		mut  func(a *App)
+		want string
+	}{
+		"off":              {func(a *App) {}, ""},
+		"off, subject set": {func(a *App) { a.Remote.Push.Subject = "junk" }, ""},
+		"on mailto":        {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com"} }, ""},
+		"on https":         {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "https://example.com/contact"} }, ""},
+		"no subject":       {func(a *App) { a.Remote.Push = Push{Enabled: true} }, "push.subject"},
+		"http subject":     {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "http://example.com"} }, "push.subject"},
+		"mailto no at":     {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "mailto:op"} }, "push.subject"},
+		"mailto two":       {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "mailto:a@b,c@d"} }, "push.subject"},
+		"control char":     {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "mailto:a@b\n"} }, "push.subject"},
+		"test hosts": {func(a *App) {
+			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com", TestHosts: []string{"127.0.0.1:9447"}}
+		}, ""},
+		"test hosts, push off": {func(a *App) { a.Remote.Push = Push{TestHosts: []string{"127.0.0.1:9447"}} }, "push.test_hosts"},
+		"test host not loopback": {func(a *App) {
+			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com", TestHosts: []string{"10.0.0.1:9447"}}
+		}, "push.test_hosts"},
+		"test host by name": {func(a *App) {
+			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com", TestHosts: []string{"localhost:9447"}}
+		}, "push.test_hosts"},
+		"console landing": {func(a *App) {
+			a.Remote.Landing = ""
+			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com"}
+		}, "landing: chat"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := base()
+			tc.mut(a)
+			err := a.validateRemote()
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemotePushYAML(t *testing.T) {
+	a, err := LoadNoHostChecks(writeConfig(t, remoteWithWorkers+"  landing: chat\n  allowed_users:\n    - op@example.com\n"+
+		"  push:\n    enabled: true\n    subject: mailto:op@example.com\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.PushOn() || a.Remote.Push.Subject != "mailto:op@example.com" {
+		t.Fatalf("push %+v", a.Remote.Push)
+	}
+	a.Remote.Enabled = false
+	if a.PushOn() {
+		t.Fatal("push needs remote access on")
+	}
+}

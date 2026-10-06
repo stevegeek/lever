@@ -298,6 +298,7 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 	var got wire.AgentMessagesMatchRequest
 	var status atomic.Int32
 	status.Store(http.StatusOK)
+	var pendingAnswer atomic.Bool
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != wire.PathOperatorAgentMessagesMatch || r.Method != http.MethodPost {
 			http.NotFound(w, r)
@@ -306,6 +307,10 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 		if s := int(status.Load()); s != http.StatusOK {
 			http.Error(w, "no", s)
+			return
+		}
+		if pendingAnswer.Load() {
+			_, _ = io.WriteString(w, `{"keep":["m1","not-asked"],"pending":["m1","m2","not-asked"]}`)
 			return
 		}
 		_, _ = io.WriteString(w, `{"keep":["m1","not-asked"]}`)
@@ -320,8 +325,25 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 	if err != nil || !keep["m1"] || keep["m2"] || keep["not-asked"] || len(keep) != 1 {
 		t.Fatalf("%v %v", keep, err)
 	}
-	if got.Contact != "c@x" || got.Agent != "w1" || len(got.Messages) != 2 || got.Messages[1] != (wire.AgentMessageRef{ID: "m2", SHA256: "bb", CreatedAt: at}) {
+	if got.Contact != "c@x" || got.Agent != "w1" || len(got.Messages) != 2 || got.Messages[1] != (wire.AgentMessageRef{ID: "m2", SHA256: "bb", CreatedAt: at}) || got.Peek {
 		t.Fatalf("request %+v", got)
+	}
+	// The operator view's question is the same, as a peek.
+	// The broker names m1 kept and pending, and pending ids it did not keep
+	// or was not asked about: only m1 is pending.
+	pendingAnswer.Store(true)
+	keep, pending, err := remoteAgentMessagesPeek(app, st)(context.Background(), "c@x", "w1", msgs)
+	if err != nil || !keep["m1"] || !got.Peek || !pending["m1"] || len(pending) != 1 {
+		t.Fatalf("peek: %v %v %v request %+v", keep, pending, err, got)
+	}
+	// The binding question asks with no peek.
+	got = wire.AgentMessagesMatchRequest{}
+	if keep, err := m(context.Background(), "c@x", "w1", msgs); err != nil || !keep["m1"] || got.Peek {
+		t.Fatalf("match after peek: %v %v", keep, err)
+	}
+	pendingAnswer.Store(false)
+	if remoteAgentMessagesPeek(&config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true}}, st) != nil {
+		t.Fatal("off: no peek")
 	}
 	// Any refusal is an error: the proxy hides every agent row.
 	for _, s := range []int{http.StatusForbidden, http.StatusServiceUnavailable, http.StatusBadRequest} {

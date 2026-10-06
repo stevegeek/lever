@@ -46,13 +46,14 @@ import (
 // under it is a 404, never forwarded, so a route added here later cannot
 // shadow one the hub answers.
 
-// The page is installable as an app (a web app manifest and icons, below),
-// with no service worker on purpose: a worker scoped to /lever/ would sit
-// between the page and every request it makes, and a cache it keeps can
-// serve a page older than the binary. Current browsers install without one.
+// The page is installable as an app (a web app manifest and icons, below).
+// The page has no service worker unless remote.push is on. Then
+// /lever/sw.js is a push-only worker (no fetch handler, no cache): it shows
+// a notification and opens the chat, and never sits between the page and
+// its requests, so it cannot serve a stale page.
 
 //go:generate go run chaticons_gen.go
-//go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js chatui/*.png
+//go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js chatui/sw.js chatui/*.png
 var chatUI embed.FS
 
 // DecisionChatUnavailable is the audit decision for a chat page request the
@@ -93,7 +94,7 @@ func chatCSPFor(serveHost string) string {
 	// Trusted Types with no policy allowed makes every markup or script sink
 	// throw where the browser supports it: a second guard on the same rule.
 	return "default-src 'none'; script-src " + own + "; style-src " + own + "; connect-src 'self'; " +
-		"img-src " + img + "; manifest-src " + own + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
+		"img-src " + img + "; manifest-src " + own + "; worker-src " + own + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
 		"require-trusted-types-for 'script'; trusted-types 'none'"
 }
 
@@ -179,6 +180,13 @@ func newChatPage(cfg Config) *chatPage {
 			panic("remoteproxy: embedded chat page file: " + err.Error())
 		}
 		add(route, f.contentType, body)
+	}
+	if cfg.Push != nil {
+		body, err := chatUI.ReadFile("chatui/sw.js")
+		if err != nil {
+			panic("remoteproxy: embedded service worker: " + err.Error())
+		}
+		add(chatSWPath, "text/javascript; charset=utf-8", body)
 	}
 	for tier, name := range map[string]string{chatledger.TierOperator: cfg.ChatAgent, chatledger.TierContact: contactAppName} {
 		manifest, err := json.Marshal(chatManifestFor(name))
@@ -299,6 +307,10 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 			return true
 		}
 		g.serveWake(w, r, line, v, name)
+		return true
+	}
+	if g.push != nil && (p == pushKeyPath || p == pushSubsPath) {
+		g.servePush(w, r, line, v, p)
 		return true
 	}
 	if !read {

@@ -130,6 +130,14 @@ func RemoteConfigHash(app *config.App) string {
 			id.Files = f
 		}
 	}
+	if app.PushOn() {
+		id.Push = app.Remote.Push.Subject
+		// The test hosts (TEST ONLY) are captured at start too; omitted when
+		// unset, so the stamp of a real instance is the subject alone.
+		if th := app.Remote.Push.TestHosts; len(th) > 0 {
+			id.Push += "\ntest_hosts=" + strings.Join(th, ",")
+		}
+	}
 	return state.RemoteConfigHash(id)
 }
 

@@ -210,6 +210,11 @@ func (a *App) RemoteLandingChat() bool {
 // remote access on).
 func (a *App) AgentMessagesOn() bool { return a.RemoteEnabled() && a.Remote.AgentMessages.Enabled }
 
+// PushOn reports whether the proxy sends Web Push notifications
+// (remote.push.enabled, with remote access on; validation requires the chat
+// landing).
+func (a *App) PushOn() bool { return a.RemoteEnabled() && a.Remote.Push.Enabled }
+
 // EffectiveAgentFollowUpAfter is follow_up_after with its default.
 func (a *App) EffectiveAgentFollowUpAfter() time.Duration {
 	return cmp.Or(a.Remote.AgentMessages.FollowUpAfter, DefaultAgentFollowUpAfter)

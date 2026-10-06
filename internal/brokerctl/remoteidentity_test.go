@@ -108,6 +108,11 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 		if f.Name == "Files" && g.Type == reflect.TypeFor[*state.FilesIdentity]() {
 			continue
 		}
+		// push is hashed as its subject while on: the proxy captures only
+		// whether to push and the VAPID subject.
+		if f.Name == "Push" && g.Type == reflect.TypeFor[string]() {
+			continue
+		}
 		if g.Type != f.Type {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}
@@ -181,5 +186,28 @@ func TestRemoteConfigHashCoversAgentMessages(t *testing.T) {
 	app.Remote.AgentMessages.MaxChars = 100
 	if RemoteConfigHash(app) != off {
 		t.Fatal("off must keep the proxy's hash")
+	}
+}
+func TestRemoteConfigHashPush(t *testing.T) {
+	app := &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Remote: config.Remote{Enabled: true,
+		BaseURL: "https://mac.ts.net", Landing: config.RemoteLandingChat, AllowedUsers: []config.RemoteUser{{Login: "op@x"}}}}
+	off := RemoteConfigHash(app)
+	app.Remote.Push.Subject = "mailto:a@b" // set but off
+	if RemoteConfigHash(app) != off {
+		t.Fatal("a subject without enabled must not restart the proxy")
+	}
+	app.Remote.Push.Enabled = true
+	on := RemoteConfigHash(app)
+	if on == off {
+		t.Fatal("turning push on must restart the proxy")
+	}
+	app.Remote.Push.Subject = "mailto:c@d"
+	if RemoteConfigHash(app) == on {
+		t.Fatal("the VAPID subject is captured at start: a change must restart the proxy")
+	}
+	subj := RemoteConfigHash(app)
+	app.Remote.Push.TestHosts = []string{"127.0.0.1:9447"}
+	if RemoteConfigHash(app) == subj {
+		t.Fatal("the test hosts are captured at start: a change must restart the proxy")
 	}
 }

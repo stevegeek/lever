@@ -1065,7 +1065,11 @@ login never gets it: the page does not show it, and the routes refuse a contact 
   read again every 30 seconds while it is open and with **Refresh**. "Load earlier messages"
   pages back. With `agent_messages` on, every agent message the contact is not shown (see
   [Messages agents start](#messages-agents-start)) is marked "not shown to the contact", so you
-  can spot an agent that writes to a contact outside the rules. When the broker does not answer,
+  can spot an agent that writes to a contact outside the rules. An agent message that a record
+  would show but no read of the contact has bound yet is marked "not yet read by the contact":
+  the contact has not seen it, and sees it on its next read. The marks are per page: when two
+  messages carry the same text and one record, which of them the record finally shows depends on
+  the page the contact reads first, so a "not yet read" mark can turn into "not shown". When the broker does not answer,
   the page says that which agent messages the contact sees is not known (the contact is then
   shown none).
 - **How it reads.** The hub lets a person read only the direct messages that name them, so the
@@ -1078,21 +1082,101 @@ login never gets it: the page does not show it, and the routes refuse a contact 
 - **"has not signed in yet".** The proxy reads only for a contact that `lever apply` bound to a
   hub user (`.lever-state/remote-role.json`). For any other contact it does not sign in, since a
   sign-in would create the contact's hub user. After a contact signs in for the first time, run
-  `lever apply` again; until then its conversations show "has not signed in yet".
+  `lever apply` again; until then its conversations show "has not signed in yet". When the hub
+  refuses a read and the contact's session belongs to another hub user than the one `apply`
+  bound (the hub forgot the contact, and its next sign-in made a new user), the answer is also
+  `not-signed-in`, with the hint `run lever apply`. To find that out the proxy asks the hub who
+  the session is (`GET /api/v1/auth/me`, no redirect followed), only after a failed read. The
+  proxy's own sign-in for a bound contact can create that new hub user when the hub forgot the
+  old one; this is accepted, since the contact's own next visit does the same.
 - **Side effects.** A bound contact with no live session in the proxy (after a proxy restart, or
   after the 12-hour renewal) is signed in by the proxy, which moves the contact's `last login` on
-  the hub. With `agent_messages` on, your read asks the broker the same question the contact's
-  own read asks, so the first read of an agent message binds its ledger record exactly as the
-  contact's read would; the contact then sees the same rows.
+  the hub. With `agent_messages` on, your read asks the broker with a peek: the answer is what the
+  contact's own read would show now, and the agent ledger is not written. Only the contact's
+  reads bind a record to a message, so your reads never change what the contact sees.
 - **Routes.** `GET /lever/api/contacts` (the contacts, their message agents, labels, states and
   whether each is bound) and `GET /lever/api/contacts/<login>/agents/<name>/messages?cursor=&limit=`
   (`limit` 1 to 200, default 50), with the login URL-encoded. `HEAD` is answered like `GET`; any
   other method is `405`. Refusals are fixed words: `not-found` (404: not a contact, or not one of
-  its agents), `not-signed-in` (409), `no-record` (409: the agent has no hub record),
+  its agents), `not-signed-in` (409, with `"hint": "run lever apply"` and the audit reason
+  `stale-binding` for a changed hub user), `no-record` (409: the agent has no hub record),
   `bad-query` (400) and `unavailable` (502: the hub or its answer failed).
 - **Audit.** Every answer is one line in `.lever-state/remote-audit.jsonl`: `operator-view` with
   the `contact`, the `agent` and the `count` of rows (or of contacts for the list), or
   `deny-operator-view` with the `reason` word. No line holds message text.
+
+## Notifications
+
+With `landing: chat` and `remote.push` on, a login can have its devices show a notification when
+an agent writes to it while the chat page is closed.
+
+```yaml
+remote:
+  landing: chat
+  push:
+    enabled: true
+    subject: mailto:you@example.com   # the contact the push services see for this sender
+```
+
+- **What a login sees.** "New message from <agent>" (or "New message" when the agent is not in
+  the login's list). A tap opens the chat with that agent. No message text leaves the host, not
+  even encrypted: the push carries only `{"v":1,"agent":"<name>"}`, encrypted for the device
+  (Web Push, VAPID and aes128gcm, on the Go standard library).
+- **Turning it on.** Per device, from **Turn on notifications** in the agent list (the browser
+  asks for permission then). On an iPhone, add the page to the Home Screen first and open it from
+  there (iOS 16.4 or later). On Linux Chrome, the browser tab or the installed app both work.
+  **Turn off notifications** removes the device's subscription. A login keeps at most five
+  devices (the oldest goes); a device endpoint belongs to the last login that turned it on.
+- **Shared devices.** A browser keeps one push subscription for the page, whoever is signed in.
+  The page re-sends it at load only for the login that turned notifications on in that browser
+  (a per-login mark in the browser's storage). Another login on the same device sees **Turn on
+  notifications** and gets no notification until it turns them on itself, which moves the
+  device to it. Turning notifications off removes the browser's subscription for every login.
+- **Who is told.** A login is told only about agents it may message (an operator: every agent; a
+  contact: its `agents:` list, never a `see:` agent). With `agent_messages` on, a contact is told
+  only about a message it would be shown. No notification for the login's own messages or hub
+  lines, none while the chat is open and read, and at most one per agent a minute (a later
+  message in that minute gets one more when the minute ends).
+- **How it works.** For each login with a device, the proxy holds one hub events stream with
+  that login's own hub session; an event for one of its direct conversations makes the proxy
+  read the newest messages as the login and decide. After a hub or proxy restart it catches up
+  (a message older than one hour is not notified); a check the hub or the disk fails is tried
+  again, up to five times. Each stream is one long-lived connection into the jail, so each
+  subscribed login keeps one jail dial process open on the host.
+- **What the push services learn.** Google, Apple, Mozilla or Microsoft see when a push goes to
+  a device, never what it says. That timing tells them when your agents write to that login.
+- **The broker's record.** With `agent_messages` on, the check for a contact asks the broker
+  the same question the contact's own read asks, so the broker's agent ledger may log an agent
+  message as shown when the push check binds it, before the contact opens the page.
+- **The service worker.** `/lever/sw.js` (scope `/lever/`) handles `push` and
+  `notificationclick` only: no fetch handler and no cache, so it never stands between the page
+  and its requests. The page registers it only when a login turns notifications on. The page's
+  CSP gains `worker-src` for `/lever/` only.
+- **Egress.** The host process connects out to the push services: `fcm.googleapis.com`,
+  `*.push.apple.com`, `updates.push.services.mozilla.com` and `*.notify.windows.com`, on 443. A
+  host firewall must allow that. The proxy accepts a subscription only on those hosts (https,
+  no port, one spelling per endpoint), never
+  follows a redirect, uses no HTTP proxy, and connects only to public addresses (never a
+  private, loopback, link-local or tailnet `100.64.0.0/10` address, whatever DNS answers).
+- **State.** `.lever-state/push/` (0700): `vapid.key` (the signing key), `subscriptions.json`
+  and `status.json` (the last send result), each 0600. A file that another user can read keeps
+  push off, and `lever doctor` names it. Deleting `vapid.key` makes every device turn
+  notifications on again. A login removed from `allowed_users` loses its devices at the next
+  proxy start.
+- **Off.** `enabled: false` removes the routes and the worker; the page unregisters the worker on
+  its next load.
+- **Doctor.** The `push` row shows off, or on with the key, the device count per login and the
+  last send result.
+- **Audit.** `push-subscribe`, `push-unsubscribe`, `deny-push`, `push-sent`, `push-gone`,
+  `push-failed` and `push-stream` lines in `.lever-state/remote-audit.jsonl`. A line names the
+  push service's host only, never the endpoint path, a key or a payload.
+
+> **Test only.** For the end-to-end test with `tools/test/pushrecv` (a fake push service that
+> decrypts what it gets), the proxy admits exact loopback addresses over plain http only when
+> both `remote.push.test_hosts: [127.0.0.1:<port>]` in `lever.yaml` and
+> `LEVER_PUSH_TEST_HOSTS=127.0.0.1:<port>` in the proxy's environment name the same addresses.
+> Either one alone, or any other value, stops `lever remote serve`; the proxy prints a warning
+> and `lever doctor` fails while they are set. Never set them for a real instance.
 
 ## What this does NOT do
 

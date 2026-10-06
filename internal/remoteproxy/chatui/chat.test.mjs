@@ -1498,7 +1498,8 @@ test('operator: a Contacts section; a contact gets none and never asks', async (
 test('a transcript is read-only, marks what the contact is not shown, and writes nothing', async () => {
   const env = await load(hubWith({
     contacts: CONTACTS,
-    transcript: () => ({ status: 200, body: { matched: true, messages: [T(2, 'agent', 'CANARY', false), T(1, 'contact', 'hello', true), T(3, 'system', 'started', true)] } }),
+    transcript: () => ({ status: 200, body: { matched: true, messages: [T(2, 'agent', 'CANARY', false), T(1, 'contact', 'hello', true), T(3, 'system', 'started', true),
+      { ...T(4, 'agent', 'soon', false), pending: true }] } }),
   }));
   await env.clickContact(0);
   await env.clickContactAgent(0, 0);
@@ -1512,6 +1513,7 @@ test('a transcript is read-only, marks what the contact is not shown, and writes
   assert.match(rows[0], /^msg contact: c@x .* \/ hello$/);
   assert.match(rows[1], /^msg agent unshown: w1 .* \/ CANARY \/ not shown to the contact$/);
   assert.match(rows[2], /^msg system: hub .* \/ started$/);
+  assert.match(rows[3], /^msg agent pending: w1 .* \/ soon \/ not yet read by the contact$/);
   await env.poll();
   assert.equal(env.calls.filter((c) => c.method !== 'GET').length, 0, 'no post, no read marker');
 });
@@ -1595,4 +1597,124 @@ test('opening an agent chat leaves the transcript', async () => {
   assert.equal(env.els.refresh.hidden, true);
   assert.equal(env.els.composer.hidden, false);
   assert.equal(env.els.agent.textContent, 'boss');
+});
+
+const VAPID = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4';
+// pushHub: the default hub plus the push routes.
+function pushHub(parts = {}) {
+  const h = hubWith(parts);
+  const subs = [];
+  const fn = (method, path, body) => {
+    if (path === '/lever/api/push/key') return (parts.pushKey || (() => ({ status: 200, body: { key: VAPID } })))();
+    if (path === '/lever/api/push/subscriptions') {
+      subs.push({ method, body });
+      return (parts.subs || (() => ({ status: method === 'POST' ? 201 : 200, body: { ok: 'true' } })))(method, body);
+    }
+    return h(method, path, body);
+  };
+  fn.subs = subs;
+  return fn;
+}
+
+test('push: a browser without push asks nothing and shows no button', async () => {
+  const hub = pushHub();
+  const env = await load(hub);
+  assert.equal(env.count('GET', '/lever/api/push'), 0);
+  assert.equal(env.els.push.hidden, true);
+});
+
+test('push: server off hides the button and removes an old worker', async () => {
+  const env = await load(pushHub({ pushKey: () => ({ status: 404, body: 'not found' }) }), { push: { registered: true } });
+  assert.equal(env.els.push.hidden, true);
+  assert.equal(env.push.registered, null);
+});
+
+test('push: no worker is registered until the login turns notifications on', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {} });
+  assert.equal(env.els.push.hidden, false);
+  assert.equal(env.els.push.textContent, 'Turn on notifications');
+  assert.equal(env.push.registerCalls.length, 0);
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.deepEqual(env.push.registerCalls, [{ url: '/lever/sw.js', scope: '/lever/' }]);
+  assert.equal(env.push.subscribeOpts.userVisibleOnly, true);
+  assert.equal(env.push.subscribeOpts.applicationServerKey.length, 65);
+  assert.deepEqual(hub.subs.at(-1), { method: 'POST', body: { endpoint: env.push.sub.endpoint, keys: env.push.sub.toJSON().keys } });
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+});
+
+test('push: a refused permission registers nothing and says why', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: { grant: 'denied' } });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.push.registerCalls.length, 0);
+  assert.equal(env.els.push.hidden, true);
+  assert.match(env.els.pushnote.textContent, /blocked/);
+  assert.equal(hub.subs.length, 0);
+});
+
+test('push: a subscription the server refuses is undone', async () => {
+  const hub = pushHub({ subs: () => ({ status: 400, body: { error: 'endpoint' } }) });
+  const env = await load(hub, { push: {} });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.push.sub, null);
+  assert.equal(env.els.push.textContent, 'Turn on notifications');
+  assert.ok(env.els.pushnote.textContent.length > 0);
+});
+
+test('push: an existing subscription is sent again at load and can be turned off', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: { registered: true, existing: true, permission: 'granted' }, local: { 'lever-push-optin:op': '1' } });
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+  assert.equal(hub.subs[0].method, 'POST');
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.deepEqual(hub.subs.at(-1), { method: 'DELETE', body: { endpoint: 'https://fcm.googleapis.com/fcm/send/fake' } });
+  assert.equal(env.push.sub, null);
+  assert.equal(env.push.registered, null);
+  assert.equal(env.els.push.textContent, 'Turn on notifications');
+});
+
+test('a notification tap opens the agent named in the hash, only if listed', async () => {
+  let env = await load(hubWith(), { hash: '#agent=w1' });
+  assert.equal(env.els.agent.textContent, 'w1');
+  assert.equal(env.replaced.length, 1);
+  env = await load(hubWith(), { hash: '#agent=nobody' });
+  assert.equal(env.els.agent.textContent, 'Chat');
+  env = await load(hubWith(), { hash: '#agent=../w1' });
+  assert.equal(env.els.agent.textContent, 'Chat');
+});
+
+test('a message from the worker opens a listed agent', async () => {
+  const env = await load(pushHub(), { push: {} });
+  env.swMessage({ agent: 'w1' });
+  await tick(5);
+  assert.equal(env.els.agent.textContent, 'w1');
+  env.swMessage({ agent: 'nobody' });
+  env.swMessage({ agent: 7 });
+  env.swMessage(null);
+  await tick(5);
+  assert.equal(env.els.agent.textContent, 'w1');
+});
+
+test('push: turning on marks this login, turning off clears the mark', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {} });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.local['lever-push-optin:op'], '1');
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.local['lever-push-optin:op'], undefined);
+});
+
+test('push: another login on a shared device does not take the subscription', async () => {
+  // Login op turned notifications on here; contact c now uses the page.
+  const c = pushHub({ agents: () => roster([A('w1')], { login: 'c', tier: 'contact', console: undefined }) });
+  const envC = await load(c, { push: { registered: true, existing: true, permission: 'granted' }, local: { 'lever-push-optin:op': '1' } });
+  assert.equal(c.subs.length, 0, 'the subscription was posted for a login that never opted in');
+  assert.equal(envC.els.push.textContent, 'Turn on notifications');
 });

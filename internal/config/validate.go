@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/webpush"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -571,6 +572,22 @@ func (a *App) validateRemote() error {
 			return err
 		}
 	}
+	if a.Remote.Push.Enabled {
+		if a.Remote.Landing != RemoteLandingChat {
+			return fmt.Errorf("config: remote: push needs landing: chat (a notification opens the chat page)")
+		}
+		if err := validPushSubject(a.Remote.Push.Subject); err != nil {
+			return err
+		}
+	}
+	if th := a.Remote.Push.TestHosts; len(th) > 0 {
+		if !a.Remote.Push.Enabled {
+			return fmt.Errorf("config: remote: push.test_hosts is set but push is off — drop it")
+		}
+		if _, err := webpush.ParseTestHosts(strings.Join(th, ",")); err != nil {
+			return fmt.Errorf("config: remote: push.test_hosts: each entry must be 127.0.0.1:<port> (TEST ONLY): %v", err)
+		}
+	}
 	fl := a.Remote.Files
 	if fl.MaxBytes < 0 || fl.MaxBytes > MaxFilesMaxBytes {
 		return fmt.Errorf("config: remote: files.max_bytes %d; use 1 to %d (or leave it out for %d)", fl.MaxBytes, MaxFilesMaxBytes, DefaultFilesMaxBytes)
@@ -606,6 +623,32 @@ func (a *App) validateRemote() error {
 				return fmt.Errorf("config: remote: files is on, and manager.read_only %q covers %s: the manager could not write the files it shares", e, chatfiles.Dir)
 			}
 		}
+	}
+	return nil
+}
+
+// validPushSubject accepts mailto:<local>@<domain> or an absolute https URL,
+// in printable ASCII: the push services read it as the sender's contact.
+func validPushSubject(s string) error {
+	bad := fmt.Errorf("config: remote: push.subject %q must be mailto:<address> or an https URL (push services use it to contact this sender)", s)
+	if s == "" || len(s) > 200 {
+		return bad
+	}
+	for _, c := range []byte(s) {
+		if c <= ' ' || c >= 0x7f {
+			return bad
+		}
+	}
+	if addr, ok := strings.CutPrefix(s, "mailto:"); ok {
+		local, domain, found := strings.Cut(addr, "@")
+		if !found || local == "" || domain == "" || strings.ContainsAny(addr, ",;?<>\"") || strings.Contains(domain, "@") {
+			return bad
+		}
+		return nil
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return bad
 	}
 	return nil
 }

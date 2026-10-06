@@ -25,12 +25,16 @@ import {
   LIST_MS,
   CONTACTS_MS,
   NOT_SHOWN,
+  NOT_YET,
   contactList,
   transcriptItems,
   transcriptPath,
   transcriptWho,
   mergeRows,
   viewErrorText,
+  hashAgent,
+  pushKeyBytes,
+  pushView,
 } from './chatcore.js';
 
 test('historyItems reads either key and drops junk', () => {
@@ -306,13 +310,17 @@ test('contactList keeps well-formed contacts and agents only', () => {
 test('transcriptItems: only rows with an id; shownToContact only when exactly true', () => {
   assert.deepEqual(transcriptItems({ messages: [
     { id: 'a', from: 'agent', text: 't', createdAt: 'c', shownToContact: true },
-    { id: 'b', from: 'contact', text: 7, shownToContact: 'true' },
+    { id: 'b', from: 'contact', text: 7, shownToContact: 'true', pending: 'true' },
+    { id: 'p', from: 'agent', text: 'p', shownToContact: false, pending: true },
+    { id: 'q', from: 'agent', text: 'q', shownToContact: true, pending: true },
     { id: 'c', from: '<b>', text: 'x' },
     { from: 'agent', text: 'no id' }, null,
   ] }), [
-    { id: 'a', from: 'agent', text: 't', createdAt: 'c', shownToContact: true },
-    { id: 'b', from: 'contact', text: '', createdAt: '', shownToContact: false },
-    { id: 'c', from: 'agent', text: 'x', createdAt: '', shownToContact: false },
+    { id: 'a', from: 'agent', text: 't', createdAt: 'c', shownToContact: true, pending: false },
+    { id: 'b', from: 'contact', text: '', createdAt: '', shownToContact: false, pending: false },
+    { id: 'p', from: 'agent', text: 'p', createdAt: '', shownToContact: false, pending: true },
+    { id: 'q', from: 'agent', text: 'q', createdAt: '', shownToContact: true, pending: false },
+    { id: 'c', from: 'agent', text: 'x', createdAt: '', shownToContact: false, pending: false },
   ]);
   assert.deepEqual(transcriptItems('nope'), []);
 });
@@ -334,10 +342,15 @@ test('mergeRows reports a new row, new text and a new mark', () => {
   assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: false }]), false);
   assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: true }]), true);
   assert.equal(mergeRows(m, [{ id: 'a', text: 'u', shownToContact: true }]), true);
+  assert.equal(mergeRows(m, [{ id: 'b', text: 't', shownToContact: false, pending: false }]), true);
+  assert.equal(mergeRows(m, [{ id: 'b', text: 't', shownToContact: false, pending: true }]), true);
+  assert.equal(mergeRows(m, [{ id: 'b', text: 't', shownToContact: false, pending: true }]), false);
 });
 
 test('viewErrorText reads the fixed words', () => {
   assert.equal(viewErrorText(409, { error: 'not-signed-in' }), 'has not signed in yet');
+  assert.equal(viewErrorText(409, { error: 'not-signed-in', hint: 'run lever apply' }), 'the contact has a new hub user: run lever apply');
+  assert.equal(viewErrorText(409, { error: 'not-signed-in', hint: '<b>other</b>' }), 'has not signed in yet');
   assert.equal(viewErrorText(409, { error: 'no-record' }), 'the agent has no record on the hub yet');
   assert.equal(viewErrorText(502, 'bad gateway\n'), errorText(502, 'bad gateway\n'));
 });
@@ -345,4 +358,30 @@ test('viewErrorText reads the fixed words', () => {
 test('the operator view constants', () => {
   assert.equal(CONTACTS_MS, 30000);
   assert.equal(NOT_SHOWN, 'not shown to the contact');
+  assert.equal(NOT_YET, 'not yet read by the contact');
+});
+
+test('hashAgent takes only a config name', () => {
+  assert.equal(hashAgent('#agent=deal-2'), 'deal-2');
+  for (const bad of ['', '#agent=', '#agent=Deal', '#agent=../x', '#agent=a b', '#agent=-a', '#x=deal', '#agent=deal-2&x=1', null, 7, `#agent=${'a'.repeat(64)}`]) {
+    assert.equal(hashAgent(bad), '', String(bad));
+  }
+});
+
+test('pushKeyBytes accepts only an uncompressed P-256 point', () => {
+  const key = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4';
+  const b = pushKeyBytes(key);
+  assert.equal(b.length, 65);
+  assert.equal(b[0], 4);
+  for (const bad of ['', 'AAAA', key.slice(1), key + 'A', 'A' + key.slice(1), key.replace('_', '/'), null, 5]) assert.equal(pushKeyBytes(bad), null, String(bad));
+});
+
+test('pushView', () => {
+  assert.deepEqual(pushView({ available: false }), { hidden: true, disabled: true, text: '', note: '' });
+  assert.equal(pushView({ available: true, permission: 'denied' }).hidden, true);
+  assert.match(pushView({ available: true, permission: 'denied' }).note, /blocked/);
+  assert.equal(pushView({ available: true, permission: 'default', subscribed: false }).text, 'Turn on notifications');
+  assert.equal(pushView({ available: true, permission: 'granted', subscribed: true }).text, 'Turn off notifications');
+  assert.equal(pushView({ available: true, permission: 'granted', busy: true }).disabled, true);
+  assert.equal(pushView({ available: true, permission: 'granted', error: 'x' }).note, 'x');
 });

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -72,6 +73,16 @@ func agentRow(m historyRow, uid, agentID string) bool {
 // broker's keep list is checked against the question, never trusted on its
 // own.
 func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
+	return askAgentRows(ctx, g.cfg.MatchAgentMessages, contact, agent, agentID, uid, rows)
+}
+
+// askAgentRows is keepAgentRows with the broker question given: the
+// binding match for a contact's reads, the peek for the operator view.
+func askAgentRows(ctx context.Context, match func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error),
+	contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
+	if match == nil {
+		return nil, errNoMatcher
+	}
 	seen := idCounts(rows)
 	var ask []AgentMessage
 	for _, m := range rows {
@@ -93,7 +104,7 @@ func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid s
 	if len(ask) > maxMatchRows {
 		ask = ask[:maxMatchRows] // the hub's own page cap; the rest stays hidden
 	}
-	got, err := g.cfg.MatchAgentMessages(ctx, contact, agent, ask)
+	got, err := match(ctx, contact, agent, ask)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +116,8 @@ func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid s
 	}
 	return keep, nil
 }
+
+var errNoMatcher = errors.New("no agent message matcher")
 
 // idCounts counts each row id on a page.
 func idCounts(rows []historyRow) map[string]int {

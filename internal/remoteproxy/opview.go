@@ -188,6 +188,11 @@ type viewRow struct {
 	Text           string `json:"text"`
 	CreatedAt      string `json:"createdAt"`
 	ShownToContact bool   `json:"shownToContact"`
+	// Pending marks an agent row a record would bind but no contact read
+	// has bound yet: the contact has not been shown it, and will be when
+	// its read binds this row (the record may bind another of the same
+	// text instead, depending on the page the contact reads).
+	Pending bool `json:"pending,omitempty"`
 }
 
 type viewAnswer struct {
@@ -269,8 +274,16 @@ func (g *gate) serveContactHistory(w http.ResponseWriter, r *http.Request, line 
 		return
 	}
 	key := "dm:agent:" + rec.ID + ":user:" + uid
-	body, err := g.readAsContact(ctx, login, "/api/v1/chat/conversations/"+url.PathEscape(key)+"/messages?"+query)
+	body, cookie, err := g.readAsContact(ctx, login, "/api/v1/chat/conversations/"+url.PathEscape(key)+"/messages?"+query)
 	if err != nil {
+		if errors.Is(err, errViewHub) && g.staleBinding(ctx, cookie, uid) {
+			// The hub refuses a key that does not name the session's user:
+			// apply bound the contact to a hub user it no longer is.
+			line.Reason = "stale-binding"
+			g.answerViewJSON(w, r, line, DecisionDenyOperatorView, http.StatusConflict,
+				map[string]string{"error": "not-signed-in", "hint": "run lever apply"})
+			return
+		}
 		g.refuseView(w, r, line, http.StatusBadGateway, "unavailable")
 		return
 	}
@@ -289,34 +302,51 @@ var errViewHub = errors.New("the hub did not answer the history read")
 
 // readAsContact GETs path with login's session; a session the hub no longer
 // knows (401, or a redirect to its login page: any 3xx, never followed) is
-// replaced once.
-func (g *gate) readAsContact(ctx context.Context, login, path string) ([]byte, error) {
+// replaced once. It returns the session it read with last; errViewHub
+// means the hub answered that session with something other than a 200.
+func (g *gate) readAsContact(ctx context.Context, login, path string) ([]byte, string, error) {
 	cookie, err := g.cfg.Session.Cookie(ctx, login)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	status, body, err := g.chat.hubBody(ctx, cookie, path)
 	if err == nil && (status == http.StatusUnauthorized || status >= 300 && status < 400) {
 		g.cfg.Session.Invalidate(login, cookie)
 		if cookie, err = g.cfg.Session.Cookie(ctx, login); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		status, body, err = g.chat.hubBody(ctx, cookie, path)
 	}
 	if err != nil {
-		return nil, err
+		return nil, cookie, err
 	}
 	if status != http.StatusOK {
-		return nil, errViewHub
+		return nil, cookie, errViewHub
 	}
-	return body, nil
+	return body, cookie, nil
+}
+
+// staleBinding reports whether the contact's session belongs to a hub user
+// other than uid, the one apply bound: the hub then refuses the history of
+// the bound key. It asks only GET /api/v1/auth/me (hubWhoAmI: no redirect
+// followed, a bounded answer), and only after a failed read. A session the
+// hub cannot name is not stale: the read is then "unavailable".
+func (g *gate) staleBinding(ctx context.Context, cookie, uid string) bool {
+	if cookie == "" {
+		return false
+	}
+	id, err := g.chat.whoAmI(ctx, cookie)
+	return err == nil && id != uid
 }
 
 // viewRows maps a hub history answer to the operator's rows. Each agent
 // row is marked with what the contact is shown (contactShown, the rule
 // filterHistory applies); with agent messages off the contact sees every
-// row. An unreadable row reads as an agent row with no text, as in
-// filterHistory.
+// row. The broker is asked with a peek: the operator's read binds no
+// record, so which of two same-text messages a record shows is decided by
+// the contact's own reads alone, and the peek tells a bound row (shown)
+// from one a record would bind (pending). The marks are per page. An
+// unreadable row reads as an agent row with no text, as in filterHistory.
 func (g *gate) viewRows(ctx context.Context, contact, agent, agentID, uid string, body []byte) (viewAnswer, bool) {
 	var doc struct {
 		Messages   []json.RawMessage `json:"messages"`
@@ -333,16 +363,28 @@ func (g *gate) viewRows(ctx context.Context, contact, agent, agentID, uid string
 	}
 	ans := viewAnswer{Messages: []viewRow{}, NextCursor: doc.NextCursor, Matched: true}
 	var shown map[string]bool // nil: every row is shown
+	pending := map[string]bool{}
 	if g.cfg.MatchAgentMessages != nil {
-		keep, err := g.keepAgentRows(ctx, contact, agent, agentID, uid, rows)
+		var peek func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
+		if g.cfg.PeekAgentMessages != nil {
+			peek = func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error) {
+				keep, p, err := g.cfg.PeekAgentMessages(ctx, contact, agent, msgs)
+				pending = p
+				return keep, err
+			}
+		}
+		keep, err := askAgentRows(ctx, peek, contact, agent, agentID, uid, rows)
 		if err != nil {
-			keep, ans.Matched = map[string]bool{}, false
+			keep, pending, ans.Matched = map[string]bool{}, map[string]bool{}, false
 		}
 		shown = contactShown(rows, keep, uid, agentID)
 	}
 	for _, m := range rows {
+		// Only a row the contact's rule keeps can be pending: askAgentRows
+		// already dropped every id the question did not name.
+		p := shown != nil && shown[m.ID] && agentRow(m, uid, agentID) && pending[m.ID]
 		ans.Messages = append(ans.Messages, viewRow{ID: m.ID, From: rowFrom(m, uid, agentID), Text: m.Msg,
-			CreatedAt: m.CreatedAt, ShownToContact: shown == nil || shown[m.ID]})
+			CreatedAt: m.CreatedAt, ShownToContact: (shown == nil || shown[m.ID]) && !p, Pending: p})
 	}
 	return ans, true
 }

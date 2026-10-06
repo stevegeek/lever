@@ -45,6 +45,9 @@ type RemoteIdentity struct {
 	// previews (remote.agent_messages). Omitted when off, so an instance that
 	// never turns it on keeps its stamp.
 	AgentMessages bool `json:",omitempty"`
+	// Push is the VAPID subject while remote.push is on ("" off, omitted,
+	// so an instance that never turns it on keeps its stamp).
+	Push string `json:",omitempty"`
 	// Files (remote.files, landing chat only): the limits and every agent's
 	// workspace the proxy writes uploads into. Omitted when off.
 	Files *FilesIdentity `json:",omitempty"`

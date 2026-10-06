@@ -283,6 +283,7 @@ export function wakeText(status, body, name) {
 
 export const CONTACTS_MS = 30000; // the contact list and an open transcript refresh this often
 export const NOT_SHOWN = 'not shown to the contact';
+export const NOT_YET = 'not yet read by the contact';
 const FROM = new Set(['contact', 'agent', 'system']);
 
 // contactList reads the contact list: [{login, signedIn, agents: [{name,
@@ -317,7 +318,11 @@ export function transcriptItems(body) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return [];
   return body.messages
     .filter((m) => m && typeof m === 'object' && str(m.id))
-    .map((m) => ({ id: str(m.id), from: FROM.has(str(m.from)) ? m.from : 'agent', text: str(m.text), createdAt: str(m.createdAt), shownToContact: m.shownToContact === true }));
+    .map((m) => {
+      const shownToContact = m.shownToContact === true;
+      // pending: a record would show it, but the contact has not read it yet.
+      return { id: str(m.id), from: FROM.has(str(m.from)) ? m.from : 'agent', text: str(m.text), createdAt: str(m.createdAt), shownToContact, pending: !shownToContact && m.pending === true };
+    });
 }
 
 // transcriptPath is the route of one transcript page.
@@ -339,7 +344,7 @@ export function mergeRows(map, items) {
   let changed = false;
   for (const m of items) {
     const old = map.get(m.id);
-    if (!old || old.text !== m.text || old.shownToContact !== m.shownToContact) {
+    if (!old || old.text !== m.text || old.shownToContact !== m.shownToContact || old.pending !== m.pending) {
       map.set(m.id, m);
       changed = true;
     }
@@ -350,7 +355,39 @@ export function mergeRows(map, items) {
 // viewErrorText says why a transcript cannot be read.
 export function viewErrorText(status, body) {
   const word = body && typeof body === 'object' ? str(body.error) : '';
+  // The hint is lever's fixed word: the contact's hub user is not the one
+  // lever apply bound.
+  if (word === 'not-signed-in' && body.hint === 'run lever apply') return 'the contact has a new hub user: run lever apply';
   if (word === 'not-signed-in') return 'has not signed in yet';
   if (word === 'no-record') return 'the agent has no record on the hub yet';
   return errorText(status, body);
+}
+
+// hashAgent reads the agent a notification opened the page for
+// (#agent=<name>): a config name, else ''.
+export function hashAgent(hash) {
+  const m = typeof hash === 'string' ? /^#agent=([a-z0-9][a-z0-9-]{0,62})$/.exec(hash) : null;
+  return m ? m[1] : '';
+}
+
+// pushKeyBytes turns lever's VAPID key into what pushManager.subscribe
+// takes: the 65 bytes of an uncompressed P-256 point, else null.
+export function pushKeyBytes(key) {
+  if (typeof key !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(key)) return null;
+  let bin;
+  try {
+    bin = atob(`${key.replace(/-/g, '+').replace(/_/g, '/')}=`);
+  } catch {
+    return null;
+  }
+  if (bin.length !== 65 || bin.charCodeAt(0) !== 4) return null;
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+// pushView is the notifications button and its note. Hidden where the
+// browser has no push or lever has it off; a note when the browser blocks it.
+export function pushView({ available, permission, subscribed, busy, error }) {
+  if (!available) return { hidden: true, disabled: true, text: '', note: '' };
+  if (permission === 'denied') return { hidden: true, disabled: true, text: '', note: 'Notifications are blocked for this page in the browser settings.' };
+  return { hidden: false, disabled: !!busy, text: subscribed ? 'Turn off notifications' : 'Turn on notifications', note: error || '' };
 }

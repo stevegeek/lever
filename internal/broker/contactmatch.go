@@ -15,9 +15,11 @@ const maxMatchRows = 200
 // socket, which agent rows of one contact's history the agent ledger
 // recorded. The proxy sends hashes and times, never text, and drops every
 // row not in keep. A new binding is appended before the answer, so one
-// record never shows two messages. Off: 503; a contact that does not list
-// the agent: 403; a body over 256 KiB or more than maxMatchRows rows: 400;
-// a ledger that cannot be opened or written: 503 (the proxy fails closed).
+// record never shows two messages. A peek (the operator's view) binds
+// nothing and writes nothing: it answers what the contact's read would
+// keep. Off: 503; a contact that does not list the agent: 403; a body over
+// 256 KiB or more than maxMatchRows rows: 400; a ledger that cannot be
+// opened or written: 503 (the proxy fails closed).
 func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request) {
 	var req wire.AgentMessagesMatchRequest
 	if err := decodeBody(w, r, 256<<10, &req); err != nil || len(req.Messages) > maxMatchRows {
@@ -42,7 +44,13 @@ func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request
 	for i, m := range req.Messages {
 		cands[i] = agentledger.Candidate{MessageID: m.ID, SHA256: m.SHA256, CreatedAt: m.CreatedAt}
 	}
-	keep, bound, err := led.Match(req.Agent, req.Contact, cands, time.Now())
+	var keep, pending map[string]bool
+	var bound []string
+	if req.Peek {
+		keep, pending, err = led.Peek(req.Agent, req.Contact, cands, time.Now())
+	} else {
+		keep, bound, err = led.Match(req.Agent, req.Contact, cands, time.Now())
+	}
 	if err != nil {
 		b.audit("contact", "remote", "error", "match: "+err.Error())
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
@@ -55,6 +63,9 @@ func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request
 	for _, m := range req.Messages {
 		if keep[m.ID] {
 			out.Keep = append(out.Keep, m.ID)
+			if pending[m.ID] {
+				out.Pending = append(out.Pending, m.ID)
+			}
 		}
 	}
 	writeJSON(w, out)

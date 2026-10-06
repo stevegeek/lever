@@ -171,18 +171,23 @@ func TestPushSubscribeRefusals(t *testing.T) {
 		code         int
 		word         string
 	}{
-		"put":           {"PUT", subBody("x"), nil, 405, "method"},
-		"no origin":     {"POST", subBody("x"), []string{"Origin", ""}, 403, "origin"},
-		"null origin":   {"POST", subBody("x"), []string{"Origin", "null"}, 403, ""},
-		"same-site":     {"POST", subBody("x"), []string{"Sec-Fetch-Site", "same-site"}, 403, ""},
-		"form type":     {"POST", subBody("x"), []string{"Content-Type", "application/x-www-form-urlencoded"}, 415, "content-type"},
-		"text type":     {"POST", subBody("x"), []string{"Content-Type", "text/plain"}, 415, "content-type"},
-		"too large":     {"POST", big, nil, 413, "too-large"},
-		"not json":      {"POST", `{`, nil, 400, "bad-json"},
-		"http endpoint": {"POST", strings.Replace(subBody("x"), "https://", "http://", 1), nil, 400, "endpoint"},
-		"internal host": {"POST", strings.Replace(subBody("x"), "fcm.googleapis.com", "10.0.0.1", 1), nil, 400, "endpoint"},
-		"loopback":      {"POST", strings.Replace(subBody("x"), "https://fcm.googleapis.com", "https://127.0.0.1:9447", 1), nil, 400, "endpoint"},
-		"bad keys":      {"POST", strings.Replace(subBody("x"), testAuth, "AAAA", 1), nil, 400, "keys"},
+		"put":            {"PUT", subBody("x"), nil, 405, "method"},
+		"no origin":      {"POST", subBody("x"), []string{"Origin", ""}, 403, "origin"},
+		"null origin":    {"POST", subBody("x"), []string{"Origin", "null"}, 403, ""},
+		"same-site":      {"POST", subBody("x"), []string{"Sec-Fetch-Site", "same-site"}, 403, ""},
+		"form type":      {"POST", subBody("x"), []string{"Content-Type", "application/x-www-form-urlencoded"}, 415, "content-type"},
+		"text type":      {"POST", subBody("x"), []string{"Content-Type", "text/plain"}, 415, "content-type"},
+		"too large":      {"POST", big, nil, 413, "too-large"},
+		"not json":       {"POST", `{`, nil, 400, "bad-json"},
+		"http endpoint":  {"POST", strings.Replace(subBody("x"), "https://", "http://", 1), nil, 400, "endpoint"},
+		"internal host":  {"POST", strings.Replace(subBody("x"), "fcm.googleapis.com", "10.0.0.1", 1), nil, 400, "endpoint"},
+		"loopback":       {"POST", strings.Replace(subBody("x"), "https://fcm.googleapis.com", "https://127.0.0.1:9447", 1), nil, 400, "endpoint"},
+		"bad keys":       {"POST", strings.Replace(subBody("x"), testAuth, "AAAA", 1), nil, 400, "keys"},
+		"unknown field":  {"POST", strings.Replace(subBody("x"), `"keys"`, `"extra":1,"keys"`, 1), nil, 400, "bad-json"},
+		"endpoint twice": {"POST", strings.Replace(subBody("x"), `"keys"`, `"endpoint":"https://fcm.googleapis.com/fcm/send/y","keys"`, 1), nil, 400, "bad-json"},
+		"auth twice":     {"POST", strings.Replace(subBody("x"), `"auth"`, `"auth":"`+testAuth+`","auth"`, 1), nil, 400, "bad-json"},
+		"trailing data":  {"POST", subBody("x") + `{}`, nil, 400, "bad-json"},
+		"port 443":       {"POST", strings.Replace(subBody("x"), "fcm.googleapis.com", "fcm.googleapis.com:443", 1), nil, 400, "endpoint"},
 	} {
 		rw := pushWrite(h, chatOp, tc.method, tc.body, tc.hdr...)
 		if rw.Code != tc.code || tc.word != "" && !strings.Contains(rw.Body.String(), `"error":"`+tc.word+`"`) {
@@ -213,5 +218,29 @@ func TestChatCSPAllowsTheWorkerFromLeverOnly(t *testing.T) {
 	}
 	if csp := chatCSPFor("[::1]:8445"); !strings.Contains(csp, "worker-src 'self';") {
 		t.Fatalf("fallback CSP %s", csp)
+	}
+}
+
+func TestPushKeyRouteIsReadOnly(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _ := pushConfig(t, hub, &fakeSender{}, nil)
+	h := NewHandler(cfg)
+	for _, m := range []string{"POST", "DELETE", "PUT"} {
+		rw := chatDo(h, chatOp, m, pushKeyPath, "Origin", "https://"+testServeHost)
+		if rw.Code != http.StatusMethodNotAllowed || rw.Header().Get("Allow") != "GET, HEAD" {
+			t.Errorf("%s: %d %v", m, rw.Code, rw.Header())
+		}
+	}
+}
+
+func TestPushStrictBodyKeepsNesting(t *testing.T) {
+	var in pushSubBody
+	if err := decodePushSubBody([]byte(subBody("x")), &in); err != nil || in.Keys.Auth != testAuth {
+		t.Fatalf("%v %+v", err, in)
+	}
+	// The same key in two different objects is not a duplicate.
+	b := `{"endpoint":"https://fcm.googleapis.com/fcm/send/x","keys":{"endpoint":"x","p256dh":"` + testP256 + `","auth":"` + testAuth + `"}}`
+	if err := noDuplicateKeys([]byte(b)); err != nil {
+		t.Fatal(err)
 	}
 }

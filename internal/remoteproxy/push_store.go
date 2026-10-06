@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/stevegeek/lever/internal/webpush"
@@ -57,14 +58,16 @@ type PushStore struct {
 
 var errBadPushStore = errors.New("the push store is not a lever push store")
 
-// checkPrivateDir: the push directory is this user's alone.
+// checkPrivateDir: the push directory is this user's alone (owner, mode,
+// and not a link).
 func checkPrivateDir(dir string) error {
 	fi, err := os.Lstat(dir)
 	if err != nil {
 		return err
 	}
-	if !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%s: not a private directory (want 0700)", dir)
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 || ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s: not a private directory of this user (want 0700)", dir)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package remoteproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -181,14 +182,8 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 		refuse(http.StatusRequestEntityTooLarge, "too-large")
 		return
 	}
-	var in struct {
-		Endpoint string `json:"endpoint"`
-		Keys     struct {
-			P256DH string `json:"p256dh"`
-			Auth   string `json:"auth"`
-		} `json:"keys"`
-	}
-	if json.Unmarshal(body, &in) != nil {
+	var in pushSubBody
+	if decodePushSubBody(body, &in) != nil {
 		refuse(http.StatusBadRequest, "bad-json")
 		return
 	}
@@ -214,6 +209,89 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 		return
 	}
 	g.answerWakeJSON(w, r, line, decision, http.StatusCreated, map[string]string{"ok": "true"})
+}
+
+// pushSubBody is what the page posts: PushSubscription.toJSON()'s fields, no
+// others. expirationTime is accepted and ignored (browsers send null).
+type pushSubBody struct {
+	Endpoint       string          `json:"endpoint"`
+	ExpirationTime json.RawMessage `json:"expirationTime"`
+	Keys           struct {
+		P256DH string `json:"p256dh"`
+		Auth   string `json:"auth"`
+	} `json:"keys"`
+}
+
+// decodePushSubBody reads body strictly: one JSON object, no unknown field, no
+// key twice in any object, nothing after it. Two readers of one body must
+// never see two different subscriptions.
+func decodePushSubBody(body []byte, out *pushSubBody) error {
+	if err := noDuplicateKeys(body); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("push: data after the subscription")
+	}
+	return nil
+}
+
+// noDuplicateKeys walks body's tokens and refuses an object that names a
+// key twice (encoding/json would keep the last one silently).
+func noDuplicateKeys(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	type frame struct {
+		object, wantKey bool
+		keys            map[string]bool
+	}
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		if top != nil && top.object && top.wantKey {
+			if k, ok := tok.(string); ok {
+				if top.keys[k] {
+					return errors.New("push: a key appears twice")
+				}
+				top.keys[k] = true
+				top.wantKey = false
+				continue
+			}
+		}
+		switch tok {
+		case json.Delim('{'):
+			if top != nil && top.object {
+				top.wantKey = true
+			}
+			stack = append(stack, &frame{object: true, wantKey: true, keys: map[string]bool{}})
+			continue
+		case json.Delim('['):
+			if top != nil && top.object {
+				top.wantKey = true
+			}
+			stack = append(stack, &frame{})
+			continue
+		case json.Delim('}'), json.Delim(']'):
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if top != nil && top.object {
+			top.wantKey = true // a value ends: the next token is a key
+		}
+	}
 }
 
 // endpointHost is the only part of an endpoint an audit line may carry.

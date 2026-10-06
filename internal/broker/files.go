@@ -62,6 +62,7 @@ const (
 	refuseBadPath        = "bad-path"
 	refuseNotFound       = "not-found"
 	refuseSymlink        = "symlink"
+	refuseHardLink       = "hard-link"
 	refuseNotFile        = "not-a-file"
 	refuseTooLarge       = "too-large"
 	refuseExtension      = "extension"
@@ -309,15 +310,19 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 // shareFault maps a Hash error to its refusal word ("" for none). A
 // component that exists but is not a directory (out is a file) is a plain
 // error from the walk and so unavailable: the agent broke its own exchange.
-// A hard link is "symlink": the one word for a file reached by another name.
+// A hard link has its own word; a path that leaves the tree is bad-path.
 func shareFault(err error) string {
 	switch {
 	case err == nil:
 		return ""
 	case errors.Is(err, fs.ErrNotExist):
 		return refuseNotFound
-	case errors.Is(err, fsutil.ErrSymlink), errors.Is(err, fsutil.ErrHardLink), errors.Is(err, fsutil.ErrEscapesTree):
+	case errors.Is(err, fsutil.ErrSymlink):
 		return refuseSymlink
+	case errors.Is(err, fsutil.ErrHardLink):
+		return refuseHardLink
+	case errors.Is(err, fsutil.ErrEscapesTree):
+		return refuseBadPath
 	case errors.Is(err, fsutil.ErrNotRegularFile):
 		return refuseNotFile
 	case errors.Is(err, fsutil.ErrFileTooLarge), errors.Is(err, chatfiles.ErrTooLarge):

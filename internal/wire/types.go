@@ -383,7 +383,7 @@ type FileShareRequest struct {
 
 // FileShareResponse answers PathFilesShare, always with HTTP 200. Refused:
 // Reason is one fixed word (not-a-contact, bad-path, not-found, symlink,
-// not-a-file, too-large, extension, rate, off, unavailable).
+// hard-link, not-a-file, too-large, extension, rate, off, unavailable).
 type FileShareResponse struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`

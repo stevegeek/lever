@@ -14,6 +14,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/fileledger"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -317,7 +318,18 @@ func TestFilesShareRefusesAHardLink(t *testing.T) {
 	if err := os.Link(filepath.Join(ws, "in", ck, "up.pdf"), filepath.Join(ws, "out", ck, "up.pdf")); err != nil {
 		t.Fatal(err)
 	}
-	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "up.pdf")); res.Reason != "symlink" {
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "up.pdf")); res.Reason != "hard-link" {
 		t.Fatalf("%+v", res)
+	}
+}
+
+func TestShareFaultWords(t *testing.T) {
+	for err, want := range map[error]string{
+		fsutil.ErrSymlink: "symlink", fsutil.ErrHardLink: "hard-link", fsutil.ErrEscapesTree: "bad-path",
+		fsutil.ErrNotRegularFile: "not-a-file", fsutil.ErrFileTooLarge: "too-large", os.ErrNotExist: "not-found",
+	} {
+		if got := shareFault(fmt.Errorf("x: %w", err)); got != want {
+			t.Errorf("%v: %q, want %q", err, got, want)
+		}
 	}
 }

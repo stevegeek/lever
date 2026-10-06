@@ -282,7 +282,7 @@ facts about that login only: each upload from it with `login`, `name`,
   never another login's uploads, other tasks' files, secrets,
   credentials or configuration. Refusals are fixed words:
   `contact-required`, `not-a-contact`, `bad-path`, `not-found`,
-  `symlink` (also a hard link), `not-a-file`, `too-large`, `extension`,
+  `symlink`, `hard-link`, `not-a-file`, `too-large`, `extension`,
   `rate`, `off`, `unavailable`; on any of them, tell the operator when the
   task needs it.
 - The workers' .lever-files directories (`workers/<name>/.lever-files/`)

@@ -720,6 +720,10 @@ func checkPush(app *config.App, st state.State) checkResult {
 		return checkResult{name, false, "on, but the state directory is inside the tree: push stays off (agents could read its key)",
 			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
 	}
+	if th := app.Remote.Push.TestHosts; len(th) > 0 {
+		return checkResult{name, false, "on, with remote.push.test_hosts set (" + strings.Join(th, ",") + "): TEST ONLY, the proxy may push over plain http to loopback",
+			"remove remote.push.test_hosts, stop the proxy, unset " + webpush.TestHostsEnv + ", and run `lever apply`"}
+	}
 	dir := st.PushDir()
 	sum := remoteproxy.ReadPushSummary(dir)
 	switch {
@@ -748,8 +752,8 @@ func checkPush(app *config.App, st state.State) checkResult {
 			return " (" + strings.Join(per, ", ") + ")"
 		}(), last)
 	if sum.Last != nil && sum.Last.TestHosts {
-		return warnResult(name, detail+"; the running proxy has "+webpush.TestHostsEnv+" set (TEST ONLY)",
-			"stop the proxy, unset "+webpush.TestHostsEnv+", and run `lever apply`")
+		return checkResult{name, false, detail + "; the running proxy pushes to test hosts (TEST ONLY)",
+			"stop the proxy, unset " + webpush.TestHostsEnv + ", and run `lever apply`"}
 	}
 	if sum.Last != nil && sum.Last.Result == "failed" {
 		return warnResult(name, detail, "see "+stateRel(st, st.RemoteAudit())+" (decision push-failed)")

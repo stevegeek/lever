@@ -53,9 +53,24 @@ func TestRemotePushRefusesBadTestHosts(t *testing.T) {
 	if _, err := remotePush(app, st, nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("a non-loopback test host must stop the serve")
 	}
+	// The environment alone is not enough: the config must name the same
+	// addresses, and the config alone is not enough either.
+	t.Setenv(webpush.TestHostsEnv, "127.0.0.1:9447")
+	if _, err := remotePush(app, st, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "test_hosts") {
+		t.Fatalf("environment only: %v", err)
+	}
+	app.Remote.Push.TestHosts = []string{"127.0.0.1:9448"}
+	if _, err := remotePush(app, st, nil, &bytes.Buffer{}); err == nil {
+		t.Fatal("different addresses were accepted")
+	}
+	t.Setenv(webpush.TestHostsEnv, "")
+	if _, err := remotePush(app, st, nil, &bytes.Buffer{}); err == nil {
+		t.Fatal("config only was accepted")
+	}
+	app.Remote.Push.TestHosts = []string{"127.0.0.1:9447"}
 	t.Setenv(webpush.TestHostsEnv, "127.0.0.1:9447")
 	var warn bytes.Buffer
-	if _, err := remotePush(app, st, nil, &warn); err != nil || !strings.Contains(warn.String(), "TEST ONLY") {
+	if p, err := remotePush(app, st, nil, &warn); err != nil || p == nil || !strings.Contains(warn.String(), "TEST ONLY") {
 		t.Fatalf("%v %q", err, warn.String())
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/webpush"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -575,6 +576,14 @@ func (a *App) validateRemote() error {
 		}
 		if err := validPushSubject(a.Remote.Push.Subject); err != nil {
 			return err
+		}
+	}
+	if th := a.Remote.Push.TestHosts; len(th) > 0 {
+		if !a.Remote.Push.Enabled {
+			return fmt.Errorf("config: remote: push.test_hosts is set but push is off — drop it")
+		}
+		if _, err := webpush.ParseTestHosts(strings.Join(th, ",")); err != nil {
+			return fmt.Errorf("config: remote: push.test_hosts: each entry must be 127.0.0.1:<port> (TEST ONLY): %v", err)
 		}
 	}
 	return nil

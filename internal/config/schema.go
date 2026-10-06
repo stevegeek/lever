@@ -447,6 +447,12 @@ type Push struct {
 	// Subject is the VAPID contact the push services see (RFC 8292 §2.1):
 	// mailto:<address> or an https URL. Required when enabled.
 	Subject string `yaml:"subject"`
+	// TestHosts is TEST ONLY: loopback "127.0.0.1:<port>" addresses of a
+	// fake push service (tools/test/pushrecv). The proxy admits them only
+	// when LEVER_PUSH_TEST_HOSTS in its environment names the same
+	// addresses; either one alone stops it. Never set it for a real
+	// instance (`lever doctor` fails while it is set).
+	TestHosts []string `yaml:"test_hosts"`
 }
 
 // AgentMessages is remote.agent_messages.

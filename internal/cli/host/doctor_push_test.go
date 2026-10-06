@@ -37,11 +37,18 @@ func TestCheckPush(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
-	t.Run("test hosts warn", func(t *testing.T) {
+	t.Run("a proxy on test hosts fails", func(t *testing.T) {
 		app, st := pushApp(t)
 		remotePush(app, st, nil, &bytes.Buffer{})
 		remoteproxy.WritePushStatus(st.PushDir(), remoteproxy.PushStatus{At: time.Now(), Result: "started", TestHosts: true})
-		if r := checkPush(app, st); !r.ok || r.fix == "" || !strings.Contains(r.detail, webpush.TestHostsEnv) {
+		if r := checkPush(app, st); r.ok || !strings.Contains(r.fix, webpush.TestHostsEnv) {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("test_hosts in the config fails", func(t *testing.T) {
+		app, st := pushApp(t)
+		app.Remote.Push.TestHosts = []string{"127.0.0.1:9447"}
+		if r := checkPush(app, st); r.ok || !strings.Contains(r.detail, "test_hosts") {
 			t.Fatalf("%+v", r)
 		}
 	})

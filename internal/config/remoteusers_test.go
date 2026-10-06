@@ -165,6 +165,16 @@ func TestRemotePushValidation(t *testing.T) {
 		"mailto no at":     {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "mailto:op"} }, "push.subject"},
 		"mailto two":       {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "mailto:a@b,c@d"} }, "push.subject"},
 		"control char":     {func(a *App) { a.Remote.Push = Push{Enabled: true, Subject: "mailto:a@b\n"} }, "push.subject"},
+		"test hosts": {func(a *App) {
+			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com", TestHosts: []string{"127.0.0.1:9447"}}
+		}, ""},
+		"test hosts, push off": {func(a *App) { a.Remote.Push = Push{TestHosts: []string{"127.0.0.1:9447"}} }, "push.test_hosts"},
+		"test host not loopback": {func(a *App) {
+			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com", TestHosts: []string{"10.0.0.1:9447"}}
+		}, "push.test_hosts"},
+		"test host by name": {func(a *App) {
+			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com", TestHosts: []string{"localhost:9447"}}
+		}, "push.test_hosts"},
 		"console landing": {func(a *App) {
 			a.Remote.Landing = ""
 			a.Remote.Push = Push{Enabled: true, Subject: "mailto:op@example.com"}

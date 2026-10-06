@@ -200,4 +200,9 @@ func TestRemoteConfigHashPush(t *testing.T) {
 	if RemoteConfigHash(app) == on {
 		t.Fatal("the VAPID subject is captured at start: a change must restart the proxy")
 	}
+	subj := RemoteConfigHash(app)
+	app.Remote.Push.TestHosts = []string{"127.0.0.1:9447"}
+	if RemoteConfigHash(app) == subj {
+		t.Fatal("the test hosts are captured at start: a change must restart the proxy")
+	}
 }

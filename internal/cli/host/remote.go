@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -200,6 +201,28 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 	return provider, handler, push, nil
 }
 
+// pushTestHosts is the TEST ONLY exception: both remote.push.test_hosts and
+// LEVER_PUSH_TEST_HOSTS must name the same 127.0.0.1 addresses. Either one
+// alone is an error, so neither a stray shell variable of whoever runs
+// `lever apply` nor a config key copied into a real lever.yaml widens where
+// the proxy may connect by itself.
+func pushTestHosts(app *config.App, env string) (webpush.TestHosts, error) {
+	fromEnv, err := webpush.ParseTestHosts(env)
+	if err != nil {
+		return nil, err
+	}
+	fromCfg, err := webpush.ParseTestHosts(strings.Join(app.Remote.Push.TestHosts, ","))
+	if err != nil {
+		return nil, err
+	}
+	if !maps.Equal(fromEnv, fromCfg) {
+		return nil, fmt.Errorf("remote.push: the test push hosts need both remote.push.test_hosts and %s, naming the same "+
+			"127.0.0.1:<port> addresses (config %q, environment %q); TEST ONLY — for a real instance set neither",
+			webpush.TestHostsEnv, strings.Join(app.Remote.Push.TestHosts, ","), env)
+	}
+	return fromEnv, nil
+}
+
 // remotePush builds the Web Push service (remote.push), or nil when off.
 // A malformed LEVER_PUSH_TEST_HOSTS stops the serve: never a silent
 // widening of where the proxy may connect. A fault in the push files keeps
@@ -213,7 +236,7 @@ func remotePush(app *config.App, st state.State, auditFn func(remoteproxy.AuditL
 			"the push key and subscriptions: push stays off\n")
 		return nil, nil
 	}
-	test, err := webpush.ParseTestHosts(os.Getenv(webpush.TestHostsEnv))
+	test, err := pushTestHosts(app, os.Getenv(webpush.TestHostsEnv))
 	if err != nil {
 		return nil, err
 	}

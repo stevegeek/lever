@@ -154,8 +154,14 @@ version bump moves the block under the new version heading.
     revoked identities are never healed, and a worker busy with a start, resume, stop or suspend
     is skipped until the next pass.
   - Every reset (apply, up, broker) first runs the pre-role record guard: a record created before
-    scion#1089 stores no role, which scion resolves to full hub authority, so its token is not
-    reset (a `deny` audit line / a warning instead).
+    scion#1089 carries the full role scion's migration grandfathered onto it (or, on older pins,
+    no role, which resolved to full), so its token is not reset (a `deny` audit line / a warning
+    instead). The broker also refuses a reset when no guard is wired, and re-checks revocation
+    after the worker lock wait.
+  - Every exec into an agent container (the token read, the harness probe, the session report,
+    the read-only write probe) runs as `scion` under its own 10 s deadline with its output capped
+    at 64 KiB: the agent is root in its container and can replace the programs or put a FIFO
+    where the token file was, and must not be able to hang or flood doctor, apply or the broker.
   - The new token is minted by the hub from the agent's stored role (the same path as a start or
     a refresh) and written by scion's runtime broker; it is the agent's own token, never a user
     or controller token. An agent that forges an expired token file gains a reset of its own

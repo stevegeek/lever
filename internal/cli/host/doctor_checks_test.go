@@ -1408,7 +1408,7 @@ func TestCheckManagerLive(t *testing.T) {
 		{"running record, blank column", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "no container status", ""},
 	}
 	for _, c := range cases {
-		r := checkManagerLive(context.Background(), "/lever", "assistant", c.list, now)
+		r := checkManagerLive(context.Background(), "/lever", "assistant", c.list, nil, now)
 		if r.ok != c.ok {
 			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
 		}
@@ -1423,9 +1423,134 @@ func TestCheckManagerLive(t *testing.T) {
 	// and never a finding of its own — a down jail is another row's job.
 	r := checkManagerLive(context.Background(), "/lever", "assistant", func(context.Context, string) ([]scion.Agent, error) {
 		return nil, errors.New("connection refused\nusage: scion list ...")
-	}, now)
+	}, nil, now)
 	if !r.ok || !strings.Contains(r.detail, "not checked") || strings.Contains(r.detail, "usage") {
 		t.Fatalf("list error must read as not-checked with only the first line: %+v", r)
+	}
+}
+
+// stubSession is an agentSessionReader with canned answers per container.
+type stubSession struct {
+	tok      map[string]jail.HubTokenTimes
+	tokErr   error
+	alive    bool
+	aliveErr error
+	refs     []string
+}
+
+func (s *stubSession) HubToken(_ context.Context, ref string) (jail.HubTokenTimes, error) {
+	s.refs = append(s.refs, ref)
+	if s.tokErr != nil {
+		return jail.HubTokenTimes{}, s.tokErr
+	}
+	t, ok := s.tok[ref]
+	if !ok {
+		return jail.HubTokenTimes{}, errors.New("exit status 1")
+	}
+	return t, nil
+}
+
+func (s *stubSession) HarnessAlive(_ context.Context, ref string) (bool, error) {
+	s.refs = append(s.refs, ref)
+	return s.alive, s.aliveErr
+}
+
+// TestCheckManagerLiveSessionFaults: the two faults a live container hides.
+// An expired hub token fails the row even while the activity reads stalled
+// (the pass an idle manager gets), and a phase stopped over a live container
+// says whether claude still runs and names the matching fix.
+func TestCheckManagerLiveSessionFaults(t *testing.T) {
+	now := time.Date(2026, 10, 6, 19, 30, 0, 0, time.UTC)
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	stalled := scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "stalled", LastActivityEvent: now.Add(-6 * time.Minute)}
+	expired := map[string]jail.HubTokenTimes{"lever--assistant": {Expiry: now.Add(-20 * time.Minute), Now: now}}
+	valid := map[string]jail.HubTokenTimes{"lever--assistant": {Expiry: now.Add(5 * time.Hour), Now: now}}
+
+	r := checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tok: expired}, now)
+	if r.ok || !strings.Contains(r.detail, "hub token expired at 2026-10-06T19:10:00Z (20m0s ago") || !strings.Contains(r.detail, "401") ||
+		!strings.Contains(r.fix, "lever apply") || !strings.Contains(r.fix, "scion reset-auth assistant -g /lever") {
+		t.Fatalf("expired token under a stalled activity must fail with the reset-auth fix: %+v", r)
+	}
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tok: valid}, now)
+	if !r.ok || !strings.Contains(r.detail, "idle at its prompt") {
+		t.Fatalf("a valid token keeps the idle-manager pass: %+v", r)
+	}
+	// A token that cannot be read is no finding: the stalled pass stands.
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tokErr: errors.New("exit status 1")}, now)
+	if !r.ok {
+		t.Fatalf("an unreadable token must not fail the row: %+v", r)
+	}
+
+	stoppedLive := scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "Up 3 hours"}
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{alive: true}, now)
+	if r.ok || !strings.Contains(r.detail, "claude still runs in its container") || !strings.Contains(r.detail, "SessionEnd") ||
+		!strings.Contains(r.fix, "lever apply") {
+		t.Fatalf("stopped over a live harness: %+v", r)
+	}
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{alive: false}, now)
+	if r.ok || !strings.Contains(r.detail, "claude has exited") || !strings.Contains(r.fix, "/resume") {
+		t.Fatalf("stopped with claude gone: %+v", r)
+	}
+	// The harness probe failing falls back to the plain not-live row, with
+	// the stopped fix that names the new session.
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{aliveErr: errors.New("exit status 125")}, now)
+	if r.ok || !strings.Contains(r.detail, `phase "stopped"`) || !strings.Contains(r.fix, "new claude session") {
+		t.Fatalf("stopped, harness unknown: %+v", r)
+	}
+	// A stopped record with no container is not probed at all.
+	s := &stubSession{alive: true}
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "stopped"}), s, now)
+	if r.ok || len(s.refs) != 0 || !strings.Contains(r.fix, "/resume") {
+		t.Fatalf("stopped, no container: %+v (probed %v)", r, s.refs)
+	}
+}
+
+// TestCheckAgentHubTokens: the token row over the manager and the workers.
+func TestCheckAgentHubTokens(t *testing.T) {
+	now := time.Date(2026, 10, 6, 19, 30, 0, 0, time.UTC)
+	fleet := func(context.Context, string) ([]scion.Agent, error) {
+		return []scion.Agent{
+			{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days"},
+			{Slug: "scratch", Phase: "running", ContainerStatus: "Up 1 hour"},
+			{Slug: "idle", Phase: "suspended", ContainerStatus: "stopped"},
+		}, nil
+	}
+	agents := []string{"assistant", "scratch", "idle"}
+	tok := func(left time.Duration) jail.HubTokenTimes {
+		return jail.HubTokenTimes{Expiry: now.Add(left), Now: now}
+	}
+
+	r := checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+		"lever--assistant": tok(7 * time.Hour), "lever--scratch": tok(9 * time.Hour)}})
+	if !r.ok || r.fix != "" || !strings.Contains(r.detail, "assistant (valid 7h0m0s)") || strings.Contains(r.detail, "idle") {
+		t.Fatalf("all valid: %+v", r)
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+		"lever--assistant": tok(7 * time.Hour), "lever--scratch": tok(-3 * time.Minute)}})
+	if r.ok || !strings.Contains(r.detail, "scratch (expired 3m0s ago)") || !strings.Contains(r.fix, "scion reset-auth scratch -g /lever") {
+		t.Fatalf("worker expired: %+v", r)
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+		"lever--assistant": tok(90 * time.Minute), "lever--scratch": tok(9 * time.Hour)}})
+	if !r.ok || r.fix == "" || !strings.Contains(r.detail, "assistant (refresh due 30m0s ago, expires in 1h30m0s)") {
+		t.Fatalf("overdue refresh is a warning: %+v", r)
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+		"lever--assistant": tok(7 * time.Hour)}})
+	if !r.ok || !strings.Contains(r.detail, "not checked: scratch (token unreadable)") {
+		t.Fatalf("unreadable worker token: %+v", r)
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", agents, func(context.Context, string) ([]scion.Agent, error) {
+		return nil, errors.New("hub down\nusage")
+	}, &stubSession{})
+	if !r.ok || !strings.Contains(r.detail, "not checked") || strings.Contains(r.detail, "usage") {
+		t.Fatalf("list error: %+v", r)
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", agents, func(context.Context, string) ([]scion.Agent, error) { return nil, nil }, &stubSession{})
+	if !r.ok || r.detail != "no running agent" {
+		t.Fatalf("nothing running: %+v", r)
 	}
 }
 

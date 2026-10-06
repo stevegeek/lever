@@ -144,6 +144,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	readContainerEnv := func(ctx context.Context, ref, key string) (string, bool, error) {
 		return jail.ContainerEnvValue(ctx, jr, ref, key)
 	}
+	// An agent's hub token expiry and harness liveness, read in its
+	// container (jail.AgentProbe); only a time and a boolean come back.
+	agentSession := jail.AgentProbe{R: jr}
 	workerNames := make([]string, 0, len(app.Workers))
 	workerDirs := make(map[string]string, len(app.Workers))
 	for _, w := range app.Workers {
@@ -153,7 +156,12 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 
 	checks := []func() checkResult{
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
-		func() checkResult { return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, time.Now()) },
+		func() checkResult {
+			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, time.Now())
+		},
+		func() checkResult {
+			return checkAgentHubTokens(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)
+		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)

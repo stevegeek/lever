@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/stevegeek/lever/internal/webpush"
 )
@@ -241,7 +242,9 @@ func decodePushSubBody(body []byte, out *pushSubBody) error {
 }
 
 // noDuplicateKeys walks body's tokens and refuses an object that names a
-// key twice (encoding/json would keep the last one silently).
+// key twice (encoding/json would keep the last one silently). Keys compare
+// case-folded, as encoding/json matches them to fields: "endpoint" and
+// "ENDPOINT" (or "keys" and "keyſ") are the same field.
 func noDuplicateKeys(body []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	type frame struct {
@@ -263,6 +266,7 @@ func noDuplicateKeys(body []byte) error {
 		}
 		if top != nil && top.object && top.wantKey {
 			if k, ok := tok.(string); ok {
+				k = foldKey(k)
 				if top.keys[k] {
 					return errors.New("push: a key appears twice")
 				}
@@ -292,6 +296,21 @@ func noDuplicateKeys(body []byte) error {
 			top.wantKey = true // a value ends: the next token is a key
 		}
 	}
+}
+
+// foldKey maps each rune of k to the smallest rune of its simple case
+// folding orbit, so two keys encoding/json would match to one field fold to
+// one string.
+func foldKey(k string) string {
+	var b strings.Builder
+	for _, r := range k {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+		b.WriteRune(least)
+	}
+	return b.String()
 }
 
 // endpointHost is the only part of an endpoint an audit line may carry.

@@ -23,6 +23,14 @@ import {
   WAKE_POLL_MS,
   WAKE_POLLS,
   LIST_MS,
+  CONTACTS_MS,
+  NOT_SHOWN,
+  contactList,
+  transcriptItems,
+  transcriptPath,
+  transcriptWho,
+  mergeRows,
+  viewErrorText,
 } from './chatcore.js';
 
 test('historyItems reads either key and drops junk', () => {
@@ -280,4 +288,61 @@ test('the page timings', () => {
   assert.equal(WAKE_POLL_MS, 3000);
   assert.equal(WAKE_POLLS * WAKE_POLL_MS, 90000);
   assert.equal(LIST_MS, 15000);
+});
+
+test('contactList keeps well-formed contacts and agents only', () => {
+  assert.equal(contactList(null), null);
+  assert.equal(contactList({ contacts: 'x' }), null);
+  assert.deepEqual(contactList({ contacts: [
+    { login: 'c@x', signedIn: true, agents: [{ name: 'w1', label: 'Via\nRoma', state: 'running', id: 'leak' }, { name: 'w1' }, { label: 'no name' }, { name: 'w2', state: 'bogus' }] },
+    { login: 'c@x' }, { login: '' }, null, 7,
+    { login: 'd@x', signedIn: 'yes', agents: 'none' },
+  ] }), [
+    { login: 'c@x', signedIn: true, agents: [{ name: 'w1', label: 'Via Roma', state: 'running', access: 'see' }, { name: 'w2', label: '', state: 'unknown', access: 'see' }] },
+    { login: 'd@x', signedIn: false, agents: [] },
+  ]);
+});
+
+test('transcriptItems: only rows with an id; shownToContact only when exactly true', () => {
+  assert.deepEqual(transcriptItems({ messages: [
+    { id: 'a', from: 'agent', text: 't', createdAt: 'c', shownToContact: true },
+    { id: 'b', from: 'contact', text: 7, shownToContact: 'true' },
+    { id: 'c', from: '<b>', text: 'x' },
+    { from: 'agent', text: 'no id' }, null,
+  ] }), [
+    { id: 'a', from: 'agent', text: 't', createdAt: 'c', shownToContact: true },
+    { id: 'b', from: 'contact', text: '', createdAt: '', shownToContact: false },
+    { id: 'c', from: 'agent', text: 'x', createdAt: '', shownToContact: false },
+  ]);
+  assert.deepEqual(transcriptItems('nope'), []);
+});
+
+test('transcriptPath encodes the login and the agent', () => {
+  assert.equal(transcriptPath('a/b+c@x', 'w1', ''), '/lever/api/contacts/a%2Fb%2Bc%40x/agents/w1/messages?limit=50');
+  assert.equal(transcriptPath('c@x', 'w1', 'C 1'), '/lever/api/contacts/c%40x/agents/w1/messages?limit=50&cursor=C+1');
+});
+
+test('transcriptWho names the writer', () => {
+  assert.equal(transcriptWho({ from: 'contact' }, 'c@x', 'w1'), 'c@x');
+  assert.equal(transcriptWho({ from: 'agent' }, 'c@x', 'w1'), 'w1');
+  assert.equal(transcriptWho({ from: 'system' }, 'c@x', 'w1'), 'hub');
+});
+
+test('mergeRows reports a new row, new text and a new mark', () => {
+  const m = new Map();
+  assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: false }]), true);
+  assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: false }]), false);
+  assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: true }]), true);
+  assert.equal(mergeRows(m, [{ id: 'a', text: 'u', shownToContact: true }]), true);
+});
+
+test('viewErrorText reads the fixed words', () => {
+  assert.equal(viewErrorText(409, { error: 'not-signed-in' }), 'has not signed in yet');
+  assert.equal(viewErrorText(409, { error: 'no-record' }), 'the agent has no record on the hub yet');
+  assert.equal(viewErrorText(502, 'bad gateway\n'), errorText(502, 'bad gateway\n'));
+});
+
+test('the operator view constants', () => {
+  assert.equal(CONTACTS_MS, 30000);
+  assert.equal(NOT_SHOWN, 'not shown to the contact');
 });

@@ -277,3 +277,80 @@ export function wakeText(status, body, name) {
   if (Object.hasOwn(WAKE_TEXT, word)) return WAKE_TEXT[word];
   return `${name} could not be woken (HTTP ${status || 'no answer'}).`;
 }
+
+// The operator's read-only view of contact conversations
+// (/lever/api/contacts). Like every answer, these are data of unknown shape.
+
+export const CONTACTS_MS = 30000; // the contact list and an open transcript refresh this often
+export const NOT_SHOWN = 'not shown to the contact';
+const FROM = new Set(['contact', 'agent', 'system']);
+
+// contactList reads the contact list: [{login, signedIn, agents: [{name,
+// label, state, access: 'see'}]}], or null when it is not one. access 'see'
+// keeps agent rows of this list off every input.
+export function contactList(body) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.contacts)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const c of body.contacts) {
+    if (!c || typeof c !== 'object') continue;
+    const login = str(c.login);
+    if (!login || seen.has(login)) continue;
+    seen.add(login);
+    const names = new Set();
+    const agents = [];
+    for (const a of Array.isArray(c.agents) ? c.agents : []) {
+      const name = str(a && a.name);
+      if (!name || names.has(name)) continue;
+      names.add(name);
+      agents.push({ name, label: oneLine(a.label, LABEL_MAX), state: STATES.has(str(a.state)) ? a.state : 'unknown', access: 'see' });
+    }
+    out.push({ login, signedIn: c.signedIn === true, agents });
+  }
+  return out;
+}
+
+// transcriptItems reads a transcript page's rows. A row without an id is
+// left out; an unknown writer reads as the agent; a row counts as shown to
+// the contact only when the answer says exactly true.
+export function transcriptItems(body) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return [];
+  return body.messages
+    .filter((m) => m && typeof m === 'object' && str(m.id))
+    .map((m) => ({ id: str(m.id), from: FROM.has(str(m.from)) ? m.from : 'agent', text: str(m.text), createdAt: str(m.createdAt), shownToContact: m.shownToContact === true }));
+}
+
+// transcriptPath is the route of one transcript page.
+export function transcriptPath(login, name, cursor) {
+  const q = new URLSearchParams({ limit: '50' });
+  if (cursor) q.set('cursor', cursor);
+  return `/lever/api/contacts/${encodeURIComponent(login)}/agents/${encodeURIComponent(name)}/messages?${q}`;
+}
+
+// transcriptWho names a row's writer.
+export function transcriptWho(m, login, name) {
+  if (m.from === 'contact') return login;
+  return m.from === 'agent' ? name : 'hub';
+}
+
+// mergeRows adds transcript rows by id and reports whether anything
+// changed: a row, its text, or its mark (an agent row binds later).
+export function mergeRows(map, items) {
+  let changed = false;
+  for (const m of items) {
+    const old = map.get(m.id);
+    if (!old || old.text !== m.text || old.shownToContact !== m.shownToContact) {
+      map.set(m.id, m);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// viewErrorText says why a transcript cannot be read.
+export function viewErrorText(status, body) {
+  const word = body && typeof body === 'object' ? str(body.error) : '';
+  if (word === 'not-signed-in') return 'has not signed in yet';
+  if (word === 'no-record') return 'the agent has no record on the hub yet';
+  return errorText(status, body);
+}

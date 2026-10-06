@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -141,11 +142,11 @@ func TestCheckAgentMessages(t *testing.T) {
 	st := state.State{Dir: t.TempDir()}
 	app := &config.App{Name: "x", Tree: tree, Remote: config.Remote{Enabled: true,
 		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}}}
-	if r := checkAgentMessages(app, st); !r.ok || !strings.Contains(r.detail, "off") {
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); !r.ok || !strings.Contains(r.detail, "off") {
 		t.Fatalf("off: %+v", r)
 	}
 	app.Remote.AgentMessages.Enabled = true
-	r := checkAgentMessages(app, st)
+	r := checkAgentMessages(app, st, agentMsgsLive{})
 	if !r.ok || !strings.Contains(r.detail, "c@x (x)") || !strings.Contains(r.detail, "follow_up_after 24h,") ||
 		!strings.Contains(r.detail, "max_chars 4000") || !strings.Contains(r.detail, "image") {
 		t.Fatalf("on: %+v", r)
@@ -154,23 +155,78 @@ func TestCheckAgentMessages(t *testing.T) {
 		t.Fatalf("an operator is not a contact: %+v", r)
 	}
 	app.Remote.AgentMessages.FollowUpAfter = 90 * time.Minute
-	if r := checkAgentMessages(app, st); !strings.Contains(r.detail, "follow_up_after 1h30m0s") {
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); !strings.Contains(r.detail, "follow_up_after 1h30m0s") {
 		t.Fatalf("a duration that is not whole hours: %+v", r)
 	}
 	if err := os.MkdirAll(st.AgentLedger(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if r := checkAgentMessages(app, st); !r.ok || !strings.Contains(r.detail, "0700") {
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); !r.ok || !strings.Contains(r.detail, "0700") {
 		t.Fatalf("a private ledger: %+v", r)
 	}
 	if err := os.Chmod(st.AgentLedger(), 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if r := checkAgentMessages(app, st); r.ok {
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); r.ok {
 		t.Fatalf("a group-writable ledger must fail: %+v", r)
 	}
 	inside := state.State{Dir: filepath.Join(tree, ".lever-state")}
-	if r := checkAgentMessages(app, inside); r.ok {
+	if r := checkAgentMessages(app, inside, agentMsgsLive{}); r.ok {
 		t.Fatalf("state inside the tree must fail: %+v", r)
+	}
+}
+
+// The row says when the running broker or proxy started with another
+// config: until apply, agent messages follow the old one.
+func TestCheckAgentMessagesNamesAStaleProcess(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	app := &config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true,
+		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}}}
+	same := func() (string, bool) { return brokerctl.ConfigHash(app), true }
+	other := func() (string, bool) { return "another", true }
+	none := func() (string, bool) { return "", false }
+	no, yes := func() bool { return false }, func() bool { return true }
+	for name, tc := range map[string]struct {
+		live  agentMsgsLive
+		stale string
+	}{
+		"both current": {agentMsgsLive{same, no}, ""},
+		"no broker":    {agentMsgsLive{none, no}, ""},
+		"broker stale": {agentMsgsLive{other, no}, "running broker started"},
+		"proxy stale":  {agentMsgsLive{same, yes}, "running remote proxy started"},
+		"both stale":   {agentMsgsLive{other, yes}, "broker and remote proxy"},
+	} {
+		r := checkAgentMessages(app, st, tc.live)
+		if !r.ok || (tc.stale == "") != (r.fix == "") || !strings.Contains(r.detail, tc.stale) {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+	// Off in lever.yaml while the running proxy still filters: said too.
+	if r := checkAgentMessages(app, st, agentMsgsLive{same, yes}); !strings.Contains(r.detail, "off") || !strings.Contains(r.detail, "lever apply") {
+		t.Fatalf("off, stale proxy: %+v", r)
+	}
+}
+
+// One contact file another user could write refuses every authorization;
+// the row says so.
+func TestCheckAgentMessagesUnsafeContactFile(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	app := &config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true, AgentMessages: config.AgentMessages{Enabled: true},
+		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}}}
+	if err := os.MkdirAll(st.AgentLedger(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(st.AgentLedger(), "c-000000000000000000000000.jsonl")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); !r.ok {
+		t.Fatalf("a private file: %+v", r)
+	}
+	if err := os.Chmod(f, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); r.ok || !strings.Contains(r.detail, "every agent's contact_message is refused") {
+		t.Fatalf("an unsafe file: %+v", r)
 	}
 }

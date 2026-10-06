@@ -1025,19 +1025,27 @@ remote:
   decision, never the text.
 - **What the operator sees.** Everything, unfiltered, as before. Messages to the operator keep
   their old path.
-- **Turning it on.** `lever apply` restarts the broker and the proxy (the key is part of their
-  config stamps). `lever init` rewrites both skills (they teach the two steps while it is on).
-  The agent image must contain this release's `lever-agent`, which has the two tools: run `make
-  lever-image` (and rebuild an instance image built from it), then `lever up --fresh` for the
-  manager after you back up its conversation. Each contact agent must start fresh on the new
-  skill: `lever up --fresh` for the manager, purge and start for a worker. Until then a
-  contact's post to it is refused as not fresh. `lever doctor` has an `agent messages` row.
-  Turning it off again restores the earlier behaviour (and again needs `lever init` and fresh
-  sessions).
+- **Turning it on (or off).** Run `lever init` first, then `lever apply`: `init` rewrites both
+  skills (they teach the two steps while it is on), and `apply` refuses contact logins while the
+  skills on disk are not the ones this config renders. `apply` then restarts the broker and the
+  proxy (the key is part of their config stamps); until it runs, they keep the old setting, and
+  the `agent messages` row of `lever doctor` says so. The agent image must contain this
+  release's `lever-agent`, which has the two tools: run `make lever-image` (and rebuild an
+  instance image built from it), then `lever up --fresh` for the manager after you back up its
+  conversation. Each contact agent must start fresh on the new skill: `lever up --fresh` for the
+  manager, purge and start for a worker. Until then a contact's post to it is refused as not
+  fresh. Turning it off again restores the earlier behaviour, with the same steps.
+- **Clocks.** The hub stamps a message with the VM's clock, and lever binds it to its
+  authorization only when that time is at most 10 seconds before the authorization (host
+  clock). A VM clock that fell behind the host (on Lima, after the Mac slept) hides authorized
+  messages from contacts. With agent messages on, the `guest clock` row of `lever doctor` fails
+  when the VM is more than 5 seconds behind; resync it (`limactl shell <vm> sudo hwclock -s`, or
+  restart the VM). A message sent while the clock lagged keeps its hub time and stays hidden;
+  messages sent after the resync show.
 - **Known limits.** The hub's own web UI (the console landing) shows a new agent message to a
   contact only after a reload, since the events carry no text, and shows no unread marks (lever's
-  chat page counts them itself). A message older than the two
-  4 MiB record files of that contact stops showing. An authorization the agent does not send
+  chat page counts them itself). A message older than the two 4 MiB record files of that
+  contact stops showing. An authorization the agent does not send
   still uses its slot until the reminder time.
 
 ## What this does NOT do

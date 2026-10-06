@@ -25,6 +25,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -33,6 +34,7 @@ import (
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // checkResult is one diagnostic outcome. detail is shown in both the pass and
@@ -501,9 +503,65 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s/ (%d files, 0700)", tier, stateRel(st, p), len(files)), ""}
 }
 
+// agentMsgsLive is what the running processes were started with, for the
+// agent messages row: the running broker's config hash (ok false when no
+// broker answers) and whether a running remote proxy's stamp differs from
+// this config.
+type agentMsgsLive struct {
+	brokerHash func() (string, bool)
+	proxyStale func() bool
+}
+
+// liveAgentMessages reads what the running broker and remote proxy were
+// started with: the broker's /epoch config hash on its admin port, and the
+// proxy's stamp file against this config.
+func liveAgentMessages(ctx context.Context, app *config.App, st state.State) agentMsgsLive {
+	return agentMsgsLive{
+		brokerHash: func() (string, bool) {
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			var er wire.EpochResponse
+			u := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), wire.PathEpoch)
+			if err := httpjson.Get(ctx, &http.Client{Timeout: 2 * time.Second}, u, &er); err != nil {
+				return "", false
+			}
+			return er.ConfigHash, true
+		},
+		proxyStale: func() bool {
+			_, found, alive := state.PIDStatus(st.RemotePID())
+			return found && alive && !st.RemoteStampMatches(cli.VersionString(), brokerctl.RemoteConfigHash(app))
+		},
+	}
+}
+
 // checkAgentMessages reports remote.agent_messages: off, or on with the
-// limits, the contacts and their agents, and the agent ledger's safety.
-func checkAgentMessages(app *config.App, st state.State) checkResult {
+// limits, the contacts and their agents, and the agent ledger's safety. The
+// broker and the proxy read the config only when they start, so the row
+// also says when either runs with another config (or lever version) than
+// lever.yaml holds now: until `lever apply`, they act on the old one.
+func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) checkResult {
+	r := agentMessagesRow(app, st)
+	if !r.ok {
+		return r
+	}
+	var stale []string
+	if live.brokerHash != nil {
+		if h, ok := live.brokerHash(); ok && h != brokerctl.ConfigHash(app) {
+			stale = append(stale, "broker")
+		}
+	}
+	if live.proxyStale != nil && live.proxyStale() {
+		stale = append(stale, "remote proxy")
+	}
+	if len(stale) > 0 {
+		return warnResult(r.name, r.detail+"; the running "+strings.Join(stale, " and ")+
+			" started with another config or lever version, so agent messages follow the old one until `lever apply`",
+			"run `lever init` (the skills follow the setting), then `lever apply`")
+	}
+	return r
+}
+
+func agentMessagesRow(app *config.App, st state.State) checkResult {
 	const name = "agent messages"
 	if !app.AgentMessagesOn() {
 		return checkResult{name, true, "off (agents answer contacts as before; nothing is filtered)", ""}
@@ -535,7 +593,41 @@ func checkAgentMessages(app *config.App, st state.State) checkResult {
 	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
 		return checkResult{name, false, fmt.Sprintf("the agent ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()), "remove " + p}
 	}
+	// Every authorization counts the hourly rate over all contact files,
+	// so one unsafe file refuses every authorization (failing closed).
+	if bad := unsafeLedgerFile(p); bad != "" {
+		return checkResult{name, false, "the agent ledger file " + stateRel(st, bad) + " is not a private regular file of yours: " +
+			"every agent's contact_message is refused (unavailable) and contacts are shown no agent message until it is fixed",
+			"chmod 600 " + bad + " (or remove it, which forgets that contact's records)"}
+	}
 	return checkResult{name, true, detail + "; ledger " + stateRel(st, p) + "/ (0700)", ""}
+}
+
+// unsafeLedgerFile is the first contact file in dir (or its .1) that is not
+// a regular file, is writable by others, or belongs to another user; "" if
+// none.
+func unsafeLedgerFile(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "c-") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		fi, err := os.Lstat(p)
+		if err != nil {
+			continue
+		}
+		if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o022 != 0 {
+			return p
+		}
+		if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
+			return p
+		}
+	}
+	return ""
 }
 
 // shortDuration prints whole hours as "24h" (time.Duration prints 24h0m0s).

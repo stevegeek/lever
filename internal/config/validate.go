@@ -13,6 +13,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -550,6 +551,9 @@ func (a *App) validateRemote() error {
 		if strings.Contains(lf, `\`) || path.Clean(lf) != lf || lf == "." || !filepath.IsLocal(filepath.FromSlash(lf)) {
 			return fmt.Errorf("config: remote: labels_file %q must be a clean path relative to tree (no leading /, no ..)", lf)
 		}
+		if err := a.validLabelsFileOwner(lf); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -596,6 +600,38 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 			return fmt.Errorf("config: remote: allowed_users %q lists agent %q twice in see", u.Login, name)
 		}
 		seenSee[name] = true
+	}
+	return nil
+}
+
+// validLabelsFileOwner refuses a labels file someone other than the manager
+// would write. Whoever writes it sets the text contacts see beside every
+// agent's name (the manager's row included), so it must not be inside a
+// worker's directory (that worker would author it), nor inside the host's
+// own directories (.lever, which holds the manager's bootstrap ticket, or
+// the state directory): those are host-written secrets, never labels.
+// Compared without case, since the tree may sit on a case-insensitive
+// filesystem.
+func (a *App) validLabelsFileOwner(lf string) error {
+	inside := func(p, dir string) bool {
+		p, dir = strings.ToLower(p), strings.ToLower(dir)
+		return p == dir || strings.HasPrefix(p, dir+"/")
+	}
+	for _, w := range a.Workers {
+		if d := filepath.ToSlash(filepath.Clean(w.Dir)); d != "." && inside(lf, d) {
+			return fmt.Errorf("config: remote: labels_file %q is inside worker %q's dir %q; that worker would write the labels contacts see — keep it outside every worker dir", lf, w.Name, w.Dir)
+		}
+	}
+	for _, part := range strings.Split(lf, "/") {
+		if strings.EqualFold(part, ".lever") || strings.EqualFold(part, state.DirName) {
+			return fmt.Errorf("config: remote: labels_file %q is inside %s, a host directory; keep it in the manager's part of the tree", lf, part)
+		}
+	}
+	if a.dir != "" {
+		stateDir := filepath.ToSlash(filepath.Join(a.dir, state.DirName))
+		if inside(filepath.ToSlash(filepath.Join(a.Tree, lf)), stateDir) {
+			return fmt.Errorf("config: remote: labels_file %q is inside the state directory %s, a host directory", lf, stateDir)
+		}
 	}
 	return nil
 }

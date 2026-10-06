@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -318,5 +319,21 @@ func TestHistoryFilterAsksOnlyAboutTheAgentsRows(t *testing.T) {
 	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
 	if strings.Contains(got, `"x1"`) || !strings.Contains(got, `"a1"`) || len(asked) != 1 || asked[0] != "a1" {
 		t.Fatalf("asked %v: %s", asked, got)
+	}
+}
+
+func TestContactShown(t *testing.T) {
+	rows := []historyRow{
+		{ID: "a1", Sender: "agent:w1", SenderID: agentW1, Type: "instruction", Msg: "kept"},
+		{ID: "a2", Sender: "agent:w1", SenderID: agentW1, Type: "instruction", Msg: "not kept"},
+		{ID: "c1", Sender: "user:c@x", SenderID: contactUID, Type: "instruction", Msg: "mine"},
+		{ID: "s1", Sender: "system", SenderID: "hub", Type: "system", Msg: "started"},
+		{ID: "d", Sender: "user:c@x", SenderID: contactUID, Type: "instruction", Msg: "twice"},
+		{ID: "d", Sender: "agent:w1", SenderID: agentW1, Type: "instruction", Msg: "twice"},
+	}
+	got := contactShown(rows, map[string]bool{"a1": true, "d": true}, contactUID, agentW1)
+	want := map[string]bool{"a1": true, "c1": true, "s1": true}
+	if !maps.Equal(got, want) {
+		t.Fatalf("shown %v, want %v (a repeated id is never shown, an agent row only when kept)", got, want)
 	}
 }

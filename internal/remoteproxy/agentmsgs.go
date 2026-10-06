@@ -115,6 +115,21 @@ func idCounts(rows []historyRow) map[string]int {
 	return n
 }
 
+// contactShown is the ids of the rows a contact is shown with agent
+// messages on: a row whose id is unique on the page and that is not an agent
+// row or is one the ledger keeps. filterHistory removes every other row; the
+// operator view (opview.go) marks them, so the two cannot differ.
+func contactShown(rows []historyRow, keep map[string]bool, uid, agentID string) map[string]bool {
+	seen := idCounts(rows)
+	shown := map[string]bool{}
+	for _, m := range rows {
+		if seen[m.ID] == 1 && (!agentRow(m, uid, agentID) || keep[m.ID]) {
+			shown[m.ID] = true
+		}
+	}
+	return shown
+}
+
 // emptyHistory is the fail-closed answer.
 var emptyHistory = []byte(`{"messages":[],"totalCount":0}`)
 
@@ -154,21 +169,18 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	kept := []json.RawMessage{}
 	removed := map[string]bool{}
 	agentIDs := map[string]bool{} // ids of agent rows, kept or not
-	seen := idCounts(rows)
-	shown := map[string]bool{} // ids of the rows the contact gets
+	shown := contactShown(rows, keep, uid, agentID)
 	for i, m := range rows {
-		isAgent := agentRow(m, uid, agentID)
-		if isAgent {
+		if agentRow(m, uid, agentID) {
 			agentIDs[m.ID] = true
 		}
 		// A repeated id is hidden whoever sent it: an entry keyed by it
 		// (attachments, extensions) could belong to either row.
-		if seen[m.ID] != 1 || isAgent && !keep[m.ID] {
+		if !shown[m.ID] {
 			removed[m.ID] = true
 			continue
 		}
 		kept = append(kept, raws[i])
-		shown[m.ID] = true
 	}
 	doc["messages"], _ = json.Marshal(kept)
 	delete(doc, "items")

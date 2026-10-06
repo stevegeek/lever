@@ -197,6 +197,9 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		LogPath: stateRel(st, st.RemoteLog()),
 		// remote.push: the page's notifications (nil when off).
 		Push: push,
+		// remote.files: uploads into each agent's .lever-files/in/, and
+		// downloads of the files it shares. Nil when off.
+		Files: remoteFiles(app, st),
 	})
 	return provider, handler, push, nil
 }
@@ -291,6 +294,21 @@ func remoteWorkers(app *config.App) []string {
 		out[i] = w.Name
 	}
 	return out
+}
+
+// remoteFiles is the chat page's file exchange (remote.files), or nil when
+// off. The ledger stays off ("") when the state directory is inside the
+// tree, where an agent could write a record.
+func remoteFiles(app *config.App, st state.State) *remoteproxy.FilesConfig {
+	if !app.FilesOn() {
+		return nil
+	}
+	c := &remoteproxy.FilesConfig{Tree: app.Tree, Workspaces: app.AgentWorkspaces(),
+		MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions()}
+	if !brokerctl.StateInsideTree(app, st) {
+		c.LedgerDir = st.FilesLedger()
+	}
+	return c
 }
 
 // remoteLabels is the chat page's labels source, or nil when

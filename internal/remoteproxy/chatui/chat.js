@@ -461,7 +461,7 @@ function openTranscript(login, name) {
   const a = c && c.agents.find((x) => x.name === name);
   if (!a) return;
   closeChat();
-  view = { login, name, signedIn: !!c.signedIn };
+  view = { login, name, signedIn: !!c.signedIn, noFiles: !!c.noFiles };
   document.body.classList.add('chatting');
   document.title = name;
   setText(el.agent, `${login} · ${name}`);
@@ -493,7 +493,7 @@ function pollView() {
 // the agent and the agent's shares to it), read-only, while files are on.
 async function loadViewFiles() {
   const v = view;
-  if (!v || !roster || !roster.files) return;
+  if (!v || v.noFiles || !roster || !roster.files) return;
   const seq = ++filesSeq;
   el.filespanel.hidden = false;
   const res = await api(viewFilesPath(v.login, v.name));
@@ -783,7 +783,7 @@ function showFilesNote(text) {
 // with an agent the login may message, while files are on.
 function syncAttach() {
   const on = !!(roster && roster.files && chat);
-  el.attach.hidden = !on;
+  el.attach.hidden = !on || !roster.files.uploads;
   el.files.hidden = !on;
   el.attach.disabled = uploading || sending || !chat || !chat.view || !chat.view.input;
 }
@@ -896,14 +896,17 @@ function fileRow(agent, f, sender = '') {
   const li = document.createElement('li');
   li.className = `file ${f.direction}`;
   const a = document.createElement('a');
-  const href = localLink(downloadPath(agent, f.id));
+  // Shares off: a share stays listed, but its download is refused.
+  const off = f.direction === 'received' && roster && roster.files && !roster.files.shares;
+  const href = off ? '' : localLink(downloadPath(agent, f.id));
   if (href) {
     a.setAttribute('href', href);
     // Bare: the server's Content-Disposition names the file.
     a.setAttribute('download', '');
   }
   setText(a, f.name);
-  li.append(span('who', f.direction === 'received' ? `From ${agent}` : sender ? `From ${sender}` : 'You sent'), a, span('meta', `${sizeText(f.size)} · ${when({ createdAt: f.at })}`));
+  const meta = `${sizeText(f.size)} · ${when({ createdAt: f.at })}${off ? ' · downloads of shared files are off' : ''}`;
+  li.append(span('who', f.direction === 'received' ? `From ${agent}` : sender ? `From ${sender}` : 'You sent'), a, span('meta', meta));
   return li;
 }
 

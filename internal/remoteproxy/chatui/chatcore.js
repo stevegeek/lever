@@ -307,7 +307,8 @@ export function contactList(body) {
       names.add(name);
       agents.push({ name, label: oneLine(a.label, LABEL_MAX), state: STATES.has(str(a.state)) ? a.state : 'unknown', access: 'see' });
     }
-    out.push({ login, signedIn: c.signedIn === true, agents });
+    // noFiles: files are on, but not for this contact (files: false).
+    out.push({ login, signedIn: c.signedIn === true, agents, ...(c.noFiles === true ? { noFiles: true } : {}) });
   }
   return out;
 }
@@ -411,7 +412,9 @@ const AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export function filesConfig(body) {
   const f = body && typeof body === 'object' ? body.files : null;
   if (!f || typeof f !== 'object' || !Number.isInteger(f.maxBytes) || f.maxBytes <= 0 || !Array.isArray(f.extensions)) return null;
-  return { maxBytes: f.maxBytes, extensions: f.extensions.filter((e) => typeof e === 'string' && /^[a-z0-9]{1,10}$/.test(e)) };
+  return { maxBytes: f.maxBytes, extensions: f.extensions.filter((e) => typeof e === 'string' && /^[a-z0-9]{1,10}$/.test(e)),
+    // A direction is on unless the answer says false (remote.files.uploads/shares).
+    uploads: f.uploads !== false, shares: f.shares !== false };
 }
 
 // fileList reads /lever/api/files/<agent>: rows with a well-formed id only;

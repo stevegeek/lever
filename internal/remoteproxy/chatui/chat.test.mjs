@@ -1913,3 +1913,37 @@ test('push: under Trusted Types the worker URL comes from the lever-sw policy', 
   assert.equal(env.push.registerCalls.length, 2);
   assert.equal(env.tt.refused, 0);
 });
+
+test('uploads off: no paperclip, the Files panel stays', async () => {
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS()], { files: { maxBytes: 1000, extensions: ['pdf'], uploads: false, shares: true } }) }));
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, false);
+});
+
+test('shares off: a share is listed without a link, an upload keeps its link', async () => {
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS()], { files: { maxBytes: 1000, extensions: ['pdf'], uploads: true, shares: false } }),
+    files: () => ({ status: 200, body: { files: [
+      { id: 'e'.repeat(32), name: 'v3.xlsm', size: 10, direction: 'received' },
+      { id: 'f'.repeat(32), name: 'mine.pdf', size: 10, direction: 'sent' },
+    ] } }),
+  }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  const [share, mine] = env.els.filelist.children;
+  assert.equal(share.children.find((c) => c.tag === 'a').attrs.href, undefined);
+  assert.match(share.textContent, /downloads of shared files are off/);
+  assert.equal(mine.children.find((c) => c.tag === 'a').attrs.href, `https://mac.ts.net/lever/api/files/boss/${'f'.repeat(32)}`);
+});
+
+test('operator view: a contact with files off gets no files request', async () => {
+  const env = await load(hubWith({
+    agents: withFiles([BOSS(), A('w1')]),
+    contacts: () => ({ status: 200, body: { contacts: [{ login: 'c@x', signedIn: true, noFiles: true, agents: [{ name: 'w1', label: '', state: 'running' }] }] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  await env.poll();
+  assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 0);
+  assert.equal(env.els.filespanel.hidden, true);
+});

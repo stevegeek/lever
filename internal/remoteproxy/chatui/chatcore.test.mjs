@@ -394,12 +394,12 @@ test('pushView', () => {
 });
 
 test('filesConfig: only a well-formed object turns files on', () => {
-  assert.deepEqual(filesConfig({ files: { maxBytes: 100, extensions: ['pdf', 'BAD', '.x', 'xlsm', 7] } }), { maxBytes: 100, extensions: ['pdf', 'xlsm'] });
+  assert.deepEqual(filesConfig({ files: { maxBytes: 100, extensions: ['pdf', 'BAD', '.x', 'xlsm', 7] } }), { maxBytes: 100, extensions: ['pdf', 'xlsm'], uploads: true, shares: true });
   for (const body of [{}, { files: null }, { files: { maxBytes: 0, extensions: [] } }, { files: { maxBytes: '5', extensions: [] } }, { files: { maxBytes: 5 } }]) {
     assert.equal(filesConfig(body), null, JSON.stringify(body));
   }
   assert.equal(agentList({ agents: [] }).files, null);
-  assert.deepEqual(agentList({ agents: [], files: { maxBytes: 9, extensions: ['pdf'] } }).files, { maxBytes: 9, extensions: ['pdf'] });
+  assert.deepEqual(agentList({ agents: [], files: { maxBytes: 9, extensions: ['pdf'] } }).files, { maxBytes: 9, extensions: ['pdf'], uploads: true, shares: true });
 });
 
 test('fileList: rows need a 32-hex id; names are one line; direction is a fixed word', () => {
@@ -441,4 +441,10 @@ test('uploadErrorText maps the fixed words', () => {
   for (const word of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
     assert.equal(uploadErrorText(400, { error: word }), `${word} (HTTP 400)`);
   }
+});
+
+test('filesConfig: uploads and shares are on unless the answer says false', () => {
+  assert.deepEqual(filesConfig({ files: { maxBytes: 9, extensions: ['pdf'] } }), { maxBytes: 9, extensions: ['pdf'], uploads: true, shares: true });
+  assert.deepEqual(filesConfig({ files: { maxBytes: 9, extensions: [], uploads: false, shares: false } }), { maxBytes: 9, extensions: [], uploads: false, shares: false });
+  assert.equal(contactList({ contacts: [{ login: 'c@x', agents: [], noFiles: true }, { login: 'd@x', agents: [] }] }).map((c) => !!c.noFiles).join(), 'true,false');
 });

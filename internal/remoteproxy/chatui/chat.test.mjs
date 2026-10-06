@@ -1245,3 +1245,206 @@ test('the one-agent page\'s draft and unsent record are adopted once', async () 
   await tick(10);
   assert.equal(sends(env)[0].body.idempotency_key, 'old-key', 'an unclear send keeps its key across the upgrade');
 });
+
+// The wake flow: a message to an asleep worker wakes it first.
+
+const W1_KEY = 'dm:agent:w1id:user:u1';
+const W1_SENDS = `/api/v1/chat/conversations/${encodeURIComponent(W1_KEY)}/messages`;
+
+test('wake: a message to an asleep worker wakes it, then goes under its first key', async () => {
+  let state = 'suspended';
+  const env = await load(hubWith({
+    agents: () => roster([BOSS(), A('w1', { state })]),
+    wake: () => {
+      state = 'starting';
+      return { status: 202, body: { state: 'starting' } };
+    },
+  }), { store: { 'lever-chat-open': 'w1' } });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  assert.equal(env.count('POST', '/lever/api/agents/w1/wake'), 1);
+  assert.equal(env.calls.find((c) => c.path === '/lever/api/agents/w1/wake').body, undefined, 'the wake carries nothing');
+  assert.equal(env.els.note.textContent, 'waking w1…');
+  assert.equal(env.els.send.disabled, true);
+  assert.equal(sends(env).length, 0, 'nothing is posted to an agent that is not running');
+  const record = JSON.parse(env.store['lever-chat-unsent:w1']);
+  assert.deepEqual([record.text, record.conversation, record.tries], ['hello', W1_KEY, 0], 'the text is kept before the wake');
+  // Still starting: the page waits.
+  await env.runTimers(3000);
+  assert.equal(sends(env).length, 0);
+  assert.equal(env.els.note.textContent, 'waking w1…', 'the list read does not hide the wake');
+  state = 'running';
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(sends(env).length, 1);
+  assert.equal(sends(env)[0].path, W1_SENDS);
+  assert.equal(sends(env)[0].body.idempotency_key, record.key);
+  assert.equal(env.els.text.value, '');
+  assert.equal(env.els.error.hidden, true, 'a first post is no "earlier attempt"');
+  assert.equal(env.els.note.hidden, true);
+  assert.equal(env.els.send.disabled, false);
+  assert.equal(env.store['lever-chat-unsent:w1'], undefined);
+});
+
+test('wake: no running in 90 s keeps the text and says so', async () => {
+  const env = await load(hubWith({ agents: () => roster([A('w1', { state: 'suspended' })]), wake: () => ({ status: 202, body: {} }) }), { store: { 'lever-chat-open': 'w1' } });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  for (let i = 0; i < 29; i++) await env.runTimers(3000);
+  assert.equal(env.els.error.hidden, true, 'not before 90 s');
+  await env.runTimers(3000);
+  assert.equal(env.els.error.textContent, 'Not sent: w1 did not wake in time. Your message is kept; send it again later.');
+  assert.equal(env.els.text.value, 'hello');
+  assert.ok(env.store['lever-chat-unsent:w1']);
+  assert.equal(sends(env).length, 0);
+  assert.equal(env.count('POST', '/lever/api/agents/w1/wake'), 1, 'one wake, then only list reads');
+  assert.equal(env.els.send.disabled, false);
+  assert.equal(env.els.note.textContent, 'asleep – your message wakes it');
+});
+
+test('wake: a refusal shows fixed text and keeps the message', async () => {
+  for (const [status, body, re] of [
+    [429, { error: 'rate-limited' }, /a minute/],
+    [403, { error: 'not-allowed' }, /not allowed/],
+    [503, { error: 'unavailable' }, /not available/],
+    [409, { error: 'refused' }, /lever refused to wake it/],
+    [502, '<b>proxy page</b>', /^Not sent: w1 could not be woken \(HTTP 502\)\.$/],
+  ]) {
+    const env = await load(hubWith({ agents: () => roster([A('w1', { state: 'suspended' })]), wake: () => ({ status, body }) }), { store: { 'lever-chat-open': 'w1' } });
+    await type(env, 'hello');
+    env.els.composer.dispatch('submit');
+    await tick(10);
+    assert.match(env.els.error.textContent, re, String(status));
+    assert.equal(env.els.text.value, 'hello');
+    assert.ok(env.store['lever-chat-unsent:w1']);
+    assert.equal(sends(env).length, 0);
+    assert.equal(env.count('GET', '/lever/api/agents'), 2, 'no polling after a refusal');
+    assert.equal(env.els.send.disabled, false);
+  }
+});
+
+test('wake: a network fault on the wake keeps the message', async () => {
+  const env = await load(hubWith({ agents: () => roster([A('w1', { state: 'stopped' })]), wake: () => ({ down: true }) }), { store: { 'lever-chat-open': 'w1' } });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(env.els.error.textContent, 'Not sent: w1 could not be woken (HTTP no answer).');
+  assert.equal(env.els.text.value, 'hello');
+});
+
+test('wake: already starting (409 not-asleep) waits and sends', async () => {
+  let state = 'suspended';
+  const env = await load(hubWith({
+    agents: () => roster([A('w1', { state })]),
+    wake: () => {
+      state = 'starting';
+      return { status: 409, body: { error: 'not-asleep', state: 'starting' } };
+    },
+  }), { store: { 'lever-chat-open': 'w1' } });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  assert.equal(env.els.note.textContent, 'waking w1…');
+  state = 'running';
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(sends(env).length, 1);
+  assert.equal(env.els.text.value, '');
+});
+
+test('wake: an agent that goes to error instead says so and keeps the text', async () => {
+  let state = 'suspended';
+  const env = await load(hubWith({ agents: () => roster([A('w1', { state })]), wake: () => ({ status: 202, body: {} }) }), { store: { 'lever-chat-open': 'w1' } });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  state = 'error';
+  await env.runTimers(3000);
+  assert.equal(env.els.error.textContent, 'Not sent: w1 did not wake (error).');
+  assert.equal(env.els.text.value, 'hello');
+  assert.equal(sends(env).length, 0);
+});
+
+test('wake: a list that cannot be read during the wake is waited out', async () => {
+  let n = 0;
+  const env = await load(hubWith({
+    agents: () => {
+      n++;
+      if (n <= 2) return roster([A('w1', { state: 'suspended' })]);
+      return n === 3 ? { status: 502, body: '' } : roster([A('w1')]);
+    },
+    wake: () => ({ status: 202, body: {} }),
+  }), { store: { 'lever-chat-open': 'w1' } });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  await env.runTimers(3000);
+  assert.equal(sends(env).length, 0);
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(sends(env).length, 1);
+});
+
+test('wake: a reload during the wake keeps the text and its key', async () => {
+  const record = JSON.stringify({ text: 'hello', key: 'k-wake', conversation: W1_KEY, tries: 0 });
+  // Still asleep after the reload: the same key goes with the wake and the post.
+  let state = 'suspended';
+  const env = await load(hubWith({
+    agents: () => roster([A('w1', { state })]),
+    wake: () => {
+      state = 'running';
+      return { status: 202, body: {} };
+    },
+  }), { store: { 'lever-chat-open': 'w1', 'lever-chat-unsent:w1': record, 'lever-chat-draft:w1': 'hello' } });
+  assert.equal(env.els.text.value, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(sends(env)[0].body.idempotency_key, 'k-wake');
+  assert.equal(env.els.error.hidden, true, 'nothing was posted before: no "earlier attempt" note');
+  // Awake by the reload: posted at once under the same key.
+  const awake = await load(hubWith({ agents: () => roster([A('w1')]) }), { store: { 'lever-chat-open': 'w1', 'lever-chat-unsent:w1': record, 'lever-chat-draft:w1': 'hello' } });
+  awake.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(awake.count('POST', '/lever/api/agents/w1/wake'), 0);
+  assert.equal(sends(awake)[0].body.idempotency_key, 'k-wake');
+  assert.equal(awake.els.error.hidden, true);
+});
+
+test('wake: an earlier unclear send keeps its key and its count through a wake', async () => {
+  const record = JSON.stringify({ text: 'hello', key: 'k-old', conversation: W1_KEY, tries: 1 });
+  let state = 'suspended';
+  const env = await load(hubWith({
+    agents: () => roster([A('w1', { state })]),
+    wake: () => {
+      state = 'running';
+      return { status: 202, body: {} };
+    },
+  }), { store: { 'lever-chat-open': 'w1', 'lever-chat-unsent:w1': record, 'lever-chat-draft:w1': 'hello' } });
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(sends(env)[0].body.idempotency_key, 'k-old');
+  assert.equal(env.els.error.textContent, 'Stored now. An earlier attempt had no clear answer: if the message shows twice above, both arrived.');
+});
+
+test('wake: never for the manager, a see-only agent, or a running worker', async () => {
+  for (const [agents, open] of [
+    [[BOSS({ state: 'suspended', activity: undefined })], 'boss'],
+    [[A('w1')], 'w1'],
+  ]) {
+    const env = await load(hubWith({ agents: () => roster(agents) }), { store: { 'lever-chat-open': open } });
+    await type(env, 'hello');
+    env.els.composer.dispatch('submit');
+    await tick(10);
+    assert.equal(env.count('POST', '/lever/api/agents/'), 0, open);
+  }
+  const see = await load(hubWith({ agents: () => roster([A('w2', { access: 'see', state: 'suspended' })]) }), { store: { 'lever-chat-open': 'w2' } });
+  see.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(see.count('POST', ''), 0);
+});

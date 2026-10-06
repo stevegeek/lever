@@ -16,6 +16,8 @@
 import {
   LIST_MS,
   MAX_MESSAGE,
+  WAKE_POLLS,
+  WAKE_POLL_MS,
   agentList,
   askDraft,
   badgeText,
@@ -33,6 +35,7 @@ import {
   oneLine,
   rowTitle,
   sortedMessages,
+  wakeText,
 } from './chatcore.js';
 
 const PAGE = 50; // messages per history request
@@ -108,6 +111,7 @@ let reading = false; // a history read is under way
 let readAgain = false; // something changed while it was
 let olderCursor = '';
 let sending = false;
+let waking = ''; // the agent a send is waking ('' = none)
 let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
@@ -541,7 +545,7 @@ function applyView(a) {
   showState(chipText(a), v.input);
   el.text.disabled = !v.input;
   syncSend();
-  showNote(v.note);
+  showNote(waking === a.name ? `waking ${a.name}…` : v.note);
   el.ask.hidden = !v.ask;
   setText(el.ask, v.ask ? `Ask the manager to start ${a.name}` : '');
 }
@@ -806,6 +810,10 @@ async function deliver(c, text) {
   }
   const view = inputView(a, !!managerRow());
   if (!view.input) return { blocked: view.note || `${c.name} cannot take messages now (${chipText(a)}).` };
+  if (view.wake) {
+    const woken = await wake(c, text);
+    if (woken) return woken;
+  }
   // The same text sent again after an unclear answer keeps its key, so the
   // hub stores it once if it still knows the key.
   const reuse = !!c.unsent && c.unsent.text === text && c.unsent.conversation === c.conversation;
@@ -824,6 +832,57 @@ async function deliver(c, text) {
     res = await post(c, text, key);
   }
   return { res, again, earlier };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// wake asks lever to wake c's asleep agent, then reads the list until it
+// runs. It returns null when it runs (deliver then posts) or {blocked} with
+// the page's own words; the text is kept either way.
+//
+// The unsent record is written first, with no post counted: a reload during
+// the wake restores the text with its key, and the later post goes under
+// that key. An earlier unclear send of the same text keeps its own.
+async function wake(c, text) {
+  const name = c.name;
+  if (!(c.unsent && c.unsent.text === text && c.unsent.conversation === c.conversation)) {
+    setUnsent(c, { text, key: newKey(), conversation: c.conversation, tries: 0 });
+  }
+  waking = name;
+  showWakeView();
+  try {
+    const res = await api(`/lever/api/agents/${encodeURIComponent(name)}/wake`, { method: 'POST' });
+    const word = res.body && typeof res.body === 'object' ? res.body.error : '';
+    // Someone else woke it a moment ago: wait for it the same way.
+    if (res.status !== 202 && !(res.status === 409 && word === 'not-asleep')) {
+      return { blocked: wakeText(res.status, res.body, name) };
+    }
+    for (let i = 0; i < WAKE_POLLS; i++) {
+      await sleep(WAKE_POLL_MS);
+      const l = await readList();
+      if (l.error) continue;
+      applyRoster(l);
+      const a = l.agents.find((x) => x.name === name);
+      if (!a || a.access !== 'message') return { blocked: `${name} is no longer in your list.` };
+      if (a.state === 'unknown') continue;
+      if (a.conversation !== c.conversation) {
+        return { blocked: `${name} has a new hub record, and the chat now shows it. Press Send again to send there.` };
+      }
+      if (a.state === 'running') return null;
+      if (!['suspended', 'stopped', 'starting'].includes(a.state)) return { blocked: `${name} did not wake (${chipText(a)}).` };
+    }
+    return { blocked: `${name} did not wake in time. Your message is kept; send it again later.` };
+  } finally {
+    waking = '';
+    showWakeView();
+  }
+}
+
+// showWakeView applies the open chat's row again, so its note says
+// whether a wake is under way.
+function showWakeView() {
+  const a = chat && roster && roster.agents.find((x) => x.name === chat.name);
+  if (a) applyView(a);
 }
 
 function grow() {

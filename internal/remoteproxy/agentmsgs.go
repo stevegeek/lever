@@ -65,11 +65,12 @@ func agentRow(m historyRow, uid, agentID string) bool {
 }
 
 // keepAgentRows asks the broker which agent rows to keep. Rows that are not
-// agent rows are not asked about (and not in the answer); an agent row from
-// another sender id than the DM's agent, with no id, no text (a deleted one), no readable time, or an id that appears
-// more than once in rows is never kept. Only an id the proxy asked about
-// can be in the answer: the broker's keep list is checked against the
-// question, never trusted on its own.
+// agent rows are not asked about (and not in the answer). An agent row is
+// never kept when its sender id is not the DM's agent, or it has no id, no
+// text (a deleted one), no readable time, or an id that appears more than
+// once in rows. Only an id the proxy asked about can be in the answer: the
+// broker's keep list is checked against the question, never trusted on its
+// own.
 func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
 	seen := idCounts(rows)
 	var ask []AgentMessage

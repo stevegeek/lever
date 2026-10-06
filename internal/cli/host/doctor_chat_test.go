@@ -177,33 +177,45 @@ func TestCheckAgentMessages(t *testing.T) {
 }
 
 // The row says when the running broker or proxy started with another
-// config: until apply, agent messages follow the old one.
+// config while the setting is on; while it is off, only when a process runs
+// with agent messages on (the setting itself differs).
 func TestCheckAgentMessagesNamesAStaleProcess(t *testing.T) {
 	st := state.State{Dir: t.TempDir()}
-	app := &config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true,
-		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}}}
-	same := func() (string, bool) { return brokerctl.ConfigHash(app), true }
-	other := func() (string, bool) { return "another", true }
+	users := []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}
+	off := &config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true, AllowedUsers: users}}
+	on := *off
+	on.Remote.AgentMessages.Enabled = true
+	other := *off
+	other.Workers = []config.Worker{{Name: "w9"}} // another config, setting off
+	broker := func(a *config.App) func() (string, bool) {
+		return func() (string, bool) { return brokerctl.ConfigHash(a), true }
+	}
+	proxy := func(a *config.App) func(string) (bool, bool) {
+		return func(h string) (bool, bool) { return true, h == brokerctl.RemoteConfigHash(a) }
+	}
 	none := func() (string, bool) { return "", false }
-	no, yes := func() bool { return false }, func() bool { return true }
+	noProxy := func(string) (bool, bool) { return false, false }
 	for name, tc := range map[string]struct {
+		cfg   *config.App
 		live  agentMsgsLive
 		stale string
 	}{
-		"both current": {agentMsgsLive{same, no}, ""},
-		"no broker":    {agentMsgsLive{none, no}, ""},
-		"broker stale": {agentMsgsLive{other, no}, "running broker started"},
-		"proxy stale":  {agentMsgsLive{same, yes}, "running remote proxy started"},
-		"both stale":   {agentMsgsLive{other, yes}, "broker and remote proxy"},
+		"on, current":            {&on, agentMsgsLive{broker(&on), proxy(&on)}, ""},
+		"on, nothing runs":       {&on, agentMsgsLive{none, noProxy}, ""},
+		"on, both started off":   {&on, agentMsgsLive{broker(off), proxy(off)}, "broker and remote proxy"},
+		"on, proxy started off":  {&on, agentMsgsLive{broker(&on), proxy(off)}, "running remote proxy started"},
+		"off, current":           {off, agentMsgsLive{broker(off), proxy(off)}, ""},
+		"off, both started on":   {off, agentMsgsLive{broker(&on), proxy(&on)}, "broker and remote proxy"},
+		"off, other config":      {off, agentMsgsLive{broker(&other), proxy(&other)}, ""},
+		"off, broker started on": {off, agentMsgsLive{broker(&on), proxy(off)}, "running broker started"},
 	} {
-		r := checkAgentMessages(app, st, tc.live)
+		r := checkAgentMessages(tc.cfg, st, tc.live)
 		if !r.ok || (tc.stale == "") != (r.fix == "") || !strings.Contains(r.detail, tc.stale) {
 			t.Errorf("%s: %+v", name, r)
 		}
-	}
-	// Off in lever.yaml while the running proxy still filters: said too.
-	if r := checkAgentMessages(app, st, agentMsgsLive{same, yes}); !strings.Contains(r.detail, "off") || !strings.Contains(r.detail, "lever apply") {
-		t.Fatalf("off, stale proxy: %+v", r)
+		if tc.stale != "" && !strings.Contains(r.detail, "`lever init` + `lever apply`") {
+			t.Errorf("%s: %+v", name, r)
+		}
 	}
 }
 
@@ -228,5 +240,24 @@ func TestCheckAgentMessagesUnsafeContactFile(t *testing.T) {
 	}
 	if r := checkAgentMessages(app, st, agentMsgsLive{}); r.ok || !strings.Contains(r.detail, "every agent's contact_message is refused") {
 		t.Fatalf("an unsafe file: %+v", r)
+	}
+	// A rotated .1 counts too; a file the ledger does not read does not.
+	if err := os.Chmod(f, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(st.AgentLedger(), "c-notes.txt")
+	if err := os.WriteFile(stray, nil, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(stray, 0o666)
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); !r.ok {
+		t.Fatalf("a stray file: %+v", r)
+	}
+	if err := os.WriteFile(f+".1", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(f+".1", 0o666)
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); r.ok {
+		t.Fatalf("an unsafe .1: %+v", r)
 	}
 }

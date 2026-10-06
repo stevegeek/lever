@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/agentledger"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/backend/types"
@@ -509,7 +510,10 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 // this config.
 type agentMsgsLive struct {
 	brokerHash func() (string, bool)
-	proxyStale func() bool
+	// proxyMatches reports whether a remote proxy runs, and whether it was
+	// started by this lever version with the remote config whose hash is
+	// given.
+	proxyMatches func(hash string) (running, matches bool)
 }
 
 // liveAgentMessages reads what the running broker and remote proxy were
@@ -522,41 +526,61 @@ func liveAgentMessages(ctx context.Context, app *config.App, st state.State) age
 			defer cancel()
 			var er wire.EpochResponse
 			u := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), wire.PathEpoch)
-			if err := httpjson.Get(ctx, &http.Client{Timeout: 2 * time.Second}, u, &er); err != nil {
+			// A redirect is not the broker's answer: never followed.
+			client := &http.Client{Timeout: 2 * time.Second,
+				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			if err := httpjson.Get(ctx, client, u, &er); err != nil {
 				return "", false
 			}
 			return er.ConfigHash, true
 		},
-		proxyStale: func() bool {
+		proxyMatches: func(hash string) (bool, bool) {
 			_, found, alive := state.PIDStatus(st.RemotePID())
-			return found && alive && !st.RemoteStampMatches(cli.VersionString(), brokerctl.RemoteConfigHash(app))
+			if !found || !alive {
+				return false, false
+			}
+			return true, st.RemoteStampMatches(cli.VersionString(), hash)
 		},
 	}
 }
 
 // checkAgentMessages reports remote.agent_messages: off, or on with the
 // limits, the contacts and their agents, and the agent ledger's safety. The
-// broker and the proxy read the config only when they start, so the row
-// also says when either runs with another config (or lever version) than
-// lever.yaml holds now: until `lever apply`, they act on the old one.
+// broker and the proxy read the config only when they start. So while the
+// setting is on, the row says when either runs with another config (or
+// lever version); while it is off, it says so only when a process runs
+// with this config plus agent messages on, the one case where the setting
+// itself differs. Other config changes are other rows' business.
 func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) checkResult {
 	r := agentMessagesRow(app, st)
 	if !r.ok {
 		return r
 	}
+	on := app.AgentMessagesOn()
+	// The hashes a process started with agent messages on would carry.
+	onApp := *app
+	onApp.Remote.AgentMessages.Enabled = true
 	var stale []string
 	if live.brokerHash != nil {
-		if h, ok := live.brokerHash(); ok && h != brokerctl.ConfigHash(app) {
+		if h, ok := live.brokerHash(); ok && (on && h != brokerctl.ConfigHash(app) || !on && onApp.AgentMessagesOn() && h == brokerctl.ConfigHash(&onApp)) {
 			stale = append(stale, "broker")
 		}
 	}
-	if live.proxyStale != nil && live.proxyStale() {
-		stale = append(stale, "remote proxy")
+	if live.proxyMatches != nil {
+		if on {
+			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(app)); running && !ok {
+				stale = append(stale, "remote proxy")
+			}
+		} else if onApp.AgentMessagesOn() {
+			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(&onApp)); running && ok {
+				stale = append(stale, "remote proxy")
+			}
+		}
 	}
 	if len(stale) > 0 {
 		return warnResult(r.name, r.detail+"; the running "+strings.Join(stale, " and ")+
-			" started with another config or lever version, so agent messages follow the old one until `lever apply`",
-			"run `lever init` (the skills follow the setting), then `lever apply`")
+			" started with another config; agent message settings take effect after `lever init` + `lever apply`",
+			"run `lever init`, then `lever apply`")
 	}
 	return r
 }
@@ -612,7 +636,7 @@ func unsafeLedgerFile(dir string) string {
 		return ""
 	}
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), "c-") {
+		if !agentledger.IsContactFile(e.Name()) {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())

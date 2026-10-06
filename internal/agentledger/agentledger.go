@@ -114,6 +114,12 @@ var (
 	fileRE    = regexp.MustCompile(`^c-[0-9a-f]{24}\.jsonl$`)
 )
 
+// IsContactFile reports whether name (a base name) is a contact file of the
+// ledger or its rotated .1.
+func IsContactFile(name string) bool {
+	return fileRE.MatchString(strings.TrimSuffix(name, ".1"))
+}
+
 // HashText is the hex sha256 of text's UTF-8 bytes, as records hold it.
 func HashText(text string) string {
 	h := sha256.Sum256([]byte(text))

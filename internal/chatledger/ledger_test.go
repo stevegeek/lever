@@ -244,3 +244,52 @@ func TestLookupRefusesAnUnsafeDir(t *testing.T) {
 		t.Fatalf("symlinked dir: err = %v, want ErrUnsafe", err)
 	}
 }
+
+func TestLastPostAndByMessageID(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chat-ledger")
+	w := NewWriter(dir)
+	t1 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	for _, e := range []Entry{
+		{Recorded: t1, Login: "c@x", Tier: TierContact, AgentID: "A", MessageID: "m1", Sender: "user:c@x", Text: "one"},
+		{Recorded: t1.Add(time.Hour), Login: "c@x", Tier: TierContact, AgentID: "A", MessageID: "m2", Sender: "user:c@x", Text: "two"},
+		{Recorded: t1.Add(2 * time.Hour), Login: "c@x", Tier: TierContact, AgentID: "B", MessageID: "m3", Sender: "user:c@x", Text: "other agent"},
+		{Recorded: t1.Add(3 * time.Hour), Login: "d@x", Tier: TierContact, AgentID: "A", MessageID: "m4", Sender: "user:d@x", Text: "other login"},
+	} {
+		if err := w.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := LastPost(dir, "c@x", "A")
+	if err != nil || !got.Equal(t1.Add(time.Hour)) {
+		t.Fatalf("LastPost = %v, %v", got, err)
+	}
+	if got, _ := LastPost(dir, "e@x", "A"); !got.IsZero() {
+		t.Fatal("no post must be the zero time")
+	}
+	e, ok, err := ByMessageID(dir, "c@x", "m2")
+	if err != nil || !ok || e.Text != "two" {
+		t.Fatalf("ByMessageID = %+v %v %v", e, ok, err)
+	}
+	if _, ok, _ := ByMessageID(dir, "c@x", "m4"); ok {
+		t.Fatal("another login's post must not be found in this login's file")
+	}
+	if got, err := LastPost(filepath.Join(t.TempDir(), "absent"), "c@x", "A"); err != nil || !got.IsZero() {
+		t.Fatal("a missing ledger is no post")
+	}
+}
+
+func TestLastPostRefusesAnUnsafeDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chat-ledger")
+	if err := NewWriter(dir).Append(Entry{Recorded: time.Now(), Login: "c@x", Tier: TierContact, AgentID: "A", MessageID: "m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LastPost(dir, "c@x", "A"); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("LastPost err = %v, want ErrUnsafe", err)
+	}
+	if _, _, err := ByMessageID(dir, "c@x", "m1"); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("ByMessageID err = %v, want ErrUnsafe", err)
+	}
+}

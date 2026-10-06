@@ -295,3 +295,19 @@ func (h *hostledgerFile) append(t *testing.T, name string, v any) error {
 	_, err = f.Write(append(raw, '\n'))
 	return err
 }
+
+// A contact whose records sit only in .1 (a rotate stopped before the new
+// file) still counts toward the hourly rate.
+func TestLastHourCountsARotatedFileAlone(t *testing.T) {
+	l, dir := open(t)
+	for range 3 {
+		mustAuthorize(t, l, auth(t, "worker", "c@x", KindReply, "r", t0))
+	}
+	p := filepath.Join(dir, FileFor("c@x"))
+	if err := os.Rename(p, p+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := l.View("worker", "d@x", t0.Add(time.Minute)); err != nil || v.LastHour != 3 {
+		t.Fatalf("LastHour = %d (%v), want 3", v.LastHour, err)
+	}
+}

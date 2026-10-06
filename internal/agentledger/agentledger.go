@@ -247,12 +247,17 @@ func (l *Ledger) lastHour(agent string, now time.Time) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", label, err)
 	}
-	n := 0
+	// A contact counts when either its file or its .1 is there: a .1 alone
+	// (a rotate interrupted before the new file) still holds records.
+	var contacts []string
 	for _, e := range names {
-		name := e.Name()
-		if !fileRE.MatchString(name) {
-			continue
+		name := strings.TrimSuffix(e.Name(), ".1")
+		if fileRE.MatchString(name) && !slices.Contains(contacts, name) {
+			contacts = append(contacts, name)
 		}
+	}
+	n := 0
+	for _, name := range contacts {
 		sig, err := l.fileSig(name)
 		if err != nil {
 			return 0, err

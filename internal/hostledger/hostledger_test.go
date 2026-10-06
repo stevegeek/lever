@@ -3,6 +3,7 @@ package hostledger
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +67,32 @@ func TestAppendRollsBackARotateItCannotFinish(t *testing.T) {
 	}
 	if _, err := os.Stat(w.Path + ".1"); err != nil {
 		t.Fatalf("the next append rotates: %v", err)
+	}
+}
+
+// Another process that created the main file between the rotate and the
+// failed open keeps it: the full file stays in .1.
+func TestAppendRollbackLeavesAnotherWritersFile(t *testing.T) {
+	dir := t.TempDir()
+	w := &File{Path: filepath.Join(dir, "x.jsonl"), Label: "test", Cap: 10}
+	if err := w.Append(map[string]string{"k": "a long enough first line"}); err != nil {
+		t.Fatal(err)
+	}
+	orig := openFile
+	openFile = func(p string, _ int, _ os.FileMode) (*os.File, error) {
+		if err := os.WriteFile(p, []byte("{\"k\":\"other\"}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return nil, os.ErrPermission
+	}
+	err := w.Append(map[string]string{"k": "second"})
+	openFile = orig
+	if err == nil {
+		t.Fatal("the failed open must be an error")
+	}
+	main, _ := os.ReadFile(w.Path)
+	old, _ := os.ReadFile(w.Path + ".1")
+	if string(main) != "{\"k\":\"other\"}\n" || !strings.Contains(string(old), "first line") {
+		t.Fatalf("main %q, .1 %q", main, old)
 	}
 }

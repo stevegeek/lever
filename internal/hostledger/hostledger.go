@@ -86,8 +86,12 @@ func (w *File) Append(v any) error {
 		if rotated {
 			// No new file: move the full one back, so no reader is left
 			// with a .1 and no main file (one that lists main files would
-			// miss its records). It rotates again on the next append.
-			_ = os.Rename(w.Path+".1", w.Path)
+			// miss its records). It rotates again on the next append. A
+			// link fails when another process created the main file in
+			// between; then both stay (readers read .1 and the main file).
+			if os.Link(w.Path+".1", w.Path) == nil {
+				_ = os.Remove(w.Path + ".1")
+			}
 		}
 		return fmt.Errorf("%s: %w", w.Label, err)
 	}

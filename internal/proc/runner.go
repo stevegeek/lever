@@ -11,6 +11,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 type Result struct {
@@ -111,15 +112,22 @@ func (c Call) HasPrefix(name string, args ...string) bool {
 // key matches.
 var ErrUnscripted = errors.New("unscripted command")
 
+// FakeRunner is safe for concurrent runs (mu guards Calls and scripts while
+// they run); a test reads Calls once the code under test has returned.
 type FakeRunner struct {
 	Calls   []Call
 	scripts map[string]Result
+	mu      sync.Mutex
 }
 
 func NewFakeRunner() *FakeRunner { return &FakeRunner{scripts: map[string]Result{}} }
 
 // Script registers a canned Result for a "name arg0 arg1 ..." prefix key.
-func (f *FakeRunner) Script(key string, res Result) { f.scripts[key] = res }
+func (f *FakeRunner) Script(key string, res Result) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scripts[key] = res
+}
 
 func (f *FakeRunner) scriptedResult(name string, args []string) (Result, error) {
 	full := strings.TrimSpace(name + " " + strings.Join(args, " "))
@@ -170,6 +178,8 @@ func ArgvContains(subs ...string) func(Call) bool {
 }
 
 func (f *FakeRunner) RunIn(_ context.Context, dir string, env map[string]string, name string, args ...string) (Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env, Dir: dir})
 	return f.scriptedResult(name, args)
 }
@@ -185,10 +195,14 @@ func (f *FakeRunner) RunStdin(_ context.Context, stdin io.Reader, env map[string
 	if stdin != nil {
 		var err error
 		if in, err = io.ReadAll(stdin); err != nil {
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env, Stdin: string(in)})
 			return Result{Code: 1}, fmt.Errorf("fakerunner: read stdin: %w", err)
 		}
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env, Stdin: string(in)})
 	return f.scriptedResult(name, args)
 }

@@ -78,6 +78,36 @@ version bump moves the block under the new version heading.
   allowed before), and creates a missing worker dir. Without the setting
   nothing changes.
 
+### Fixed
+
+- **A manual resume clears the healer's failed attempts.** The re-enrol
+  healer and the manager's start, resume and wake of a worker already ran
+  under the worker's one lifecycle lock, so the two never interleave (new
+  tests pin both orders, under `-race`). But a successful resume or start
+  left the count of earlier failed heals in place, so the next lapse could
+  find the cap used up. Now the success clears it, and a heal skipped for a
+  busy lock can no longer drive the count below zero.
+- **A slow agent list no longer uses up a message's time.** Before a send,
+  the broker reads the recipient's phase (to refuse a send to an agent that
+  is not running). That list call ran inside the route's 30 s deadline with
+  no bound of its own, so a hung list ended the request with 503 and
+  nothing sent. The read now has its own 5 s bound; when it runs out, the
+  send goes on without the check, as for any failed read.
+- **`lever stop` suspends workers side by side.** The worker pass suspended
+  one worker after another under one 30 s budget, so one hung suspend could
+  leave every later worker running across the power-off (and in phase error
+  after `lever up`). Now the list has its own 15 s bound, and up to four
+  suspends run at once, each under its own 20 s bound. The lines are
+  printed in config order once all have returned.
+- **A heal refused for the record's stored role stages no ticket.** The
+  healer staged a fresh one-use enrolment ticket before it checked the
+  record's role, so a refused heal left that ticket behind. The check now
+  runs before the stage, like the workspace check.
+- **The operator skill names the other resume answers.** Its resume section
+  now says when a forced resume happens and what the 409 (hub refusal or
+  stored role), 503 (busy) and 502 answers mean, and that a message to a
+  worker that is not running answers 409. Run `lever init` to refresh the skills.
+
 ### Upgrade
 
 - Edit protected directories in place. Replacing one on the host (rm -rf

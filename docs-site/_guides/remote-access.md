@@ -1207,6 +1207,17 @@ remote:
   the agent shared with it, with a download link for each. An operator also sees each contact's
   files in the [operator's view](#the-operators-view-of-contact-conversations), read-only, and may
   download them.
+- **Switching a direction or a login off.** `files.uploads: false` stops new uploads (the upload
+  route answers `403 uploads-off`, the page hides the paperclip); `files.shares: false` stops new
+  shares (`share_file` answers `shares-off`) and the download of shares already made (`403
+  shares-off`; the page lists them without a link). Records already made stay listed either
+  way, and an upload stays downloadable by its owner. An `allowed_users` entry with `files: false`
+  gives that login no file exchange at all: its file routes answer 404 as with files off, its
+  page shows no paperclip and no Files panel, `share_file` and `contact_files` answer
+  `not-a-contact` for it, and the operator view lists no files for it (and asks for none). An
+  operator entry with `files: false` has no files of its own and sees no contact's files. Each
+  change restarts the proxy (and, for shares or a login, the broker) at the next `lever apply`;
+  a direction change also rewrites the skills, so run `lever init` first.
 - **Where files live.** In the agent's own workspace, under `.lever-files/`: `in/<key>/` holds
   uploads and `out/<key>/` holds the files the agent shares, one `<key>` per login (a hash of the
   login, so no login text appears in a path). The manager's exchange is at the tree root
@@ -1260,8 +1271,8 @@ remote:
   refuses an upload without it. A browser sends such a header to another origin only after a
   CORS preflight, which the proxy never grants. A front must not answer `/lever/api/` with a
   307 or 308 redirect: those resend the request body.
-- **Doctor.** The `files` row shows off, or on with the limits and the bytes of uploads stored
-  per agent; it fails when the state directory is inside the tree (then nothing can be recorded
+- **Doctor.** The `files` row shows off, or on with each direction, the logins with no files,
+  the limits and the bytes of uploads stored per agent; it fails when the state directory is inside the tree (then nothing can be recorded
   and every route refuses), when the ledger (or its `.lock`) is not private, or when an agent's
   `.lever-files`, `in`, `out` or `in/<key>` is a link.
 - **Audit.** `file-upload`, `file-download` and `deny-file` lines in

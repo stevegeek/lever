@@ -44,9 +44,9 @@ var ErrOutputLimit = errors.New("command output passed its limit; the command wa
 
 type outputLimitKey struct{}
 
-// cappedWaitDelay is how long a capped command's pipes may stay open after
-// it was killed (exec.Cmd.WaitDelay).
-const cappedWaitDelay = 2 * time.Second
+// commandWaitDelay is how long a command's pipes may stay open after it
+// exited or was killed (exec.Cmd.WaitDelay).
+const commandWaitDelay = 2 * time.Second
 
 // WithOutputLimit returns ctx carrying a cap of n bytes on each of a
 // command's stdout and stderr. RealRunner kills a command that writes more
@@ -116,9 +116,19 @@ func (r RealRunner) run(ctx context.Context, dir string, stdin io.Reader, env ma
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
+	// A command killed at its context's deadline can leave a child holding
+	// the output pipes (the guest side of an `orb` or `limactl` exec); without
+	// WaitDelay, Run would wait for that child however long it lives.
+	cmd.WaitDelay = commandWaitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		// The command itself succeeded; only a background child it left
+		// kept the pipes open past the delay. That is how it behaved before
+		// the delay existed (minus the wait), so it stays a success.
+		err = nil
+	}
 	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
 	if ee, ok := err.(*exec.ExitError); ok {
 		res.Code = ee.ExitCode()
@@ -147,7 +157,7 @@ func (r RealRunner) runCapped(ctx context.Context, n int, dir string, stdin io.R
 	// A killed command's own children (the guest side of an `orb` or
 	// `limactl` exec) can hold the output pipes open; WaitDelay closes them
 	// so Run returns soon after the kill or the context's deadline.
-	cmd.WaitDelay = cappedWaitDelay
+	cmd.WaitDelay = commandWaitDelay
 	stdout := &cappedBuffer{max: n, over: cancel}
 	stderr := &cappedBuffer{max: n, over: cancel}
 	cmd.Stdout, cmd.Stderr = stdout, stderr

@@ -143,3 +143,28 @@ func TestRealRunnerOutputLimit(t *testing.T) {
 		t.Fatalf("held pipe: err=%v after %s", err, time.Since(start))
 	}
 }
+
+// TestRealRunnerReturnsAtTheDeadlineDespiteAHeldPipe: a command killed at
+// its context's deadline returns soon after it, even while a child it
+// started still holds the output pipes; a command that succeeded but left
+// such a child stays a success.
+func TestRealRunnerReturnsAtTheDeadlineDespiteAHeldPipe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := RealRunner{}.Run(ctx, nil, "sh", "-c", "(sleep 8) & sleep 60")
+	if err == nil {
+		t.Fatal("a command killed at its deadline must fail")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("Run returned after %s, want soon after the 1 s deadline", took)
+	}
+	start = time.Now()
+	res, err := RealRunner{}.Run(context.Background(), nil, "sh", "-c", "echo done; (sleep 8) &")
+	if err != nil || res.Stdout != "done\n" {
+		t.Fatalf("a successful command with a background child: res=%+v err=%v", res, err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("Run waited %s for the background child", took)
+	}
+}

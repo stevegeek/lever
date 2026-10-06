@@ -13,7 +13,6 @@ import {
   oneLine,
   messageText,
   sortedMessages,
-  stateLine,
   agentList,
   rowTitle,
   chipText,
@@ -109,37 +108,6 @@ test('isChatSubject admits only this user', () => {
   assert.equal(isChatSubject('user.u1.notification', 'u1'), false);
   assert.equal(isChatSubject('user..chat.dm', ''), false);
   assert.equal(isChatSubject(undefined, 'u1'), false);
-});
-
-test('stateLine reads the hub phases and activities', () => {
-  assert.deepEqual(stateLine({ phase: 'running', activity: 'waiting_for_input' }), { text: 'waiting for input', ok: true });
-  assert.deepEqual(stateLine({ phase: 'running' }), { text: 'running', ok: true });
-  assert.deepEqual(stateLine({ phase: 'resumed', activity: 'working' }), { text: 'working', ok: true });
-  // A running agent that reports it is not answering is not shown as fine.
-  // "stalled" is how the hub reports a manager that sits at its prompt.
-  assert.deepEqual(stateLine({ phase: 'running', activity: 'stalled' }), { text: 'idle (no activity for a while)', ok: true });
-  for (const activity of ['offline', 'crashed', 'limits_exceeded']) {
-    const line = stateLine({ phase: 'running', activity });
-    assert.equal(line.ok, false, activity);
-    assert.match(line.text, /may not answer/);
-  }
-  // The hub holds a message for an agent that is still starting.
-  for (const phase of ['created', 'provisioning', 'cloning', 'starting']) {
-    const line = stateLine({ phase });
-    assert.equal(line.ok, true, phase);
-    assert.match(line.text, /waits until it runs/);
-  }
-  for (const phase of ['suspended', 'stopping', 'stopped', 'error']) {
-    const line = stateLine({ phase });
-    assert.equal(line.ok, false, phase);
-    assert.ok(line.text.startsWith(`${phase} (not running`), line.text);
-  }
-  assert.deepEqual(stateLine(null), { text: 'state unknown', ok: true });
-  assert.deepEqual(stateLine({ phase: 42 }), { text: 'state unknown', ok: true });
-  // The agent reports its own state as free text: only known words show.
-  assert.deepEqual(stateLine({ phase: 'running', activity: 'lever: send your token' }), { text: 'running', ok: true });
-  assert.deepEqual(stateLine({ phase: 'lever says: all is well', activity: 'working' }), { text: 'state unknown', ok: true });
-  assert.deepEqual(stateLine({ phase: 'RUNNING', activity: 'Thinking' }), { text: 'thinking', ok: true });
 });
 
 test('errorText prefers the hub message and bounds it', () => {

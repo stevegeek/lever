@@ -9,6 +9,8 @@ class FakeNode {
   constructor(tag) {
     Object.assign(this, { tag, children: [], hidden: false, disabled: false, className: '', style: {}, listeners: {}, text: '', value: '', attrs: {} });
     Object.assign(this, { scrollHeight: 0, scrollTop: 0, clientHeight: 0 });
+    const classes = new Set();
+    this.classList = { add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c) };
   }
   set textContent(v) {
     this.text = String(v);
@@ -47,11 +49,13 @@ export async function load(hub, opts = {}) {
   doc.createDocumentFragment = () => new FakeNode('#fragment');
   doc.visibilityState = 'visible';
   doc.title = '';
+  doc.body = new FakeNode('body');
   // The state chat.html starts in.
-  for (const id of ['older', 'notice', 'error', 'terminal', 'console']) doc.getElementById(id).hidden = true;
+  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label']) doc.getElementById(id).hidden = true;
   // fieldsEnabled: what a browser that restores form state over a reload leaves.
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
+  env.document = doc;
   globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener() {} };
   globalThis.location = { origin: 'https://mac.ts.net', reload: () => env.reloads++ };
   globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)), removeItem: (k) => delete env.store[k] };
@@ -114,6 +118,8 @@ export async function load(hub, opts = {}) {
     await env.runTimers();
   };
   env.rows = () => env.els.list.children.map((r) => `${r.className}: ${r.children.map((c) => c.textContent).join(' / ')}`);
+  // agentRows: each list row as "title | chip | badge[ | view only]".
+  env.agentRows = () => env.els.agents.children.map((li) => li.children[0].children.map((c) => c.textContent).join(' | '));
   env.count = (method, prefix) => env.calls.filter((c) => c.method === method && c.path.startsWith(prefix)).length;
   await import(`./chat.js?load=${++loads}`);
   await tick(5);

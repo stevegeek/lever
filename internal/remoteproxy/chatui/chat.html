@@ -19,28 +19,49 @@
 <script type="module" src="/lever/chat.js"></script>
 </head>
 <body>
-<header>
-  <div class="who">
-    <h1 id="agent">Chat</h1>
-    <p id="state" class="state">connecting</p>
-  </div>
-  <nav>
-    <a id="terminal" hidden>Terminal</a>
-    <a id="console" hidden>Console</a>
-  </nav>
-</header>
-<main id="scroll">
-  <button id="older" type="button" hidden>Load earlier messages</button>
-  <p id="notice" class="notice" hidden></p>
-  <div id="list" role="log" aria-live="polite"></div>
-</main>
-<form id="composer">
-  <p id="error" class="error" role="alert" hidden></p>
-  <div class="row">
-    <textarea id="text" rows="1" placeholder="Message" aria-label="Message" disabled></textarea>
-    <button id="send" type="submit" disabled>Send</button>
-  </div>
-</form>
+<div id="app" class="app">
+<section id="pane-list" class="pane">
+  <header>
+    <div class="who">
+      <h1>Agents</h1>
+    </div>
+    <nav>
+      <a id="console" hidden>Console</a>
+    </nav>
+  </header>
+  <main class="listscroll">
+    <p id="listnote" class="notice" hidden></p>
+    <ul id="agents" class="agents"></ul>
+  </main>
+</section>
+<section id="pane-chat" class="pane">
+  <header>
+    <button id="back" type="button" aria-label="Back to the agent list">Back</button>
+    <div class="who">
+      <h1><span id="agent">Chat</span> <span id="label" class="label" hidden></span></h1>
+      <p id="state" class="state"></p>
+    </div>
+    <nav>
+      <a id="terminal" hidden>Terminal</a>
+    </nav>
+  </header>
+  <main id="scroll">
+    <button id="older" type="button" hidden>Load earlier messages</button>
+    <p id="notice" class="notice">Choose an agent from the list.</p>
+    <p id="viewonly" class="notice" hidden>View only: you can see this agent and its state, not its messages.</p>
+    <div id="list" role="log" aria-live="polite"></div>
+  </main>
+  <form id="composer" hidden>
+    <p id="error" class="error" role="alert" hidden></p>
+    <p id="note" class="note" hidden></p>
+    <button id="ask" class="ask" type="button" hidden></button>
+    <div class="row">
+      <textarea id="text" rows="1" placeholder="Message" aria-label="Message" disabled></textarea>
+      <button id="send" type="submit" disabled>Send</button>
+    </div>
+  </form>
+</section>
+</div>
 <noscript><p class="notice">This page needs JavaScript.</p></noscript>
 </body>
 </html>

@@ -89,41 +89,6 @@ export function isChatSubject(subject, userId) {
   return !!userId && str(subject).startsWith(`user.${userId}.chat.`);
 }
 
-// The hub's agent states (scion pkg/agent/state): the phases before
-// "running", the phases after it, the activities of a running agent, and
-// those that mean it is not answering.
-const STARTING = new Set(['created', 'provisioning', 'cloning', 'starting']);
-const STOPPED = new Set(['suspended', 'stopping', 'stopped', 'error']);
-const ACTIVE = new Set(['working', 'thinking', 'executing', 'waiting_for_input', 'blocked', 'completed']);
-const NOT_ANSWERING = new Set(['offline', 'crashed', 'limits_exceeded']);
-
-const label = (s) => s.replaceAll('_', ' ');
-
-// stateLine describes the agent for the header: {text, ok}. ok is false when
-// a message sent now would likely get no answer.
-//
-// An agent reports its own phase and activity to the hub, as free text. So
-// only the words above are ever shown: a value that is not one of them shows
-// as unknown, and an agent cannot write a line of its own into the header.
-export function stateLine(agent) {
-  const unknown = { text: 'state unknown', ok: true };
-  if (!agent || typeof agent !== 'object') return unknown;
-  const phase = str(agent.phase).toLowerCase();
-  const activity = str(agent.activity).toLowerCase();
-  // "resumed" is what the hub reports for a short time after a resume.
-  if (phase === 'running' || phase === 'resumed') {
-    if (NOT_ANSWERING.has(activity)) return { text: `${label(activity)} (it may not answer)`, ok: false };
-    // The hub marks an agent stalled when it has reported nothing for a
-    // while. That is what a manager waiting at its prompt looks like, and
-    // also a turn that never finished; a message reaches it either way.
-    if (activity === 'stalled') return { text: 'idle (no activity for a while)', ok: true };
-    return { text: ACTIVE.has(activity) ? label(activity) : 'running', ok: true };
-  }
-  if (STARTING.has(phase)) return { text: `${phase} (a message waits until it runs)`, ok: true };
-  if (STOPPED.has(phase)) return { text: `${phase} (not running: start it with lever up)`, ok: false };
-  return unknown;
-}
-
 // oneLine makes another party's text safe to quote inside a sentence of the
 // page's own: one line, at most max characters. Control and format
 // characters go (a direction override would redraw the rest of the

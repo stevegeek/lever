@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -241,5 +242,25 @@ func TestCachedAgentRecordsSlowHubBlocksNobodyPastTheirContext(t *testing.T) {
 	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("hub lists %d, want one in flight", n)
+	}
+}
+
+// A panic in the hub list is one failed refresh, not a dead proxy: the
+// waiters get an error, and the next call refreshes again.
+func TestCachedAgentRecordsSurvivesAPanickingList(t *testing.T) {
+	var calls atomic.Int32
+	recs, _ := cachedAgentRecords(func(context.Context) ([]hubapi.Agent, error) {
+		if calls.Add(1) == 1 {
+			panic("boom")
+		}
+		return []hubapi.Agent{{Slug: "w1", ID: "id-w1"}}, nil
+	}, time.Now)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := recs(ctx); err == nil || errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "boom") {
+		t.Fatalf("a panicking list: %v, want a fixed error at once", err)
+	}
+	if got, err := recs(ctx); err != nil || got["w1"].ID != "id-w1" {
+		t.Fatalf("after the panic: %v %v", got, err)
 	}
 }

@@ -245,6 +245,10 @@ const agentRecordsTTL = 3 * time.Second
 // on any caller's.
 const agentRecordsRefresh = 10 * time.Second
 
+// errAgentListPanicked is the fixed error of a hub list that panicked; it
+// is not cached, so the next caller refreshes again.
+var errAgentListPanicked = errors.New("the hub agent list failed unexpectedly")
+
 // agentFlight is one hub list in progress; done closes when recs and err
 // are set.
 type agentFlight struct {
@@ -277,7 +281,16 @@ func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now 
 	refresh := func(f *agentFlight, ctx context.Context) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentRecordsRefresh)
 		defer cancel()
-		agents, err := list(ctx)
+		agents, err := func() (agents []hubapi.Agent, err error) {
+			// A panic in the list is one failed refresh: on this goroutine
+			// it would end the proxy and leave the flight open for good.
+			defer func() {
+				if recover() != nil {
+					agents, err = nil, errAgentListPanicked
+				}
+			}()
+			return list(ctx)
+		}()
 		if err == nil {
 			f.recs = map[string]remoteproxy.AgentRecord{}
 			for _, a := range agents {
@@ -288,7 +301,7 @@ func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now 
 		}
 		f.err = err
 		mu.Lock()
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errAgentListPanicked) {
 			recs, lerr, at = f.recs, err, now()
 		}
 		flight = nil

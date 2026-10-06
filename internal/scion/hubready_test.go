@@ -188,13 +188,16 @@ func TestWaitHubReadyStopsWhenTheServerIsGone(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("sh -c f=", proc.Result{}) // the probe: no live scion server
 	c := New(f, Options{})
-	c.hubReadyTimeout, c.hubReadyInterval, c.hubAliveEvery = time.Hour, time.Millisecond, 0
+	// A budget long enough that only the liveness check can end the wait
+	// early, short enough that a regression fails here, not at go test's
+	// timeout: running it out reads as "after 2s", without "server.log".
+	c.hubReadyTimeout, c.hubReadyInterval, c.hubAliveEvery = 2*time.Second, time.Millisecond, 0
 	start := time.Now()
 	err := c.waitHubReady(context.Background(), nil)
 	if !errors.Is(err, ErrHubNotReady) || !strings.Contains(err.Error(), "server.log") {
 		t.Fatalf("err = %v, want ErrHubNotReady pointing at the server log", err)
 	}
-	if time.Since(start) > 10*time.Second {
+	if time.Since(start) > time.Second {
 		t.Fatal("the wait did not stop when the server was gone")
 	}
 }

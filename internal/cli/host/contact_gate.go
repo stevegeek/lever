@@ -137,10 +137,28 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	case !ok:
 		return errors.New("lever has no record of its session starting fresh")
 	case r.SkillHash != hash:
-		return fmt.Errorf("its session started before its current skill was written (at %s, lever %s)",
-			r.Started.UTC().Format(time.RFC3339), r.Version)
+		return staleSessionError{fmt.Sprintf("at %s, lever %s", r.Started.UTC().Format(time.RFC3339), r.Version)}
 	}
 	return nil
+}
+
+// staleSessionError is contactSession's refusal of a session that started
+// before the current skill. Its text carries the start time and version;
+// reason is the part shared by every such agent, which the bring-up
+// warning groups on (after an upgrade every agent has its own start time).
+type staleSessionError struct{ detail string }
+
+const staleSessionReason = "its session started before its current skill was written"
+
+func (e staleSessionError) Error() string { return staleSessionReason + " (" + e.detail + ")" }
+
+// contactRefusalReason is err's text with any per-agent detail dropped.
+func contactRefusalReason(err error) string {
+	var stale staleSessionError
+	if errors.As(err, &stale) {
+		return staleSessionReason
+	}
+	return err.Error()
 }
 
 // contactAgents is every agent some contact login lists, in config order.
@@ -182,7 +200,7 @@ func printContactSessionWarnings(cmd *cobra.Command, app *config.App, st state.S
 	var blocked []blockedContactAgent
 	for _, a := range contactAgents(app) {
 		if err := contactSession(app, st, a); err != nil {
-			blocked = append(blocked, blockedContactAgent{a, err.Error()})
+			blocked = append(blocked, blockedContactAgent{a, contactRefusalReason(err)})
 		}
 	}
 	if line := contactSessionWarning(app.Name, blocked); line != "" {

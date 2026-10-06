@@ -253,6 +253,18 @@ func rootNoLinks(tree, dir string, mkdir bool, perm os.FileMode) (*os.Root, erro
 	return cur, nil
 }
 
+// OpenDirInTreeNoLinks opens the directory rel below tree as an os.Root
+// with no symbolic link on any component (rootNoLinks: each one checked
+// through its parent and SameFile after the open). A read through the Root
+// never leaves it. The caller closes it.
+func OpenDirInTreeNoLinks(tree, rel string) (*os.Root, error) {
+	rel = filepath.ToSlash(rel)
+	if rel == "" || path.Clean(rel) != rel || !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return nil, fmt.Errorf("%q: %w", rel, ErrEscapesTree)
+	}
+	return rootNoLinks(tree, rel, false, 0)
+}
+
 // splitNoLinks checks rel (clean, local, slash-separated) and splits it
 // into its directory ("." for none) and its leaf.
 func splitNoLinks(rel string) (dir, leaf string, err error) {

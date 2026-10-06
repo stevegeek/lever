@@ -76,46 +76,60 @@ func checkFiles(app *config.App, st state.State) checkResult {
 // exchangeUsage is the bytes of the regular files in ws's
 // .lever-files/in/<key>/ directories, and the tree-relative path of the
 // first symbolic link it meets at .lever-files, in, out or an in/<key>
-// ("" for none). Nothing is followed: every entry is Lstat-ed.
+// ("" for none). Every directory is opened through fsutil's no-link walk
+// (os.Root, each component checked), so nothing is followed.
 func exchangeUsage(tree, ws string) (int64, string) {
 	dir := path.Join(ws, chatfiles.Dir)
 	for _, rel := range []string{dir, path.Join(dir, "in"), path.Join(dir, "out")} {
-		if _, err := fsutil.StatInTreeNoLinks(tree, rel); errors.Is(err, fsutil.ErrSymlink) {
+		if r, err := fsutil.OpenDirInTreeNoLinks(tree, rel); errors.Is(err, fsutil.ErrSymlink) {
 			return 0, rel
+		} else if err == nil {
+			r.Close()
 		}
 	}
 	in := path.Join(dir, "in")
-	if fi, err := fsutil.StatInTreeNoLinks(tree, in); err != nil || !fi.IsDir() {
-		return 0, ""
-	}
-	keys, err := os.ReadDir(filepath.Join(tree, filepath.FromSlash(in)))
+	keys, err := readRootDir(tree, in)
 	if err != nil {
 		return 0, ""
 	}
 	var total int64
 	for _, k := range keys {
-		rel := path.Join(in, k.Name())
-		fi, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(rel)))
-		if err != nil {
-			continue
-		}
-		if fi.Mode()&fs.ModeSymlink != 0 {
+		rel := path.Join(in, k)
+		r, err := fsutil.OpenDirInTreeNoLinks(tree, rel)
+		if errors.Is(err, fsutil.ErrSymlink) {
 			return 0, rel
 		}
-		if !fi.IsDir() {
-			continue
-		}
-		files, err := os.ReadDir(filepath.Join(tree, filepath.FromSlash(rel)))
 		if err != nil {
-			continue
+			continue // not a directory: not lever's
 		}
-		for _, f := range files {
-			if fi, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(rel), f.Name())); err == nil && fi.Mode().IsRegular() {
-				total += fi.Size()
+		if d, err := r.Open("."); err == nil {
+			ents, _ := d.ReadDir(-1)
+			d.Close()
+			for _, e := range ents {
+				if fi, err := r.Lstat(e.Name()); err == nil && fi.Mode().IsRegular() {
+					total += fi.Size()
+				}
 			}
 		}
+		r.Close()
 	}
 	return total, ""
+}
+
+// readRootDir is the entry names of the directory rel below tree, read
+// through the no-link walk.
+func readRootDir(tree, rel string) ([]string, error) {
+	r, err := fsutil.OpenDirInTreeNoLinks(tree, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	d, err := r.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.Readdirnames(-1)
 }
 
 // byteText is n bytes for people.

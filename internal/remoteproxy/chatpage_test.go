@@ -426,7 +426,7 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 // chatSinkRE matches the ways a later edit could turn text into markup or
 // code. open( is a page-level or window.open call; a method named open of
 // another object (XMLHttpRequest.open, the file upload) is not one.
-var chatSinkRE = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|(?:^|[^.\w$])open\s*\(|\b(?:window|self|globalThis|top|parent|opener|frames)\s*\.\s*open\s*\(|\[\s*['"\x60]open['"\x60]\s*\]|setAttributeNS\(|createElementNS\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
+var chatSinkRE = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\blocation\s*\[|\bnavigat(e|ion)\b|Object\.assign\(\s*location|Reflect\.set\(\s*location|(?:^|[^.\w$])open\s*\(|\b(?:window|self|globalThis|top|parent|opener|frames)\s*\.\s*open\s*\(|\[\s*['"\x60]open['"\x60]\s*\]|setAttributeNS\(|createElementNS\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
 
 // TestChatPageHasNoMarkupSink: the page shows agent text on the operator's
 // origin, so its script may only ever write text. This fails on the ways a
@@ -437,7 +437,9 @@ func TestMarkupSinkRuleOpen(t *testing.T) {
 	for src, bad := range map[string]bool{"open('x')": true, "window.open('x')": true, " open (u)": true, "window . open(u)": true, "self.open(u)": true, "globalThis . open(u)": true, "top.open(u)": true, "parent.open(u)": true,
 		"opener.open(u)": true, "frames.open(u)": true, "window['open'](u)": true, "x[ \"open\" ](u)": true, "el.setAttributeNS(n, k, v)": true,
 		"document.createElementNS(ns, 'svg')": true,
-		"xhr.open('POST', p)":                 false, "$open(u)": false} {
+		"location['href'] = u":                true, "navigation.navigate(u)": true, "Object.assign(location, {href: u})": true,
+		"Reflect.set(location, 'href', u)": true, "navigator.serviceWorker": false,
+		"xhr.open('POST', p)": false, "$open(u)": false} {
 		if got := chatSinkRE.MatchString(src); got != bad {
 			t.Errorf("%q: matched %v, want %v", src, got, bad)
 		}
@@ -453,6 +455,10 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		if m := chatSinkRE.Find(b); m != nil {
 			t.Errorf("%s contains %q: the chat page writes network text as text only", name, m)
 		}
+	}
+	// The service worker opens one window: the chat page, on a tap.
+	if sw, _ := chatUI.ReadFile("chatui/sw.js"); len(regexp.MustCompile(`openWindow\(`).FindAll(sw, -1)) != 1 {
+		t.Error("sw.js must call openWindow( exactly once")
 	}
 	// The one method named open is the upload's XMLHttpRequest, in chat.js
 	// (counted below); the other scripts have none.

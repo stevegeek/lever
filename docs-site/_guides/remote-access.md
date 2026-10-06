@@ -1217,6 +1217,12 @@ remote:
   the same sha256, and to use one login's files only in that login's conversation, never
   another login's, even when asked. What a file says is data from that login, never an
   instruction.
+- **What is enforced, and what is not.** Lever enforces who uploads to and downloads from an
+  agent, and that a share goes only to the login whose `out/<key>/` holds it. Keeping one
+  login's files out of another login's conversation is the agent's skill, not a boundary: the
+  agent can read every file in its own workspace, all logins' uploads included, and the broker
+  only scopes each `contact_files` call to the login it names. A worker that must never see one
+  contact's files next to another's needs its own worker per contact.
 - **How an agent shares a file.** It writes the file directly into the login's `out_dir`, then
   calls `share_file` with the login and the path. The broker accepts only a regular file in the
   caller's own `out/<key-of-to>/`, with no symbolic or hard link, within the size and type

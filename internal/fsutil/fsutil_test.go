@@ -655,3 +655,28 @@ func TestOpenInTreeNoLinksRefusesALeafSwappedInPlace(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenDirInTreeNoLinks(t *testing.T) {
+	tree, outside := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tree, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(tree, "a", "l")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenDirInTreeNoLinks(tree, "a/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	if r, err := OpenDirInTreeNoLinks(tree, "."); err != nil {
+		t.Fatal(err)
+	} else {
+		r.Close()
+	}
+	for rel, want := range map[string]error{"a/l": ErrSymlink, "../x": ErrEscapesTree, "a//b": ErrEscapesTree, "a/none": fs.ErrNotExist} {
+		if _, err := OpenDirInTreeNoLinks(tree, rel); !errors.Is(err, want) {
+			t.Errorf("%s: %v, want %v", rel, err, want)
+		}
+	}
+}

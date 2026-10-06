@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Result struct {
@@ -37,7 +38,71 @@ type Runner interface {
 
 type RealRunner struct{}
 
+// ErrOutputLimit reports a command killed because its stdout or its stderr
+// passed the limit WithOutputLimit set on its context.
+var ErrOutputLimit = errors.New("command output passed its limit; the command was killed")
+
+type outputLimitKey struct{}
+
+// cappedWaitDelay is how long a capped command's pipes may stay open after
+// it was killed (exec.Cmd.WaitDelay).
+const cappedWaitDelay = 2 * time.Second
+
+// WithOutputLimit returns ctx carrying a cap of n bytes on each of a
+// command's stdout and stderr. RealRunner kills a command that writes more
+// and returns ErrOutputLimit with what it read up to the cap. It is for a
+// command whose output another party controls — an exec into an agent
+// container, where the agent can replace the program with one that streams
+// forever — so that output cannot grow the host process without bound. The
+// context travels through wrapping runners (the jail runner) unchanged.
+func WithOutputLimit(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, outputLimitKey{}, n)
+}
+
+// OutputLimit reports the cap WithOutputLimit set on ctx.
+func OutputLimit(ctx context.Context) (int, bool) {
+	n, ok := ctx.Value(outputLimitKey{}).(int)
+	return n, ok && n > 0
+}
+
+// cappedBuffer keeps the first max bytes written to it and calls over the
+// first time a write would pass them. Writes past the cap are discarded but
+// reported as written, so the copying goroutine never blocks the command on
+// a full pipe while it is being killed.
+type cappedBuffer struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	max  int
+	over func()
+	hit  bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if room := c.max - c.buf.Len(); room < len(p) {
+		if room > 0 {
+			c.buf.Write(p[:room])
+		}
+		if !c.hit {
+			c.hit = true
+			c.over()
+		}
+		return len(p), nil
+	}
+	return c.buf.Write(p)
+}
+
+func (c *cappedBuffer) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
 func (r RealRunner) run(ctx context.Context, dir string, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error) {
+	if n, ok := OutputLimit(ctx); ok {
+		return r.runCapped(ctx, n, dir, stdin, env, name, args...)
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	if len(env) > 0 {
 		cmd.Env = cmd.Environ()
@@ -57,6 +122,45 @@ func (r RealRunner) run(ctx context.Context, dir string, stdin io.Reader, env ma
 	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
 	if ee, ok := err.(*exec.ExitError); ok {
 		res.Code = ee.ExitCode()
+	}
+	return res, err
+}
+
+// runCapped is run with each output stream capped at n bytes: past the cap
+// the command is killed and the error is ErrOutputLimit.
+func (r RealRunner) runCapped(ctx context.Context, n int, dir string, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error) {
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, name, args...)
+	if len(env) > 0 {
+		cmd.Env = cmd.Environ()
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
+	// A killed command's own children (the guest side of an `orb` or
+	// `limactl` exec) can hold the output pipes open; WaitDelay closes them
+	// so Run returns soon after the kill or the context's deadline.
+	cmd.WaitDelay = cappedWaitDelay
+	stdout := &cappedBuffer{max: n, over: cancel}
+	stderr := &cappedBuffer{max: n, over: cancel}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	err := cmd.Run()
+	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
+	if ee, ok := err.(*exec.ExitError); ok {
+		res.Code = ee.ExitCode()
+	}
+	if stdout.hit || stderr.hit {
+		if res.Code == 0 {
+			res.Code = -1
+		}
+		return res, fmt.Errorf("%s: %w", name, ErrOutputLimit)
 	}
 	return res, err
 }

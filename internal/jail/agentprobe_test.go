@@ -38,7 +38,7 @@ func TestAgentProbeHubToken(t *testing.T) {
 		t.Fatal("a token 1.6 h from expiry is past its 2 h refresh point")
 	}
 	argv := host.Calls[0].Argv()
-	if !strings.Contains(argv, "podman exec lever--assistant sh -c") || !strings.Contains(argv, "cut -s -d. -f2") ||
+	if !strings.Contains(argv, "podman exec --user scion lever--assistant sh -c") || !strings.Contains(argv, "cut -s -d. -f2") ||
 		!strings.HasSuffix(argv, "sh "+AgentTokenPath) {
 		t.Fatalf("argv %q", argv)
 	}
@@ -154,7 +154,7 @@ func TestAgentProbeHarnessAlive(t *testing.T) {
 		if alive != c.alive || (err != nil) != c.wantErr {
 			t.Errorf("%s: alive=%v err=%v, want %v err=%v", c.name, alive, err, c.alive, c.wantErr)
 		}
-		if argv := calls[0]; !strings.Contains(argv, "podman exec lever--assistant tmux list-panes -t scion:agent") {
+		if argv := calls[0]; !strings.Contains(argv, "podman exec --user scion lever--assistant tmux list-panes -t scion:agent") {
 			t.Errorf("%s: argv %q", c.name, argv)
 		}
 	}
@@ -168,11 +168,8 @@ func TestAgentProbeReportSessionRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	argv := host.Calls[0].Argv()
-	if !strings.HasSuffix(argv, "podman exec lever--assistant sciontool hook --dialect=claude SessionStart") {
-		t.Fatalf("argv %q", argv)
-	}
-	if strings.Contains(argv, "--user") {
-		t.Fatal("the hook runs as the container's own user, like Claude Code's")
+	if !strings.HasSuffix(argv, "podman exec --user scion lever--assistant sciontool hook --dialect=claude SessionStart") {
+		t.Fatalf("argv %q: the hook runs as scion, the user scion's own execs use", argv)
 	}
 	jr = New(Config{Host: failingRunner{`Error: no such container "x"`}, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
 	if err := (AgentProbe{R: jr}).ReportSessionRunning(context.Background(), "x"); !errors.Is(err, ErrNoContainer) {
@@ -223,5 +220,64 @@ func TestAgentTokenScriptRealShell(t *testing.T) {
 	out = runTokenScript(t, []byte(big))
 	if _, line, _ := strings.Cut(out, "\n"); len(line) > 8192 {
 		t.Fatalf("payload line is %d bytes, want <= 8192", len(line))
+	}
+}
+
+// hangRunner blocks every call until its context ends, like a probe reading
+// a FIFO the agent put in place of its token file, and records the deadline
+// and output cap it was given.
+type hangRunner struct {
+	deadlines []time.Duration
+	limits    []int
+}
+
+func (h *hangRunner) Run(ctx context.Context, _ map[string]string, _ string, _ ...string) (proc.Result, error) {
+	d, _ := ctx.Deadline()
+	h.deadlines = append(h.deadlines, time.Until(d))
+	n, _ := proc.OutputLimit(ctx)
+	h.limits = append(h.limits, n)
+	<-ctx.Done()
+	return proc.Result{Code: -1}, ctx.Err()
+}
+func (h *hangRunner) RunIn(ctx context.Context, _ string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return h.Run(ctx, env, name, args...)
+}
+func (h *hangRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return h.Run(ctx, env, name, args...)
+}
+
+// TestAgentProbeExecsAreBounded: every probe exec, and the read-only write
+// probe, runs under its own deadline whatever the caller's context, so a
+// hanging exec (a FIFO token file, a fake tmux server, a sciontool that never
+// returns) ends in an error instead of hanging doctor, apply or the broker.
+func TestAgentProbeExecsAreBounded(t *testing.T) {
+	old := agentExecTimeout
+	agentExecTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { agentExecTimeout = old })
+	h := &hangRunner{}
+	p := AgentProbe{R: h}
+	ctx := context.Background() // no deadline of its own
+	start := time.Now()
+	_, err1 := p.HubToken(ctx, "lever--x")
+	_, err2 := p.HarnessAlive(ctx, "lever--x")
+	err3 := p.ReportSessionRunning(ctx, "lever--x")
+	_, err4 := ContainerPathWritable(ctx, h, "lever--x", "/workspace/a")
+	for i, err := range []error{err1, err2, err3, err4} {
+		if err == nil {
+			t.Fatalf("exec %d: a hung exec must end in an error", i)
+		}
+	}
+	for i, d := range h.deadlines {
+		if d <= 0 || d > agentExecTimeout {
+			t.Fatalf("exec %d had deadline %s, want within %s", i, d, agentExecTimeout)
+		}
+	}
+	if len(h.deadlines) != 4 || time.Since(start) > 5*time.Second {
+		t.Fatalf("deadlines %v after %s", h.deadlines, time.Since(start))
+	}
+	for i, n := range h.limits {
+		if n != agentExecOutputLimit {
+			t.Fatalf("exec %d output cap = %d, want %d", i, n, agentExecOutputLimit)
+		}
 	}
 }

@@ -57,6 +57,28 @@ func (t HubTokenTimes) RefreshOverdue() bool {
 // agent's hub token (scion cmd/sciontool/commands/init.go).
 const AgentTokenRefreshMargin = 2 * time.Hour
 
+// AgentUser is the user every probe execs as: scion's own execs into an
+// agent container run as "scion" (scion pkg/runtime/podman.go), the user
+// that owns the harness's tmux server and the token file, whatever USER the
+// image declares.
+const AgentUser = "scion"
+
+// Every exec into an agent container runs a program the agent can replace
+// (it is root in its own container) or feed a file it can replace (a FIFO
+// makes `head` block): each gets its own deadline, so a hostile agent
+// cannot hang doctor, apply or the broker, and its output is capped, so it
+// cannot grow the host process (proc.WithOutputLimit).
+const agentExecOutputLimit = 64 << 10
+
+// agentExecTimeout is a var so a test can shrink it.
+var agentExecTimeout = 10 * time.Second
+
+// BoundAgentExec returns ctx with the deadline and output cap every exec
+// into an agent container runs under. The caller defers cancel.
+func BoundAgentExec(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(proc.WithOutputLimit(ctx, agentExecOutputLimit), agentExecTimeout)
+}
+
 // AgentProbe reads (and, for ReportSessionRunning, nudges) an agent's
 // session from inside its container, through the jail. Every call is a
 // `podman exec` into a container the agent controls, so everything it
@@ -74,7 +96,9 @@ func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, er
 	if err := checkRef(ref); err != nil {
 		return HubTokenTimes{}, fmt.Errorf("reading agent hub token: %w", err)
 	}
-	res, err := p.R.Run(ctx, nil, "podman", "exec", ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
+	ctx, cancel := BoundAgentExec(ctx)
+	defer cancel()
+	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
 	if err != nil {
 		if noSuchContainer(res.Stderr) {
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrNoContainer)
@@ -127,7 +151,9 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	if err := checkRef(ref); err != nil {
 		return false, fmt.Errorf("probing agent harness: %w", err)
 	}
-	res, err := p.R.Run(ctx, nil, "podman", "exec", ref, "tmux", "list-panes", "-t", "scion:agent", "-F", "#{pane_dead}")
+	ctx, cancel := BoundAgentExec(ctx)
+	defer cancel()
+	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "tmux", "list-panes", "-t", "scion:agent", "-F", "#{pane_dead}")
 	if err == nil {
 		for _, ln := range strings.Fields(res.Stdout) {
 			if ln == "0" {
@@ -160,7 +186,9 @@ func (p AgentProbe) ReportSessionRunning(ctx context.Context, ref string) error 
 	if err := checkRef(ref); err != nil {
 		return fmt.Errorf("reporting agent session: %w", err)
 	}
-	res, err := p.R.Run(ctx, nil, "podman", "exec", ref, "sciontool", "hook", "--dialect=claude", "SessionStart")
+	ctx, cancel := BoundAgentExec(ctx)
+	defer cancel()
+	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sciontool", "hook", "--dialect=claude", "SessionStart")
 	if err != nil {
 		if noSuchContainer(res.Stderr) {
 			return fmt.Errorf("reporting agent session in %s: %w", ref, ErrNoContainer)

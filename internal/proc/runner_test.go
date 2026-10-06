@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFakeRunnerRecordsAndScripts(t *testing.T) {
@@ -108,5 +109,37 @@ func TestRealRunnerFeedsStdin(t *testing.T) {
 	}
 	if res.Stdout != "hello stdin" {
 		t.Fatalf("stdout=%q", res.Stdout)
+	}
+}
+
+// TestRealRunnerOutputLimit: a command that streams past the cap is killed,
+// keeps only the capped bytes, and fails with ErrOutputLimit; one under the
+// cap runs as usual.
+func TestRealRunnerOutputLimit(t *testing.T) {
+	ctx := WithOutputLimit(context.Background(), 1024)
+	start := time.Now()
+	res, err := RealRunner{}.Run(ctx, nil, "sh", "-c", "yes leverleverlever")
+	if !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("err = %v, want ErrOutputLimit", err)
+	}
+	if len(res.Stdout) != 1024 {
+		t.Fatalf("kept %d bytes, want the 1024-byte cap", len(res.Stdout))
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("the streaming command was not killed promptly")
+	}
+	// stderr is capped the same way.
+	if _, err := (RealRunner{}).Run(ctx, nil, "sh", "-c", "yes x >&2"); !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("stderr flood: err = %v", err)
+	}
+	res, err = RealRunner{}.Run(ctx, nil, "sh", "-c", "echo small; exit 3")
+	if err == nil || errors.Is(err, ErrOutputLimit) || res.Code != 3 || res.Stdout != "small\n" {
+		t.Fatalf("under the cap: res=%+v err=%v", res, err)
+	}
+	// A child that keeps the pipe open past the kill still lets Run return.
+	start = time.Now()
+	_, err = RealRunner{}.Run(ctx, nil, "sh", "-c", "(sleep 30 &) ; yes y")
+	if !errors.Is(err, ErrOutputLimit) || time.Since(start) > 10*time.Second {
+		t.Fatalf("held pipe: err=%v after %s", err, time.Since(start))
 	}
 }

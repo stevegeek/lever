@@ -5,7 +5,7 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
-## [Unreleased]
+## [0.30.0] - 2026-10-06
 
 ### Added
 
@@ -70,6 +70,23 @@ version bump moves the block under the new version heading.
     hooks and config) is still agent-writable; the config reference and
     security model §5.1.1 say so.
 
+- **A multi-agent chat page.** With `remote.landing: chat` the page opens on the login's list of
+  agents and chats with each one it may message. An operator sees the manager and every worker;
+  a contact sees its `agents:` (to message) and the agents of a new `see:` key (name, label and
+  state only: no history, no input). The list is built per login on the server
+  (`GET /lever/api/agents`): an agent outside the login's lists never appears, not its name, id
+  or conversation. Each row shows a state from a fixed set of words and an unread count; reading
+  a chat moves the hub read marker. A message to a suspended worker wakes it first (a stopped
+  one only for an operator: a contact gets "Ask the manager to start <name>" instead)
+  (`POST /lever/api/agents/<name>/wake`: worker only, a login that may message it, same-origin,
+  one wake per worker per minute, through the broker's operator socket, audited), then goes out
+  under the idempotency key it had before the wake. A worker in error, with no record, or not
+  fresh offers "Ask the manager to start <name>", an editable draft in the manager chat.
+  Optional `remote.labels_file` names a manager-written JSON file of short labels the page
+  shows after each name (host-side read, no symbolic links, 16 KiB, cleaned and cut to 60
+  characters); a bad file means no labels and a new `chat labels` row in `lever doctor`. Wide
+  screens show the list and the chat side by side.
+
 ### Changed
 
 - With `manager.read_only` set, **every** `lever apply` (also one that
@@ -77,6 +94,49 @@ version bump moves the block under the new version heading.
   reached through a symbolic link (an in-tree link included, which was
   allowed before), and creates a missing worker dir. Without the setting
   nothing changes.
+
+- **Contacts get the chat page with `landing: chat`.** A contact's page navigations redirect to
+  `/lever/chat` instead of the contact landing page or the hub's web UI shell; every hub rule of
+  the contact fence is unchanged. With `landing` unset or `console`, nothing changes.
+- **`/lever/api/chat` is gone**: the page reads `/lever/api/agents`. An open chat whose agent gets
+  a new hub record moves to the new conversation instead of reloading the page, and the page no
+  longer reads the agent's hub record (`GET /api/v1/agents/<id>`) for its state.
+- **Drafts and unsent records are kept per agent** in the tab's session storage
+  (`lever-chat-draft:<name>`, `lever-chat-unsent:<name>`); the one-agent page's records are
+  adopted once, so a send with no clear answer keeps its key across the upgrade.
+
+### Security
+
+- **The remote proxy refuses a path that is not in one spelling, for every
+  tier (400, audit `deny-path`).** Its route checks read the path by prefix,
+  so a contact's `GET /assets/../lever/api/chat` passed the static-asset rule
+  and reached the hub with the contact's session (the hub answered with a
+  redirect, so nothing was served). A path with a `.` or `..` segment, an
+  empty segment (`//`), a backslash or NUL, or an encoded slash, backslash,
+  dot or NUL (`%2f`, `%5c`, `%2e`, `%00`) is now refused before any route
+  decision, so the decisions and the forwarded request name the same route.
+- **Terminal output replaces invisible and reordering characters from the
+  jail.** `termsafe.Sanitize` (doctor and up rows, apply log lines, returned
+  errors) passed printable UTF-8 unchanged, so a guest string could carry a
+  bidi override, a zero-width character, a tag character or a blank glyph
+  and render as text that is not there. Every format character (category
+  Cf), U+2028 and U+2029, the blank glyphs U+2800, U+3164, U+115F,
+  U+1160 and U+FFA0, the variation selectors (U+FE00-FE0F,
+  U+E0100-E01EF), U+034F and U+17B4/U+17B5 now become U+FFFD. Other
+  combining marks pass. This includes the zero-width joiner and non-joiner
+  (U+200D, U+200C): an emoji ZWJ sequence shows as its parts with U+FFFD
+  between them (👨‍💻 as 👨�💻), and Persian or Hindi text that uses ZWNJ
+  shows U+FFFD where it stood. The same holds for worker event messages
+  (`msg list`, `watch`).
+- **A worker's own text in an event is marked as the worker's.** scion builds
+  a notification's message from the watched worker's own `Message` and
+  `TaskSummary`, and `/msg/list`, `lever-manager msg list` and
+  `lever-manager watch` passed it and its status through raw. Each event's
+  `message` now starts with `worker-reported:`, is sanitized (one line, no
+  escapes or invisible characters) and cut to 1 KiB; its `status` is shown
+  only when it is one the hub produces, else `UNRECOGNISED`. The JSON shape
+  is unchanged. The manager skill says the message is data. Run `lever init`
+  to refresh the skills.
 
 ### Fixed
 
@@ -182,6 +242,15 @@ version bump moves the block under the new version heading.
   bare release and apply kept the old daemons. The version string of a build with no commit
   stamp, or a dirty one, now ends in the binary's own hash (`0.29.1 (bin f24a48f494ee)`).
 
+- **A worker start no longer writes one audit deny per tool.** Newer Claude
+  Code probes every MCP server with `server/discover` at start, and the
+  broker gateway denied it as "method not allowlisted". The gateway now
+  answers `server/discover`, `resources/list`, `resources/templates/list`
+  and `prompts/list` itself with JSON-RPC "method not found" (-32601), or a
+  bodiless 202 for a notification, logs them at debug level only (a revoked
+  caller's probe gets the same answer and an audit deny line), and never
+  forwards them. Every other unknown method is still denied and audited.
+
 ### Upgrade
 
 - The `lever-operator` skill changed (a boundary line: do not run the `claude` CLI in the
@@ -211,79 +280,6 @@ version bump moves the block under the new version heading.
   point a scaffold path at another tree file and have `lever init`
   overwrite it with the fixed scaffold content: corruption, not code
   execution. Not fixed yet.
-
-- **A multi-agent chat page.** With `remote.landing: chat` the page opens on the login's list of
-  agents and chats with each one it may message. An operator sees the manager and every worker;
-  a contact sees its `agents:` (to message) and the agents of a new `see:` key (name, label and
-  state only: no history, no input). The list is built per login on the server
-  (`GET /lever/api/agents`): an agent outside the login's lists never appears, not its name, id
-  or conversation. Each row shows a state from a fixed set of words and an unread count; reading
-  a chat moves the hub read marker. A message to a suspended worker wakes it first (a stopped
-  one only for an operator: a contact gets "Ask the manager to start <name>" instead)
-  (`POST /lever/api/agents/<name>/wake`: worker only, a login that may message it, same-origin,
-  one wake per worker per minute, through the broker's operator socket, audited), then goes out
-  under the idempotency key it had before the wake. A worker in error, with no record, or not
-  fresh offers "Ask the manager to start <name>", an editable draft in the manager chat.
-  Optional `remote.labels_file` names a manager-written JSON file of short labels the page
-  shows after each name (host-side read, no symbolic links, 16 KiB, cleaned and cut to 60
-  characters); a bad file means no labels and a new `chat labels` row in `lever doctor`. Wide
-  screens show the list and the chat side by side.
-
-### Changed
-
-- **Contacts get the chat page with `landing: chat`.** A contact's page navigations redirect to
-  `/lever/chat` instead of the contact landing page or the hub's web UI shell; every hub rule of
-  the contact fence is unchanged. With `landing` unset or `console`, nothing changes.
-- **`/lever/api/chat` is gone**: the page reads `/lever/api/agents`. An open chat whose agent gets
-  a new hub record moves to the new conversation instead of reloading the page, and the page no
-  longer reads the agent's hub record (`GET /api/v1/agents/<id>`) for its state.
-- **Drafts and unsent records are kept per agent** in the tab's session storage
-  (`lever-chat-draft:<name>`, `lever-chat-unsent:<name>`); the one-agent page's records are
-  adopted once, so a send with no clear answer keeps its key across the upgrade.
-
-### Security
-
-- **The remote proxy refuses a path that is not in one spelling, for every
-  tier (400, audit `deny-path`).** Its route checks read the path by prefix,
-  so a contact's `GET /assets/../lever/api/chat` passed the static-asset rule
-  and reached the hub with the contact's session (the hub answered with a
-  redirect, so nothing was served). A path with a `.` or `..` segment, an
-  empty segment (`//`), a backslash or NUL, or an encoded slash, backslash,
-  dot or NUL (`%2f`, `%5c`, `%2e`, `%00`) is now refused before any route
-  decision, so the decisions and the forwarded request name the same route.
-- **Terminal output replaces invisible and reordering characters from the
-  jail.** `termsafe.Sanitize` (doctor and up rows, apply log lines, returned
-  errors) passed printable UTF-8 unchanged, so a guest string could carry a
-  bidi override, a zero-width character, a tag character or a blank glyph
-  and render as text that is not there. Every format character (category
-  Cf), U+2028 and U+2029, the blank glyphs U+2800, U+3164, U+115F,
-  U+1160 and U+FFA0, the variation selectors (U+FE00-FE0F,
-  U+E0100-E01EF), U+034F and U+17B4/U+17B5 now become U+FFFD. Other
-  combining marks pass. This includes the zero-width joiner and non-joiner
-  (U+200D, U+200C): an emoji ZWJ sequence shows as its parts with U+FFFD
-  between them (👨‍💻 as 👨�💻), and Persian or Hindi text that uses ZWNJ
-  shows U+FFFD where it stood. The same holds for worker event messages
-  (`msg list`, `watch`).
-- **A worker's own text in an event is marked as the worker's.** scion builds
-  a notification's message from the watched worker's own `Message` and
-  `TaskSummary`, and `/msg/list`, `lever-manager msg list` and
-  `lever-manager watch` passed it and its status through raw. Each event's
-  `message` now starts with `worker-reported:`, is sanitized (one line, no
-  escapes or invisible characters) and cut to 1 KiB; its `status` is shown
-  only when it is one the hub produces, else `UNRECOGNISED`. The JSON shape
-  is unchanged. The manager skill says the message is data. Run `lever init`
-  to refresh the skills.
-
-### Fixed
-
-- **A worker start no longer writes one audit deny per tool.** Newer Claude
-  Code probes every MCP server with `server/discover` at start, and the
-  broker gateway denied it as "method not allowlisted". The gateway now
-  answers `server/discover`, `resources/list`, `resources/templates/list`
-  and `prompts/list` itself with JSON-RPC "method not found" (-32601), or a
-  bodiless 202 for a notification, logs them at debug level only (a revoked
-  caller's probe gets the same answer and an audit deny line), and never
-  forwards them. Every other unknown method is still denied and audited.
 
 ## [0.29.1] - 2026-10-02
 

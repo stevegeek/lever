@@ -184,6 +184,11 @@ type Config struct {
 	// pending is the kept ids no contact read has bound yet (not shown to
 	// the contact so far).
 	PeekAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (keep, pending map[string]bool, err error)
+	// Files (remote.files) turns on the chat page's file exchange: a login
+	// uploads to an agent it may message and downloads what the agent
+	// shared with it (files.go). Nil = off: every /lever/api/files/ path is
+	// a 404. Needs ChatAgent.
+	Files *FilesConfig
 	// Push, when non-nil, is the Web Push service (remote.push, push.go):
 	// the page's subscription routes and worker, and the hub streams that
 	// turn agent messages into pushes (the caller runs Push.Run). It needs
@@ -535,6 +540,9 @@ func NewHandler(cfg Config) http.Handler {
 	}
 	if cfg.ChatAgent != "" {
 		g.chat = newChatPage(cfg)
+		if cfg.Files != nil {
+			g.files = newFilesState(*cfg.Files)
+		}
 		if cfg.Push != nil {
 			g.push = cfg.Push
 			cfg.Push.attach(g)
@@ -761,6 +769,7 @@ type gate struct {
 	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
 	chat     *chatPage     // nil unless Config.ChatAgent is set
 	push     *Push         // nil unless Config.Push and ChatAgent are set
+	files    *filesState   // nil unless Config.Files and ChatAgent are set
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration

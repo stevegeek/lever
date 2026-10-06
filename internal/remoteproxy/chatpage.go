@@ -309,6 +309,16 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		g.serveWake(w, r, line, v, name)
 		return true
 	}
+	if agent, id, under := filesTarget(p); under {
+		if g.files == nil || agent == "" {
+			// Off, or a path under the prefix that names no agent: the
+			// prefix is lever's either way, never the hub's.
+			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
+			return true
+		}
+		g.serveFiles(w, r, line, v, agent, id)
+		return true
+	}
 	if g.push != nil && (p == pushKeyPath || p == pushSubsPath) {
 		g.servePush(w, r, line, v, p)
 		return true

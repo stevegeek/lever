@@ -62,6 +62,14 @@ type agentsAnswer struct {
 	UserID  string       `json:"userId"`
 	Console string       `json:"console,omitempty"` // operator only
 	Agents  []agentEntry `json:"agents"`
+	Files   *filesInfo   `json:"files,omitempty"` // remote.files on
+}
+
+// filesInfo is the upload limits the page checks before it sends a file
+// (the proxy checks them again).
+type filesInfo struct {
+	MaxBytes   int64    `json:"maxBytes"`
+	Extensions []string `json:"extensions"`
 }
 
 const (
@@ -464,6 +472,9 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	recs, err := g.records(ctx)
 	ans := buildAgents(v, g.cfg.ChatAgent, uid, recs, err != nil, g.labels(), g.cfg.ContactSession)
+	if g.files != nil {
+		ans.Files = &filesInfo{MaxBytes: g.files.cfg.MaxBytes, Extensions: g.files.cfg.Extensions}
+	}
 	g.addUnread(ctx, v.login, cookie, &ans)
 	body, err := json.Marshal(ans)
 	if err != nil {

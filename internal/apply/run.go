@@ -289,9 +289,11 @@ type Deps struct {
 	// contacts are refused (fail closed). Nil records nothing.
 	BeginSession func(agent string) (commit func() error)
 	// InspectContainerMounts reads a jail container's mounts (id or name),
-	// jail.ContainerMounts in production. Used only to warn when a manager
-	// that apply kept or resumed lacks the manager.read_only mounts, which
-	// only a create can add. nil ⇒ the warning says it could not check.
+	// jail.ContainerMounts in production. Used to warn when a manager that
+	// apply kept or resumed lacks the manager.read_only mounts, which only a
+	// create can add, and, before the keep or resume, to find mounts the
+	// record holds that the config dropped or whose directory is gone
+	// (checkStaleTreeMounts). nil ⇒ the warning says it could not check.
 	InspectContainerMounts func(ctx context.Context, ref string) ([]jail.Mount, error)
 	// ProbeContainerWritable asks a running container whether its user can
 	// write a path (jail.ContainerPathWritable in production): the live
@@ -944,6 +946,11 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
+	if rec != nil && !r.fresh {
+		if err := r.checkStaleTreeMounts(ctx, jp, rec); err != nil {
+			return err
+		}
+	}
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
 	if err != nil {
 		return err
@@ -1179,6 +1186,136 @@ func ManagerTreeMountsFix(g TreeMountGaps) string {
 		fix += "; from then on edit protected directories in place — replacing one on the host (rm -rf and recreate, a rename-based deploy, a git checkout that removes and re-adds it) drops the protection until the next fresh create"
 	}
 	return fix
+}
+
+// StaleTreeMounts is how a manager container's tree mounts outlive the
+// config. scion keeps a record's volumes for life and a resume recreates
+// the container from them, so a mount lever made at the create stays after
+// the config stops asking for it, each list by tree-relative path:
+//
+//   - Gone: the host directory behind the mount no longer exists. podman
+//     cannot recreate the container ("statfs …: no such file or
+//     directory"), so the next resume fails (card #157);
+//   - DroppedReadOnly: an entry no longer in manager.read_only, still
+//     mounted read-only — the manager cannot write it until a fresh create;
+//   - DroppedPins: a pin the plan no longer has (a removed entry's
+//     ancestor, a removed worker's dir), still mounted over itself — the
+//     directory cannot be renamed or removed from inside the container.
+//
+// The reverse case, an entry ADDED to the config, is a TreeMountGaps
+// Missing gap: it too needs a fresh create.
+type StaleTreeMounts struct {
+	Gone, DroppedReadOnly, DroppedPins []string
+}
+
+// Empty reports whether the container mounts nothing the config dropped.
+func (s StaleTreeMounts) Empty() bool {
+	return len(s.Gone)+len(s.DroppedReadOnly)+len(s.DroppedPins) == 0
+}
+
+// String words the stale mounts for a doctor row or an apply message. The
+// paths come from the container's inspect and are sanitized.
+func (s StaleTreeMounts) String() string {
+	var parts []string
+	add := func(paths []string, what string) {
+		if len(paths) == 0 {
+			return
+		}
+		safe := make([]string, len(paths))
+		for i, p := range paths {
+			safe[i] = termsafe.Sanitize(p)
+		}
+		parts = append(parts, strings.Join(safe, ", ")+" "+what)
+	}
+	add(s.Gone, "mounted by the manager record but no longer on the host: podman cannot recreate the container, so the next resume fails (statfs: no such file or directory)")
+	add(s.DroppedReadOnly, "still mounted read-only although no longer in manager.read_only (the record keeps its mounts until a fresh create)")
+	add(s.DroppedPins, "still pinned (mounted over itself) although the config no longer asks for it (the record keeps its mounts until a fresh create)")
+	return strings.Join(parts, "; ")
+}
+
+// Fix is the operator's way out: for a gone directory, recreate it (empty
+// is enough) or start fresh; for a dropped mount, keep the directory until
+// a fresh create, which is the only way to drop the mount.
+func (s StaleTreeMounts) Fix() string {
+	const fresh = "back up the manager's conversation first, then run `lever up --fresh` (the fresh start deletes the manager record and its conversation, and creates the manager with the mounts the config names now)"
+	if len(s.Gone) > 0 {
+		return "recreate each missing directory on the host (an empty directory is enough) and run the command again; or, to drop the mounts, " + fresh
+	}
+	return "keep these directories until the next fresh create (a missing one blocks the resume); to drop the mounts now, " + fresh
+}
+
+// ManagerStaleTreeMounts finds, among a manager container's mounts, the
+// tree directories lever mounted over themselves (source the directory in
+// the in-jail tree jp, target the same place under the workspace) that the
+// current read_only plan no longer has, or whose host directory (under
+// tree) is gone. Any other mount — the workspace itself, scion's own — is
+// not lever's and is skipped.
+func ManagerStaleTreeMounts(jp, tree string, want []config.TreeMount, got []jail.Mount) StaleTreeMounts {
+	planned := make(map[string]bool, len(want))
+	for _, w := range want {
+		planned[w.Rel] = true
+	}
+	var s StaleTreeMounts
+	for _, m := range got {
+		rel, ok := treeSelfMount(jp, m)
+		if !ok {
+			continue
+		}
+		_, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(rel)))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			s.Gone = append(s.Gone, rel)
+		case planned[rel]:
+		case m.RW:
+			s.DroppedPins = append(s.DroppedPins, rel)
+		default:
+			s.DroppedReadOnly = append(s.DroppedReadOnly, rel)
+		}
+	}
+	slices.Sort(s.Gone)
+	slices.Sort(s.DroppedReadOnly)
+	slices.Sort(s.DroppedPins)
+	return s
+}
+
+// treeSelfMount reports whether m is a tree directory mounted over its own
+// place in the workspace, the shape managerTreeVolumes creates, and its
+// tree-relative path.
+func treeSelfMount(jp string, m jail.Mount) (string, bool) {
+	rel, ok := strings.CutPrefix(m.Destination, scion.ContainerWorkspace+"/")
+	if !ok || rel == "" || path.Clean(rel) != rel || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	return rel, m.Source == path.Join(jp, rel)
+}
+
+// checkStaleTreeMounts runs before apply acts on a manager record it will
+// keep or resume: a mount the record holds for a directory that is gone
+// fails the resume inside podman with a bare statfs error, and a mount the
+// config dropped stays until a fresh create. It reads the mounts off the
+// manager's container, which a stopped record keeps (scion's stop does not
+// remove it); with no container, or an inspect that fails, it says nothing
+// — warnManagerTreeMounts and doctor report what they cannot inspect. A
+// gone directory under a record that is not live refuses the bring-up
+// before anything is acted on, naming the fix; everything else is a
+// warning.
+func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, rec *scion.Agent) error {
+	if r.d.InspectContainerMounts == nil {
+		return nil
+	}
+	got, err := r.d.InspectContainerMounts(ctx, jail.ContainerName(path.Base(jp), r.app.Name))
+	if err != nil {
+		return nil
+	}
+	stale := ManagerStaleTreeMounts(jp, r.app.Tree, r.app.ManagerTreeMounts(), got)
+	if stale.Empty() {
+		return nil
+	}
+	if len(stale.Gone) > 0 && !scion.ContainerLive(rec.ContainerStatus) {
+		return fmt.Errorf("start-manager: manager %q cannot be resumed: %s. To fix it, %s", r.app.Name, stale, stale.Fix())
+	}
+	r.d.Log("start-manager: WARNING: manager %q: %s. %s", r.app.Name, stale, stale.Fix())
+	return nil
 }
 
 // warnManagerTreeMounts runs after apply kept or resumed a manager rather

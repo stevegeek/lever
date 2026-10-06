@@ -1600,6 +1600,16 @@ func TestCheckManagerReadOnly(t *testing.T) {
 	}
 	full := append([]jail.Mount{ws, pin, ro}, wpins...)
 	with := func(ms ...jail.Mount) []jail.Mount { return append(append([]jail.Mount{}, ms...), wpins...) }
+	// The host tree behind /lever: every planned dir, and kb (an entry the
+	// config dropped, its dir kept). /lever/gone has no dir.
+	tree := t.TempDir()
+	for _, d := range []string{"assistant/tools", "workers/w", "kb"} {
+		if err := os.MkdirAll(filepath.Join(tree, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kb := jail.Mount{Source: "/lever/kb", Destination: "/workspace/kb"}
+	gone := jail.Mount{Source: "/lever/gone", Destination: "/workspace/gone"}
 	cases := []struct {
 		label      string
 		want       []config.TreeMount
@@ -1633,6 +1643,17 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		{"no container id, found by name", want, listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "running"}),
 			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), refused, true, false, "a write probe refused", ""},
 		{"none configured", nil, mgr, inspectOf(nil), refused, true, false, "none configured", ""},
+		{"none configured, nothing mounted", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, true, false, "none configured", ""},
+		{"none configured, list fails", nil, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, inspectOf(nil), refused, true, false, "none configured", ""},
+		// card #157: the record keeps the mounts of its create.
+		{"dropped entry still mounted", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, kb}}), refused, true, false,
+			"kb still mounted read-only although no longer in manager.read_only", "keep these directories"},
+		{"mounted dir gone", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, gone}}), refused, false, false,
+			"gone mounted by the manager record but no longer on the host", "recreate each missing directory"},
+		{"plan held, dropped entry too", want, mgr, inspectOf(map[string][]jail.Mount{"cm": append(append([]jail.Mount{}, full...), kb)}), refused, true, false,
+			"kb still mounted read-only", "lever up --fresh"},
+		{"gap and gone dir", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, gone}}), refused, false, false,
+			"; also gone mounted by the manager record", "recreate each missing directory"},
 		{"no record", want, listing(), inspectOf(nil), refused, true, false, "not checked (no manager record)", ""},
 		{"no container", want, mgr, inspectOf(nil), refused, true, false, "not checked (no manager container)", ""},
 		{"inspect fails", want, mgr, inspectOf(map[string][]jail.Mount{}, "cm"), refused, true, false, "not checked (could not inspect", ""},
@@ -1640,7 +1661,7 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		{"nil probes", want, nil, nil, nil, true, false, "not checked", ""},
 	}
 	for _, c := range cases {
-		r := checkManagerReadOnly(context.Background(), "/lever", "assistant", c.want, c.list, c.inspect, c.probe)
+		r := checkManagerReadOnly(context.Background(), "/lever", tree, "assistant", c.want, c.list, c.inspect, c.probe)
 		if r.name != "manager read-only paths" {
 			t.Fatalf("%s: name = %q", c.label, r.name)
 		}

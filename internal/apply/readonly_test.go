@@ -263,8 +263,10 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 			} else if !strings.Contains(joined, "WARNING") || !strings.Contains(joined, tc.wantWarn) {
 				t.Fatalf("want a warning mentioning %q, got %q", tc.wantWarn, joined)
 			}
-			if tc.inspect != nil && (len(refs) != 1 || refs[0] != jail.ContainerName(path.Base(jp), "hello")) {
-				t.Fatalf("inspected %q, want the manager container by name", refs)
+			// Twice on a resume: the stale-mount check before it, and the
+			// protection check after.
+			if tc.inspect != nil && (len(refs) != 2 || refs[0] != jail.ContainerName(path.Base(jp), "hello") || refs[1] != refs[0]) {
+				t.Fatalf("inspected %q, want the manager container by name, before and after the resume", refs)
 			}
 		})
 	}
@@ -325,5 +327,113 @@ func TestManagerTreeMountGaps(t *testing.T) {
 		return false, errors.New("exec failed")
 	}, "c", want); err == nil {
 		t.Fatal("a probe that cannot run must be an error")
+	}
+}
+
+// card #157: a manager record keeps the mounts of its create. A directory it
+// mounts that is gone on the host refuses the resume up front, naming the
+// directory and both fixes; an entry the config dropped is a warning; the
+// mounts of the current plan, the workspace and scion's own say nothing.
+func TestStartManagerStaleTreeMounts(t *testing.T) {
+	_, app := readOnlyConfig(t, true)
+	jp := JailPath(app.Tree, app.Tree, "")
+	if err := os.MkdirAll(filepath.Join(app.Tree, "kb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := []jail.Mount{
+		{Source: jp, Destination: "/workspace", RW: true},
+		{Source: "/home/u/.scion/x", Destination: "/workspace/.scion-volumes/x", RW: true},
+		{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
+		{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
+	}
+	refused := func(context.Context, string, string) (bool, error) { return false, nil }
+	for _, tc := range []struct {
+		name             string
+		extra            []jail.Mount
+		phase, cstatus   string
+		wantErr, wantLog string
+	}{
+		{"current plan", nil, "suspended", "stopped", "", ""},
+		{"dropped entry, dir kept", []jail.Mount{{Source: path.Join(jp, "kb"), Destination: "/workspace/kb"}}, "suspended", "stopped",
+			"", "kb still mounted read-only although no longer in manager.read_only"},
+		{"dropped entry, dir gone, stopped", []jail.Mount{{Source: path.Join(jp, "gone"), Destination: "/workspace/gone"}}, "suspended", "stopped",
+			"gone mounted by the manager record but no longer on the host", ""},
+		{"dropped pin, dir gone, running", []jail.Mount{{Source: path.Join(jp, "old"), Destination: "/workspace/old", RW: true}}, "running", "Up 2 hours",
+			"", "old mounted by the manager record but no longer on the host"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs []string
+			f := scionOKRunner()
+			r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: tc.phase, initContainerStatus: tc.cstatus}
+			mounts := append(append([]jail.Mount{}, base...), tc.extra...)
+			deps := Deps{
+				Scion:                  scion.New(r, scion.Options{}),
+				Log:                    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+				InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
+				ProbeContainerWritable: refused,
+			}
+			err := runApply(app, deps)
+			joined := strings.Join(logs, "\n")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "recreate each missing directory") || !strings.Contains(err.Error(), "lever up --fresh") {
+					t.Fatalf("err = %v, want a refusal naming %q and both fixes", err, tc.wantErr)
+				}
+				if f.Called(proc.ArgvPrefix("scion", "resume")) {
+					t.Fatal("the resume ran although its container cannot be recreated")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if tc.wantLog == "" {
+				if strings.Contains(joined, "WARNING") {
+					t.Fatalf("no warning expected, got %q", joined)
+				}
+				return
+			}
+			if !strings.Contains(joined, "WARNING") || !strings.Contains(joined, tc.wantLog) || !strings.Contains(joined, "lever up --fresh") {
+				t.Fatalf("want a warning mentioning %q and the fix, got %q", tc.wantLog, joined)
+			}
+		})
+	}
+}
+
+func TestManagerStaleTreeMounts(t *testing.T) {
+	tree := t.TempDir()
+	for _, d := range []string{"a/tools", "kb", "w"} {
+		if err := os.MkdirAll(filepath.Join(tree, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []config.TreeMount{{Rel: "a"}, {Rel: "a/tools", ReadOnly: true}}
+	got := []jail.Mount{
+		{Source: "/lever", Destination: "/workspace", RW: true},
+		{Source: "/lever/a", Destination: "/workspace/a", RW: true},
+		{Source: "/lever/a/tools", Destination: "/workspace/a/tools"},
+		{Source: "/lever/kb", Destination: "/workspace/kb"},
+		{Source: "/lever/w", Destination: "/workspace/w", RW: true},
+		{Source: "/lever/gone", Destination: "/workspace/gone"},
+		{Source: "/elsewhere/x", Destination: "/workspace/x"},       // not lever's shape
+		{Source: "/lever/../etc", Destination: "/workspace/../etc"}, // not a clean path
+		{Source: "/lever/tmp", Destination: "/tmp"},                 // outside the workspace
+	}
+	s := ManagerStaleTreeMounts("/lever", tree, want, got)
+	if !reflect.DeepEqual(s.Gone, []string{"gone"}) || !reflect.DeepEqual(s.DroppedReadOnly, []string{"kb"}) || !reflect.DeepEqual(s.DroppedPins, []string{"w"}) {
+		t.Fatalf("stale = %+v", s)
+	}
+	if !strings.Contains(s.Fix(), "recreate each missing directory") {
+		t.Fatalf("fix with a gone dir = %q", s.Fix())
+	}
+	s.Gone = nil
+	if !strings.Contains(s.Fix(), "keep these directories") || !strings.Contains(s.String(), "kb still mounted read-only") || !strings.Contains(s.String(), "w still pinned") {
+		t.Fatalf("dropped only: %q / %q", s, s.Fix())
+	}
+	if !ManagerStaleTreeMounts("/lever", tree, want, got[:3]).Empty() {
+		t.Fatal("the current plan alone is not stale")
+	}
+	// Paths are sanitized for the terminal.
+	if str := (StaleTreeMounts{Gone: []string{"x\x1b[2J"}}).String(); strings.Contains(str, "\x1b") {
+		t.Fatalf("unsanitized: %q", str)
 	}
 }

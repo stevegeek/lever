@@ -1090,21 +1090,32 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // The container is found by the id scion reports or else by scion's
 // container name, as for the worker ticket mounts. No manager record or
 // container, a listing or an inspect failure, is "not checked".
-func checkManagerReadOnly(ctx context.Context, project, name string, want []config.TreeMount, list agentLister, inspect mountInspector, probe apply.WritableProbe) checkResult {
+//
+// The row also reports the other direction (apply.ManagerStaleTreeMounts):
+// a mount the record still holds for a directory the config dropped, or
+// whose directory is gone from the host tree — the latter fails, because
+// the next resume cannot recreate the container (card #157). That half
+// runs even with read_only unset, since removing the whole list is how a
+// record ends up with mounts the config no longer names; only then is a
+// failed listing or inspect still "none configured".
+func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, probe apply.WritableProbe) checkResult {
 	const check = "manager read-only paths"
-	if len(want) == 0 {
-		return checkResult{check, true, "none configured", ""}
+	notChecked := func(detail string) checkResult {
+		if len(want) == 0 {
+			detail = "none configured"
+		}
+		return checkResult{check, true, detail, ""}
 	}
 	if list == nil || inspect == nil {
-		return checkResult{check, true, "not checked", ""}
+		return notChecked("not checked")
 	}
 	agents, err := list(ctx, project)
 	if err != nil {
-		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+		return notChecked("not checked (could not list agents): " + firstLine(err.Error()))
 	}
 	a := scionpkg.FindAgent(agents, name)
 	if a == nil {
-		return checkResult{check, true, "not checked (no manager record)", ""}
+		return notChecked("not checked (no manager record)")
 	}
 	ref := a.ContainerID
 	if ref == "" {
@@ -1112,14 +1123,37 @@ func checkManagerReadOnly(ctx context.Context, project, name string, want []conf
 	}
 	mounts, err := inspect(ctx, ref)
 	if errors.Is(err, jail.ErrNoContainer) {
-		return checkResult{check, true, "not checked (no manager container)", ""}
+		return notChecked("not checked (no manager container)")
 	}
 	if err != nil {
-		return checkResult{check, true, "not checked (could not inspect the manager container): " + firstLine(err.Error()), ""}
+		return notChecked("not checked (could not inspect the manager container): " + firstLine(err.Error()))
 	}
+	stale := apply.ManagerStaleTreeMounts(project, tree, want, mounts)
+	if len(want) == 0 {
+		if !stale.Empty() {
+			return staleTreeMountsResult(check, name, stale)
+		}
+		return checkResult{check, true, "none configured", ""}
+	}
+	r := managerReadOnlyGaps(ctx, check, project, name, ref, a.ContainerStatus, want, mounts, probe)
+	if stale.Empty() {
+		return r
+	}
+	sr := staleTreeMountsResult(check, name, stale)
+	if r.fix == "" {
+		return sr
+	}
+	// Both: the row fails if either does, and names both, with both fixes.
+	return checkResult{check, r.ok && sr.ok, r.detail + "; also " + stale.String(), r.fix + "; and " + sr.fix}
+}
+
+// managerReadOnlyGaps is checkManagerReadOnly's half for the current plan:
+// every planned mount present, and (on a running container) every entry
+// refusing a write.
+func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, containerStatus string, want []config.TreeMount, mounts []jail.Mount, probe apply.WritableProbe) checkResult {
 	gaps := apply.ManagerTreeMountGaps(project, want, mounts)
 	if gaps.Empty() {
-		if !scionpkg.ContainerLive(a.ContainerStatus) {
+		if !scionpkg.ContainerLive(containerStatus) {
 			return warnResult(check, "the mounts are listed, but the write probe did not run (the manager container is not running), so a protected directory replaced on the host would go unnoticed",
 				"bring the manager up (`lever up`) and re-run doctor")
 		}
@@ -1147,6 +1181,17 @@ func checkManagerReadOnly(ctx context.Context, project, name string, want []conf
 		}
 	}
 	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q (mounted, and a write probe refused), %d pin(s) mounted (pins are checked by inspect only)", entries, name, pins), ""}
+}
+
+// staleTreeMountsResult is checkManagerReadOnly's row for mounts the
+// record holds beyond the config: a gone directory fails (the next resume
+// fails), a dropped mount warns.
+func staleTreeMountsResult(check, name string, stale apply.StaleTreeMounts) checkResult {
+	detail := fmt.Sprintf("manager %q: %s", name, stale)
+	if len(stale.Gone) > 0 {
+		return checkResult{check, false, detail, stale.Fix()}
+	}
+	return warnResult(check, detail, stale.Fix())
 }
 
 // checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own

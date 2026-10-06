@@ -1329,7 +1329,8 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 			return brokerctl.BeginSession(w.app, st, cli.VersionString(), agent)
 		},
 		// InspectContainerMounts lets apply warn when a manager it kept or
-		// resumed lacks the manager.read_only mounts (create-time only).
+		// resumed lacks the manager.read_only mounts (create-time only), and
+		// refuse a resume whose record mounts a directory that is gone.
 		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
 			return jail.ContainerMounts(ctx, b.JailRunner(), ref)
 		},

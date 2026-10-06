@@ -227,6 +227,10 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		q["sub"] = []string{"user." + uid + ".chat.>", "user." + uid + ".notification"}
 		r2 := r.Clone(r.Context())
 		r2.URL.RawQuery = q.Encode()
+		if g.cfg.MatchAgentMessages != nil {
+			// Agent messages on: events carry no text (events.go).
+			r2 = withRewrite(r2, reduceEvents(uid))
+		}
 		return r2
 	case m == http.MethodGet && contactCanned[p] != "":
 		g.answerContact(w, line, "application/json", contactCanned[p])

@@ -597,8 +597,10 @@ decision (`allow` / `deny-host` when the `Host` header does not match `base_url`
 `deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session` / `deny-contact` when the
 contact fence refuses a request / `chat-unavailable` when the [chat page](#the-chat-page) cannot
 resolve your hub user / `remote-wake` and `deny-wake` for a [wake](#waking-a-worker), with a
-`reason` word on a refusal, and `remote-wake-result` for the broker's late answer), and the
-upstream status once known. The login path writes there too: `oidc-session` when a session is
+`reason` word on a refusal, and `remote-wake-result` for the broker's late answer /
+`operator-view` and `deny-operator-view` for the [operator's view of contact
+conversations](#the-operators-view-of-contact-conversations), with `contact`, `agent` and `count`
+fields and a `reason` word on a refusal), and the upstream status once known. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
 refuses one, `oidc-not-found` for an unknown path), and `deny-authorize` for anything that probes `/authorize` — nothing legitimate
@@ -1024,7 +1026,9 @@ remote:
   `off`, `unavailable`. The broker audit names the login, agent, kind, record id, length and
   decision, never the text.
 - **What the operator sees.** Everything, unfiltered, as before. Messages to the operator keep
-  their old path.
+  their old path. The chat page's [Contacts
+  section](#the-operators-view-of-contact-conversations) shows each contact's conversations
+  read-only, with the agent messages the contact is not shown marked.
 - **Turning it on (or off).** Run `lever init` first, then `lever apply`: `init` rewrites both
   skills (they teach the two steps while it is on), and `apply` refuses contact logins while the
   skills on disk are not the ones this config renders. `apply` then restarts the broker and the
@@ -1047,6 +1051,48 @@ remote:
   chat page counts them itself). A message older than the two 4 MiB record files of that
   contact stops showing. An authorization the agent does not send
   still uses its slot until the reminder time.
+
+## The operator's view of contact conversations
+
+With `landing: chat`, an operator login's agent list on the [chat page](#the-chat-page) has a
+**Contacts** section: what you would otherwise get by being copied on a contact's email. A contact
+login never gets it: the page does not show it, and the routes refuse a contact (`403`, audit
+`deny-contact`) whatever it sends.
+
+- **What it shows.** Each contact in `allowed_users`, the agents it may message (its `agents:`
+  list; a `see:` agent has no conversation), and, per agent, the whole direct conversation
+  between them: read-only (no composer, no read marker, no event stream), newest at the bottom,
+  read again every 30 seconds while it is open and with **Refresh**. "Load earlier messages"
+  pages back. With `agent_messages` on, every agent message the contact is not shown (see
+  [Messages agents start](#messages-agents-start)) is marked "not shown to the contact", so you
+  can spot an agent that writes to a contact outside the rules. When the broker does not answer,
+  the page says that which agent messages the contact sees is not known (the contact is then
+  shown none).
+- **How it reads.** The hub lets a person read only the direct messages that name them, so the
+  proxy reads the conversation with the CONTACT's own hub session, on the host, and passes you the
+  rows as text. That session makes one request kind only: `GET` of that one conversation's
+  history (`limit` and `cursor`, nothing else of your request), with no redirect followed. Your
+  browser never holds the contact's session. The contact login and the agent in the path must
+  match your config exactly; the conversation key comes from the agent's hub record and the
+  contact's hub user id, never from the request.
+- **"has not signed in yet".** The proxy reads only for a contact that `lever apply` bound to a
+  hub user (`.lever-state/remote-role.json`). For any other contact it does not sign in, since a
+  sign-in would create the contact's hub user. After a contact signs in for the first time, run
+  `lever apply` again; until then its conversations show "has not signed in yet".
+- **Side effects.** A bound contact with no live session in the proxy (after a proxy restart, or
+  after the 12-hour renewal) is signed in by the proxy, which moves the contact's `last login` on
+  the hub. With `agent_messages` on, your read asks the broker the same question the contact's
+  own read asks, so the first read of an agent message binds its ledger record exactly as the
+  contact's read would; the contact then sees the same rows.
+- **Routes.** `GET /lever/api/contacts` (the contacts, their message agents, labels, states and
+  whether each is bound) and `GET /lever/api/contacts/<login>/agents/<name>/messages?cursor=&limit=`
+  (`limit` 1 to 200, default 50), with the login URL-encoded. `HEAD` is answered like `GET`; any
+  other method is `405`. Refusals are fixed words: `not-found` (404: not a contact, or not one of
+  its agents), `not-signed-in` (409), `no-record` (409: the agent has no hub record),
+  `bad-query` (400) and `unavailable` (502: the hub or its answer failed).
+- **Audit.** Every answer is one line in `.lever-state/remote-audit.jsonl`: `operator-view` with
+  the `contact`, the `agent` and the `count` of rows (or of contacts for the list), or
+  `deny-operator-view` with the `reason` word. No line holds message text.
 
 ## What this does NOT do
 

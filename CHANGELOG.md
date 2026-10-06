@@ -9,6 +9,13 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **The operator can read contacts' conversations (chat page, read-only).** With `landing: chat`,
+  an operator login's agent list gains a Contacts section: each contact, the agents it may message,
+  and each conversation, read-only, with agent messages the contact is not shown (agent messages on)
+  marked. The proxy reads with the contact's own hub session, GET of that one history route only;
+  a contact `lever apply` has not bound to a hub user shows "has not signed in yet" and no session
+  is made for it. Routes `/lever/api/contacts[/<login>/agents/<name>/messages]`, operator only;
+  every read is audited (`operator-view`).
 - **Agents can start a message to a contact (`remote.agent_messages`).** Off by default. On, an
   agent messages a contact in two steps: `contact_message` (lever-capability MCP tool) checks that
   the contact lists the agent, that a reply answers that contact's verified post, and the limit (one

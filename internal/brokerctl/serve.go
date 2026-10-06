@@ -221,6 +221,8 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	// remote.agent_messages: the contacts each agent may message, the
 	// limits, and the agent ledger (off inside the tree, like the others).
 	cfg.AgentMessages = AgentMessages(app, st)
+	// remote.files: the file exchange (share_file and its ledger).
+	cfg.Files = Files(app, st)
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)

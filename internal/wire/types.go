@@ -329,6 +329,70 @@ type ContactMessageResponse struct {
 	Note          string `json:"note,omitempty"`
 }
 
+// ---- files in the chat (remote.files) ----
+
+// FilesListRequest asks PathFilesList for the caller's exchange; Contact,
+// when set, keeps only that login's records.
+type FilesListRequest struct {
+	Contact string `json:"contact,omitempty"`
+}
+
+// FilesListResponse answers PathFilesList: the logins the caller may share
+// with (operators, then each contact whose agents list the caller), with
+// their directories as the caller's container sees them, and the caller's
+// recorded uploads and shares, oldest first. Enabled false: off (Note says
+// so), or Note "rate".
+type FilesListResponse struct {
+	Enabled    bool          `json:"enabled"`
+	Note       string        `json:"note,omitempty"`
+	MaxBytes   int64         `json:"max_bytes,omitempty"`
+	Extensions []string      `json:"extensions,omitempty"`
+	Contacts   []FileContact `json:"contacts"`
+	Uploads    []FileInfo    `json:"uploads"`
+	Shares     []FileInfo    `json:"shares"`
+}
+
+// FileContact is one login the caller may share with: its tier and its
+// in and out directories as the caller's container sees them.
+type FileContact struct {
+	Login  string `json:"login"`
+	Tier   string `json:"tier"`
+	InDir  string `json:"in_dir"`
+	OutDir string `json:"out_dir"`
+}
+
+// FileInfo is one recorded file: Path is where the caller's container sees
+// it, At RFC 3339 UTC.
+type FileInfo struct {
+	ID     string `json:"id"`
+	Login  string `json:"login"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	Path   string `json:"path"`
+	At     string `json:"at"`
+}
+
+// FileShareRequest asks PathFilesShare to record the file at Path (in the
+// caller's out directory for To) as shared with the login To.
+type FileShareRequest struct {
+	To   string `json:"to"`
+	Path string `json:"path"`
+}
+
+// FileShareResponse answers PathFilesShare, always with HTTP 200. Refused:
+// Reason is one fixed word (not-a-contact, bad-path, not-found, symlink,
+// not-a-file, too-large, extension, rate, off, unavailable).
+type FileShareResponse struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+	Note   string `json:"note,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Name   string `json:"name,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+}
+
 // AgentMessagesMatchRequest asks PathOperatorAgentMessagesMatch which of
 // Agent's rows in Contact's DM history the agent ledger recorded. Agent is
 // the scion slug (the app name for the manager, else the worker name), as

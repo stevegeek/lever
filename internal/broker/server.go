@@ -15,6 +15,7 @@ import (
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
 // Routes: /worker/*, /msg/send, /msg/list, /msg/recipients, /directive/consume,
 // /directive/check, /directive/preview, /message/verify, /chat/verify, /contacts, /contact/message,
+// /files/list, /files/share,
 // /enrol, /renew, /request, and one gated proxy per
 // currently-registered tool under /mcp/<name>/. Tool routes are bound at
 // call time — tools must be registered before JailHandler() is called.
@@ -57,6 +58,8 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathChatVerify, control(b.handleChatVerify))
 	mux.Handle("POST "+wire.PathContacts, control(b.handleContacts))
 	mux.Handle("POST "+wire.PathContactMessage, control(b.handleContactMessage))
+	mux.Handle("POST "+wire.PathFilesList, control(b.handleFilesList))
+	mux.Handle("POST "+wire.PathFilesShare, control(b.handleFilesShare))
 	mux.Handle("POST "+wire.PathEnrol, control(b.handleEnrol))
 	mux.Handle("POST "+wire.PathRenew, control(b.handleRenew))
 	mux.Handle("POST "+wire.PathRequest, control(b.handleRequest))

@@ -29,6 +29,10 @@ const (
 	PathContacts = "/contacts"
 	// PathContactMessage authorizes one message to a contact and records it.
 	PathContactMessage = "/contact/message"
+	// PathFilesList lists an agent's file exchange (remote.files).
+	PathFilesList = "/files/list"
+	// PathFilesShare records one file an agent shares with a login.
+	PathFilesShare = "/files/share"
 )
 
 // Admin (loopback) listener routes.

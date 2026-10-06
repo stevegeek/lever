@@ -9,6 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // AgentSessionProbe reads an agent's session from inside its container and
@@ -57,7 +58,14 @@ var sessionHealSettle = RetryBudget{Attempts: 3, Interval: time.Second}
 // can already refresh), a forged live harness buys a "running" phase (which
 // its own token may already post). Neither touches another agent or widens a
 // role.
-func HealAgentSession(ctx context.Context, sc *scion.Client, probe AgentSessionProbe, log func(string, ...any), project string, rec *scion.Agent) *scion.Agent {
+//
+// A stopped phase can also be scion's own, set by a stop whose container is
+// still shutting down; a heal racing it reports running for a harness about
+// to die. That corrects itself: running is not a terminal phase, so the
+// runtime broker's next heartbeat moves the record to the container's real
+// state, and the liveness gates that follow a heal fail on a dead container.
+func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec *scion.Agent) *scion.Agent {
+	sc, probe, log := h.Scion, h.Probe, h.Log
 	if probe == nil || log == nil || rec == nil || !scion.ContainerLive(rec.ContainerStatus) {
 		return rec
 	}
@@ -65,7 +73,7 @@ func HealAgentSession(ctx context.Context, sc *scion.Client, probe AgentSessionP
 		return rec
 	}
 	ref := jail.ContainerName(path.Base(project), rec.Slug)
-	healHubToken(ctx, sc, probe, log, project, rec.Slug, ref)
+	healHubToken(ctx, h, project, rec.Slug, ref)
 	if rec.Phase != scion.PhaseStopped {
 		return rec
 	}
@@ -104,8 +112,23 @@ func HealAgentSession(ctx context.Context, sc *scion.Client, probe AgentSessionP
 	return healed
 }
 
+// SessionHealer is what HealAgentSession acts with: the scion client, the
+// in-container probe, the pre-role record guard and the log line sink.
+type SessionHealer struct {
+	Scion *scion.Client
+	Probe AgentSessionProbe
+	// VerifyRole is the pre-role record guard (Deps.VerifyAgentRole: project
+	// key, agent). The hub mints a reset token from the record's STORED role,
+	// and a record created before scion#1089 stores none, which a later scion
+	// resolves to full hub authority — so the reset runs only once the guard
+	// passes. nil ⇒ no reset (the expiry is still logged with its fix).
+	VerifyRole func(ctx context.Context, project, agent string) error
+	Log        func(string, ...any)
+}
+
 // healHubToken runs `scion reset-auth` for an agent whose hub token expired.
-func healHubToken(ctx context.Context, sc *scion.Client, probe AgentSessionProbe, log func(string, ...any), project, slug, ref string) {
+func healHubToken(ctx context.Context, h SessionHealer, project, slug, ref string) {
+	sc, probe, log := h.Scion, h.Probe, h.Log
 	tok, err := probe.HubToken(ctx, ref)
 	if err != nil {
 		log("WARNING: could not read agent %q's hub token expiry (%v); `lever doctor` shows the token row", slug, err)
@@ -116,8 +139,16 @@ func healHubToken(ctx context.Context, sc *scion.Client, probe AgentSessionProbe
 	}
 	log("agent %q: its hub token expired at %s (guest clock %s) — every reply, status and heartbeat it sends fails with 401; resetting it (scion reset-auth)",
 		slug, tok.Expiry.Format(time.RFC3339), tok.Now.Format(time.RFC3339))
+	if h.VerifyRole == nil {
+		log("WARNING: agent %q: its hub token was not reset here; run `lever apply`", slug)
+		return
+	}
+	if err := h.VerifyRole(ctx, path.Base(project), slug); err != nil {
+		log("WARNING: agent %q: its hub token was NOT reset: %s", slug, termsafe.Sanitize(err.Error()))
+		return
+	}
 	if err := sc.ResetAuth(ctx, slug, project); err != nil {
-		log("WARNING: agent %q: scion reset-auth failed: %s — in the guest, run `scion reset-auth %s -g %s` with the controller PAT", slug, scion.ErrSummary(err), slug, project)
+		log("WARNING: agent %q: scion reset-auth failed: %s — in the guest, run `scion reset-auth %s -g %s` with the controller PAT", slug, termsafe.Sanitize(scion.ErrSummary(err)), slug, project)
 		return
 	}
 	if now, err := probe.HubToken(ctx, ref); err == nil && !now.Expired() {
@@ -142,11 +173,11 @@ func healNamedSessions(ctx context.Context, d Deps, project string, names []stri
 	}
 	agents, err := d.Scion.List(ctx, project)
 	if err != nil {
-		d.Log("WARNING: could not list agents to check their hub sessions: %s", scion.ErrSummary(err))
+		d.Log("WARNING: could not list agents to check their hub sessions: %s", termsafe.Sanitize(scion.ErrSummary(err)))
 		return
 	}
 	for _, name := range names {
-		HealAgentSession(ctx, d.Scion, d.AgentSession, d.Log, project, scion.FindAgent(agents, name))
+		HealAgentSession(ctx, d.sessionHealer(), project, scion.FindAgent(agents, name))
 	}
 }
 
@@ -156,4 +187,9 @@ func workerNames(app *config.App) []string {
 		out = append(out, w.Name)
 	}
 	return out
+}
+
+// sessionHealer is the SessionHealer apply acts with.
+func (d Deps) sessionHealer() SessionHealer {
+	return SessionHealer{Scion: d.Scion, Probe: d.AgentSession, VerifyRole: d.VerifyAgentRole, Log: d.Log}
 }

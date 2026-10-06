@@ -5,6 +5,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +38,8 @@ func TestAgentProbeHubToken(t *testing.T) {
 		t.Fatal("a token 1.6 h from expiry is past its 2 h refresh point")
 	}
 	argv := host.Calls[0].Argv()
-	if !strings.Contains(argv, "podman exec lever--assistant sh -c") || !strings.Contains(argv, "cut -d. -f2") {
+	if !strings.Contains(argv, "podman exec lever--assistant sh -c") || !strings.Contains(argv, "cut -s -d. -f2") ||
+		!strings.HasSuffix(argv, "sh "+AgentTokenPath) {
 		t.Fatalf("argv %q", argv)
 	}
 	// The header and signature segments never leave the container.
@@ -139,7 +143,9 @@ func TestAgentProbeHarnessAlive(t *testing.T) {
 		{"pane alive", proc.Result{Stdout: "0\n"}, true, false},
 		{"pane dead", proc.Result{Stdout: "1\n"}, false, false},
 		{"window gone", proc.Result{Code: 1, Stderr: "can't find window: agent"}, false, false},
-		{"no tmux server", proc.Result{Code: 1, Stderr: "no server running on /tmp/tmux-1000/default"}, false, false},
+		{"session gone", proc.Result{Code: 1, Stderr: "can't find session: scion"}, false, false},
+		{"no tmux server is unknown", proc.Result{Code: 1, Stderr: "no server running on /tmp/tmux-1000/default"}, false, true},
+		{"socket error is unknown", proc.Result{Code: 1, Stderr: "error connecting to /tmp/tmux-1000/default (Permission denied)"}, false, true},
 		{"container not running", proc.Result{Code: 125, Stderr: "Error: can only create exec sessions on running containers"}, false, true},
 	} {
 		var calls []string
@@ -171,5 +177,51 @@ func TestAgentProbeReportSessionRunning(t *testing.T) {
 	jr = New(Config{Host: failingRunner{`Error: no such container "x"`}, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
 	if err := (AgentProbe{R: jr}).ReportSessionRunning(context.Background(), "x"); !errors.Is(err, ErrNoContainer) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// runTokenScript runs agentTokenScript in a real sh against a file holding
+// content, as the container would.
+func runTokenScript(t *testing.T, content []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "scion-token")
+	if content != nil {
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, _ := exec.Command("sh", "-c", agentTokenScript, "sh", path).Output()
+	return string(out)
+}
+
+// TestAgentTokenScriptRealShell: only the payload segment crosses, bounded;
+// a dotless file and a missing one yield no payload at all.
+func TestAgentTokenScriptRealShell(t *testing.T) {
+	payload := tokenPayload(`{"exp":1791313904}`)
+	out := runTokenScript(t, []byte("HEADERSECRET."+payload+".SIGNATURESECRET\n"))
+	if strings.Contains(out, "SECRET") {
+		t.Fatalf("header or signature crossed: %q", out)
+	}
+	if got, err := parseHubTokenTimes(out); err != nil || got.Expiry.Unix() != 1791313904 {
+		t.Fatalf("parse %q: %+v %v", out, got, err)
+	}
+	// A dotless file (not a JWT) prints the clock line only.
+	out = runTokenScript(t, []byte("BARESECRETVALUE\n"))
+	if strings.Contains(out, "BARESECRET") || strings.Count(strings.TrimSpace(out), "\n") != 0 {
+		t.Fatalf("a dotless file crossed: %q", out)
+	}
+	if _, err := parseHubTokenTimes(out); err == nil {
+		t.Fatal("a dotless file must not parse")
+	}
+	// A missing file: no payload.
+	out = runTokenScript(t, nil)
+	if _, err := parseHubTokenTimes(out); err == nil {
+		t.Fatalf("a missing file must not parse: %q", out)
+	}
+	// An oversize payload segment is cut at 8 KiB.
+	big := "h." + strings.Repeat("A", 20000) + ".s"
+	out = runTokenScript(t, []byte(big))
+	if _, line, _ := strings.Cut(out, "\n"); len(line) > 8192 {
+		t.Fatalf("payload line is %d bytes, want <= 8192", len(line))
 	}
 }

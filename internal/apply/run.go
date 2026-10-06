@@ -945,7 +945,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if !r.fresh {
 		// Before converge: a stopped record whose claude still runs must be
 		// reported running again, or the resume below restarts it FRESH.
-		rec = HealAgentSession(ctx, r.d.Scion, r.d.AgentSession, r.d.Log, jp, rec)
+		rec = HealAgentSession(ctx, r.d.sessionHealer(), jp, rec)
 	}
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
 	if err != nil {

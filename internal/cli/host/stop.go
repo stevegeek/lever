@@ -9,6 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
@@ -62,7 +63,6 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// timeout stops a hung scion from blocking power-off.
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
-					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					// st was set alongside appName above; HostScionClient's
 					// HubTokenSource lets suspend authenticate against the real,
 					// dev-auth-off hub with the controller PAT minted by a prior
@@ -70,7 +70,12 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// Empty agent role: this client only calls List and Suspend,
 					// and only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
-					healStoppedManager(sctx, cmd, sc, jail.AgentProbe{R: b.JailRunner()}, appName, b.MountDest())
+					// The heal has its own budget, ahead of the suspend's, so a
+					// slow one cannot cost the manager its suspend.
+					hctx, hcancel := context.WithTimeout(cmd.Context(), stopHealBudget)
+					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), appName, b.MountDest())
+					hcancel()
+					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
 					}
@@ -99,6 +104,10 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 // would lose the conversation's continuity. Reporting the session running
 // first lets the suspend keep it (apply.HealAgentSession). Best-effort, like
 // the suspend: a failure is a warning.
+//
+// No role verifier is passed, so an expired hub token is only reported here
+// (`lever apply` resets it); the session report needs a valid token, so the
+// heal then leaves the phase as it is.
 func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, name, project string) {
 	agents, err := sc.List(ctx, project)
 	if err != nil {
@@ -108,10 +117,18 @@ func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Clien
 	if rec == nil || rec.Phase != scion.PhaseStopped {
 		return
 	}
-	apply.HealAgentSession(ctx, sc, probe, func(format string, args ...any) {
+	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, Log: func(format string, args ...any) {
 		logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...)
-	}, project, rec)
+	}}, project, rec)
 }
+
+// stopHealBudget bounds healStoppedManager: a list, a token read, a harness
+// probe, the session report and its re-read. A var so a test can shrink it.
+var stopHealBudget = 20 * time.Second
+
+// stopSessionProbe builds the in-container probe the stop heal uses; a test
+// seam.
+var stopSessionProbe = func(r proc.Runner) apply.AgentSessionProbe { return jail.AgentProbe{R: r} }
 
 // workerSuspendBudget bounds the whole worker pass of `lever stop`: one list
 // and one suspend per running worker.

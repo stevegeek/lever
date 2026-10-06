@@ -145,3 +145,44 @@ func TestHealHubTokensReadAndListFailures(t *testing.T) {
 		t.Fatalf("a failed listing still read tokens: %v", h2.reads)
 	}
 }
+
+// A record the pre-role guard refuses is never reset: the hub would mint the
+// new token from its empty stored role, which a later scion reads as full.
+func TestHealHubTokensRefusesAPreRoleRecord(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true, "scratch": true}}
+	b, log := tokenWatchBroker(t, "all", liveFleet, h)
+	b.verifyRole = func(_ context.Context, agent string) error {
+		if agent == "scratch" {
+			return errors.New("record stores no role \x1b[31m")
+		}
+		return nil
+	}
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "appname" {
+		t.Fatalf("resets = %v, want only the manager", h.resets)
+	}
+	if !strings.Contains(log.String(), "decision=deny") || strings.Contains(log.String(), "\x1b") {
+		t.Fatalf("audit = %q", log.String())
+	}
+}
+
+// A worker whose lifecycle lock is held is skipped without spending its
+// cooldown; the next pass resets it once the lock is free.
+func TestHealHubTokensSkipsABusyWorker(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"scratch": true}}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	b.reenrolLockWait = 10 * time.Millisecond
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 {
+		t.Fatalf("a busy worker was reset: %v", h.resets)
+	}
+	unlock()
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "scratch" {
+		t.Fatalf("resets after the lock freed = %v, want [scratch]", h.resets)
+	}
+}

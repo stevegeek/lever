@@ -98,7 +98,7 @@ func TestHealAgentSessionResetsAnExpiredToken(t *testing.T) {
 	probe := &fakeSessionProbe{tok: expiredToken(), afterReset: validToken()}
 	var sink logSink
 	rec := &scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"}
-	got := HealAgentSession(context.Background(), sc, probe, sink.logf, "/lever", rec)
+	got := HealAgentSession(context.Background(), testHealer(sc, probe, sink.logf), "/lever", rec)
 	if got != rec {
 		t.Fatal("a token heal leaves the record as it was")
 	}
@@ -120,7 +120,7 @@ func TestHealAgentSessionLeavesAValidTokenAlone(t *testing.T) {
 	f := scionOKRunner()
 	probe := &fakeSessionProbe{tok: validToken()}
 	var sink logSink
-	HealAgentSession(context.Background(), scion.New(f, scion.Options{}), probe, sink.logf, "/lever",
+	HealAgentSession(context.Background(), testHealer(scion.New(f, scion.Options{}), probe, sink.logf), "/lever",
 		&scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"})
 	if countCalls(f, "reset-auth") != 0 || len(sink.lines) != 0 {
 		t.Fatalf("a valid token must not be reset: calls %q, log %q", joinedCalls(f), sink.lines)
@@ -134,7 +134,7 @@ func TestHealAgentSessionResetFailureNamesTheManualFix(t *testing.T) {
 	f.Script("scion reset-auth", proc.Result{Code: 1, Stderr: "hub unreachable"})
 	sc := scion.New(failingScionRunner{f}, scion.Options{})
 	var sink logSink
-	HealAgentSession(context.Background(), sc, &fakeSessionProbe{tok: expiredToken()}, sink.logf, "/lever",
+	HealAgentSession(context.Background(), testHealer(sc, &fakeSessionProbe{tok: expiredToken()}, sink.logf), "/lever",
 		&scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"})
 	if !logged(&sink, "scion reset-auth failed") || !logged(&sink, "scion reset-auth assistant -g /lever") {
 		t.Fatalf("log = %q", sink.lines)
@@ -170,13 +170,13 @@ func TestHealAgentSessionSkips(t *testing.T) {
 		f := scionOKRunner()
 		probe := &fakeSessionProbe{tok: expiredToken(), alive: true}
 		var sink logSink
-		HealAgentSession(context.Background(), scion.New(f, scion.Options{}), probe, sink.logf, "/lever", rec)
+		HealAgentSession(context.Background(), testHealer(scion.New(f, scion.Options{}), probe, sink.logf), "/lever", rec)
 		if len(probe.refs) != 0 || len(f.Calls) != 0 {
 			t.Fatalf("%+v: probed %v, called %q", rec, probe.refs, joinedCalls(f))
 		}
 	}
 	f := scionOKRunner()
-	got := HealAgentSession(context.Background(), scion.New(f, scion.Options{}), nil, (&logSink{}).logf, "/lever",
+	got := HealAgentSession(context.Background(), testHealer(scion.New(f, scion.Options{}), nil, (&logSink{}).logf), "/lever",
 		&scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "Up 1 hour"})
 	if got == nil || len(f.Calls) != 0 {
 		t.Fatal("a nil probe heals nothing")
@@ -287,7 +287,8 @@ func TestHealSessionsCoversWorkers(t *testing.T) {
 	app := helloApp(t.TempDir())
 	app.Workers = []config.Worker{{Name: "scratch", Dir: "workers/scratch"}, {Name: "idle", Dir: "workers/idle"}}
 	probe := &fakeSessionProbe{tok: expiredToken()}
-	HealSessions(context.Background(), Deps{Scion: scion.New(f, scion.Options{}), AgentSession: probe, Log: (&logSink{}).logf}, app, "/lever")
+	HealSessions(context.Background(), Deps{Scion: scion.New(f, scion.Options{}), AgentSession: probe, Log: (&logSink{}).logf,
+		VerifyAgentRole: func(context.Context, string, string) error { return nil }}, app, "/lever")
 	if !sawScionCall(f, "reset-auth hello") || !sawScionCall(f, "reset-auth scratch") || sawScionCall(f, "reset-auth stray") {
 		t.Fatalf("calls %q", joinedCalls(f))
 	}
@@ -301,9 +302,67 @@ func TestHealSessionsCoversWorkers(t *testing.T) {
 func TestHealAgentSessionTokenReadFailureIsAWarning(t *testing.T) {
 	f := scionOKRunner()
 	var sink logSink
-	HealAgentSession(context.Background(), scion.New(f, scion.Options{}), &fakeSessionProbe{tokErr: errors.New("exit status 1")}, sink.logf, "/lever",
+	HealAgentSession(context.Background(), testHealer(scion.New(f, scion.Options{}), &fakeSessionProbe{tokErr: errors.New("exit status 1")}, sink.logf), "/lever",
 		&scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"})
 	if countCalls(f, "reset-auth") != 0 || !logged(&sink, "could not read agent \"assistant\"'s hub token") {
+		t.Fatalf("calls %q log %q", joinedCalls(f), sink.lines)
+	}
+}
+
+// testHealer is a SessionHealer whose role guard passes.
+func testHealer(sc *scion.Client, probe AgentSessionProbe, log func(string, ...any)) SessionHealer {
+	return SessionHealer{Scion: sc, Probe: probe, Log: log,
+		VerifyRole: func(context.Context, string, string) error { return nil }}
+}
+
+// TestHealAgentSessionRefusesAPreRoleRecord: the hub mints a reset token
+// from the record's stored role, and a pre-role record resolves to full
+// authority — so no reset runs when the guard refuses, and none without a
+// guard at all.
+func TestHealAgentSessionRefusesAPreRoleRecord(t *testing.T) {
+	rec := &scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"}
+	f := scionOKRunner()
+	var sink logSink
+	var guarded []string
+	h := SessionHealer{Scion: scion.New(f, scion.Options{}), Probe: &fakeSessionProbe{tok: expiredToken()}, Log: sink.logf,
+		VerifyRole: func(_ context.Context, project, agent string) error {
+			guarded = append(guarded, project+"/"+agent)
+			return errors.New("record stores no role \x1b]0;x\x07")
+		}}
+	HealAgentSession(context.Background(), h, "/lever", rec)
+	if countCalls(f, "reset-auth") != 0 || !logged(&sink, "NOT reset") || logged(&sink, "\x1b") {
+		t.Fatalf("calls %q log %q", joinedCalls(f), sink.lines)
+	}
+	if len(guarded) != 1 || guarded[0] != "lever/assistant" {
+		t.Fatalf("guard calls = %v, want the project key and the agent", guarded)
+	}
+	h.VerifyRole = nil
+	HealAgentSession(context.Background(), h, "/lever", rec)
+	if countCalls(f, "reset-auth") != 0 {
+		t.Fatal("no guard, no reset")
+	}
+}
+
+// TestStartManagerWorkerPreRoleRecordNotReset: apply's worker pass runs the
+// same guard as the manager's resume paths before any reset.
+func TestStartManagerWorkerPreRoleRecordNotReset(t *testing.T) {
+	app := helloApp(t.TempDir())
+	app.Workers = []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}
+	f := proc.NewFakeRunner()
+	f.Script("scion reset-auth", proc.Result{Stdout: "ok"})
+	f.Script("scion list", proc.Result{Stdout: `[{"slug":"hello","phase":"running","containerStatus":"Up 1 hour"},` +
+		`{"slug":"scratch","phase":"running","containerStatus":"Up 5 minutes"}]`})
+	sc := scion.New(f, scion.Options{})
+	var sink logSink
+	deps := Deps{Scion: sc, AgentSession: &fakeSessionProbe{tok: expiredToken()}, Log: sink.logf,
+		VerifyAgentRole: func(_ context.Context, _, agent string) error {
+			if agent == "scratch" {
+				return errPreRoleRefusal
+			}
+			return nil
+		}}
+	healNamedSessions(context.Background(), deps, "/lever", workerNames(app))
+	if sawScionCall(f, "reset-auth scratch") || !logged(&sink, "NOT reset") {
 		t.Fatalf("calls %q log %q", joinedCalls(f), sink.lines)
 	}
 }

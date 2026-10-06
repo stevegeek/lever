@@ -85,15 +85,20 @@ version bump moves the block under the new version heading.
   host sleeps; once it expired, every reply, status update and heartbeat of that agent failed
   with 401 (`AUTH_LOST`) while `lever doctor` stayed green (the hub then marks the manager
   `stalled`, which the manager row passes for an idle manager). Now:
-  - `lever doctor` reads each running agent's token expiry in its container (only the JWT payload
-    leaves it, and only the `exp` claim is decoded). The `manager agent` row fails on an expired
+  - `lever doctor` reads each running agent's token expiry in its container: only the middle
+    (payload) segment of the token file leaves it, nothing at all for a file without a dot, at most
+    8 KiB, and only the `exp` claim is decoded. The `manager agent` row fails on an expired
     token whatever the activity, and a new row, *agent hub tokens*, covers the manager and every
     worker: expired fails, a refresh past due warns.
   - `lever apply` (and `lever up` on a running manager) runs `scion reset-auth` for each running
     agent whose token expired: no restart, the conversation is kept.
   - The broker checks every 5 min and resets a lapsed token itself, at most once per agent per
     15 min, audited as `op=hub-token`. `broker.auto_reenrol` governs it (`off` disables it);
-    revoked identities are never healed.
+    revoked identities are never healed, and a worker busy with a start, resume, stop or suspend
+    is skipped until the next pass.
+  - Every reset (apply, up, broker) first runs the pre-role record guard: a record created before
+    scion#1089 stores no role, which scion resolves to full hub authority, so its token is not
+    reset (a `deny` audit line / a warning instead).
   - The new token is minted by the hub from the agent's stored role (the same path as a start or
     a refresh) and written by scion's runtime broker; it is the agent's own token, never a user
     or controller token. An agent that forges an expired token file gains a reset of its own

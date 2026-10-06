@@ -1,11 +1,13 @@
 package broker
 
 import (
+	"cmp"
 	"context"
 	"slices"
 	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // HubTokenHealer reads whether a running agent's hub token expired and gives
@@ -107,21 +109,51 @@ func (b *Broker) healHubTokens(ctx context.Context) {
 		if err != nil || !expired {
 			continue
 		}
-		now := b.reenrolNow()
-		b.reenrolMu.Lock()
-		last, seen := b.tokenHealLast[slug]
-		if seen && now.Sub(last) < tokenHealCooldown {
-			b.reenrolMu.Unlock()
-			continue
-		}
-		b.tokenHealLast[slug] = now
-		b.reenrolMu.Unlock()
-		if err := b.hubTokens.ResetAuth(pctx, slug); err != nil {
-			b.audit("hub-token", cn, "error", "expired agent hub token: scion reset-auth failed: "+scion.ErrSummary(err))
-			continue
-		}
-		b.audit("hub-token", cn, "allow", "expired agent hub token reset (scion reset-auth, the agent's own role)")
+		b.healOneHubToken(pctx, cn, slug)
 	}
+}
+
+// healOneHubToken resets one agent's expired token, gated like every other
+// broker action that has the hub mint for an agent: cooldown, the worker's
+// lifecycle lock (a busy worker is skipped until the next tick, so a reset
+// never interleaves with a start, resume, wake, stop or suspend of it), and
+// the pre-role record guard. The hub mints the new token from the record's
+// STORED role, and on a record created before scion#1089 that role is empty,
+// which a later scion resolves to full hub authority — so a reset of such a
+// record would hand the agent full authority, exactly what the resume paths
+// refuse.
+func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
+	now := b.reenrolNow()
+	b.reenrolMu.Lock()
+	last, seen := b.tokenHealLast[slug]
+	if seen && now.Sub(last) < tokenHealCooldown {
+		b.reenrolMu.Unlock()
+		return
+	}
+	b.tokenHealLast[slug] = now
+	b.reenrolMu.Unlock()
+	if _, isWorker := b.workerSpec(slug); isWorker {
+		lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
+		unlock, err := b.lockWorker(lctx, slug)
+		cancel()
+		if err != nil {
+			// Not an attempt: the next tick may try again at once.
+			b.reenrolMu.Lock()
+			delete(b.tokenHealLast, slug)
+			b.reenrolMu.Unlock()
+			return
+		}
+		defer unlock()
+	}
+	if err := b.checkAgentRole(ctx, slug); err != nil {
+		b.audit("hub-token", cn, "deny", "expired agent hub token NOT reset: "+termsafe.Sanitize(err.Error()))
+		return
+	}
+	if err := b.hubTokens.ResetAuth(ctx, slug); err != nil {
+		b.audit("hub-token", cn, "error", "expired agent hub token: scion reset-auth failed: "+termsafe.Sanitize(scion.ErrSummary(err)))
+		return
+	}
+	b.audit("hub-token", cn, "allow", "expired agent hub token reset (scion reset-auth, the agent's own role)")
 }
 
 // tokenWatchPassTimeout bounds one pass: a list, then a token read and at

@@ -21,11 +21,13 @@ import (
 const AgentTokenPath = "/home/scion/.scion/scion-token"
 
 // agentTokenScript prints the container's clock (Unix seconds) and then the
-// payload segment of the agent's hub token — the middle of the three JWT
-// segments, and nothing else. The header and the signature stay in the
+// payload segment of the token file named by $1 — the middle of the three
+// JWT segments, and nothing else. The header and the signature stay in the
 // container: without the signature the payload is no credential, only the
-// claims (agent id, project, scopes, expiry). The read is bounded.
-const agentTokenScript = `date -u +%s && head -c 16384 ` + AgentTokenPath + ` | cut -d. -f2 | head -c 8192`
+// claims (agent id, project, scopes, expiry). `cut -s` prints nothing for a
+// line without a dot, so a file that is not a JWT (or a bare secret) never
+// leaves the container whole. The read is bounded.
+const agentTokenScript = `date -u +%s && head -c 16384 "$1" | cut -s -d. -f2 | head -c 8192`
 
 // HubTokenTimes is what lever reads of an agent's hub token: its expiry and
 // the container's clock at the moment of the read. The container clock is
@@ -72,7 +74,7 @@ func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, er
 	if err := checkRef(ref); err != nil {
 		return HubTokenTimes{}, fmt.Errorf("reading agent hub token: %w", err)
 	}
-	res, err := p.R.Run(ctx, nil, "podman", "exec", ref, "sh", "-c", agentTokenScript)
+	res, err := p.R.Run(ctx, nil, "podman", "exec", ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
 	if err != nil {
 		if noSuchContainer(res.Stderr) {
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrNoContainer)
@@ -117,8 +119,10 @@ func parseHubTokenTimes(out string) (HubTokenTimes, error) {
 // pane of scion's `agent` tmux window is alive. scion starts the harness as
 // `sh -c 'claude …; echo $? > /tmp/scion-harness-exit-code'` in that window
 // (the `shell` window keeps the session itself alive), so the window goes
-// away when claude exits. tmux answering "no such window" or "no server" is
-// a false; anything else that fails is an error, never a false.
+// away when claude exits. tmux answering that it cannot find the window or
+// session is a false; anything else that fails is an error, never a false.
+// The exec runs as the container's user, the uid that owns scion's tmux
+// server (both scion, uid 1000, on the assistant 2026-10-06).
 func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) {
 	if err := checkRef(ref); err != nil {
 		return false, fmt.Errorf("probing agent harness: %w", err)
@@ -136,10 +140,12 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	switch {
 	case noSuchContainer(res.Stderr):
 		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrNoContainer)
-	case strings.Contains(s, "can't find window"), strings.Contains(s, "can't find session"),
-		strings.Contains(s, "no server running"), strings.Contains(s, "error connecting to"):
+	case strings.Contains(s, "can't find window"), strings.Contains(s, "can't find session"):
 		return false, nil
 	}
+	// "no server running" and "error connecting to" are not proof the
+	// harness exited: they also mean this exec reached another socket than
+	// scion's server (another uid or TMUX_TMPDIR). Unknown, so an error.
 	return false, fmt.Errorf("probing agent harness in %s: exit status %d", ref, res.Code)
 }
 

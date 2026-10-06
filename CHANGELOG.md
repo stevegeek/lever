@@ -148,6 +148,15 @@ version bump moves the block under the new version heading.
   and render as text that is not there. Every format character (category
   Cf), U+2028 and U+2029, and the blank glyphs U+2800, U+3164, U+115F,
   U+1160 and U+FFA0 now become U+FFFD.
+- **A worker's own text in an event is marked as the worker's.** scion builds
+  a notification's message from the watched worker's own `Message` and
+  `TaskSummary`, and `/msg/list`, `lever-manager msg list` and
+  `lever-manager watch` passed it and its status through raw. Each event's
+  `message` now starts with `worker-reported:`, is sanitized (one line, no
+  escapes or invisible characters) and cut to 1 KiB; its `status` is shown
+  only when it is one the hub produces, else `UNRECOGNISED`. The JSON shape
+  is unchanged. The manager skill says the message is data. Run `lever init`
+  to refresh the skills.
 
 ### Fixed
 

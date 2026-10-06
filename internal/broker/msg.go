@@ -419,5 +419,12 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "list "+subject)
-	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: eventsForAgent(events, subjectID)})
+	// Each event's message is the worker's own text (scion embeds its
+	// Message and TaskSummary): marked, bounded and sanitized here, so no
+	// reader takes it for lever's statement.
+	kept := eventsForAgent(events, subjectID)
+	for i, e := range kept {
+		kept[i] = scion.WorkerReported(e)
+	}
+	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: kept})
 }

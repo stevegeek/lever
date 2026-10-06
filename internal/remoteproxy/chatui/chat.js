@@ -27,6 +27,7 @@ import {
   classify,
   contactList,
   errorText,
+  hashAgent,
   historyItems,
   inputView,
   isChatSubject,
@@ -37,6 +38,8 @@ import {
   messageText,
   nextCursor,
   oneLine,
+  pushKeyBytes,
+  pushView,
   rowTitle,
   sortedMessages,
   transcriptItems,
@@ -88,6 +91,8 @@ const el = {
   contactsTitle: $('contacts-title'),
   refresh: $('refresh'),
   readonly: $('readonly'),
+  push: $('push'),
+  pushnote: $('pushnote'),
 };
 
 let roster = null; // the list as last applied (agentList shape)
@@ -1080,6 +1085,114 @@ function askManager() {
   el.text.focus();
 }
 
+// Notifications (remote.push). The page asks lever for its key only where
+// the browser can push, and registers the push-only worker only when the
+// login turns notifications on (a click: iOS and Chrome ask for permission
+// only then). The worker has no fetch handler: it never stands between the
+// page and its requests.
+const PUSH_SCOPE = '/lever/';
+let push = { available: false, permission: 'default', subscribed: false, busy: false, error: '', key: null };
+const pushSupported = () => !!(navigator && navigator.serviceWorker) && typeof window.PushManager !== 'undefined' && typeof Notification !== 'undefined';
+
+function showPush() {
+  const v = pushView(push);
+  el.push.hidden = v.hidden;
+  el.push.disabled = v.disabled;
+  setText(el.push, v.text);
+  setText(el.pushnote, v.note);
+  el.pushnote.hidden = !v.note;
+}
+
+function sendSubscription(sub, method) {
+  const j = sub.toJSON();
+  const body = method === 'DELETE' ? { endpoint: j.endpoint } : { endpoint: j.endpoint, keys: j.keys };
+  return api('/lever/api/push/subscriptions', { method, headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+async function pushRegistration() {
+  try {
+    return await navigator.serviceWorker.getRegistration(PUSH_SCOPE);
+  } catch {
+    return undefined;
+  }
+}
+
+async function setupPush() {
+  if (!pushSupported()) return;
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    const d = ev && ev.data;
+    const name = d && typeof d.agent === 'string' ? hashAgent(`#agent=${d.agent}`) : '';
+    if (name && roster && roster.agents.some((a) => a.name === name)) openChat(name);
+  });
+  const res = await api('/lever/api/push/key');
+  const key = res.ok && res.body ? pushKeyBytes(res.body.key) : null;
+  const reg = await pushRegistration();
+  if (!key) {
+    // Push is off on the server: a worker left from when it was on goes.
+    if (reg && res.status === 404) await reg.unregister().catch(() => {});
+    return;
+  }
+  push = { ...push, available: true, key, permission: Notification.permission };
+  const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+  if (sub) {
+    push.subscribed = true;
+    // lever may have dropped it (the push service said gone): send it again.
+    void sendSubscription(sub, 'POST');
+  }
+  showPush();
+}
+
+async function turnOn() {
+  let perm = 'denied';
+  try {
+    perm = await Notification.requestPermission();
+  } catch {
+    // treated as refused
+  }
+  push.permission = perm;
+  if (perm !== 'granted') return;
+  let sub;
+  try {
+    await navigator.serviceWorker.register('/lever/sw.js', { scope: '/lever/' });
+    const reg = await navigator.serviceWorker.ready;
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: push.key });
+  } catch {
+    push.error = 'Notifications could not be turned on in this browser.';
+    return;
+  }
+  const res = await sendSubscription(sub, 'POST');
+  if (!res.ok) {
+    await sub.unsubscribe().catch(() => {});
+    push.error = `Notifications could not be turned on: ${errorText(res.status, res.body)}.`;
+    return;
+  }
+  push.subscribed = true;
+}
+
+async function turnOff() {
+  const reg = await pushRegistration();
+  const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+  if (sub) {
+    await sendSubscription(sub, 'DELETE');
+    await sub.unsubscribe().catch(() => {});
+  }
+  if (reg) await reg.unregister().catch(() => {});
+  push.subscribed = false;
+}
+
+async function togglePush() {
+  if (push.busy || !push.available) return;
+  push.busy = true;
+  push.error = '';
+  showPush();
+  try {
+    await (push.subscribed ? turnOff() : turnOn());
+  } finally {
+    push.busy = false;
+    showPush();
+  }
+}
+
 async function start() {
   const l = await readList();
   if (l.error) {
@@ -1105,9 +1218,12 @@ async function start() {
   // The stream first, so a message stored while a history is read still
   // raises an event.
   openStream();
-  const want = stored(OPEN_KEY);
+  const fromHash = hashAgent(location.hash);
+  if (fromHash) history.replaceState(null, '', '/lever/chat');
+  const want = fromHash || stored(OPEN_KEY);
   if (want && roster.agents.some((a) => a.name === want)) openChat(want);
   else closeChat();
+  void setupPush();
 }
 
 el.form.addEventListener('submit', (ev) => {
@@ -1132,6 +1248,7 @@ el.older.addEventListener('click', () => void (view ? readTranscript(viewOlder) 
 el.refresh.addEventListener('click', () => void readTranscript(''));
 el.back.addEventListener('click', closeChat);
 el.ask.addEventListener('click', askManager);
+el.push.addEventListener('click', () => void togglePush());
 window.addEventListener('resize', grow);
 
 void start();

@@ -31,6 +31,9 @@ import {
   transcriptWho,
   mergeRows,
   viewErrorText,
+  hashAgent,
+  pushKeyBytes,
+  pushView,
 } from './chatcore.js';
 
 test('historyItems reads either key and drops junk', () => {
@@ -345,4 +348,29 @@ test('viewErrorText reads the fixed words', () => {
 test('the operator view constants', () => {
   assert.equal(CONTACTS_MS, 30000);
   assert.equal(NOT_SHOWN, 'not shown to the contact');
+});
+
+test('hashAgent takes only a config name', () => {
+  assert.equal(hashAgent('#agent=deal-2'), 'deal-2');
+  for (const bad of ['', '#agent=', '#agent=Deal', '#agent=../x', '#agent=a b', '#agent=-a', '#x=deal', '#agent=deal-2&x=1', null, 7, `#agent=${'a'.repeat(64)}`]) {
+    assert.equal(hashAgent(bad), '', String(bad));
+  }
+});
+
+test('pushKeyBytes accepts only an uncompressed P-256 point', () => {
+  const key = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4';
+  const b = pushKeyBytes(key);
+  assert.equal(b.length, 65);
+  assert.equal(b[0], 4);
+  for (const bad of ['', 'AAAA', key.slice(1), key + 'A', 'A' + key.slice(1), key.replace('_', '/'), null, 5]) assert.equal(pushKeyBytes(bad), null, String(bad));
+});
+
+test('pushView', () => {
+  assert.deepEqual(pushView({ available: false }), { hidden: true, disabled: true, text: '', note: '' });
+  assert.equal(pushView({ available: true, permission: 'denied' }).hidden, true);
+  assert.match(pushView({ available: true, permission: 'denied' }).note, /blocked/);
+  assert.equal(pushView({ available: true, permission: 'default', subscribed: false }).text, 'Turn on notifications');
+  assert.equal(pushView({ available: true, permission: 'granted', subscribed: true }).text, 'Turn off notifications');
+  assert.equal(pushView({ available: true, permission: 'granted', busy: true }).disabled, true);
+  assert.equal(pushView({ available: true, permission: 'granted', error: 'x' }).note, 'x');
 });

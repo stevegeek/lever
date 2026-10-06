@@ -354,3 +354,32 @@ export function viewErrorText(status, body) {
   if (word === 'no-record') return 'the agent has no record on the hub yet';
   return errorText(status, body);
 }
+
+// hashAgent reads the agent a notification opened the page for
+// (#agent=<name>): a config name, else ''.
+export function hashAgent(hash) {
+  const m = typeof hash === 'string' ? /^#agent=([a-z0-9][a-z0-9-]{0,62})$/.exec(hash) : null;
+  return m ? m[1] : '';
+}
+
+// pushKeyBytes turns lever's VAPID key into what pushManager.subscribe
+// takes: the 65 bytes of an uncompressed P-256 point, else null.
+export function pushKeyBytes(key) {
+  if (typeof key !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(key)) return null;
+  let bin;
+  try {
+    bin = atob(`${key.replace(/-/g, '+').replace(/_/g, '/')}=`);
+  } catch {
+    return null;
+  }
+  if (bin.length !== 65 || bin.charCodeAt(0) !== 4) return null;
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+// pushView is the notifications button and its note. Hidden where the
+// browser has no push or lever has it off; a note when the browser blocks it.
+export function pushView({ available, permission, subscribed, busy, error }) {
+  if (!available) return { hidden: true, disabled: true, text: '', note: '' };
+  if (permission === 'denied') return { hidden: true, disabled: true, text: '', note: 'Notifications are blocked for this page in the browser settings.' };
+  return { hidden: false, disabled: !!busy, text: subscribed ? 'Turn off notifications' : 'Turn on notifications', note: error || '' };
+}

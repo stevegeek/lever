@@ -51,13 +51,48 @@ export async function load(hub, opts = {}) {
   doc.title = '';
   doc.body = new FakeNode('body');
   // The state chat.html starts in.
-  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly']) doc.getElementById(id).hidden = true;
+  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote']) doc.getElementById(id).hidden = true;
   // fieldsEnabled: what a browser that restores form state over a reload leaves.
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
   env.document = doc;
   globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener() {} };
   globalThis.location = { origin: 'https://mac.ts.net', reload: () => env.reloads++ };
+  // Push: present only when a test asks (opts.push), as in a browser
+  // without it (iOS outside a Home Screen app).
+  env.replaced = [];
+  globalThis.history = { replaceState: (...a) => env.replaced.push(a) };
+  globalThis.location.hash = opts.hash || '';
+  let swListeners = {};
+  env.swMessage = (data) => (swListeners.message || []).forEach((f) => f({ data }));
+  if (opts.push) {
+    const p = (env.push = { permission: opts.push.permission || 'default', registerCalls: [], subscribeOpts: null, sub: null, registered: null });
+    const fakeSub = () => ({
+      endpoint: 'https://fcm.googleapis.com/fcm/send/fake',
+      toJSON: () => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/fake', expirationTime: null, keys: { p256dh: 'P', auth: 'A' } }),
+      unsubscribe: async () => { p.sub = null; return true; },
+    });
+    const reg = {
+      pushManager: {
+        getSubscription: async () => p.sub,
+        subscribe: async (o) => { if (opts.push.subscribeFails) throw new Error('no'); p.subscribeOpts = o; p.sub = fakeSub(); return p.sub; },
+      },
+      unregister: async () => { p.registered = null; return true; },
+    };
+    if (opts.push.registered) p.registered = reg;
+    if (opts.push.existing) p.sub = fakeSub();
+    globalThis.window.PushManager = class {};
+    globalThis.Notification = { get permission() { return p.permission; }, requestPermission: async () => (p.permission = opts.push.grant || 'granted') };
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: { serviceWorker: {
+      register: async (url, o) => { p.registerCalls.push({ url, scope: o && o.scope }); p.registered = reg; return reg; },
+      get ready() { return Promise.resolve(reg); },
+      getRegistration: async () => p.registered || undefined,
+      addEventListener: (t, f) => (swListeners[t] ||= []).push(f),
+    } } });
+  } else {
+    delete globalThis.Notification;
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: {} });
+  }
   globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)), removeItem: (k) => delete env.store[k] };
   globalThis.EventSource = class {
     static CLOSED = 2;

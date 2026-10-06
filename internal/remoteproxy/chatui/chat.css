@@ -49,7 +49,7 @@ body {
   #pane-list { flex: 0 0 18rem; border-right: 1px solid var(--line); }
   #back { display: none; }
 }
-#back, #refresh {
+#back, #refresh, #push {
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -58,6 +58,8 @@ body {
   font: inherit;
   font-size: 14px;
 }
+#push { cursor: pointer; }
+#push:disabled { opacity: .5; cursor: default; }
 .label { font-weight: 400; color: var(--muted); }
 .label::before { content: "· "; }
 .listscroll { padding-left: 0; padding-right: 0; }

@@ -206,7 +206,7 @@ func TestFilesOnTeachesTheExchange(t *testing.T) {
 		s := string(pair[0])
 		for _, want := range []string{"contact_files", "share_file", "sha256", "out_dir", "📎 uploaded", "data from that login",
 			"not-a-contact", "bad-path", "symlink", "too-large", "extension", "never another login's uploads",
-			"`contact` set to that login", "`hard-link`", "the login it names as the sender is the uploader", "contact-required",
+			"`contact` set to that login", "`hard-link`", "with no `request` mint", "the login it names as the sender is the uploader", "contact-required",
 			"belong to that login's conversation only", "never use, quote, summarise or disclose another login's"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("%s on: missing %q", name, want)

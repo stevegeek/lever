@@ -1246,11 +1246,13 @@ remote:
   one only for an operator; 20 shares an hour per agent.
   The extensions `html`, `htm`, `xhtml`, `shtml`, `svg`, `js`, `mjs` and `xml` are refused at
   config load.
-- **Turning it on.** `landing: chat` is required. `lever apply` restarts the broker and the
-  proxy, and `lever init` rewrites the skills. Then restart each agent fresh, so its session reads
-  the new skill (a contact cannot upload to an agent that has not): `lever up --fresh` for the
-  manager (back up its conversation first), purge and start for a worker. The agent image must
-  contain this release's lever-agent (`make lever-image`), which has the two tools.
+- **Turning it on or off.** `landing: chat` is required. The skills change with the setting,
+  so run `lever init` first (it rewrites them), then `lever apply` (it restarts the broker and
+  the proxy). From then on a contact sees every agent as not fresh, and cannot post or upload to
+  it, until that agent starts a fresh session on the new skill: `lever up --fresh` for the
+  manager (back up its conversation first), purge and start for a worker. The operator is not
+  held back. The agent image must contain this release's lever-agent (`make lever-image`), which
+  has the two tools; they are direct lever-capability tools, called with no `request` mint.
 - **The front.** The page sends every upload with the header `X-Lever-Upload: 1`, and the proxy
   refuses an upload without it. A browser sends such a header to another origin only after a
   CORS preflight, which the proxy never grants. A front must not answer `/lever/api/` with a

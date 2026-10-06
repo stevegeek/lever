@@ -200,6 +200,9 @@ file to share; one `<key>` per login. Call `contact_files`
 facts about that login only: each upload from it with `login`, `name`,
 `size`, `sha256` and `path`, your shares to it, and its `in_dir` and
 `out_dir`.
+`contact_files` and `share_file` are direct tools of the lever-capability
+server, like `message_verify`: call them by name, with no `request` mint
+and no `_capability` argument.
 
 - A chat message "📎 uploaded <name>" means: verify the message first;
   the login it names as the sender is the uploader. Call

@@ -125,3 +125,18 @@ func TestContactsReturnsTheBrokersAnswer(t *testing.T) {
 		t.Fatalf("%s", out)
 	}
 }
+
+// to reaches the broker exactly as given (the broker compares it exactly).
+func TestContactMessagePassesToUnchanged(t *testing.T) {
+	var got wire.ContactMessageRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(wire.ContactMessageResponse{Reason: "not-a-contact"})
+	}))
+	defer srv.Close()
+	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "worker", Client: srv.Client(), BodyDir: t.TempDir()})
+	out := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"contact_message","arguments":{"to":" c@example.com ","text":"hi"}}}`)
+	if got.To != " c@example.com " || !strings.Contains(out, "not-a-contact") {
+		t.Fatalf("posted %q, result %s", got.To, out)
+	}
+}

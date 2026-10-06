@@ -69,7 +69,9 @@ func contactsTool(s *MCPServer, ctx context.Context, _ map[string]string) (strin
 // reads the word; a broker answer this tool would not put on a command line
 // is an error.
 func contactMessageTool(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
-	to, text, ref := strings.TrimSpace(args["to"]), args["text"], strings.TrimSpace(args["reply_to_ref"])
+	// to goes to the broker as given: it compares it exactly with the
+	// configured logins, so " c@x" is not-a-contact rather than a guess.
+	to, text, ref := args["to"], args["text"], strings.TrimSpace(args["reply_to_ref"])
 	if to == "" || text == "" {
 		return "", invalidParams{errors.New(`"to" and "text" are required`)}
 	}
@@ -95,6 +97,10 @@ func contactMessageTool(s *MCPServer, ctx context.Context, args map[string]strin
 	if err != nil {
 		return "", fmt.Errorf("writing the body file: %w", err)
 	}
+	// The exact authorized bytes, trailing newline included: scion message
+	// --body-file reads the file unchanged (cmd/message.go
+	// resolveMessageBody; only the stdin form "-" trims), and the hub
+	// stores it unchanged once the broker refused mention-like "@".
 	_, werr := f.WriteString(text)
 	if err := errors.Join(werr, f.Close()); err != nil {
 		_ = os.Remove(path)

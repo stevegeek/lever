@@ -149,6 +149,16 @@ version bump moves the block under the new version heading.
   Cf), U+2028 and U+2029, and the blank glyphs U+2800, U+3164, U+115F,
   U+1160 and U+FFA0 now become U+FFFD.
 
+### Fixed
+
+- **A worker start no longer writes one audit deny per tool.** Newer Claude
+  Code probes every MCP server with `server/discover` at start, and the
+  broker gateway denied it as "method not allowlisted". The gateway now
+  answers `server/discover`, `resources/list`, `resources/templates/list`
+  and `prompts/list` itself with JSON-RPC "method not found" (-32601), or a
+  bodiless 202 for a notification, logs them at debug level only, and never
+  forwards them. Every other unknown method is still denied and audited.
+
 ## [0.29.1] - 2026-10-02
 
 Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them

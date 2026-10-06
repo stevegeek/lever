@@ -511,3 +511,21 @@ func TestHealRefusedForRoleStagesNoTicket(t *testing.T) {
 		t.Fatalf("want two deny lines:\n%s", buf.String())
 	}
 }
+
+// A fresh start of a worker (absent record: stage, scion start, live) also
+// clears the count earlier failed heals left, as a resume does.
+func TestFreshStartResetsTheAttemptCount(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	b.liveAttempts, b.liveInterval = 5, time.Millisecond
+	b.reenrolMu.Lock()
+	b.reenrolTries["scratch"] = reenrolMaxAttempts
+	b.reenrolMu.Unlock()
+	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
+	if rec.Code != http.StatusOK || len(rt.started) != 1 {
+		t.Fatalf("start: %d %s started=%d, want 200 and one start", rec.Code, rec.Body.String(), len(rt.started))
+	}
+	if n := reenrolTriesOf(b, "scratch"); n != 0 {
+		t.Fatalf("heal attempts after a fresh start = %d, want 0", n)
+	}
+}

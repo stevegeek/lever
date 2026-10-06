@@ -349,13 +349,13 @@ func agentRecordOf(a hubapi.Agent) remoteproxy.AgentRecord {
 // 0600 operator socket, the host user's own channel. Nil when the state
 // directory is inside the tree: then the broker binds no operator socket
 // (brokerctl.bindListeners), and the page answers every wake "unavailable".
-func remoteWake(app *config.App, st state.State) func(ctx context.Context, login, worker string) error {
+func remoteWake(app *config.App, st state.State) func(ctx context.Context, login, tier, worker string) error {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil
 	}
 	client := udsClient(st.OperatorSock())
-	return func(ctx context.Context, login, worker string) error {
-		err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorWake, wire.OperatorWakeRequest{Worker: worker, Login: login}, nil)
+	return func(ctx context.Context, login, tier, worker string) error {
+		err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorWake, wire.OperatorWakeRequest{Worker: worker, Login: login, Tier: tier}, nil)
 		if err != nil {
 			return &remoteproxy.WakeError{Status: httpjson.Status(err), Err: err}
 		}

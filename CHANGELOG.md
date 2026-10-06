@@ -31,7 +31,8 @@ version bump moves the block under the new version heading.
   state only: no history, no input). The list is built per login on the server
   (`GET /lever/api/agents`): an agent outside the login's lists never appears, not its name, id
   or conversation. Each row shows a state from a fixed set of words and an unread count; reading
-  a chat moves the hub read marker. A message to a suspended or stopped worker wakes it first
+  a chat moves the hub read marker. A message to a suspended worker wakes it first (a stopped
+  one only for an operator: a contact gets "Ask the manager to start <name>" instead)
   (`POST /lever/api/agents/<name>/wake`: worker only, a login that may message it, same-origin,
   one wake per worker per minute, through the broker's operator socket, audited), then goes out
   under the idempotency key it had before the wake. A worker in error, with no record, or not

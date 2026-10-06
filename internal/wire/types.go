@@ -169,10 +169,13 @@ type OperatorNoteRequest struct {
 // OperatorWakeRequest is the body of POST /operator/wake: the remote proxy
 // asks for a suspended or stopped worker to be resumed because a login that
 // may message it sent it a message. Login is the proxy's verified login,
-// for the audit line only; the socket's file mode is the authority.
+// for the audit line only; the socket's file mode is the authority. Tier is
+// that login's tier: only "operator" may wake a stopped worker (a contact
+// wakes only a suspended one; any other value reads as a contact).
 type OperatorWakeRequest struct {
 	Worker string `json:"worker"`
 	Login  string `json:"login"`
+	Tier   string `json:"tier"`
 }
 
 // OperatorNoteResponse is the reply of POST /operator/note: the sent-ledger

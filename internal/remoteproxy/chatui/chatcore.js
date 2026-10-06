@@ -226,8 +226,9 @@ const NOTE_UNKNOWN = 'state unknown – retrying';
 // input (the composer is on), note (a fixed line under it), ask (the "Ask
 // the manager to start" button; only when the login may message the
 // manager), wake (a send wakes the agent first), viewOnly (no history, no
-// input). The manager is never woken from the page.
-export function inputView(a, canAskManager) {
+// input). The manager is never woken from the page. tier is the login's:
+// a contact (anything but 'operator') wakes only a suspended worker.
+export function inputView(a, canAskManager, tier) {
   const off = { input: false, note: '', ask: false, wake: false, viewOnly: false };
   if (!a || a.access !== 'message') return { ...off, viewOnly: true };
   const manager = a.role === 'manager';
@@ -238,7 +239,12 @@ export function inputView(a, canAskManager) {
       return { ...off, input: true, note: NOTE_STARTING };
     case 'suspended':
     case 'stopped':
-      return manager ? { ...off, note: NOTE_OFFLINE } : { ...off, input: true, note: NOTE_ASLEEP, wake: true };
+      if (manager) return { ...off, note: NOTE_OFFLINE };
+      // A contact wakes only a suspended worker: a stopped one was stopped
+      // by the operator on purpose, so the manager is asked instead (the
+      // server refuses the wake too). Anything but 'operator' is a contact.
+      if (a.state === 'stopped' && tier !== 'operator') return { ...off, ask: !!canAskManager };
+      return { ...off, input: true, note: NOTE_ASLEEP, wake: true };
     case 'error':
     case 'no-record':
     case 'not-fresh':

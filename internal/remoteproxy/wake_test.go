@@ -16,13 +16,15 @@ import (
 type wakeRec struct {
 	mu    sync.Mutex
 	calls []string
+	tiers []string
 	err   error
 	block chan struct{}
 }
 
-func (w *wakeRec) fn(ctx context.Context, login, worker string) error {
+func (w *wakeRec) fn(ctx context.Context, login, tier, worker string) error {
 	w.mu.Lock()
 	w.calls = append(w.calls, login+" "+worker)
+	w.tiers = append(w.tiers, tier)
 	w.mu.Unlock()
 	if w.block != nil {
 		<-w.block
@@ -79,8 +81,8 @@ func TestWakeASuspendedWorker(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, got, v)
 		}
 	}
-	if !slices.Equal(wr.got(), []string{"c@x w1"}) {
-		t.Fatalf("broker calls %v", wr.got())
+	if !slices.Equal(wr.got(), []string{"c@x w1"}) || !slices.Equal(wr.tiers, []string{"contact"}) {
+		t.Fatalf("broker calls %v tiers %v", wr.got(), wr.tiers)
 	}
 	all := lines.all()
 	last := all[len(all)-1]
@@ -232,19 +234,21 @@ func TestWakeStateAndBrokerAnswers(t *testing.T) {
 		state   string
 		brokers int
 	}{
-		"running":       {"c@x", func(c *Config, _ *wakeRec) { c.AgentRecords = recs("running") }, 409, "not-asleep", "running", 0},
-		"starting":      {"c@x", func(c *Config, _ *wakeRec) { c.AgentRecords = recs("resumed") }, 409, "not-asleep", "starting", 0},
-		"error":         {chatOp, func(c *Config, _ *wakeRec) { c.AgentRecords = recs("error") }, 409, "not-asleep", "error", 0},
-		"no record":     {chatOp, func(c *Config, _ *wakeRec) { c.AgentRecords = recs("") }, 409, "not-asleep", "no-record", 0},
-		"hub down":      {chatOp, func(c *Config, _ *wakeRec) { c.AgentRecords = nil }, 409, "not-asleep", "unknown", 0},
-		"not fresh":     {"c@x", func(c *Config, _ *wakeRec) { c.ContactSession = func(string) error { return errors.New("old") } }, 409, "not-asleep", "not-fresh", 0},
-		"op not fresh":  {chatOp, func(c *Config, _ *wakeRec) { c.ContactSession = func(string) error { return errors.New("old") } }, 202, "", "starting", 1},
-		"no wake":       {"c@x", func(c *Config, _ *wakeRec) { c.Wake = nil }, 503, "unavailable", "", 0},
-		"broker 409":    {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Status: 409, Err: errors.New("not asleep")} }, 409, "refused", "", 1},
-		"broker 403":    {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Status: 403, Err: errors.New("x")} }, 409, "refused", "", 1},
-		"broker 502":    {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Status: 502, Err: errors.New("x")} }, 502, "failed", "", 1},
-		"broker absent": {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Err: errors.New("dial")} }, 502, "failed", "", 1},
-		"plain error":   {"c@x", func(_ *Config, w *wakeRec) { w.err = errors.New("x") }, 502, "failed", "", 1},
+		"running":          {"c@x", func(c *Config, _ *wakeRec) { c.AgentRecords = recs("running") }, 409, "not-asleep", "running", 0},
+		"starting":         {"c@x", func(c *Config, _ *wakeRec) { c.AgentRecords = recs("resumed") }, 409, "not-asleep", "starting", 0},
+		"contact stopped":  {"c@x", func(c *Config, _ *wakeRec) { c.AgentRecords = recs("stopped") }, 409, "not-asleep", "stopped", 0},
+		"operator stopped": {chatOp, func(c *Config, _ *wakeRec) { c.AgentRecords = recs("stopped") }, 202, "", "starting", 1},
+		"error":            {chatOp, func(c *Config, _ *wakeRec) { c.AgentRecords = recs("error") }, 409, "not-asleep", "error", 0},
+		"no record":        {chatOp, func(c *Config, _ *wakeRec) { c.AgentRecords = recs("") }, 409, "not-asleep", "no-record", 0},
+		"hub down":         {chatOp, func(c *Config, _ *wakeRec) { c.AgentRecords = nil }, 409, "not-asleep", "unknown", 0},
+		"not fresh":        {"c@x", func(c *Config, _ *wakeRec) { c.ContactSession = func(string) error { return errors.New("old") } }, 409, "not-asleep", "not-fresh", 0},
+		"op not fresh":     {chatOp, func(c *Config, _ *wakeRec) { c.ContactSession = func(string) error { return errors.New("old") } }, 202, "", "starting", 1},
+		"no wake":          {"c@x", func(c *Config, _ *wakeRec) { c.Wake = nil }, 503, "unavailable", "", 0},
+		"broker 409":       {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Status: 409, Err: errors.New("not asleep")} }, 409, "refused", "", 1},
+		"broker 403":       {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Status: 403, Err: errors.New("x")} }, 409, "refused", "", 1},
+		"broker 502":       {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Status: 502, Err: errors.New("x")} }, 502, "failed", "", 1},
+		"broker absent":    {"c@x", func(_ *Config, w *wakeRec) { w.err = &WakeError{Err: errors.New("dial")} }, 502, "failed", "", 1},
+		"plain error":      {"c@x", func(_ *Config, w *wakeRec) { w.err = errors.New("x") }, 502, "failed", "", 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			hub := newPageHub(t)

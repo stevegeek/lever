@@ -71,7 +71,8 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 // (handleWorkerResume): the role guard, the hub's phase, then resumeRecord,
 // which stages a fresh ticket, picks the verb by phase and waits until the
 // worker is live. Narrower than the verb: only a declared worker (never the
-// manager), and only from suspended or stopped (running is a no-op success:
+// manager), and only from suspended, or stopped for the operator's own
+// login (a contact may not undo an operator's stop; running is a no-op success:
 // a resume that won the worker's lock got there first). It is on the 0600 operator
 // socket, never on the admin listener the hub's network can reach.
 func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +124,13 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		// Live already (another resume won the lock): what the caller wants.
 		b.audit("worker", actor, "allow", "wake "+spec.Name+": already running")
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+		return
+	}
+	if phase == scion.PhaseStopped && req.Tier != "operator" {
+		// Stopped is the operator's own decision; only the operator's login
+		// undoes it. A contact wakes only a suspended worker.
+		b.audit("worker", actor, "deny", "wake "+spec.Name+": stopped, and the login is not the operator's")
+		http.Error(w, "stopped by the operator", http.StatusConflict)
 		return
 	}
 	if phase != scion.PhaseSuspended && phase != scion.PhaseStopped {

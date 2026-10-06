@@ -108,16 +108,16 @@ func TestRemoteWakeOverTheOperatorSocket(t *testing.T) {
 	if wake == nil {
 		t.Fatal("no wake with the state outside the tree")
 	}
-	if err := wake(context.Background(), "c@x", "w1"); err != nil || got != (wire.OperatorWakeRequest{Worker: "w1", Login: "c@x"}) {
+	if err := wake(context.Background(), "c@x", "contact", "w1"); err != nil || got != (wire.OperatorWakeRequest{Worker: "w1", Login: "c@x", Tier: "contact"}) {
 		t.Fatalf("%v %+v", err, got)
 	}
 	var we *remoteproxy.WakeError
-	if err := wake(context.Background(), "c@x", "w-busy"); !errors.As(err, &we) || we.Status != http.StatusConflict {
+	if err := wake(context.Background(), "c@x", "contact", "w-busy"); !errors.As(err, &we) || we.Status != http.StatusConflict {
 		t.Fatalf("refusal: %v", err)
 	}
 	// No broker on the socket: an error with no status.
 	srv.Close()
-	if err := wake(context.Background(), "c@x", "w1"); !errors.As(err, &we) || we.Status != 0 {
+	if err := wake(context.Background(), "c@x", "contact", "w1"); !errors.As(err, &we) || we.Status != 0 {
 		t.Fatalf("no broker: %v", err)
 	}
 }

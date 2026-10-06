@@ -1092,6 +1092,20 @@ test('the state table drives the composer', async () => {
   }
 });
 
+test('a contact sees a stopped worker with input off and the ask button; an operator may wake it', async () => {
+  const contact = (agents) => roster(agents, { login: 'c', tier: 'contact', console: undefined });
+  let env = await load(hubWith({ agents: () => contact([BOSS({ terminal: undefined }), A('w1', { state: 'stopped', terminal: undefined })]) }), { store: { 'lever-chat-open': 'w1' } });
+  assert.equal(env.els.text.disabled, true);
+  assert.equal(env.els.ask.hidden, false);
+  assert.equal(env.els.ask.textContent, 'Ask the manager to start w1');
+  env = await load(hubWith({ agents: () => contact([BOSS({ terminal: undefined }), A('w1', { state: 'suspended', terminal: undefined })]) }), { store: { 'lever-chat-open': 'w1' } });
+  assert.equal(env.els.text.disabled, false);
+  assert.equal(env.els.note.textContent, 'asleep – your message wakes it');
+  env = await load(hubWith({ agents: () => roster([BOSS(), A('w1', { state: 'stopped' })]) }), { store: { 'lever-chat-open': 'w1' } });
+  assert.equal(env.els.text.disabled, false);
+  assert.equal(env.els.ask.hidden, true);
+});
+
 test('Ask the manager opens the manager chat with an editable draft, sending nothing', async () => {
   const env = await load(hubWith({ agents: () => roster([BOSS(), A('deal-3', { state: 'no-record', id: undefined, conversation: undefined })]) }), { store: { 'lever-chat-open': 'deal-3' } });
   assert.equal(env.els.ask.hidden, false);

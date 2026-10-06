@@ -175,12 +175,22 @@ test('MAX_MESSAGE is the hub cap', () => {
   assert.equal(MAX_MESSAGE, 16000);
 });
 
+test('a contact cannot wake a stopped worker: the operator stopped it on purpose', () => {
+  const w = (state) => ({ name: 'deal-3', role: 'worker', access: 'message', state });
+  assert.deepEqual(inputView(w('stopped'), true, 'contact'), { input: false, note: '', ask: true, wake: false, viewOnly: false });
+  assert.equal(inputView(w('stopped'), false, 'contact').ask, false);
+  assert.deepEqual(inputView(w('suspended'), true, 'contact'), { input: true, note: 'asleep – your message wakes it', ask: false, wake: true, viewOnly: false });
+  assert.deepEqual(inputView(w('stopped'), true, 'operator'), { input: true, note: 'asleep – your message wakes it', ask: false, wake: true, viewOnly: false });
+  // No tier given reads as a contact: the narrower view.
+  assert.equal(inputView(w('stopped'), true).wake, false);
+});
+
 test('inputView follows the spec table', () => {
   const w = (state, extra = {}) => ({ name: 'deal-3', role: 'worker', access: 'message', state, ...extra });
   assert.deepEqual(inputView(w('running'), true), { input: true, note: '', ask: false, wake: false, viewOnly: false });
   assert.deepEqual(inputView(w('starting'), true), { input: true, note: 'starting – your message waits until it runs', ask: false, wake: false, viewOnly: false });
   for (const s of ['suspended', 'stopped']) {
-    assert.deepEqual(inputView(w(s), true), { input: true, note: 'asleep – your message wakes it', ask: false, wake: true, viewOnly: false });
+    assert.deepEqual(inputView(w(s), true, 'operator'), { input: true, note: 'asleep – your message wakes it', ask: false, wake: true, viewOnly: false });
   }
   for (const s of ['error', 'no-record', 'not-fresh']) {
     assert.deepEqual(inputView(w(s), true), { input: false, note: '', ask: true, wake: false, viewOnly: false });

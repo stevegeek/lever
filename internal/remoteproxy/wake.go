@@ -18,8 +18,8 @@ import (
 )
 
 // The wake route: POST /lever/api/agents/<name>/wake. A login that may
-// message a suspended or stopped worker asks lever to resume it (spec: wake
-// on message). The resume itself is the broker's, over its 0600 operator
+// message a suspended worker (or, the operator, a stopped one) asks lever
+// to resume it (spec: wake on message). The resume itself is the broker's, over its 0600 operator
 // socket (Config.Wake), the same code the manager's resume verb runs.
 //
 // Order matters: method, browser provenance, the login's lists, the hub
@@ -151,7 +151,10 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	if v.tier == chatledger.TierContact && !contactFresh(state, name, g.cfg.ContactSession) {
 		state = "not-fresh"
 	}
-	if state != "suspended" && state != "stopped" {
+	// A contact wakes only a suspended worker: stopped is the operator's
+	// own decision. The operator may wake either.
+	asleep := state == "suspended" || state == "stopped" && v.tier == chatledger.TierOperator
+	if !asleep {
 		refuse(http.StatusConflict, "not-asleep", map[string]string{"state": state})
 		return
 	}
@@ -170,7 +173,7 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	go func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), wakeBudget)
 		defer cancel()
-		done <- g.cfg.Wake(ctx, v.login, name)
+		done <- g.cfg.Wake(ctx, v.login, v.tier, name)
 	}()
 	timer := time.NewTimer(g.wakeWait())
 	defer timer.Stop()

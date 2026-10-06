@@ -155,11 +155,12 @@ type Config struct {
 	AgentRecords func(ctx context.Context) (map[string]AgentRecord, error)
 	// Labels returns the labels by agent name (nil for none). Optional.
 	Labels func() map[string]string
-	// Wake asks the broker to resume a suspended or stopped worker for a
-	// login that may message it (the operator socket's /operator/wake). It
-	// returns when the worker is live or the broker refused; a refusal is a
-	// *WakeError with the broker's status. Nil answers every wake 503.
-	Wake func(ctx context.Context, login, worker string) error
+	// Wake asks the broker to resume a suspended (or, for the operator,
+	// stopped) worker for a login that may message it (the operator socket's
+	// /operator/wake); tier is the login's. It returns when the worker is
+	// live or the broker refused; a refusal is a *WakeError with the
+	// broker's status. Nil answers every wake 503.
+	Wake func(ctx context.Context, login, tier, worker string) error
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.

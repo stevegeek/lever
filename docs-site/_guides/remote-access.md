@@ -800,11 +800,15 @@ as a hint. The composer of a chat follows it:
 |---|---|---|
 | running (working / waiting / idle) | yes | — |
 | starting | yes | "starting – your message waits until it runs" |
-| asleep (suspended) or stopped, a worker | yes | "asleep – your message wakes it" |
+| asleep (suspended), a worker | yes | "asleep – your message wakes it" |
+| stopped, a worker, for an operator | yes | "asleep – your message wakes it" |
+| stopped, a worker, for a contact | no | a button **Ask the manager to start &lt;name&gt;** |
 | error, no record, not fresh, a worker | no | a button **Ask the manager to start &lt;name&gt;** |
 | the manager not running | no | "the assistant is offline" |
 | unknown (the hub cannot be read) | no | "state unknown – retrying" |
 
+A contact never wakes a stopped worker: suspended is the state an idle worker sleeps in, but
+stopped is a decision the operator made, and only the operator's login undoes it from the page.
 "Not fresh" is for a contact only: the agent's session started before the skills on disk now
 (see [Contacts](#contacts-chat-only-logins)), so the fence would refuse the contact's message.
 **Ask the manager to start** opens your chat with the manager with an editable draft ("Please
@@ -813,7 +817,8 @@ manager gets no button.
 
 ### Waking a worker
 
-A message to an asleep (suspended or stopped) worker wakes it first. The page keeps your text,
+A message to an asleep worker wakes it first: a suspended one for any login that may message it,
+a stopped one only for an operator. The page keeps your text,
 asks lever to wake the worker, shows "waking &lt;name&gt;…", and reads the list every 3 seconds
 for up to 90. When the worker runs, the message goes through the normal send, under the same
 idempotency key it was given before the wake, so a reload during the wake cannot store it twice.
@@ -828,7 +833,8 @@ The wake (`POST /lever/api/agents/<name>/wake`) is accepted only:
   does not exist;
 - from the page itself: one `Origin` header, and `Sec-Fetch-Site: same-origin` when the browser
   sends it;
-- while the worker is suspended or stopped;
+- while the worker is suspended, or, for an operator's login, stopped (the broker checks this
+  again, with the login's tier, before it resumes anything);
 - once a minute per worker, across all logins (a second wake inside the minute gets 429 with
   `Retry-After`).
 

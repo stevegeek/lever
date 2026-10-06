@@ -34,7 +34,7 @@ func TestOperatorWakeResumesASuspendedWorker(t *testing.T) {
 		b := newTestBroker(t, rt, wakeSpec)
 		var buf bytes.Buffer
 		b.log = slog.New(slog.NewTextHandler(&buf, nil))
-		rec := postWake(t, b, `{"worker":"worker","login":"c@x"}`)
+		rec := postWake(t, b, `{"worker":"worker","login":"c@x","tier":"operator"}`)
 		if rec.Code != http.StatusOK || len(rt.resumed) != 1 {
 			t.Fatalf("%s: %d %s resumed=%d", phase, rec.Code, rec.Body.String(), len(rt.resumed))
 		}
@@ -205,5 +205,29 @@ func TestOperatorWakeRefusesARevokedWorker(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "decision=deny") || !strings.Contains(buf.String(), "revoked") {
 		t.Fatalf("audit:\n%s", buf.String())
+	}
+}
+
+// A contact wakes only a suspended worker: stopped is the operator's own
+// decision. The operator's login may wake either; a request that names no
+// tier reads as a contact's.
+func TestOperatorWakeStoppedOnlyForTheOperator(t *testing.T) {
+	for _, tc := range []struct {
+		phase, tier string
+		code        int
+	}{
+		{"stopped", "contact", http.StatusConflict},
+		{"stopped", "", http.StatusConflict},
+		{"stopped", "bogus", http.StatusConflict},
+		{"stopped", "operator", http.StatusOK},
+		{"suspended", "contact", http.StatusOK},
+		{"suspended", "", http.StatusOK},
+	} {
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: tc.phase}}}}
+		b := newTestBroker(t, rt, wakeSpec)
+		rec := postWake(t, b, `{"worker":"worker","login":"c@x","tier":"`+tc.tier+`"}`)
+		if rec.Code != tc.code || (tc.code == http.StatusOK) != (len(rt.resumed) == 1) {
+			t.Errorf("%s/%q: %d %s resumed=%d", tc.phase, tc.tier, rec.Code, rec.Body, len(rt.resumed))
+		}
 	}
 }

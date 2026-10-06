@@ -540,7 +540,7 @@ async function reloadList() {
 // manager" button from the agent's row (inputView).
 function applyView(a) {
   if (!chat || a.name !== chat.name) return;
-  const v = inputView(a, !!managerRow());
+  const v = inputView(a, !!managerRow(), roster && roster.tier);
   chat.view = v;
   showState(chipText(a), v.input);
   el.text.disabled = !v.input;
@@ -808,7 +808,7 @@ async function deliver(c, text) {
   if (a.conversation !== c.conversation) {
     return { blocked: `${c.name} has a new hub record, and the chat now shows it. Press Send again to send there.` };
   }
-  const view = inputView(a, !!managerRow());
+  const view = inputView(a, !!managerRow(), roster && roster.tier);
   if (!view.input) return { blocked: view.note || `${c.name} cannot take messages now (${chipText(a)}).` };
   if (view.wake) {
     const woken = await wake(c, text);

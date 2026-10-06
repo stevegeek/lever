@@ -242,3 +242,42 @@ func TestClientUsesNoProxy(t *testing.T) {
 		t.Fatal("the push client lost its guarded dialer or its redirect refusal")
 	}
 }
+
+// TestDialerGivesEachAddressItsOwnBudget: a first address that never
+// answers is given up after perAddr, and the next one is tried within the
+// send's time.
+func TestDialerGivesEachAddressItsOwnBudget(t *testing.T) {
+	var mu sync.Mutex
+	var tried []string
+	d := &dialer{
+		perAddr: 50 * time.Millisecond,
+		lookup: func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("142.250.180.10"), netip.MustParseAddr("142.250.180.11")}, nil
+		},
+		dial: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			mu.Lock()
+			tried = append(tried, addr)
+			mu.Unlock()
+			if addr == "142.250.180.10:443" {
+				<-ctx.Done() // a blackhole: no answer until the context ends
+				return nil, ctx.Err()
+			}
+			c, _ := net.Pipe()
+			return c, nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	c, err := d.DialContext(ctx, "tcp", "fcm.googleapis.com:443")
+	if err != nil {
+		t.Fatalf("the second address was not reached: %v (tried %v)", err, tried)
+	}
+	c.Close()
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("took %v: the blackholed address ate the budget", took)
+	}
+	if len(tried) != 2 {
+		t.Fatalf("tried %v", tried)
+	}
+}

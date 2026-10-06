@@ -412,7 +412,8 @@ func contactLanding(s contactScope) string {
 // errNoUserID means the hub's /auth/me answer carried no id.
 var errNoUserID = errors.New("the hub named no user id")
 
-// errSessionUnknown means the hub answered 401 to the login's session.
+// errSessionUnknown means the hub answered the login's session with a 401
+// or a redirect (to its login page): it does not know the session.
 var errSessionUnknown = errors.New("the hub does not know this session")
 
 // hubWhoAmI asks the hub, with a login's own session, for its user id.
@@ -434,7 +435,7 @@ func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, err
 			return "", err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			return "", errSessionUnknown
 		}
 		if resp.StatusCode != http.StatusOK {

@@ -137,6 +137,7 @@ func (f *contactFence) userID(ctx context.Context, login, cookie string) (string
 type contactScope struct {
 	userID string
 	agents map[string]string // hub id → name
+	login  string
 }
 
 func (s contactScope) key(agentID string) string { return "dm:agent:" + agentID + ":user:" + s.userID }
@@ -216,7 +217,7 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		g.deny(w, line, http.StatusBadGateway, DecisionDenyContact, "cannot resolve your agents")
 		return nil
 	}
-	scope := contactScope{userID: uid, agents: ids}
+	scope := contactScope{userID: uid, agents: ids, login: login}
 
 	switch {
 	case strings.HasPrefix(p, "/api/v1/chat/conversations/"):
@@ -235,8 +236,13 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		return nil
 	case (m == http.MethodGet || m == http.MethodHead) && p == "/api/v1/chat/dms":
 		// The hub lists every DM the user is in, with a message preview;
-		// the answer is cut down to the contact's own conversations.
-		return r.WithContext(context.WithValue(r.Context(), keepDMKey{}, scope.allows))
+		// the answer is cut down to the contact's own conversations. With
+		// agent messages on, the previews go too (stripDMPreviews).
+		r = r.WithContext(context.WithValue(r.Context(), keepDMKey{}, scope.allows))
+		if g.cfg.MatchAgentMessages != nil {
+			r = withRewrite(r, stripDMPreviews)
+		}
+		return r
 	case (m == http.MethodGet || m == http.MethodHead) && slices.Contains(contactForwardGET, p):
 		return r
 	case (m == http.MethodPut && p == "/api/v1/chat/user-prefs") || (m == http.MethodPost && p == "/auth/logout"):
@@ -274,7 +280,14 @@ func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *A
 	m := r.Method
 	switch {
 	case sub == "messages" && m == http.MethodGet:
-		return r
+		if g.cfg.MatchAgentMessages == nil {
+			return r
+		}
+		// Agent messages on: only the agent rows the agent ledger recorded
+		// reach the contact (agentmsgs.go).
+		agentID := strings.Split(key, ":")[2]
+		name := scope.agents[agentID]
+		return withRewrite(r, func(resp *http.Response) { g.filterHistory(resp, scope.login, name, agentID, scope.userID) })
 	case sub == "messages" && m == http.MethodPost:
 		r2 := g.checkContactMessage(w, r, line, deny)
 		if r2 == nil {

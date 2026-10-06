@@ -161,6 +161,13 @@ type Config struct {
 	// live or the broker refused; a refusal is a *WakeError with the
 	// broker's status. Nil answers every wake 503.
 	Wake func(ctx context.Context, login, tier, worker string) error
+	// MatchAgentMessages (remote.agent_messages) reports which agent rows of
+	// a contact's DM the broker's agent ledger recorded, by row id. A
+	// contact is shown no other agent row, no event text, no DM preview,
+	// and only shown rows count as unread (agentmsgs.go, events.go). Any
+	// error hides every agent row. Nil = off: no contact answer is
+	// rewritten.
+	MatchAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -476,6 +483,9 @@ type ctxState struct {
 	// keepDM, when set, filters the hub's /api/v1/chat/dms answer to the
 	// conversations it allows (the contact fence).
 	keepDM func(key string) bool
+	// rewrite, when set, rewrites the hub's answer for a contact
+	// (remote.agent_messages): after keepDM, on every attempt.
+	rewrite func(*http.Response)
 }
 
 type ctxStateKey struct{}
@@ -586,6 +596,9 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 		sandboxAPIDocument(resp)
 		if s := stateFrom(resp.Request); s != nil && s.keepDM != nil {
 			filterDMList(resp, s.keepDM)
+		}
+		if s := stateFrom(resp.Request); s != nil && s.rewrite != nil && !(s.retryable && sessionRejected(resp)) {
+			s.rewrite(resp)
 		}
 		if s := stateFrom(resp.Request); s != nil {
 			if s.retryable && sessionRejected(resp) {
@@ -807,6 +820,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		state.cookie = cookie
 		state.keepDM = contactKeepDM(r)
+		state.rewrite = contactRewrite(r)
 	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.
@@ -951,7 +965,7 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 	}
 	// retryable is deliberately not set: one retry, then the hub's answer
 	// stands whatever it is.
-	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM}
+	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM, rewrite: state.rewrite}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }
 

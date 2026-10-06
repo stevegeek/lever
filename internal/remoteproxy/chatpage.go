@@ -283,6 +283,12 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		return false
 	}
 	v := g.viewerFor(login)
+	if p == chatContactsPath || strings.HasPrefix(p, chatContactsPath+"/") {
+		// Before the method check: a contact gets the fence's refusal
+		// whatever it sends.
+		g.serveOperatorView(w, r, line, v)
+		return true
+	}
 	if name, under := wakeTarget(p); under {
 		if name == "" {
 			// Under the agents prefix only the wake route exists.

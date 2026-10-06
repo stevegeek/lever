@@ -168,6 +168,14 @@ type Config struct {
 	// error hides every agent row. Nil = off: no contact answer is
 	// rewritten.
 	MatchAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
+	// ContactUser reports the hub user id `lever apply` bound a contact login
+	// to (remote-role.json), or false when it bound none: the contact never
+	// signed in, or signed in after the last apply. The operator view
+	// (opview.go) reads a contact's conversations only for a bound contact,
+	// with that contact's own session; for an unbound one it asks the login
+	// driver for nothing, since a login would create the contact's hub user.
+	// Nil: no contact is bound.
+	ContactUser func(login string) (string, bool)
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -387,7 +395,8 @@ type AuditLine struct {
 	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
 	// navigation, DecisionLoginRedirect; the contact fence DecisionDenyContact;
 	// the chat page DecisionChatUnavailable and, for its wake route,
-	// DecisionWake, DecisionDenyWake and DecisionWakeResult; the login driver DecisionOIDCSession
+	// DecisionWake, DecisionDenyWake and DecisionWakeResult; the operator view
+	// DecisionOperatorView and DecisionDenyOperatorView; the login driver DecisionOIDCSession
 	// and DecisionOIDCSessionFailed; the provider the DecisionOIDC* values and
 	// DecisionDenyAuthorize.
 	Decision Decision `json:"decision"`
@@ -395,6 +404,12 @@ type AuditLine struct {
 	// Reason is a fixed word for why the chat page's wake route refused or
 	// how a late wake ended (wake.go), never caller or broker text.
 	Reason string `json:"reason,omitempty"`
+	// Contact and Agent name the conversation an operator-view read was for,
+	// and Count how many rows (or contacts) it answered (opview.go). Never
+	// message text.
+	Contact string `json:"contact,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Count   *int   `json:"count,omitempty"`
 	// Error records why an allowed request never got an answer from the hub
 	// (set only on the 502 path). The transport's own diagnosis lands here
 	// rather than in the client's response body: the operator needs to know

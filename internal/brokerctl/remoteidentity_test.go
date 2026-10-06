@@ -103,6 +103,11 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 		if f.Name == "AgentMessages" && g.Type == reflect.TypeFor[bool]() {
 			continue
 		}
+		// files is hashed as its effective limits and the agents'
+		// workspaces, and only while on (FilesOn).
+		if f.Name == "Files" && g.Type == reflect.TypeFor[*state.FilesIdentity]() {
+			continue
+		}
 		if g.Type != f.Type {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}

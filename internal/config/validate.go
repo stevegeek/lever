@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/egress"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
@@ -569,8 +571,44 @@ func (a *App) validateRemote() error {
 			return err
 		}
 	}
+	fl := a.Remote.Files
+	if fl.MaxBytes < 0 || fl.MaxBytes > MaxFilesMaxBytes {
+		return fmt.Errorf("config: remote: files.max_bytes %d; use 1 to %d (or leave it out for %d)", fl.MaxBytes, MaxFilesMaxBytes, DefaultFilesMaxBytes)
+	}
+	seenExt := map[string]bool{}
+	for _, e := range fl.Extensions {
+		if !filesExtRE.MatchString(e) {
+			return fmt.Errorf("config: remote: files.extensions %q: lowercase letters and digits only, 1 to 10, no dot", e)
+		}
+		if seenExt[e] {
+			return fmt.Errorf("config: remote: files.extensions lists %q twice", e)
+		}
+		seenExt[e] = true
+	}
+	if fl.Enabled {
+		if a.Remote.Landing != RemoteLandingChat {
+			return fmt.Errorf("config: remote: files needs landing: chat (the upload and download routes are the chat page's)")
+		}
+		// The manager's exchange is <tree>/.lever-files. A worker mounted
+		// inside it would read and write the manager's files; a read-only
+		// mount over it would stop the manager sharing. Case-folded: the
+		// tree may be on a case-insensitive filesystem.
+		for _, w := range a.Workers {
+			if fsutil.RelOverlapFold(w.Dir, chatfiles.Dir) {
+				return fmt.Errorf("config: remote: files is on, and worker %q dir %q overlaps %s, the manager's file exchange; move the worker", w.Name, w.Dir, chatfiles.Dir)
+			}
+		}
+		for _, e := range a.Manager.ReadOnly {
+			if fsutil.RelOverlapFold(e, chatfiles.Dir) {
+				return fmt.Errorf("config: remote: files is on, and manager.read_only %q covers %s: the manager could not write the files it shares", e, chatfiles.Dir)
+			}
+		}
+	}
 	return nil
 }
+
+// filesExtRE is one remote.files extension: lowercase, no dot.
+var filesExtRE = regexp.MustCompile(`^[a-z0-9]{1,10}$`)
 
 // validRemoteUserTier checks an entry's tier and agent list: a contact must
 // list the agents it may reach (declared workers or the manager, each once);

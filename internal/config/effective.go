@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"net"
 	"net/textproto"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/opsig"
 )
 
@@ -216,6 +218,34 @@ func (a *App) EffectiveAgentFollowUpAfter() time.Duration {
 // EffectiveAgentMaxChars is max_chars with its default.
 func (a *App) EffectiveAgentMaxChars() int {
 	return cmp.Or(a.Remote.AgentMessages.MaxChars, DefaultAgentMaxChars)
+}
+
+// FilesOn reports whether the chat page's file exchange is on
+// (remote.files.enabled; the routes are the chat page's, so landing chat).
+func (a *App) FilesOn() bool { return a.RemoteLandingChat() && a.Remote.Files.Enabled }
+
+// EffectiveFilesMaxBytes is max_bytes with its default.
+func (a *App) EffectiveFilesMaxBytes() int64 {
+	return cmp.Or(a.Remote.Files.MaxBytes, DefaultFilesMaxBytes)
+}
+
+// EffectiveFilesExtensions is extensions with its default, as a copy.
+func (a *App) EffectiveFilesExtensions() []string {
+	if len(a.Remote.Files.Extensions) == 0 {
+		return slices.Clone(chatfiles.DefaultExtensions)
+	}
+	return slices.Clone(a.Remote.Files.Extensions)
+}
+
+// AgentWorkspaces maps each agent name to its workspace, tree-relative:
+// the manager's is the tree ("."), a worker's its dir. Inside its container
+// each one is /workspace.
+func (a *App) AgentWorkspaces() map[string]string {
+	out := map[string]string{a.Name: "."}
+	for _, w := range a.Workers {
+		out[w.Name] = path.Clean(filepath.ToSlash(w.Dir))
+	}
+	return out
 }
 
 // RemoteBindLoopback reports whether the proxy listens on loopback only — the

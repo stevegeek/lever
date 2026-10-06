@@ -107,3 +107,45 @@ func TestConfigHashUnchangedWhileAgentMessagesOff(t *testing.T) {
 		t.Fatal("a contact's agents must be in the stamp while on")
 	}
 }
+
+func TestConfigHashFilesOnlyWhileOn(t *testing.T) {
+	app := remoteTestApp(t)
+	off := ConfigHash(app)
+	app.Remote.Files.MaxBytes = 5 << 20 // set but off
+	if ConfigHash(app) != off {
+		t.Fatal("files settings while off changed the broker hash")
+	}
+	app.Remote.Files.Enabled = true
+	on := ConfigHash(app)
+	if on == off {
+		t.Fatal("turning files on must bounce the broker")
+	}
+	app.Remote.Files.Extensions = []string{"pdf"}
+	if ConfigHash(app) == on {
+		t.Fatal("extensions must be in the broker hash")
+	}
+}
+
+func TestRemoteConfigHashFilesOnlyWhileOn(t *testing.T) {
+	app := remoteTestApp(t)
+	off := RemoteConfigHash(app)
+	app.Remote.Files.MaxBytes = 5 << 20
+	if RemoteConfigHash(app) != off {
+		t.Fatal("files settings while off changed the proxy hash")
+	}
+	app.Remote.Files.Enabled = true
+	if RemoteConfigHash(app) == off {
+		t.Fatal("turning files on must restart the proxy")
+	}
+}
+
+// Off, the proxy's stamp is the one it had before remote.files existed.
+func TestRemoteConfigHashUnchangedWhileFilesOff(t *testing.T) {
+	app := remoteTestApp(t)
+	id := state.RemoteIdentity{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net", AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
+		IdentityHeader: app.EffectiveRemoteIdentityHeader(), Bind: app.EffectiveRemoteBind(), Landing: app.EffectiveRemoteLanding(),
+		Name: "boss", Workers: []string{"w1", "w2"}, Tree: "/t"}
+	if RemoteConfigHash(app) != state.RemoteConfigHash(id) {
+		t.Fatal("off must keep the pre-change proxy hash")
+	}
+}

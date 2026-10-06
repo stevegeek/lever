@@ -56,6 +56,10 @@ func (s State) SentLedger() string { return filepath.Join(s.Dir, "sent-ledger") 
 // agentledger): written and read by the broker only.
 func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger") }
 
+// FilesLedger is the record of the chat page's file exchange (package
+// fileledger): uploads written by the remote proxy, shares by the broker.
+func (s State) FilesLedger() string { return filepath.Join(s.Dir, "files-ledger") }
+
 // Sessions is the record of each agent's last fresh session start and the
 // skill text on disk for it then (package sessionrec): written by apply (the
 // manager) and the broker (workers), read by the remote proxy before it lets

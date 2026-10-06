@@ -45,6 +45,16 @@ type RemoteIdentity struct {
 	// previews (remote.agent_messages). Omitted when off, so an instance that
 	// never turns it on keeps its stamp.
 	AgentMessages bool `json:",omitempty"`
+	// Files (remote.files, landing chat only): the limits and every agent's
+	// workspace the proxy writes uploads into. Omitted when off.
+	Files *FilesIdentity `json:",omitempty"`
+}
+
+// FilesIdentity is the part of remote.files a running proxy captured.
+type FilesIdentity struct {
+	MaxBytes   int64
+	Extensions []string
+	Workspaces []string // "name=dir", config order, manager first
 }
 
 // RemoteConfigHash identifies the configuration a `lever remote serve` process

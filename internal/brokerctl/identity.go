@@ -34,7 +34,7 @@ func ConfigHash(app *config.App) string {
 	//
 	// AgentMessages (only while on) is the contact list and limits
 	// contact_message enforces; nil while off keeps the hash an instance had
-	// before remote.agent_messages existed.
+	// before remote.agent_messages existed. Files likewise (share_file).
 	return state.HashJSON(struct {
 		Broker        config.Broker
 		Workers       []config.Worker
@@ -42,7 +42,8 @@ func ConfigHash(app *config.App) string {
 		VerifiedChat  bool
 		WebSenders    []string            `json:",omitempty"`
 		AgentMessages *agentMessagesStamp `json:",omitempty"`
-	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app)})
+		Files         *filesStamp         `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app)})
 }
 
 // agentMessagesStamp is the part of remote.agent_messages the broker acts on.
@@ -57,6 +58,29 @@ func agentMessagesStampOf(app *config.App) *agentMessagesStamp {
 		return nil
 	}
 	s := &agentMessagesStamp{FollowUpAfter: app.EffectiveAgentFollowUpAfter(), MaxChars: app.EffectiveAgentMaxChars()}
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			s.Contacts = append(s.Contacts, u.Login+"="+strings.Join(u.Agents, ","))
+		}
+	}
+	return s
+}
+
+// filesStamp is the part of remote.files the broker acts on (share_file):
+// the limits and who may receive files from which agent.
+type filesStamp struct {
+	MaxBytes   int64
+	Extensions []string
+	Contacts   []string // "login=agent,agent", config order
+	Operators  []string
+}
+
+func filesStampOf(app *config.App) *filesStamp {
+	if !app.FilesOn() {
+		return nil
+	}
+	s := &filesStamp{MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions(),
+		Operators: app.Remote.LoginsWithTier(config.TierOperator)}
 	for _, u := range app.Remote.AllowedUsers {
 		if u.EffectiveTier() == config.TierContact {
 			s.Contacts = append(s.Contacts, u.Login+"="+strings.Join(u.Agents, ","))
@@ -97,6 +121,14 @@ func RemoteConfigHash(app *config.App) string {
 		}
 		id.Tree = app.Tree
 		id.LabelsFile = app.Remote.LabelsFile
+		if app.FilesOn() {
+			f := &state.FilesIdentity{MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions(),
+				Workspaces: []string{app.Name + "=."}}
+			for _, w := range app.Workers {
+				f.Workspaces = append(f.Workspaces, w.Name+"="+app.AgentWorkspaces()[w.Name])
+			}
+			id.Files = f
+		}
 	}
 	return state.RemoteConfigHash(id)
 }

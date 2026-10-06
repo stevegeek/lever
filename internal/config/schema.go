@@ -435,6 +435,11 @@ type Remote struct {
 	// (broker contact_message) and makes the proxy show a contact only the
 	// agent messages lever recorded. Off by default; see AgentMessages.
 	AgentMessages AgentMessages `yaml:"agent_messages"`
+	// Files lets a login upload files to an agent it may message and
+	// download the files that agent shares with it, through the chat page
+	// (remoteproxy/files.go, broker share_file). Off by default; needs
+	// landing: chat. See Files.
+	Files Files `yaml:"files"`
 }
 
 // AgentMessages is remote.agent_messages.
@@ -454,6 +459,23 @@ const (
 	// MaxAgentMaxChars is scion's own cap on one message
 	// (messages.MaxMessageLength): a longer text could never be sent.
 	MaxAgentMaxChars = 16000
+)
+
+// Files is remote.files.
+type Files struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxBytes bounds one file. Zero = DefaultFilesMaxBytes.
+	MaxBytes int64 `yaml:"max_bytes"`
+	// Extensions are the accepted file types, lowercase, without the dot.
+	// Empty = chatfiles.DefaultExtensions.
+	Extensions []string `yaml:"extensions"`
+}
+
+const (
+	DefaultFilesMaxBytes = 25 << 20
+	// MaxFilesMaxBytes bounds max_bytes: a download is copied whole to a
+	// private temp file before it is served (chatfiles.CopyVerified).
+	MaxFilesMaxBytes = 100 << 20
 )
 
 type App struct {

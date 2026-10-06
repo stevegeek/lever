@@ -141,6 +141,13 @@ version bump moves the block under the new version heading.
   empty segment (`//`), a backslash or NUL, or an encoded slash, backslash,
   dot or NUL (`%2f`, `%5c`, `%2e`, `%00`) is now refused before any route
   decision, so the decisions and the forwarded request name the same route.
+- **Terminal output replaces invisible and reordering characters from the
+  jail.** `termsafe.Sanitize` (doctor and up rows, apply log lines, returned
+  errors) passed printable UTF-8 unchanged, so a guest string could carry a
+  bidi override, a zero-width character, a tag character or a blank glyph
+  and render as text that is not there. Every format character (category
+  Cf), U+2028 and U+2029, and the blank glyphs U+2800, U+3164, U+115F,
+  U+1160 and U+FFA0 now become U+FFFD.
 
 ## [0.29.1] - 2026-10-02
 

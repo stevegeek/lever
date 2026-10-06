@@ -311,3 +311,36 @@ func TestLastHourCountsARotatedFileAlone(t *testing.T) {
 		t.Fatalf("LastHour = %d (%v), want 3", v.LastHour, err)
 	}
 }
+
+// TestPeekWritesNothing: the operator's read peeks. It answers what a
+// Match would keep, binds nothing, and a later Match binds exactly as it
+// would have with no peek (two rows of the same text, one record: the
+// earliest binds, even when the peek saw only the later one).
+func TestPeekWritesNothing(t *testing.T) {
+	l, dir := open(t)
+	a := auth(t, "worker", "c@x", KindInitiated, "hello", t0)
+	mustAuthorize(t, l, a)
+	m1 := Candidate{MessageID: "m1", SHA256: HashText("hello"), CreatedAt: t0.Add(time.Minute)}
+	m2 := Candidate{MessageID: "m2", SHA256: HashText("hello"), CreatedAt: t0.Add(2 * time.Minute)}
+	files, _ := filepath.Glob(filepath.Join(dir, "c-*.jsonl"))
+	before, _ := os.ReadFile(files[0])
+	keep, err := l.Peek("worker", "c@x", []Candidate{m2}, t0.Add(3*time.Minute))
+	if err != nil || !keep["m2"] {
+		t.Fatalf("peek of the later row alone: %v %v, want it would bind", keep, err)
+	}
+	keep, err = l.Peek("worker", "c@x", []Candidate{m2, m1}, t0.Add(3*time.Minute))
+	if err != nil || !keep["m1"] || keep["m2"] {
+		t.Fatalf("peek of both: %v %v, want only the earliest", keep, err)
+	}
+	if after, _ := os.ReadFile(files[0]); string(after) != string(before) {
+		t.Fatal("a peek must not write")
+	}
+	keep, bound, err := l.Match("worker", "c@x", []Candidate{m2, m1}, t0.Add(4*time.Minute))
+	if err != nil || !keep["m1"] || keep["m2"] || len(bound) != 1 || bound[0] != a.ID {
+		t.Fatalf("the contact's match after the peeks: keep=%v bound=%v err=%v", keep, bound, err)
+	}
+	// A peek after the binding sees it.
+	if keep, _ := l.Peek("worker", "c@x", []Candidate{m2, m1}, t0.Add(time.Hour)); !keep["m1"] || keep["m2"] {
+		t.Fatalf("peek after the binding: %v", keep)
+	}
+}

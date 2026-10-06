@@ -339,6 +339,10 @@ type AgentMessagesMatchRequest struct {
 	Contact  string            `json:"contact"`
 	Agent    string            `json:"agent"`
 	Messages []AgentMessageRef `json:"messages"`
+	// Peek asks without binding: the answer is what the contact's own read
+	// would keep now, and the ledger is not written. The operator's view of
+	// a contact's conversation peeks; the contact's reads bind.
+	Peek bool `json:"peek,omitempty"`
 }
 
 // AgentMessageRef is one agent row without its text.

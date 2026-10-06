@@ -176,6 +176,12 @@ type Config struct {
 	// driver for nothing, since a login would create the contact's hub user.
 	// Nil: no contact is bound.
 	ContactUser func(login string) (string, bool)
+	// PeekAgentMessages is MatchAgentMessages without binding: it answers
+	// what the contact's own read would keep now, and the broker writes
+	// nothing. The operator view uses it, so an operator's read never decides
+	// which message a record shows. Nil while MatchAgentMessages is set: the
+	// operator view treats every answer as unmatched (no agent row shown).
+	PeekAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.

@@ -368,6 +368,21 @@ func (l *Ledger) Authorize(a Auth, now time.Time, allow func(View) error) error 
 // before the answer. bound lists the record ids newly bound (for the audit).
 // A failed append keeps none of this call's new bindings.
 func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (map[string]bool, []string, error) {
+	return l.match(agent, contact, msgs, now, true)
+}
+
+// Peek answers what Match would keep for msgs now, and writes nothing: a
+// bound message by its binding, an unbound one by whether a record would
+// bind it. The operator's view of a contact's conversation peeks, so its
+// reads (of any page, in any order) never decide which message a record
+// shows; only the contact's own reads bind.
+func (l *Ledger) Peek(agent, contact string, msgs []Candidate, now time.Time) (map[string]bool, error) {
+	keep, _, err := l.match(agent, contact, msgs, now, false)
+	return keep, err
+}
+
+// match is Match, appending the new bindings only when write is set.
+func (l *Ledger) match(agent, contact string, msgs []Candidate, now time.Time, write bool) (map[string]bool, []string, error) {
 	unlock, err := l.lock()
 	if err != nil {
 		return nil, nil, err
@@ -423,6 +438,9 @@ func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (
 		lines = append(lines, ln)
 		bound = append(bound, a.ID)
 		keep[m.MessageID] = true
+	}
+	if !write {
+		return keep, nil, nil
 	}
 	f := l.file(FileFor(contact))
 	for _, ln := range lines {

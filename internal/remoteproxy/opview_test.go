@@ -272,7 +272,7 @@ func TestOperatorViewRowMapping(t *testing.T) {
 	}
 	// Agent messages on: only the recorded agent row is shown to the contact.
 	cfg := viewConfig(t, hub, sess, audit)
-	cfg.MatchAgentMessages = recordedOnly("recorded")
+	cfg.MatchAgentMessages, cfg.PeekAgentMessages = refuseMatch(t), recordedOnly("recorded")
 	a := viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
 	want := `a1 agent "recorded" true|a2 agent "SECRET unrecorded" false|a3 agent "SECRET as state" false|` +
 		`c1 contact "mine" true|s1 system "agent started" true|`
@@ -283,7 +283,7 @@ func TestOperatorViewRowMapping(t *testing.T) {
 		t.Fatalf("createdAt %q", a.Messages[0].CreatedAt)
 	}
 	// Off: the contact sees the hub's answer as it is.
-	cfg.MatchAgentMessages = nil
+	cfg.MatchAgentMessages, cfg.PeekAgentMessages = nil, nil
 	a = viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
 	if got := rows(a); strings.Contains(got, "false") {
 		t.Fatalf("off: every row is shown to the contact: %s", got)
@@ -293,44 +293,102 @@ func TestOperatorViewRowMapping(t *testing.T) {
 func TestOperatorViewMatcherFailure(t *testing.T) {
 	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
 	cfg := viewConfig(t, hub, sess, audit)
-	cfg.MatchAgentMessages = func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
+	down := func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
 		return nil, errors.New("broker down")
 	}
-	a := viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
-	if a.Matched || len(a.Messages) != 5 {
-		t.Fatalf("matched=%v rows=%d: every row, and matched false", a.Matched, len(a.Messages))
-	}
-	for _, m := range a.Messages {
-		if m.From == "agent" && m.ShownToContact {
-			t.Fatalf("%s: with no answer the contact is shown no agent row", m.ID)
+	// The broker down, and a peek that is not wired (the view never falls
+	// back to the binding question).
+	for _, peek := range []func(context.Context, string, string, []AgentMessage) (map[string]bool, error){down, nil} {
+		cfg.MatchAgentMessages, cfg.PeekAgentMessages = refuseMatch(t), peek
+		a := viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
+		if a.Matched || len(a.Messages) != 5 {
+			t.Fatalf("matched=%v rows=%d: every row, and matched false", a.Matched, len(a.Messages))
+		}
+		for _, m := range a.Messages {
+			if m.From == "agent" && m.ShownToContact {
+				t.Fatalf("%s: with no answer the contact is shown no agent row", m.ID)
+			}
 		}
 	}
 }
 
-func TestOperatorViewBindsLikeTheContactRead(t *testing.T) {
-	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
-	cfg := viewConfig(t, hub, sess, audit)
-	// A matcher that binds like the broker's ledger: one record, for the
-	// text "recorded", binds the first id it is asked about and stays bound.
-	var mu sync.Mutex
-	bound := ""
-	cfg.MatchAgentMessages = func(_ context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error) {
-		mu.Lock()
-		defer mu.Unlock()
+// refuseMatch is a binding matcher the operator view must never call.
+func refuseMatch(t *testing.T) func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
+	return func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
+		t.Error("the operator view asked the binding question")
+		return nil, errors.New("not for the operator view")
+	}
+}
+
+// fakeLedger binds like the broker's agent ledger: one record for the
+// text "same", bound to the earliest unbound row it is asked about; a peek
+// answers the same and binds nothing.
+type fakeLedger struct {
+	mu    sync.Mutex
+	bound string
+}
+
+func (l *fakeLedger) ask(bind bool) func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
+	return func(_ context.Context, _, _ string, msgs []AgentMessage) (map[string]bool, error) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
 		keep := map[string]bool{}
+		if l.bound != "" {
+			for _, m := range msgs {
+				keep[m.ID] = m.ID == l.bound
+			}
+			return keep, nil
+		}
+		msgs = slices.Clone(msgs)
+		slices.SortFunc(msgs, func(a, b AgentMessage) int { return a.CreatedAt.Compare(b.CreatedAt) })
 		for _, m := range msgs {
-			if m.SHA256 == hashHex("recorded") && (bound == "" || bound == m.ID) {
-				bound, keep[m.ID] = m.ID, true
+			if m.SHA256 == hashHex("same") {
+				keep[m.ID] = true
+				if bind {
+					l.bound = m.ID
+				}
+				break
 			}
 		}
 		return keep, nil
 	}
+}
+
+// TestOperatorViewPeeksAndBindsNothing: two agent rows of the same text and
+// one record. The operator reads a page holding only the later one (it
+// would be shown, were it read alone), and binds nothing: the contact's own
+// read of both rows then shows the earliest, as with no operator read.
+func TestOperatorViewPeeksAndBindsNothing(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	const m1 = `{"id":"m1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"same","createdAt":"2026-10-06T10:00:00Z"}`
+	const m2 = `{"id":"m2","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"same","createdAt":"2026-10-06T10:01:00Z"}`
+	hub.answer = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != viewDMPath {
+			return false
+		}
+		if r.URL.Query().Get("limit") == "1" {
+			_, _ = io.WriteString(w, `{"messages":[`+m2+`]}`)
+		} else {
+			_, _ = io.WriteString(w, `{"messages":[`+m2+`,`+m1+`]}`)
+		}
+		return true
+	}
+	led := &fakeLedger{}
+	cfg := viewConfig(t, hub, sess, audit)
+	cfg.MatchAgentMessages, cfg.PeekAgentMessages = led.ask(true), led.ask(false)
 	h := viewHandler(t, cfg)
-	viewMessages(t, viewDo(h, "op@x", "GET", viewC))
-	// The contact's own read of the same DM, through the fence.
+	a := viewMessages(t, viewDo(h, "op@x", "GET", viewC+"?limit=1"))
+	if len(a.Messages) != 1 || !a.Messages[0].ShownToContact || led.bound != "" {
+		t.Fatalf("operator read: %+v bound=%q, want m2 marked shown and nothing bound", a.Messages, led.bound)
+	}
 	rw := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages?limit=50"), "")
-	if rw.Code != http.StatusOK || !strings.Contains(rw.Body.String(), `"recorded"`) || strings.Contains(rw.Body.String(), "SECRET") {
-		t.Fatalf("the contact's read after the operator's: %d %s", rw.Code, rw.Body)
+	if rw.Code != http.StatusOK || !strings.Contains(rw.Body.String(), `"m1"`) || strings.Contains(rw.Body.String(), `"m2"`) || led.bound != "m1" {
+		t.Fatalf("the contact's read after the operator's: %d %s bound=%q", rw.Code, rw.Body, led.bound)
+	}
+	// The operator's next read shows what the contact now sees.
+	a = viewMessages(t, viewDo(h, "op@x", "GET", viewC))
+	if len(a.Messages) != 2 || a.Messages[0].ID != "m2" || a.Messages[0].ShownToContact || !a.Messages[1].ShownToContact {
+		t.Fatalf("operator read after the binding: %+v", a.Messages)
 	}
 }
 
@@ -464,7 +522,7 @@ func TestOperatorViewHubFailure(t *testing.T) {
 func TestOperatorViewAuditHasNoText(t *testing.T) {
 	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
 	cfg := viewConfig(t, hub, sess, audit)
-	cfg.MatchAgentMessages = recordedOnly("recorded")
+	cfg.MatchAgentMessages, cfg.PeekAgentMessages = refuseMatch(t), recordedOnly("recorded")
 	h := viewHandler(t, cfg)
 	viewMessages(t, viewDo(h, "op@x", "GET", viewC))
 	l := audit.last()

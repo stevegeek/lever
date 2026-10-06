@@ -315,7 +315,9 @@ func (g *gate) readAsContact(ctx context.Context, login, path string) ([]byte, e
 // viewRows maps a hub history answer to the operator's rows. Each agent
 // row is marked with what the contact is shown (contactShown, the rule
 // filterHistory applies); with agent messages off the contact sees every
-// row. An unreadable row reads as an agent row with no text, as in
+// row. The broker is asked with a peek: the operator's read binds no
+// record, so which of two same-text messages a record shows is decided by
+// the contact's own reads alone. An unreadable row reads as an agent row with no text, as in
 // filterHistory.
 func (g *gate) viewRows(ctx context.Context, contact, agent, agentID, uid string, body []byte) (viewAnswer, bool) {
 	var doc struct {
@@ -334,7 +336,7 @@ func (g *gate) viewRows(ctx context.Context, contact, agent, agentID, uid string
 	ans := viewAnswer{Messages: []viewRow{}, NextCursor: doc.NextCursor, Matched: true}
 	var shown map[string]bool // nil: every row is shown
 	if g.cfg.MatchAgentMessages != nil {
-		keep, err := g.keepAgentRows(ctx, contact, agent, agentID, uid, rows)
+		keep, err := askAgentRows(ctx, g.cfg.PeekAgentMessages, contact, agent, agentID, uid, rows)
 		if err != nil {
 			keep, ans.Matched = map[string]bool{}, false
 		}

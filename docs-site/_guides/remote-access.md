@@ -1081,9 +1081,9 @@ login never gets it: the page does not show it, and the routes refuse a contact 
   `lever apply` again; until then its conversations show "has not signed in yet".
 - **Side effects.** A bound contact with no live session in the proxy (after a proxy restart, or
   after the 12-hour renewal) is signed in by the proxy, which moves the contact's `last login` on
-  the hub. With `agent_messages` on, your read asks the broker the same question the contact's
-  own read asks, so the first read of an agent message binds its ledger record exactly as the
-  contact's read would; the contact then sees the same rows.
+  the hub. With `agent_messages` on, your read asks the broker with a peek: the answer is what the
+  contact's own read would show now, and the agent ledger is not written. Only the contact's
+  reads bind a record to a message, so your reads never change what the contact sees.
 - **Routes.** `GET /lever/api/contacts` (the contacts, their message agents, labels, states and
   whether each is bound) and `GET /lever/api/contacts/<login>/agents/<name>/messages?cursor=&limit=`
   (`limit` 1 to 200, default 50), with the login URL-encoded. `HEAD` is answered like `GET`; any

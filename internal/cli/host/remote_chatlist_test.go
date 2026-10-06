@@ -320,8 +320,15 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 	if err != nil || !keep["m1"] || keep["m2"] || keep["not-asked"] || len(keep) != 1 {
 		t.Fatalf("%v %v", keep, err)
 	}
-	if got.Contact != "c@x" || got.Agent != "w1" || len(got.Messages) != 2 || got.Messages[1] != (wire.AgentMessageRef{ID: "m2", SHA256: "bb", CreatedAt: at}) {
+	if got.Contact != "c@x" || got.Agent != "w1" || len(got.Messages) != 2 || got.Messages[1] != (wire.AgentMessageRef{ID: "m2", SHA256: "bb", CreatedAt: at}) || got.Peek {
 		t.Fatalf("request %+v", got)
+	}
+	// The operator view's question is the same, as a peek.
+	if keep, err := remoteAgentMessagesPeek(app, st)(context.Background(), "c@x", "w1", msgs); err != nil || !keep["m1"] || !got.Peek {
+		t.Fatalf("peek: %v %v request %+v", keep, err, got)
+	}
+	if remoteAgentMessagesPeek(&config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true}}, st) != nil {
+		t.Fatal("off: no peek")
 	}
 	// Any refusal is an error: the proxy hides every agent row.
 	for _, s := range []int{http.StatusForbidden, http.StatusServiceUnavailable, http.StatusBadRequest} {

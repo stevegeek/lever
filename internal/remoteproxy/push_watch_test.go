@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stevegeek/lever/internal/chatledger"
 )
 
 // sseHub is a hub whose /events the test drives.
@@ -219,8 +221,11 @@ func TestWatchContactGetsNoPushForUnrecordedRows(t *testing.T) {
 	var asked atomic.Int32
 	e := startWatch(t, func(e *watchEnv) {
 		e.g.cfg.MatchAgentMessages = func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
-			asked.Add(1)
 			return map[string]bool{}, nil
+		}
+		e.g.cfg.PeekAgentMessages = func(context.Context, string, string, []AgentMessage) (map[string]bool, map[string]bool, error) {
+			asked.Add(1)
+			return map[string]bool{}, map[string]bool{}, nil
 		}
 		e.p.store.Add("c@x", sub("c"))
 	})
@@ -412,5 +417,105 @@ func TestSchedulerKeepsACatchUpFlag(t *testing.T) {
 	q.add("k", 0, false)
 	if !q.catch[""] || q.catch["k"] {
 		t.Fatalf("catch %v", q.catch)
+	}
+}
+
+// failingRecords makes the agent records fail n times, then answer as rec.
+func failingRecords(n int, rec func(context.Context) (map[string]AgentRecord, error)) func(context.Context) (map[string]AgentRecord, error) {
+	var left atomic.Int32
+	left.Store(int32(n))
+	return func(ctx context.Context) (map[string]AgentRecord, error) {
+		if left.Add(-1) >= 0 {
+			return nil, fmt.Errorf("records down")
+		}
+		return rec(ctx)
+	}
+}
+
+// TestWatchRetriesWhenTheTargetsFail: the catch-up pass cannot list the
+// login's agents (the hub's records fail) and is tried again.
+func TestWatchRetriesWhenTheTargetsFail(t *testing.T) {
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = time.Minute
+		e.g.cfg.AgentRecords = failingRecords(2, e.g.cfg.AgentRecords)
+		e.p.store.Add(chatOp, sub("op"))
+		e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: time.Now().Add(-time.Minute)})
+		e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	})
+	eventually(t, "the push after the targets came back", func() bool { return len(e.fs.all()) == 1 })
+}
+
+// TestWatchTargetsRetryKeepsTheCatchUpFlag: retried after a targets
+// failure, the pass is still a catch-up: a first sight sets the mark only.
+func TestWatchTargetsRetryKeepsTheCatchUpFlag(t *testing.T) {
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = time.Minute
+		e.g.cfg.AgentRecords = failingRecords(2, e.g.cfg.AgentRecords)
+		e.p.store.Add(chatOp, sub("op"))
+		e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	})
+	eventually(t, "the baseline mark", func() bool { m, ok := e.p.store.Mark(chatOp, "w1"); return ok && m.ID == "m1" })
+	time.Sleep(100 * time.Millisecond)
+	if len(e.fs.all()) != 0 {
+		t.Fatal("a retried catch-up pushed a row that was there before the connect")
+	}
+}
+
+// TestSchedulerRetryBackoffDoubles: each retry of a key waits twice the
+// last, from backoffMin up to backoffMax.
+func TestSchedulerRetryBackoffDoubles(t *testing.T) {
+	p := &Push{debounce: time.Millisecond, backoffMin: 100 * time.Millisecond, backoffMax: 350 * time.Millisecond}
+	q := newPushScheduler(context.Background(), p, chatOp, &pushSession{})
+	for i, want := range []time.Duration{100, 200, 350, 350} {
+		start := time.Now()
+		q.retry("k", false)
+		q.mu.Lock()
+		got := q.due["k"].Sub(start)
+		delete(q.due, "k")
+		q.mu.Unlock()
+		if d := got - want*time.Millisecond; d < 0 || d > 30*time.Millisecond {
+			t.Errorf("retry %d waits %v, want %v", i+1, got, want*time.Millisecond)
+		}
+	}
+}
+
+// TestSchedulerSuccessResetsTheRetryCount: a check that succeeds clears its
+// count, so a later run of failures gets the full five retries again.
+func TestSchedulerSuccessResetsTheRetryCount(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("op"))
+	e.p.debounce, e.p.backoffMin, e.p.backoffMax = time.Millisecond, time.Millisecond, time.Millisecond
+	tg := e.target(t, chatOp, chatUID, "w1")
+	q := newPushScheduler(context.Background(), e.p, chatOp, e.session(chatUID, chatledger.TierOperator))
+	run := func(fail bool) bool {
+		e.hub.mu.Lock()
+		if fail {
+			e.hub.histErr, e.hub.histErrTimes = http.StatusBadGateway, 1
+		}
+		e.hub.mu.Unlock()
+		q.mu.Lock()
+		q.due[tg.key] = time.Now().Add(-time.Millisecond)
+		q.mu.Unlock()
+		q.runDue()
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		_, again := q.due[tg.key]
+		return again
+	}
+	if !run(true) {
+		t.Fatal("a failed check was not retried")
+	}
+	if run(false) {
+		t.Fatal("a successful check was scheduled again")
+	}
+	for i := range maxCheckRetries {
+		if !run(true) {
+			t.Fatalf("failure %d after a success was not retried: the count was not reset", i+1)
+		}
+	}
+	if run(true) {
+		t.Fatal("the retries did not stop")
 	}
 }

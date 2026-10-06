@@ -1006,11 +1006,14 @@ remote:
   record showing one hub message, sent within 10 minutes of the authorization (the hub's time
   for it may be at most 10 seconds before the authorization and 2 minutes after its expiry). A message the
   agent sent any other way, or edited after it showed, is removed from the contact's history.
-  Reply previews are removed; attachment entries of removed messages too. The contact's event
-  stream carries the subject and ids of each event, never text or a sender; the DM list carries
-  no last-message preview; the chat page's unread count holds only shown messages. Anything the
-  proxy cannot read, or a broker that does not answer, hides every agent message (it fails
-  closed); paging stays the hub's, so a page can hold fewer messages than asked for.
+  Reply previews are removed, and so are the attachment entries of every agent message (their
+  names are agent text no record covers). A row id that appears twice on a page hides both rows.
+  The contact's event stream carries only the subject of each event (and the stream's event id),
+  never text, a sender or a message id; the DM list carries no last-message preview, sender, id
+  or time and no unread flag; the chat page's unread count holds only shown messages. Anything
+  the proxy cannot read, or a broker that does not answer, hides every agent message (it fails
+  closed); paging stays the hub's, so a page can hold fewer messages than asked for, and its
+  `totalCount` can show how many rows the page hid (never their text).
 - **The limit.** Per agent and contact: one message the agent started and the contact has not
   answered yet, then one reminder after `follow_up_after`; a message from the contact resets
   it. Every authorization counts, sent or not. A reply to a contact message is not limited by
@@ -1032,7 +1035,8 @@ remote:
   Turning it off again restores the earlier behaviour (and again needs `lever init` and fresh
   sessions).
 - **Known limits.** The hub's own web UI (the console landing) shows a new agent message to a
-  contact only after a reload, since the events carry no text. A message older than the two
+  contact only after a reload, since the events carry no text, and shows no unread marks (lever's
+  chat page counts them itself). A message older than the two
   4 MiB record files of that contact stops showing. An authorization the agent does not send
   still uses its slot until the reminder time.
 

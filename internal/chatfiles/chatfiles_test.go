@@ -40,8 +40,18 @@ func TestSanitizeName(t *testing.T) {
 		"Report (final).pdf":     "Report _final_.pdf",
 		"../../etc/passwd.pdf":   "passwd.pdf",
 		`a\b.pdf`:                "b.pdf",
-		".bashrc.pdf":            "bashrc.pdf",
-		"  ..x.pdf. ":            "x.pdf",
+		".bashrc.pdf":            "_bashrc.pdf",
+		"  ..x.pdf. ":            "_.x.pdf",
+		"-rf.pdf":                "_rf.pdf",
+		" -x.pdf":                "_x.pdf",
+		"CON.pdf":                "_CON.pdf",
+		"nul":                    "_nul",
+		"com1 .tar.zip":          "_com1 .tar.zip",
+		"Lpt9.xlsx":              "_Lpt9.xlsx",
+		"COM10.pdf":              "COM10.pdf",
+		"console.pdf":            "console.pdf",
+		".":                      "file",
+		"-":                      "_",
 		"x\u202e.pdf":            "x___.pdf",
 		"Fattura è.pdf":          "Fattura __.pdf",
 		"":                       "file",
@@ -78,8 +88,13 @@ func TestStoreWritesHashesAndRetriesATakenName(t *testing.T) {
 		t.Fatalf("%+v", s1)
 	}
 	fi, _ := os.Lstat(filepath.Join(tree, s1.Rel))
-	if fi.Mode().Perm() != 0o644 {
+	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+	for _, d := range []string{"workers/w1/" + Dir, "workers/w1/" + Dir + "/in", dir} {
+		if fi, err := os.Lstat(filepath.Join(tree, d)); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Fatalf("%s: %v %v", d, fi, err)
+		}
 	}
 	s2, err := Store(tree, dir, "a.pdf", strings.NewReader("x"), 100, t0)
 	if err != nil || s2.Rel != dir+"/20261007T101500Z-2-a.pdf" {

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -64,9 +65,11 @@ func OutDir(ws, login string) string { return path.Join(ws, Dir, "out", Key(logi
 
 // SanitizeName reduces a client- or agent-given name to a plain file name:
 // the part after the last / or \, every byte outside [A-Za-z0-9._ -] as
-// "_", no leading or trailing dot or space (no hidden file, no "." or
-// ".."), "file" when nothing is left, and at most MaxNameLen bytes with the
-// extension kept.
+// "_", no leading or trailing space, no trailing dot, a leading "." or "-"
+// as "_" (no hidden file, no "." or "..", nothing a shell reads as an
+// option), a "_" before a Windows device name (CON, NUL, COM1, …: the
+// operator may save the file on Windows), "file" when nothing is left, and
+// at most MaxNameLen bytes with the extension kept.
 func SanitizeName(raw string) string {
 	if i := strings.LastIndexAny(raw, `/\`); i >= 0 {
 		raw = raw[i+1:]
@@ -81,7 +84,16 @@ func SanitizeName(raw string) string {
 			b = append(b, '_')
 		}
 	}
-	s := strings.Trim(string(b), ". ")
+	s := strings.TrimRight(strings.TrimLeft(string(b), " "), ". ")
+	if s == "" {
+		return "file"
+	}
+	if s[0] == '.' || s[0] == '-' {
+		s = "_" + s[1:]
+	}
+	if base, _, _ := strings.Cut(s, "."); windowsDevice.MatchString(strings.TrimRight(base, " ")) {
+		s = "_" + s
+	}
 	if len(s) > MaxNameLen {
 		ext := path.Ext(s)
 		if len(ext) > 16 {
@@ -89,11 +101,12 @@ func SanitizeName(raw string) string {
 		}
 		s = strings.TrimRight(s[:MaxNameLen-len(ext)], ". ") + ext
 	}
-	if s == "" {
-		return "file"
-	}
 	return s
 }
+
+// windowsDevice is a base name Windows opens as a device, whatever the
+// extension.
+var windowsDevice = regexp.MustCompile(`(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])$`)
 
 // ExtAllowed reports whether name's extension (case-folded) is one of exts.
 func ExtAllowed(name string, exts []string) bool {
@@ -117,7 +130,10 @@ type Stored struct {
 	Size        int64
 }
 
-// Store writes src, at most max bytes, as a new file in dirRel. A name
+// Store writes src, at most max bytes, as a new file in dirRel (0600;
+// missing directories 0700). The agent's container user is the host
+// owner (rootless podman keep-id, as for .lever/bootstrap.json), so it reads
+// them; no other user of the guest or the host does. A name
 // already taken (by an earlier upload, or by anything the agent put there,
 // a link included) is skipped for the next try. More than max bytes is
 // ErrTooLarge, and nothing is left behind.
@@ -130,7 +146,7 @@ func Store(tree, dirRel, name string, src io.Reader, max int64, now time.Time) (
 		}
 		rel = path.Join(dirRel, StoredName(now, name, n))
 		var err error
-		f, err = fsutil.CreateInTreeNoLinks(tree, rel, 0o755, 0o644)
+		f, err = fsutil.CreateInTreeNoLinks(tree, rel, 0o700, 0o600)
 		if errors.Is(err, fs.ErrExist) {
 			continue
 		}

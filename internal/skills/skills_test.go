@@ -223,3 +223,34 @@ func TestFilesOnTeachesTheExchange(t *testing.T) {
 		t.Error("the manager's skill must send it to the operator, not to itself")
 	}
 }
+
+// The direction blocks render only when a direction is off; with both on
+// the files skill is exactly what it was before the blocks existed.
+func TestFilesDirectionBlocks(t *testing.T) {
+	dirBlocks := regexp.MustCompile(`(?ms)^<!-- lever:(uploads|shares) off -->\n.*?^<!-- /lever:(uploads|shares) off -->\n`)
+	for name, pair := range map[string][2]string{"agent": {agentSrc, "a"}, "operator": {operatorSrc, "o"}} {
+		render := func(f Files) string {
+			if pair[1] == "a" {
+				return string(AgentWith("1", true, false, f))
+			}
+			return string(OperatorWith("1", true, false, f))
+		}
+		want := string(renderChat(pickBlocks(pick(dirBlocks.ReplaceAllString(pair[0], ""), false), true, filesOn, filesOff), "1", true))
+		if got := render(Files{On: true}); got != want {
+			t.Fatalf("%s: both directions on changed the skill", name)
+		}
+		if render(Files{On: true}) != map[string]string{"a": string(Agent("1", true, false, true)), "o": string(Operator("1", true, false, true))}[pair[1]] {
+			t.Fatalf("%s: AgentWith/OperatorWith with defaults differ from Agent/Operator", name)
+		}
+		up, sh := render(Files{On: true, NoUploads: true}), render(Files{On: true, NoShares: true})
+		if !strings.Contains(up, "`uploads-off`") || strings.Contains(up, "`shares-off`") || !strings.Contains(sh, "`shares-off`") || strings.Contains(sh, "`uploads-off`") {
+			t.Fatalf("%s: direction text", name)
+		}
+		if strings.Contains(up+sh, "lever:uploads") || strings.Contains(up+sh, "lever:shares") {
+			t.Fatalf("%s: a marker survived", name)
+		}
+		if off := render(Files{NoUploads: true, NoShares: true}); strings.Contains(off, "uploads-off") || strings.Contains(off, "shares-off") {
+			t.Fatalf("%s: files off renders no direction text", name)
+		}
+	}
+}

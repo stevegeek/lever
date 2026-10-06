@@ -61,10 +61,10 @@ type skillTarget struct {
 // sessionrec.SkillRel names for it (the session record hashes the same file).
 func skillTargets(app *config.App) []skillTarget {
 	rel, _ := sessionrec.SkillRel(app, app.Name)
-	ts := []skillTarget{{relPath: rel, content: skills.Operator(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), app.FilesOn())}}
+	ts := []skillTarget{{relPath: rel, content: skills.OperatorWith(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), skillFiles(app))}}
 	for _, g := range app.Workers {
 		rel, _ := sessionrec.SkillRel(app, g.Name)
-		ts = append(ts, skillTarget{relPath: rel, content: skills.Agent(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), app.FilesOn())})
+		ts = append(ts, skillTarget{relPath: rel, content: skills.AgentWith(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), skillFiles(app))})
 	}
 	return ts
 }
@@ -425,4 +425,9 @@ func adoptSkills(app *config.App, stateDir state.State) ([]skillSyncResult, erro
 		}
 	}
 	return results, nil
+}
+
+// skillFiles is remote.files as the skills render it.
+func skillFiles(app *config.App) skills.Files {
+	return skills.Files{On: app.FilesOn(), NoUploads: app.FilesOn() && !app.FilesUploadsOn(), NoShares: app.FilesOn() && !app.FilesSharesOn()}
 }

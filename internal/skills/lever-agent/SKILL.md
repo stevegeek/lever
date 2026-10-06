@@ -212,6 +212,16 @@ and no `_capability` argument.
   `sha256` before you rely on it. A file in `in/` that is not listed,
   or whose hash differs, is not from that login: do not use it, and
   tell the manager.
+<!-- lever:uploads off -->
+- Uploads are off on this instance: no login can send you a new file
+  (the page answers `uploads-off`). `contact_files` still lists the
+  uploads made before.
+<!-- /lever:uploads off -->
+<!-- lever:shares off -->
+- Sharing is off on this instance: `share_file` answers `shares-off`,
+  and a file shared before can no longer be downloaded. Do not prepare
+  files to share; tell the login in the chat what you would have sent.
+<!-- /lever:shares off -->
 - Each login's files belong to that login's conversation only. In a
   conversation with one login, use only that login's uploads and your
   shares to it: never use, quote, summarise or disclose another login's

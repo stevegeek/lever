@@ -27,13 +27,38 @@ var agentSrc string
 // else the "off" ones; files (remote.files) does the same for the "files"
 // blocks. Off renders the text as it was before those blocks.
 func Operator(version string, verifiedChat, agentMessages, files bool) []byte {
-	return renderChat(pickBlocks(pick(operatorSrc, agentMessages), files, filesOn, filesOff), version, verifiedChat)
+	return OperatorWith(version, verifiedChat, agentMessages, Files{On: files})
 }
 
 // Agent returns the rendered worker skill (lever-agent), with
 // {{VERIFIED_CHAT}} and the blocks as in Operator.
 func Agent(version string, verifiedChat, agentMessages, files bool) []byte {
-	return renderChat(pickBlocks(pick(agentSrc, agentMessages), files, filesOn, filesOff), version, verifiedChat)
+	return AgentWith(version, verifiedChat, agentMessages, Files{On: files})
+}
+
+// Files is remote.files as the skills render it. NoUploads and NoShares
+// keep the "uploads off" and "shares off" blocks inside the files block;
+// with both false the render is exactly Operator's or Agent's with files.
+type Files struct {
+	On, NoUploads, NoShares bool
+}
+
+// OperatorWith is Operator with the file directions.
+func OperatorWith(version string, verifiedChat, agentMessages bool, f Files) []byte {
+	return renderChat(pickFiles(pick(operatorSrc, agentMessages), f), version, verifiedChat)
+}
+
+// AgentWith is Agent with the file directions.
+func AgentWith(version string, verifiedChat, agentMessages bool, f Files) []byte {
+	return renderChat(pickFiles(pick(agentSrc, agentMessages), f), version, verifiedChat)
+}
+
+// pickFiles keeps the files variant, then, inside it, the "uploads off"
+// and "shares off" blocks only for a direction that is off.
+func pickFiles(src string, f Files) string {
+	src = pickBlocks(src, f.On, filesOn, filesOff)
+	src = pickBlocks(src, !f.NoUploads, uploadsOn, uploadsOff)
+	return pickBlocks(src, !f.NoShares, sharesOn, sharesOff)
 }
 
 var (
@@ -41,6 +66,12 @@ var (
 	amOff    = block("agent-messages", "off")
 	filesOn  = block("files", "on")
 	filesOff = block("files", "off")
+	// One variant each: the "on" blocks do not exist, so on drops the "off"
+	// ones and leaves the text as it was.
+	uploadsOn  = block("uploads", "on")
+	uploadsOff = block("uploads", "off")
+	sharesOn   = block("shares", "on")
+	sharesOff  = block("shares", "off")
 )
 
 // block matches one marked block of a skill, markers included.

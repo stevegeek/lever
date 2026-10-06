@@ -82,5 +82,9 @@ func (s State) SkillsAdopted() string { return filepath.Join(s.Dir, "skills-adop
 // remote.pid keeps the answer host-side, where only lever writes it.
 func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
 
+// PushDir holds the remote proxy's Web Push key, subscriptions and last
+// send result (remote.push), each 0600.
+func (s State) PushDir() string { return filepath.Join(s.Dir, "push") }
+
 // ToolLogDir is the directory holding per-supervised-tool logs.
 func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }

@@ -435,6 +435,18 @@ type Remote struct {
 	// (broker contact_message) and makes the proxy show a contact only the
 	// agent messages lever recorded. Off by default; see AgentMessages.
 	AgentMessages AgentMessages `yaml:"agent_messages"`
+	// Push turns on Web Push notifications for the chat page: a login's
+	// devices show "New message from <agent>" when the page is closed.
+	// Off by default; needs landing: chat. See Push.
+	Push Push `yaml:"push"`
+}
+
+// Push is remote.push.
+type Push struct {
+	Enabled bool `yaml:"enabled"`
+	// Subject is the VAPID contact the push services see (RFC 8292 §2.1):
+	// mailto:<address> or an https URL. Required when enabled.
+	Subject string `yaml:"subject"`
 }
 
 // AgentMessages is remote.agent_messages.

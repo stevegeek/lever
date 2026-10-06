@@ -98,6 +98,9 @@ func RemoteConfigHash(app *config.App) string {
 		id.Tree = app.Tree
 		id.LabelsFile = app.Remote.LabelsFile
 	}
+	if app.PushOn() {
+		id.Push = app.Remote.Push.Subject
+	}
 	return state.RemoteConfigHash(id)
 }
 

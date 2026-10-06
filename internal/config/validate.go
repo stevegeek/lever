@@ -569,6 +569,40 @@ func (a *App) validateRemote() error {
 			return err
 		}
 	}
+	if a.Remote.Push.Enabled {
+		if a.Remote.Landing != RemoteLandingChat {
+			return fmt.Errorf("config: remote: push needs landing: chat (a notification opens the chat page)")
+		}
+		if err := validPushSubject(a.Remote.Push.Subject); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validPushSubject accepts mailto:<local>@<domain> or an absolute https URL,
+// in printable ASCII: the push services read it as the sender's contact.
+func validPushSubject(s string) error {
+	bad := fmt.Errorf("config: remote: push.subject %q must be mailto:<address> or an https URL (push services use it to contact this sender)", s)
+	if s == "" || len(s) > 200 {
+		return bad
+	}
+	for _, c := range []byte(s) {
+		if c <= ' ' || c >= 0x7f {
+			return bad
+		}
+	}
+	if addr, ok := strings.CutPrefix(s, "mailto:"); ok {
+		local, domain, found := strings.Cut(addr, "@")
+		if !found || local == "" || domain == "" || strings.ContainsAny(addr, ",;?<>\"") || strings.Contains(domain, "@") {
+			return bad
+		}
+		return nil
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return bad
+	}
 	return nil
 }
 

@@ -84,3 +84,37 @@ func TestRemoteFilesConfig(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 }
+
+func TestCheckFilesUsageAndLinks(t *testing.T) {
+	app, st := filesApp(t, false)
+	app.Remote.Files.Enabled = true
+	if r := checkFiles(app, st); !r.ok || !strings.Contains(r.detail, "no uploads stored") || !strings.Contains(r.detail, "never removes") {
+		t.Fatalf("empty: %+v", r)
+	}
+	key := chatfiles.InDir("workers/w1", "c@x")
+	if err := os.MkdirAll(filepath.Join(app.Tree, key), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(app.Tree, key, "a.pdf"), make([]byte, 2048), 0o600)
+	_ = os.Symlink("/etc/hosts", filepath.Join(app.Tree, key, "l.pdf")) // a link leaf is not counted
+	if r := checkFiles(app, st); !r.ok || !strings.Contains(r.detail, "w1 2.0 KiB") {
+		t.Fatalf("usage: %+v", r)
+	}
+	for _, at := range []string{"workers/w1/.lever-files/in/" + chatfiles.Key("d@x"), "workers/w1/.lever-files/out"} {
+		t.Run(at, func(t *testing.T) {
+			if err := os.Symlink(t.TempDir(), filepath.Join(app.Tree, at)); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(filepath.Join(app.Tree, at))
+			if r := checkFiles(app, st); r.ok || !strings.Contains(r.detail, at) {
+				t.Fatalf("%+v", r)
+			}
+		})
+	}
+	_ = os.MkdirAll(st.FilesLedger(), 0o700)
+	_ = os.WriteFile(filepath.Join(st.FilesLedger(), ".lock"), nil, 0o600)
+	_ = os.Chmod(filepath.Join(st.FilesLedger(), ".lock"), 0o666)
+	if r := checkFiles(app, st); r.ok || !strings.Contains(r.detail, ".lock") {
+		t.Fatalf("lock: %+v", r)
+	}
+}

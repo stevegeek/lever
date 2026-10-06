@@ -53,26 +53,94 @@ func checkFiles(app *config.App, st state.State) checkResult {
 		return checkResult{name, false, "cannot read the files ledger: " + err.Error(), "check " + stateRel(st, p)}
 	}
 	names := slices.Sorted(maps.Keys(app.AgentWorkspaces()))
+	var usage []string
 	for _, agent := range names {
 		ws := app.AgentWorkspaces()[agent]
-		rel := path.Join(ws, chatfiles.Dir)
-		if _, err := fsutil.StatInTreeNoLinks(app.Tree, rel); errors.Is(err, fsutil.ErrSymlink) {
-			return checkResult{name, false, fmt.Sprintf("%s's exchange %s has a symbolic link on its path: every upload to %s is refused", agent, rel, agent),
-				"remove the link at " + filepath.Join(app.Tree, rel) + " (the agent made it; lever creates the directory again)"}
+		bytes, link := exchangeUsage(app.Tree, ws)
+		if link != "" {
+			return checkResult{name, false, fmt.Sprintf("%s's exchange has a symbolic link at %s: uploads to %s are refused", agent, link, agent),
+				"remove the link at " + filepath.Join(app.Tree, link) + " (the agent made it; lever creates the directory again)"}
+		}
+		if bytes > 0 {
+			usage = append(usage, fmt.Sprintf("%s %s", agent, byteText(bytes)))
 		}
 	}
-	return checkResult{name, true, detail + "; ledger " + stateRel(st, p) + "/ (0700)", ""}
+	used := "no uploads stored"
+	if len(usage) > 0 {
+		used = "uploads stored: " + strings.Join(usage, ", ")
+	}
+	return checkResult{name, true, detail + "; ledger " + stateRel(st, p) + "/ (0700); " + used +
+		" (lever never removes them: delete old ones from .lever-files/in/ by hand)", ""}
 }
 
-// unsafeFilesLedgerFile is the first agent file in dir (or its .1) that is
-// not a regular file, is writable by others, or belongs to another user.
+// exchangeUsage is the bytes of the regular files in ws's
+// .lever-files/in/<key>/ directories, and the tree-relative path of the
+// first symbolic link it meets at .lever-files, in, out or an in/<key>
+// ("" for none). Nothing is followed: every entry is Lstat-ed.
+func exchangeUsage(tree, ws string) (int64, string) {
+	dir := path.Join(ws, chatfiles.Dir)
+	for _, rel := range []string{dir, path.Join(dir, "in"), path.Join(dir, "out")} {
+		if _, err := fsutil.StatInTreeNoLinks(tree, rel); errors.Is(err, fsutil.ErrSymlink) {
+			return 0, rel
+		}
+	}
+	in := path.Join(dir, "in")
+	if fi, err := fsutil.StatInTreeNoLinks(tree, in); err != nil || !fi.IsDir() {
+		return 0, ""
+	}
+	keys, err := os.ReadDir(filepath.Join(tree, filepath.FromSlash(in)))
+	if err != nil {
+		return 0, ""
+	}
+	var total int64
+	for _, k := range keys {
+		rel := path.Join(in, k.Name())
+		fi, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return 0, rel
+		}
+		if !fi.IsDir() {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(tree, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if fi, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(rel), f.Name())); err == nil && fi.Mode().IsRegular() {
+				total += fi.Size()
+			}
+		}
+	}
+	return total, ""
+}
+
+// byteText is n bytes for people.
+func byteText(n int64) string {
+	switch {
+	case n < 1<<10:
+		return fmt.Sprintf("%d B", n)
+	case n < 1<<20:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	case n < 1<<30:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	}
+	return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+}
+
+// unsafeFilesLedgerFile is the first agent file in dir (or its .1), or the
+// .lock both writers share, that is not a regular file, is writable by
+// others, or belongs to another user.
 func unsafeFilesLedgerFile(dir string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
-		if !fileledger.IsAgentFile(e.Name()) {
+		if !fileledger.IsAgentFile(e.Name()) && e.Name() != ".lock" {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())

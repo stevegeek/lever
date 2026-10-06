@@ -1222,7 +1222,9 @@ remote:
   caller's own `out/<key-of-to>/`, with no symbolic or hard link, within the size and type
   limits, to a login whose `agents:` list names the caller (an operator always). It records the
   sha256. A new version is a new file.
-- **What lever guarantees.** Host-side writes into the agent-writable tree never follow a link
+- **What lever guarantees.** An upload is first read whole into a private file outside the
+  tree; only after its limits pass does lever copy it into `in/<key>/`, so a refused upload
+  leaves nothing in the agent's workspace. Host-side writes into the agent-writable tree never follow a link
   (each directory is opened through its parent and checked, and the file is created with
   `O_EXCL`); uploads are `0600` in `0700` directories (the agent's container user is the host
   owner). A download is served only from a private copy whose sha256 equals the record: a file
@@ -1231,7 +1233,9 @@ remote:
   `Content-Security-Policy: sandbox`, `no-store`), never shown in the page. Another login's file
   id answers like an unknown one. No log, audit line or record holds file content.
 - **Limits.** `max_bytes` and `extensions`; per login and agent, 30 uploads an hour and 1 GiB a
-  day; 2 uploads at once per login, 4 in all; 4 downloads at once; 20 shares an hour per agent.
+  day; per login, 60 upload attempts an hour (refused ones count), 60 file lists and 20
+  downloads a minute; 2 uploads at once per login, 4 in all; 2 downloads at once per login, 4 in
+  all, the last one only for an operator; 20 shares an hour per agent.
   The extensions `html`, `htm`, `xhtml`, `shtml`, `svg`, `js`, `mjs` and `xml` are refused at
   config load.
 - **Turning it on.** `landing: chat` is required. `lever apply` restarts the broker and the
@@ -1239,15 +1243,21 @@ remote:
   the new skill (a contact cannot upload to an agent that has not): `lever up --fresh` for the
   manager (back up its conversation first), purge and start for a worker. The agent image must
   contain this release's lever-agent (`make lever-image`), which has the two tools.
-- **Doctor.** The `files` row shows off, or on with the limits; it fails when the state
-  directory is inside the tree (then nothing can be recorded and every route refuses), when the
-  ledger is not private, or when an agent's `.lever-files` is behind a link.
+- **The front.** The page sends every upload with the header `X-Lever-Upload: 1`, and the proxy
+  refuses an upload without it. A browser sends such a header to another origin only after a
+  CORS preflight, which the proxy never grants. A front must not answer `/lever/api/` with a
+  307 or 308 redirect: those resend the request body.
+- **Doctor.** The `files` row shows off, or on with the limits and the bytes of uploads stored
+  per agent; it fails when the state directory is inside the tree (then nothing can be recorded
+  and every route refuses), when the ledger (or its `.lock`) is not private, or when an agent's
+  `.lever-files`, `in`, `out` or `in/<key>` is a link.
 - **Audit.** `file-upload`, `file-download` and `deny-file` lines in
   `.lever-state/remote-audit.jsonl`; the broker audits `files` list and share calls.
 - **Known limits.** The host record is `.lever-state/files-ledger/` (`0700`, one `0600` file per
   agent). A file is rotated at 8 MiB; past the second rotation its oldest records are dropped, and
-  those files are no longer listed or downloadable. Lever never deletes a file: remove old ones
-  from the workspace by hand. Disk space is the host's.
+  those files are no longer listed or downloadable. Lever never deletes a file, uploads included:
+  the doctor row shows how much each agent holds; remove old ones from `.lever-files/in/` by
+  hand. Disk space is the host's.
 
 ## What this does NOT do
 

@@ -346,31 +346,57 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 		{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
 		{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
 	}
+	goneRO := []jail.Mount{{Source: path.Join(jp, "gone"), Destination: "/workspace/gone"}}
+	noContainer := func(context.Context, string) ([]jail.Mount, error) { return nil, jail.ErrNoContainer }
+	const goneMsg = "gone mounted by the manager record but no longer on the host"
 	refused := func(context.Context, string, string) (bool, error) { return false, nil }
 	for _, tc := range []struct {
 		name             string
 		extra            []jail.Mount
 		phase, cstatus   string
 		wantErr, wantLog string
+		// inspect overrides the container inspect; record, when set, is the
+		// hub record's volumes (the fallback).
+		inspect func(context.Context, string) ([]jail.Mount, error)
+		record  []jail.Mount
 	}{
-		{"current plan", nil, "suspended", "stopped", "", ""},
-		{"dropped entry, dir kept", []jail.Mount{{Source: path.Join(jp, "kb"), Destination: "/workspace/kb"}}, "suspended", "stopped",
-			"", "kb still mounted read-only although no longer in manager.read_only"},
-		{"dropped entry, dir gone, stopped", []jail.Mount{{Source: path.Join(jp, "gone"), Destination: "/workspace/gone"}}, "suspended", "stopped",
-			"gone mounted by the manager record but no longer on the host", ""},
-		{"dropped pin, dir gone, running", []jail.Mount{{Source: path.Join(jp, "old"), Destination: "/workspace/old", RW: true}}, "running", "Up 2 hours",
-			"", "old mounted by the manager record but no longer on the host"},
+		{name: "current plan", phase: "suspended", cstatus: "stopped"},
+		{name: "dropped entry, dir kept", extra: []jail.Mount{{Source: path.Join(jp, "kb"), Destination: "/workspace/kb"}}, phase: "suspended", cstatus: "stopped",
+			wantLog: "kb still mounted read-only although no longer in manager.read_only"},
+		{name: "dropped entry, dir gone, stopped", extra: goneRO, phase: "suspended", cstatus: "stopped", wantErr: goneMsg},
+		// Kept as it is (phase running): no resume, so only a warning.
+		{name: "dropped pin, dir gone, running", extra: []jail.Mount{{Source: path.Join(jp, "old"), Destination: "/workspace/old", RW: true}}, phase: "running", cstatus: "Up 2 hours",
+			wantLog: "old mounted by the manager record but no longer on the host"},
+		// The forced resume of an error phase recreates the container even
+		// while it is up: refused like a plain resume.
+		{name: "dir gone, error phase, container up", extra: goneRO, phase: "error", cstatus: "Up 3 hours", wantErr: goneMsg},
+		// No container to inspect: the hub record's volumes are read instead.
+		{name: "no container, record mounts a gone dir", phase: "suspended", cstatus: "stopped", wantErr: goneMsg, inspect: noContainer, record: goneRO},
+		{name: "no container, record current", phase: "suspended", cstatus: "stopped", inspect: noContainer, record: base},
+		{name: "no container, no record", phase: "suspended", cstatus: "stopped", inspect: noContainer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs []string
 			f := scionOKRunner()
 			r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: tc.phase, initContainerStatus: tc.cstatus}
 			mounts := append(append([]jail.Mount{}, base...), tc.extra...)
+			inspect := tc.inspect
+			if inspect == nil {
+				inspect = func(context.Context, string) ([]jail.Mount, error) { return mounts, nil }
+			}
 			deps := Deps{
 				Scion:                  scion.New(r, scion.Options{}),
 				Log:                    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
-				InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
+				InspectContainerMounts: inspect,
 				ProbeContainerWritable: refused,
+			}
+			if tc.record != nil {
+				deps.RecordVolumes = func(_ context.Context, project, agent string) ([]jail.Mount, error) {
+					if project != path.Base(jp) || agent != app.Name {
+						t.Errorf("record read for %q/%q", project, agent)
+					}
+					return tc.record, nil
+				}
 			}
 			err := runApply(app, deps)
 			joined := strings.Join(logs, "\n")
@@ -378,8 +404,8 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "recreate each missing directory") || !strings.Contains(err.Error(), "lever up --fresh") {
 					t.Fatalf("err = %v, want a refusal naming %q and both fixes", err, tc.wantErr)
 				}
-				if f.Called(proc.ArgvPrefix("scion", "resume")) {
-					t.Fatal("the resume ran although its container cannot be recreated")
+				if f.Called(proc.ArgvContains("resume")) {
+					t.Fatal("a resume ran although its container cannot be recreated")
 				}
 				return
 			}
@@ -387,8 +413,10 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 				t.Fatalf("Run: %v", err)
 			}
 			if tc.wantLog == "" {
-				if strings.Contains(joined, "WARNING") {
-					t.Fatalf("no warning expected, got %q", joined)
+				// (The inspect fakes stay unreadable after the resume, so
+				// warnManagerTreeMounts may warn; that is not this check.)
+				if strings.Contains(joined, "no longer") {
+					t.Fatalf("no stale-mount warning expected, got %q", joined)
 				}
 				return
 			}

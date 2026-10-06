@@ -31,6 +31,18 @@ type Agent struct {
 	Phase           string
 	Activity        string
 	ContainerStatus string
+	// Volumes are the extra mounts the record was created with (the inline
+	// config's `volumes`, which a resume recreates the container from).
+	// Hub-stored text: compare it, never echo it unsanitized.
+	Volumes []Volume
+}
+
+// Volume is one entry of a record's inline-config `volumes` (scion's
+// api.VolumeMount, local type): a guest source, an in-container target.
+type Volume struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"read_only"`
 }
 
 // wireAgent decodes the subset of the hub's agent record lever reads. The hub
@@ -46,6 +58,9 @@ type wireAgent struct {
 	AppliedConfig   *struct {
 		AgentRole              string `json:"agentRole"`
 		AgentRoleGrandfathered bool   `json:"agentRoleGrandfathered"`
+		InlineConfig           *struct {
+			Volumes []Volume `json:"volumes"`
+		} `json:"inlineConfig"`
 	} `json:"appliedConfig"`
 }
 
@@ -108,6 +123,9 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 			if a.AppliedConfig != nil {
 				rec.Role = a.AppliedConfig.AgentRole
 				rec.RoleGrandfathered = a.AppliedConfig.AgentRoleGrandfathered
+				if a.AppliedConfig.InlineConfig != nil {
+					rec.Volumes = a.AppliedConfig.InlineConfig.Volumes
+				}
 			}
 			out = append(out, rec)
 		}

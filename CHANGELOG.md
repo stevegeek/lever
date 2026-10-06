@@ -86,9 +86,10 @@ version bump moves the block under the new version heading.
   while the list was set) the manager still mounted it, and once its
   directory was deleted the next `lever up` failed with podman's
   `statfs /lever/<dir>: no such file or directory`. `lever apply` and
-  `lever up` now read the manager container's mounts before a keep or
-  resume: a mounted directory that is gone refuses the bring-up before
-  the resume, naming it, with both fixes (recreate it, empty is enough,
+  `lever up` now read the manager container's mounts (with no container,
+  the hub record's volumes) before a keep or resume: a mounted directory
+  that is gone refuses every resume, the forced resume of an `error`
+  phase included, before it runs, naming it, with both fixes (recreate it, empty is enough,
   or back up the conversation and `lever up --fresh`); a mount the config
   dropped is a warning. `lever doctor`'s *manager read-only paths* row
   reports both, even with `read_only` unset.

@@ -1337,6 +1337,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ProbeContainerWritable: func(ctx context.Context, ref, target string) (bool, error) {
 			return jail.ContainerPathWritable(ctx, b.JailRunner(), ref, target)
 		},
+		RecordVolumes: w.recordVolumes,
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is
@@ -1368,6 +1369,32 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 		},
 		ScopeKnown: w.sc.KnowsUATScope,
 	})
+}
+
+// recordVolumes backs Deps.RecordVolumes: the record's inline-config volumes
+// from the hub's agent listing, as jail mounts (read-only, like the role
+// check that reads the same listing).
+func (w *applyWiring) recordVolumes(ctx context.Context, projectName, agentName string) ([]jail.Mount, error) {
+	agents, err := w.hub().Agents(ctx, projectName, scion.DefaultHubEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	return recordMounts(agents, agentName)
+}
+
+// recordMounts converts agentName's record volumes to jail mounts.
+func recordMounts(agents []hubapi.Agent, agentName string) ([]jail.Mount, error) {
+	for _, a := range agents {
+		if a.Slug != agentName {
+			continue
+		}
+		out := make([]jail.Mount, 0, len(a.Volumes))
+		for _, v := range a.Volumes {
+			out = append(out, jail.Mount{Source: v.Source, Destination: v.Target, RW: !v.ReadOnly})
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("no hub record for agent %q", agentName)
 }
 
 // hub is the Hub REST client, over curl in the jail with the controller PAT.

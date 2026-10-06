@@ -300,6 +300,12 @@ type Deps struct {
 	// check that a read_only entry was not replaced on the host after the
 	// manager was created. nil ⇒ the warning says it could not check.
 	ProbeContainerWritable func(ctx context.Context, ref, target string) (bool, error)
+	// RecordVolumes reads the extra mounts the hub record of agent in
+	// project was created with (its inline-config volumes, through the
+	// controller's read-only agent listing), as jail mounts. It is
+	// checkStaleTreeMounts' fallback when the manager has no container to
+	// inspect. nil (or an error) ⇒ no fallback.
+	RecordVolumes func(ctx context.Context, project, agent string) ([]jail.Mount, error)
 	// StartRemoteProxy backs the remote-proxy step (present only when
 	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
 	// the daemonized `lever remote serve` proxy (a config with remote disabled
@@ -1289,33 +1295,62 @@ func treeSelfMount(jp string, m jail.Mount) (string, bool) {
 	return rel, m.Source == path.Join(jp, rel)
 }
 
+// managerKept reports whether convergeManager keeps rec as it is (no
+// resume, no restart, so its container is not recreated). Every other arm
+// that acts on a record resumes it — plain, or forced for the error phase —
+// and a resume recreates the container from the record's volumes. One
+// predicate for both, so checkStaleTreeMounts cannot drift from what
+// convergeManager does.
+func managerKept(rec *scion.Agent) bool { return rec.Phase == scion.PhaseRunning }
+
 // checkStaleTreeMounts runs before apply acts on a manager record it will
 // keep or resume: a mount the record holds for a directory that is gone
 // fails the resume inside podman with a bare statfs error, and a mount the
-// config dropped stays until a fresh create. It reads the mounts off the
-// manager's container, which a stopped record keeps (scion's stop does not
-// remove it); with no container, or an inspect that fails, it says nothing
-// — warnManagerTreeMounts and doctor report what they cannot inspect. A
-// gone directory under a record that is not live refuses the bring-up
-// before anything is acted on, naming the fix; everything else is a
-// warning.
+// config dropped stays until a fresh create.
+//
+// It reads the mounts off the manager's container, which a stopped record
+// keeps (scion's stop does not remove it). With no container to inspect,
+// or an inspect that fails, it falls back to the record's own volumes on
+// the hub (Deps.RecordVolumes: the inline-config volumes a resume recreates
+// the container from); with neither it says nothing, and doctor and
+// warnManagerTreeMounts report what they cannot inspect.
+//
+// A gone directory refuses the bring-up before anything is acted on,
+// naming the fix, unless apply will keep the record as it is
+// (managerKept): every other path resumes it — the forced resume of an
+// error phase too, even while its container is still up — and the resume
+// recreates the container. Everything else is a warning.
 func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, rec *scion.Agent) error {
-	if r.d.InspectContainerMounts == nil {
-		return nil
-	}
-	got, err := r.d.InspectContainerMounts(ctx, jail.ContainerName(path.Base(jp), r.app.Name))
-	if err != nil {
+	got, ok := r.managerMounts(ctx, jp)
+	if !ok {
 		return nil
 	}
 	stale := ManagerStaleTreeMounts(jp, r.app.Tree, r.app.ManagerTreeMounts(), got)
 	if stale.Empty() {
 		return nil
 	}
-	if len(stale.Gone) > 0 && !scion.ContainerLive(rec.ContainerStatus) {
+	if len(stale.Gone) > 0 && !managerKept(rec) {
 		return fmt.Errorf("start-manager: manager %q cannot be resumed: %s. To fix it, %s", r.app.Name, stale, stale.Fix())
 	}
 	r.d.Log("start-manager: WARNING: manager %q: %s. %s", r.app.Name, stale, stale.Fix())
 	return nil
+}
+
+// managerMounts is the manager's mounts for checkStaleTreeMounts: its
+// container's, or else the record's volumes. ok is false when neither can
+// be read.
+func (r *run) managerMounts(ctx context.Context, jp string) ([]jail.Mount, bool) {
+	if r.d.InspectContainerMounts != nil {
+		if got, err := r.d.InspectContainerMounts(ctx, jail.ContainerName(path.Base(jp), r.app.Name)); err == nil {
+			return got, true
+		}
+	}
+	if r.d.RecordVolumes != nil {
+		if got, err := r.d.RecordVolumes(ctx, path.Base(jp), r.app.Name); err == nil {
+			return got, true
+		}
+	}
+	return nil, false
 }
 
 // warnManagerTreeMounts runs after apply kept or resumed a manager rather
@@ -1380,7 +1415,7 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		return true, r.recoverDeleteAndCreate(ctx, jp, opts,
 			fmt.Sprintf("start-manager: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.app.Name, scion.BoundedQuote(rec.Phase)),
 			"--fresh delete")
-	case rec.Phase == scion.PhaseRunning:
+	case managerKept(rec):
 		// No-op — the liveness verify in startManager still confirms the
 		// container is actually up: a running RECORD with a dead container
 		// must fail loudly, not silently pass.

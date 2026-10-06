@@ -1285,7 +1285,9 @@ func ManagerStaleTreeMounts(jp, tree string, want []config.TreeMount, got []jail
 		if !ok {
 			continue
 		}
-		_, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(rel)))
+		// Stat, not Lstat: podman follows a link when it statfs's the
+		// source, so a link to a missing target is as gone as no entry.
+		_, err := os.Stat(filepath.Join(tree, filepath.FromSlash(rel)))
 		switch {
 		case errors.Is(err, os.ErrNotExist):
 			s.Gone = append(s.Gone, rel)

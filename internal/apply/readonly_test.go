@@ -446,8 +446,14 @@ func TestManagerStaleTreeMounts(t *testing.T) {
 		{Source: "/lever/../etc", Destination: "/workspace/../etc"}, // not a clean path
 		{Source: "/lever/tmp", Destination: "/tmp"},                 // outside the workspace
 	}
+	// A dropped dir replaced by a symbolic link to a missing target is gone
+	// too: podman follows the link and its statfs fails.
+	if err := os.Symlink(filepath.Join(tree, "nowhere"), filepath.Join(tree, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	got = append(got, jail.Mount{Source: "/lever/dangling", Destination: "/workspace/dangling"})
 	s := ManagerStaleTreeMounts("/lever", tree, want, got)
-	if !reflect.DeepEqual(s.Gone, []string{"gone"}) || !reflect.DeepEqual(s.DroppedReadOnly, []string{"kb"}) || !reflect.DeepEqual(s.DroppedPins, []string{"w"}) {
+	if !reflect.DeepEqual(s.Gone, []string{"dangling", "gone"}) || !reflect.DeepEqual(s.DroppedReadOnly, []string{"kb"}) || !reflect.DeepEqual(s.DroppedPins, []string{"w"}) {
 		t.Fatalf("stale = %+v", s)
 	}
 	if !strings.Contains(s.Fix(), "recreate each missing directory") {

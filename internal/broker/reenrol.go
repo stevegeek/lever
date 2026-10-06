@@ -70,6 +70,9 @@ func (b *Broker) runHealer(ctx context.Context) {
 // healLapse is one auto-re-enrol attempt for cn. Synchronous; called only
 // from the healer goroutine (and directly by tests). The steps, in order:
 // policy gate, throttle, revocation, ticket re-stage, bounce.
+// reenrolHealTimeout bounds one heal (ticket stage + bounce).
+const reenrolHealTimeout = 5 * time.Minute
+
 func (b *Broker) healLapse(ctx context.Context, cn string) {
 	stage, slug, ok := b.healTarget(cn)
 	if !ok {
@@ -106,12 +109,23 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 			return
 		}
 		defer unlock()
+		// The lock wait can take seconds: a `lever revoke` that landed
+		// during it must still win, so check again right before the mint.
+		if b.isRevoked(cn) {
+			b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
+			return
+		}
 	}
-	if err := stage(ctx); err != nil {
+	// Bounded: a worker's heal holds that worker's lifecycle lock, and the
+	// scion CLI sets no timeout of its own, so a hung hub would otherwise
+	// hold every start, resume, wake, stop and suspend of it for good.
+	hctx, hcancel := context.WithTimeout(ctx, reenrolHealTimeout)
+	defer hcancel()
+	if err := stage(hctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return
 	}
-	verb, ok := b.bounceForReenrol(ctx, cn, slug)
+	verb, ok := b.bounceForReenrol(hctx, cn, slug)
 	if !ok {
 		return
 	}

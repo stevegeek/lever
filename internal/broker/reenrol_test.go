@@ -263,3 +263,31 @@ func TestHealSkipsAWorkerWhoseLockIsHeld(t *testing.T) {
 		unlock()
 	}
 }
+
+// A `lever revoke` that lands while the heal waits for the worker's lock
+// still wins: the heal checks revocation again once it holds the lock.
+func TestHealRechecksRevocationAfterTheLockWait(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "running", ContainerStatus: "Up 2 minutes"}},
+	}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	b.reenrolLockWait = 5 * time.Second
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// While the heal waits: revoke, then release the lock.
+	b.onWorkerLockWait = func(string) {
+		b.Revoke("scratch")
+		unlock()
+	}
+	b.healLapse(context.Background(), "scratch")
+	if len(rt.staged) != 0 || len(rt.suspend) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("a heal ran for a worker revoked during its lock wait: staged=%d suspend=%v resume=%v", len(rt.staged), rt.suspend, rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "revoked identity") {
+		t.Fatalf("no deny line for the revoked heal:\n%s", buf.String())
+	}
+}

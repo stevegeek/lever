@@ -2,10 +2,13 @@ package remoteproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -231,5 +234,247 @@ func TestOperatorViewNeedsTheChatPage(t *testing.T) {
 	}
 	if got := hub.reached(); len(got) != 1 || got[0] != "GET /lever/api/contacts "+viewOpCookie {
 		t.Fatalf("with the page off the path is the hub's, as every /lever path is: %v", got)
+	}
+}
+
+func viewMessages(t *testing.T, rw *httptest.ResponseRecorder) viewAnswer {
+	t.Helper()
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rw.Code, rw.Body)
+	}
+	var a viewAnswer
+	if err := json.Unmarshal(rw.Body.Bytes(), &a); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+const viewC = "/lever/api/contacts/c%40x/agents/w1/messages"
+
+func TestOperatorViewReadsWithTheContactSession(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	h := viewHandler(t, viewConfig(t, hub, sess, audit))
+	viewMessages(t, viewDo(h, "op@x", "GET", viewC))
+	want := []string{"GET " + viewDMPath + "?limit=50 " + viewCCookie}
+	if got := hub.reached(); !slices.Equal(got, want) {
+		t.Fatalf("hub saw %v, want exactly %v", got, want)
+	}
+}
+
+func TestOperatorViewRowMapping(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	rows := func(a viewAnswer) string {
+		var b strings.Builder
+		for _, m := range a.Messages {
+			fmt.Fprintf(&b, "%s %s %q %v|", m.ID, m.From, m.Text, m.ShownToContact)
+		}
+		return b.String()
+	}
+	// Agent messages on: only the recorded agent row is shown to the contact.
+	cfg := viewConfig(t, hub, sess, audit)
+	cfg.MatchAgentMessages = recordedOnly("recorded")
+	a := viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
+	want := `a1 agent "recorded" true|a2 agent "SECRET unrecorded" false|a3 agent "SECRET as state" false|` +
+		`c1 contact "mine" true|s1 system "agent started" true|`
+	if got := rows(a); got != want || a.Contact != "c@x" || a.Agent != "w1" || a.NextCursor != "cur-1" || !a.Matched {
+		t.Fatalf("on:\n got %s %+v\nwant %s", got, a, want)
+	}
+	if a.Messages[0].CreatedAt != "2026-10-06T10:00:00Z" {
+		t.Fatalf("createdAt %q", a.Messages[0].CreatedAt)
+	}
+	// Off: the contact sees the hub's answer as it is.
+	cfg.MatchAgentMessages = nil
+	a = viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
+	if got := rows(a); strings.Contains(got, "false") {
+		t.Fatalf("off: every row is shown to the contact: %s", got)
+	}
+}
+
+func TestOperatorViewMatcherFailure(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	cfg := viewConfig(t, hub, sess, audit)
+	cfg.MatchAgentMessages = func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
+		return nil, errors.New("broker down")
+	}
+	a := viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
+	if a.Matched || len(a.Messages) != 5 {
+		t.Fatalf("matched=%v rows=%d: every row, and matched false", a.Matched, len(a.Messages))
+	}
+	for _, m := range a.Messages {
+		if m.From == "agent" && m.ShownToContact {
+			t.Fatalf("%s: with no answer the contact is shown no agent row", m.ID)
+		}
+	}
+}
+
+func TestOperatorViewBindsLikeTheContactRead(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	cfg := viewConfig(t, hub, sess, audit)
+	// A matcher that binds like the broker's ledger: one record, for the
+	// text "recorded", binds the first id it is asked about and stays bound.
+	var mu sync.Mutex
+	bound := ""
+	cfg.MatchAgentMessages = func(_ context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		keep := map[string]bool{}
+		for _, m := range msgs {
+			if m.SHA256 == hashHex("recorded") && (bound == "" || bound == m.ID) {
+				bound, keep[m.ID] = m.ID, true
+			}
+		}
+		return keep, nil
+	}
+	h := viewHandler(t, cfg)
+	viewMessages(t, viewDo(h, "op@x", "GET", viewC))
+	// The contact's own read of the same DM, through the fence.
+	rw := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages?limit=50"), "")
+	if rw.Code != http.StatusOK || !strings.Contains(rw.Body.String(), `"recorded"`) || strings.Contains(rw.Body.String(), "SECRET") {
+		t.Fatalf("the contact's read after the operator's: %d %s", rw.Code, rw.Body)
+	}
+}
+
+func TestOperatorViewAllowList(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	h := viewHandler(t, viewConfig(t, hub, sess, audit))
+	for _, p := range []string{
+		"/lever/api/contacts/x%40x/agents/w1/messages",       // not a login
+		"/lever/api/contacts/op%40x/agents/w1/messages",      // the operator is not a contact
+		"/lever/api/contacts/c%40x/agents/w2/messages",       // see-only agent
+		"/lever/api/contacts/c%40x/agents/w3/messages",       // not one of its agents
+		"/lever/api/contacts/c%40x/agents/W1/messages",       // not an agent name
+		"/lever/api/contacts/c%40x/agents/w1",                // no messages part
+		"/lever/api/contacts/c%40x/agents/w1/messages/extra", // more parts
+		"/lever/api/contacts/c%40x/agent/w1/messages",        // wrong word
+		"/lever/api/contacts/C%40x/agents/w1/messages",       // case differs
+		"/lever/api/contacts/%2E%2E/agents/w1/messages",      // dots
+		"/lever/api/contacts/c%40x%2Fagents%2Fw1%2Fmessages", // one escaped segment
+		"/lever/api/contacts/",
+	} {
+		rw := viewDo(h, "op@x", "GET", p)
+		if rw.Code != http.StatusNotFound || strings.TrimSpace(rw.Body.String()) != `{"error":"not-found"}` {
+			t.Errorf("%s: %d %s", p, rw.Code, rw.Body)
+		}
+	}
+	if sess.askedFor("c@x") != 0 || len(hub.reached()) != 0 {
+		t.Fatalf("a refused path asked for a session (%d) or reached the hub (%v)", sess.askedFor("c@x"), hub.reached())
+	}
+}
+
+func TestOperatorViewLoginEncoding(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	cfg := viewConfig(t, hub, sess, audit)
+	cfg.AllowedUsers = append(cfg.AllowedUsers, "a/b@x")
+	cfg.Contacts["a/b@x"] = []string{"w1"}
+	h := viewHandler(t, cfg)
+	viewMessages(t, viewDo(h, "op@x", "GET", "/lever/api/contacts/"+url.PathEscape("a/b@x")+"/agents/w1/messages"))
+	if sess.askedFor("a/b@x") != 1 {
+		t.Fatal("an escaped slash is part of the login")
+	}
+	if rw := viewDo(h, "op@x", "GET", "/lever/api/contacts/a/b@x/agents/w1/messages"); rw.Code != http.StatusNotFound {
+		t.Fatalf("a raw slash splits the path: %d", rw.Code)
+	}
+}
+
+func TestOperatorViewNeverSignedIn(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	h := viewHandler(t, viewConfig(t, hub, sess, audit))
+	rw := viewDo(h, "op@x", "GET", "/lever/api/contacts/d%40x/agents/w1/messages")
+	if rw.Code != http.StatusConflict || strings.TrimSpace(rw.Body.String()) != `{"error":"not-signed-in"}` {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if sess.askedFor("d@x") != 0 || len(hub.reached()) != 0 {
+		t.Fatal("an unbound contact must not get a session: the login would create its hub user")
+	}
+	if l := audit.last(); l.Decision != DecisionDenyOperatorView || l.Reason != "not-signed-in" || l.Contact != "d@x" || l.Agent != "w1" {
+		t.Fatalf("audit %+v", l)
+	}
+}
+
+func TestOperatorViewNoAgentRecord(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	cfg := viewConfig(t, hub, sess, audit)
+	cfg.AgentRecords = func(context.Context) (map[string]AgentRecord, error) { return map[string]AgentRecord{}, nil }
+	rw := viewDo(viewHandler(t, cfg), "op@x", "GET", viewC)
+	if rw.Code != http.StatusConflict || strings.TrimSpace(rw.Body.String()) != `{"error":"no-record"}` || sess.askedFor("c@x") != 0 {
+		t.Fatalf("%d %s asked=%d", rw.Code, rw.Body, sess.askedFor("c@x"))
+	}
+}
+
+func TestOperatorViewQuery(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	h := viewHandler(t, viewConfig(t, hub, sess, audit))
+	viewMessages(t, viewDo(h, "op@x", "GET", viewC+"?cursor=cur-1&limit=200&around=x&sub=y"))
+	want := "GET " + viewDMPath + "?cursor=cur-1&limit=200 " + viewCCookie
+	if got := hub.reached(); len(got) != 1 || got[0] != want {
+		t.Fatalf("hub saw %v, want %s (only cursor and limit pass)", got, want)
+	}
+	for _, q := range []string{"limit=0", "limit=201", "limit=x", "cursor=a%20b", "cursor=" + strings.Repeat("c", 513), "cursor=%C3%A9"} {
+		rw := viewDo(h, "op@x", "GET", viewC+"?"+q)
+		if rw.Code != http.StatusBadRequest || strings.TrimSpace(rw.Body.String()) != `{"error":"bad-query"}` {
+			t.Errorf("%s: %d %s", q, rw.Code, rw.Body)
+		}
+	}
+}
+
+func TestOperatorViewRetriesALapsedSession(t *testing.T) {
+	for _, lapsed := range []int{http.StatusUnauthorized, http.StatusFound, http.StatusSeeOther} {
+		hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+		sess.renew[viewCCookie] = "sess-c-2"
+		hub.answer = func(w http.ResponseWriter, r *http.Request) bool {
+			if c, _ := r.Cookie(sessionCookieName); c != nil && c.Value == viewCCookie {
+				if lapsed != http.StatusUnauthorized {
+					w.Header().Set("Location", "/login")
+				}
+				w.WriteHeader(lapsed)
+				return true
+			}
+			if c, _ := r.Cookie(sessionCookieName); c != nil && c.Value == "sess-c-2" {
+				_, _ = io.WriteString(w, historyBody)
+				return true
+			}
+			return false
+		}
+		a := viewMessages(t, viewDo(viewHandler(t, viewConfig(t, hub, sess, audit)), "op@x", "GET", viewC))
+		if len(a.Messages) != 5 || !slices.Equal(sess.invalidated, []string{viewCCookie}) || len(hub.reached()) != 2 {
+			t.Fatalf("%d: rows=%d invalidated=%v hub=%v", lapsed, len(a.Messages), sess.invalidated, hub.reached())
+		}
+	}
+}
+
+func TestOperatorViewHubFailure(t *testing.T) {
+	for _, answer := range []func(http.ResponseWriter){
+		func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) },
+		func(w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) },
+		func(w http.ResponseWriter) { _, _ = io.WriteString(w, "not json") },
+		func(w http.ResponseWriter) { w.WriteHeader(http.StatusUnauthorized) }, // twice: the retry also fails
+	} {
+		hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+		hub.answer = func(w http.ResponseWriter, _ *http.Request) bool { answer(w); return true }
+		rw := viewDo(viewHandler(t, viewConfig(t, hub, sess, audit)), "op@x", "GET", viewC)
+		if rw.Code != http.StatusBadGateway || strings.TrimSpace(rw.Body.String()) != `{"error":"unavailable"}` {
+			t.Fatalf("%d %s", rw.Code, rw.Body)
+		}
+		if len(hub.reached()) > 2 {
+			t.Fatalf("at most one retry: %v", hub.reached())
+		}
+	}
+}
+
+func TestOperatorViewAuditHasNoText(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	cfg := viewConfig(t, hub, sess, audit)
+	cfg.MatchAgentMessages = recordedOnly("recorded")
+	h := viewHandler(t, cfg)
+	viewMessages(t, viewDo(h, "op@x", "GET", viewC))
+	l := audit.last()
+	if l.Decision != DecisionOperatorView || l.Contact != "c@x" || l.Agent != "w1" || l.Count == nil || *l.Count != 5 {
+		t.Fatalf("audit %+v", l)
+	}
+	b, _ := json.Marshal(audit.all())
+	for _, text := range []string{"SECRET", "recorded", "mine", "agent started"} {
+		if strings.Contains(string(b), text) {
+			t.Fatalf("an audit line carries message text %q: %s", text, b)
+		}
 	}
 }

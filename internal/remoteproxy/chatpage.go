@@ -144,6 +144,9 @@ type chatPage struct {
 	// hubGet reads a hub JSON route with a login's own session (the agent
 	// list's unread counts).
 	hubGet func(ctx context.Context, cookie, path string, out any) (int, error)
+	// hubBody reads a hub route's raw 200 answer with a login's own session,
+	// GET only (the operator view's one use of a contact's session).
+	hubBody func(ctx context.Context, cookie, path string) (int, []byte, error)
 
 	mu      sync.Mutex
 	users   map[string]contactUser  // login → hub user id, for the agent list
@@ -155,7 +158,7 @@ type chatPage struct {
 // fault, so it panics rather than serve a page with a hole in it.
 func newChatPage(cfg Config) *chatPage {
 	p := &chatPage{csp: chatCSPFor(cfg.ServeHost), whoAmI: hubWhoAmI(cfg),
-		hubGet: hubGetJSON(cfg), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
+		hubGet: hubGetJSON(cfg), hubBody: hubGetBody(cfg, maxHistoryAnswer), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
 	file := func(contentType string, body []byte) chatFile {
 		sum := sha256.Sum256(body)
 		return chatFile{contentType: contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}

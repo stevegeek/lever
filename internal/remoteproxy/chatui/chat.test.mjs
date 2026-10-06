@@ -1892,3 +1892,24 @@ test('the view poll does not read a not-signed-in contact\'s conversation', asyn
   assert.equal(reads(), before, 'no transcript or files read from the poll');
   assert.equal(env.els.notice.textContent, 'd@x has not signed in yet.');
 });
+
+test('push: under Trusted Types the worker URL comes from the lever-sw policy', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {}, trustedTypes: true });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.deepEqual(env.push.registerCalls, [{ url: '/lever/sw.js', scope: '/lever/', trusted: true }]);
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+  const policy = env.tt.policies['lever-sw'];
+  for (const bad of ['/lever/sw.js?x', '/lever/other.js', '/api/agent.js', 'https://evil.test/sw.js', '']) {
+    assert.throws(() => policy.createScriptURL(bad), /refused/, bad);
+  }
+  // Off, then on again: the policy is made once (a second one would be
+  // refused by the CSP).
+  env.els.push.dispatch('click');
+  await tick(20);
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.push.registerCalls.length, 2);
+  assert.equal(env.tt.refused, 0);
+});

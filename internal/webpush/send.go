@@ -101,7 +101,15 @@ type dialer struct {
 	lookup func(ctx context.Context, host string) ([]netip.Addr, error)
 	test   TestHosts
 	dial   func(ctx context.Context, network, addr string) (net.Conn, error)
+	// perAddr bounds one address's connect (0: AddrDialTimeout), so an
+	// address that never answers leaves the rest of the send's budget to
+	// the next one.
+	perAddr time.Duration
 }
+
+// AddrDialTimeout is the longest one resolved address may take to connect;
+// the whole send stays within SendTimeout.
+const AddrDialTimeout = 3 * time.Second
 
 func (d *dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d.test[addr] {
@@ -120,7 +128,13 @@ func (d *dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		if !publicAddr(a) {
 			continue
 		}
-		c, err := d.dial(ctx, "tcp", netip.AddrPortFrom(a.Unmap(), 443).String())
+		per := d.perAddr
+		if per <= 0 {
+			per = AddrDialTimeout
+		}
+		actx, cancel := context.WithTimeout(ctx, per)
+		c, err := d.dial(actx, "tcp", netip.AddrPortFrom(a.Unmap(), 443).String())
+		cancel()
 		if err == nil {
 			return c, nil
 		}

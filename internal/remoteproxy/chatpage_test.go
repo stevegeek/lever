@@ -123,7 +123,7 @@ func TestChatPageServesItsFiles(t *testing.T) {
 		if rw.Code != http.StatusOK || rw.Header().Get("Content-Type") != ctype || rw.Body.Len() == 0 {
 			t.Errorf("%s: %d %q (%d bytes), want 200 %s", path, rw.Code, rw.Header().Get("Content-Type"), rw.Body.Len(), ctype)
 		}
-		if got := rw.Header().Get("Content-Security-Policy"); got != chatCSPFor(testServeHost) {
+		if got := rw.Header().Get("Content-Security-Policy"); got != chatCSPFor(testServeHost, false) {
 			t.Errorf("%s: CSP %q", path, got)
 		}
 		for k, want := range map[string]string{"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
@@ -165,26 +165,30 @@ func TestChatPageServesItsFiles(t *testing.T) {
 // Script and style come from /lever/ only: on this origin 'self' would also
 // admit a .js file an agent wrote, which the hub serves under /api/.
 func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
-	csp := chatCSPFor("mac.ts.net")
+	csp := chatCSPFor("mac.ts.net", false)
 	for _, bad := range []string{"unsafe-inline", "unsafe-eval", "*", "data:", "blob:", "http:", "https:", "script-src 'self'", "style-src 'self'"} {
 		if strings.Contains(csp, bad) {
 			t.Errorf("chat CSP contains %q: %s", bad, csp)
 		}
 	}
 	for _, need := range []string{"default-src 'none'", "script-src mac.ts.net/lever/;", "style-src mac.ts.net/lever/;",
-		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/;", "manifest-src mac.ts.net/lever/;", "worker-src mac.ts.net/lever/;", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/;", "manifest-src mac.ts.net/lever/;", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 		"require-trusted-types-for 'script'", "trusted-types 'none'"} {
 		if !strings.Contains(csp, need) {
 			t.Errorf("chat CSP lacks %q: %s", need, csp)
 		}
 	}
+	if strings.Contains(csp, "worker-src") {
+		t.Errorf("push off: the CSP names a worker source: %s", csp)
+	}
 	// The whole policy, pinned: a directive added or widened shows up here.
+	// With push off it is byte-identical to the policy before push existed.
 	if want := "default-src 'none'; script-src mac.ts.net/lever/; style-src mac.ts.net/lever/; connect-src 'self'; " +
-		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; worker-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
 		"frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"; csp != want {
 		t.Errorf("chat CSP\n got %s\nwant %s", csp, want)
 	}
-	if got := chatCSPFor("127.0.0.1:8445"); !strings.Contains(got, "script-src 127.0.0.1:8445/lever/;") {
+	if got := chatCSPFor("127.0.0.1:8445", false); !strings.Contains(got, "script-src 127.0.0.1:8445/lever/;") {
 		t.Errorf("an address with a port must be nameable: %s", got)
 	}
 	// A host the policy cannot name is never written into it. An IPv6
@@ -192,7 +196,7 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	// cannot parse would leave the page with no script.
 	for _, odd := range []string{"", "a b", "a;script-src *", "a,b", "a'b", "a/b", "*", "*.ts.net", "[::1]:8445", "[fd7a::1]", "fd7a::1",
 		"https:", "data:", "a:", ":80", "a:b", "a:80:90", strings.Repeat("a", 256)} {
-		got := chatCSPFor(odd)
+		got := chatCSPFor(odd, false)
 		if !strings.Contains(got, "script-src 'self';") || !strings.Contains(got, "img-src 'self'; manifest-src 'self';") ||
 			(odd != "" && strings.Contains(got, odd)) {
 			t.Errorf("chatCSPFor(%q) = %s, want the 'self' fallback", odd, got)
@@ -244,7 +248,7 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 		if rw.Code != http.StatusNotFound || rw.Header().Get("Cache-Control") != "no-store" {
 			t.Errorf("GET %s: %d (Cache-Control %q), want an uncached 404", p, rw.Code, rw.Header().Get("Cache-Control"))
 		}
-		if rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost) || rw.Header().Get("X-Content-Type-Options") != "nosniff" {
+		if rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost, false) || rw.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("GET %s: the 404 lacks the page's headers", p)
 		}
 		if head := chatDo(h, chatOp, "HEAD", p); head.Code != http.StatusNotFound || head.Body.Len() != 0 {
@@ -452,6 +456,10 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// No policy outside chat.js's one (the CSP names only lever-sw).
+		if name != "chatui/chat.js" && regexp.MustCompile(`createPolicy|trustedTypes`).Match(b) {
+			t.Errorf("%s makes a Trusted Types policy: only chat.js's lever-sw may", name)
+		}
 		if m := chatSinkRE.Find(b); m != nil {
 			t.Errorf("%s contains %q: the chat page writes network text as text only", name, m)
 		}
@@ -493,11 +501,17 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`new XMLHttpRequest\(`:       1,
 		`\.\s*open\s*\(`:             1,
 		`\bfetch\(`:                  1,
-		`serviceWorker\.register\('/lever/sw\.js', \{ scope: '/lever/' \}\)`: 1,
-		`serviceWorker\.register\(`: 1,
-		`pushManager\.subscribe\(`:  1,
-		`new EventSource\(`:         1,
-		`location\.reload\(\)`:      0,
+		`serviceWorker\.register\(swScriptURL\(\), \{ scope: '/lever/' \}\)`: 1,
+		// The one Trusted Types policy, whose only output is the worker URL.
+		`createPolicy\(`: 1,
+		`createPolicy\('lever-sw', \{ createScriptURL: \(u\) => \{ if \(u !== '/lever/sw\.js'\) throw new TypeError\('lever-sw: refused'\); return u; \} \}\)`: 1,
+		`createScriptURL\(`:                            1,
+		`swPolicy\.createScriptURL\('/lever/sw\.js'\)`: 1,
+		`createHTML|createScript\b`:                    0,
+		`serviceWorker\.register\(`:                    1,
+		`pushManager\.subscribe\(`:                     1,
+		`new EventSource\(`:                            1,
+		`location\.reload\(\)`:                         0,
 	} {
 		if got := len(regexp.MustCompile(re).FindAll(js, -1)); got != want {
 			t.Errorf("chat.js has %d of %s, want %d: review what the new one writes or requests", got, re, want)

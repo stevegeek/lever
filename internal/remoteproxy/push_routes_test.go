@@ -208,18 +208,39 @@ func TestServiceWorkerServedOnlyWithPush(t *testing.T) {
 	for _, login := range []string{chatOp, "c@x"} {
 		rw := chatDo(h, login, "GET", chatSWPath)
 		if rw.Code != 200 || rw.Header().Get("Content-Type") != "text/javascript; charset=utf-8" ||
-			rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost) || rw.Header().Get("Service-Worker-Allowed") != "" {
+			rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost, true) || rw.Header().Get("Service-Worker-Allowed") != "" {
 			t.Fatalf("%s: %d %v", login, rw.Code, rw.Header())
 		}
 	}
 }
 
 func TestChatCSPAllowsTheWorkerFromLeverOnly(t *testing.T) {
-	if csp := chatCSPFor("mac.ts.net"); !strings.Contains(csp, "worker-src mac.ts.net/lever/;") {
-		t.Fatalf("CSP %s", csp)
+	// Push on: exactly two directives differ from the push-off policy.
+	on, off := chatCSPFor("mac.ts.net", true), chatCSPFor("mac.ts.net", false)
+	want := strings.Replace(off, "base-uri", "worker-src mac.ts.net/lever/; base-uri", 1)
+	want = strings.Replace(want, "trusted-types 'none'", "trusted-types lever-sw", 1)
+	if on != want {
+		t.Fatalf("push CSP\n got %s\nwant %s", on, want)
 	}
-	if csp := chatCSPFor("[::1]:8445"); !strings.Contains(csp, "worker-src 'self';") {
+	if !strings.Contains(on, "require-trusted-types-for 'script';") {
+		t.Fatalf("push CSP dropped require-trusted-types-for: %s", on)
+	}
+	if csp := chatCSPFor("[::1]:8445", true); !strings.Contains(csp, "worker-src 'self';") {
 		t.Fatalf("fallback CSP %s", csp)
+	}
+}
+
+// TestChatPageCSPFollowsPush: the page itself carries the push policy only
+// when push is on.
+func TestChatPageCSPFollowsPush(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _ := pushConfig(t, hub, &fakeSender{}, nil)
+	if got := chatDo(NewHandler(cfg), chatOp, "GET", chatPagePath).Header().Get("Content-Security-Policy"); !strings.Contains(got, "trusted-types lever-sw") {
+		t.Fatalf("push on: %s", got)
+	}
+	if got := chatDo(NewHandler(chatConfig(t, hub)), chatOp, "GET", chatPagePath).Header().Get("Content-Security-Policy"); got != chatCSPFor(testServeHost, false) ||
+		strings.Contains(got, "lever-sw") {
+		t.Fatalf("push off: %s", got)
 	}
 }
 

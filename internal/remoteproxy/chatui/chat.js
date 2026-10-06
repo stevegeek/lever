@@ -1281,6 +1281,22 @@ function askManager() {
 // only then). The worker has no fetch handler: it never stands between the
 // page and its requests.
 const PUSH_SCOPE = '/lever/';
+
+// serviceWorker.register is a script-URL sink: with the page's Trusted
+// Types policy on (require-trusted-types-for 'script'), Chrome refuses a
+// plain string there. With push on, the CSP allows exactly one policy,
+// lever-sw, and this is it: its only output is the literal worker URL;
+// anything else throws. Created once, on the first Turn on. A browser
+// without Trusted Types takes the plain string.
+let swPolicy = null;
+function swScriptURL() {
+  const tt = window.trustedTypes;
+  if (!tt || typeof tt.createPolicy !== 'function') return '/lever/sw.js';
+  if (!swPolicy) {
+    swPolicy = tt.createPolicy('lever-sw', { createScriptURL: (u) => { if (u !== '/lever/sw.js') throw new TypeError('lever-sw: refused'); return u; } });
+  }
+  return swPolicy.createScriptURL('/lever/sw.js');
+}
 let push = { available: false, permission: 'default', subscribed: false, busy: false, error: '', key: null };
 const pushSupported = () => !!(navigator && navigator.serviceWorker) && typeof window.PushManager !== 'undefined' && typeof Notification !== 'undefined';
 
@@ -1367,7 +1383,7 @@ async function turnOn() {
   if (perm !== 'granted') return;
   let sub;
   try {
-    await navigator.serviceWorker.register('/lever/sw.js', { scope: '/lever/' });
+    await navigator.serviceWorker.register(swScriptURL(), { scope: '/lever/' });
     const reg = await navigator.serviceWorker.ready;
     sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: push.key });
   } catch {

@@ -1152,8 +1152,10 @@ remote:
   yet read" until the contact reads it.
 - **The service worker.** `/lever/sw.js` (scope `/lever/`) handles `push` and
   `notificationclick` only: no fetch handler and no cache, so it never stands between the page
-  and its requests. The page registers it only when a login turns notifications on. The page's
-  CSP gains `worker-src` for `/lever/` only.
+  and its requests. The page registers it only when a login turns notifications on. With push on,
+  the page's CSP gains `worker-src` for `/lever/` and allows one Trusted Types policy,
+  `lever-sw`, whose only output is the worker's URL (`serviceWorker.register` is a script-URL
+  sink); with push off the CSP is the same as without push.
 - **Egress.** The host process connects out to the push services: `fcm.googleapis.com`,
   `*.push.apple.com`, `updates.push.services.mozilla.com` and `*.notify.windows.com`, on 443. A
   host firewall must allow that. The proxy accepts a subscription only on those hosts (https,

@@ -131,6 +131,17 @@ version bump moves the block under the new version heading.
   (`lever-chat-draft:<name>`, `lever-chat-unsent:<name>`); the one-agent page's records are
   adopted once, so a send with no clear answer keeps its key across the upgrade.
 
+### Security
+
+- **The remote proxy refuses a path that is not in one spelling, for every
+  tier (400, audit `deny-path`).** Its route checks read the path by prefix,
+  so a contact's `GET /assets/../lever/api/chat` passed the static-asset rule
+  and reached the hub with the contact's session (the hub answered with a
+  redirect, so nothing was served). A path with a `.` or `..` segment, an
+  empty segment (`//`), a backslash or NUL, or an encoded slash, backslash,
+  dot or NUL (`%2f`, `%5c`, `%2e`, `%00`) is now refused before any route
+  decision, so the decisions and the forwarded request name the same route.
+
 ## [0.29.1] - 2026-10-02
 
 Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them

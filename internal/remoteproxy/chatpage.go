@@ -6,35 +6,41 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/stevegeek/lever/internal/chatledger"
 )
 
 // The chat page.
 //
 // With Config.ChatAgent set (remote.landing: chat), the proxy serves a small
-// page of its own under /lever/ and sends "/" there: one conversation, the
-// operator's DM with the manager, plus links to the manager's terminal and to
-// the hub's full web UI. It is an alternative front for a route that already
-// exists, not a new route to the agent:
+// page of its own under /lever/ and sends "/" there: a list of the login's
+// agents and a chat with each it may message, plus, for an operator, links
+// to each agent's terminal and to the hub's full web UI. It is an
+// alternative front for routes that already exist, not a new route to an
+// agent:
 //
 //   - The page reads and sends through the hub's own chat routes, forwarded
-//     by this proxy like any other request. A message it posts is therefore
-//     recorded by recordChat exactly as one posted from the hub's web UI, and
-//     verifies the same way (package chatledger). Nothing here signs,
-//     records or delivers a message.
-//   - Everything below is answered only for an operator-tier login that
-//     passed the gate. A contact never gets here: ServeHTTP hands its
-//     requests to the contact fence instead, which answers every page with
-//     its own landing page.
-//   - What lever serves is fixed: the files embedded in the binary, and one
-//     JSON answer (the bootstrap) built from the verified login and from two
-//     ids the hub names, each checked before it is used. No agent-written
-//     byte is served from here. The page writes what it reads from the hub as
-//     text only (see chatui/chat.js), and its CSP allows no inline script.
+//     by this proxy like any other request. A contact's go through the
+//     contact fence exactly as before (contact.go): the page gains no hub
+//     route a contact did not have. A message it posts is recorded by
+//     recordChat exactly as one posted from the hub's web UI, and verifies
+//     the same way (package chatledger). Nothing here signs, records or
+//     delivers a message.
+//   - Everything below is answered only for a verified login that passed
+//     the gate, operator or contact. What each sees is built server-side
+//     from its tier and lists (agents.go): a contact never learns of an
+//     agent outside its lists.
+//   - What lever serves is fixed: the files embedded in the binary, a
+//     manifest per tier, and the agent list (JSON built from config, the
+//     hub's records reduced to fixed words, and cleaned labels). No other
+//     agent-written byte is served from here. The page writes what it reads
+//     from the hub as text only (see chatui/chat.js), and its CSP allows no
+//     inline script.
+//   - Its own writes are the wake route alone (wake.go).
 //
 // The whole /lever/ prefix is lever's while the page is on: an unknown path
 // under it is a 404, never forwarded, so a route added here later cannot
@@ -54,11 +60,10 @@ var chatUI embed.FS
 const DecisionChatUnavailable Decision = "chat-unavailable"
 
 const (
-	chatPrefix        = "/lever/"
-	chatPagePath      = "/lever/chat"
-	chatBootstrapPath = "/lever/api/chat"
-	chatAgentsPath    = "/lever/api/agents"
-	chatManifestPath  = "/lever/manifest.webmanifest"
+	chatPrefix       = "/lever/"
+	chatPagePath     = "/lever/chat"
+	chatAgentsPath   = "/lever/api/agents"
+	chatManifestPath = "/lever/manifest.webmanifest"
 	// chatConsolePath is where the page's link to the hub's web UI goes: its
 	// agent list, since "/" now leads back to the chat page.
 	chatConsolePath = "/agents"
@@ -128,13 +133,14 @@ type chatFile struct {
 	etag        string
 }
 
-// chatPage serves the page for one manager agent.
+// chatPage serves the page, for both tiers.
 type chatPage struct {
-	agent   string // the manager's agent name (Config.ChatAgent)
-	csp     string
-	files   map[string]chatFile
-	resolve func(ctx context.Context) (map[string]string, error) // agent name → hub id
-	whoAmI  func(ctx context.Context, cookie string) (string, error)
+	csp   string
+	files map[string]chatFile
+	// manifests is the app manifest per tier: an operator's names the
+	// instance, a contact's is generic, so it names no agent.
+	manifests map[string]chatFile
+	whoAmI    func(ctx context.Context, cookie string) (string, error)
 	// hubGet reads a hub JSON route with a login's own session (the agent
 	// list's unread counts).
 	hubGet func(ctx context.Context, cookie, path string, out any) (int, error)
@@ -147,12 +153,13 @@ type chatPage struct {
 // newChatPage loads the embedded files. A file that is missing is a build
 // fault, so it panics rather than serve a page with a hole in it.
 func newChatPage(cfg Config) *chatPage {
-	p := &chatPage{agent: cfg.ChatAgent, csp: chatCSPFor(cfg.ServeHost), resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg),
-		hubGet: hubGetJSON(cfg), files: map[string]chatFile{}}
-	add := func(route, contentType string, body []byte) {
+	p := &chatPage{csp: chatCSPFor(cfg.ServeHost), whoAmI: hubWhoAmI(cfg),
+		hubGet: hubGetJSON(cfg), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
+	file := func(contentType string, body []byte) chatFile {
 		sum := sha256.Sum256(body)
-		p.files[route] = chatFile{contentType: contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+		return chatFile{contentType: contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
 	}
+	add := func(route, contentType string, body []byte) { p.files[route] = file(contentType, body) }
 	for route, f := range map[string]struct{ name, contentType string }{
 		chatPagePath:                   {"chatui/chat.html", "text/html; charset=utf-8"},
 		"/lever/chat.css":              {"chatui/chat.css", "text/css; charset=utf-8"},
@@ -169,13 +176,19 @@ func newChatPage(cfg Config) *chatPage {
 		}
 		add(route, f.contentType, body)
 	}
-	manifest, err := json.Marshal(chatManifestFor(cfg.ChatAgent))
-	if err != nil {
-		panic("remoteproxy: chat page manifest: " + err.Error())
+	for tier, name := range map[string]string{chatledger.TierOperator: cfg.ChatAgent, chatledger.TierContact: contactAppName} {
+		manifest, err := json.Marshal(chatManifestFor(name))
+		if err != nil {
+			panic("remoteproxy: chat page manifest: " + err.Error())
+		}
+		p.manifests[tier] = file("application/manifest+json", manifest)
 	}
-	add(chatManifestPath, "application/manifest+json", manifest)
 	return p
 }
+
+// contactAppName names a contact's installed app: generic, so the manifest
+// names no agent (the manager may be outside the contact's lists).
+const contactAppName = "Chat"
 
 // chatManifest is the page's web app manifest: what a browser needs to
 // install the page as an app (Chrome's "Install page as app", Safari's "Add
@@ -226,23 +239,6 @@ func chatManifestFor(instance string) chatManifest {
 	}
 }
 
-// chatBootstrap is what the page needs to find its conversation.
-type chatBootstrap struct {
-	Login  string       `json:"login"`
-	UserID string       `json:"userId"`
-	Agent  chatAgentRef `json:"agent"`
-	// Conversation is the DM key, and Terminal the hub web UI's terminal
-	// page for the agent. Both are empty while the agent has no hub record.
-	Conversation string `json:"conversation,omitempty"`
-	Terminal     string `json:"terminal,omitempty"`
-	Console      string `json:"console"`
-}
-
-type chatAgentRef struct {
-	Name string `json:"name"`
-	ID   string `json:"id"`
-}
-
 // validHubID reports whether an id the hub named is safe to put in a URL
 // path and a conversation key: the page builds both from it, on the
 // operator's origin. Hub ids are UUIDs; anything with a separator in it is
@@ -262,11 +258,12 @@ func validHubID(s string) bool {
 }
 
 // serveChatPage answers a request the chat page owns and reports true, or
-// reports false for a request that goes to the hub as before. operator is
-// the verified operator-tier login and cookie its hub session; the caller
-// has already run authorize and ruled out a contact.
-func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *AuditLine, operator, cookie string) bool {
-	if g.chat == nil || operator == "" {
+// reports false for a request that goes on (to the contact fence for a
+// contact, to the hub for an operator). login is the verified login, of
+// either tier, and cookie its hub session; the caller has already run
+// authorize.
+func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *AuditLine, login, cookie string) bool {
+	if g.chat == nil || login == "" {
 		// No verified login (allowed_users empty): nothing the page sent
 		// would verify, so there is no page.
 		return false
@@ -284,20 +281,24 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	if p != strings.TrimSuffix(chatPrefix, "/") && !strings.HasPrefix(p, chatPrefix) {
 		return false
 	}
+	v := g.viewerFor(login)
+	if name, ok := wakeTarget(p); ok {
+		g.serveWake(w, r, line, v, name)
+		return true
+	}
 	if !read {
 		w.Header().Set("Allow", "GET, HEAD")
 		g.answerChat(w, line, DecisionAllow, http.StatusMethodNotAllowed, nil, []byte("method not allowed\n"), r)
 		return true
 	}
-	if p == chatBootstrapPath {
-		g.serveChatBootstrap(w, r, line, operator, cookie)
-		return true
-	}
 	if p == chatAgentsPath {
-		g.serveAgents(w, r, line, g.viewerFor(operator), cookie)
+		g.serveAgents(w, r, line, v, cookie)
 		return true
 	}
 	f, ok := g.chat.files[p]
+	if p == chatManifestPath {
+		f, ok = g.chat.manifests[v.tier]
+	}
 	if !ok {
 		g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
 		return true
@@ -306,8 +307,8 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		w.Header().Set("Content-Type", f.contentType)
 		w.Header().Set("ETag", f.etag)
 		// Revalidate on every load: the files change with the lever binary.
-		// private: the answer at this URL depends on who asks (a contact
-		// gets the fence's page), so no shared cache may keep it.
+		// private: the answer at this URL depends on who asks (the manifest
+		// differs per tier), so no shared cache may keep it.
 		w.Header().Set("Cache-Control", "private, no-cache")
 	}
 	if etagMatches(r.Header.Get("If-None-Match"), f.etag) {
@@ -351,58 +352,4 @@ func (g *gate) answerChat(w http.ResponseWriter, line *AuditLine, decision Decis
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(body)
 	}
-}
-
-// serveChatBootstrap answers the bootstrap: who the operator is to the hub,
-// and which agent and conversation the page is for.
-func (g *gate) serveChatBootstrap(w http.ResponseWriter, r *http.Request, line *AuditLine, operator, cookie string) {
-	c := g.chat
-	unavailable := func(msg string) {
-		g.answerChat(w, line, DecisionChatUnavailable, http.StatusBadGateway, nil, []byte(msg+"\n"), r)
-	}
-	if c.resolve == nil {
-		unavailable("the chat page cannot resolve its agent")
-		return
-	}
-	uid, err := c.whoAmI(r.Context(), cookie)
-	if errors.Is(err, errSessionUnknown) {
-		// The hub no longer knows this session (it restarted, or the
-		// session lapsed): replace it once, as forward does for a GET.
-		g.cfg.Session.Invalidate(operator, cookie)
-		if fresh, cerr := g.cfg.Session.Cookie(r.Context(), operator); cerr == nil {
-			uid, err = c.whoAmI(r.Context(), fresh)
-		}
-	}
-	if err != nil || !validHubID(uid) {
-		unavailable("cannot resolve your hub user")
-		return
-	}
-	ids, err := c.resolve(r.Context())
-	if err != nil {
-		unavailable("cannot resolve the manager agent")
-		return
-	}
-	out := chatBootstrap{Login: operator, UserID: uid, Agent: chatAgentRef{Name: c.agent}, Console: chatConsolePath}
-	// No id is not a fault: the manager has no hub record until its first
-	// start. The page says so.
-	if id := ids[c.agent]; id != "" {
-		if !validHubID(id) {
-			unavailable("the hub named an agent id the chat page cannot use")
-			return
-		}
-		out.Agent.ID = id
-		out.Conversation = "dm:agent:" + id + ":user:" + uid
-		out.Terminal = "/agents/" + id + "/terminal"
-	}
-	body, err := json.Marshal(out)
-	if err != nil {
-		unavailable("cannot encode the chat page's data")
-		return
-	}
-	g.answerChat(w, line, DecisionAllow, http.StatusOK, func() {
-		w.Header().Set("Content-Type", "application/json")
-		// Like every /api/ answer the proxy forwards (sandboxAPIDocument):
-		// opened as a page, this is an inert document.
-		w.Header().Set("Content-Security-Policy", "sandbox")
-	}, body, r)
 }

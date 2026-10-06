@@ -137,10 +137,11 @@ type Config struct {
 	// contact can type. Nil refuses every contact post.
 	ContactSession func(agent string) error
 	// ChatAgent, when set, is the manager's agent name, and turns on lever's
-	// chat page for operator logins (chatpage.go): the proxy answers
-	// /lever/* itself and redirects "/" to the page. It needs ResolveAgents
-	// to find the agent's hub id, and a verified login (AllowedUsers).
-	// Empty leaves every one of those paths to the hub, as before.
+	// chat page for every verified login, operator or contact (chatpage.go):
+	// the proxy answers /lever/* itself and redirects "/" (and, for a
+	// contact, every page) to the page. It needs AgentRecords for the agent
+	// list, and a verified login (AllowedUsers). Empty leaves every one of
+	// those paths to the hub (or, for a contact, the fence), as before.
 	ChatAgent string
 	// Workers is every configured worker name in config order: the agents an
 	// operator sees beside the manager on the chat page.
@@ -781,16 +782,18 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state.cookie = cookie
+	// lever's chat page, for both tiers. It claims only GET/HEAD "/" and the
+	// /lever prefix, and answers them itself, never from the hub. Every other
+	// request of a contact goes on to the fence below, unchanged.
+	if g.serveChatPage(w, r, &line, operator, cookie) {
+		return
+	}
 	if names, isContact := cfg.Contacts[operator]; isContact && operator != "" {
 		if r = g.fenceContact(w, r, &line, operator, names, &cookie); r == nil {
 			return
 		}
 		state.cookie = cookie
 		state.keepDM = contactKeepDM(r)
-	} else if g.serveChatPage(w, r, &line, operator, cookie) {
-		// An operator's request for lever's own chat page. Only on this
-		// branch: a contact's requests all went to the fence above.
-		return
 	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -237,7 +238,7 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
 	for _, p := range []string{"/lever", "/lever/", "/lever/nope", "/lever/chat/", "/lever/chat.html", "/lever/chatui/chat.js",
-		"/lever/../api/v1/agents", "/lever/api/", "/lever/api/chat/x", "/lever/chatcore.test.mjs", "/lever/chat.test.mjs",
+		"/lever/../api/v1/agents", "/lever/api/", "/lever/api/chat", "/lever/api/chat/x", "/lever/api/agents/", "/lever/api/agents/w1", "/lever/api/agentsx", "/lever/chatcore.test.mjs", "/lever/chat.test.mjs",
 		"/lever/fakebrowser.mjs", "/lever/package.json"} {
 		rw := chatDo(h, chatOp, "GET", p)
 		if rw.Code != http.StatusNotFound || rw.Header().Get("Cache-Control") != "no-store" {
@@ -251,7 +252,7 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 		}
 	}
 	for _, m := range []string{"POST", "PUT", "DELETE", "PATCH", "OPTIONS"} {
-		for _, p := range []string{chatPagePath, chatBootstrapPath, "/lever/chat.js", chatManifestPath, "/lever/icon-192.png"} {
+		for _, p := range []string{chatPagePath, chatAgentsPath, "/lever/chat.js", chatManifestPath, "/lever/icon-192.png"} {
 			if rw := chatDo(h, chatOp, m, p); rw.Code != http.StatusMethodNotAllowed || rw.Header().Get("Allow") != "GET, HEAD" {
 				t.Errorf("%s %s: %d Allow %q, want 405 and the allowed methods", m, p, rw.Code, rw.Header().Get("Allow"))
 			}
@@ -268,7 +269,7 @@ func TestChatPageOffLeavesEveryPathToTheHub(t *testing.T) {
 	cfg := chatConfig(t, hub)
 	cfg.ChatAgent = ""
 	h := NewHandler(cfg)
-	paths := []string{"/", chatPagePath, "/lever/chat.js", chatBootstrapPath, "/lever/nope"}
+	paths := []string{"/", chatPagePath, "/lever/chat.js", chatAgentsPath, "/lever/nope"}
 	for _, p := range paths {
 		if rw := chatDo(h, chatOp, "GET", p); rw.Code != http.StatusOK || rw.Body.String() != "{}" {
 			t.Errorf("GET %s: %d %q, want the hub's answer", p, rw.Code, rw.Body)
@@ -286,42 +287,9 @@ func TestChatPageNeedsAVerifiedLogin(t *testing.T) {
 	cfg := chatConfig(t, hub)
 	cfg.AllowedUsers, cfg.Contacts = nil, nil
 	h := NewHandler(cfg)
-	for _, p := range []string{"/", chatPagePath, chatBootstrapPath} {
+	for _, p := range []string{"/", chatPagePath, chatAgentsPath} {
 		if rw := chatDo(h, chatOp, "GET", p); rw.Code != http.StatusOK || rw.Body.String() != "{}" {
 			t.Errorf("GET %s: %d %q, want it forwarded", p, rw.Code, rw.Body)
-		}
-	}
-}
-
-// TestChatPageIsNotForContacts: a contact gets the fence's landing page for
-// every one of the chat page's paths, never the page, its script or its data.
-func TestChatPageIsNotForContacts(t *testing.T) {
-	hub := newPageHub(t)
-	h := NewHandler(chatConfig(t, hub))
-	for _, p := range []string{"/", chatPagePath, "/lever/chat.js", "/lever/chatcore.js", "/lever/chat.css", chatBootstrapPath,
-		chatManifestPath, "/lever/icon-192.png", "/lever/icon-512.png", "/lever/icon-maskable-512.png", "/lever/apple-touch-icon.png"} {
-		rw := chatDo(h, "c@x", "GET", p)
-		body := rw.Body.String()
-		if rw.Code != http.StatusOK || !strings.Contains(body, "<h1>Chat</h1>") {
-			t.Errorf("GET %s as a contact: %d %q, want the contact landing page", p, rw.Code, body)
-		}
-		// The operator gets another answer at the same URL: no cache may
-		// hand this one to them.
-		if got := rw.Header().Get("Cache-Control"); got != "no-store" {
-			t.Errorf("GET %s as a contact: Cache-Control %q, want no-store", p, got)
-		}
-		for _, leak := range []string{chatMgrID, "boss", chatOp, "chatcore", "userId", "EventSource"} {
-			if strings.Contains(body, leak) {
-				t.Errorf("GET %s as a contact leaks %q", p, leak)
-			}
-		}
-		if rw.Header().Get("Location") != "" {
-			t.Errorf("GET %s as a contact was redirected to %q", p, rw.Header().Get("Location"))
-		}
-	}
-	for _, p := range []string{chatPagePath, chatBootstrapPath} {
-		if rw := chatDo(h, "c@x", "POST", p); rw.Code != http.StatusForbidden {
-			t.Errorf("POST %s as a contact: %d, want 403", p, rw.Code)
 		}
 	}
 }
@@ -338,7 +306,7 @@ func TestChatPageStaysBehindTheGate(t *testing.T) {
 		"same-site sibling":  {"Sec-Fetch-Site", "same-site"},
 		"comma-joined login": {"Tailscale-User-Login", "evil@x, " + chatOp},
 	} {
-		for _, p := range []string{"/", chatPagePath, "/lever/chat.js", chatBootstrapPath, chatManifestPath, "/lever/icon-512.png"} {
+		for _, p := range []string{"/", chatPagePath, "/lever/chat.js", chatAgentsPath, chatManifestPath, "/lever/icon-512.png"} {
 			login := chatOp
 			if hdr[0] == "Tailscale-User-Login" {
 				login = ""
@@ -349,10 +317,10 @@ func TestChatPageStaysBehindTheGate(t *testing.T) {
 		}
 	}
 	// No login header at all, and a foreign Host.
-	if rw := chatDo(h, "", "GET", chatBootstrapPath); rw.Code != http.StatusForbidden {
+	if rw := chatDo(h, "", "GET", chatAgentsPath); rw.Code != http.StatusForbidden {
 		t.Errorf("no login: %d, want 403", rw.Code)
 	}
-	req := proxyRequest("GET", chatBootstrapPath, nil)
+	req := proxyRequest("GET", chatAgentsPath, nil)
 	req.Host = "evil.test"
 	req.Header.Set("Tailscale-User-Login", chatOp)
 	rw := httptest.NewRecorder()
@@ -368,107 +336,6 @@ func TestChatPageStaysBehindTheGate(t *testing.T) {
 	}
 }
 
-// TestChatBootstrap: the answer names the operator, the manager and their
-// conversation, and is not cacheable.
-func TestChatBootstrap(t *testing.T) {
-	hub := newPageHub(t)
-	h := NewHandler(chatConfig(t, hub))
-	rw := chatDo(h, chatOp, "GET", chatBootstrapPath)
-	if rw.Code != http.StatusOK {
-		t.Fatalf("status %d %s", rw.Code, rw.Body)
-	}
-	want := `{"login":"op@x","userId":"u-op","agent":{"name":"boss","id":"id-mgr"},` +
-		`"conversation":"dm:agent:id-mgr:user:u-op","terminal":"/agents/id-mgr/terminal","console":"/agents"}`
-	if got := rw.Body.String(); got != want {
-		t.Fatalf("bootstrap\n got %s\nwant %s", got, want)
-	}
-	for k, v := range map[string]string{"Content-Type": "application/json", "Cache-Control": "no-store",
-		"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"} {
-		if got := rw.Header().Get(k); got != v {
-			t.Errorf("%s = %q, want %q", k, got, v)
-		}
-	}
-	if head := chatDo(h, chatOp, "HEAD", chatBootstrapPath); head.Code != http.StatusOK || head.Body.Len() != 0 {
-		t.Errorf("HEAD: %d with %d bytes", head.Code, head.Body.Len())
-	}
-	// The conversation it names is one recordChat records.
-	if _, agent, ok := chatDMAgent("POST", chatConversationsPrefix+"dm:agent:id-mgr:user:u-op/messages"); !ok || agent != chatMgrID {
-		t.Fatal("the bootstrap's conversation key is not a recorded DM route")
-	}
-}
-
-// TestChatBootstrapWithoutAManagerRecord: no hub record is a state the page
-// reports, not a fault.
-func TestChatBootstrapWithoutAManagerRecord(t *testing.T) {
-	hub := newPageHub(t)
-	cfg := chatConfig(t, hub)
-	cfg.ResolveAgents = func(context.Context) (map[string]string, error) { return map[string]string{"w1": agentW1}, nil }
-	rw := chatDo(NewHandler(cfg), chatOp, "GET", chatBootstrapPath)
-	want := `{"login":"op@x","userId":"u-op","agent":{"name":"boss","id":""},"console":"/agents"}`
-	if rw.Code != http.StatusOK || rw.Body.String() != want {
-		t.Fatalf("%d %s, want 200 %s", rw.Code, rw.Body, want)
-	}
-}
-
-// TestChatBootstrapFailsClosed: an identity or agent the proxy cannot
-// resolve, or an id that is not a plain token, gets no answer built from it.
-func TestChatBootstrapFailsClosed(t *testing.T) {
-	ok := func(context.Context) (map[string]string, error) { return map[string]string{"boss": chatMgrID}, nil }
-	me := func(body string, status int) func(http.ResponseWriter, *http.Request) {
-		return func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(status)
-			_, _ = io.WriteString(w, body)
-		}
-	}
-	ids := func(id string) func(context.Context) (map[string]string, error) {
-		return func(context.Context) (map[string]string, error) { return map[string]string{"boss": id}, nil }
-	}
-	for name, c := range map[string]struct {
-		me      func(http.ResponseWriter, *http.Request)
-		resolve func(context.Context) (map[string]string, error)
-	}{
-		"resolver error":      {nil, func(context.Context) (map[string]string, error) { return nil, errors.New("hub down") }},
-		"no resolver":         {nil, nil},
-		"hub 500 on identity": {me(`{}`, 500), ok},
-		"no user id":          {me(`{"id":""}`, 200), ok},
-		"identity not JSON":   {me(`<html>`, 200), ok},
-		"user id with slash":  {me(`{"id":"u/../../x"}`, 200), ok},
-		"user id with colon":  {me(`{"id":"u:agent:x"}`, 200), ok},
-		"user id with quote":  {me(`{"id":"u\"x"}`, 200), ok},
-		"user id with space":  {me(`{"id":"u x"}`, 200), ok},
-		"user id too long":    {me(`{"id":"`+strings.Repeat("a", 129)+`"}`, 200), ok},
-		"agent id with slash": {nil, ids("a/terminal/../../x")},
-		"agent id with colon": {nil, ids("a:user:other")},
-		"agent id with dots":  {nil, ids("..")},
-		"agent id with query": {nil, ids("a?x=1")},
-		"agent id non-ASCII":  {nil, ids("aé")},
-	} {
-		hub := newPageHub(t)
-		hub.me = c.me
-		cfg := chatConfig(t, hub)
-		cfg.ResolveAgents = c.resolve
-		var lines []AuditLine
-		cfg.Audit = func(l AuditLine) { lines = append(lines, l) }
-		rw := chatDo(NewHandler(cfg), chatOp, "GET", chatBootstrapPath)
-		if rw.Code != http.StatusBadGateway {
-			t.Errorf("%s: %d %s, want 502", name, rw.Code, rw.Body)
-		}
-		if strings.Contains(rw.Body.String(), "conversation") || strings.Contains(rw.Body.String(), "{") {
-			t.Errorf("%s: a refused bootstrap still carries data: %s", name, rw.Body)
-		}
-		if h := rw.Header(); h.Get("Content-Security-Policy") != chatCSPFor(testServeHost) || h.Get("Cache-Control") != "no-store" ||
-			h.Get("X-Frame-Options") != "DENY" || h.Get("X-Content-Type-Options") != "nosniff" {
-			t.Errorf("%s: a refused bootstrap lacks the page's headers: %v", name, h)
-		}
-		if len(lines) != 1 || lines[0].Decision != DecisionChatUnavailable || lines[0].Status != http.StatusBadGateway {
-			t.Errorf("%s: audit %+v, want one chat-unavailable 502", name, lines)
-		}
-		if head := chatDo(NewHandler(cfg), chatOp, "HEAD", chatBootstrapPath); head.Code != http.StatusBadGateway || head.Body.Len() != 0 {
-			t.Errorf("%s: HEAD answered %d with %d bytes, want a bodiless 502", name, head.Code, head.Body.Len())
-		}
-	}
-}
-
 func TestValidHubID(t *testing.T) {
 	for _, good := range []string{"a", "id-mgr", "0191f2c4-7b1e-7c3a-9d2e-3f4a5b6c7d8e", "A_b-9", strings.Repeat("a", 128)} {
 		if !validHubID(good) {
@@ -479,25 +346,6 @@ func TestValidHubID(t *testing.T) {
 		if validHubID(bad) {
 			t.Errorf("validHubID(%q) = true", bad)
 		}
-	}
-}
-
-// TestChatBootstrapHealsALapsedSession: a 401 from the identity lookup
-// replaces the session once.
-func TestChatBootstrapHealsALapsedSession(t *testing.T) {
-	hub := newPageHub(t)
-	hub.me = func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Cookie") != sessionCookieName+"=new" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		_, _ = io.WriteString(w, `{"id":"`+chatUID+`"}`)
-	}
-	cfg := chatConfig(t, hub)
-	cfg.Session = &rotatingSession{}
-	rw := chatDo(NewHandler(cfg), chatOp, "GET", chatBootstrapPath)
-	if rw.Code != http.StatusOK || !strings.Contains(rw.Body.String(), `"userId":"u-op"`) {
-		t.Fatalf("%d %s, want the bootstrap on the new session", rw.Code, rw.Body)
 	}
 }
 
@@ -516,7 +364,7 @@ func TestChatPageAuditsEveryAnswer(t *testing.T) {
 		{"GET", "/", http.StatusFound},
 		{"GET", chatPagePath, http.StatusOK},
 		{"GET", "/lever/chat.js", http.StatusOK},
-		{"GET", chatBootstrapPath, http.StatusOK},
+		{"GET", chatAgentsPath, http.StatusOK},
 		{"GET", "/lever/nope", http.StatusNotFound},
 		{"POST", chatPagePath, http.StatusMethodNotAllowed},
 	} {
@@ -545,15 +393,22 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 	cfg := Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
 		AllowedUsers:  []string{chatOp},
 		ResolveAgents: func(context.Context) (map[string]string, error) { return map[string]string{"boss": chatMgrID}, nil },
-		ChatAgent:     "boss",
-		ChatLedger:    func(e chatledger.Entry) error { got = append(got, e); return nil }}
+		AgentRecords: func(context.Context) (map[string]AgentRecord, error) {
+			return map[string]AgentRecord{"boss": {ID: chatMgrID, Phase: "running"}}, nil
+		},
+		ChatAgent:  "boss",
+		ChatLedger: func(e chatledger.Entry) error { got = append(got, e); return nil }}
 	h := NewHandler(cfg)
 
-	var boot chatBootstrap
-	if err := json.Unmarshal(chatDo(h, chatOp, "GET", chatBootstrapPath).Body.Bytes(), &boot); err != nil || boot.Conversation != key {
-		t.Fatalf("bootstrap conversation %q (%v), want %s", boot.Conversation, err, key)
+	var list agentsAnswer
+	if err := json.Unmarshal(chatDo(h, chatOp, "GET", chatAgentsPath).Body.Bytes(), &list); err != nil || len(list.Agents) == 0 || list.Agents[0].Conversation != key {
+		t.Fatalf("agent list %+v (%v), want the manager's conversation %s first", list, err, key)
 	}
-	req := proxyRequest("POST", chatConversationsPrefix+boot.Conversation+"/messages", strings.NewReader(`{"content":"hello"}`))
+	// The conversation it names is one recordChat records.
+	if _, agent, ok := chatDMAgent("POST", chatConversationsPrefix+key+"/messages"); !ok || agent != chatMgrID {
+		t.Fatal("the list's conversation key is not a recorded DM route")
+	}
+	req := proxyRequest("POST", chatConversationsPrefix+list.Agents[0].Conversation+"/messages", strings.NewReader(`{"content":"hello"}`))
 	req.Header.Set("Tailscale-User-Login", chatOp)
 	req.Header.Set("Origin", "https://"+testServeHost)
 	req.Header.Set("Content-Type", "application/json")
@@ -727,5 +582,105 @@ func TestChatManifestShortName(t *testing.T) {
 		if got := chatManifestFor(in).ShortName; got != want {
 			t.Errorf("short name for %q = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestChatPageForContacts: with landing chat, a contact lands on the page,
+// gets its files and its list, and never the hub's shell or console.
+func TestChatPageForContacts(t *testing.T) {
+	hub := newPageHub(t)
+	var lines []AuditLine
+	cfg := chatConfig(t, hub)
+	cfg.Audit = func(l AuditLine) { lines = append(lines, l) }
+	h := NewHandler(cfg)
+	for _, p := range []string{"/", "/agents", "/chat/dm/" + url.PathEscape("dm:agent:"+agentW1+":user:u-c"), "/settings", "/agents/" + chatMgrID + "/terminal"} {
+		for _, m := range []string{"GET", "HEAD"} {
+			rw := chatDo(h, "c@x", m, p)
+			if rw.Code != http.StatusFound || rw.Header().Get("Location") != chatPagePath || rw.Header().Get("Cache-Control") != "no-store" {
+				t.Errorf("%s %s as a contact: %d %q, want 302 %s", m, p, rw.Code, rw.Header().Get("Location"), chatPagePath)
+			}
+		}
+	}
+	for _, p := range []string{chatPagePath, "/lever/chat.js", "/lever/chatcore.js", "/lever/chat.css", "/lever/icon-192.png", chatManifestPath, chatAgentsPath} {
+		if rw := chatDo(h, "c@x", "GET", p); rw.Code != http.StatusOK {
+			t.Errorf("GET %s as a contact: %d", p, rw.Code)
+		}
+	}
+	for p, code := range map[string]int{"/lever/api/chat": 404, "/lever/nope": 404} {
+		if rw := chatDo(h, "c@x", "GET", p); rw.Code != code {
+			t.Errorf("GET %s: %d, want %d", p, rw.Code, code)
+		}
+	}
+	for _, p := range []string{chatPagePath, chatAgentsPath} {
+		if rw := chatDo(h, "c@x", "POST", p, "Origin", "https://"+testServeHost); rw.Code != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s: %d, want 405", p, rw.Code)
+		}
+	}
+	// Only the list reaches the hub, and only for the contact's identity and
+	// DM read state, with its own session.
+	for _, r := range hub.reached() {
+		if r != "GET /api/v1/chat/dms" {
+			t.Errorf("the hub saw a page request: %s", r)
+		}
+	}
+	for _, l := range lines {
+		if l.TSLogin != "c@x" || (l.Decision != DecisionAllow) {
+			t.Errorf("audit %+v", l)
+		}
+	}
+}
+
+func TestContactManifestIsGeneric(t *testing.T) {
+	hub := newPageHub(t)
+	h := NewHandler(chatConfig(t, hub))
+	c := chatDo(h, "c@x", "GET", chatManifestPath)
+	o := chatDo(h, chatOp, "GET", chatManifestPath)
+	if strings.Contains(c.Body.String(), "boss") || !strings.Contains(o.Body.String(), "boss") {
+		t.Fatalf("contact manifest %s / operator manifest %s", c.Body, o.Body)
+	}
+	var m chatManifest
+	if err := json.Unmarshal(c.Body.Bytes(), &m); err != nil || m.Name != "Chat · lever" || m.ShortName != "Chat" || m.StartURL != chatPagePath {
+		t.Fatalf("contact manifest %+v %v", m, err)
+	}
+	if c.Header().Get("ETag") == o.Header().Get("ETag") {
+		t.Fatal("two manifests share an ETag")
+	}
+}
+
+// The fence's hub rules do not move: a contact's request for a hub route
+// it may not use is still refused, landing chat or not.
+func TestContactFenceUnchangedUnderChat(t *testing.T) {
+	hub := newPageHub(t)
+	hub.me = func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"id":"u-c"}`) }
+	h := NewHandler(chatConfig(t, hub))
+	for _, p := range []string{"/api/v1/agents/" + chatMgrID, "/api/v1/chat/conversations/" + url.PathEscape("dm:agent:id-w2:user:u-c") + "/messages",
+		"/api/v1/chat/conversations/" + url.PathEscape("dm:agent:"+chatMgrID+":user:u-c") + "/messages", "/api/v1/projects/x"} {
+		if rw := chatDo(h, "c@x", "GET", p); rw.Code != http.StatusForbidden {
+			t.Errorf("GET %s: %d, want 403", p, rw.Code)
+		}
+	}
+	// Its own conversation still works through the fence.
+	own := "/api/v1/chat/conversations/" + url.PathEscape("dm:agent:"+agentW1+":user:u-c") + "/messages"
+	if rw := chatDo(h, "c@x", "GET", own); rw.Code != http.StatusOK {
+		t.Errorf("GET %s: %d, want 200", own, rw.Code)
+	}
+	if rw := chatDo(h, "c@x", "GET", "/assets/app.js"); rw.Code != http.StatusOK {
+		t.Errorf("a static asset: %d", rw.Code)
+	}
+}
+
+// landing unset: a contact still gets the old landing page.
+func TestContactLandingWithoutChat(t *testing.T) {
+	hub := newPageHub(t)
+	cfg := chatConfig(t, hub)
+	cfg.ChatAgent = ""
+	h := NewHandler(cfg)
+	for _, p := range []string{"/", chatPagePath, "/agents"} {
+		if rw := chatDo(h, "c@x", "GET", p); rw.Code != 200 || !strings.Contains(rw.Body.String(), "<h1>Chat</h1>") {
+			t.Fatalf("%s: %d %s", p, rw.Code, rw.Body.String())
+		}
+	}
+	if rw := chatDo(h, "c@x", "GET", chatAgentsPath); rw.Code == http.StatusOK && strings.Contains(rw.Body.String(), "agents") {
+		t.Fatalf("the agent list answered with the page off: %s", rw.Body)
 	}
 }

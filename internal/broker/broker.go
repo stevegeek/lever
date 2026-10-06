@@ -283,6 +283,12 @@ type Broker struct {
 	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
 	workerToWorker  bool
 
+	// workerLocks serialises the read-phase-then-act paths of one worker
+	// (start, the resume verb, the remote wake): two of them at once would
+	// both read "suspended" and both resume (lockWorker).
+	workerLocksMu sync.Mutex
+	workerLocks   map[string]chan struct{}
+
 	mu           sync.Mutex
 	minEpoch     int
 	revoked      map[string]bool

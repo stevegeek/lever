@@ -71,7 +71,8 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 // (handleWorkerResume): the role guard, the hub's phase, then resumeRecord,
 // which stages a fresh ticket, picks the verb by phase and waits until the
 // worker is live. Narrower than the verb: only a declared worker (never the
-// manager), and only from suspended or stopped. It is on the 0600 operator
+// manager), and only from suspended or stopped (running is a no-op success:
+// a resume that won the worker's lock got there first). It is on the 0600 operator
 // socket, never on the admin listener the hub's network can reach.
 func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 	var req wire.OperatorWakeRequest
@@ -91,6 +92,14 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	// The same lock as the start route and the resume verb: a manager
+	// resuming this worker at the same moment would otherwise read
+	// "suspended" too, and the second resume fail on a live record.
+	unlock, ok := b.lockWorkerOrRefuse(w, ctx, actor, "wake", spec.Name)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
 		b.audit("worker", actor, "deny", "wake "+spec.Name+": "+err.Error())
 		http.Error(w, "refused", http.StatusConflict)
@@ -102,6 +111,12 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		b.audit("worker", actor, "error", "wake "+spec.Name+": phase: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
+		return
+	}
+	if phase == scion.PhaseRunning {
+		// Live already (another resume won the lock): what the caller wants.
+		b.audit("worker", actor, "allow", "wake "+spec.Name+": already running")
+		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
 	if phase != scion.PhaseSuspended && phase != scion.PhaseStopped {

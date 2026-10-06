@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
@@ -55,7 +57,6 @@ func TestOperatorWakeRefuses(t *testing.T) {
 		"manager":   {asleep, `{"worker":"test-manager","login":"c@x"}`, http.StatusForbidden},
 		"unknown":   {asleep, `{"worker":"zz","login":"c@x"}`, http.StatusForbidden},
 		"empty":     {asleep, `{"login":"c@x"}`, http.StatusForbidden},
-		"running":   {[]scion.Agent{{Slug: "worker", Phase: "running"}}, `{"worker":"worker","login":"c@x"}`, http.StatusConflict},
 		"error":     {[]scion.Agent{{Slug: "worker", Phase: "error"}}, `{"worker":"worker","login":"c@x"}`, http.StatusConflict},
 		"starting":  {[]scion.Agent{{Slug: "worker", Phase: "starting"}}, `{"worker":"worker","login":"c@x"}`, http.StatusConflict},
 		"resumed":   {[]scion.Agent{{Slug: "worker", Phase: "resumed"}}, `{"worker":"worker","login":"c@x"}`, http.StatusConflict},
@@ -110,5 +111,82 @@ func TestOperatorWakeIsNotOnTheTCPListeners(t *testing.T) {
 		if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s handler answers %s: %d", name, wire.PathOperatorWake, rec.Code)
 		}
+	}
+}
+
+// slowResumeRuntime is fakeRuntime made safe for concurrent calls, with a
+// resume that takes until gate closes. While a resume is under way the
+// hub still reports the record suspended, as the real one does.
+type slowResumeRuntime struct {
+	*fakeRuntime
+	mu        sync.Mutex
+	resuming  bool
+	gate      chan struct{}
+	entered   chan struct{}
+	enterOnce sync.Once
+}
+
+func (s *slowResumeRuntime) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.resuming {
+		return []scion.Agent{{Slug: "worker", Phase: "suspended"}}, nil
+	}
+	return s.fakeRuntime.List(ctx, project)
+}
+
+func (s *slowResumeRuntime) Resume(ctx context.Context, worker, project string) error {
+	s.mu.Lock()
+	s.resuming = true
+	err := s.fakeRuntime.Resume(ctx, worker, project)
+	s.mu.Unlock()
+	s.enterOnce.Do(func() { close(s.entered) })
+	<-s.gate
+	s.mu.Lock()
+	s.resuming = false
+	s.mu.Unlock()
+	return err
+}
+
+func (s *slowResumeRuntime) StageWorkerTicket(ctx context.Context, worker string, payload []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeRuntime.StageWorkerTicket(ctx, worker, payload)
+}
+
+// The manager's resume verb and a remote wake of the same worker at once:
+// one resume, and neither caller fails. Without a per-worker lock both read
+// "suspended" and both resume; the second resume fails on a live record.
+func TestResumeAndWakeOfOneWorkerDoNotRace(t *testing.T) {
+	rt := &slowResumeRuntime{fakeRuntime: &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}},
+		gate: make(chan struct{}), entered: make(chan struct{})}
+	b := newTestBroker(t, rt, wakeSpec)
+	verb := make(chan int, 1)
+	go func() { verb <- callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager").Code }()
+	<-rt.entered
+	wake := make(chan *httptest.ResponseRecorder, 1)
+	go func() { wake <- postWake(t, b, `{"worker":"worker","login":"c@x"}`) }()
+	time.Sleep(50 * time.Millisecond) // let the wake reach the lock (or, without one, the runtime)
+	close(rt.gate)
+	if code := <-verb; code != http.StatusOK {
+		t.Fatalf("verb: %d", code)
+	}
+	if rec := <-wake; rec.Code != http.StatusOK {
+		t.Fatalf("wake: %d %s", rec.Code, rec.Body)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.resumed) != 1 {
+		t.Fatalf("resumed %d times, want once", len(rt.resumed))
+	}
+}
+
+// A wake that finds the worker running (another resume won the lock) is a
+// no-op success: the caller wanted it live, and it is.
+func TestOperatorWakeOfARunningWorkerIsANoOp(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "running"}}}}
+	b := newTestBroker(t, rt, wakeSpec)
+	if rec := postWake(t, b, `{"worker":"worker","login":"c@x"}`); rec.Code != http.StatusOK || len(rt.resumed) != 0 || len(rt.staged) != 0 {
+		t.Fatalf("%d resumed=%d staged=%d", rec.Code, len(rt.resumed), len(rt.staged))
 	}
 }

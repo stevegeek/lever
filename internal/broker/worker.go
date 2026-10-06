@@ -146,6 +146,40 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, re
 	return spec, true
 }
 
+// lockWorker takes name's lifecycle lock, waiting for it as long as ctx
+// allows. The holder reads the phase and acts on it with no other start,
+// resume or wake of that worker in between.
+func (b *Broker) lockWorker(ctx context.Context, name string) (func(), error) {
+	b.workerLocksMu.Lock()
+	if b.workerLocks == nil {
+		b.workerLocks = map[string]chan struct{}{}
+	}
+	sem := b.workerLocks[name]
+	if sem == nil {
+		sem = make(chan struct{}, 1)
+		b.workerLocks[name] = sem
+	}
+	b.workerLocksMu.Unlock()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// lockWorkerOrRefuse is lockWorker for a handler: a caller that gave up
+// while it waited gets 503 and an audit line.
+func (b *Broker) lockWorkerOrRefuse(w http.ResponseWriter, ctx context.Context, actor, verb, name string) (func(), bool) {
+	unlock, err := b.lockWorker(ctx, name)
+	if err != nil {
+		b.audit("worker", actor, "error", verb+" "+name+": gave up waiting for another start/resume of it: "+err.Error())
+		http.Error(w, "busy: another start or resume of "+name+" is under way", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return unlock, true
+}
+
 func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
@@ -407,6 +441,11 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+	unlock, ok := b.lockWorkerOrRefuse(w, r.Context(), b.manager, "start", spec.Name)
+	if !ok {
+		return
+	}
+	defer unlock()
 	phase, err := b.phaseOf(r.Context(), spec)
 	if err != nil {
 		b.audit("worker", b.manager, "error", "phase: "+err.Error())
@@ -662,6 +701,13 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 	if !ok {
 		return
 	}
+	// Stop and suspend take the worker's lock too, so neither lands in the
+	// middle of a start, resume or remote wake of it.
+	unlock, ok := b.lockWorkerOrRefuse(w, r.Context(), b.manager, r.URL.Path, spec.Name)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if err := do(r.Context(), spec); err != nil {
 		b.audit("worker", b.manager, "error", r.URL.Path+" "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
@@ -695,6 +741,11 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	unlock, ok := b.lockWorkerOrRefuse(w, ctx, b.manager, "resume", spec.Name)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
 		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, err.Error(), http.StatusConflict)

@@ -1197,6 +1197,71 @@ func TestWorkerResumeOfAWorkerAlreadyComingUpOnlyWaits(t *testing.T) {
 	}
 }
 
+// The pre-role record guard runs before the resume verb reads the phase, so
+// a record whose stored role reads as full is refused (409, deny audit,
+// nothing staged or resumed) even while it is running or coming up: the
+// verb must not answer "already running" or wait on such a record. The
+// start route without a task leaves a running record alone (it resumes
+// nothing) but refuses one coming up, which it would wait on as a resume.
+// The healer refuses to bounce it in either phase.
+func TestRoleRefusalInRunningAndResumedPhases(t *testing.T) {
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
+	refuse := func(context.Context, string) error { return errors.New("stored role reads as full") }
+	for _, phase := range []string{"running", "resumed"} {
+		seed := func() *fakeRuntime {
+			return &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "worker", Phase: phase, ContainerStatus: "Up 1 second"}},
+			}}
+		}
+		assertUntouched := func(route string, rt *fakeRuntime) {
+			t.Helper()
+			if len(rt.resumed) != 0 || len(rt.resumeForced) != 0 || len(rt.suspend) != 0 || len(rt.started) != 0 {
+				t.Fatalf("%s %s: resumed=%v forced=%v suspend=%v started=%d, want none", phase, route, rt.resumed, rt.resumeForced, rt.suspend, len(rt.started))
+			}
+		}
+
+		rt := seed()
+		b := newTestBroker(t, rt, spec)
+		b.verifyRole = refuse
+		var buf bytes.Buffer
+		b.log = slog.New(slog.NewTextHandler(&buf, nil))
+		rec := callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager")
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "stored role") {
+			t.Fatalf("%s resume: status=%d body=%q, want 409 with the reason", phase, rec.Code, rec.Body.String())
+		}
+		if len(rt.staged) != 0 || !strings.Contains(buf.String(), "decision=deny") {
+			t.Fatalf("%s resume: staged=%d, audit:\n%s", phase, len(rt.staged), buf.String())
+		}
+		assertUntouched("resume", rt)
+
+		rt = seed()
+		b = newTestBroker(t, rt, spec)
+		b.verifyRole = refuse
+		rec = callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+		wantStart := http.StatusConflict
+		if phase == scion.PhaseRunning {
+			wantStart = http.StatusOK
+		}
+		if rec.Code != wantStart || len(rt.staged) != 0 {
+			t.Fatalf("%s start: status=%d staged=%d, want %d and nothing staged", phase, rec.Code, len(rt.staged), wantStart)
+		}
+		assertUntouched("start", rt)
+
+		rt = &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+			testInstanceProject: {{Slug: "scratch", Phase: phase, ContainerStatus: "Up 1 second"}},
+		}}
+		hb, _, _ := reenrolBroker(t, rt, "all")
+		hb.verifyRole = refuse
+		buf.Reset()
+		hb.log = slog.New(slog.NewTextHandler(&buf, nil))
+		hb.healLapse(context.Background(), "scratch")
+		if !strings.Contains(buf.String(), "refusing to bounce scratch") {
+			t.Fatalf("%s heal: no deny line:\n%s", phase, buf.String())
+		}
+		assertUntouched("heal", rt)
+	}
+}
+
 // TestWorkerLivenessErrorCarriesNoAgentText: a worker that never comes up can
 // have posted any phase and container status about itself. The resume answer
 // the manager reads, and the audit line, carry labels only.

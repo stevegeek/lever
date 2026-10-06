@@ -435,7 +435,7 @@ func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
 		var out bytes.Buffer
 		cmd.SetErr(&out)
 		p := &reportProbe{}
-		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, "demo", "/lever")
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, nil, "demo", "/lever")
 		if p.reports != tc.wantReports {
 			t.Fatalf("%s: reports = %d, want %d (%s)", tc.list, p.reports, tc.wantReports, out.String())
 		}
@@ -507,5 +507,68 @@ func TestStopHealCannotEatTheSuspendBudget(t *testing.T) {
 	}
 	if len(r.suspendCtxErr) != 1 || r.suspendCtxErr[0] != nil {
 		t.Fatalf("suspend calls / ctx errors = %v, want one live-context suspend", r.suspendCtxErr)
+	}
+}
+
+// expiredThenReportProbe models #84 and #156 at once: the token reads expired
+// until a reset-auth has run (seen on the scion runner), and the session
+// report records whether the reset came first.
+type expiredThenReportProbe struct {
+	f                *proc.FakeRunner
+	reportAfterReset []bool
+}
+
+func (p *expiredThenReportProbe) reset() bool {
+	return p.f.Called(proc.ArgvContains("reset-auth demo"))
+}
+func (p *expiredThenReportProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
+	now := time.Now()
+	if p.reset() {
+		return jail.HubTokenTimes{Expiry: now.Add(10 * time.Hour), Now: now}, nil
+	}
+	return jail.HubTokenTimes{Expiry: now.Add(-time.Hour), Now: now}, nil
+}
+func (p *expiredThenReportProbe) HarnessAlive(context.Context, string) (bool, error) {
+	return true, nil
+}
+func (p *expiredThenReportProbe) ReportSessionRunning(context.Context, string) error {
+	p.reportAfterReset = append(p.reportAfterReset, p.reset())
+	return nil
+}
+
+// TestHealStoppedManagerResetsAnExpiredTokenFirst: with an expired token the
+// stop heal resets it (behind the role guard) before the session report, which
+// would otherwise go out on a token the hub refuses; a guard refusal resets
+// nothing.
+func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
+	for _, refuse := range []bool{false, true} {
+		f := proc.NewFakeRunner()
+		f.Script("scion list", proc.Result{Stdout: `[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`})
+		f.Script("scion reset-auth", proc.Result{Stdout: "ok"})
+		p := &expiredThenReportProbe{f: f}
+		var guarded []string
+		verify := func(_ context.Context, project, agent string) error {
+			guarded = append(guarded, project+"/"+agent)
+			if refuse {
+				return errors.New("record stores no role")
+			}
+			return nil
+		}
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetErr(&out)
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, verify, "demo", "/lever")
+		if len(guarded) != 1 || guarded[0] != "lever/demo" {
+			t.Fatalf("refuse=%v: guard calls %v", refuse, guarded)
+		}
+		if refuse {
+			if p.reset() || !strings.Contains(out.String(), "NOT reset") {
+				t.Fatalf("a refused guard must reset nothing: %q", out.String())
+			}
+			continue
+		}
+		if len(p.reportAfterReset) != 1 || !p.reportAfterReset[0] {
+			t.Fatalf("the session report must follow the reset: %v (%s)", p.reportAfterReset, out.String())
+		}
 	}
 }

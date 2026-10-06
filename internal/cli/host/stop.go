@@ -9,6 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -74,7 +75,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// The heal has its own budget, ahead of the suspend's, so a
 					// slow one cannot cost the manager its suspend.
 					hctx, hcancel := context.WithTimeout(cmd.Context(), stopHealBudget)
-					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), appName, b.MountDest())
+					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), appName, b.MountDest())
 					hcancel()
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
@@ -106,10 +107,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 // first lets the suspend keep it (apply.HealAgentSession). Best-effort, like
 // the suspend: a failure is a warning.
 //
-// No role verifier is passed, so an expired hub token is only reported here
-// (`lever apply` resets it); the session report needs a valid token, so the
-// heal then leaves the phase as it is.
-func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, name, project string) {
+// The session report travels on the agent's hub token, and a manager left
+// stopped this way has often also slept past its token's expiry: the heal
+// resets an expired token first (scion reset-auth, behind verifyRole, the
+// pre-role record guard), then reports. verifyRole nil ⇒ no reset.
+func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, name, project string) {
 	agents, err := sc.List(ctx, project)
 	if err != nil {
 		return // the suspend that follows reports a hub that cannot answer
@@ -118,9 +120,19 @@ func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Clien
 	if rec == nil || rec.Phase != scion.PhaseStopped {
 		return
 	}
-	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, Log: func(format string, args ...any) {
+	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, VerifyRole: verifyRole, Log: func(format string, args ...any) {
 		logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...)
 	}}, project, rec)
+}
+
+// stopRoleVerifier is the pre-role record guard for the stop heal's token
+// reset: the hub read apply's guard makes (hubapi.VerifyAgentRole), through
+// the jail with the controller PAT.
+func stopRoleVerifier(jr proc.Runner, st state.State, sc *scion.Client) func(ctx context.Context, project, agent string) error {
+	hc := &hubapi.Client{T: hubJailTransport(jr, st)}
+	return func(ctx context.Context, project, agent string) error {
+		return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, project, agent)
+	}
 }
 
 // stopHealBudget bounds healStoppedManager: a list, a token read, a harness

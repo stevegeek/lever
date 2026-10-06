@@ -172,7 +172,7 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 		}
 	}
 	for _, need := range []string{"default-src 'none'", "script-src mac.ts.net/lever/;", "style-src mac.ts.net/lever/;",
-		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/;", "manifest-src mac.ts.net/lever/;", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/;", "manifest-src mac.ts.net/lever/;", "worker-src mac.ts.net/lever/;", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 		"require-trusted-types-for 'script'", "trusted-types 'none'"} {
 		if !strings.Contains(csp, need) {
 			t.Errorf("chat CSP lacks %q: %s", need, csp)
@@ -180,7 +180,7 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	}
 	// The whole policy, pinned: a directive added or widened shows up here.
 	if want := "default-src 'none'; script-src mac.ts.net/lever/; style-src mac.ts.net/lever/; connect-src 'self'; " +
-		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
+		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; worker-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
 		"frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"; csp != want {
 		t.Errorf("chat CSP\n got %s\nwant %s", csp, want)
 	}
@@ -509,7 +509,7 @@ func TestChatPageEmbedsOnlyThePage(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	want := "apple-touch-icon.png,chat.css,chat.html,chat.js,chatcore.js,icon-192.png,icon-512.png,icon-maskable-512.png"
+	want := "apple-touch-icon.png,chat.css,chat.html,chat.js,chatcore.js,icon-192.png,icon-512.png,icon-maskable-512.png,sw.js"
 	if got := strings.Join(names, ","); got != want {
 		t.Fatalf("embedded %s, want only the page's files: %s", got, want)
 	}

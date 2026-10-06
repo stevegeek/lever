@@ -176,6 +176,11 @@ type Config struct {
 	// driver for nothing, since a login would create the contact's hub user.
 	// Nil: no contact is bound.
 	ContactUser func(login string) (string, bool)
+	// Push, when non-nil, is the Web Push service (remote.push, push.go):
+	// the page's subscription routes and worker, and the hub streams that
+	// turn agent messages into pushes (the caller runs Push.Run). It needs
+	// ChatAgent: without the chat page there is nothing to notify about.
+	Push *Push
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -522,6 +527,10 @@ func NewHandler(cfg Config) http.Handler {
 	}
 	if cfg.ChatAgent != "" {
 		g.chat = newChatPage(cfg)
+		if cfg.Push != nil {
+			g.push = cfg.Push
+			cfg.Push.attach(g)
+		}
 	}
 	return g
 }
@@ -743,6 +752,7 @@ type gate struct {
 	rp       *httputil.ReverseProxy
 	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
 	chat     *chatPage     // nil unless Config.ChatAgent is set
+	push     *Push         // nil unless Config.Push and ChatAgent are set
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration

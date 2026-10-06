@@ -128,11 +128,7 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	// and Sec-Fetch-Site, when sent, must be same-origin ("none" is a typed
 	// navigation, never a page's fetch). The gate already refused an Origin
 	// for another host.
-	if o := r.Header.Values("Origin"); len(o) != 1 || o[0] == "" || o[0] == "null" {
-		refuse(http.StatusForbidden, "origin", nil)
-		return
-	}
-	if s := r.Header.Values("Sec-Fetch-Site"); len(s) > 1 || len(s) == 1 && !strings.EqualFold(s[0], "same-origin") {
+	if !sameOriginWrite(r) {
 		refuse(http.StatusForbidden, "origin", nil)
 		return
 	}

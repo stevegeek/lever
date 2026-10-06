@@ -25,6 +25,15 @@ func ContainerLive(status string) bool {
 	return status == "running" || strings.HasPrefix(status, "Up")
 }
 
+// RunningContainerDown reports a record the hub still calls running while
+// its container is not live: until the hub's own sweep marks it error, a
+// message to it reaches nothing. A blank status ("cannot tell") and
+// "created", which scion reports briefly for a running record, are not down.
+func RunningContainerDown(phase, containerStatus string) bool {
+	return phase == PhaseRunning && containerStatus != "" && !ContainerLive(containerStatus) &&
+		!strings.EqualFold(containerStatus, "created")
+}
+
 // LiveBudget bounds WaitAgentLive. Attempts × Interval is how long a record may
 // take to become live at all; Settle is how long it must then STAY live before
 // the caller may call it up (0 = return on the first live observation, the

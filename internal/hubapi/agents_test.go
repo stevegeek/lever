@@ -249,3 +249,11 @@ func TestVerifyAgentRoleRefusesAGrandfatheredRecord(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentsDecodesStateFields(t *testing.T) {
+	f := agentsScript(`{"agents":[{"id":"a1","slug":"w1","phase":"suspended","activity":"idle","containerStatus":"Exited (0) 2 minutes ago"}]}`)
+	got, err := (&Client{T: f}).Agents(context.Background(), "lever", "hub")
+	if err != nil || len(got) != 1 || got[0].Phase != "suspended" || got[0].Activity != "idle" || got[0].ContainerStatus != "Exited (0) 2 minutes ago" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}

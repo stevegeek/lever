@@ -158,8 +158,7 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 			// so no caller can echo or audit an agent's own words as a
 			// phase.
 			phase := scion.PhaseLabel(a.Phase)
-			if phase == scion.PhaseRunning && a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus) &&
-				!strings.EqualFold(a.ContainerStatus, "created") {
+			if scion.RunningContainerDown(phase, a.ContainerStatus) {
 				// The hub keeps a record "running" for minutes after its
 				// container died (until its own sweep marks it error). In
 				// that window a resume was a no-op and a message was "sent"

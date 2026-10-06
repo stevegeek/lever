@@ -24,16 +24,26 @@ type Agent struct {
 	// `full` once, and marked. To lever that is the empty-role hazard wearing
 	// a stored role, and every consumer of Role treats it as such.
 	RoleGrandfathered bool
+	// Phase, Activity and ContainerStatus are the record's state as the hub
+	// stores it. They are agent-reported text (an agent may post its own
+	// status): label them with scion.PhaseLabel / ActivityLabel before use;
+	// never echo them.
+	Phase           string
+	Activity        string
+	ContainerStatus string
 }
 
 // wireAgent decodes the subset of the hub's agent record lever reads. The hub
 // embeds its whole store.Agent in the list response, so this deliberately names
 // only the fields lever uses rather than mirroring a large upstream struct.
 type wireAgent struct {
-	ID            string `json:"id"`
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	AppliedConfig *struct {
+	ID              string `json:"id"`
+	Slug            string `json:"slug"`
+	Name            string `json:"name"`
+	Phase           string `json:"phase"`
+	Activity        string `json:"activity"`
+	ContainerStatus string `json:"containerStatus"`
+	AppliedConfig   *struct {
 		AgentRole              string `json:"agentRole"`
 		AgentRoleGrandfathered bool   `json:"agentRoleGrandfathered"`
 	} `json:"appliedConfig"`
@@ -93,7 +103,8 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 			return nil, &APIError{Msg: fmt.Sprintf("decoding agents: %v", err)}
 		}
 		for _, a := range records {
-			rec := Agent{ID: a.ID, Slug: a.Slug, Name: a.Name}
+			rec := Agent{ID: a.ID, Slug: a.Slug, Name: a.Name,
+				Phase: a.Phase, Activity: a.Activity, ContainerStatus: a.ContainerStatus}
 			if a.AppliedConfig != nil {
 				rec.Role = a.AppliedConfig.AgentRole
 				rec.RoleGrandfathered = a.AppliedConfig.AgentRoleGrandfathered

@@ -26,10 +26,12 @@ function hubWith(parts = {}) {
     transcript: () => ({ status: 200, body: { contact: 'c@x', agent: 'w1', matched: true, messages: [] } }),
     upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: 'report.pdf', size: 3, sha256: '0'.repeat(64) }, progress: [50, 100] }),
     files: () => ({ status: 200, body: { files: [] } }),
+    viewFiles: () => ({ status: 200, body: { files: [] } }),
     ...parts,
   };
   const fn = (method, path, body) => {
     if (path === '/lever/api/contacts') return h.contacts();
+    if (path.startsWith('/lever/api/contacts/') && path.endsWith('/files')) return h.viewFiles(path);
     if (path.startsWith('/lever/api/contacts/')) return h.transcript(path);
     if (path === '/lever/api/agents') return h.agents();
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
@@ -1835,4 +1837,44 @@ test('push and files together: both buttons work', async () => {
   await env.runTimers();
   assert.equal(env.count('POST', '/lever/api/files/boss'), 1);
   assert.equal(sends(env).length, 1);
+});
+
+test('operator view: a contact\'s files are listed read-only, with links to lever\'s download route', async () => {
+  const id = 'e'.repeat(32);
+  const evil = '<img src=x onerror=alert(1)>.pdf';
+  const env = await load(hubWith({
+    agents: withFiles([BOSS(), A('w1')]),
+    contacts: CONTACTS,
+    viewFiles: () => ({ status: 200, body: { files: [
+      { id, name: evil, size: 10, at: '2026-10-07T10:00:00Z', direction: 'sent' },
+      { id: 'f'.repeat(32), name: 'v3.xlsm', size: 2048, direction: 'received' },
+      { id: '../x', name: 'bad', size: 1, direction: 'sent' },
+    ] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 1);
+  assert.equal(env.els.filespanel.hidden, false);
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, true);
+  const rows = env.els.filelist.children;
+  assert.equal(rows.length, 2);
+  const a = rows[0].children.find((c) => c.tag === 'a');
+  assert.equal(a.textContent, evil);
+  assert.equal(a.attrs.href, `https://mac.ts.net/lever/api/files/w1/${id}`);
+  assert.match(rows[0].textContent, /From c@x/);
+  assert.match(rows[1].textContent, /From w1/);
+  await env.poll();
+  assert.equal(env.calls.filter((c) => c.method !== 'GET').length, 0, 'the view writes nothing');
+  env.els.back.dispatch('click');
+  assert.equal(env.els.filespanel.hidden, true);
+  assert.equal(env.els.filelist.children.length, 0);
+});
+
+test('operator view with files off: no files list and no request', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 0);
+  assert.equal(env.els.filespanel.hidden, true);
 });

@@ -333,6 +333,12 @@ export function transcriptPath(login, name, cursor) {
   return `/lever/api/contacts/${encodeURIComponent(login)}/agents/${encodeURIComponent(name)}/messages?${q}`;
 }
 
+// viewFilesPath is the route of a contact's files with one agent
+// (remote.files, operator only).
+export function viewFilesPath(login, name) {
+  return `/lever/api/contacts/${encodeURIComponent(login)}/agents/${encodeURIComponent(name)}/files`;
+}
+
 // transcriptWho names a row's writer.
 export function transcriptWho(m, login, name) {
   if (m.from === 'contact') return login;

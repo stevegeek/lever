@@ -22,6 +22,7 @@ import {
   sizeText,
   uploadErrorText,
   uploadNote,
+  viewFilesPath,
   LIST_MS,
   MAX_MESSAGE,
   NOT_SHOWN,
@@ -473,13 +474,35 @@ function openTranscript(login, name) {
   showNotice(c.signedIn ? '' : `${login} has not signed in yet.`);
   renderContacts();
   if (c.signedIn) void readTranscript('');
+  void loadViewFiles();
 }
 
 // pollView refreshes the contact list and the open transcript.
 function pollView() {
   if (document.visibilityState !== 'visible') return;
   void reloadContacts();
-  if (view) void readTranscript('');
+  if (view) {
+    void readTranscript('');
+    void loadViewFiles();
+  }
+}
+
+// loadViewFiles lists the open transcript's files (the contact's uploads to
+// the agent and the agent's shares to it), read-only, while files are on.
+async function loadViewFiles() {
+  const v = view;
+  if (!v || !roster || !roster.files) return;
+  const seq = ++filesSeq;
+  el.filespanel.hidden = false;
+  const res = await api(viewFilesPath(v.login, v.name));
+  if (seq !== filesSeq || view !== v) return;
+  const list = res.ok ? fileList(res.body) : null;
+  if (!list) {
+    showFilesNote(`The files cannot be read: ${viewErrorText(res.status, res.body)}`);
+    return;
+  }
+  showFilesNote(list.length ? '' : 'No files yet.');
+  el.filelist.replaceChildren(...list.map((f) => fileRow(v.name, f, v.login)));
 }
 
 function historyPath(c, cursor) {
@@ -863,7 +886,8 @@ async function loadFiles() {
 
 // fileRow is one file as text, with a download link only to lever's own
 // route for that agent and id (built here, never taken from the answer).
-function fileRow(agent, f) {
+// sender names who uploaded a "sent" row ('' = this login).
+function fileRow(agent, f, sender = '') {
   const li = document.createElement('li');
   li.className = `file ${f.direction}`;
   const a = document.createElement('a');
@@ -873,7 +897,7 @@ function fileRow(agent, f) {
     a.setAttribute('download', f.name);
   }
   setText(a, f.name);
-  li.append(span('who', f.direction === 'received' ? `From ${agent}` : 'You sent'), a, span('meta', `${sizeText(f.size)} · ${when({ createdAt: f.at })}`));
+  li.append(span('who', f.direction === 'received' ? `From ${agent}` : sender ? `From ${sender}` : 'You sent'), a, span('meta', `${sizeText(f.size)} · ${when({ createdAt: f.at })}`));
   return li;
 }
 
@@ -1431,7 +1455,10 @@ el.text.addEventListener('keydown', (ev) => {
   if (!ev.repeat) void send();
 });
 el.older.addEventListener('click', () => void (view ? readTranscript(viewOlder) : loadOlder()));
-el.refresh.addEventListener('click', () => void readTranscript(''));
+el.refresh.addEventListener('click', () => {
+  void readTranscript('');
+  void loadViewFiles();
+});
 el.back.addEventListener('click', closeChat);
 el.ask.addEventListener('click', askManager);
 el.push.addEventListener('click', () => void togglePush());

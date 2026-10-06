@@ -59,27 +59,28 @@ type contactsAnswer struct {
 }
 
 // opViewTarget splits an ESCAPED path under /lever/api/contacts: list for
-// the bare route, or the login and agent of a messages route. Splitting the
+// the bare route, or the login and agent of a messages route (files for the
+// files route, remote.files). Splitting the
 // escaped form keeps a "/" inside a login (legal in allowed_users) in its
 // segment.
-func opViewTarget(escaped string) (login, name string, list, ok bool) {
+func opViewTarget(escaped string) (login, name string, list, files, ok bool) {
 	if escaped == chatContactsPath {
-		return "", "", true, true
+		return "", "", true, false, true
 	}
 	rest, found := strings.CutPrefix(escaped, chatContactsPath+"/")
 	if !found {
-		return "", "", false, false
+		return "", "", false, false, false
 	}
 	parts := strings.Split(rest, "/")
-	if len(parts) != 4 || parts[1] != "agents" || parts[3] != "messages" {
-		return "", "", false, false
+	if len(parts) != 4 || parts[1] != "agents" || parts[3] != "messages" && parts[3] != "files" {
+		return "", "", false, false, false
 	}
 	l, err1 := url.PathUnescape(parts[0])
 	n, err2 := url.PathUnescape(parts[2])
 	if err1 != nil || err2 != nil || l == "" || !agentNameRE.MatchString(n) {
-		return "", "", false, false
+		return "", "", false, false, false
 	}
-	return l, n, false, true
+	return l, n, false, parts[3] == "files", true
 }
 
 // contactLogins is every contact login, in allowed_users order.
@@ -114,7 +115,7 @@ func (g *gate) serveOperatorView(w http.ResponseWriter, r *http.Request, line *A
 		g.refuseView(w, r, line, http.StatusMethodNotAllowed, "method")
 		return
 	}
-	login, name, list, ok := opViewTarget(r.URL.EscapedPath())
+	login, name, list, files, ok := opViewTarget(r.URL.EscapedPath())
 	if !ok {
 		g.refuseView(w, r, line, http.StatusNotFound, "not-found")
 		return
@@ -128,7 +129,33 @@ func (g *gate) serveOperatorView(w http.ResponseWriter, r *http.Request, line *A
 		g.refuseView(w, r, line, http.StatusNotFound, "not-found")
 		return
 	}
+	if files {
+		g.serveContactFiles(w, r, line, login, name)
+		return
+	}
 	g.serveContactHistory(w, r, line, login, name)
+}
+
+// serveContactFiles answers a contact's file exchange with one of its
+// agents (remote.files), from the files ledger alone: the same rows the
+// contact's own Files panel shows ("sent" = the contact's upload). Each row
+// links to the normal download route, where mayDownload lets an operator
+// fetch any record of an agent it may message.
+func (g *gate) serveContactFiles(w http.ResponseWriter, r *http.Request, line *AuditLine, login, name string) {
+	line.Contact, line.Agent = truncateAudit(login), truncateAudit(name)
+	if g.files == nil {
+		g.refuseView(w, r, line, http.StatusNotFound, "not-found")
+		return
+	}
+	files, err := g.filesFor(name, login)
+	if err != nil {
+		line.Error = err.Error()
+		g.refuseView(w, r, line, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	n := len(files)
+	line.Count = &n
+	g.answerViewJSON(w, r, line, DecisionOperatorView, http.StatusOK, map[string]any{"files": files})
 }
 
 // serveContactList answers the contacts and their message agents, from

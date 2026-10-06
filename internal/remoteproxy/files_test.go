@@ -566,3 +566,42 @@ func TestContentDispositionRefusesAnUnsanitizedName(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestOperatorViewListsAContactsFiles(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	var lines lockedLines
+	cfg.Audit = lines.add
+	h := NewHandler(cfg)
+	if rw := upload(t, h, "c@x", "w1", "c.pdf", "x"); rw.Code != 201 {
+		t.Fatal(rw.Code)
+	}
+	if rw := upload(t, h, "d@x", "w1", "d.pdf", "x"); rw.Code != 201 {
+		t.Fatal(rw.Code)
+	}
+	id, _ := shareRec(t, cfg, "w1", "c@x", "v3.xlsm", "wb")
+	rw := chatDo(h, chatOp, "GET", "/lever/api/contacts/c@x/agents/w1/files")
+	body := rw.Body.String()
+	if rw.Code != 200 || !strings.Contains(body, `"name":"c.pdf"`) || !strings.Contains(body, `"id":"`+id+`"`) ||
+		strings.Contains(body, "d.pdf") || rw.Header().Get("Content-Security-Policy") != "sandbox" {
+		t.Fatalf("%d %s", rw.Code, body)
+	}
+	all := lines.all()
+	if last := all[len(all)-1]; last.Decision != DecisionOperatorView || last.Contact != "c@x" || last.Agent != "w1" || last.Count == nil || *last.Count != 2 {
+		t.Fatalf("audit %+v", last)
+	}
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/contacts/c@x/agents/w1/files"); rw.Code != 403 && rw.Code != 404 {
+		t.Fatalf("a contact reached the operator view: %d", rw.Code)
+	}
+	for _, p := range []string{"/lever/api/contacts/c@x/agents/w2/files", "/lever/api/contacts/z@x/agents/w1/files", "/lever/api/contacts/c@x/agents/w1/files/x"} {
+		if rw := chatDo(h, chatOp, "GET", p); rw.Code != 404 {
+			t.Fatalf("%s = %d", p, rw.Code)
+		}
+	}
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 200 || rw.Body.String() != "wb" {
+		t.Fatalf("the view's link = %d", rw.Code)
+	}
+	if rw := chatDo(NewHandler(chatConfig(t, hub)), chatOp, "GET", "/lever/api/contacts/c@x/agents/w1/files"); rw.Code != 404 {
+		t.Fatalf("files off = %d", rw.Code)
+	}
+}

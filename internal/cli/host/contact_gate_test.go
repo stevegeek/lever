@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -234,5 +237,34 @@ func TestContactSessionWarningIsBounded(t *testing.T) {
 	}
 	if contactSessionWarning("hello", nil) != "" {
 		t.Fatal("nothing blocked must print nothing")
+	}
+}
+
+// Agents whose sessions predate the current skill share one group in the
+// warning even though each started at its own time (after an upgrade every
+// agent does); the per-agent start time stays in contactSession's error.
+func TestContactSessionWarningGroupsStaleSessions(t *testing.T) {
+	app, _, st := scaffoldFixture(t)
+	app.Name = "hello"
+	withContact(app)
+	app.Remote.AllowedUsers[1].Agents = []string{"scratch", "hello"}
+	if _, err := syncSkills(app, st, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for i, a := range []string{"scratch", "hello"} {
+		r := sessionrec.Record{Agent: a, SkillHash: "old", Version: "0.0." + strconv.Itoa(i), Started: time.Date(2026, 9, 1+i, 0, 0, 0, 0, time.UTC)}
+		if err := sessionrec.Append(st.Sessions(), r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "2026-09-01") {
+		t.Fatalf("contactSession err = %v, want the start time in it", err)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetErr(&out)
+	printContactSessionWarnings(cmd, app, st)
+	if !strings.Contains(out.String(), "scratch, hello (its session started before its current skill was written)") || strings.Contains(out.String(), "2026-09") {
+		t.Fatalf("warning %q: want one group with no per-agent time", out.String())
 	}
 }

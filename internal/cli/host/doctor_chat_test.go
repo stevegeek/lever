@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
@@ -132,5 +133,44 @@ func TestCheckVerifiedChatNamesSeeLists(t *testing.T) {
 	r := checkVerifiedChat(app, st)
 	if !strings.Contains(r.detail, "c@x contact (w1, w3; see: w2)") || !strings.Contains(r.detail, "d@x contact (w4)") {
 		t.Fatalf("row = %+v", r)
+	}
+}
+
+func TestCheckAgentMessages(t *testing.T) {
+	tree := t.TempDir()
+	st := state.State{Dir: t.TempDir()}
+	app := &config.App{Name: "x", Tree: tree, Remote: config.Remote{Enabled: true,
+		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}}}
+	if r := checkAgentMessages(app, st); !r.ok || !strings.Contains(r.detail, "off") {
+		t.Fatalf("off: %+v", r)
+	}
+	app.Remote.AgentMessages.Enabled = true
+	r := checkAgentMessages(app, st)
+	if !r.ok || !strings.Contains(r.detail, "c@x (x)") || !strings.Contains(r.detail, "follow_up_after 24h,") ||
+		!strings.Contains(r.detail, "max_chars 4000") || !strings.Contains(r.detail, "image") {
+		t.Fatalf("on: %+v", r)
+	}
+	if strings.Contains(r.detail, "op@x") {
+		t.Fatalf("an operator is not a contact: %+v", r)
+	}
+	app.Remote.AgentMessages.FollowUpAfter = 90 * time.Minute
+	if r := checkAgentMessages(app, st); !strings.Contains(r.detail, "follow_up_after 1h30m0s") {
+		t.Fatalf("a duration that is not whole hours: %+v", r)
+	}
+	if err := os.MkdirAll(st.AgentLedger(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if r := checkAgentMessages(app, st); !r.ok || !strings.Contains(r.detail, "0700") {
+		t.Fatalf("a private ledger: %+v", r)
+	}
+	if err := os.Chmod(st.AgentLedger(), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if r := checkAgentMessages(app, st); r.ok {
+		t.Fatalf("a group-writable ledger must fail: %+v", r)
+	}
+	inside := state.State{Dir: filepath.Join(tree, ".lever-state")}
+	if r := checkAgentMessages(app, inside); r.ok {
+		t.Fatalf("state inside the tree must fail: %+v", r)
 	}
 }

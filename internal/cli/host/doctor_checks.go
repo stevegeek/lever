@@ -501,6 +501,51 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s/ (%d files, 0700)", tier, stateRel(st, p), len(files)), ""}
 }
 
+// checkAgentMessages reports remote.agent_messages: off, or on with the
+// limits, the contacts and their agents, and the agent ledger's safety.
+func checkAgentMessages(app *config.App, st state.State) checkResult {
+	const name = "agent messages"
+	if !app.AgentMessagesOn() {
+		return checkResult{name, true, "off (agents answer contacts as before; nothing is filtered)", ""}
+	}
+	if brokerctl.StateInsideTree(app, st) {
+		return checkResult{name, false, "on, but the state directory is inside the tree: no record can be kept, so contacts see no agent message",
+			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	}
+	var who []string
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			who = append(who, u.Login+" ("+strings.Join(u.Agents, ", ")+")")
+		}
+	}
+	detail := fmt.Sprintf("on: follow_up_after %s, max_chars %d; contacts: %s; agents need an image with this release's lever-agent (contacts, contact_message)",
+		shortDuration(app.EffectiveAgentFollowUpAfter()), app.EffectiveAgentMaxChars(), strings.Join(who, "; "))
+	p := st.AgentLedger()
+	fi, err := os.Lstat(p)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return checkResult{name, true, detail + "; no message authorized yet", ""}
+	case err != nil:
+		return checkResult{name, false, "cannot read the agent ledger: " + err.Error(), "check " + stateRel(st, p)}
+	case !fi.IsDir():
+		return checkResult{name, false, "the agent ledger " + stateRel(st, p) + " is not a directory (a symlink?), so contacts see no agent message", "remove " + p}
+	case fi.Mode().Perm()&0o022 != 0:
+		return checkResult{name, false, fmt.Sprintf("the agent ledger %s is %v: another user can add a file, so contacts see no agent message", stateRel(st, p), fi.Mode().Perm()), "chmod 700 " + p}
+	}
+	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
+		return checkResult{name, false, fmt.Sprintf("the agent ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()), "remove " + p}
+	}
+	return checkResult{name, true, detail + "; ledger " + stateRel(st, p) + "/ (0700)", ""}
+}
+
+// shortDuration prints whole hours as "24h" (time.Duration prints 24h0m0s).
+func shortDuration(d time.Duration) string {
+	if d > 0 && d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", d/time.Hour)
+	}
+	return d.String()
+}
+
 // checkChatLabels reads remote.labels_file the way the proxy does. A bad
 // file is a warning, not a failure: it is agent-written, and its only
 // effect is that the chat page shows no labels. The row names the fault.

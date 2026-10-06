@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/chatfiles"
+	"gopkg.in/yaml.v3"
 )
 
 func filesApp() *App {
@@ -80,5 +81,56 @@ func TestDefaultFilesExtensionsHoldNoActiveContent(t *testing.T) {
 		if slices.Contains(filesActiveExts, e) || !filesExtRE.MatchString(e) {
 			t.Errorf("default extension %q", e)
 		}
+	}
+}
+
+func TestFilesDirectionsAndLoginSwitch(t *testing.T) {
+	a := filesApp()
+	a.Remote.Files.Enabled = true
+	if !a.FilesUploadsOn() || !a.FilesSharesOn() || len(a.FilesExcludedLogins()) != 0 {
+		t.Fatal("defaults: both directions on, nobody excluded")
+	}
+	no, yes := false, true
+	a.Remote.Files.Uploads, a.Remote.Files.Shares = &no, &yes
+	if a.FilesUploadsOn() || !a.FilesSharesOn() {
+		t.Fatal("uploads off")
+	}
+	a.Remote.Files.Shares = &no
+	if a.FilesSharesOn() {
+		t.Fatal("shares off")
+	}
+	a.Remote.AllowedUsers[1].Files = &no
+	a.Remote.AllowedUsers[0].Files = &yes
+	if got := a.FilesExcludedLogins(); !slices.Equal(got, []string{"c@x"}) {
+		t.Fatalf("%v", got)
+	}
+	if a.Remote.AllowedUsers[1].FilesAllowed() || !a.Remote.AllowedUsers[0].FilesAllowed() {
+		t.Fatal("FilesAllowed")
+	}
+	a.Remote.Files.Enabled = false
+	if a.FilesUploadsOn() || a.FilesSharesOn() || len(a.FilesExcludedLogins()) != 0 {
+		t.Fatal("off: no direction is on and nobody is listed")
+	}
+}
+
+func TestAllowedUserFilesKey(t *testing.T) {
+	var u struct {
+		Users []RemoteUser `yaml:"users"`
+	}
+	if err := yaml.Unmarshal([]byte("users:\n- {login: c@x, tier: contact, agents: [w1], files: false}\n- {login: op@x, files: true}\n- d@x\n"), &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Users[0].Files == nil || *u.Users[0].Files || u.Users[1].Files == nil || !*u.Users[1].Files || u.Users[2].Files != nil {
+		t.Fatalf("%+v", u.Users)
+	}
+	if err := yaml.Unmarshal([]byte("users:\n- {login: c@x, files: maybe}\n"), &u); err == nil {
+		t.Fatal("a non-bool files was accepted")
+	}
+	var f Files
+	if err := yaml.Unmarshal([]byte("enabled: true\nuploads: false\nshares: true\n"), &f); err != nil || f.Uploads == nil || *f.Uploads || !*f.Shares {
+		t.Fatalf("%+v %v", f, err)
+	}
+	if err := yaml.Unmarshal([]byte("uploads: sometimes\n"), &f); err == nil {
+		t.Fatal("a non-bool uploads was accepted")
 	}
 }

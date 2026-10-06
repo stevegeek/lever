@@ -242,6 +242,34 @@ func (a *App) EffectiveFilesExtensions() []string {
 	return slices.Clone(a.Remote.Files.Extensions)
 }
 
+// FilesUploadsOn reports whether logins may upload (files on, and
+// remote.files.uploads not false).
+func (a *App) FilesUploadsOn() bool {
+	return a.FilesOn() && (a.Remote.Files.Uploads == nil || *a.Remote.Files.Uploads)
+}
+
+// FilesSharesOn reports whether agents may share files (files on, and
+// remote.files.shares not false).
+func (a *App) FilesSharesOn() bool {
+	return a.FilesOn() && (a.Remote.Files.Shares == nil || *a.Remote.Files.Shares)
+}
+
+// FilesExcludedLogins is every allowed_users login with files: false, in
+// config order, while files are on (nil otherwise): logins with no file
+// exchange at all.
+func (a *App) FilesExcludedLogins() []string {
+	if !a.FilesOn() {
+		return nil
+	}
+	var out []string
+	for _, u := range a.Remote.AllowedUsers {
+		if !u.FilesAllowed() {
+			out = append(out, u.Login)
+		}
+	}
+	return out
+}
+
 // AgentWorkspaces maps each agent name to its workspace, tree-relative:
 // the manager's is the tree ("."), a worker's its dir. Inside its container
 // each one is /workspace.

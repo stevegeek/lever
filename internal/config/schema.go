@@ -487,6 +487,12 @@ type Files struct {
 	// Extensions are the accepted file types, lowercase, without the dot.
 	// Empty = chatfiles.DefaultExtensions.
 	Extensions []string `yaml:"extensions"`
+	// Uploads and Shares turn one direction off (nil = on): no new upload
+	// from a login, or no new share from an agent. Records already made
+	// stay listed; a share already made is no longer downloadable while
+	// Shares is off.
+	Uploads *bool `yaml:"uploads"`
+	Shares  *bool `yaml:"shares"`
 }
 
 const (

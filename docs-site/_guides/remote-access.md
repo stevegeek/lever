@@ -1240,8 +1240,8 @@ remote:
   id answers like an unknown one. No log, audit line or record holds file content.
 - **Limits.** `max_bytes` and `extensions`; per login and agent, 30 uploads an hour and 1 GiB a
   day; per login, 60 upload attempts an hour (refused ones count), 60 file lists and 20
-  downloads a minute; 2 uploads at once per login, 4 in all; 2 downloads at once per login, 4 in
-  all, the last one only for an operator; 20 shares an hour per agent.
+  downloads a minute; 2 uploads and 2 downloads at once per login, 4 of each in all, the last
+  one only for an operator; 20 shares an hour per agent.
   The extensions `html`, `htm`, `xhtml`, `shtml`, `svg`, `js`, `mjs` and `xml` are refused at
   config load.
 - **Turning it on.** `landing: chat` is required. `lever apply` restarts the broker and the

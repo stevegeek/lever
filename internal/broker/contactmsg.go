@@ -72,6 +72,10 @@ const (
 	// contactReplyWindow is how long after a contact's post an agent may
 	// reply to it outside the initiate rule.
 	contactReplyWindow = 24 * time.Hour
+	// contactRepliesPerRef bounds the replies to one contact post, so one
+	// verified post cannot carry an agent's whole hourly rate for a day.
+	// Counted from the ledger, under its lock.
+	contactRepliesPerRef = 3
 	// contactBodyLimit fits a 16000-character text in JSON escapes.
 	contactBodyLimit = 128 << 10
 )
@@ -161,10 +165,12 @@ func contactText(text string, max int) string {
 	if !utf8.ValidString(text) {
 		return refuseBadText
 	}
-	for i, r := range text {
-		if r == '＠' || r == '@' && (i == 0 || !wordByte(text[i-1])) {
+	prev := rune(-1) // the rune before r; -1 at the start
+	for _, r := range text {
+		if r == '＠' || r == '@' && (prev < 0 || !wordRune(prev)) {
 			return refuseBadText
 		}
+		prev = r
 		if r == utf8.RuneError || r != '\n' && r != '\t' && unicode.IsControl(r) {
 			return refuseBadText
 		}
@@ -178,9 +184,13 @@ func contactText(text string, max int) string {
 	return ""
 }
 
-// wordByte is scion's mention boundary rule (mention_translate.go isWordChar).
-func wordByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+// wordRune is scion's mention boundary rule (mention_translate.go
+// isWordChar) applied to the rune before an "@": an ASCII letter, digit,
+// "_" or "-" there means the "@" is inside a word, which the hub leaves
+// alone. Any other rune before it (space, punctuation, a non-ASCII letter
+// such as "é") is a boundary to the hub, so the "@" there is refused.
+func wordRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-'
 }
 
 func (b *Broker) handleContacts(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +260,9 @@ func (b *Broker) agentHubID(r *http.Request, slug string) (string, error) {
 }
 
 var errRate = errors.New(refuseRate)
+
+// errReplyCap: the contact post already has contactRepliesPerRef replies.
+var errReplyCap = errors.New(refuseLimit)
 
 type limitErr struct{ next time.Time }
 
@@ -324,6 +337,15 @@ func (b *Broker) handleContactMessage(w http.ResponseWriter, r *http.Request) {
 			return errRate
 		}
 		if kind == agentledger.KindReply {
+			n := 0
+			for _, p := range v.ForContact {
+				if p.Kind == agentledger.KindReply && p.ReplyTo == replyTo {
+					n++
+				}
+			}
+			if n >= contactRepliesPerRef {
+				return errReplyCap
+			}
 			return nil
 		}
 		var initiated []time.Time
@@ -341,6 +363,9 @@ func (b *Broker) handleContactMessage(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.As(err, &le):
 		refuse(refuseLimit, "you have an unanswered message to this contact; wait for their answer or next_allowed_at", "limit", le.next)
+		return
+	case errors.Is(err, errReplyCap):
+		refuse(refuseLimit, "this contact message already has 3 replies; wait for the contact to write again", "reply cap", time.Time{})
 		return
 	case errors.Is(err, errRate):
 		refuse(refuseRate, "too many messages this hour", "hourly rate", time.Time{})

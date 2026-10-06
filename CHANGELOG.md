@@ -13,7 +13,7 @@ version bump moves the block under the new version heading.
   agent messages a contact in two steps: `contact_message` (lever-capability MCP tool) checks that
   the contact lists the agent, that a reply answers that contact's verified post, and the limit (one
   unanswered message the agent started, one reminder after `follow_up_after`, 24 h by default;
-  replies are not limited), and records a hash of the exact text; the agent then sends it with the
+  a reply to a contact message: up to 3 per contact message), and records a hash of the exact text; the agent then sends it with the
   returned `scion message` command. The remote proxy shows a contact only agent messages whose text
   the record holds, removes text from the contact's events stream and DM previews, and counts only
   shown messages as unread; the operator's view is unchanged. Needs the agent image rebuilt

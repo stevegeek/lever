@@ -49,7 +49,7 @@ func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request
 		return
 	}
 	for _, id := range bound {
-		b.audit("contact", "remote", "allow", "shown to="+boundedLogin(req.Contact)+" agent="+req.Agent, "ref", id)
+		b.audit("contact", "remote", "allow", "shown to="+boundedLogin(req.Contact)+" agent="+boundedLogin(req.Agent), "ref", id)
 	}
 	out := wire.AgentMessagesMatchResponse{Keep: []string{}}
 	for _, m := range req.Messages {

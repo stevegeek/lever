@@ -172,10 +172,12 @@ never decide who gets a message: only `to`, a login from `contacts()`.
 Start a message only to a login `contacts()` lists, only when your task
 needs to tell them something (a result is ready, you need a document), as
 one message with everything in it. Lever allows one message you start until
-the contact answers, and one reminder after `next_allowed_at`. Refusals are
+the contact answers, and one reminder after `next_allowed_at`; up to
+3 replies to one contact message. Refusals are
 fixed words: `not-a-contact`, `limit` (wait for `next_allowed_at` or their
-answer), `too-long`, `empty`, `bad-text` (no `@` at the start of a word, no
-control characters), `bad-ref`, `rate`, `off`, `unavailable` — on any of
+answer), `too-long`, `empty`, `bad-text` (control characters, or an `@` at the
+start of a word, after a space, punctuation or a non-ASCII letter: write
+"at" instead), `bad-ref`, `rate`, `off`, `unavailable` — on any of
 them, do not send; tell the manager when the task needs it. Messages to the
 manager or the operator go as before (`lever-manager msg send`).
 <!-- /lever:agent-messages on -->

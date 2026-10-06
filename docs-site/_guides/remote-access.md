@@ -1003,7 +1003,8 @@ remote:
   `scion message --body-file … -- '@<email>'` command it gets back. `contacts` lists the logins
   the agent may write to, with when it may start its next message.
 - **What the contact sees.** Only agent messages whose exact text the record holds, each
-  record showing one hub message, sent within 10 minutes of the authorization. A message the
+  record showing one hub message, sent within 10 minutes of the authorization (the hub's time
+  for it may be at most 10 seconds before the authorization and 2 minutes after its expiry). A message the
   agent sent any other way, or edited after it showed, is removed from the contact's history.
   Reply previews are removed; attachment entries of removed messages too. The contact's event
   stream carries the subject and ids of each event, never text or a sender; the DM list carries
@@ -1012,8 +1013,9 @@ remote:
   closed); paging stays the hub's, so a page can hold fewer messages than asked for.
 - **The limit.** Per agent and contact: one message the agent started and the contact has not
   answered yet, then one reminder after `follow_up_after`; a message from the contact resets
-  it. Every authorization counts, sent or not. Replies are not limited by this rule. Every agent
-  has at most 30 authorizations an hour. Refusals are fixed words: `not-a-contact`, `limit`
+  it. Every authorization counts, sent or not. A reply to a contact message is not limited by
+  this rule: up to 3 per contact message, within 24 hours of it. Every agent has at most 30
+  authorizations an hour. Refusals are fixed words: `not-a-contact`, `limit`
   (with `next_allowed_at`), `too-long`, `empty`, `bad-text` (invalid UTF-8, a control
   character, or a word that starts with `@`, which the hub would rewrite), `bad-ref`, `rate`,
   `off`, `unavailable`. The broker audit names the login, agent, kind, record id, length and

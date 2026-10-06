@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -136,6 +137,14 @@ func TestContactMessageRefusesTextTheHubWouldChange(t *testing.T) {
 			t.Errorf("%q: %+v, want bad-text", text, got)
 		}
 	}
+	// The hub's boundary rule looks at the byte before "@": any non-ASCII
+	// rune ends in a byte the hub reads as a boundary, so "é@x" would be
+	// rewritten and is refused like " @x".
+	for _, text := range []string{"café@x", "日本@x"} {
+		if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: text}); got.OK || got.Reason != "bad-text" {
+			t.Errorf("%q: %+v, want bad-text", text, got)
+		}
+	}
 	if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "mail bob@example.com\n\tok"}); !got.OK {
 		t.Fatalf("an email inside a word is not a mention: %+v", got)
 	}
@@ -162,17 +171,133 @@ func TestContactMessageReplyNeedsAVerifiedContactPost(t *testing.T) {
 
 func TestContactMessageHourlyRateSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
-	post := contactEntry(chatScratchID, "q", "22222222-2222-2222-2222-222222222222")
-	f := verifyBroker(t, []chatledger.Entry{post}, agentMsgOpt(dir, time.Hour))
-	f.verify(t, "scratch", wire.MessageVerifyRequest{Timestamp: chatTS, From: contactSender})
-	for i := 0; i < 30; i++ {
-		if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "r", ReplyToRef: post.MessageID}); !got.OK {
-			t.Fatalf("reply %d: %+v", i, got)
+	// 30 authorizations of scratch in the last few minutes, written by an
+	// earlier broker.
+	led, err := agentledger.Open(filepath.Join(dir, "agent-ledger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := range 30 {
+		id, _ := agentledger.NewID()
+		a := agentledger.Auth{ID: id, Agent: "scratch", Contact: "client@example.org", Kind: agentledger.KindReply,
+			SHA256: agentledger.HashText("r"), Length: 1, ReplyTo: fmt.Sprintf("post-%d", i), Created: now.Add(-time.Minute), Expires: now.Add(9 * time.Minute)}
+		if err := led.Authorize(a, now, func(agentledger.View) error { return nil }); err != nil {
+			t.Fatal(err)
 		}
 	}
 	g := verifyBroker(t, nil, agentMsgOpt(dir, time.Hour)) // a new broker on the same ledger
 	if got := g.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "new"}); got.Reason != "rate" {
 		t.Fatalf("31st authorization in an hour: %+v, want rate", got)
+	}
+	// The rate is per agent: worker is still allowed.
+	if got := g.contactMessage(t, "worker", wire.ContactMessageRequest{To: "d@example.org", Text: "hello"}); !got.OK {
+		t.Fatalf("another agent: %+v", got)
+	}
+}
+
+// markVerified records that caller verified the post id (as message_verify
+// does), so a test can reach the checks after it.
+func (f *verifyFixture) markVerified(caller, id string) {
+	f.b.chatUses.mu.Lock()
+	f.b.chatUses.used[useKey(caller, id)] = time.Now()
+	f.b.chatUses.mu.Unlock()
+}
+
+// A reply ref passes only for a contact-tier post of that login to the
+// caller, recorded within 24 h, even when the caller verified it.
+func TestContactMessageReplyRefChecks(t *testing.T) {
+	ok := contactEntry(chatScratchID, "q", "55555555-5555-5555-5555-555555555555")
+	ok.Recorded = time.Now().UTC().Add(-23 * time.Hour)
+	toManager := contactEntry(chatManagerID, "q", "66666666-6666-6666-6666-666666666666")
+	old := contactEntry(chatScratchID, "q", "77777777-7777-7777-7777-777777777777")
+	old.Recorded = time.Now().UTC().Add(-25 * time.Hour)
+	asOperator := contactEntry(chatScratchID, "q", "88888888-8888-8888-8888-888888888888")
+	asOperator.Tier = chatledger.TierOperator
+	f := verifyBroker(t, []chatledger.Entry{ok, toManager, old, asOperator}, agentMsgOpt(t.TempDir(), time.Hour))
+	for _, e := range []chatledger.Entry{ok, toManager, old, asOperator} {
+		f.markVerified("scratch", e.MessageID)
+	}
+	for name, tc := range map[string]struct {
+		id   string
+		want string
+	}{
+		"within 24h":          {ok.MessageID, ""},
+		"posted to another":   {toManager.MessageID, "bad-ref"},
+		"older than 24h":      {old.MessageID, "bad-ref"},
+		"operator-tier entry": {asOperator.MessageID, "bad-ref"},
+	} {
+		got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "yes", ReplyToRef: tc.id})
+		if tc.want == "" && (!got.OK || got.Kind != agentledger.KindReply) || tc.want != "" && got.Reason != tc.want {
+			t.Errorf("%s: %+v, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// At most 3 replies per contact post, also across a broker restart.
+func TestContactMessageRepliesPerPostAreCapped(t *testing.T) {
+	dir := t.TempDir()
+	post := contactEntry(chatScratchID, "is v3 ready?", "99999999-9999-9999-9999-999999999999")
+	other := contactEntry(chatScratchID, "and v4?", "aaaaaaaa-9999-9999-9999-999999999999")
+	f := verifyBroker(t, []chatledger.Entry{post, other}, agentMsgOpt(dir, time.Hour))
+	f.markVerified("scratch", post.MessageID)
+	f.markVerified("scratch", other.MessageID)
+	reply := func(b *verifyFixture, id string) wire.ContactMessageResponse {
+		return b.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "yes", ReplyToRef: id})
+	}
+	for i := range 3 {
+		if got := reply(f, post.MessageID); !got.OK {
+			t.Fatalf("reply %d: %+v", i, got)
+		}
+	}
+	if got := reply(f, post.MessageID); got.OK || got.Reason != "limit" {
+		t.Fatalf("4th reply: %+v, want limit", got)
+	}
+	if got := reply(f, other.MessageID); !got.OK {
+		t.Fatalf("the cap is per post: %+v", got)
+	}
+	g := verifyBroker(t, []chatledger.Entry{post}, agentMsgOpt(dir, time.Hour))
+	g.markVerified("scratch", post.MessageID)
+	if got := reply(g, post.MessageID); got.OK || got.Reason != "limit" {
+		t.Fatalf("after a restart: %+v, want limit", got)
+	}
+}
+
+// An operator-tier chat entry of the contact's login (the same person
+// listed twice is refused by config, but the ledger is read as it is) does
+// not reset the initiate rule.
+func TestContactMessageOperatorEntryDoesNotReset(t *testing.T) {
+	f := verifyBroker(t, nil, agentMsgOpt(t.TempDir(), time.Hour))
+	if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "first"}); !got.OK {
+		t.Fatalf("first: %+v", got)
+	}
+	e := contactEntry(chatScratchID, "x", "bbbbbbbb-9999-9999-9999-999999999999")
+	e.Tier = chatledger.TierOperator
+	e.Recorded = time.Now().UTC().Add(time.Second)
+	if err := chatledger.NewWriter(f.ledger).Append(e); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "second"}); got.Reason != "limit" {
+		t.Fatalf("after an operator-tier entry: %+v, want limit", got)
+	}
+}
+
+// 60 calls a minute per agent, contacts and contact_message together.
+func TestContactCallRate(t *testing.T) {
+	f := verifyBroker(t, nil, agentMsgOpt(t.TempDir(), time.Hour))
+	for i := range 60 {
+		if rec := callWorker(t, f.b, wire.PathContacts, `{}`, "scratch"); strings.Contains(rec.Body.String(), `"rate"`) {
+			t.Fatalf("call %d refused: %s", i+1, rec.Body)
+		}
+	}
+	if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "hi"}); got.Reason != "rate" {
+		t.Fatalf("61st call: %+v, want rate", got)
+	}
+	if rec := callWorker(t, f.b, wire.PathContacts, `{}`, "scratch"); !strings.Contains(rec.Body.String(), `"rate"`) {
+		t.Fatalf("62nd call: %s", rec.Body)
+	}
+	if got := f.contactMessage(t, "worker", wire.ContactMessageRequest{To: "d@example.org", Text: "hi"}); !got.OK {
+		t.Fatalf("the call rate is per agent: %+v", got)
 	}
 }
 

@@ -143,3 +143,17 @@ func TestRemoteFilesSwitches(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 }
+
+func TestCheckFilesShowsTheSwitches(t *testing.T) {
+	app, st := filesApp(t, false)
+	app.Remote.Files.Enabled = true
+	if r := checkFiles(app, st); !r.ok || !strings.Contains(r.detail, "uploads on, shares on") || strings.Contains(r.detail, "no files for") {
+		t.Fatalf("defaults: %+v", r)
+	}
+	no := false
+	app.Remote.Files.Shares = &no
+	app.Remote.AllowedUsers[1].Files = &no
+	if r := checkFiles(app, st); !r.ok || !strings.Contains(r.detail, "uploads on, shares off") || !strings.Contains(r.detail, "no files for c@x") {
+		t.Fatalf("%+v", r)
+	}
+}

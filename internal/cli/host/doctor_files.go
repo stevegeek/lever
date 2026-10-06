@@ -32,8 +32,18 @@ func checkFiles(app *config.App, st state.State) checkResult {
 		return checkResult{name, false, "on, but the state directory is inside the tree: no record can be kept, so every upload, share and download is refused",
 			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
 	}
-	detail := fmt.Sprintf("on: max %d MiB, types %s; agents need an image with this release's lever-agent (contact_files, share_file)",
+	onOff := func(on bool) string {
+		if on {
+			return "on"
+		}
+		return "off"
+	}
+	detail := fmt.Sprintf("on: uploads %s, shares %s, max %d MiB, types %s", onOff(app.FilesUploadsOn()), onOff(app.FilesSharesOn()),
 		app.EffectiveFilesMaxBytes()>>20, strings.Join(app.EffectiveFilesExtensions(), ","))
+	if x := app.FilesExcludedLogins(); len(x) > 0 {
+		detail += "; no files for " + strings.Join(x, ", ")
+	}
+	detail += "; agents need an image with this release's lever-agent (contact_files, share_file)"
 	p := st.FilesLedger()
 	if fi, err := os.Lstat(p); err == nil {
 		switch {

@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"time"
 
@@ -72,6 +73,12 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 	if rec.Phase != scion.PhaseRunning && rec.Phase != scion.PhaseStopped {
 		return rec
 	}
+	if h.Revoked != nil && h.Revoked(rec.Slug) {
+		// `lever revoke` is the kill-switch: no token reset, no probe of its
+		// container, no session report on its behalf.
+		log("agent %q is revoked (lever revoke), or the revocation list cannot be read; lever does not heal its session", rec.Slug)
+		return rec
+	}
 	ref := jail.ContainerName(path.Base(project), rec.Slug)
 	healHubToken(ctx, h, project, rec.Slug, ref)
 	if rec.Phase != scion.PhaseStopped {
@@ -125,7 +132,8 @@ type SessionHealer struct {
 	// ⇒ no reset (the expiry is still logged with its fix).
 	VerifyRole func(ctx context.Context, project, agent string) error
 	// Revoked reports an agent (by slug) the broker has revoked: `lever
-	// revoke` stays the kill-switch, so its token is not reset. nil ⇒ no
+	// revoke` stays the kill-switch, so its session is not healed at all (no
+	// token reset, no probe, no session report). nil ⇒ no
 	// revocation is known. A read error must answer true (fail closed).
 	Revoked func(agent string) bool
 	Log     func(string, ...any)
@@ -142,20 +150,17 @@ func healHubToken(ctx context.Context, h SessionHealer, project, slug, ref strin
 	if !tok.Expired() {
 		return
 	}
-	log("agent %q: its hub token expired at %s (guest clock %s) — every reply, status and heartbeat it sends fails with 401; resetting it (scion reset-auth)",
-		slug, tok.Expiry.Format(time.RFC3339), tok.Now.Format(time.RFC3339))
-	if h.Revoked != nil && h.Revoked(slug) {
-		log("agent %q is revoked (lever revoke), or the revocation list cannot be read; its hub token is NOT reset", slug)
-		return
-	}
+	expired := fmt.Sprintf("its hub token expired at %s (guest clock %s) — every reply, status and heartbeat it sends fails with 401",
+		tok.Expiry.Format(time.RFC3339), tok.Now.Format(time.RFC3339))
 	if h.VerifyRole == nil {
-		log("WARNING: agent %q: its hub token was not reset here; run `lever apply`", slug)
+		log("WARNING: agent %q: %s; it is not reset here — run `lever apply`", slug, expired)
 		return
 	}
 	if err := h.VerifyRole(ctx, path.Base(project), slug); err != nil {
-		log("WARNING: agent %q: its hub token was NOT reset: %s", slug, termsafe.Sanitize(err.Error()))
+		log("WARNING: agent %q: %s; it is NOT reset: %s", slug, expired, termsafe.Sanitize(err.Error()))
 		return
 	}
+	log("agent %q: %s; resetting it (scion reset-auth)", slug, expired)
 	if err := sc.ResetAuth(ctx, slug, project); err != nil {
 		log("WARNING: agent %q: scion reset-auth failed: %s — in the guest, run `scion reset-auth %s -g %s` with the controller PAT", slug, termsafe.Sanitize(scion.ErrSummary(err)), slug, project)
 		return

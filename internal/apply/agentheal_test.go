@@ -423,3 +423,43 @@ func TestHealAgentSessionSkipsARevokedAgent(t *testing.T) {
 		t.Fatalf("an unrevoked agent must still be reset: %q", joinedCalls(f))
 	}
 }
+
+// TestHealAgentSessionRevokedSkipsEverything: a revoked agent's container is
+// not probed at all — no token read, no harness probe, no session report —
+// even when its phase reads stopped over a live harness.
+func TestHealAgentSessionRevokedSkipsEverything(t *testing.T) {
+	f := scionOKRunner()
+	probe := &fakeSessionProbe{tok: expiredToken(), alive: true}
+	var sink logSink
+	h := testHealer(scion.New(f, scion.Options{}), probe, sink.logf)
+	h.Revoked = func(string) bool { return true }
+	HealAgentSession(context.Background(), h, "/lever", &scion.Agent{Slug: "scratch", Phase: "stopped", ContainerStatus: "Up 1 hour"})
+	if len(probe.refs) != 0 || len(f.Calls) != 0 || !logged(&sink, "does not heal its session") {
+		t.Fatalf("probed %v, called %q, log %q", probe.refs, joinedCalls(f), sink.lines)
+	}
+}
+
+// TestHealAgentSessionLogsAResetOnlyWhenOneRuns: "resetting it" is logged
+// only once the guards passed; a refused or missing guard logs the expiry
+// with the reason it is not reset.
+func TestHealAgentSessionLogsAResetOnlyWhenOneRuns(t *testing.T) {
+	rec := &scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"}
+	for _, tc := range []struct {
+		name   string
+		verify func(context.Context, string, string) error
+		want   string
+		reset  bool
+	}{
+		{"guard passes", func(context.Context, string, string) error { return nil }, "resetting it", true},
+		{"guard refuses", func(context.Context, string, string) error { return errors.New("pre-role") }, "it is NOT reset", false},
+		{"no guard", nil, "it is not reset here", false},
+	} {
+		f := scionOKRunner()
+		var sink logSink
+		h := SessionHealer{Scion: scion.New(f, scion.Options{}), Probe: &fakeSessionProbe{tok: expiredToken()}, VerifyRole: tc.verify, Log: sink.logf}
+		HealAgentSession(context.Background(), h, "/lever", rec)
+		if logged(&sink, "resetting it") != tc.reset || !logged(&sink, tc.want) || sawScionCall(f, "reset-auth") != tc.reset {
+			t.Fatalf("%s: log %q calls %q", tc.name, sink.lines, joinedCalls(f))
+		}
+	}
+}

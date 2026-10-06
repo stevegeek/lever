@@ -178,6 +178,10 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
+- The `lever-operator` skill changed (a boundary line: do not run the `claude` CLI in the
+  manager's container). Run `lever init` in each instance after upgrading so the manager gets it;
+  until then the `lever doctor` skills row asks for it. A skill you adopted as custom keeps your
+  version: merge the line yourself.
 - Edit protected directories in place. Replacing one on the host (rm -rf
   and recreate, a rename-based deploy, a git checkout that removes and
   re-adds it) drops its protection until the next fresh create; the same

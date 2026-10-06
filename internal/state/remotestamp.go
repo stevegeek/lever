@@ -35,6 +35,12 @@ type RemoteIdentity struct {
 	// reused it.
 	Name    string
 	Backend string
+	// The chat page's agent list (landing chat only, so a worker change does
+	// not bounce a console-landing proxy): the workers an operator sees, the
+	// tree and the labels file read through it.
+	Workers    []string `json:",omitempty"`
+	Tree       string   `json:",omitempty"`
+	LabelsFile string   `json:",omitempty"`
 }
 
 // RemoteConfigHash identifies the configuration a `lever remote serve` process

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -542,6 +543,14 @@ func (a *App) validateRemote() error {
 	default:
 		return fmt.Errorf("config: remote: landing %q; use %s or %s", a.Remote.Landing, RemoteLandingConsole, RemoteLandingChat)
 	}
+	// filepath.IsLocal refuses absolute paths and any ".." that leaves the
+	// base; path.Clean(lf) != lf refuses "a/../b", "a//b" and "./a". A
+	// relative, local path is under tree by construction.
+	if lf := a.Remote.LabelsFile; lf != "" {
+		if strings.Contains(lf, `\`) || path.Clean(lf) != lf || lf == "." || !filepath.IsLocal(filepath.FromSlash(lf)) {
+			return fmt.Errorf("config: remote: labels_file %q must be a clean path relative to tree (no leading /, no ..)", lf)
+		}
+	}
 	return nil
 }
 
@@ -554,6 +563,9 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 		if len(u.Agents) > 0 {
 			return fmt.Errorf("config: remote: allowed_users %q is an operator, which reaches every agent; remove its agents list, or set tier: contact", u.Login)
 		}
+		if len(u.See) > 0 {
+			return fmt.Errorf("config: remote: allowed_users %q is an operator, which sees every agent; remove its see list", u.Login)
+		}
 		return nil
 	case TierContact:
 	default:
@@ -564,11 +576,7 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 	}
 	seen := map[string]bool{}
 	for _, name := range u.Agents {
-		known := name == a.Name
-		for _, w := range a.Workers {
-			known = known || w.Name == name
-		}
-		if !known {
+		if !a.knownAgent(name) {
 			return fmt.Errorf("config: remote: allowed_users %q lists agent %q, which is not a declared worker or the manager (%s)", u.Login, name, a.Name)
 		}
 		if seen[name] {
@@ -576,7 +584,25 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 		}
 		seen[name] = true
 	}
+	seenSee := map[string]bool{}
+	for _, name := range u.See {
+		if !a.knownAgent(name) {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q in see, which is not a declared worker or the manager (%s)", u.Login, name, a.Name)
+		}
+		if slices.Contains(u.Agents, name) {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q in both agents and see; keep it in one", u.Login, name)
+		}
+		if seenSee[name] {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q twice in see", u.Login, name)
+		}
+		seenSee[name] = true
+	}
 	return nil
+}
+
+// knownAgent reports whether name is the manager or a declared worker.
+func (a *App) knownAgent(name string) bool {
+	return name == a.Name || slices.ContainsFunc(a.Workers, func(w Worker) bool { return w.Name == name })
 }
 
 // validateRemoteBind accepts the proxy's listen address only where the jail

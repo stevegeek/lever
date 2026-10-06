@@ -2,6 +2,7 @@ package brokerctl
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -101,9 +102,9 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}
 	}
-	const appExtras = 2 // Name, Backend
+	const appExtras = 4 // Name, Backend, Workers, Tree
 	if got, want := identity.NumField(), remote.NumField()+appExtras; got != want {
-		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend)", got, want)
+		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend + Workers + Tree)", got, want)
 	}
 }
 
@@ -118,5 +119,42 @@ func TestRemoteConfigHashCoversTiers(t *testing.T) {
 	b := remoteUserKeys([]config.RemoteUser{{Login: "c@x", Tier: config.TierContact, Agents: []string{"w1", "w2"}}})
 	if a[0] == b[0] || a[0] == "c@x" {
 		t.Fatalf("contact keys %q / %q do not carry tier and agents", a[0], b[0])
+	}
+}
+
+func remoteTestApp(t *testing.T) *config.App {
+	t.Helper()
+	return &config.App{Name: "boss", Tree: "/t", Workers: []config.Worker{{Name: "w1", Dir: "workers/w1"}, {Name: "w2", Dir: "workers/w2"}},
+		Remote: config.Remote{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net", Landing: config.RemoteLandingChat,
+			AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+}
+
+func TestRemoteHashCoversChatListInputs(t *testing.T) {
+	app := remoteTestApp(t)
+	h0 := RemoteConfigHash(app)
+	for name, mut := range map[string]func(*config.App){
+		"see":         func(a *config.App) { a.Remote.AllowedUsers[1].See = []string{"w2"} },
+		"labels_file": func(a *config.App) { a.Remote.LabelsFile = "workers/labels.json" },
+		"workers":     func(a *config.App) { a.Workers = append(a.Workers, config.Worker{Name: "w9", Dir: "workers/w9"}) },
+		"tree":        func(a *config.App) { a.Tree = "/other" },
+	} {
+		a := *app
+		a.Workers = slices.Clone(app.Workers)
+		a.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
+		mut(&a)
+		if RemoteConfigHash(&a) == h0 {
+			t.Errorf("%s: hash unchanged; a running proxy would keep the old list", name)
+		}
+	}
+}
+
+func TestRemoteHashOfAConsoleInstanceIgnoresWorkers(t *testing.T) {
+	app := remoteTestApp(t)
+	app.Remote.Landing = ""
+	h0 := RemoteConfigHash(app)
+	app.Workers = append(app.Workers, config.Worker{Name: "w9", Dir: "workers/w9"})
+	app.Tree = "/other"
+	if RemoteConfigHash(app) != h0 {
+		t.Fatal("a worker change bounced a console-landing proxy")
 	}
 }

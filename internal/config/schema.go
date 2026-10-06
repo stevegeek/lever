@@ -408,6 +408,12 @@ type Remote struct {
 	// allowed_users entry (validateRemote): with no verified login, nothing
 	// the page sends would verify.
 	Landing string `yaml:"landing"`
+	// LabelsFile is a tree-relative JSON file the manager writes, mapping
+	// agent names to short labels the chat page shows beside each name
+	// (remoteproxy.ReadLabels). Optional. It is jail-written data: read
+	// host-side with no symlink on the path, bounded, and only ever shown
+	// as text.
+	LabelsFile string `yaml:"labels_file"`
 }
 
 type App struct {

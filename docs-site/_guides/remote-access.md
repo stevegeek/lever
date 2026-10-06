@@ -1141,7 +1141,8 @@ remote:
   that login's own hub session; an event for one of its direct conversations makes the proxy
   read the newest messages as the login and decide. After a hub or proxy restart it catches up
   (a message older than one hour is not notified); a check the hub or the disk fails is tried
-  again, up to five times. Each stream is one long-lived connection into the jail, so each
+  again, up to five times over about 31 seconds (1, 2, 4, 8 and 16 s); then it stops, with a
+  `push-failed` audit line (reason `retries`), until the next event or connect checks again. Each stream is one long-lived connection into the jail, so each
   subscribed login keeps one jail dial process open on the host.
 - **What the push services learn.** Google, Apple, Mozilla or Microsoft see when a push goes to
   a device, never what it says. That timing tells them when your agents write to that login.

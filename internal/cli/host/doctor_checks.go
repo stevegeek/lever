@@ -1066,6 +1066,10 @@ func checkWorkerTicketMounts(ctx context.Context, project string, workers []stri
 	return checkResult{check, true, fmt.Sprintf("%d worker container(s) mount %s", checked, workerTicketMount), ""}
 }
 
+// recordVolumeReader returns the extra mounts an agent's hub record was
+// created with (hubRecordVolumes in production).
+type recordVolumeReader func(ctx context.Context, project, agent string) ([]jail.Mount, error)
+
 // mountInspector returns a jail container's mounts with their writability by
 // id or name (jail.ContainerMounts in production); jail.ErrNoContainer when
 // there is none.
@@ -1098,7 +1102,11 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // runs even with read_only unset, since removing the whole list is how a
 // record ends up with mounts the config no longer names; only then is a
 // failed listing or inspect still "none configured".
-func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, probe apply.WritableProbe) checkResult {
+//
+// With no container to inspect (or an inspect that fails), that half reads
+// the hub record's volumes instead (record; nil skips it), which a resume
+// recreates the container from; the plan half then stays "not checked".
+func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, record recordVolumeReader, probe apply.WritableProbe) checkResult {
 	const check = "manager read-only paths"
 	notChecked := func(detail string) checkResult {
 		if len(want) == 0 {
@@ -1122,10 +1130,19 @@ func checkManagerReadOnly(ctx context.Context, project, tree, name string, want 
 		ref = jail.ContainerName(hubProjectKey(project), name)
 	}
 	mounts, err := inspect(ctx, ref)
-	if errors.Is(err, jail.ErrNoContainer) {
-		return notChecked("not checked (no manager container)")
-	}
 	if err != nil {
+		if record != nil {
+			if vols, rerr := record(ctx, hubProjectKey(project), name); rerr == nil {
+				if stale := apply.ManagerStaleTreeMounts(project, tree, want, vols); !stale.Empty() {
+					r := staleTreeMountsResult(check, name, stale)
+					r.detail += " (read from the hub record: no manager container to inspect)"
+					return r
+				}
+			}
+		}
+		if errors.Is(err, jail.ErrNoContainer) {
+			return notChecked("not checked (no manager container)")
+		}
 		return notChecked("not checked (could not inspect the manager container): " + firstLine(err.Error()))
 	}
 	stale := apply.ManagerStaleTreeMounts(project, tree, want, mounts)

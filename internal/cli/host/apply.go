@@ -1371,11 +1371,17 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 	})
 }
 
-// recordVolumes backs Deps.RecordVolumes: the record's inline-config volumes
-// from the hub's agent listing, as jail mounts (read-only, like the role
-// check that reads the same listing).
+// recordVolumes backs Deps.RecordVolumes (see hubRecordVolumes).
 func (w *applyWiring) recordVolumes(ctx context.Context, projectName, agentName string) ([]jail.Mount, error) {
-	agents, err := w.hub().Agents(ctx, projectName, scion.DefaultHubEndpoint)
+	return hubRecordVolumes(ctx, w.hub(), projectName, agentName)
+}
+
+// hubRecordVolumes is agentName's record volumes from the hub's agent
+// listing, as jail mounts — read-only, the same listing the role check
+// reads. Shared by apply's stale-mount check and doctor's read-only row,
+// for when the manager has no container to inspect.
+func hubRecordVolumes(ctx context.Context, hc *hubapi.Client, projectName, agentName string) ([]jail.Mount, error) {
+	agents, err := hc.Agents(ctx, projectName, scion.DefaultHubEndpoint)
 	if err != nil {
 		return nil, err
 	}

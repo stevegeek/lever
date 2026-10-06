@@ -348,7 +348,7 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 	}
 	goneRO := []jail.Mount{{Source: path.Join(jp, "gone"), Destination: "/workspace/gone"}}
 	noContainer := func(context.Context, string) ([]jail.Mount, error) { return nil, jail.ErrNoContainer }
-	const goneMsg = "gone mounted by the manager record but no longer on the host"
+	const goneMsg = `"gone" mounted by the manager record but no longer on the host`
 	refused := func(context.Context, string, string) (bool, error) { return false, nil }
 	for _, tc := range []struct {
 		name             string
@@ -362,11 +362,11 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 	}{
 		{name: "current plan", phase: "suspended", cstatus: "stopped"},
 		{name: "dropped entry, dir kept", extra: []jail.Mount{{Source: path.Join(jp, "kb"), Destination: "/workspace/kb"}}, phase: "suspended", cstatus: "stopped",
-			wantLog: "kb still mounted read-only although no longer in manager.read_only"},
+			wantLog: `"kb" still mounted read-only although no longer in manager.read_only`},
 		{name: "dropped entry, dir gone, stopped", extra: goneRO, phase: "suspended", cstatus: "stopped", wantErr: goneMsg},
 		// Kept as it is (phase running): no resume, so only a warning.
 		{name: "dropped pin, dir gone, running", extra: []jail.Mount{{Source: path.Join(jp, "old"), Destination: "/workspace/old", RW: true}}, phase: "running", cstatus: "Up 2 hours",
-			wantLog: "old mounted by the manager record but no longer on the host"},
+			wantLog: `"old" mounted by the manager record but no longer on the host`},
 		// The forced resume of an error phase recreates the container even
 		// while it is up: refused like a plain resume.
 		{name: "dir gone, error phase, container up", extra: goneRO, phase: "error", cstatus: "Up 3 hours", wantErr: goneMsg},
@@ -454,11 +454,24 @@ func TestManagerStaleTreeMounts(t *testing.T) {
 		t.Fatalf("fix with a gone dir = %q", s.Fix())
 	}
 	s.Gone = nil
-	if !strings.Contains(s.Fix(), "keep these directories") || !strings.Contains(s.String(), "kb still mounted read-only") || !strings.Contains(s.String(), "w still pinned") {
+	if !strings.Contains(s.Fix(), "keep these directories") || !strings.Contains(s.String(), `"kb" still mounted read-only`) || !strings.Contains(s.String(), `"w" still pinned`) {
 		t.Fatalf("dropped only: %q / %q", s, s.Fix())
 	}
 	if !ManagerStaleTreeMounts("/lever", tree, want, got[:3]).Empty() {
 		t.Fatal("the current plan alone is not stale")
+	}
+	// Paths are quoted for the terminal, cut to a bound, and the list is
+	// capped; a leading "/" after the workspace prefix is not lever's shape.
+	var many []string
+	for i := range maxStalePaths + 3 {
+		many = append(many, fmt.Sprintf("d%d", i))
+	}
+	long := (StaleTreeMounts{Gone: append([]string{strings.Repeat("x", 500)}, many...)}).String()
+	if !strings.Contains(long, "and 4 more") || strings.Contains(long, strings.Repeat("x", maxStalePathBytes+1)) {
+		t.Fatalf("unbounded: %q", long)
+	}
+	if _, ok := treeSelfMount("/lever", jail.Mount{Source: "/lever/etc", Destination: "/workspace//etc"}); ok {
+		t.Fatal("a doubled slash after the workspace prefix must not count as a tree mount")
 	}
 	// Paths are sanitized for the terminal.
 	if str := (StaleTreeMounts{Gone: []string{"x\x1b[2J"}}).String(); strings.Contains(str, "\x1b") {

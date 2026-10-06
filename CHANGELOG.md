@@ -92,7 +92,8 @@ version bump moves the block under the new version heading.
   phase included, before it runs, naming it, with both fixes (recreate it, empty is enough,
   or back up the conversation and `lever up --fresh`); a mount the config
   dropped is a warning. `lever doctor`'s *manager read-only paths* row
-  reports both, even with `read_only` unset.
+  reports both, even with `read_only` unset, and also reads the hub
+  record when there is no container.
 - **The first apply after a cold start no longer gives up on a slow
   hub.** It failed at `scion-server` with "hub not ready after 30
   attempts" after a Mac restart or a scion pin change, and a retry right

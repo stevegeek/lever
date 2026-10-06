@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1219,17 +1220,34 @@ func (s StaleTreeMounts) Empty() bool {
 	return len(s.Gone)+len(s.DroppedReadOnly)+len(s.DroppedPins) == 0
 }
 
-// String words the stale mounts for a doctor row or an apply message. The
-// paths come from the container's inspect and are sanitized.
+// maxStalePaths and maxStalePathBytes bound what String lists: the paths
+// come from the container's inspect or the hub record, text lever does not
+// control.
+const (
+	maxStalePaths     = 10
+	maxStalePathBytes = 120
+)
+
+// String words the stale mounts for a doctor row or an apply message. Each
+// path is quoted (%q escapes every control character) after a cut to
+// maxStalePathBytes, and each list stops at maxStalePaths with a count of
+// the rest.
 func (s StaleTreeMounts) String() string {
 	var parts []string
 	add := func(paths []string, what string) {
 		if len(paths) == 0 {
 			return
 		}
-		safe := make([]string, len(paths))
+		var safe []string
 		for i, p := range paths {
-			safe[i] = termsafe.Sanitize(p)
+			if i == maxStalePaths {
+				safe = append(safe, fmt.Sprintf("and %d more", len(paths)-maxStalePaths))
+				break
+			}
+			if len(p) > maxStalePathBytes {
+				p = strings.ToValidUTF8(p[:maxStalePathBytes], "") + "…"
+			}
+			safe = append(safe, strconv.Quote(p))
 		}
 		parts = append(parts, strings.Join(safe, ", ")+" "+what)
 	}
@@ -1289,7 +1307,7 @@ func ManagerStaleTreeMounts(jp, tree string, want []config.TreeMount, got []jail
 // tree-relative path.
 func treeSelfMount(jp string, m jail.Mount) (string, bool) {
 	rel, ok := strings.CutPrefix(m.Destination, scion.ContainerWorkspace+"/")
-	if !ok || rel == "" || path.Clean(rel) != rel || rel == ".." || strings.HasPrefix(rel, "../") {
+	if !ok || rel == "" || path.Clean(rel) != rel || rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
 		return "", false
 	}
 	return rel, m.Source == path.Join(jp, rel)

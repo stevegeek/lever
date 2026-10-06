@@ -100,14 +100,25 @@ func TestCheckFilesUsageAndLinks(t *testing.T) {
 	if r := checkFiles(app, st); !r.ok || !strings.Contains(r.detail, "w1 2.0 KiB") {
 		t.Fatalf("usage: %+v", r)
 	}
-	for _, at := range []string{"workers/w1/.lever-files/in/" + chatfiles.Key("d@x"), "workers/w1/.lever-files/out"} {
+	for _, at := range []string{"workers/w1/.lever-files/in/" + chatfiles.Key("op@x"), "workers/w1/.lever-files/in/kunknown", "workers/w1/.lever-files/out"} {
 		t.Run(at, func(t *testing.T) {
 			if err := os.Symlink(t.TempDir(), filepath.Join(app.Tree, at)); err != nil {
 				t.Fatal(err)
 			}
 			defer os.Remove(filepath.Join(app.Tree, at))
-			if r := checkFiles(app, st); r.ok || !strings.Contains(r.detail, at) {
+			r := checkFiles(app, st)
+			if r.ok || !strings.Contains(r.detail, at) {
 				t.Fatalf("%+v", r)
+			}
+			want := "uploads from op@x to w1 are refused"
+			switch {
+			case strings.HasSuffix(at, "/out"):
+				want = "every file w1 shares is refused"
+			case strings.HasSuffix(at, "/kunknown"):
+				want = "not a login's directory"
+			}
+			if !strings.Contains(r.detail, want) {
+				t.Fatalf("want %q: %+v", want, r)
 			}
 		})
 	}

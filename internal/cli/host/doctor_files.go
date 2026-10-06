@@ -58,7 +58,7 @@ func checkFiles(app *config.App, st state.State) checkResult {
 		ws := app.AgentWorkspaces()[agent]
 		bytes, link := exchangeUsage(app.Tree, ws)
 		if link != "" {
-			return checkResult{name, false, fmt.Sprintf("%s's exchange has a symbolic link at %s: uploads to %s are refused", agent, link, agent),
+			return checkResult{name, false, fmt.Sprintf("%s's exchange has a symbolic link at %s: %s", agent, link, linkEffect(app, agent, ws, link)),
 				"remove the link at " + filepath.Join(app.Tree, link) + " (the agent made it; lever creates the directory again)"}
 		}
 		if bytes > 0 {
@@ -71,6 +71,26 @@ func checkFiles(app *config.App, st state.State) checkResult {
 	}
 	return checkResult{name, true, detail + "; ledger " + stateRel(st, p) + "/ (0700); " + used +
 		" (lever never removes them: delete old ones from .lever-files/in/ by hand)", ""}
+}
+
+// linkEffect says what a link at link (from exchangeUsage) refuses: at
+// in/<key> only that login's uploads, at out the agent's shares, higher up
+// every upload to the agent.
+func linkEffect(app *config.App, agent, ws, link string) string {
+	dir := path.Join(ws, chatfiles.Dir)
+	switch {
+	case link == path.Join(dir, "out"):
+		return fmt.Sprintf("every file %s shares is refused", agent)
+	case path.Dir(link) == path.Join(dir, "in"):
+		key := path.Base(link)
+		for _, u := range app.Remote.AllowedUsers {
+			if chatfiles.Key(u.Login) == key {
+				return fmt.Sprintf("uploads from %s to %s are refused", u.Login, agent)
+			}
+		}
+		return fmt.Sprintf("it is not a login's directory (no allowed_users login has that key); uploads to %s are unaffected", agent)
+	}
+	return fmt.Sprintf("every upload to %s is refused", agent)
 }
 
 // exchangeUsage is the bytes of the regular files in ws's

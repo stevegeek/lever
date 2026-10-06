@@ -862,6 +862,14 @@ labels. A file that breaks a rule (too big, not JSON, not an object of strings, 
 also means no labels, and `lever doctor` shows a `chat labels` warning row that names the fault.
 The page writes a label as text, after the name, never in its place.
 
+**Who sets the labels.** Whoever can write `labels_file` sets the text a contact sees beside each
+agent's true name, the manager's row included. By default that is the manager, which owns its
+part of the tree. So `lever.yaml` refuses a `labels_file` equal to or inside any worker's `dir`
+(that worker could then write what a contact reads next to every name), and one inside `.lever`
+or the state directory (host-written files). Keep the file in the manager's own part of the tree,
+and treat a label as the manager's words, not lever's: it can say anything up to 60 characters,
+but never replaces the name.
+
 ### What it is, and is not
 
 - **The same conversations.** A chat goes into the agent's one session, the one `lever up`

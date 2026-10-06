@@ -264,3 +264,74 @@ func TestCachedAgentRecordsSurvivesAPanickingList(t *testing.T) {
 		t.Fatalf("after the panic: %v %v", got, err)
 	}
 }
+
+func TestRemoteAgentMessagesOffIsNil(t *testing.T) {
+	app := &config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true}}
+	if remoteAgentMessages(app, state.State{Dir: t.TempDir()}) != nil {
+		t.Fatal("off: no matcher, no rewrite")
+	}
+}
+
+func TestRemoteAgentMessagesInsideTheTreeFailsClosed(t *testing.T) {
+	tree := t.TempDir()
+	app := &config.App{Name: "x", Tree: tree, Remote: config.Remote{Enabled: true, AgentMessages: config.AgentMessages{Enabled: true}}}
+	m := remoteAgentMessages(app, state.State{Dir: filepath.Join(tree, ".lever-state")})
+	if m == nil {
+		t.Fatal("on: the matcher must exist so the filter applies")
+	}
+	if _, err := m(context.Background(), "c@x", "w1", nil); err == nil {
+		t.Fatal("no operator socket: every row hidden")
+	}
+}
+
+func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "lm") // short: socket paths are capped
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st := state.State{Dir: dir}
+	ln, err := net.Listen("unix", st.OperatorSock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got wire.AgentMessagesMatchRequest
+	var status atomic.Int32
+	status.Store(http.StatusOK)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != wire.PathOperatorAgentMessagesMatch || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		if s := int(status.Load()); s != http.StatusOK {
+			http.Error(w, "no", s)
+			return
+		}
+		_, _ = io.WriteString(w, `{"keep":["m1"]}`)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	app := &config.App{Name: "boss", Tree: t.TempDir(), Remote: config.Remote{Enabled: true, AgentMessages: config.AgentMessages{Enabled: true}}}
+	m := remoteAgentMessages(app, st)
+	at := time.Date(2026, 10, 6, 10, 0, 0, 0, time.UTC)
+	msgs := []remoteproxy.AgentMessage{{ID: "m1", SHA256: "aa", CreatedAt: at}, {ID: "m2", SHA256: "bb", CreatedAt: at}}
+	keep, err := m(context.Background(), "c@x", "w1", msgs)
+	if err != nil || !keep["m1"] || keep["m2"] || len(keep) != 1 {
+		t.Fatalf("%v %v", keep, err)
+	}
+	if got.Contact != "c@x" || got.Agent != "w1" || len(got.Messages) != 2 || got.Messages[1] != (wire.AgentMessageRef{ID: "m2", SHA256: "bb", CreatedAt: at}) {
+		t.Fatalf("request %+v", got)
+	}
+	// Any refusal is an error: the proxy hides every agent row.
+	for _, s := range []int{http.StatusForbidden, http.StatusServiceUnavailable, http.StatusBadRequest} {
+		status.Store(int32(s))
+		if _, err := m(context.Background(), "c@x", "w1", msgs); err == nil {
+			t.Fatalf("status %d: no error", s)
+		}
+	}
+	srv.Close()
+	if _, err := m(context.Background(), "c@x", "w1", msgs); err == nil {
+		t.Fatal("no broker: no error")
+	}
+}

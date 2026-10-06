@@ -164,6 +164,9 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		AgentRecords: records,
 		Labels:       remoteLabels(app),
 		Wake:         remoteWake(app, st),
+		// remote.agent_messages: which agent rows a contact is shown, asked
+		// of the broker over its operator socket. Nil when off.
+		MatchAgentMessages: remoteAgentMessages(app, st),
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
@@ -373,6 +376,43 @@ func remoteWake(app *config.App, st state.State) func(ctx context.Context, login
 			return &remoteproxy.WakeError{Status: httpjson.Status(err), Err: err}
 		}
 		return nil
+	}
+}
+
+// agentMessagesTimeout bounds one match question: the proxy holds the
+// contact's history answer while it waits.
+const agentMessagesTimeout = 10 * time.Second
+
+// remoteAgentMessages asks the broker which agent rows of a contact's DM its
+// agent ledger recorded. Nil when agent messages are off. With the state
+// directory inside the tree there is no operator socket: every call fails,
+// and the proxy hides every agent row. Any answer but 200 is an error.
+func remoteAgentMessages(app *config.App, st state.State) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
+	if !app.AgentMessagesOn() {
+		return nil
+	}
+	if brokerctl.StateInsideTree(app, st) {
+		return func(context.Context, string, string, []remoteproxy.AgentMessage) (map[string]bool, error) {
+			return nil, errors.New("no operator socket: the state directory is inside the tree")
+		}
+	}
+	client := udsClient(st.OperatorSock())
+	return func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
+		ctx, cancel := context.WithTimeout(ctx, agentMessagesTimeout)
+		defer cancel()
+		req := wire.AgentMessagesMatchRequest{Contact: contact, Agent: agent, Messages: make([]wire.AgentMessageRef, len(msgs))}
+		for i, m := range msgs {
+			req.Messages[i] = wire.AgentMessageRef{ID: m.ID, SHA256: m.SHA256, CreatedAt: m.CreatedAt}
+		}
+		var out wire.AgentMessagesMatchResponse
+		if err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorAgentMessagesMatch, req, &out); err != nil {
+			return nil, err
+		}
+		keep := make(map[string]bool, len(out.Keep))
+		for _, id := range out.Keep {
+			keep[id] = true
+		}
+		return keep, nil
 	}
 }
 

@@ -14,8 +14,10 @@
 // A test in the proxy package fails the build if one appears in this file.
 
 import {
+  CONTACTS_MS,
   LIST_MS,
   MAX_MESSAGE,
+  NOT_SHOWN,
   WAKE_POLLS,
   WAKE_POLL_MS,
   agentList,
@@ -23,18 +25,24 @@ import {
   badgeText,
   chipText,
   classify,
+  contactList,
   errorText,
   historyItems,
   inputView,
   isChatSubject,
   makeCoalescer,
   mergeMessages,
+  mergeRows,
   messageLength,
   messageText,
   nextCursor,
   oneLine,
   rowTitle,
   sortedMessages,
+  transcriptItems,
+  transcriptPath,
+  transcriptWho,
+  viewErrorText,
   wakeText,
 } from './chatcore.js';
 
@@ -76,6 +84,10 @@ const el = {
   ask: $('ask'),
   text: $('text'),
   send: $('send'),
+  contacts: $('contacts'),
+  contactsTitle: $('contacts-title'),
+  refresh: $('refresh'),
+  readonly: $('readonly'),
 };
 
 let roster = null; // the list as last applied (agentList shape)
@@ -115,6 +127,18 @@ let waking = ''; // the agent a send is waking ('' = none)
 let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
+
+// The operator's read-only view of contact conversations. contacts is the
+// list from /lever/api/contacts (null for a contact login: it never asks).
+// view is the open transcript ({login, name}); a transcript has its own
+// rows and never touches chat, the composer or the read marker.
+let contacts = null;
+const openContacts = new Set(); // contact logins whose agents show
+let view = null;
+let viewSeq = 0; // counts transcript opens and closes
+let viewReading = false;
+let viewOlder = '';
+const transcript = new Map();
 
 // api does one same-origin request and reads the answer as JSON when it is
 // JSON, else as text. It never throws: a network fault is status 0.
@@ -292,6 +316,146 @@ function renderRows() {
     frag.append(li);
   }
   el.agents.replaceChildren(frag);
+}
+
+// renderContacts draws the Contacts section: per contact a button with its
+// login (and a note when it never signed in), and, opened, its agents.
+function renderContacts() {
+  const has = !!contacts && contacts.length > 0;
+  el.contactsTitle.hidden = !has;
+  el.contacts.hidden = !has;
+  const frag = document.createDocumentFragment();
+  for (const c of has ? contacts : []) {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.append(span('title', c.login), span('note', c.signedIn ? '' : 'not signed in yet'));
+    b.addEventListener('click', () => toggleContact(c.login));
+    li.append(b);
+    if (openContacts.has(c.login)) {
+      const ul = document.createElement('ul');
+      ul.className = 'agents nested';
+      for (const a of c.agents) {
+        const ali = document.createElement('li');
+        ali.className = view && view.login === c.login && view.name === a.name ? 'current' : '';
+        const ab = document.createElement('button');
+        // a.state is one of contactList's fixed words.
+        ab.append(span('title', rowTitle(a)), span(`chip ${a.state}`, chipText(a)));
+        ab.addEventListener('click', () => openTranscript(c.login, a.name));
+        ali.append(ab);
+        ul.append(ali);
+      }
+      li.append(ul);
+    }
+    frag.append(li);
+  }
+  el.contacts.replaceChildren(frag);
+}
+
+function toggleContact(login) {
+  if (openContacts.has(login)) openContacts.delete(login);
+  else openContacts.add(login);
+  renderContacts();
+}
+
+async function reloadContacts() {
+  const res = await api('/lever/api/contacts');
+  const l = res.ok ? contactList(res.body) : null;
+  if (l) contacts = l; // a failed read keeps the last list
+  renderContacts();
+}
+
+// renderTranscript draws the open transcript, all text. A row the contact
+// is not shown carries the mark.
+function renderTranscript(toBottom) {
+  const stick = toBottom || nearBottom();
+  const frag = document.createDocumentFragment();
+  for (const m of sortedMessages(transcript)) {
+    const row = document.createElement('div');
+    // m.from is one of transcriptItems' fixed words.
+    row.className = `msg ${m.from}${m.shownToContact ? '' : ' unshown'}`;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    setText(meta, `${transcriptWho(m, view.login, view.name)} ${when(m)}`.trim());
+    const body = document.createElement('div');
+    body.className = 'body';
+    setText(body, m.text || '(no text)');
+    row.append(meta, body);
+    if (!m.shownToContact) {
+      const mark = document.createElement('div');
+      mark.className = 'mark';
+      setText(mark, NOT_SHOWN);
+      row.append(mark);
+    }
+    frag.append(row);
+  }
+  el.list.replaceChildren(frag);
+  if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
+}
+
+// readTranscript reads the newest page (cursor '') or the page before
+// cursor, one read at a time; an answer for a transcript no longer open
+// is dropped.
+async function readTranscript(cursor) {
+  const v = view;
+  if (!v || viewReading) return;
+  viewReading = true;
+  const seq = viewSeq;
+  try {
+    const res = await api(transcriptPath(v.login, v.name, cursor));
+    if (seq !== viewSeq) return;
+    if (!res.ok) {
+      showNotice(`Cannot read the conversation: ${viewErrorText(res.status, res.body)}`);
+      return;
+    }
+    const first = transcript.size === 0;
+    if (cursor || first) viewOlder = nextCursor(res.body);
+    el.older.hidden = !viewOlder;
+    const changed = mergeRows(transcript, transcriptItems(res.body));
+    if (res.body && res.body.matched === false) showNotice('The broker did not answer: which agent messages the contact sees is not known.');
+    else showNotice(transcript.size ? '' : 'No messages yet.');
+    if (changed || first) renderTranscript(first);
+  } finally {
+    viewReading = false;
+  }
+}
+
+// leaveTranscript closes the open transcript, if any.
+function leaveTranscript() {
+  view = null;
+  viewSeq++;
+  transcript.clear();
+  viewOlder = '';
+  el.readonly.hidden = true;
+  el.refresh.hidden = true;
+}
+
+// openTranscript shows a contact's conversation with one of its agents,
+// read-only: no composer, no read marker, no events.
+function openTranscript(login, name) {
+  const c = contacts && contacts.find((x) => x.login === login);
+  const a = c && c.agents.find((x) => x.name === name);
+  if (!a) return;
+  closeChat();
+  view = { login, name };
+  document.body.classList.add('chatting');
+  document.title = name;
+  setText(el.agent, `${login} · ${name}`);
+  setText(el.label, a.label);
+  el.label.hidden = !a.label;
+  showState('read only', true);
+  el.form.hidden = true;
+  el.readonly.hidden = false;
+  el.refresh.hidden = false;
+  showNotice(c.signedIn ? '' : `${login} has not signed in yet.`);
+  renderContacts();
+  if (c.signedIn) void readTranscript('');
+}
+
+// pollView refreshes the contact list and the open transcript.
+function pollView() {
+  if (document.visibilityState !== 'visible') return;
+  void reloadContacts();
+  if (view) void readTranscript('');
 }
 
 function historyPath(c, cursor) {
@@ -567,6 +731,7 @@ function resetHistory() {
 // openChat shows the chat with name. A see-only agent shows its name,
 // label and state, and nothing is read for it.
 function openChat(name) {
+  leaveTranscript();
   const a = roster && roster.agents.find((x) => x.name === name);
   if (!a) {
     closeChat();
@@ -609,6 +774,7 @@ function openChat(name) {
 
 // closeChat goes back to the list.
 function closeChat() {
+  leaveTranscript();
   current = '';
   chat = null;
   store(OPEN_KEY, null);
@@ -626,6 +792,7 @@ function closeChat() {
   el.form.hidden = true;
   showNotice('Choose an agent from the list.');
   if (roster) renderRows();
+  if (contacts) renderContacts();
 }
 
 // openStream listens for the hub's chat events for this login: one stream
@@ -929,6 +1096,10 @@ async function start() {
   showListNote('');
   adoptOldRecords(l);
   applyRoster(l);
+  if (roster.tier === 'operator') {
+    void reloadContacts();
+    setInterval(pollView, CONTACTS_MS);
+  }
   setInterval(poll, LIST_MS);
   document.addEventListener('visibilitychange', poll);
   // The stream first, so a message stored while a history is read still
@@ -957,7 +1128,8 @@ el.text.addEventListener('keydown', (ev) => {
   // A held key repeats: one press, one send (and no new lines from it).
   if (!ev.repeat) void send();
 });
-el.older.addEventListener('click', () => void loadOlder());
+el.older.addEventListener('click', () => void (view ? readTranscript(viewOlder) : loadOlder()));
+el.refresh.addEventListener('click', () => void readTranscript(''));
 el.back.addEventListener('click', closeChat);
 el.ask.addEventListener('click', askManager);
 window.addEventListener('resize', grow);

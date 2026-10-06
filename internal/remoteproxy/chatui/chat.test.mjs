@@ -22,9 +22,13 @@ function hubWith(parts = {}) {
     post: (body) => ({ status: 201, body: { id: 'sent1', content: body.content, senderId: 'u1', type: 'instruction', createdAt: new Date(1.8e12).toISOString(), dispatchState: 'dispatched' } }),
     read: () => ({ status: 200, body: { status: 'ok' } }),
     wake: () => ({ status: 202, body: { state: 'starting' } }),
+    contacts: () => ({ status: 200, body: { contacts: [] } }),
+    transcript: () => ({ status: 200, body: { contact: 'c@x', agent: 'w1', matched: true, messages: [] } }),
     ...parts,
   };
   const fn = (method, path, body) => {
+    if (path === '/lever/api/contacts') return h.contacts();
+    if (path.startsWith('/lever/api/contacts/')) return h.transcript(path);
     if (path === '/lever/api/agents') return h.agents();
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
     if (method === 'POST' && path.endsWith('/read')) return h.read(body, path);
@@ -119,7 +123,7 @@ test('a history answer of any shape does not stop the page', async () => {
   for (const body of ['null', 'not json', '[]', '{"messages":"x"}', '{"messages":[null,7,{"id":7}]}']) {
     const env = await loadChat(hubWith({ history: () => ({ status: 200, body }) }));
     assert.equal(env.streams.length, 1, body);
-    assert.equal(env.intervals.length, 1, body);
+    assert.equal(env.intervals.filter((i) => i.ms === 15000).length, 1, body);
     assert.equal(env.rows().length, 0, body);
   }
 });
@@ -293,7 +297,7 @@ test('the hub is away at start: the page keeps trying', async () => {
   assert.equal(env.els.listnote.hidden, true);
   assert.equal(env.els.agent.textContent, 'boss');
   assert.equal(env.els.text.disabled, false);
-  assert.equal(env.intervals.length, 1, 'one poll, however many attempts it took');
+  assert.equal(env.intervals.filter((i) => i.ms === 15000).length, 1, 'one poll, however many attempts it took');
 });
 
 test('a list the fence refuses is not asked for again and again', async () => {
@@ -1178,7 +1182,8 @@ test('a chat event reloads the list and the open history', async () => {
 
 test('the list is read every 15 s while the page shows', async () => {
   const env = await load(hubWith());
-  assert.deepEqual(env.intervals.map((i) => i.ms), [15000]);
+  // An operator's page also reads its contacts every 30 s.
+  assert.deepEqual(env.intervals.map((i) => i.ms), [30000, 15000]);
   const lists = env.count('GET', '/lever/api/agents');
   await env.poll();
   assert.equal(env.count('GET', '/lever/api/agents'), lists + 1);
@@ -1468,4 +1473,126 @@ test('with no chat open the chat pane says to choose an agent (a wide screen sho
   assert.equal(env.els.notice.textContent, 'Choose an agent from the list.');
   assert.equal(env.els.notice.hidden, false);
   assert.equal(env.els.composer.hidden, true);
+});
+
+const CONTACTS = () => ({ status: 200, body: { contacts: [
+  { login: 'c@x', signedIn: true, agents: [{ name: 'w1', label: 'Via Roma', state: 'running' }] },
+  { login: 'd@x', signedIn: false, agents: [{ name: 'w1', label: '', state: 'suspended' }] },
+] } });
+const T = (i, from, text, shown) => ({ id: `t${i}`, from, text, createdAt: new Date(1.7e12 + i * 1000).toISOString(), shownToContact: shown });
+const TPATH = '/lever/api/contacts/c%40x/agents/w1/messages';
+
+test('operator: a Contacts section; a contact gets none and never asks', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  assert.equal(env.els['contacts-title'].hidden, false);
+  assert.deepEqual(env.contactRows(), ['c@x | ', 'd@x | not signed in yet']);
+  await env.clickContact(0);
+  assert.deepEqual(env.contactRows(), ['c@x | ', '  w1 · Via Roma | running', 'd@x | not signed in yet']);
+
+  const contact = await load(hubWith({ agents: () => roster([A('w1')], { tier: 'contact', console: '' }), contacts: CONTACTS }));
+  assert.equal(contact.count('GET', '/lever/api/contacts'), 0);
+  assert.equal(contact.els['contacts-title'].hidden, true);
+  assert.equal(contact.els.contacts.hidden, true);
+});
+
+test('a transcript is read-only, marks what the contact is not shown, and writes nothing', async () => {
+  const env = await load(hubWith({
+    contacts: CONTACTS,
+    transcript: () => ({ status: 200, body: { matched: true, messages: [T(2, 'agent', 'CANARY', false), T(1, 'contact', 'hello', true), T(3, 'system', 'started', true)] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.count('GET', TPATH), 1);
+  assert.equal(env.els.agent.textContent, 'c@x · w1');
+  assert.equal(env.els.state.textContent, 'read only');
+  assert.equal(env.els.composer.hidden, true);
+  assert.equal(env.els.readonly.hidden, false);
+  assert.equal(env.els.refresh.hidden, false);
+  const rows = env.rows();
+  assert.match(rows[0], /^msg contact: c@x .* \/ hello$/);
+  assert.match(rows[1], /^msg agent unshown: w1 .* \/ CANARY \/ not shown to the contact$/);
+  assert.match(rows[2], /^msg system: hub .* \/ started$/);
+  await env.poll();
+  assert.equal(env.calls.filter((c) => c.method !== 'GET').length, 0, 'no post, no read marker');
+});
+
+test('transcript text is only text', async () => {
+  const evil = '<img src=x onerror=alert(1)>';
+  const env = await load(hubWith({
+    contacts: () => ({ status: 200, body: { contacts: [{ login: evil, signedIn: true, agents: [{ name: 'w1', label: evil, state: evil }] }] } }),
+    transcript: () => ({ status: 200, body: { matched: true, messages: [{ id: 't1', from: evil, text: evil, createdAt: evil, shownToContact: false }] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  for (const row of env.els.list.children) {
+    assert.equal(row.tag, 'div');
+    for (const c of row.children) assert.deepEqual([c.tag, c.children.length], ['div', 0]);
+  }
+  assert.ok(env.rows()[0].startsWith('msg agent unshown: w1'));
+  assert.equal(env.contactRows()[1], `  w1 · ${evil} | unknown`);
+});
+
+test('a contact that never signed in reads nothing', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(1);
+  await env.clickContactAgent(1, 0);
+  assert.equal(env.els.notice.textContent, 'd@x has not signed in yet.');
+  assert.equal(env.count('GET', '/lever/api/contacts/'), 0);
+});
+
+test('a refusal shows its words', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS, transcript: () => ({ status: 409, body: { error: 'not-signed-in' } }) }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.els.notice.textContent, 'Cannot read the conversation: has not signed in yet');
+});
+
+test('a transcript the broker could not match says so', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS, transcript: () => ({ status: 200, body: { matched: false, messages: [T(1, 'agent', 'x', false)] } }) }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.els.notice.textContent, 'The broker did not answer: which agent messages the contact sees is not known.');
+});
+
+test('the transcript refreshes every 30 s and on Refresh, and stops when closed', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  const every = env.intervals.find((i) => i.ms === 30000);
+  assert.ok(every, 'a 30 s interval');
+  every.f();
+  await tick(5);
+  assert.equal(env.count('GET', TPATH), 2);
+  env.els.refresh.dispatch('click');
+  await tick(5);
+  assert.equal(env.count('GET', TPATH), 3);
+  env.els.back.dispatch('click');
+  every.f();
+  await tick(5);
+  assert.equal(env.count('GET', TPATH), 3, 'no read once closed');
+  assert.equal(env.els.readonly.hidden, true);
+});
+
+test('Load earlier reads with the cursor', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS, transcript: (p) => ({ status: 200, body: { matched: true, nextCursor: p.includes('cursor=') ? '' : 'C1', messages: [T(p.includes('cursor=') ? 1 : 2, 'agent', 'x', true)] } }) }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.els.older.hidden, false);
+  env.els.older.dispatch('click');
+  await tick(5);
+  assert.equal(env.count('GET', `${TPATH}?limit=50&cursor=C1`), 1);
+  assert.equal(env.rows().length, 2);
+  assert.equal(env.els.older.hidden, true);
+});
+
+test('opening an agent chat leaves the transcript', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  env.els.agents.children[0].children[0].dispatch('click');
+  await tick(5);
+  assert.equal(env.els.readonly.hidden, true);
+  assert.equal(env.els.refresh.hidden, true);
+  assert.equal(env.els.composer.hidden, false);
+  assert.equal(env.els.agent.textContent, 'boss');
 });

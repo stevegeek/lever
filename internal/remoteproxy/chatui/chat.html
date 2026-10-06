@@ -32,6 +32,8 @@
   <main class="listscroll">
     <p id="listnote" class="notice" hidden></p>
     <ul id="agents" class="agents"></ul>
+    <h2 id="contacts-title" class="section" hidden>Contacts</h2>
+    <ul id="contacts" class="agents" hidden></ul>
   </main>
 </section>
 <section id="pane-chat" class="pane">
@@ -42,6 +44,7 @@
       <p id="state" class="state"></p>
     </div>
     <nav>
+      <button id="refresh" type="button" hidden>Refresh</button>
       <a id="terminal" hidden>Terminal</a>
     </nav>
   </header>
@@ -49,6 +52,7 @@
     <button id="older" type="button" hidden>Load earlier messages</button>
     <p id="notice" class="notice">Choose an agent from the list.</p>
     <p id="viewonly" class="notice" hidden>View only: you can see this agent and its state, not its messages.</p>
+    <p id="readonly" class="notice" hidden>Read only: this contact's conversation with the agent. Messages marked "not shown to the contact" are hidden from them.</p>
     <div id="list" role="log" aria-live="polite"></div>
   </main>
   <form id="composer" hidden>

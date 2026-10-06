@@ -51,7 +51,7 @@ export async function load(hub, opts = {}) {
   doc.title = '';
   doc.body = new FakeNode('body');
   // The state chat.html starts in.
-  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label']) doc.getElementById(id).hidden = true;
+  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly']) doc.getElementById(id).hidden = true;
   // fieldsEnabled: what a browser that restores form state over a reload leaves.
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
@@ -120,6 +120,20 @@ export async function load(hub, opts = {}) {
   env.rows = () => env.els.list.children.map((r) => `${r.className}: ${r.children.map((c) => c.textContent).join(' / ')}`);
   // agentRows: each list row as "title | chip | badge[ | view only]".
   env.agentRows = () => env.els.agents.children.map((li) => li.children[0].children.map((c) => c.textContent).join(' | '));
+  // contactRows: each contact row as "login | note", then its open agents
+  // as "  title | chip".
+  env.contactRows = () => env.els.contacts.children.flatMap((li) => [
+    li.children[0].children.map((c) => c.textContent).join(' | '),
+    ...(li.children[1] ? li.children[1].children.map((a) => `  ${a.children[0].children.map((c) => c.textContent).join(' | ')}`) : []),
+  ]);
+  env.clickContact = async (i) => {
+    env.els.contacts.children[i].children[0].dispatch('click');
+    await tick(5);
+  };
+  env.clickContactAgent = async (i, j) => {
+    env.els.contacts.children[i].children[1].children[j].children[0].dispatch('click');
+    await tick(5);
+  };
   env.count = (method, prefix) => env.calls.filter((c) => c.method === method && c.path.startsWith(prefix)).length;
   await import(`./chat.js?load=${++loads}`);
   await tick(5);

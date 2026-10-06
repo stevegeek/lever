@@ -438,18 +438,20 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		}
 	}
 	// What the script may build and where it may reach, counted: every
-	// element it makes is a div, the one attribute it sets is the href of
-	// the two fixed links, and the one fetch is the api helper's. A new
-	// element kind, attribute or request shows up here, to be looked at.
+	// element it makes is a div, li, ul, button or span, the one attribute
+	// it sets is the href of the two fixed links, and the one fetch is the
+	// api helper's. A new element kind, attribute or request shows up here,
+	// to be looked at.
 	js, err := chatUI.ReadFile("chatui/chat.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for re, want := range map[string]int{
-		`createElement\(`:           7,
-		`createElement\('div'\)`:    4,
-		`createElement\('li'\)`:     1,
-		`createElement\('button'\)`: 1,
+		`createElement\(`:           16,
+		`createElement\('div'\)`:    8,
+		`createElement\('li'\)`:     3,
+		`createElement\('button'\)`: 3,
+		`createElement\('ul'\)`:     1,
 		`createElement\('span'\)`:   1,
 		`setAttribute\(`:            1,
 		`setAttribute\('href', `:    1,

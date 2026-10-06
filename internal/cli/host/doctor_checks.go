@@ -909,7 +909,14 @@ func hubTokenFix(name, project string) string {
 // which stands still while the host sleeps, so an overdue refresh turns into
 // an expiry unless it fires in time. An agent whose token cannot be read is
 // "not checked" for that agent, never a pass with a claim.
-func checkAgentHubTokens(ctx context.Context, project string, agents []string, list agentLister, session agentSessionReader) checkResult {
+//
+// Only a running or stopped agent fails the row: those are the phases
+// `lever apply` heals. An expired token under another phase (error,
+// starting, …) is a warning, since the resume or restart that phase needs
+// issues a new token anyway. A running manager's expired token is the
+// manager row's failure already, so here it is a warning pointing there:
+// one fault, one failed row.
+func checkAgentHubTokens(ctx context.Context, project, manager string, agents []string, list agentLister, session agentSessionReader) checkResult {
 	const check = "agent hub tokens"
 	if list == nil || session == nil {
 		return checkResult{check, true, "not checked", ""}
@@ -918,7 +925,8 @@ func checkAgentHubTokens(ctx context.Context, project string, agents []string, l
 	if err != nil {
 		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
 	}
-	var good, overdue, expired, unread []string
+	var good, overdue, expired, otherPhase, unread []string
+	managerExpired := false
 	var fixFor string
 	for _, name := range agents {
 		a := scionpkg.FindAgent(recs, name)
@@ -929,11 +937,15 @@ func checkAgentHubTokens(ctx context.Context, project string, agents []string, l
 		switch {
 		case err != nil:
 			unread = append(unread, name)
-		case tok.Expired():
+		case tok.Expired() && name == manager && a.Phase == scionpkg.PhaseRunning:
+			managerExpired = true
+		case tok.Expired() && (a.Phase == scionpkg.PhaseRunning || a.Phase == scionpkg.PhaseStopped):
 			expired = append(expired, fmt.Sprintf("%s (expired %s ago)", name, tok.Now.Sub(tok.Expiry).Truncate(time.Second)))
 			if fixFor == "" {
 				fixFor = name
 			}
+		case tok.Expired():
+			otherPhase = append(otherPhase, fmt.Sprintf("%s (expired, phase %s)", name, scionpkg.BoundedQuote(scionpkg.PhaseLabel(a.Phase))))
 		case tok.RefreshOverdue():
 			overdue = append(overdue, fmt.Sprintf("%s (refresh due %s ago, expires in %s)", name,
 				tok.Now.Sub(tok.Expiry.Add(-jail.AgentTokenRefreshMargin)).Truncate(time.Second), tok.Expiry.Sub(tok.Now).Truncate(time.Second)))
@@ -945,15 +957,28 @@ func checkAgentHubTokens(ctx context.Context, project string, agents []string, l
 	if len(unread) > 0 {
 		notChecked = "; not checked: " + strings.Join(unread, ", ") + " (token unreadable)"
 	}
+	var warns, fixes []string
+	if managerExpired {
+		warns = append(warns, manager+"'s token expired (the manager agent row reports it)")
+		fixes = append(fixes, hubTokenFix(manager, project))
+	}
+	if len(otherPhase) > 0 {
+		warns = append(warns, "expired under a phase `lever apply` does not heal: "+strings.Join(otherPhase, ", "))
+		fixes = append(fixes, "bring the agent back to running (`lever up` for the manager, a resume for a worker): the resume issues it a new token")
+	}
+	if len(overdue) > 0 {
+		warns = append(warns, "refresh overdue: "+strings.Join(overdue, ", ")+" — sciontool's refresh timer stands still while the host sleeps; it may still fire in time")
+		fixes = append(fixes, "if the token expires first, `lever apply` resets it (`scion reset-auth`, no restart)")
+	}
 	switch {
 	case len(expired) > 0:
-		return checkResult{check, false,
-			"expired: " + strings.Join(expired, ", ") + " — every reply, status update and heartbeat from these agents fails with 401, and an expired token cannot refresh itself" + notChecked,
-			hubTokenFix(fixFor, project)}
-	case len(overdue) > 0:
-		return warnResult(check,
-			"refresh overdue: "+strings.Join(overdue, ", ")+" — sciontool's refresh timer stands still while the host sleeps; it may still fire in time"+notChecked,
-			"if the token expires first, `lever apply` resets it (`scion reset-auth`, no restart)")
+		detail := "expired: " + strings.Join(expired, ", ") + " — every reply, status update and heartbeat from these agents fails with 401, and an expired token cannot refresh itself"
+		if len(warns) > 0 {
+			detail += "; also " + strings.Join(warns, "; ")
+		}
+		return checkResult{check, false, detail + notChecked, hubTokenFix(fixFor, project)}
+	case len(warns) > 0:
+		return warnResult(check, strings.Join(warns, "; ")+notChecked, strings.Join(fixes, "; "))
 	case len(good) == 0 && len(unread) == 0:
 		return checkResult{check, true, "no running agent", ""}
 	case len(good) == 0:

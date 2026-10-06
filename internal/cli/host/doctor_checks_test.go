@@ -1522,33 +1522,62 @@ func TestCheckAgentHubTokens(t *testing.T) {
 		return jail.HubTokenTimes{Expiry: now.Add(left), Now: now}
 	}
 
-	r := checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+	r := checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
 		"lever--assistant": tok(7 * time.Hour), "lever--scratch": tok(9 * time.Hour)}})
 	if !r.ok || r.fix != "" || !strings.Contains(r.detail, "assistant (valid 7h0m0s)") || strings.Contains(r.detail, "idle") {
 		t.Fatalf("all valid: %+v", r)
 	}
-	r = checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
 		"lever--assistant": tok(7 * time.Hour), "lever--scratch": tok(-3 * time.Minute)}})
 	if r.ok || !strings.Contains(r.detail, "scratch (expired 3m0s ago)") || !strings.Contains(r.fix, "scion reset-auth scratch -g /lever") {
 		t.Fatalf("worker expired: %+v", r)
 	}
-	r = checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
 		"lever--assistant": tok(90 * time.Minute), "lever--scratch": tok(9 * time.Hour)}})
 	if !r.ok || r.fix == "" || !strings.Contains(r.detail, "assistant (refresh due 30m0s ago, expires in 1h30m0s)") {
 		t.Fatalf("overdue refresh is a warning: %+v", r)
 	}
-	r = checkAgentHubTokens(context.Background(), "/lever", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
 		"lever--assistant": tok(7 * time.Hour)}})
 	if !r.ok || !strings.Contains(r.detail, "not checked: scratch (token unreadable)") {
 		t.Fatalf("unreadable worker token: %+v", r)
 	}
-	r = checkAgentHubTokens(context.Background(), "/lever", agents, func(context.Context, string) ([]scion.Agent, error) {
+	// The running manager's expired token is the manager row's failure: here
+	// a warning that points there, one fault failing one row.
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+		"lever--assistant": tok(-10 * time.Minute), "lever--scratch": tok(9 * time.Hour)}})
+	if !r.ok || r.fix == "" || !strings.Contains(r.detail, "the manager agent row reports it") {
+		t.Fatalf("manager expired: %+v", r)
+	}
+	// A phase apply does not heal: a warning naming the phase, not a failure
+	// whose fix would not work.
+	errFleet := func(context.Context, string) ([]scion.Agent, error) {
+		return []scion.Agent{
+			{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days"},
+			{Slug: "scratch", Phase: "error", ContainerStatus: "Up 1 hour"},
+		}, nil
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, errFleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+		"lever--assistant": tok(7 * time.Hour), "lever--scratch": tok(-time.Hour)}})
+	if !r.ok || !strings.Contains(r.detail, `scratch (expired, phase "error")`) || !strings.Contains(r.fix, "resume") {
+		t.Fatalf("expired under phase error: %+v", r)
+	}
+	// A stopped worker over a live container is one apply heals: a failure.
+	stoppedFleet := func(context.Context, string) ([]scion.Agent, error) {
+		return []scion.Agent{{Slug: "scratch", Phase: "stopped", ContainerStatus: "Up 1 hour"}}, nil
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, stoppedFleet, &stubSession{tok: map[string]jail.HubTokenTimes{
+		"lever--scratch": tok(-time.Hour)}})
+	if r.ok || !strings.Contains(r.fix, "lever apply") {
+		t.Fatalf("expired under phase stopped: %+v", r)
+	}
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, func(context.Context, string) ([]scion.Agent, error) {
 		return nil, errors.New("hub down\nusage")
 	}, &stubSession{})
 	if !r.ok || !strings.Contains(r.detail, "not checked") || strings.Contains(r.detail, "usage") {
 		t.Fatalf("list error: %+v", r)
 	}
-	r = checkAgentHubTokens(context.Background(), "/lever", agents, func(context.Context, string) ([]scion.Agent, error) { return nil, nil }, &stubSession{})
+	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, func(context.Context, string) ([]scion.Agent, error) { return nil, nil }, &stubSession{})
 	if !r.ok || r.detail != "no running agent" {
 		t.Fatalf("nothing running: %+v", r)
 	}

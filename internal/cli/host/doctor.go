@@ -164,7 +164,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, time.Now())
 		},
 		func() checkResult {
-			return checkAgentHubTokens(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)
+			return checkAgentHubTokens(ctx, b.MountDest(), app.Name, networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)
 		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {

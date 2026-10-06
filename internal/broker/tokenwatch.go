@@ -93,9 +93,9 @@ func (b *Broker) healHubTokens(ctx context.Context) {
 	if b.hubTokens == nil || b.runtime == nil || len(agents) == 0 {
 		return
 	}
-	pctx, cancel := context.WithTimeout(ctx, tokenWatchPassTimeout)
-	defer cancel()
-	recs, err := b.runtime.List(pctx, b.instanceProject)
+	lctx, cancel := context.WithTimeout(ctx, tokenWatchListTimeout)
+	recs, err := b.runtime.List(lctx, b.instanceProject)
+	cancel()
 	if err != nil {
 		return // a hub or jail that cannot answer is not this watch's finding
 	}
@@ -111,23 +111,29 @@ func (b *Broker) healHubTokens(ctx context.Context) {
 		if b.isRevoked(cn) {
 			continue
 		}
-		expired, err := b.hubTokens.TokenExpired(pctx, slug)
-		if err != nil || !expired {
-			continue
+		// Each agent under its own deadline, from the watch's context and
+		// not a shared pass budget: the read is an exec into a container
+		// the agent controls, and one that hangs must not cost the other
+		// agents their heal.
+		actx, cancel := context.WithTimeout(ctx, tokenWatchAgentTimeout)
+		expired, err := b.hubTokens.TokenExpired(actx, slug)
+		if err == nil && expired {
+			b.healOneHubToken(actx, cn, slug)
 		}
-		b.healOneHubToken(pctx, cn, slug)
+		cancel()
 	}
 }
 
 // healOneHubToken resets one agent's expired token, gated like every other
 // broker action that has the hub mint for an agent: cooldown, the worker's
 // lifecycle lock (a busy worker is skipped until the next tick, so a reset
-// never interleaves with a start, resume, wake, stop or suspend of it), and
-// the pre-role record guard. The hub mints the new token from the record's
-// STORED role, and on a record created before scion#1089 that role is empty,
-// which a later scion resolves to full hub authority — so a reset of such a
-// record would hand the agent full authority, exactly what the resume paths
-// refuse.
+// never interleaves with a start, resume, wake, stop or suspend of it),
+// revocation again after the lock wait (a `lever revoke` that landed during
+// it wins), and the pre-role record guard. The hub mints the new token from
+// the record's stored role, and a record created before scion#1089 carries
+// a role scion's migration grandfathered to full (or, on older pins, none,
+// which resolved to full): the guard (hubapi.VerifyAgentRole) refuses both,
+// as the resume paths do. With no guard wired at all the reset is refused.
 func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 	now := b.reenrolNow()
 	b.reenrolMu.Lock()
@@ -151,7 +157,14 @@ func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 		}
 		defer unlock()
 	}
-	if err := b.checkAgentRole(ctx, slug); err != nil {
+	if b.isRevoked(cn) {
+		return
+	}
+	if b.verifyRole == nil {
+		b.audit("hub-token", cn, "deny", "expired agent hub token NOT reset: no pre-role record guard is wired")
+		return
+	}
+	if err := b.verifyRole(ctx, slug); err != nil {
 		b.audit("hub-token", cn, "deny", "expired agent hub token NOT reset: "+termsafe.Sanitize(err.Error()))
 		return
 	}
@@ -162,6 +175,11 @@ func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 	b.audit("hub-token", cn, "allow", "expired agent hub token reset (scion reset-auth, the agent's own role)")
 }
 
-// tokenWatchPassTimeout bounds one pass: a list, then a token read and at
-// most one reset per agent.
-const tokenWatchPassTimeout = 2 * time.Minute
+// tokenWatchListTimeout bounds a pass's one agent listing, and
+// tokenWatchAgentTimeout one agent's token read, lock wait, guard and reset
+// (the read itself is bounded tighter, by jail.BoundAgentExec).
+const tokenWatchListTimeout = 30 * time.Second
+
+// tokenWatchAgentTimeout is the per-agent bound; a var so a test can
+// shrink it.
+var tokenWatchAgentTimeout = 90 * time.Second

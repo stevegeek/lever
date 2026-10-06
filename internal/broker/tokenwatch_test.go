@@ -39,6 +39,7 @@ func tokenWatchBroker(t *testing.T, mode string, agents []scion.Agent, h *fakeHu
 	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{testInstanceProject: agents}}
 	b, _, _ := reenrolBroker(t, rt, mode)
 	b.hubTokens = h
+	b.verifyRole = func(context.Context, string) error { return nil }
 	var buf bytes.Buffer
 	b.log = slog.New(slog.NewTextHandler(&buf, nil))
 	return b, &buf
@@ -261,3 +262,67 @@ func (c *countingHubTokens) TokenExpired(context.Context, string) (bool, error) 
 	return false, nil
 }
 func (c *countingHubTokens) ResetAuth(context.Context, string) error { return nil }
+
+// With no pre-role guard wired the watch refuses every reset: a guard that
+// cannot run is not a pass.
+func TestHealHubTokensRefusesWithoutAGuard(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true}}
+	b, log := tokenWatchBroker(t, "all", liveFleet, h)
+	b.verifyRole = nil
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 || !strings.Contains(log.String(), "no pre-role record guard") {
+		t.Fatalf("resets %v audit %q", h.resets, log.String())
+	}
+}
+
+// A `lever revoke` that lands while the reset waits for the worker's lock
+// wins: no reset after the wait.
+func TestHealHubTokensRechecksRevocationAfterTheLockWait(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"scratch": true}}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	b.reenrolLockWait = 5 * time.Second
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.onWorkerLockWait = func(string) {
+		b.Revoke("scratch")
+		unlock()
+	}
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 {
+		t.Fatalf("a worker revoked during the lock wait was reset: %v", h.resets)
+	}
+}
+
+// slowHubTokens hangs the read of one agent until its context ends, like a
+// FIFO token file in a hostile worker's container.
+type slowHubTokens struct {
+	fakeHubTokens
+	hang string
+}
+
+func (s *slowHubTokens) TokenExpired(ctx context.Context, agent string) (bool, error) {
+	if agent == s.hang {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	return s.fakeHubTokens.TokenExpired(ctx, agent)
+}
+
+// One agent's hanging read ends at its own deadline and does not cost the
+// next agent its reset.
+func TestHealHubTokensOneHangDoesNotStarveTheRest(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{testInstanceProject: liveFleet}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	b.verifyRole = func(context.Context, string) error { return nil }
+	h := &slowHubTokens{fakeHubTokens: fakeHubTokens{expired: map[string]bool{"scratch": true}}, hang: "appname"}
+	b.hubTokens = h
+	old := tokenWatchAgentTimeout
+	tokenWatchAgentTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { tokenWatchAgentTimeout = old })
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "scratch" {
+		t.Fatalf("resets = %v, want the worker after the manager's hung read", h.resets)
+	}
+}

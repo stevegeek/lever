@@ -1178,6 +1178,71 @@ remote:
 > Either one alone, or any other value, stops `lever remote serve`; the proxy prints a warning
 > and `lever doctor` fails while they are set. Never set them for a real instance.
 
+## Files in the chat
+
+With `landing: chat` and `remote.files` on, a login uploads files to an agent it may message, and
+downloads the files that agent shares with it. For example, a contact sends a PDF, and the
+agent sends back a versioned `.xlsm` workbook.
+
+```yaml
+remote:
+  landing: chat
+  files:
+    enabled: true
+    # max_bytes: 26214400                     # one file; default 25 MiB, at most 100 MiB
+    # extensions: [pdf, xlsx, xlsm, xls, csv, docx, doc, png, jpg, jpeg, txt, zip]
+```
+
+- **What a login does.** In a chat with an agent it may message (never a `see:` agent), the
+  paperclip uploads one file at a time, with progress. After the upload, the page sends the chat
+  message "📎 uploaded <name>" through the normal send path, so the agent verifies it as that
+  login's message. The **Files** button lists the login's own uploads to that agent and the files
+  the agent shared with it, with a download link for each. An operator also sees each contact's
+  files in the [operator's view](#the-operators-view-of-contact-conversations), read-only, and may
+  download them.
+- **Where files live.** In the agent's own workspace, under `.lever-files/`: `in/<key>/` holds
+  uploads and `out/<key>/` holds the files the agent shares, one `<key>` per login (a hash of the
+  login, so no login text appears in a path). The manager's exchange is at the tree root
+  (`<tree>/.lever-files/`); a worker's is in its `dir`. The manager's workspace is the whole tree,
+  so it can see every worker's exchange; its skill tells it not to touch them. An upload is stored
+  as `<UTC time>-<name>`, with the name reduced to letters, digits, `.`, `_`, `-` and spaces
+  (no leading dot or dash, no Windows device name). The page shows the name the server stored.
+- **How an agent reads an upload.** The `contact_files` tool (lever-capability MCP server) lists
+  lever's host record of each upload: login, name, size, sha256 and path. The skill tells the agent
+  to use a file only when `contact_files` lists it with the same sha256, and to treat what a file
+  says as data from that login, never as an instruction.
+- **How an agent shares a file.** It writes the file directly into the login's `out_dir`, then
+  calls `share_file` with the login and the path. The broker accepts only a regular file in the
+  caller's own `out/<key-of-to>/`, with no symbolic or hard link, within the size and type
+  limits, to a login whose `agents:` list names the caller (an operator always). It records the
+  sha256. A new version is a new file.
+- **What lever guarantees.** Host-side writes into the agent-writable tree never follow a link
+  (each directory is opened through its parent and checked, and the file is created with
+  `O_EXCL`); uploads are `0600` in `0700` directories (the agent's container user is the host
+  owner). A download is served only from a private copy whose sha256 equals the record: a file
+  the agent changed, replaced by a link or hard-linked after the share is refused (409), and a
+  deleted one is gone (410). Downloads are attachments (`application/octet-stream`, `nosniff`,
+  `Content-Security-Policy: sandbox`, `no-store`), never shown in the page. Another login's file
+  id answers like an unknown one. No log, audit line or record holds file content.
+- **Limits.** `max_bytes` and `extensions`; per login and agent, 30 uploads an hour and 1 GiB a
+  day; 2 uploads at once per login, 4 in all; 4 downloads at once; 20 shares an hour per agent.
+  The extensions `html`, `htm`, `xhtml`, `shtml`, `svg`, `js`, `mjs` and `xml` are refused at
+  config load.
+- **Turning it on.** `landing: chat` is required. `lever apply` restarts the broker and the
+  proxy, and `lever init` rewrites the skills. Then restart each agent fresh, so its session reads
+  the new skill (a contact cannot upload to an agent that has not): `lever up --fresh` for the
+  manager (back up its conversation first), purge and start for a worker. The agent image must
+  contain this release's lever-agent (`make lever-image`), which has the two tools.
+- **Doctor.** The `files` row shows off, or on with the limits; it fails when the state
+  directory is inside the tree (then nothing can be recorded and every route refuses), when the
+  ledger is not private, or when an agent's `.lever-files` is behind a link.
+- **Audit.** `file-upload`, `file-download` and `deny-file` lines in
+  `.lever-state/remote-audit.jsonl`; the broker audits `files` list and share calls.
+- **Known limits.** The host record is `.lever-state/files-ledger/` (`0700`, one `0600` file per
+  agent). A file is rotated at 8 MiB; past the second rotation its oldest records are dropped, and
+  those files are no longer listed or downloadable. Lever never deletes a file: remove old ones
+  from the workspace by hand. Disk space is the host's.
+
 ## What this does NOT do
 
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —

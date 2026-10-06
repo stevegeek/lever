@@ -397,6 +397,9 @@ access guide](/remote-access/) for the accepted security posture, setup steps, a
 | `push.enabled` | bool | no | `false` | Web Push notifications for the chat page: a login's devices show "New message from <agent>" when an agent writes while the page is closed. Needs `landing: chat` (rejected at config load without it). Off, the proxy has no push routes, no service worker and no hub streams, and its config stamp is unchanged. See the [guide](/remote-access/#notifications). |
 | `push.subject` | string | when `push.enabled` | - | The VAPID contact the push services see for this sender (RFC 8292): `mailto:<local>@<domain>` or an absolute `https://` URL, printable ASCII, at most 200 bytes. A change restarts the proxy at the next `lever apply`. |
 | `push.test_hosts` | list of `127.0.0.1:<port>` | no | - | TEST ONLY: the loopback addresses of a fake push service for lever's end-to-end test. The proxy admits them only when `LEVER_PUSH_TEST_HOSTS` in its environment names the same addresses; either one alone stops `lever remote serve`. Needs `push.enabled`. `lever doctor` fails while it is set. Never set it for a real instance. |
+| `files.enabled` | bool | no | `false` | Files in the chat: a login uploads one file at a time to an agent it may message, and downloads the files that agent shares with it (broker `share_file`). Needs `landing: chat` (rejected at config load without it). While it is on, no worker `dir` and no `manager.read_only` entry may overlap `.lever-files` (compared case-insensitively). Off, the proxy has no file routes, the two tools answer `off`, and the skills and config stamps are unchanged. See the [guide](/remote-access/#files-in-the-chat). |
+| `files.max_bytes` | int | no | `26214400` (25 MiB) | The largest file, in bytes, for an upload and a share. `0` or unset is the default; otherwise `1` to `104857600` (100 MiB). |
+| `files.extensions` | list of strings | no | `pdf, xlsx, xlsm, xls, csv, docx, doc, png, jpg, jpeg, txt, zip` | The accepted file types: lowercase letters and digits, 1 to 10, no dot, each once. `html`, `htm`, `xhtml`, `shtml`, `svg`, `js`, `mjs` and `xml` are refused (active content). |
 
 ```yaml
 remote:
@@ -413,6 +416,8 @@ remote:
   # push:                                     # optional; chat page notifications (needs landing: chat)
   #   enabled: true
   #   subject: mailto:you@example.com
+  # files:                                    # optional; files in the chat (needs landing: chat)
+  #   enabled: true
 ```
 
 ## Conventions & derived values

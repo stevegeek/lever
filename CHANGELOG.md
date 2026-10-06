@@ -9,6 +9,14 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **Files in the chat (`remote.files`).** Off by default; needs `landing: chat`. A login uploads
+  one file at a time to an agent it may message (paperclip, progress) and downloads the files the
+  agent shares with it (Files panel); the operator also sees each contact's files in its read-only
+  view. Files live in the agent's workspace under `.lever-files/in|out/<key>/`, written host-side
+  with no link followed and `O_EXCL`; a host ledger records every upload and share with its
+  sha256, and a download is served only from a private copy that still matches. New capability
+  tools `contact_files` and `share_file` (rebuild the agent image and restart agents fresh).
+  `lever doctor` row `files`.
 - **Notifications for the chat page (`remote.push`).** Off by default. On, a login turns
   notifications on per device from the agent list; when an agent writes to it while the page is
   closed, the device shows "New message from <agent>" and a tap opens that chat (Linux Chrome; iPhone

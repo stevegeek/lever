@@ -602,3 +602,19 @@ func TestOperatorViewAsksWhoOnlyAfterAFailedRead(t *testing.T) {
 		t.Fatalf("auth/me asked %v", hub.meSeen)
 	}
 }
+
+// TestOperatorViewOversizeAnswer: a history answer over maxHistoryAnswer is
+// not read on, and no row of it is answered.
+func TestOperatorViewOversizeAnswer(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	big := `{"messages":[{"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"`
+	big += strings.Repeat("x", maxHistoryAnswer+1-len(big)-3) + `"}]`
+	hub.answer = func(w http.ResponseWriter, _ *http.Request) bool { _, _ = io.WriteString(w, big+"}"); return true }
+	rw := viewDo(viewHandler(t, viewConfig(t, hub, sess, audit)), "op@x", "GET", viewC)
+	if rw.Code != http.StatusBadGateway || strings.TrimSpace(rw.Body.String()) != `{"error":"unavailable"}` {
+		t.Fatalf("%d %.200s", rw.Code, rw.Body)
+	}
+	if l := audit.last(); l.Reason != "unavailable" || l.Count != nil {
+		t.Fatalf("audit %+v", l)
+	}
+}

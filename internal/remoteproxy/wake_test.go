@@ -320,3 +320,41 @@ func TestWakeRouteShape(t *testing.T) {
 		t.Fatalf("broker %v hub %v", wr.got(), hub.reached())
 	}
 }
+
+// The manager check stands on its own: even with the manager in a
+// contact's agents: list and (by a config error) among the workers, its
+// wake is refused, with the same body as any other refusal.
+func TestWakeRefusesTheManagerByName(t *testing.T) {
+	hub := newPageHub(t)
+	wr := &wakeRec{}
+	cfg := wakeConfig(t, hub, wr)
+	cfg.Contacts = map[string][]string{"c@x": {"boss", "w1"}}
+	cfg.Workers = append(cfg.Workers, "boss")
+	rw := wakePost(NewHandler(cfg), "c@x", "boss")
+	if rw.Code != http.StatusForbidden || strings.TrimSpace(rw.Body.String()) != `{"error":"not-allowed"}` || len(wr.got()) != 0 {
+		t.Fatalf("%d %s calls=%v", rw.Code, rw.Body, wr.got())
+	}
+}
+
+// The route's own Origin rule, past the gate: one Origin header, never
+// "null" or empty (a sandboxed or opaque origin is no page of ours).
+func TestWakeRouteOriginRuleItself(t *testing.T) {
+	hub := newPageHub(t)
+	wr := &wakeRec{}
+	g := NewHandler(wakeConfig(t, hub, wr)).(*gate)
+	for name, origins := range map[string][]string{"null": {"null"}, "empty": {""}, "none": nil, "two": {"https://" + testServeHost, "https://" + testServeHost}} {
+		req := proxyRequest("POST", "/lever/api/agents/w1/wake", nil)
+		for _, o := range origins {
+			req.Header.Add("Origin", o)
+		}
+		rw := httptest.NewRecorder()
+		line := AuditLine{}
+		g.serveWake(rw, req, &line, g.viewerFor("c@x"), "w1")
+		if rw.Code != http.StatusForbidden || line.Reason != "origin" {
+			t.Errorf("%s: %d %+v", name, rw.Code, line)
+		}
+	}
+	if len(wr.got()) != 0 {
+		t.Fatalf("broker called: %v", wr.got())
+	}
+}

@@ -130,9 +130,13 @@ func (b *Broker) AdminHandler() http.Handler {
 // network namespace, and a route there that writes operator-note records
 // would let any of them pass text off as the operator's. The socket's file
 // permissions are the gate, the same boundary as the host records it writes.
+// The remote chat page's wake (handleOperatorWake) is here for the same
+// reason: a resume route on the admin listener would let the jail wake
+// workers.
 func (b *Broker) OperatorHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
+	mux.HandleFunc("POST "+wire.PathOperatorWake, b.handleOperatorWake)
 	return mux
 }
 

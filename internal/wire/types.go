@@ -166,6 +166,15 @@ type OperatorNoteRequest struct {
 	Interrupt bool   `json:"interrupt"`
 }
 
+// OperatorWakeRequest is the body of POST /operator/wake: the remote proxy
+// asks for a suspended or stopped worker to be resumed because a login that
+// may message it sent it a message. Login is the proxy's verified login,
+// for the audit line only; the socket's file mode is the authority.
+type OperatorWakeRequest struct {
+	Worker string `json:"worker"`
+	Login  string `json:"login"`
+}
+
 // OperatorNoteResponse is the reply of POST /operator/note: the sent-ledger
 // id of the note ("" when the ledger is off).
 type OperatorNoteResponse struct {

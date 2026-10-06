@@ -1,8 +1,11 @@
 package broker
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
+	"strings"
+	"unicode"
 
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sentledger"
@@ -60,4 +63,65 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 	}
 	b.audit("msg", "operator", "allow", "note->"+cn, "ref", ref)
 	writeJSON(w, wire.OperatorNoteResponse{ID: ref})
+}
+
+// handleOperatorWake resumes a suspended or stopped worker for the remote
+// chat page (a login that may message it sent it a message). It runs the
+// same checks and the same resume as the manager's resume verb
+// (handleWorkerResume): the role guard, the hub's phase, then resumeRecord,
+// which stages a fresh ticket, picks the verb by phase and waits until the
+// worker is live. Narrower than the verb: only a declared worker (never the
+// manager), and only from suspended or stopped. It is on the 0600 operator
+// socket, never on the admin listener the hub's network can reach.
+func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
+	var req wire.OperatorWakeRequest
+	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
+		b.audit("worker", "remote", "deny", "wake: bad body")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	actor := "remote:" + boundedLogin(req.Login)
+	spec, ok := b.workerSpec(req.Worker)
+	if !ok {
+		b.audit("worker", actor, "deny", "wake: not a declared worker")
+		http.Error(w, "not a worker", http.StatusForbidden)
+		return
+	}
+	if !b.runtimeReady(w) {
+		return
+	}
+	ctx := r.Context()
+	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
+		b.audit("worker", actor, "deny", "wake "+spec.Name+": "+err.Error())
+		http.Error(w, "refused", http.StatusConflict)
+		return
+	}
+	// phaseOf passes the hub's phase through scion.PhaseLabel, so it is a
+	// known word here and safe to audit.
+	phase, err := b.phaseOf(ctx, spec)
+	if err != nil {
+		b.audit("worker", actor, "error", "wake "+spec.Name+": phase: "+err.Error())
+		http.Error(w, "runtime error", http.StatusBadGateway)
+		return
+	}
+	if phase != scion.PhaseSuspended && phase != scion.PhaseStopped {
+		b.audit("worker", actor, "deny", "wake "+spec.Name+": not asleep (phase "+cmp.Or(phase, "none")+")")
+		http.Error(w, "not asleep", http.StatusConflict)
+		return
+	}
+	b.resumeRecord(ctx, w, spec, phase, actor)
+}
+
+// boundedLogin keeps a caller-supplied login to one short audit token.
+func boundedLogin(s string) string {
+	s = strings.ToValidUTF8(s, "_")
+	if len(s) > 120 {
+		s = strings.ToValidUTF8(s[:120], "_")
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
+			return '_'
+		}
+		return r
+	}, s)
 }

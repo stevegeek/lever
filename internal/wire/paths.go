@@ -42,6 +42,10 @@ const (
 // Operator note (UDS) channel route: `lever msg send`.
 const PathOperatorNote = "/operator/note"
 
+// PathOperatorWake is the remote chat page's wake of a suspended or stopped
+// worker, on the same 0600 operator socket (never the admin listener).
+const PathOperatorWake = "/operator/wake"
+
 // Operator-directive (UDS) admin channel routes.
 const (
 	PathDirectiveSend     = "/directive/send"

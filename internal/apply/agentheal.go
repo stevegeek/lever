@@ -167,6 +167,16 @@ func HealSessions(ctx context.Context, d Deps, app *config.App, project string) 
 }
 
 // healNamedSessions heals the named agents' sessions from one listing.
+//
+// For a worker this runs without the broker's per-worker lifecycle lock
+// (that lock lives in the broker process, which apply cannot see), so it can
+// race a start, resume, stop or suspend the manager ordered through the
+// broker. Both heals are safe against that: a reset-auth on a container that
+// is going away fails or writes a token the next start replaces (a start
+// mints its own), and a session report over a dying harness sets phase
+// running, which is not terminal — the runtime broker's next heartbeat moves
+// the record to the container's real state. The broker's own token watch
+// does take the lock.
 func healNamedSessions(ctx context.Context, d Deps, project string, names []string) {
 	if d.AgentSession == nil || d.Log == nil || len(names) == 0 {
 		return

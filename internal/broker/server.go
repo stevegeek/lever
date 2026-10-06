@@ -183,7 +183,7 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		// of the serve. Only started when the hook is installed at all.
 		go b.runHealer(ctx)
 	}
-	if b.hubTokens != nil && b.runtime != nil && len(b.tokenWatchAgents()) > 0 {
+	if b.tokenWatchEnabled() {
 		// Expired agent hub tokens (tokenwatch.go): scion's refresh timer
 		// stalls while the host sleeps, and nothing else notices.
 		go b.runTokenWatch(ctx)

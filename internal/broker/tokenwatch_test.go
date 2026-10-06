@@ -186,3 +186,78 @@ func TestHealHubTokensSkipsABusyWorker(t *testing.T) {
 		t.Fatalf("resets after the lock freed = %v, want [scratch]", h.resets)
 	}
 }
+
+// Serve starts the watch only with a healer, a runtime, and a mode that
+// covers an agent.
+func TestTokenWatchEnabled(t *testing.T) {
+	h := &fakeHubTokens{}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	if !b.tokenWatchEnabled() {
+		t.Fatal("healer + runtime + mode all must enable the watch")
+	}
+	b.hubTokens = nil
+	if b.tokenWatchEnabled() {
+		t.Fatal("no healer, no watch")
+	}
+	b, _ = tokenWatchBroker(t, "all", liveFleet, h)
+	b.runtime = nil
+	if b.tokenWatchEnabled() {
+		t.Fatal("no runtime, no watch")
+	}
+	b, _ = tokenWatchBroker(t, "off", liveFleet, h)
+	if b.tokenWatchEnabled() {
+		t.Fatal("auto_reenrol off, no watch")
+	}
+	b, _ = tokenWatchBroker(t, "manager", liveFleet, h)
+	if !b.tokenWatchEnabled() {
+		t.Fatal("auto_reenrol manager still watches the manager")
+	}
+}
+
+// runTokenWatch makes one pass at once, then one per tick, and returns when
+// its context ends.
+func TestRunTokenWatchPassesAndStops(t *testing.T) {
+	h := &countingHubTokens{passes: make(chan struct{}, 16)}
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{testInstanceProject: {liveFleet[0]}}}
+	b, _, _ := reenrolBroker(t, rt, "manager")
+	b.hubTokens = h
+	b.tokenWatchEvery = time.Hour // only the immediate pass can run in time
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { b.runTokenWatch(ctx); close(done) }()
+	select {
+	case <-h.passes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no pass at start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch did not stop with its context")
+	}
+
+	b.tokenWatchEvery = 5 * time.Millisecond
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	go b.runTokenWatch(ctx)
+	for i := 0; i < 3; i++ {
+		select {
+		case <-h.passes:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("pass %d did not come on the ticker", i+1)
+		}
+	}
+}
+
+// countingHubTokens signals every token read (one per pass with one agent).
+type countingHubTokens struct{ passes chan struct{} }
+
+func (c *countingHubTokens) TokenExpired(context.Context, string) (bool, error) {
+	select {
+	case c.passes <- struct{}{}:
+	default:
+	}
+	return false, nil
+}
+func (c *countingHubTokens) ResetAuth(context.Context, string) error { return nil }

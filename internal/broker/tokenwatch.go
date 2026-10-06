@@ -54,6 +54,12 @@ func (b *Broker) tokenWatchAgents() []string {
 	return append(out, names...)
 }
 
+// tokenWatchEnabled reports whether Serve starts the watch: a healer and a
+// runtime are wired, and the auto_reenrol mode covers at least one agent.
+func (b *Broker) tokenWatchEnabled() bool {
+	return b.hubTokens != nil && b.runtime != nil && len(b.tokenWatchAgents()) > 0
+}
+
 // runTokenWatch heals expired agent hub tokens for the life of ctx: one pass
 // at once (a broker restart often follows the wake that caused the lapse),
 // then one per tokenWatchInterval. Started by Serve when a healer and a

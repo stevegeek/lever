@@ -143,6 +143,10 @@ func StatInTreeNoLinks(tree, rel string) (fs.FileInfo, error) {
 	return fi, nil
 }
 
+// afterNoLinkWalk, when set, runs between ReadInTreeNoLinks's walk and its
+// open: a test seam for a leaf swapped in that window.
+var afterNoLinkWalk func()
+
 // ReadInTreeNoLinks reads a jail-written file host-side: a regular file at
 // most max bytes, with no symbolic link on any component of rel. The open
 // goes through an os.Root at tree and must land on the file the walk saw
@@ -157,6 +161,9 @@ func ReadInTreeNoLinks(tree, rel string, max int64) ([]byte, error) {
 	}
 	if leaf.Size() > max {
 		return nil, fmt.Errorf("%s: %d bytes: %w", filepath.Join(tree, rel), leaf.Size(), ErrFileTooLarge)
+	}
+	if afterNoLinkWalk != nil {
+		afterNoLinkWalk()
 	}
 	r, err := os.OpenRoot(tree)
 	if err != nil {
